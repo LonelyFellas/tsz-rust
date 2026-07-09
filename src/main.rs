@@ -1,4 +1,5 @@
 use tsz_rust::config;
+use tsz_rust::platform;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -6,6 +7,6 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = config::load_config()?;
-
-    tsz_rust::run(&config).await
+    let pool = platform::connect(&config.database_url).await?;
+    tsz_rust::run(config, pool).await
 }
