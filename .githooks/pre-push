@@ -1,5 +1,9 @@
 #!/bin/sh
-# 推送前 clippy 门禁：任何 clippy 警告都会拦截推送。
+# 推送前门禁：clippy（警告即拦截）+ 全量测试。任一失败都会拦下推送。
 set -e
-echo "▶ pre-push: cargo clippy --all-targets -- -D warnings"
+
+echo "▶ pre-push (1/2): cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets --all-features -- -D warnings
+
+echo "▶ pre-push (2/2): cargo test"
+cargo test
