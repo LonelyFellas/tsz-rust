@@ -15,9 +15,8 @@ async fn liveness() -> &'static str {
 
 /// 总入口：读配置 -> 绑端口 -> serve。绑socket的部分不适合单测
 /// 所以和 router() 分开，让逻辑（router）可测、启动（run）够薄。
-pub async fn run() -> anyhow::Result<()> {
-    let config = config::load_config()?;
-    serve(router(), &config).await
+pub async fn run(config: &Config) -> anyhow::Result<()> {
+    serve(router(), config).await
 }
 
 async fn serve(router: Router, config: &Config) -> anyhow::Result<()> {
