@@ -1,11 +1,11 @@
+// tests/health.rs（项目根，不是 src/tests/）
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use tower::ServiceExt; // oneshot
-use tsz_rust::router; // ← 只有库 crate 导得进来，这就是拆 lib 的回报
+use tower::ServiceExt;
 
-#[tokio::test]
-async fn healthz_returns_ok() {
-    let resp = router()
+#[sqlx::test]
+async fn healthz_returns_ok(pool: sqlx::PgPool) {
+    let resp = tsz_rust::router(pool)
         .oneshot(
             Request::builder()
                 .uri("/healthz")

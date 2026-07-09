@@ -1,4 +1,5 @@
 pub mod config;
+pub mod error;
 pub mod platform;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
@@ -24,12 +25,13 @@ async fn liveness() -> impl IntoResponse {
 async fn readiness(State(pool): State<PgPool>) -> impl IntoResponse {
     match sqlx::query("SELECT 1").execute(&pool).await {
         Ok(_) => (StatusCode::OK, Json(json!({"status": "ready"}))),
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                json!({"status": "unavailable", "reason": format!("database connection failed: {}", e.to_string())}),
-            ),
-        ),
+        Err(e) => {
+            tracing::error!("database connection failed: {}", e);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"status": "unavailable", "reason": "database connection failed"})),
+            )
+        }
     }
 }
 

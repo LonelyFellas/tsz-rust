@@ -24,9 +24,9 @@ impl Config {
     }
 }
 
-/// 生产入口：加载 `.env.local`（存在则读），再从进程环境解析配置。
+/// 生产入口：加载 `.env`（存在则读），再从进程环境解析配置。
 pub fn load_config() -> Result<Config, envy::Error> {
-    dotenvy::from_filename(".env.local").ok();
+    dotenvy::from_filename(".env").ok();
     Config::from_pairs(std::env::vars())
 }
 
