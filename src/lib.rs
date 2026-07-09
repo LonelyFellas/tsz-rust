@@ -1,6 +1,7 @@
 pub mod config;
 pub mod error;
 pub mod platform;
+pub mod user;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use config::Config;

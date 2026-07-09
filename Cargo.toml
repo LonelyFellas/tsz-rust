@@ -6,11 +6,20 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.103"
 axum = "0.8.9"
+chrono = { version = "0.4.45", features = ["serde"] }
 dotenvy = "0.15.7"
 envy = "0.4.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "uuid", "migrate"], default-features = false }
+sqlx = { version = "0.9.0", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+    "uuid",
+    "migrate",
+    "chrono",
+], default-features = false }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 tracing = "0.1.44"
