@@ -3,10 +3,17 @@ pub mod error;
 pub mod platform;
 pub mod user;
 
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use config::Config;
 use serde_json::json;
 use sqlx::PgPool;
+use user::handler;
 
 /// 构建路由。** 纯函数，不绑定端口 ** -- 这是可测的接缝
 /// 集成测试能拿它做oneshot, 不必真起服务器
@@ -14,6 +21,7 @@ pub fn router(pool: PgPool) -> Router {
     Router::new()
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
+        .route("/user/register", post(handler::register))
         .with_state(pool)
 }
 

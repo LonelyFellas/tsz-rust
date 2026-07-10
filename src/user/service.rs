@@ -1,7 +1,5 @@
-use bcrypt::{DEFAULT_COST, hash};
 use rand::RngExt;
 use rand::seq::IndexedRandom;
-use unicode_general_category::{GeneralCategory, get_general_category};
 use uuid::Uuid;
 
 const ADJECTIVES: &[&str] = &[
@@ -127,7 +125,7 @@ fn generate_display_name() -> String {
 }
 
 use crate::user::{
-    model::{CodeError, PasswordError, SubjectError, User, UserRole},
+    model::{Password, PasswordError, SubjectError, User, UserRole},
     repository::{NewUser, UserError, UserRepository},
 };
 
@@ -136,106 +134,6 @@ fn normalize_phone(phone: &str) -> String {
 }
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
-}
-
-#[derive(Debug, PartialEq, thiserror::Error)]
-pub enum DisplayNameError {
-    #[error("display name cannot be empty")]
-    Empty,
-    #[error("display name cannot be longer than 50 characters")]
-    TooLong,
-    #[error("display name contains forbidden characters")]
-    ForbiddenCharacters,
-}
-
-pub struct DisplayName(String);
-
-impl DisplayName {
-    pub fn parse(raw: &str) -> Result<Self, DisplayNameError> {
-        // 1) trim
-        let display_name = raw.trim();
-        // 2) empty
-        if display_name.is_empty() {
-            return Err(DisplayNameError::Empty);
-        }
-        // 3) 长度按chars().count()数，大于50 -> TooLong (中文昵称是3不是9)
-        let size = display_name.chars().count();
-
-        if size > 50 {
-            return Err(DisplayNameError::TooLong);
-        }
-
-        // 4) 禁用字符：< >
-        if display_name.contains(['<', '>']) {
-            return Err(DisplayNameError::ForbiddenCharacters);
-        }
-        // 5) 含 Unicode Cf（零宽 \u{200b}、BOM \u{feff}、bidi \u{202e}）→ Forbidden
-        if display_name
-            .chars()
-            .any(|c| c.is_control() || get_general_category(c) == GeneralCategory::Format)
-        {
-            return Err(DisplayNameError::ForbiddenCharacters);
-        }
-
-        Ok(DisplayName(display_name.to_string()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-pub struct Code(String);
-
-impl Code {
-    pub fn parse(raw: &str) -> Result<Self, CodeError> {
-        // 1) trim
-        let code = raw.trim();
-        if code.is_empty() {
-            return Err(CodeError::Empty);
-        }
-        // 2) 必须6位数字
-        if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
-            return Err(CodeError::Invalid);
-        }
-        // 3) 验证码必须唯一, TODO: 实现
-        Ok(Code(code.to_string()))
-    }
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-pub struct Password(String);
-
-impl Password {
-    pub fn parse(raw: &str) -> Result<Self, PasswordError> {
-        // 2) empty
-        if raw.is_empty() {
-            return Err(PasswordError::Empty);
-        }
-        // 3) 长度至少8位
-        if raw.len() < 8 {
-            return Err(PasswordError::TooShort);
-        }
-        // 4) 长度不超过72位
-        if raw.len() > 72 {
-            return Err(PasswordError::TooLong);
-        }
-        Ok(Password(raw.to_string()))
-    }
-
-    pub fn hash(&self) -> Result<String, PasswordError> {
-        hash(&self.0, DEFAULT_COST).map_err(|_| PasswordError::HashFailed)
-    }
-
-    pub fn into_string(self) -> String {
-        self.0
-    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -287,7 +185,7 @@ impl UserService {
 
         // 2) 密码哈希
         let password = Password::parse(&input.password)?;
-        let password_hash = password.hash()?;
+        let password_hash = password.hash_password()?;
 
         // 3) 验证码校验
         // let _ = Code::parse(&input.code)?;
@@ -319,7 +217,8 @@ mod default_display_name_tests {
     //! `generate_display_name` 的规格测试（随机生成的默认昵称）。
     //! 随机值没法断言确切内容，只能断言**性质**（property-based 思路）。
 
-    use super::{DisplayName, generate_display_name};
+    use super::generate_display_name;
+    use crate::user::model::DisplayName;
     use std::collections::HashSet;
 
     /// 生成的默认昵称必须**天然合法**：非空、能过 DisplayName 全部规则。
@@ -360,7 +259,7 @@ mod display_name_tests {
     //! 只依赖 `DisplayName::parse` 与 `DisplayName::as_str`——错误分支用 `matches!`
     //! 比对，成功分支比 `as_str()`，不强制 `DisplayName` 实现 `PartialEq`。
 
-    use super::{DisplayName, DisplayNameError};
+    use crate::user::model::{DisplayName, DisplayNameError};
 
     // ——————————————— 放行路径 ———————————————
 

@@ -33,9 +33,10 @@
 
 use sqlx::PgPool;
 
+use tsz_rust::user::model::DisplayName;
 use tsz_rust::user::model::{PasswordError, SubjectError, UserRole, UserStatus};
 use tsz_rust::user::repository::UserRepository;
-use tsz_rust::user::service::{DisplayName, RegisterError, RegisterInput, UserService};
+use tsz_rust::user::service::{RegisterError, RegisterInput, UserService};
 
 fn service(pool: PgPool) -> UserService {
     UserService::new(UserRepository::new(pool))
