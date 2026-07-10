@@ -13,6 +13,10 @@ pub enum UserError {
     EmailAlreadyExists,
     #[error("user already has this role")]
     AlreadyHasRole,
+    #[error("missing subject")]
+    MissingSubject,
+    #[error("duplicate subject")]
+    DuplicateSubject,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -86,15 +90,15 @@ impl UserRepository {
         Ok(user)
     }
 
-    pub async fn get_by_phone(&self, phone: &str) -> Result<User, UserError> {
+    pub async fn get_by_identifier(&self, identifier: &str) -> Result<User, UserError> {
         let user = sqlx::query_as!(
             User,
             r#"
             SELECT id, phone, email, password_hash, display_name, last_active_role as "last_active_role: UserRole", created_at, updated_at, status AS "status: UserStatus", avatar_url
             FROM users
-            WHERE phone = $1
+            WHERE phone = $1 OR email = $1
             "#,
-            phone
+            identifier   
         )
         .fetch_optional(&self.pool)
         .await?
@@ -102,6 +106,8 @@ impl UserRepository {
 
         Ok(user)
     }
+
+   
 }
 
 fn map_unique_violation(e: sqlx::Error) -> UserError {

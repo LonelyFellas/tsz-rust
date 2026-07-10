@@ -1,10 +1,141 @@
+use bcrypt::{DEFAULT_COST, hash};
+use rand::RngExt;
+use rand::seq::IndexedRandom;
 use unicode_general_category::{GeneralCategory, get_general_category};
+use uuid::Uuid;
 
-pub fn normalize_phone(phone: &str) -> String {
+const ADJECTIVES: &[&str] = &[
+    "勤奋", "阳光", "机智", "沉稳", "聪明", "勇敢", "善良", "美丽", "帅气", "优雅", "大方", "自信",
+    "乐观", "开朗", "幽默", "风趣", "机灵", "灵活", "敏捷", "迅速", "果断", "坚定", "执着", "努力",
+    "奋斗", "积极", "向上", "热情", "温柔", "细腻", "真诚", "厚道", "正直", "忠诚", "可靠", "踏实",
+    "稳重", "冷静", "从容", "淡定", "睿智", "博学", "精明", "干练", "活力", "青春", "活泼", "可爱",
+    "甜美", "清新", "自然", "朴实", "谦虚", "低调", "进取", "创新", "独特", "非凡", "卓越", "优秀",
+    "杰出", "出色", "精彩", "耀眼", "闪亮", "明亮", "温暖", "贴心", "细心", "周到", "体贴", "浪漫",
+    "自由", "随性", "洒脱", "文艺", "知性", "理性", "感性", "敏锐", "犀利", "精准", "专注", "认真",
+    "严谨", "耐心", "恒心", "毅力", "坚强", "独立", "自强", "谦逊", "慷慨", "豪爽", "爽朗", "健谈",
+    "有趣", "灵动", "豁达", "潇洒",
+];
+const NOUNS: &[&str] = &[
+    "松鼠",
+    "海豚",
+    "考拉",
+    "狐狸",
+    "熊猫",
+    "刺猬",
+    "猫头鹰",
+    "兔子",
+    "猫咪",
+    "小狗",
+    "小熊",
+    "小象",
+    "企鹅",
+    "河马",
+    "斑马",
+    "羚羊",
+    "小鹿",
+    "麋鹿",
+    "犀牛",
+    "水牛",
+    "骆驼",
+    "绵羊",
+    "山羊",
+    "小猪",
+    "老虎",
+    "狮子",
+    "豹子",
+    "雪豹",
+    "猎豹",
+    "灰狼",
+    "浣熊",
+    "水獭",
+    "海獭",
+    "海狮",
+    "海豹",
+    "鲸鱼",
+    "虎鲸",
+    "章鱼",
+    "乌贼",
+    "螃蟹",
+    "龙虾",
+    "海龟",
+    "海星",
+    "水母",
+    "蝴蝶",
+    "蜜蜂",
+    "蜻蜓",
+    "瓢虫",
+    "蚂蚁",
+    "萤火虫",
+    "鹦鹉",
+    "孔雀",
+    "天鹅",
+    "鸭子",
+    "鸽子",
+    "老鹰",
+    "燕子",
+    "麻雀",
+    "啄木鸟",
+    "翠鸟",
+    "乌鸦",
+    "喜鹊",
+    "黄鹂",
+    "鹌鹑",
+    "火烈鸟",
+    "袋鼠",
+    "树懒",
+    "水豚",
+    "土拨鼠",
+    "仓鼠",
+    "龙猫",
+    "鼹鼠",
+    "蝙蝠",
+    "海牛",
+    "鸭嘴兽",
+    "小熊猫",
+    "金丝猴",
+    "大猩猩",
+    "狒狒",
+    "猴子",
+    "长颈鹿",
+    "牦牛",
+    "野牛",
+    "驴子",
+    "马儿",
+    "豪猪",
+    "白兔",
+    "红狐",
+    "银狐",
+    "雪兔",
+    "野兔",
+    "野鸭",
+    "野猫",
+    "獾",
+    "黄鼠狼",
+    "林麝",
+    "貂熊",
+    "信天翁",
+    "布谷鸟",
+    "金丝雀",
+];
+
+fn generate_display_name() -> String {
+    let mut rng = rand::rng();
+    let adj = ADJECTIVES.choose(&mut rng).unwrap();
+    let noun = NOUNS.choose(&mut rng).unwrap();
+    let num = rng.random_range(1..=999);
+    format!("{adj}{noun}{num:04}")
+}
+
+use crate::user::{
+    model::{CodeError, PasswordError, SubjectError, User, UserRole},
+    repository::{NewUser, UserError, UserRepository},
+};
+
+fn normalize_phone(phone: &str) -> String {
     phone.trim().to_string()
 }
-pub fn normalize_email(email: &str) -> String {
-    email.trim().to_string()
+fn normalize_email(email: &str) -> String {
+    email.trim().to_lowercase()
 }
 
 #[derive(Debug, PartialEq, thiserror::Error)]
@@ -55,6 +186,166 @@ impl DisplayName {
 
     pub fn into_string(self) -> String {
         self.0
+    }
+}
+
+pub struct Code(String);
+
+impl Code {
+    pub fn parse(raw: &str) -> Result<Self, CodeError> {
+        // 1) trim
+        let code = raw.trim();
+        if code.is_empty() {
+            return Err(CodeError::Empty);
+        }
+        // 2) 必须6位数字
+        if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+            return Err(CodeError::Invalid);
+        }
+        // 3) 验证码必须唯一, TODO: 实现
+        Ok(Code(code.to_string()))
+    }
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+pub struct Password(String);
+
+impl Password {
+    pub fn parse(raw: &str) -> Result<Self, PasswordError> {
+        // 2) empty
+        if raw.is_empty() {
+            return Err(PasswordError::Empty);
+        }
+        // 3) 长度至少8位
+        if raw.len() < 8 {
+            return Err(PasswordError::TooShort);
+        }
+        // 4) 长度不超过72位
+        if raw.len() > 72 {
+            return Err(PasswordError::TooLong);
+        }
+        Ok(Password(raw.to_string()))
+    }
+
+    pub fn hash(&self) -> Result<String, PasswordError> {
+        hash(&self.0, DEFAULT_COST).map_err(|_| PasswordError::HashFailed)
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct RegisterInput {
+    pub phone: Option<String>,
+    pub email: Option<String>,
+    pub password: String,
+    // pub code: String,
+}
+
+pub struct UserService {
+    repository: UserRepository,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RegisterError {
+    #[error(transparent)]
+    Register(#[from] SubjectError),
+    #[error(transparent)]
+    Password(#[from] PasswordError),
+    // #[error(transparent)]
+    // Code(#[from] CodeError),
+    #[error(transparent)]
+    Repository(#[from] UserError),
+}
+
+impl UserService {
+    pub fn new(repository: UserRepository) -> Self {
+        Self { repository }
+    }
+
+    /// 注册用户
+    pub async fn register(&self, input: RegisterInput) -> Result<User, RegisterError> {
+        // 1) 手机号 / 邮箱
+        let phone = input
+            .phone
+            .as_deref()
+            .map(normalize_phone)
+            .filter(|s| !s.is_empty());
+        let email = input
+            .email
+            .as_deref()
+            .map(normalize_email)
+            .filter(|s| !s.is_empty());
+        // 1.1) phone or email empty
+        if phone.is_none() && email.is_none() {
+            return Err(RegisterError::Register(SubjectError::PhoneOrEmailMissing));
+        }
+
+        // 2) 密码哈希
+        let password = Password::parse(&input.password)?;
+        let password_hash = password.hash()?;
+
+        // 3) 验证码校验
+        // let _ = Code::parse(&input.code)?;
+
+        // TODO: 验证码验
+
+        // 3) create user
+        self.repository
+            .create(NewUser {
+                id: Uuid::now_v7(),
+                phone,
+                email,
+                password_hash,
+                display_name: generate_display_name(),
+                first_role: UserRole::Student,
+            })
+            .await
+            .map_err(|e| match e {
+                UserError::PhoneNumberAlreadyExists | UserError::EmailAlreadyExists => {
+                    RegisterError::Register(SubjectError::UserAlreadyExists)
+                }
+                other => RegisterError::Repository(other),
+            })
+    }
+}
+
+#[cfg(test)]
+mod default_display_name_tests {
+    //! `generate_display_name` 的规格测试（随机生成的默认昵称）。
+    //! 随机值没法断言确切内容，只能断言**性质**（property-based 思路）。
+
+    use super::{DisplayName, generate_display_name};
+    use std::collections::HashSet;
+
+    /// 生成的默认昵称必须**天然合法**：非空、能过 DisplayName 全部规则。
+    /// 跑 100 次覆盖不同随机组合，避免某个词表项/数字恰好越界没被发现。
+    #[test]
+    fn generated_name_is_always_a_valid_display_name() {
+        for _ in 0..100 {
+            let name = generate_display_name();
+            assert!(!name.is_empty(), "默认昵称不应为空");
+            assert!(
+                DisplayName::parse(&name).is_ok(),
+                "生成的默认昵称应满足 DisplayName 规则：{name}"
+            );
+        }
+    }
+
+    /// 随机性：大量生成应基本互不相同（576 万组合，200 次碰撞概率极低）。
+    /// 若生成器退化成常量或随机源坏了，这条会挂。
+    #[test]
+    fn generated_names_are_mostly_unique() {
+        let set: HashSet<String> = (0..200).map(|_| generate_display_name()).collect();
+        assert!(
+            set.len() >= 190,
+            "200 次生成应基本不重复，实际唯一数：{}",
+            set.len()
+        );
     }
 }
 

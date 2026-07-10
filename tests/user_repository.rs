@@ -27,7 +27,11 @@ fn new_user(phone: Option<&str>, email: Option<&str>, role: UserRole) -> NewUser
 async fn create_persists_user_with_defaults_and_active_role(pool: PgPool) {
     let repo = UserRepository::new(pool.clone());
     // phone 与 email 取不同值：若 create 里两个 Option 参数传反，下面断言会立刻挂。
-    let input = new_user(Some("13800138000"), Some("alice@example.com"), UserRole::Student);
+    let input = new_user(
+        Some("13800138000"),
+        Some("alice@example.com"),
+        UserRole::Student,
+    );
     let id = input.id;
 
     let user = repo.create(input).await.expect("create 应成功");
@@ -109,14 +113,22 @@ async fn create_rejects_duplicate_email_case_insensitive(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn get_by_phone_returns_the_matching_user(pool: PgPool) {
+async fn get_by_identifier_by_phone_returns_the_matching_user(pool: PgPool) {
     let repo = UserRepository::new(pool.clone());
     let created = repo
-        .create(new_user(Some("13800138000"), Some("alice@example.com"), UserRole::Student))
+        .create(new_user(
+            Some("13800138000"),
+            Some("alice@example.com"),
+            UserRole::Student,
+        ))
         .await
         .expect("create 应成功");
 
-    let got = repo.get_by_phone("13800138000").await.expect("应查到该用户");
+    // 传手机号：`WHERE phone=$1 OR email=$1` 应命中 phone 列。
+    let got = repo
+        .get_by_identifier("13800138000")
+        .await
+        .expect("应按手机查到该用户");
 
     assert_eq!(got.id, created.id);
     assert_eq!(got.phone.as_deref(), Some("13800138000"));
@@ -127,18 +139,18 @@ async fn get_by_phone_returns_the_matching_user(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn get_by_phone_unknown_phone_is_not_found(pool: PgPool) {
+async fn get_by_identifier_unknown_is_not_found(pool: PgPool) {
     let repo = UserRepository::new(pool.clone());
-    // 库里没有这个号：应返回 NotFound，而不是漏成 Db(RowNotFound)。
-    let result = repo.get_by_phone("10000000000").await;
+    // 库里没有这个标识：应返回 NotFound，而不是漏成 Db(RowNotFound)。
+    let result = repo.get_by_identifier("10000000000").await;
     assert!(
         matches!(result, Err(UserError::NotFound)),
-        "查不到的手机号应返回 NotFound，实际: {result:?}"
+        "查不到的标识应返回 NotFound，实际: {result:?}"
     );
 }
 
 #[sqlx::test]
-async fn get_by_phone_does_not_return_a_different_user(pool: PgPool) {
+async fn get_by_identifier_does_not_return_a_different_user(pool: PgPool) {
     let repo = UserRepository::new(pool.clone());
     let a = repo
         .create(new_user(Some("13800138000"), None, UserRole::Student))
@@ -149,7 +161,29 @@ async fn get_by_phone_does_not_return_a_different_user(pool: PgPool) {
         .expect("用户 B 应创建成功");
 
     // 查 A 的号应精确返回 A，绝不串到 B。
-    let got = repo.get_by_phone("13800138000").await.expect("应查到 A");
+    let got = repo
+        .get_by_identifier("13800138000")
+        .await
+        .expect("应查到 A");
     assert_eq!(got.id, a.id, "应返回 A，不能串到 B");
     assert_eq!(got.last_active_role, Some(UserRole::Student));
+}
+
+/// 传邮箱应命中 email 列（`get_by_identifier` 的另一半能力）。
+/// 注：repository 不做归一化，存/查都用小写邮箱（归一化是 service 的活）。
+#[sqlx::test]
+async fn get_by_identifier_by_email_returns_the_matching_user(pool: PgPool) {
+    let repo = UserRepository::new(pool.clone());
+    let created = repo
+        .create(new_user(None, Some("bob@example.com"), UserRole::Student))
+        .await
+        .expect("create 应成功");
+
+    let got = repo
+        .get_by_identifier("bob@example.com")
+        .await
+        .expect("应按邮箱查到该用户");
+    assert_eq!(got.id, created.id, "应按邮箱命中同一用户");
+    assert_eq!(got.email.as_deref(), Some("bob@example.com"));
+    assert_eq!(got.phone, None, "该用户无手机");
 }
