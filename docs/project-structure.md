@@ -68,40 +68,42 @@ use tsz_rust::config::Config;   // 只有 lib crate 才导得进来
 
 ## 2. 推荐目录结构
 
+> 下面是**推荐范式**。标 `（规划）` 的是后续再落地的形状，当前仓库尚无（见结尾「当前实况」）。
+
 ```
 tsz-rust/
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs              # 库根：pub mod 各模块 + run()
+│   ├── lib.rs              # 库根：pub mod 各模块 + router()/run()；健康检查当前内联在此
 │   ├── main.rs             # 瘦二进制入口，调 tsz_rust::run()
-│   ├── bin/                # 额外可执行文件
-│   │   ├── migrate.rs      #   cargo run --bin migrate
-│   │   └── seed.rs         #   cargo run --bin seed
+│   ├── bin/                # 额外可执行文件（规划：migrate / seed）
 │   ├── config.rs           # 小模块 = 单文件
 │   ├── error.rs            # 统一错误类型
+│   ├── auth.rs             # 小模块单文件：TokenManager（JWT 签发/解析）
 │   ├── platform/           # 大模块 = 目录
 │   │   ├── mod.rs          #   目录模块入口：声明子模块
-│   │   ├── db.rs
-│   │   └── http/
-│   │       ├── mod.rs
-│   │       ├── router.rs
-│   │       └── health.rs
+│   │   └── db.rs           #   PgPool 构建
 │   └── user/               # 业务模块（垂直切片）
 │       ├── mod.rs
-│       ├── model.rs
-│       ├── repository.rs
+│       ├── model.rs        #   含 value object（DisplayName/Password）+ 内联单测
+│       ├── repository.rs   #   具体 UserRepository { pool }，非 trait
 │       ├── service.rs
 │       ├── handler.rs
-│       └── tests.rs        # 大模块的白盒测试拆到这
+│       └── display_name.rs #   默认昵称词表 + 生成器
 ├── tests/                  # 黑盒集成 / e2e（独立 crate，import tsz_rust::）
-│   ├── common/
-│   │   └── mod.rs          # 共享测试脚手架（建 app、种子数据）
-│   └── user_flow.rs
-├── migrations/             # sqlx 迁移 .sql
+│   ├── *_schema.rs         # 各表约束测试（#[sqlx::test] 打真库）
+│   ├── user_repository.rs / user_service.rs / user_register_handler.rs
+│   └── health.rs
+├── migrations/             # sqlx 迁移 .sql（up/down 成对）
 └── docs/
 ```
 
-一个 package 只能有 **1 个 `lib.rs`**，但可有 **多个二进制**（`main.rs` + `bin/*.rs`）——`migrate`、`seed` 就是这么来的，它们都 `use tsz_rust::...` 复用库逻辑。
+一个 package 只能有 **1 个 `lib.rs`**，但可有 **多个二进制**（`main.rs` + `bin/*.rs`）——将来的
+`migrate`、`seed` 会这么来，它们都 `use tsz_rust::...` 复用库逻辑。
+
+> **当前实况**：`auth.rs`/`config.rs`/`error.rs` 是单文件；`platform/` 下只有 `db.rs`，健康检查
+> `/healthz` `/readyz` 内联在 `lib.rs`（尚无 `platform/http/` 子树）；`bin/`、`session/`、`otp/`、
+> `word/` 均未建。白盒测试目前走**同文件内联** `#[cfg(test)]`（如 `model.rs`），暂未拆 `tests.rs`。
 
 ---
 
@@ -127,7 +129,7 @@ Rust 的模块树是**显式声明**的：父级写 `mod xxx;`，编译器才会
 | 对象 | 规范 | 例 |
 |------|------|-----|
 | 文件 / 模块 | `snake_case` | `user_profile.rs`，不是 `UserProfile.rs` |
-| 类型（struct/enum/trait） | `UpperCamelCase` | `AppError`、`UserStore` |
+| 类型（struct/enum/trait） | `UpperCamelCase` | `AppError`、`UserRepository` |
 | 函数 / 变量 / 字段 | `snake_case` | `load_config`、`database_url` |
 | 常量 / 静态 | `SCREAMING_SNAKE_CASE` | `DEFAULT_PORT` |
 | crate 导入名 | 连字符转下划线 | `tsz-rust` → `tsz_rust` |
