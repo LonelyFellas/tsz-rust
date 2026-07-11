@@ -94,4 +94,34 @@ impl RefreshTokenRepository {
         .await?;
         Ok(row.rows_affected())
     }
+
+    /// CAS 消费： 命中且未轮换/未吊销/未过期，才盖rotated_at, RETURNING user_id
+    /// 抢到->OK(Some(user_id))；未命中（不存在/已轮换/已吊销/已过期）-> Ok(None)
+    pub async fn consume(&self, token_hash: &str) -> Result<Option<Uuid>, RefreshTokenError> {
+        let user_id= sqlx::query_scalar!(
+            r#"
+            UPDATE refresh_tokens SET rotated_at = NOW() WHERE token_hash = $1 AND rotated_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()
+            RETURNING user_id
+            "#,
+            token_hash
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(user_id)
+    }
+
+    /// logout: 按哈希吊销，幂等，返回影响行数
+    pub async fn revoke_by_hash(&self, token_hash: &str) -> Result<u64, RefreshTokenError> {
+        let row = sqlx::query!(
+            r#"
+            UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1 AND revoked_at IS NULL
+            "#,
+            token_hash
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(row.rows_affected())
+    }
 }

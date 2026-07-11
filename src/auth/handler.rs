@@ -1,10 +1,13 @@
 use crate::{
     error::AppError,
-    session::{repository::RefreshTokenRepository, service::SessionService},
+    session::{
+        repository::RefreshTokenRepository,
+        service::{SessionError, SessionService},
+    },
     state::AppState,
     user::{
-        model::UserRole,
-        repository::UserRepository,
+        model::{UserRole, UserStatus},
+        repository::{UserError, UserRepository},
         service::{LoginError, UserService},
     },
 };
@@ -65,6 +68,90 @@ pub async fn login(
             expires_in: state.token_manager.ttl_seconds(),
         }),
     ))
+}
+
+#[derive(Deserialize)]
+pub struct RefreshTokenRequest {
+    pub refresh_token: String,
+}
+
+/// POST /api/v1/auth/refresh
+pub async fn refresh_token(
+    State(state): State<AppState>,
+    Json(req): Json<RefreshTokenRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // 1)
+    let session_svc = SessionService::new(
+        RefreshTokenRepository::new(state.pool.clone()),
+        state.refresh_ttl,
+    );
+    let user_id = session_svc
+        .rotate(&req.refresh_token)
+        .await
+        .map_err(map_session_error)?;
+
+    let user_repo = UserRepository::new(state.pool.clone());
+
+    let user = user_repo.get_by_id(&user_id).await.map_err(|e| match e {
+        UserError::NotFound => AppError::Unauthenticated("invalid refresh token".into()),
+        _ => AppError::internal(e),
+    })?;
+
+    if user.status != UserStatus::Active {
+        return Err(AppError::Unauthenticated("invalid refresh token".into()));
+    }
+
+    let access_token = state
+        .token_manager
+        .generate(
+            user.id,
+            user.last_active_role.unwrap_or(UserRole::Student).as_str(),
+        )
+        .map_err(AppError::internal)?;
+    let refresh_token = session_svc
+        .issue(user.id)
+        .await
+        .map_err(AppError::internal)?;
+
+    Ok((
+        StatusCode::OK,
+        Json(LoginResponse {
+            access_token,
+            refresh_token: refresh_token.plaintext,
+            token_type: "Bearer",
+            expires_in: state.token_manager.ttl_seconds(),
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct LogoutRequest {
+    pub refresh_token: String,
+}
+/// POST /api/v1/auth/logout
+pub async fn logout(
+    State(state): State<AppState>,
+    Json(req): Json<LogoutRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let session_svc = SessionService::new(
+        RefreshTokenRepository::new(state.pool.clone()),
+        state.refresh_ttl,
+    );
+
+    session_svc
+        .logout(&req.refresh_token)
+        .await
+        .map_err(map_session_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn map_session_error(err: SessionError) -> AppError {
+    match err {
+        SessionError::InvalidRefreshToken => {
+            AppError::Unauthenticated("invalid refresh token".into())
+        }
+        SessionError::Repository(e) => AppError::internal(e),
+    }
 }
 
 fn map_login_error(err: LoginError) -> AppError {

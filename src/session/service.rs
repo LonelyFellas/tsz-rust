@@ -12,8 +12,6 @@ use crate::session::{
 pub enum SessionError {
     #[error("invalid refresh token")]
     InvalidRefreshToken,
-    #[error("access disabled")]
-    AccessDisabled,
     #[error(transparent)]
     Repository(#[from] RefreshTokenError),
 }
@@ -36,7 +34,7 @@ impl SessionService {
         }
     }
 
-    // login 调用：为user发一枚refresh。生成明文 -> 哈希 -> 存库 -> 返回明文
+    /// login 调用：为user发一枚refresh。生成明文 -> 哈希 -> 存库 -> 返回明文
     pub async fn issue(&self, user_id: Uuid) -> Result<IssuedRefresh, SessionError> {
         let plaintext = generate_plaintext();
         let token_hash = hash_token(&plaintext);
@@ -55,6 +53,21 @@ impl SessionService {
             plaintext,
             expires_at,
         })
+    }
+    /// /auth/refresh 步骤1:哈希明文 → CAS 消费旧枚 → 返回属主 user_id。不发新枚、不查账号状态。
+    pub async fn rotate(&self, plaintext: &str) -> Result<Uuid, SessionError> {
+        let token_hash = hash_token(plaintext);
+        match self.repository.consume(&token_hash).await? {
+            Some(user_id) => Ok(user_id),
+            None => Err(SessionError::InvalidRefreshToken),
+        }
+    }
+
+    /// /auth/logout:哈希明文 → revoke_by_hash。幂等,永远 Ok(不泄露 token 是否存在)。
+    pub async fn logout(&self, plaintext: &str) -> Result<(), SessionError> {
+        let token_hash = hash_token(plaintext);
+        self.repository.revoke_by_hash(&token_hash).await?;
+        Ok(())
     }
 }
 

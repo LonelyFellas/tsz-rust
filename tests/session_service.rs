@@ -9,8 +9,9 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use tsz_rust::session::model::NewRefreshToken;
 use tsz_rust::session::repository::RefreshTokenRepository;
-use tsz_rust::session::service::SessionService;
+use tsz_rust::session::service::{SessionError, SessionService};
 
 /// FK 依赖：造一个用户，返回 id。phone 用 id 串保证唯一。
 async fn seed_user(pool: &PgPool) -> Uuid {
@@ -111,4 +112,112 @@ async fn two_issues_produce_distinct_tokens(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(count, Some(2), "应有两行");
+}
+
+// ————————————————————— rotate（哈希明文 → CAS 消费旧枚）—————————————————————
+// service 层只验「哈希接线对了 + 错误映射对了」；CAS 状态机本身在 session_repository.rs 钉过。
+
+/// happy：issue 出的明文能被 rotate 消费 → 返回属主 user_id，且 DB 里对应行被标 rotated。
+#[sqlx::test]
+async fn rotate_consumes_issued_token_and_returns_owner(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool.clone());
+    let svc = service(pool, Duration::days(30));
+
+    let issued = svc.issue(user_id).await.unwrap();
+    let got = svc.rotate(&issued.plaintext).await.expect("rotate 应成功");
+    assert_eq!(got, user_id, "rotate 应返回属主 user_id");
+
+    let row = repo
+        .find_by_hash(&expected_hash(&issued.plaintext))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.rotated_at.is_some(), "被 rotate 的行应标上 rotated_at");
+}
+
+/// 复用即拒：同一明文 rotate 两次，第二次 InvalidRefreshToken。
+#[sqlx::test]
+async fn rotate_same_token_twice_is_rejected(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let svc = service(pool, Duration::days(30));
+
+    let issued = svc.issue(user_id).await.unwrap();
+    svc.rotate(&issued.plaintext).await.expect("首次 rotate 应成功");
+
+    let err = svc
+        .rotate(&issued.plaintext)
+        .await
+        .expect_err("复用应被拒");
+    assert!(
+        matches!(err, SessionError::InvalidRefreshToken),
+        "复用应是 InvalidRefreshToken，实际 {err:?}"
+    );
+}
+
+/// 垃圾明文 → InvalidRefreshToken（不 panic、不泄露差别）。
+#[sqlx::test]
+async fn rotate_garbage_token_is_invalid(pool: PgPool) {
+    let svc = service(pool, Duration::days(30));
+    let err = svc
+        .rotate("definitely-not-a-real-token")
+        .await
+        .expect_err("垃圾串应被拒");
+    assert!(matches!(err, SessionError::InvalidRefreshToken));
+}
+
+/// 过期明文 → InvalidRefreshToken。用 repo 直插一枚「明文已知但已过期」的行来造。
+#[sqlx::test]
+async fn rotate_expired_token_is_invalid(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool.clone());
+    let svc = service(pool, Duration::days(30));
+
+    // 塞 sha256(P) + 过去的 expires_at，这样 rotate(P) 哈希后能命中这行、但被 expires 守卫拦下。
+    let plaintext = "known-plaintext-for-expiry-test";
+    repo.insert(NewRefreshToken {
+        id: Uuid::now_v7(),
+        user_id,
+        token_hash: expected_hash(plaintext),
+        expires_at: Utc::now() - Duration::days(1),
+    })
+    .await
+    .unwrap();
+
+    let err = svc.rotate(plaintext).await.expect_err("过期应被拒");
+    assert!(matches!(err, SessionError::InvalidRefreshToken));
+}
+
+// ————————————————————— revoke（logout）—————————————————————
+
+/// revoke 后该明文不能再 rotate（token 立即失效）。
+#[sqlx::test]
+async fn revoked_token_cannot_be_rotated(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let svc = service(pool, Duration::days(30));
+
+    let issued = svc.issue(user_id).await.unwrap();
+    svc.logout(&issued.plaintext).await.expect("revoke 应成功");
+
+    let err = svc
+        .rotate(&issued.plaintext)
+        .await
+        .expect_err("已吊销的不该能 rotate");
+    assert!(matches!(err, SessionError::InvalidRefreshToken));
+}
+
+/// revoke 幂等 + 不泄露：重复调、以及对不存在的明文，都应 Ok（logout 永远"成功"）。
+#[sqlx::test]
+async fn revoke_is_idempotent_and_silent_on_unknown(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let svc = service(pool, Duration::days(30));
+
+    let issued = svc.issue(user_id).await.unwrap();
+    svc.logout(&issued.plaintext).await.expect("首次 revoke 应 Ok");
+    svc.logout(&issued.plaintext)
+        .await
+        .expect("再次 revoke 也应 Ok（幂等）");
+    svc.logout("never-existed")
+        .await
+        .expect("未知明文也应 Ok（不泄露）");
 }

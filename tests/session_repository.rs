@@ -204,3 +204,180 @@ async fn revoke_all_for_user_is_idempotent(pool: PgPool) {
         .expect("仍应是吊销态");
     assert_eq!(after_first, after_second, "重复调用不应刷新原吊销时刻");
 }
+
+// ————————————————————— consume（CAS 轮换消费）—————————————————————
+// consume = 一条 UPDATE...WHERE 未轮换/未吊销/未过期...RETURNING user_id 的原子 CAS。
+// 抢到返回 Some(user_id) 并盖上 rotated_at；任何失效态或未命中都返回 None（对内不可区分，
+// 对外由 handler 统一收敛成 401）。以下钉住这套状态机的每条边。
+
+/// happy：活跃 token 被 consume → 返回属主 user_id，且该行 rotated_at 被置上、revoked_at 不动。
+#[sqlx::test]
+async fn consume_active_token_returns_owner_and_marks_rotated(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+    repo.insert(new_token(user_id, "hash-live")).await.unwrap();
+
+    let got = repo.consume("hash-live").await.expect("consume 不应报错");
+    assert_eq!(got, Some(user_id), "抢到应返回属主 user_id");
+
+    let row = repo.find_by_hash("hash-live").await.unwrap().unwrap();
+    assert!(row.rotated_at.is_some(), "consume 应盖上 rotated_at");
+    assert!(row.revoked_at.is_none(), "consume 不应动 revoked_at");
+}
+
+/// 复用即拒（CAS 的命根子）：同一枚 consume 两次，第二次必 None。
+#[sqlx::test]
+async fn consume_twice_second_time_misses(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+    repo.insert(new_token(user_id, "hash-once")).await.unwrap();
+
+    assert_eq!(
+        repo.consume("hash-once").await.unwrap(),
+        Some(user_id),
+        "首次应抢到"
+    );
+    assert_eq!(
+        repo.consume("hash-once").await.unwrap(),
+        None,
+        "已轮换的再 consume 必落空"
+    );
+}
+
+/// 已吊销的 token 不能被 consume。
+#[sqlx::test]
+async fn consume_revoked_token_misses(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+    let row = repo
+        .insert(new_token(user_id, "hash-revoked"))
+        .await
+        .unwrap();
+    repo.revoke(row.id).await.unwrap();
+
+    assert_eq!(
+        repo.consume("hash-revoked").await.unwrap(),
+        None,
+        "已吊销的不该能 consume"
+    );
+}
+
+/// 已过期的 token 不能被 consume，且不应被误标 rotated（WHERE expires_at > NOW() 守住）。
+#[sqlx::test]
+async fn consume_expired_token_misses_and_leaves_it_untouched(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+    let past = Utc::now() - Duration::days(1);
+    repo.insert(new_token_expiring(user_id, "hash-expired", past))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.consume("hash-expired").await.unwrap(),
+        None,
+        "过期的不该能 consume"
+    );
+
+    let row = repo.find_by_hash("hash-expired").await.unwrap().unwrap();
+    assert!(row.rotated_at.is_none(), "过期行不应被误盖 rotated_at");
+}
+
+/// 不存在的哈希 → None（未命中是正常结果，不是错误）。
+#[sqlx::test]
+async fn consume_unknown_hash_misses(pool: PgPool) {
+    let repo = RefreshTokenRepository::new(pool);
+    assert_eq!(repo.consume("no-such-hash").await.unwrap(), None);
+}
+
+/// 并发抢同一枚：两个 consume 同时打，恰好一个拿到 Some、另一个 None。
+/// 这是 CAS 相对 find-then-mark 的核心优势——数据库行级原子性天然序列化，无需应用层锁。
+#[sqlx::test]
+async fn concurrent_consume_only_one_wins(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+    repo.insert(new_token(user_id, "hash-race")).await.unwrap();
+
+    let (a, b) = tokio::join!(repo.consume("hash-race"), repo.consume("hash-race"));
+    let (a, b) = (a.expect("不应报错"), b.expect("不应报错"));
+
+    assert!(
+        a.is_some() ^ b.is_some(),
+        "并发下应恰好一个抢到（a={a:?}, b={b:?}）"
+    );
+    assert_eq!(a.or(b), Some(user_id), "抢到的那个应返回属主 user_id");
+}
+
+// ————————————————————— revoke_by_hash（logout）—————————————————————
+
+/// 按哈希吊销：命中未吊销行 → 返回 1、盖 revoked_at、不动 rotated_at；行仍可查回。
+#[sqlx::test]
+async fn revoke_by_hash_revokes_matching_row(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+    repo.insert(new_token(user_id, "hash-logout"))
+        .await
+        .unwrap();
+
+    let n = repo
+        .revoke_by_hash("hash-logout")
+        .await
+        .expect("revoke_by_hash 不应报错");
+    assert_eq!(n, 1, "应吊销 1 行");
+
+    let row = repo.find_by_hash("hash-logout").await.unwrap().unwrap();
+    assert!(row.revoked_at.is_some(), "应盖上 revoked_at");
+    assert!(row.rotated_at.is_none(), "不应动 rotated_at");
+}
+
+/// 幂等：再吊销一次返回 0（AND revoked_at IS NULL 守卫），不刷新原吊销时刻。
+#[sqlx::test]
+async fn revoke_by_hash_is_idempotent(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+    repo.insert(new_token(user_id, "hash-idem")).await.unwrap();
+
+    assert_eq!(repo.revoke_by_hash("hash-idem").await.unwrap(), 1);
+    let first = repo
+        .find_by_hash("hash-idem")
+        .await
+        .unwrap()
+        .unwrap()
+        .revoked_at
+        .unwrap();
+
+    assert_eq!(
+        repo.revoke_by_hash("hash-idem").await.unwrap(),
+        0,
+        "已吊销再调应返回 0"
+    );
+    let second = repo
+        .find_by_hash("hash-idem")
+        .await
+        .unwrap()
+        .unwrap()
+        .revoked_at
+        .unwrap();
+    assert_eq!(first, second, "重复吊销不应刷新时刻");
+}
+
+/// 吊销后不能再被 consume（logout 让 token 立即失效）。
+#[sqlx::test]
+async fn revoked_by_hash_token_cannot_be_consumed(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+    repo.insert(new_token(user_id, "hash-dead")).await.unwrap();
+    repo.revoke_by_hash("hash-dead").await.unwrap();
+
+    assert_eq!(
+        repo.consume("hash-dead").await.unwrap(),
+        None,
+        "吊销后 consume 应落空"
+    );
+}
+
+/// 不存在的哈希 → 0（幂等 logout 不因此报错）。
+#[sqlx::test]
+async fn revoke_by_hash_unknown_returns_zero(pool: PgPool) {
+    let repo = RefreshTokenRepository::new(pool);
+    assert_eq!(repo.revoke_by_hash("no-such").await.unwrap(), 0);
+}

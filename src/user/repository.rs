@@ -90,6 +90,7 @@ impl UserRepository {
         Ok(user)
     }
 
+    /// 通过手机号/邮箱进行查询用户
     pub async fn get_by_identifier(&self, identifier: &str) -> Result<User, UserError> {
         let user = sqlx::query_as!(
             User,
@@ -99,6 +100,23 @@ impl UserRepository {
             WHERE phone = $1 OR email = $1
             "#,
             identifier   
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(UserError::NotFound)?;
+
+        Ok(user)
+    }
+    /// 通过user_id 查询用户
+    pub async fn get_by_id(&self, id: &Uuid) -> Result<User, UserError> {
+        let user = sqlx::query_as!(
+            User,
+            r#"
+                SELECT id, phone, email, password_hash, display_name, last_active_role as "last_active_role: UserRole", created_at, updated_at, status AS "status: UserStatus", avatar_url
+                FROM users
+                WHERE id = $1
+            "#,
+            id
         )
         .fetch_optional(&self.pool)
         .await?

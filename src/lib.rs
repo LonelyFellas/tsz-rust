@@ -31,6 +31,8 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(readiness))
         .route("/user/register", post(user::handler::register))
         .route("/auth/login", post(auth::handler::login))
+        .route("/auth/refresh", post(auth::handler::refresh_token))
+        .route("/auth/logout", post(auth::handler::logout))
         .with_state(state)
 }
 
