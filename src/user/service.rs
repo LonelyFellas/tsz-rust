@@ -1,6 +1,10 @@
+use std::sync::OnceLock;
+
+use bcrypt::{DEFAULT_COST, hash, verify};
 use uuid::Uuid;
 
 use crate::user::display_name::generate_display_name;
+use crate::user::model::UserStatus;
 use crate::user::{
     model::{Password, PasswordError, SubjectError, User, UserRole},
     repository::{NewUser, UserError, UserRepository},
@@ -11,6 +15,13 @@ fn normalize_phone(phone: &str) -> String {
 }
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
+}
+fn normalize_identifier(identifier: &str) -> String {
+    if identifier.contains('@') {
+        normalize_email(identifier)
+    } else {
+        normalize_phone(identifier)
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -37,6 +48,24 @@ pub enum RegisterError {
     Repository(#[from] UserError),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum LoginError {
+    #[error("invalid credentials")]
+    InvalidCredentials, // 用户不存在或者密码不正确
+    #[error("account is disabled")]
+    AccountDisabled,
+    #[error(transparent)]
+    Repository(#[from] UserError),
+}
+
+fn verify_password(password: &str, password_hash: &str) -> bool {
+    verify(password, password_hash).unwrap_or(false)
+}
+
+fn dummy_hash() -> &'static str {
+    static H: OnceLock<String> = OnceLock::new();
+    H.get_or_init(|| hash("timing-balance", DEFAULT_COST).expect("系统错误：dummy hash 生成失败"))
+}
 impl UserService {
     pub fn new(repository: UserRepository) -> Self {
         Self { repository }
@@ -86,6 +115,31 @@ impl UserService {
                 }
                 other => RegisterError::Repository(other),
             })
+    }
+
+    pub async fn authenticate(&self, identifier: &str, password: &str) -> Result<User, LoginError> {
+        let id = normalize_identifier(identifier);
+
+        match self.repository.get_by_identifier(&id).await {
+            Ok(user) => {
+                // 先验证密码
+                if !verify_password(password, &user.password_hash) {
+                    return Err(LoginError::InvalidCredentials);
+                }
+                // 密码对了，身份已证实 -> 再看状态（禁用只透传给证明了拥有改账号的人）
+                if user.status == UserStatus::Disabled {
+                    return Err(LoginError::AccountDisabled);
+                }
+                Ok(user)
+            }
+            // 查无此人：也跑一次假 verify 平衡时序，然后返回【和密码错同一个】错误
+            Err(UserError::NotFound) => {
+                verify_password(password, dummy_hash());
+                Err(LoginError::InvalidCredentials)
+            }
+            // 其余底层错 -> 如实透传
+            Err(e) => Err(LoginError::Repository(e)),
+        }
     }
 }
 

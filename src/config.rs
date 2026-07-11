@@ -7,6 +7,18 @@ pub struct Config {
     pub port: NonZeroU16,
     pub database_url: String,
     pub jwt_secret: String,
+    #[serde(default = "default_refresh_ttl_days")]
+    pub refresh_ttl_days: u64,
+    #[serde(default = "default_access_ttl_minutes")]
+    pub access_ttl_minutes: u64,
+}
+
+fn default_refresh_ttl_days() -> u64 {
+    30
+}
+
+fn default_access_ttl_minutes() -> u64 {
+    15
 }
 
 fn default_port() -> NonZeroU16 {

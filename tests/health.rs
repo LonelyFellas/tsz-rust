@@ -5,7 +5,7 @@ use tower::ServiceExt;
 
 #[sqlx::test]
 async fn healthz_returns_ok(pool: sqlx::PgPool) {
-    let resp = tsz_rust::router(pool)
+    let resp = tsz_rust::router(tsz_rust::state::AppState::for_test(pool))
         .oneshot(
             Request::builder()
                 .uri("/healthz")

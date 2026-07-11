@@ -26,7 +26,7 @@ pub struct RegisterResponse {
     pub role: &'static str,
 }
 
-/// POST /api/v1/users/register
+/// POST /api/v1/user/register
 pub async fn register(
     State(pool): State<PgPool>,
     Json(payload): Json<RegisterRequest>,

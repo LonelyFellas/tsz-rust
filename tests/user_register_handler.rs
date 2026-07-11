@@ -28,7 +28,7 @@ use tower::ServiceExt;
 /// 把 JSON 值打成 `POST /user/register` 请求，过 `router().oneshot()`，
 /// 返回 `(状态码, 响应体 JSON)`。成功体和错误体都是 JSON，统一解析。
 async fn register(pool: PgPool, body: Value) -> (StatusCode, Value) {
-    let resp = tsz_rust::router(pool)
+    let resp = tsz_rust::router(tsz_rust::state::AppState::for_test(pool))
         .oneshot(
             Request::builder()
                 .method("POST")

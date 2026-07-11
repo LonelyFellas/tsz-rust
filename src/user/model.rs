@@ -19,6 +19,15 @@ pub enum UserRole {
     Teacher,
 }
 
+impl UserRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UserRole::Student => "student",
+            UserRole::Teacher => "teacher",
+        }
+    }
+}
+
 #[derive(sqlx::Type, Debug, PartialEq)]
 #[sqlx(type_name = "text")]
 pub enum CefrLevel {

@@ -12,12 +12,12 @@ pub enum AppError {
     NotFound,
     #[error("{0}")]
     BadRequest(String),
-    #[error("unauthorized")]
-    Unauthorized,
     #[error("forbidden")]
     Forbidden,
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    Unauthenticated(String),
 
     /// 内部错误：真实原因藏在 anyhow 里，只进日志，不进响应。
     #[error("internal error")]
@@ -36,10 +36,10 @@ impl AppError {
         match self {
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::Unauthenticated(_) => StatusCode::UNAUTHORIZED,
         }
     }
 }
@@ -81,7 +81,10 @@ mod tests {
             AppError::BadRequest("x".into()).status_code(),
             StatusCode::BAD_REQUEST
         );
-        assert_eq!(AppError::Unauthorized.status_code(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            AppError::Unauthenticated("x".into()).status_code(),
+            StatusCode::UNAUTHORIZED
+        );
         assert_eq!(AppError::Forbidden.status_code(), StatusCode::FORBIDDEN);
         assert_eq!(
             AppError::Conflict("x".into()).status_code(),
@@ -96,7 +99,11 @@ mod tests {
     #[test]
     fn internal_hides_cause_in_message() {
         let err = AppError::internal(anyhow::anyhow!("db password leaked"));
-        assert_eq!(err.to_string(), "internal error", "内部错误对外只暴露通用文案");
+        assert_eq!(
+            err.to_string(),
+            "internal error",
+            "内部错误对外只暴露通用文案"
+        );
     }
 
     #[test]

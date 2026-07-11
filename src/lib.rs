@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod platform;
 pub mod session;
+pub mod state;
 pub mod user;
 
 use axum::{
@@ -12,19 +13,25 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use chrono::Duration;
 use config::Config;
 use serde_json::json;
 use sqlx::PgPool;
-use user::handler;
+
+use crate::{
+    auth::{Realm, TokenManager},
+    state::AppState,
+};
 
 /// 构建路由。** 纯函数，不绑定端口 ** -- 这是可测的接缝
 /// 集成测试能拿它做oneshot, 不必真起服务器
-pub fn router(pool: PgPool) -> Router {
+pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
-        .route("/user/register", post(handler::register))
-        .with_state(pool)
+        .route("/user/register", post(user::handler::register))
+        .route("/auth/login", post(auth::handler::login))
+        .with_state(state)
 }
 
 // 存活：纯进程检查，不碰DB
@@ -52,6 +59,19 @@ pub async fn run(config: Config, pool: PgPool) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on {addr}");
-    axum::serve(listener, router(pool)).await?;
+
+    // 建web realm 的TokenManager, secret + access TTL 从 config 读取
+    let token_manager = std::sync::Arc::new(TokenManager::new(
+        &config.jwt_secret,
+        Realm::Web,
+        Duration::minutes(config.access_ttl_minutes as i64),
+    ));
+    let state = AppState {
+        pool,
+        token_manager,
+        refresh_ttl: Duration::days(config.refresh_ttl_days as i64),
+    };
+
+    axum::serve(listener, router(state)).await?;
     Ok(())
 }

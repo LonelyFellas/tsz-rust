@@ -104,4 +104,7 @@ impl TokenManager {
 
         validation
     }
+    pub fn ttl_seconds(&self) -> i64 {
+        self.ttl.num_seconds()
+    }
 }
