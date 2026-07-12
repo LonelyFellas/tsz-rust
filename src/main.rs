@@ -7,6 +7,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = config::load_config()?;
-    let pool = platform::connect(&config.database_url).await?;
-    tsz_rust::run(config, pool).await
+    let pool = platform::connect_db(&config.database_url).await?;
+    let redis = platform::connect_redis(&config.redis_url).await?;
+    // redis.get().await?.ping::<()>().await?;
+    tsz_rust::run(config, pool, redis).await
 }

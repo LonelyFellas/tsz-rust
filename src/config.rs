@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::num::NonZeroU16;
+use std::num::{NonZeroU8, NonZeroU16};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -11,6 +11,17 @@ pub struct Config {
     pub refresh_ttl_days: u64,
     #[serde(default = "default_access_ttl_minutes")]
     pub access_ttl_minutes: u64,
+    #[serde(default = "default_otp_ttl_minutes")]
+    pub otp_ttl_minutes: u64,
+    #[serde(default = "default_otp_cooldown_seconds")]
+    pub otp_cooldown_seconds: u64,
+    #[serde(default = "default_otp_daily_limit")]
+    pub otp_daily_limit: u64,
+    // NonZeroU8：类型即约束——envy 解析期即拒 0（"错一次即毁"）/负数/越界，
+    // 传给 store 的 max_attempts:u8 无需 `as` 截断（对齐 port: NonZeroU16 的做法）。
+    #[serde(default = "default_otp_max_attempts")]
+    pub otp_max_attempts: NonZeroU8,
+    pub redis_url: String,
 }
 
 fn default_refresh_ttl_days() -> u64 {
@@ -21,6 +32,18 @@ fn default_access_ttl_minutes() -> u64 {
     15
 }
 
+fn default_otp_ttl_minutes() -> u64 {
+    10
+}
+fn default_otp_cooldown_seconds() -> u64 {
+    60
+}
+fn default_otp_daily_limit() -> u64 {
+    10
+}
+fn default_otp_max_attempts() -> NonZeroU8 {
+    NonZeroU8::new(5).unwrap()
+}
 fn default_port() -> NonZeroU16 {
     NonZeroU16::new(8383).unwrap()
 }
@@ -53,6 +76,9 @@ mod tests {
         vec![
             ("DATABASE_URL", "postgres://localhost/tsz"),
             ("JWT_SECRET", "s3cret"),
+            // Redis 是硬依赖（见 docs/redis-design.md §4），与 DATABASE_URL 同级必填，
+            // 故基线里备齐，其余测试才能只声明「与基线的差异」。
+            ("REDIS_URL", "redis://localhost:6379/0"),
         ]
     }
 
@@ -92,6 +118,7 @@ mod tests {
         assert_eq!(cfg.port.get(), 9000);
         assert_eq!(cfg.database_url, "postgres://localhost/tsz");
         assert_eq!(cfg.jwt_secret, "s3cret");
+        assert_eq!(cfg.redis_url, "redis://localhost:6379/0");
     }
 
     #[test]
@@ -134,11 +161,24 @@ mod tests {
     }
 
     #[test]
+    fn missing_redis_url_errors() {
+        // REDIS_URL 无 #[serde(default)]，与 DATABASE_URL 同为硬依赖：缺了必须解析失败，
+        // 让「Redis 连接串没配」在启动即暴露，而不是运行到发验证码时才炸。
+        let input = [
+            ("DATABASE_URL", "postgres://localhost/tsz"),
+            ("JWT_SECRET", "s3cret"),
+        ];
+        assert!(parse(&input).is_err(), "缺少必填的 REDIS_URL 应返回错误");
+    }
+
+    #[test]
     fn env_key_is_case_insensitive() {
         // envy 把键统一小写化后匹配字段名，用小写键验证这一行为。
+        // 备齐全部必填项（含 redis_url），否则会因缺项报错而非验证到大小写匹配。
         let input = [
             ("database_url", "postgres://localhost/tsz"),
             ("jwt_secret", "s3cret"),
+            ("redis_url", "redis://localhost:6379/0"),
         ];
         let cfg = parse(&input).expect("小写键也应能匹配到字段");
         assert_eq!(cfg.database_url, "postgres://localhost/tsz");

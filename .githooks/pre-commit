@@ -1,5 +1,14 @@
 #!/bin/sh
-# 提交前 clippy 门禁：任何 clippy 警告都会拦截提交（-D warnings 把警告升级为错误）。
+# 提交前门禁（两道，任一失败都拦下提交）：
+#   1) 刷新 sqlx 离线缓存并纳入本次提交 —— 保证 .sqlx 与代码同步，离线/CI 编译不会撞 "no cached data"。
+#      覆盖面（--all-targets --all-features）与下方 clippy 对齐：clippy 能编到的 query! 缓存里都得有。
+#      ⚠️ 本步需连 DATABASE_URL（sqlx-cli 自动读 .env）——本地 Docker 库必须在跑，否则本步失败、提交被拦。
+#   2) clippy 门禁：任何警告都拦截提交（-D warnings 把警告升级为错误）。
 set -e
-echo "▶ pre-commit: cargo clippy --all-targets -- -D warnings"
+
+echo "▶ pre-commit (1/2): cargo sqlx prepare -- --all-targets --all-features"
+cargo sqlx prepare -- --all-targets --all-features
+git add -A .sqlx
+
+echo "▶ pre-commit (2/2): cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets --all-features -- -D warnings

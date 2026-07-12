@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod otp;
 pub mod platform;
 pub mod session;
 pub mod state;
@@ -15,6 +16,7 @@ use axum::{
 };
 use chrono::Duration;
 use config::Config;
+use deadpool_redis::Pool as RedisPool;
 use serde_json::json;
 use sqlx::PgPool;
 
@@ -33,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(auth::handler::login))
         .route("/auth/refresh", post(auth::handler::refresh_token))
         .route("/auth/logout", post(auth::handler::logout))
+        .route("/otp/send", post(otp::handler::send_otp))
         .with_state(state)
 }
 
@@ -42,22 +45,46 @@ async fn liveness() -> impl IntoResponse {
 }
 
 // 就绪：DB连通性检查
-async fn readiness(State(pool): State<PgPool>) -> impl IntoResponse {
-    match sqlx::query("SELECT 1").execute(&pool).await {
-        Ok(_) => (StatusCode::OK, Json(json!({"status": "ready"}))),
+async fn readiness(
+    State(pool): State<PgPool>,
+    State(redis): State<RedisPool>,
+) -> impl IntoResponse {
+    // 1) 探 DB
+    if let Err(e) = sqlx::query("SELECT 1").execute(&pool).await {
+        tracing::error!("database connection failed: {}", e);
+        return unavailable("database connection failed");
+    }
+
+    // 2) 探 Redis
+    match redis.get().await {
+        Ok(mut conn) => {
+            if let Err(e) = deadpool_redis::redis::cmd("PING")
+                .query_async::<()>(&mut conn)
+                .await
+            {
+                tracing::error!("redis connection failed: {}", e);
+                return unavailable("redis connection failed");
+            }
+        }
         Err(e) => {
-            tracing::error!("database connection failed: {}", e);
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"status": "unavailable", "reason": "database connection failed"})),
-            )
+            tracing::error!("redis connection failed: {}", e);
+            return unavailable("redis connection failed");
         }
     }
+
+    (StatusCode::OK, Json(json!({"status": "ready"})))
+}
+
+fn unavailable(reason: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"status": "unavailable", "reason": reason})),
+    )
 }
 
 /// 总入口：读配置 -> 绑端口 -> serve。绑socket的部分不适合单测
 /// 所以和 router() 分开，让逻辑（router）可测、启动（run）够薄。
-pub async fn run(config: Config, pool: PgPool) -> anyhow::Result<()> {
+pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on {addr}");
@@ -72,6 +99,7 @@ pub async fn run(config: Config, pool: PgPool) -> anyhow::Result<()> {
         pool,
         token_manager,
         refresh_ttl: Duration::days(config.refresh_ttl_days as i64),
+        redis,
     };
 
     axum::serve(listener, router(state)).await?;

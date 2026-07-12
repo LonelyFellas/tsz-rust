@@ -15,5 +15,16 @@ services:
       timeout: 3s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379" # 对齐 .env 的 REDIS_URL；tsz-go 暂无 redis，不冲突
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # OTP/缓存数据到期即弃，无需持久化卷——容器重建即清空，符合语义
+
 volumes:
   tsz_rust_pgdata:

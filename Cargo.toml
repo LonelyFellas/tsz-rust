@@ -9,6 +9,10 @@ axum = "0.8.9"
 base64 = "0.22.1"
 bcrypt = "0.19.2"
 chrono = { version = "0.4.45", features = ["serde"] }
+deadpool-redis = "0.23.0"
+# 直接依赖 redis 只为打开 `script` feature（deadpool-redis 默认不开）——EVALSHA/Script 需要它。
+# 版本跟随 deadpool-redis 拉的 redis 1.x，Cargo 会 feature-union 到同一个实例，不会双份。
+redis = { version = "1", default-features = false, features = ["script"] }
 dotenvy = "0.15.7"
 envy = "0.4.2"
 getrandom = "0.4.3"
