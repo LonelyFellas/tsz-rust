@@ -18,6 +18,10 @@ pub enum AppError {
     Conflict(String),
     #[error("{0}")]
     Unauthenticated(String),
+    #[error("too many requests")]
+    TooManyRequests,
+    #[error("service unavailable")]
+    ServiceUnavailable,
 
     /// 内部错误：真实原因藏在 anyhow 里，只进日志，不进响应。
     #[error("internal error")]
@@ -40,6 +44,9 @@ impl AppError {
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Unauthenticated(_) => StatusCode::UNAUTHORIZED,
+            // status_code() —— 这是 exhaustive match，不加会编译不过（好，漏不掉）
+            AppError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS, // 429
+            AppError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE, // 503
         }
     }
 }

@@ -7,6 +7,9 @@ pub mod session;
 pub mod state;
 pub mod user;
 
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
 use axum::{
     Json, Router,
     extract::State,
@@ -22,6 +25,7 @@ use sqlx::PgPool;
 
 use crate::{
     auth::{Realm, TokenManager},
+    otp::{sender::OtpSender, service::OtpService, store::OtpStore},
     state::AppState,
 };
 
@@ -95,11 +99,21 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         Realm::Web,
         Duration::minutes(config.access_ttl_minutes as i64),
     ));
+
+    let otp_service = Arc::new(OtpService::new(
+        OtpStore::new(redis.clone()),
+        OtpSender::Mock,
+        StdDuration::from_secs(config.otp_cooldown_seconds), // cooldown
+        config.otp_daily_limit,                              // daily_limit
+        StdDuration::from_secs(config.otp_ttl_minutes * 60), // ttl
+        config.otp_max_attempts.get(),                       // NonZeroU8 → u8，兑现了！
+    ));
     let state = AppState {
         pool,
         token_manager,
         refresh_ttl: Duration::days(config.refresh_ttl_days as i64),
         redis,
+        otp_service,
     };
 
     axum::serve(listener, router(state)).await?;

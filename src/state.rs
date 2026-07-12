@@ -1,8 +1,13 @@
 use chrono::Duration;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
+use uuid::Uuid;
 
-use crate::auth::{Realm, TokenManager};
+use crate::{
+    auth::{Realm, TokenManager},
+    otp::{sender::OtpSender, service::OtpService, store::OtpStore},
+};
 use axum::extract::FromRef;
 
 #[derive(Clone)]
@@ -11,6 +16,7 @@ pub struct AppState {
     pub token_manager: Arc<TokenManager>,
     pub refresh_ttl: Duration,
     pub redis: deadpool_redis::Pool,
+    pub otp_service: Arc<OtpService>,
 }
 
 impl AppState {
@@ -27,6 +33,15 @@ impl AppState {
     /// 需要**注入特定 redis pool** 的测试用——如 readyz 的「Redis 宕机」场景要塞一个
     /// 指向死地址的 pool 来验证探活会失败。
     pub fn for_test_with_redis(pool: PgPool, redis: deadpool_redis::Pool) -> Self {
+        // 唯一前缀隔离——每个 for_test 的 OtpService 独享 keyspace，可并行、不串号。
+        let otp_service = Arc::new(OtpService::new(
+            OtpStore::with_prefix(redis.clone(), format!("test:{}:", Uuid::now_v7())),
+            OtpSender::Mock,
+            StdDuration::from_secs(60),  // cooldown（>0，好测 429）
+            10,                          // daily_limit
+            StdDuration::from_secs(300), // ttl
+            5,                           // max_attempts
+        ));
         Self {
             pool,
             token_manager: Arc::new(TokenManager::new(
@@ -36,6 +51,7 @@ impl AppState {
             )),
             refresh_ttl: Duration::days(30),
             redis,
+            otp_service,
         }
     }
 }

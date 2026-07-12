@@ -1,3 +1,5 @@
+use serde::Deserialize;
+
 #[derive(sqlx::Type, PartialEq, Debug)]
 #[sqlx(type_name = "channel", rename_all = "lowercase")]
 pub enum Channel {
@@ -15,8 +17,9 @@ impl Channel {
     }
 }
 
-#[derive(sqlx::Type, PartialEq, Debug, Clone, Copy)]
+#[derive(sqlx::Type, PartialEq, Debug, Clone, Copy, Deserialize)]
 #[sqlx(type_name = "purpose", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Purpose {
     Login,           // 登录
     PasswordReset,   // 密码重置

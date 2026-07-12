@@ -263,7 +263,7 @@ impl OtpService {
 
 ## 12. 端点与编排
 
-- **`POST /otp/request` 是真端点**：`{ target, purpose }` → `request(...)` → 204/200。是「发一枚码」的通用入口。
+- **`POST /otp/send` 是真端点**：`{ phone? | email?, purpose }`（phone/email 恰好一个非空，否则 400；`purpose` 缺失/非法 → **422** 由 axum Json 反序列化返回）→ `request(...)` → **202 Accepted**（成功体不含码）。是「发一枚码」的通用入口。错误映射见 §9（`RateLimited`→429、`Store`→503 fail-close、`Send`→隐藏 cause 500）。
 - **verify 不做成独立端点**：因为「验过了」本身没有意义——login/改密等都要在验过的**同一步**里紧接着发 token / 改密码（否则「先验后做」之间有竞态/绕过缺口）。所以 `verify` 是 **service 方法，被 purpose 专属 handler 调用**：
   ```
   未来 POST /auth/login-otp:  otp_service.verify(target, Login, code)? → user 查/建 → token_manager.generate + session.issue  （像 password 登录那样编排）
@@ -283,7 +283,7 @@ impl OtpService {
 - **service 层**要覆盖：
   - request：成功存一行 + channel 判定对（sms/email）；冷却内再请求→RateLimited 且不新增行；日限到顶→RateLimited；限流命中时**不发**（Mock 不被调用——可用计数或返回值验证）。
   - verify：正确码→Ok 且 `consumed_at` 落上；同码再验→InvalidCode（单次）；错码→InvalidCode 且 `attempts+1`；错满 `max_attempts`→InvalidCode（锁）；过期码→InvalidCode；没发过→InvalidCode；**并发双验正确码只一个 Ok**。
-- **handler 层**（`/otp/request`）：请求发码 200/204 且库里落一行；冷却内二次请求→429。
+- **handler 层**（`/otp/send`）：合法请求→202 且 Redis 落一枚码；冷却内二次→429；缺/空/双 target→400；缺/错 purpose→422；Redis 挂→503（fail-close）；成功体不含码。
 
 ---
 
