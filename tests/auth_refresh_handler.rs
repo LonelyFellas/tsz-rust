@@ -51,7 +51,7 @@ async fn post(pool: PgPool, uri: &str, body: Value) -> (StatusCode, Value) {
 async fn login_for_refresh(pool: &PgPool, phone: &str) -> String {
     let (status, body) = post(
         pool.clone(),
-        "/auth/login",
+        "/api/v1/auth/login",
         json!({ "identifier": phone, "password": "password123" }),
     )
     .await;
@@ -72,7 +72,7 @@ async fn refresh_returns_200_with_rotated_token_pair(pool: PgPool) {
 
     let (status, body) = post(
         pool.clone(),
-        "/auth/refresh",
+        "/api/v1/auth/refresh",
         json!({ "refresh_token": r0 }),
     )
     .await;
@@ -102,13 +102,13 @@ async fn old_refresh_is_rejected_after_rotation(pool: PgPool) {
 
     let (s1, _) = post(
         pool.clone(),
-        "/auth/refresh",
+        "/api/v1/auth/refresh",
         json!({ "refresh_token": r0.clone() }),
     )
     .await;
     assert_eq!(s1, StatusCode::OK, "首次刷新应成功");
 
-    let (s2, body) = post(pool, "/auth/refresh", json!({ "refresh_token": r0 })).await;
+    let (s2, body) = post(pool, "/api/v1/auth/refresh", json!({ "refresh_token": r0 })).await;
     assert_eq!(s2, StatusCode::UNAUTHORIZED, "已轮换的旧 token 再用应 401");
     assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
 }
@@ -121,14 +121,14 @@ async fn rotated_new_refresh_is_usable(pool: PgPool) {
 
     let (s1, b1) = post(
         pool.clone(),
-        "/auth/refresh",
+        "/api/v1/auth/refresh",
         json!({ "refresh_token": r0 }),
     )
     .await;
     assert_eq!(s1, StatusCode::OK);
     let r1 = b1["refresh_token"].as_str().unwrap().to_owned();
 
-    let (s2, _) = post(pool, "/auth/refresh", json!({ "refresh_token": r1 })).await;
+    let (s2, _) = post(pool, "/api/v1/auth/refresh", json!({ "refresh_token": r1 })).await;
     assert_eq!(s2, StatusCode::OK, "轮换出的新 refresh 应可继续使用");
 }
 
@@ -139,7 +139,7 @@ async fn rotated_new_refresh_is_usable(pool: PgPool) {
 async fn garbage_refresh_is_401(pool: PgPool) {
     let (status, body) = post(
         pool,
-        "/auth/refresh",
+        "/api/v1/auth/refresh",
         json!({ "refresh_token": "definitely-not-a-real-token" }),
     )
     .await;
@@ -156,20 +156,20 @@ async fn reused_and_garbage_are_identical_401(pool: PgPool) {
     // 预热：把 r0 用掉（轮换成新的），r0 变成「已轮换」失效态。
     let _ = post(
         pool.clone(),
-        "/auth/refresh",
+        "/api/v1/auth/refresh",
         json!({ "refresh_token": r0.clone() }),
     )
     .await;
 
     let (s_reused, b_reused) = post(
         pool.clone(),
-        "/auth/refresh",
+        "/api/v1/auth/refresh",
         json!({ "refresh_token": r0 }),
     )
     .await;
     let (s_garbage, b_garbage) = post(
         pool,
-        "/auth/refresh",
+        "/api/v1/auth/refresh",
         json!({ "refresh_token": "definitely-not-a-real-token" }),
     )
     .await;
@@ -202,7 +202,7 @@ async fn disabled_user_refresh_is_401_without_tokens(pool: PgPool) {
     .await
     .unwrap();
 
-    let (status, body) = post(pool, "/auth/refresh", json!({ "refresh_token": r0 })).await;
+    let (status, body) = post(pool, "/api/v1/auth/refresh", json!({ "refresh_token": r0 })).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED, "禁用账号 refresh 应 401");
     assert!(
@@ -225,13 +225,13 @@ async fn logout_then_refresh_is_401(pool: PgPool) {
 
     let (s_logout, _) = post(
         pool.clone(),
-        "/auth/logout",
+        "/api/v1/auth/logout",
         json!({ "refresh_token": r0.clone() }),
     )
     .await;
     assert_eq!(s_logout, StatusCode::NO_CONTENT, "登出应成功（204 No Content）");
 
-    let (s_refresh, body) = post(pool, "/auth/refresh", json!({ "refresh_token": r0 })).await;
+    let (s_refresh, body) = post(pool, "/api/v1/auth/refresh", json!({ "refresh_token": r0 })).await;
     assert_eq!(s_refresh, StatusCode::UNAUTHORIZED, "登出后再刷应 401");
     assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
 }
@@ -244,13 +244,13 @@ async fn logout_is_idempotent_and_silent(pool: PgPool) {
 
     let (s1, _) = post(
         pool.clone(),
-        "/auth/logout",
+        "/api/v1/auth/logout",
         json!({ "refresh_token": r0.clone() }),
     )
     .await;
     let (s2, _) = post(
         pool.clone(),
-        "/auth/logout",
+        "/api/v1/auth/logout",
         json!({ "refresh_token": r0 }),
     )
     .await;
@@ -259,7 +259,7 @@ async fn logout_is_idempotent_and_silent(pool: PgPool) {
 
     let (s3, _) = post(
         pool,
-        "/auth/logout",
+        "/api/v1/auth/logout",
         json!({ "refresh_token": "never-existed" }),
     )
     .await;

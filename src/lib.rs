@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod constant;
 pub mod error;
 pub mod otp;
 pub mod platform;
@@ -35,11 +36,19 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
-        .route("/user/register", post(user::handler::register))
-        .route("/auth/login", post(auth::handler::login))
-        .route("/auth/refresh", post(auth::handler::refresh_token))
-        .route("/auth/logout", post(auth::handler::logout))
-        .route("/otp/send", post(otp::handler::send_otp))
+        .nest(
+            "/api/v1/user",
+            Router::new().route("/register", post(user::handler::register)),
+        )
+        .nest(
+            "/api/v1/auth",
+            Router::new()
+                .route("/login", post(auth::handler::login))
+                .route("/refresh", post(auth::handler::refresh_token))
+                .route("/logout", post(auth::handler::logout))
+                .route("/me", get(auth::handler::me)),
+        )
+        .route("/api/v1/otp/send", post(otp::handler::send_otp))
         .with_state(state)
 }
 

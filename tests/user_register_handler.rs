@@ -32,7 +32,7 @@ async fn register(pool: PgPool, body: Value) -> (StatusCode, Value) {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/user/register")
+                .uri("/api/v1/user/register")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),

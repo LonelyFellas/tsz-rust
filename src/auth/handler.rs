@@ -1,4 +1,6 @@
 use crate::{
+    auth::extract::AuthUser,
+    constant::TOKEN_SCHEMA,
     error::AppError,
     session::{
         repository::RefreshTokenRepository,
@@ -13,6 +15,7 @@ use crate::{
 };
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -64,7 +67,7 @@ pub async fn login(
         Json(LoginResponse {
             access_token,
             refresh_token: refresh.plaintext,
-            token_type: "Bearer",
+            token_type: TOKEN_SCHEMA,
             expires_in: state.token_manager.ttl_seconds(),
         }),
     ))
@@ -118,7 +121,7 @@ pub async fn refresh_token(
         Json(LoginResponse {
             access_token,
             refresh_token: refresh_token.plaintext,
-            token_type: "Bearer",
+            token_type: TOKEN_SCHEMA,
             expires_in: state.token_manager.ttl_seconds(),
         }),
     ))
@@ -143,6 +146,52 @@ pub async fn logout(
         .await
         .map_err(map_session_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+pub struct Profile {
+    pub id: Uuid,
+    pub name: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub role: String,
+}
+
+/// GET /api/v1/auth/me
+pub async fn me(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let user = UserRepository::new(state.pool)
+        .get_by_id(&user.subject)
+        .await
+        .map_err(map_user_error)?;
+
+    if user.status != UserStatus::Active {
+        return Err(AppError::Unauthenticated("user is not active".into()));
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(Profile {
+            id: user.id,
+            name: user.display_name,
+            email: user.email,
+            phone: user.phone,
+            role: user
+                .last_active_role
+                .unwrap_or(UserRole::Student)
+                .as_str()
+                .to_string(),
+        }),
+    ))
+}
+
+fn map_user_error(err: UserError) -> AppError {
+    match err {
+        UserError::NotFound => AppError::Unauthenticated("user not found".into()),
+        _ => AppError::internal(err),
+    }
 }
 
 fn map_session_error(err: SessionError) -> AppError {

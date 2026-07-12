@@ -8,6 +8,7 @@ use jsonwebtoken::{
 };
 use thiserror::Error;
 
+#[derive(Clone)]
 pub struct Claims {
     pub subject: Uuid,
     pub realm: Realm,
@@ -67,6 +68,7 @@ impl TokenManager {
             ttl,
         }
     }
+
     /// 生成令牌
     pub fn generate(&self, subject: Uuid, role: &str) -> Result<String, TokenError> {
         let now = chrono::Utc::now();

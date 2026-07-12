@@ -29,7 +29,7 @@ async fn post_send(state: &AppState, body: Value) -> (StatusCode, String) {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/otp/send")
+                .uri("/api/v1/otp/send")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
