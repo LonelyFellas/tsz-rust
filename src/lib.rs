@@ -113,6 +113,13 @@ fn unavailable(reason: &str) -> (StatusCode, Json<serde_json::Value>) {
 /// 总入口：读配置 -> 绑端口 -> serve。绑socket的部分不适合单测
 /// 所以和 router() 分开，让逻辑（router）可测、启动（run）够薄。
 pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> anyhow::Result<()> {
+    // 启动即迁移：migrations/ 于编译期内嵌进二进制（sqlx 的 `migrate` feature），
+    // 部署到空库时自动建表/升级——裸机部署无需单独跑 `sqlx migrate run`，二进制自带迁移。
+    // 放在 bind 之前：迁移未完成不开始收流量，避免 readyz 过早报 ready。
+    // 并发安全：sqlx 迁移持有 Postgres advisory lock，多实例同时启动只有一个真正执行。
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    tracing::info!("database migrations applied");
+
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on {addr}");
@@ -140,6 +147,39 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         otp_service,
     };
 
-    axum::serve(listener, router(state)).await?;
+    // 接优雅停机：systemctl stop / 容器停止发 SIGTERM，Ctrl+C 发 SIGINT。
+    // 收到信号后停止收新连接、放在途请求跑完再退出，避免请求被硬砍。
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+/// 等待停机信号：SIGTERM（systemd/容器）或 SIGINT（Ctrl+C），任一到达即返回。
+async fn shutdown_signal() {
+    use tokio::signal;
+
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("shutdown signal received, starting graceful shutdown");
 }
