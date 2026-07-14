@@ -56,7 +56,8 @@ async fn login_for_refresh(pool: &PgPool, phone: &str) -> String {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "预置登录应成功");
-    body["refresh_token"]
+    // login 响应把 token 嵌在 `token` 下（refresh 响应才是打平的）。
+    body["token"]["refresh_token"]
         .as_str()
         .expect("登录应返回 refresh_token")
         .to_owned()

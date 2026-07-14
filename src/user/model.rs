@@ -1,5 +1,6 @@
 use bcrypt::{DEFAULT_COST, hash};
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use unicode_general_category::{GeneralCategory, get_general_category};
 use uuid::Uuid;
 
@@ -12,8 +13,9 @@ pub enum UserStatus {
     Disabled,
 }
 
-#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy)]
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum UserRole {
     Student,
     Teacher,

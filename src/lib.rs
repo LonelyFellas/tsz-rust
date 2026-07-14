@@ -46,6 +46,7 @@ pub fn router(state: AppState) -> Router {
                 .route("/login", post(auth::handler::login))
                 .route("/refresh", post(auth::handler::refresh_token))
                 .route("/logout", post(auth::handler::logout))
+                .route("/login-otp", post(auth::handler::login_otp))
                 .route("/me", get(auth::handler::me)),
         )
         .route("/api/v1/otp/send", post(otp::handler::send_otp))

@@ -54,6 +54,38 @@ impl AppState {
             otp_service,
         }
     }
+
+    /// 测试用：返回 `(AppState, OtpStore)`，二者共享**同一 OTP keyspace**（同 key 前缀）。
+    /// 供 verify 编排的集成测试（如 login-otp）——先用返回的 `store` 注入一枚**已知** code，
+    /// 再驱动 handler 走真实 `verify`（`OtpSender::Mock` 不回传码，没法从发码流程读回，故走注入）。
+    pub fn for_test_with_otp_store(pool: PgPool) -> (Self, OtpStore) {
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379/0")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("测试 redis pool 应能创建（惰性）");
+        let prefix = format!("test:{}:", Uuid::now_v7());
+        // 同一 prefix 造两个 handle：store 给测试注入码、service 给 handler verify——同 keyspace 才对得上。
+        let store = OtpStore::with_prefix(redis.clone(), prefix.clone());
+        let otp_service = Arc::new(OtpService::new(
+            OtpStore::with_prefix(redis.clone(), prefix),
+            OtpSender::Mock,
+            StdDuration::from_secs(60),
+            10,
+            StdDuration::from_secs(300),
+            5,
+        ));
+        let state = Self {
+            pool,
+            token_manager: Arc::new(TokenManager::new(
+                "test-secret",
+                Realm::Web,
+                Duration::minutes(15),
+            )),
+            refresh_ttl: Duration::days(30),
+            redis,
+            otp_service,
+        };
+        (state, store)
+    }
 }
 
 // 让只要 pool 的老 handler（healthz/readyz/register）继续用 State<PgPool>，不用改

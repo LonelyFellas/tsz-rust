@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT role as \"role: UserRole\"\n            FROM user_roles\n            WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role: UserRole",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_roles",
+            "name": "role"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e5b19b42cdab743b768c8a350fdfd357c45cd8deef0197d81a9aa9a5e60a4a2e"
+}

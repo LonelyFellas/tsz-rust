@@ -3,9 +3,12 @@ use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::session::{
-    model::NewRefreshToken,
-    repository::{RefreshTokenError, RefreshTokenRepository},
+use crate::{
+    auth::TokenError,
+    session::{
+        model::NewRefreshToken,
+        repository::{RefreshTokenError, RefreshTokenRepository},
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -14,6 +17,8 @@ pub enum SessionError {
     InvalidRefreshToken,
     #[error(transparent)]
     Repository(#[from] RefreshTokenError),
+    #[error("signing error: {0}")]
+    Signing(TokenError),
 }
 
 pub struct IssuedRefresh {

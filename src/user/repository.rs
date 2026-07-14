@@ -126,6 +126,22 @@ impl UserRepository {
     }
 
    
+    // 查询用户用户的角色列表
+    pub async fn get_roles_by_user_id(&self, user_id: &Uuid) -> Result<Vec<UserRole>, UserError> {
+        let roles = sqlx::query_scalar!(
+            r#"
+            SELECT role as "role: UserRole"
+            FROM user_roles
+            WHERE user_id = $1
+            "#,
+            user_id   
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect::<Vec<UserRole>>();
+        Ok(roles)
+    }
 }
 
 fn map_unique_violation(e: sqlx::Error) -> UserError {

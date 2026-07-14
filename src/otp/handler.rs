@@ -5,6 +5,7 @@ use crate::{
     error::AppError,
     otp::{model::Purpose, service::OtpServiceError},
     state::AppState,
+    user::service::normalize_identifier,
 };
 
 #[derive(Deserialize)]
@@ -30,8 +31,8 @@ pub async fn send_otp(
             .map(str::trim)
             .filter(|s| !s.is_empty()),
     ) {
-        (Some(p), None) => p,
-        (None, Some(e)) => e,
+        (Some(p), None) => normalize_identifier(p),
+        (None, Some(e)) => normalize_identifier(e),
         _ => {
             return Err(AppError::BadRequest(
                 "exactly one of phone or email is required".into(),
@@ -41,7 +42,7 @@ pub async fn send_otp(
 
     state
         .otp_service
-        .request(target, req.purpose)
+        .request(&target, req.purpose)
         .await
         .map_err(map_otp_error)?;
     Ok(StatusCode::ACCEPTED) // 202

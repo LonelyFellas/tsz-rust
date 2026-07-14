@@ -61,24 +61,31 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
 
     assert_eq!(status, StatusCode::OK, "正确凭证应 200");
 
-    // OAuth 形状四字段
+    // OAuth 形状四字段（登录响应把 token 嵌在 `token` 下，profile 字段在顶层）
     assert!(
-        body["access_token"].as_str().is_some_and(|s| !s.is_empty()),
+        body["token"]["access_token"].as_str().is_some_and(|s| !s.is_empty()),
         "应有非空 access_token"
     );
     assert!(
-        body["refresh_token"].as_str().is_some_and(|s| !s.is_empty()),
+        body["token"]["refresh_token"].as_str().is_some_and(|s| !s.is_empty()),
         "应有非空 refresh_token"
     );
-    assert_eq!(body["token_type"], "Bearer");
-    assert_eq!(body["expires_in"], 900, "for_test 的 access TTL=15min=900s");
+    assert_eq!(body["token"]["token_type"], "Bearer");
+    assert_eq!(
+        body["token"]["expires_in"], 900,
+        "for_test 的 access TTL=15min=900s"
+    );
 
     // access_token 看着像 JWT（三段）
     assert_eq!(
-        body["access_token"].as_str().unwrap().split('.').count(),
+        body["token"]["access_token"].as_str().unwrap().split('.').count(),
         3,
         "access_token 应是三段式 JWT"
     );
+
+    // role 序列化必须小写，与 JWT 里的 role claim（as_str）一致，别漂成 "Student"
+    assert_eq!(body["last_active_role"], "student", "last_active_role 应小写");
+    assert_eq!(body["roles"][0], "student", "roles 元素应小写");
 
     // 绝不泄露 hash
     assert!(!body.to_string().contains("$2b$"), "响应不得含 bcrypt hash 片段");
