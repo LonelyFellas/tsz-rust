@@ -137,9 +137,8 @@ impl UserRepository {
             user_id   
         )
         .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .collect::<Vec<UserRole>>();
+        .await?;
+
         Ok(roles)
     }
 }

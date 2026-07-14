@@ -49,7 +49,7 @@ pub async fn login(
         .map_err(map_login_error)?;
 
     // 2) 查角色 + 发 token + 拼响应（与 login_otp 共用 build_login_response）
-    let resp = build_login_response(&state, &user_sve, user).await?;
+    let resp = build_login_response(&state, user).await?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
@@ -82,20 +82,16 @@ pub async fn login_otp(
         .map_err(map_login_error)?;
 
     // 3) 查角色 + 发 token + 拼响应（与 login 共用）
-    let resp = build_login_response(&state, &user_sve, user).await?;
+    let resp = build_login_response(&state, user).await?;
     Ok((StatusCode::OK, Json(resp)))
 }
 
 /// 组装登录响应：查角色 + 发 token + 拼 `LoginResponse`。
 /// `login` / `login_otp` 各自完成鉴权（密码 / OTP）后共用它，避免响应形状两处漂移。
 /// 顺序：先查角色（只读）再发 token（refresh 落库，有副作用）——查角色失败时不留孤儿 refresh。
-async fn build_login_response(
-    state: &AppState,
-    user_sve: &UserService,
-    user: User,
-) -> Result<LoginResponse, AppError> {
-    let roles = user_sve
-        .query_roles_by_user_id(&user.id)
+async fn build_login_response(state: &AppState, user: User) -> Result<LoginResponse, AppError> {
+    let roles = UserRepository::new(state.pool.clone())
+        .get_roles_by_user_id(&user.id)
         .await
         .map_err(map_user_error)?;
     let token = generate_token(state, &user)

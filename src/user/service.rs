@@ -142,19 +142,11 @@ impl UserService {
         }
     }
     pub async fn find_active_by_identifier(&self, id: &str) -> Result<User, LoginError> {
-        match self.repository.get_by_identifier(&id).await {
+        match self.repository.get_by_identifier(id).await {
             Ok(user) if user.status != UserStatus::Active => Err(LoginError::AccountDisabled),
             Ok(user) => Ok(user),
             Err(UserError::NotFound) => Err(LoginError::InvalidCredentials),
             Err(e) => Err(LoginError::Repository(e)),
-        }
-    }
-
-    pub async fn query_roles_by_user_id(&self, user_id: &Uuid) -> Result<Vec<UserRole>, UserError> {
-        match self.repository.get_roles_by_user_id(user_id).await {
-            Ok(roles) => Ok(roles),
-            Err(UserError::NotFound) => Err(UserError::NotFound),
-            Err(e) => Err(e),
         }
     }
 }

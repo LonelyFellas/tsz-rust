@@ -161,3 +161,42 @@ async fn login_disabled_account_is_403(pool: PgPool) {
 
     assert_eq!(status, StatusCode::FORBIDDEN, "密码对+账号禁用应 403");
 }
+
+// ————————————————————— 角色列表 —————————————————————
+
+/// 登录响应的 `roles` 应反映**真实角色表**（可多个），而非只回 last_active_role。
+/// 注册默认给 student；再追加 teacher → 响应应同时含 student 与 teacher。
+/// 这条能区分「查 user_roles 表」与「vec![last_active_role] 假实现」——后者只会回 1 个。
+#[sqlx::test]
+async fn login_returns_all_roles_from_table(pool: PgPool) {
+    let uid = register_user(&pool, "13800138000").await; // 默认 student
+    sqlx::query("INSERT INTO user_roles (user_id, role) VALUES ($1, $2)")
+        .bind(uid)
+        .bind("teacher")
+        .execute(&pool)
+        .await
+        .expect("追加 teacher 角色应成功");
+
+    let (status, body) = login(
+        pool,
+        json!({ "identifier": "13800138000", "password": "password123" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let roles: Vec<&str> = body["roles"]
+        .as_array()
+        .expect("应有 roles 数组")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        roles.contains(&"student"),
+        "roles 应含 student，实际 {roles:?}"
+    );
+    assert!(
+        roles.contains(&"teacher"),
+        "roles 应含 teacher（证明查的是真实角色表而非 last_active_role），实际 {roles:?}"
+    );
+    assert_eq!(roles.len(), 2, "应恰好两个角色，实际 {roles:?}");
+}

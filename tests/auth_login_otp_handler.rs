@@ -186,3 +186,42 @@ async fn explicit_reset_purpose_in_body_is_ignored_401(pool: PgPool) {
         "请求体里的 purpose 应被无视，重置码换不来登录会话"
     );
 }
+
+#[sqlx::test]
+async fn email_login_otp_is_case_insensitive(pool: PgPool) {
+    // 回归锁：OTP 登录对邮箱大小写不敏感（与密码登录一致）。
+    // 发码/存码走归一化后的小写邮箱；登录用大写邮箱。handler 先 normalize_identifier
+    // 再 verify + 查账号 → 命中同一 key、同一账号 → 200。
+    // 若哪端漏了归一化（verify 用原始串 / send 不归一化），大写登录会查不到码 → 401，本用例立刻变红。
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    // 注册邮箱用户（register 内部把邮箱归一化为小写入库）
+    UserService::new(UserRepository::new(pool.clone()))
+        .register(RegisterInput {
+            phone: None,
+            email: Some("User@X.com".to_owned()),
+            password: "password123".to_owned(),
+        })
+        .await
+        .expect("注册应成功");
+    // 码存在归一化后的小写邮箱下（send_otp 现在就是这么存的）
+    store
+        .save_code("user@x.com", Purpose::Login, CODE, ttl())
+        .await
+        .unwrap();
+
+    // 登录用大写邮箱 + 正确码 → 应 200
+    let (status, body) =
+        login_otp(&state, json!({"identifier": "User@X.com", "code": CODE})).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "大写邮箱 + 正确码应 200（大小写不敏感）"
+    );
+    assert!(
+        body["token"]["access_token"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "应发出非空 access_token"
+    );
+}
