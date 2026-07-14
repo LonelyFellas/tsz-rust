@@ -32,10 +32,21 @@ sqlx = { version = "0.9.0", features = [
 ], default-features = false }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
+# OpenAPI 文档。utoipa 出 spec（轻量，常在，所有 #[derive(ToSchema)] / #[utoipa::path] 都依赖它）。
+# uuid feature 让 ToSchema 认识 Uuid（映射成 string）。
+utoipa = { version = "5", features = ["axum_extras", "uuid", "chrono"] }
+# Swagger UI 页面。用 rust-embed 把静态资源打进二进制（几 MB），故设为 optional，
+# 由 `swagger` feature 控制——只在 dev/staging 开，release 默认不带（安全 + 省体积）。
+utoipa-swagger-ui = { version = "9", features = ["axum"], optional = true }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 unicode-general-category = "1.1.0"
 uuid = { version = "1.23.4", features = ["v7", "serde"] }
+
+[features]
+# 开启后在 /swagger-ui 暴露可交互 API 文档。默认关闭：release 二进制不含 UI 资源、不暴露接口清单。
+# 开发预览：cargo run --features swagger
+swagger = ["dep:utoipa-swagger-ui"]
 
 [dev-dependencies]
 http-body-util = "0.1.3"

@@ -1,6 +1,7 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use utoipa::ToSchema;
 
 use crate::{
     error::AppError,
@@ -12,21 +13,40 @@ use crate::{
 };
 
 /// DTO
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct RegisterRequest {
+    /// 手机号（与 email 二选一）
+    #[schema(example = "13800138000")]
     phone: Option<String>,
+    /// 邮箱（与 phone 二选一）
+    #[schema(example = "student@example.com")]
     email: Option<String>,
+    #[schema(example = "P@ssw0rd!")]
     password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RegisterResponse {
+    #[schema(example = "0198f2a1-3b4c-7d5e-8f90-1a2b3c4d5e6f")]
     pub user_id: String,
+    #[schema(example = "同学1234")]
     pub display_name: String,
+    #[schema(example = "student")]
     pub role: &'static str,
 }
 
 /// POST /api/v1/user/register
+#[utoipa::path(
+    post,
+    path = "/api/v1/user/register",
+    tag = "user",
+    request_body = RegisterRequest,
+    responses(
+        (status = 201, description = "注册成功", body = RegisterResponse),
+        (status = 400, description = "手机号/邮箱缺失或密码格式不合法"),
+        (status = 409, description = "手机号或邮箱已被占用"),
+    )
+)]
 pub async fn register(
     State(pool): State<PgPool>,
     Json(payload): Json<RegisterRequest>,

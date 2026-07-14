@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod constant;
 pub mod error;
+pub mod openapi;
 pub mod otp;
 pub mod platform;
 pub mod session;
@@ -33,7 +34,7 @@ use crate::{
 /// 构建路由。** 纯函数，不绑定端口 ** -- 这是可测的接缝
 /// 集成测试能拿它做oneshot, 不必真起服务器
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
         .nest(
@@ -49,8 +50,21 @@ pub fn router(state: AppState) -> Router {
                 .route("/login-otp", post(auth::handler::login_otp))
                 .route("/me", get(auth::handler::me)),
         )
-        .route("/api/v1/otp/send", post(otp::handler::send_otp))
-        .with_state(state)
+        .route("/api/v1/otp/send", post(otp::handler::send_otp));
+
+    // Swagger UI 仅在 `swagger` feature 开启时挂载：/swagger-ui 页面，spec 在 /api-docs/openapi.json。
+    // release 默认不带此 feature —— 不暴露接口清单、二进制也不含 UI 资源。
+    #[cfg(feature = "swagger")]
+    let router = {
+        use utoipa::OpenApi;
+        use utoipa_swagger_ui::SwaggerUi;
+        router.merge(
+            SwaggerUi::new("/swagger-ui")
+                .url("/api-docs/openapi.json", crate::openapi::ApiDoc::openapi()),
+        )
+    };
+
+    router.with_state(state)
 }
 
 // 存活：纯进程检查，不碰DB

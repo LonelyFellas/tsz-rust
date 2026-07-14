@@ -13,7 +13,7 @@ pub enum UserStatus {
     Disabled,
 }
 
-#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize)]
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize, utoipa::ToSchema)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {

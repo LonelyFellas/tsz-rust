@@ -17,9 +17,10 @@ impl Channel {
     }
 }
 
-#[derive(sqlx::Type, PartialEq, Debug, Clone, Copy, Deserialize)]
+#[derive(sqlx::Type, PartialEq, Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
 #[sqlx(type_name = "purpose", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[schema(example = "login")]
 pub enum Purpose {
     Login,           // 登录
     PasswordReset,   // 密码重置

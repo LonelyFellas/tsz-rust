@@ -16,27 +16,47 @@ use crate::{
 };
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
+    /// 登录标识：手机号或邮箱
+    #[schema(example = "student@example.com")]
     pub identifier: String,
+    #[schema(example = "P@ssw0rd!")]
     pub password: String,
 }
 
-#[derive(Serialize)]
-struct LoginResponse {
+#[derive(Serialize, ToSchema)]
+pub struct LoginResponse {
+    #[schema(example = "0198f2a1-3b4c-7d5e-8f90-1a2b3c4d5e6f")]
     id: Uuid,
+    #[schema(example = "student@example.com")]
     email: Option<String>,
+    #[schema(example = "13800138000")]
     phone: Option<String>,
+    #[schema(example = "同学1234")]
     display_name: String,
     roles: Vec<UserRole>,
     token: Token,
     last_active_role: UserRole,
+    #[schema(example = "https://cdn.example.com/avatar/default.png")]
     avatar_url: Option<String>,
 }
 
 /// POST /api/v1/auth/login
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/login",
+    tag = "auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "登录成功，返回用户信息与令牌", body = LoginResponse),
+        (status = 401, description = "凭证无效（用户不存在或密码错误，不可区分）"),
+        (status = 403, description = "账号被禁用"),
+    )
+)]
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
@@ -53,13 +73,28 @@ pub async fn login(
     Ok((StatusCode::OK, Json(resp)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct LoginOtpRequest {
+    /// 登录标识：手机号或邮箱
+    #[schema(example = "13800138000")]
     pub identifier: String,
+    /// 收到的 6 位验证码
+    #[schema(example = "123456")]
     pub code: String,
 }
 
 /// POST /api/v1/auth/login-otp
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/login-otp",
+    tag = "auth",
+    request_body = LoginOtpRequest,
+    responses(
+        (status = 200, description = "验证码登录成功，返回用户信息与令牌", body = LoginResponse),
+        (status = 401, description = "验证码无效或已过期"),
+        (status = 429, description = "请求过于频繁"),
+    )
+)]
 pub async fn login_otp(
     State(state): State<AppState>,
     Json(req): Json<LoginOtpRequest>,
@@ -109,11 +144,16 @@ async fn build_login_response(state: &AppState, user: User) -> Result<LoginRespo
     })
 }
 
-#[derive(Serialize)]
-struct Token {
+#[derive(Serialize, ToSchema)]
+pub struct Token {
+    #[schema(example = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMTk4Zi4uLiJ9.sig")]
     access_token: String,
+    #[schema(example = "kU3n7pQ2xR9vTfLmA1sB4dW6yZ0cE8gHjKlNoP-qRsT")]
     refresh_token: String,
+    #[schema(example = "Bearer")]
     token_type: &'static str,
+    /// access token 有效期（秒）
+    #[schema(example = 900)]
     expires_in: i64,
 }
 
@@ -141,12 +181,24 @@ async fn generate_token(state: &AppState, user: &User) -> Result<Token, SessionE
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct RefreshTokenRequest {
+    /// 登录/轮换时下发的不透明 refresh token（base64url 随机串，非 JWT）
+    #[schema(example = "kU3n7pQ2xR9vTfLmA1sB4dW6yZ0cE8gHjKlNoP-qRsT")]
     pub refresh_token: String,
 }
 
 /// POST /api/v1/auth/refresh
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/refresh",
+    tag = "auth",
+    request_body = RefreshTokenRequest,
+    responses(
+        (status = 200, description = "轮换成功，返回新令牌", body = Token),
+        (status = 401, description = "refresh token 无效、已过期或用户被禁用"),
+    )
+)]
 pub async fn refresh_token(
     State(state): State<AppState>,
     Json(req): Json<RefreshTokenRequest>,
@@ -179,11 +231,23 @@ pub async fn refresh_token(
     Ok((StatusCode::OK, Json(token)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct LogoutRequest {
+    /// 要作废的 refresh token（不透明串，同登录下发的那枚）
+    #[schema(example = "kU3n7pQ2xR9vTfLmA1sB4dW6yZ0cE8gHjKlNoP-qRsT")]
     pub refresh_token: String,
 }
 /// POST /api/v1/auth/logout
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/logout",
+    tag = "auth",
+    request_body = LogoutRequest,
+    responses(
+        (status = 204, description = "登出成功，refresh token 已失效"),
+        (status = 401, description = "refresh token 无效"),
+    )
+)]
 pub async fn logout(
     State(state): State<AppState>,
     Json(req): Json<LogoutRequest>,
@@ -200,16 +264,31 @@ pub async fn logout(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct Profile {
+    #[schema(example = "0198f2a1-3b4c-7d5e-8f90-1a2b3c4d5e6f")]
     pub id: Uuid,
+    #[schema(example = "同学1234")]
     pub name: String,
+    #[schema(example = "student@example.com")]
     pub email: Option<String>,
+    #[schema(example = "13800138000")]
     pub phone: Option<String>,
+    #[schema(example = "student")]
     pub role: String,
 }
 
 /// GET /api/v1/auth/me
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/me",
+    tag = "auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "当前登录用户信息", body = Profile),
+        (status = 401, description = "未认证 / token 无效或过期"),
+    )
+)]
 pub async fn me(
     user: AuthUser,
     State(state): State<AppState>,
