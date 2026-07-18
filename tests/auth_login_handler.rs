@@ -99,8 +99,8 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
         "必须 SameSite=Lax，实际：{cookie}"
     );
     assert!(
-        cookie.contains("Path=/api/v1/auth"),
-        "Path 应收窄到 /api/v1/auth，实际：{cookie}"
+        cookie.contains(&format!("Path={}", tsz_rust::auth::AUTH_MOUNT)),
+        "Path 应收窄到 auth 挂载前缀（AUTH_MOUNT），实际：{cookie}"
     );
     assert!(
         cookie.contains("Max-Age=2592000"),

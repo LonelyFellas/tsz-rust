@@ -38,11 +38,11 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
         .nest(
-            "/api/v1/user",
+            user::USER_MOUNT,
             Router::new().route("/register", post(user::handler::register)),
         )
         .nest(
-            "/api/v1/auth",
+            auth::AUTH_MOUNT,
             Router::new()
                 .route("/login", post(auth::handler::login))
                 .route("/refresh", post(auth::handler::refresh_token))
@@ -50,7 +50,10 @@ pub fn router(state: AppState) -> Router {
                 .route("/login-otp", post(auth::handler::login_otp))
                 .route("/me", get(auth::handler::me)),
         )
-        .route("/api/v1/otp/send", post(otp::handler::send_otp));
+        .nest(
+            otp::OTP_MOUNT,
+            Router::new().route("/send", post(otp::handler::send_otp)),
+        );
 
     // Swagger UI 仅在 `swagger` feature 开启时挂载：/swagger-ui 页面，spec 在 /api-docs/openapi.json。
     // release 默认不带此 feature —— 不暴露接口清单、二进制也不含 UI 资源。

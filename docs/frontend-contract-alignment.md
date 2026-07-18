@@ -160,6 +160,11 @@ rotate 里要接的逻辑：`consume` 落空 → `find_by_hash` 兜一下 → �
 - 入参：从 **Cookie** 读 refresh token（删 body）。吊销之。
 - 下发 `Max-Age=0` 清除 refresh cookie。
 - 返回 **204 No Content**（前端 `logout: () => http.post<void>`，http 层对 204 返回 undefined；勿返回带 body 的 200，会走 `res.json()`）。
+- **幂等定案（2026-07-18）：logout 无任何失败分支——缺 cookie / cookie 无效 / 重复登出
+  一律 204**（对齐 RFC 7009：撤销目标是「确保失效」，对象不存在 = 已达成）。
+  带 cookie 的路径附清除 Set-Cookie；缺 cookie 时浏览器本就无枚可清，仅 204 无清除头。
+  缺 cookie 报 401 的旧行为已废弃：30 天 Max-Age 到期后用户点退出会平白报错。
+  logout 只杀当前会话，不动其它设备（区别于重放检测的全端连坐）。
 
 ---
 

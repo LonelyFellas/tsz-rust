@@ -128,8 +128,8 @@ async fn refresh_returns_200_with_rotated_cookie(pool: PgPool) {
         "轮换下发的 cookie 也必须 HttpOnly：{cookie}"
     );
     assert!(
-        cookie.contains("Path=/api/v1/auth"),
-        "轮换下发的 cookie Path 必须与登录一致：{cookie}"
+        cookie.contains(&format!("Path={}", tsz_rust::auth::AUTH_MOUNT)),
+        "轮换下发的 cookie Path 必须与登录一致（AUTH_MOUNT）：{cookie}"
     );
 }
 
@@ -306,8 +306,8 @@ async fn logout_clears_cookie_and_revokes_token(pool: PgPool) {
         "清除 cookie 应 Max-Age=0：{cookie}"
     );
     assert!(
-        cookie.contains("Path=/api/v1/auth"),
-        "清除 cookie 的 Path 必须与下发时一致，否则浏览器清不掉：{cookie}"
+        cookie.contains(&format!("Path={}", tsz_rust::auth::AUTH_MOUNT)),
+        "清除 cookie 的 Path 必须与下发时一致（AUTH_MOUNT），否则浏览器清不掉：{cookie}"
     );
 
     let (s_refresh, _, body) = post(pool, "/api/v1/auth/refresh", Some(&r0), None).await;
@@ -315,8 +315,8 @@ async fn logout_clears_cookie_and_revokes_token(pool: PgPool) {
     assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
 }
 
-/// 登出幂等且不泄露：重复登出、以及对从不存在的 token 登出，都应 204。
-/// （缺 cookie 是当前契约里唯一的 401 例外，见下一条。）
+/// 登出幂等且不泄露：重复登出、以及对从不存在的 token 登出，都应 204 + 清除 cookie。
+/// （对齐 RFC 7009 语义：撤销的目标是「确保失效」，对象本就不存在 = 目标已达成。）
 #[sqlx::test]
 async fn logout_is_idempotent_and_silent(pool: PgPool) {
     register_user(&pool, "13800138000").await;
@@ -327,21 +327,51 @@ async fn logout_is_idempotent_and_silent(pool: PgPool) {
     assert_eq!(s1, StatusCode::NO_CONTENT);
     assert_eq!(s2, StatusCode::NO_CONTENT, "重复登出也应 204（幂等）");
 
-    let (s3, _, _) = post(pool, "/api/v1/auth/logout", Some("never-existed"), None).await;
+    let (s3, set_cookie, _) = post(pool, "/api/v1/auth/logout", Some("never-existed"), None).await;
     assert_eq!(
         s3,
         StatusCode::NO_CONTENT,
         "登出未知 token 也应 204，不报错"
     );
+    assert!(
+        set_cookie.is_some_and(|c| c.contains("Max-Age=0")),
+        "任何登出路径都应下发清除 cookie"
+    );
 }
 
-/// 缺 cookie 登出 → 401（当前契约选择；前端需把它也当「已登出」处理）。
+/// 缺 cookie 登出 → 仍是 204（幂等定案，2026-07-18）：
+/// 没有 cookie = 已处于登出态 = 目标已达成。典型场景：30 天 Max-Age 到期后
+/// 用户点「退出登录」，浏览器不带 cookie——报 401 只会让前端的退出按钮报错。
+///
+/// 注：此路径**不**要求清除头——`jar.remove` 只对请求里真带来的 cookie 生成
+/// 清除 Set-Cookie；浏览器本就没有这枚 cookie，无可清。cookie Path 与 logout
+/// 路径同前缀，「有 cookie 却没带上」的状态不存在，清除头的不变量由
+/// 上面两条带 cookie 的用例钉住。
 #[sqlx::test]
-async fn logout_without_cookie_is_401(pool: PgPool) {
-    let (status, _, _) = post(pool, "/api/v1/auth/logout", None, None).await;
+async fn logout_without_cookie_is_204(pool: PgPool) {
+    let (status, _, body) = post(pool, "/api/v1/auth/logout", None, None).await;
     assert_eq!(
         status,
-        StatusCode::UNAUTHORIZED,
-        "缺 cookie 登出按当前契约应 401"
+        StatusCode::NO_CONTENT,
+        "缺 cookie 登出应 204——幂等，不设凭证门槛"
+    );
+    assert_eq!(body, serde_json::Value::Null, "204 不应有 body");
+}
+
+/// logout 只杀当前会话，不迁怒其它设备（logout ≠ 重放连坐的 revoke_all）。
+#[sqlx::test]
+async fn logout_only_kills_this_session(pool: PgPool) {
+    register_user(&pool, "13800138000").await;
+    let device1 = login_for_refresh(&pool, "13800138000").await;
+    let device2 = login_for_refresh(&pool, "13800138000").await;
+
+    let (s1, _, _) = post(pool.clone(), "/api/v1/auth/logout", Some(&device1), None).await;
+    assert_eq!(s1, StatusCode::NO_CONTENT);
+
+    let (s2, _, _) = post(pool, "/api/v1/auth/refresh", Some(&device2), None).await;
+    assert_eq!(
+        s2,
+        StatusCode::OK,
+        "设备一登出不该影响设备二的会话——logout 是单会话操作"
     );
 }

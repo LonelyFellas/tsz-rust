@@ -119,4 +119,46 @@ mod tests {
             "Profile schema 应出现在 spec 中"
         );
     }
+
+    /// cookie 契约必须写进 spec：refresh/logout 的入参是 Cookie 而非 body——
+    /// 不声明的话，照 swagger 生成的客户端会以为这两个 POST 无需任何凭证，调用必 401。
+    /// login/login-otp/refresh 的 200 同理要声明 Set-Cookie 响应头。
+    #[test]
+    fn cookie_contract_is_documented() {
+        let spec = ApiDoc::openapi();
+        let json = serde_json::to_value(&spec).expect("spec 应能序列化为 JSON");
+
+        // refresh 与 logout 都声明了名为 refresh_token 的 Cookie 参数
+        for path in ["/api/v1/auth/refresh", "/api/v1/auth/logout"] {
+            let params = json["paths"][path]["post"]["parameters"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{path} 应声明 parameters（refresh_token cookie）"));
+            assert!(
+                params
+                    .iter()
+                    .any(|p| p["name"] == "refresh_token" && p["in"] == "cookie"),
+                "{path} 的 parameters 里应有 in=cookie 的 refresh_token，实际：{params:?}"
+            );
+        }
+
+        // 下发 refresh cookie 的三个成功响应都声明了 Set-Cookie 头
+        for (path, status) in [
+            ("/api/v1/auth/login", "200"),
+            ("/api/v1/auth/login-otp", "200"),
+            ("/api/v1/auth/refresh", "200"),
+            ("/api/v1/auth/logout", "204"),
+        ] {
+            assert!(
+                json["paths"][path]["post"]["responses"][status]["headers"]["Set-Cookie"]
+                    .is_object(),
+                "{path} 的 {status} 响应应声明 Set-Cookie 头"
+            );
+        }
+
+        // logout 已幂等化：spec 里不得再出现 401
+        assert!(
+            json["paths"]["/api/v1/auth/logout"]["post"]["responses"]["401"].is_null(),
+            "logout 无失败分支，401 应从 spec 移除"
+        );
+    }
 }
