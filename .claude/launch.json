@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tsz-rust (swagger)",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "--features", "swagger"],
+      "port": 8383
+    },
+    {
+      "name": "tsz-web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "/Users/darwish/Dev/tsz-core/tsz", "dev"],
+      "port": 3000
+    }
+  ]
+}

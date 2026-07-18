@@ -2,4 +2,8 @@
 .env
 .env.local
 .DS_Store
-.claude/
+# .claude 下只跟踪可共享的项目配置(skills/launch.json)；
+# settings.local.json 是个人本地权限、worktrees 是临时目录，保持忽略。
+.claude/*
+!.claude/skills/
+!.claude/launch.json
