@@ -56,7 +56,8 @@ async fn login(pool: PgPool, body: Value) -> (StatusCode, Option<String>, Value)
 
 // ————————————————————— 成功 —————————————————————
 
-/// 正确凭证 → 200 + access 字段齐全、refresh 走 Set-Cookie 不进 body、不泄露 hash、refresh 已落库。
+/// 正确凭证 → 200 + `AuthResponse` 形状（契约 T1）：token 字段平铺在顶层、用户对象嵌在
+/// `user` 下、refresh 走 Set-Cookie 不进 body、不泄露 hash、refresh 已落库。
 #[sqlx::test]
 async fn login_returns_200_with_tokens(pool: PgPool) {
     let user_id = register_user(&pool, "13800138000").await;
@@ -69,16 +70,25 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
 
     assert_eq!(status, StatusCode::OK, "正确凭证应 200");
 
-    // access 侧字段（登录响应把 token 嵌在 `token` 下，profile 字段在顶层）
+    // ——— 顶层：token 字段平铺（契约 T1，不再嵌套 token:{}） ———
     assert!(
-        body["token"]["access_token"]
+        body["access_token"]
             .as_str()
             .is_some_and(|s| !s.is_empty()),
-        "应有非空 access_token"
+        "顶层应有非空 access_token"
     );
-    // refresh token 改走 httpOnly cookie（契约 0.2），body 里任何位置都不得出现明文
     assert!(
-        !body.to_string().contains("refresh_token"),
+        body.get("token").is_none(),
+        "不得再有嵌套的 token 对象（契约 T1 是平铺）"
+    );
+    assert!(
+        body.get("token_type").is_none(),
+        "契约里没有 token_type（前端自己拼 Bearer），不应下发"
+    );
+    // refresh token 改走 httpOnly cookie（契约 0.2）：body 里不得有 refresh_token 键。
+    // 注意不能用子串匹配——契约 T1 的 refresh_token_expires_at 含同名前缀，会误杀。
+    assert!(
+        body.get("refresh_token").is_none(),
         "refresh_token 不得出现在响应 body"
     );
 
@@ -88,6 +98,10 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
         .strip_prefix("refresh_token=")
         .and_then(|rest| rest.split(';').next())
         .expect("Set-Cookie 应以 refresh_token= 开头");
+    assert!(
+        !body.to_string().contains(value),
+        "refresh token 明文不得出现在响应 body 任何位置"
+    );
     assert_eq!(
         value.len(),
         43,
@@ -111,29 +125,69 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
         "for_test cookie_secure=false，不应带 Secure，实际：{cookie}"
     );
 
-    assert_eq!(body["token"]["token_type"], "Bearer");
     assert_eq!(
-        body["token"]["expires_in"], 900,
+        body["expires_in"], 900,
         "for_test 的 access TTL=15min=900s"
     );
 
     // access_token 看着像 JWT（三段）
     assert_eq!(
-        body["token"]["access_token"]
-            .as_str()
-            .unwrap()
-            .split('.')
-            .count(),
+        body["access_token"].as_str().unwrap().split('.').count(),
         3,
         "access_token 应是三段式 JWT"
     );
 
+    // refresh_token_expires_at 必须是**真枚**的过期时间（与落库行完全一致），
+    // 不是 handler 里拿 now+TTL 自己再算一遍的模拟值——两处推导迟早漂移。
+    let db_expires_at = sqlx::query_scalar!(
+        "SELECT expires_at FROM refresh_tokens WHERE user_id = $1",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        body["refresh_token_expires_at"].as_i64(),
+        Some(db_expires_at.timestamp()),
+        "refresh_token_expires_at 应等于落库那枚 refresh 的 expires_at（Unix 秒）"
+    );
+
+    // active_role 放在 user 内、顶层不放（2026-07-18 拍板，偏离前端 AuthResponse 类型——
+    // 前端消费时需从 user.active_role 读，见契约文档 T1 备注）
+    assert!(
+        body.get("active_role").is_none(),
+        "顶层不应有 active_role（拍板放 user 内）"
+    );
+
+    // ——— user 对象（契约 0.1 UserPublic） ———
+    let user = body["user"].as_object().expect("应有 user 对象");
+    assert_eq!(body["user"]["id"].as_str(), Some(user_id.to_string().as_str()));
+    assert!(
+        body["user"]["display_name"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "user.display_name 应非空"
+    );
+    assert_eq!(body["user"]["phone"], "13800138000");
+    assert!(
+        !user.contains_key("email"),
+        "纯手机账号 email 应整个字段省略（skip_serializing_if），不是 null"
+    );
+    assert_eq!(
+        body["user"]["avatar_url"].as_str(),
+        Some(""),
+        "未实现头像 → avatar_url 恒空串（不是 null、不省略）"
+    );
     // role 序列化必须小写，与 JWT 里的 role claim（as_str）一致，别漂成 "Student"
     assert_eq!(
-        body["last_active_role"], "student",
-        "last_active_role 应小写"
+        body["user"]["active_role"], "student",
+        "user.active_role 应存在且小写"
     );
-    assert_eq!(body["roles"][0], "student", "roles 元素应小写");
+    assert!(
+        !user.contains_key("last_active_role"),
+        "字段名是 active_role，不应残留 last_active_role"
+    );
+    assert_eq!(body["user"]["roles"][0], "student", "roles 元素应小写");
 
     // 绝不泄露 hash
     assert!(
@@ -240,9 +294,9 @@ async fn login_returns_all_roles_from_table(pool: PgPool) {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    let roles: Vec<&str> = body["roles"]
+    let roles: Vec<&str> = body["user"]["roles"]
         .as_array()
-        .expect("应有 roles 数组")
+        .expect("user 下应有 roles 数组")
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
@@ -255,4 +309,34 @@ async fn login_returns_all_roles_from_table(pool: PgPool) {
         "roles 应含 teacher（证明查的是真实角色表而非 last_active_role），实际 {roles:?}"
     );
     assert_eq!(roles.len(), 2, "应恰好两个角色，实际 {roles:?}");
+}
+
+// ————————————————————— 可选字段省略（对称面） —————————————————————
+
+/// 纯邮箱账号 → `user.phone` 整个字段省略、`user.email` 存在。
+/// 与 phone 账号的 email 省略互为对称，两条合起来钉死「None → 省略而非 null」。
+#[sqlx::test]
+async fn login_email_only_user_omits_phone_field(pool: PgPool) {
+    UserService::new(UserRepository::new(pool.clone()))
+        .register(RegisterInput {
+            phone: None,
+            email: Some("a@b.com".to_owned()),
+            password: "password123".to_owned(),
+        })
+        .await
+        .expect("注册应成功");
+
+    let (status, _, body) = login(
+        pool,
+        json!({ "identifier": "a@b.com", "password": "password123" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let user = body["user"].as_object().expect("应有 user 对象");
+    assert_eq!(body["user"]["email"], "a@b.com");
+    assert!(
+        !user.contains_key("phone"),
+        "纯邮箱账号 phone 应整个字段省略（skip_serializing_if），不是 null"
+    );
 }

@@ -37,11 +37,12 @@ use utoipa::{
     components(
         schemas(
             // auth
-            crate::auth::handler::Profile,
+            crate::auth::handler::UserProfile,
             crate::auth::handler::LoginRequest,
             crate::auth::handler::LoginResponse,
             crate::auth::handler::LoginOtpRequest,
             crate::auth::handler::Token,
+            crate::auth::handler::RefreshResponse,
             // user
             crate::user::handler::RegisterRequest,
             crate::user::handler::RegisterResponse,
@@ -115,8 +116,12 @@ mod tests {
         );
         // 响应 DTO 已登记
         assert!(
-            json["components"]["schemas"]["Profile"].is_object(),
-            "Profile schema 应出现在 spec 中"
+            json["components"]["schemas"]["UserProfile"].is_object(),
+            "UserProfile schema 应出现在 spec 中"
+        );
+        assert!(
+            json["components"]["schemas"]["RefreshResponse"].is_object(),
+            "RefreshResponse schema 应出现在 spec 中（refresh 响应含 refresh_token_expires_at，不是裸 Token）"
         );
     }
 

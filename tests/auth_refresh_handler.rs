@@ -98,30 +98,50 @@ async fn refresh_returns_200_with_rotated_cookie(pool: PgPool) {
     register_user(&pool, "13800138000").await;
     let r0 = login_for_refresh(&pool, "13800138000").await;
 
-    let (status, set_cookie, body) = post(pool, "/api/v1/auth/refresh", Some(&r0), None).await;
+    let (status, set_cookie, body) =
+        post(pool.clone(), "/api/v1/auth/refresh", Some(&r0), None).await;
 
     assert_eq!(status, StatusCode::OK, "有效 refresh 应 200");
     assert!(
         body["access_token"].as_str().is_some_and(|s| !s.is_empty()),
         "应有非空 access_token"
     );
-    assert_eq!(body["token_type"], "Bearer");
+    assert!(
+        body.get("token_type").is_none(),
+        "契约 T3 里没有 token_type（前端自己拼 Bearer），不应下发"
+    );
     assert_eq!(body["expires_in"], 900, "for_test 的 access TTL=15min=900s");
     assert_eq!(
         body["access_token"].as_str().unwrap().split('.').count(),
         3,
         "access_token 应是三段式 JWT"
     );
+    // body 里不得有 refresh_token 键（refresh_token_expires_at 含同名前缀，不能子串匹配）
     assert!(
-        !body.to_string().contains("refresh_token"),
-        "refresh token 明文不得出现在响应 body"
+        body.get("refresh_token").is_none(),
+        "refresh_token 不得出现在响应 body"
     );
 
     let cookie = set_cookie.as_deref().expect("轮换后应重新下发 Set-Cookie");
-    assert_ne!(
-        cookie_value(cookie),
-        r0,
-        "轮换后应发一枚不同于旧的 refresh token"
+    let new_plaintext = cookie_value(cookie);
+    assert_ne!(new_plaintext, r0, "轮换后应发一枚不同于旧的 refresh token");
+    assert!(
+        !body.to_string().contains(new_plaintext) && !body.to_string().contains(&r0),
+        "新旧 refresh token 明文都不得出现在响应 body"
+    );
+
+    // refresh_token_expires_at 必须是轮换出的**新枚**的真实过期时间（与落库行一致），
+    // 不是 handler 里 now+TTL 再算一遍的模拟值。新枚 = 未轮换未吊销的那一行。
+    let db_expires_at = sqlx::query_scalar!(
+        "SELECT expires_at FROM refresh_tokens WHERE rotated_at IS NULL AND revoked_at IS NULL"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        body["refresh_token_expires_at"].as_i64(),
+        Some(db_expires_at.timestamp()),
+        "refresh_token_expires_at 应等于新枚 refresh 落库的 expires_at（Unix 秒）"
     );
     assert!(
         cookie.contains("HttpOnly"),
@@ -280,6 +300,137 @@ async fn disabled_user_refresh_is_401_without_tokens(pool: PgPool) {
         "禁用账号不应拿到 access_token"
     );
     assert!(set_cookie.is_none(), "禁用账号不应拿到新 refresh cookie");
+}
+
+// ———————————————— 轮换压轴：可失败步骤不得消费旧枚（评审①） ————————————————
+//
+// handler 顺序：peek_user_id（只读定位属主）→ 查用户 → 状态检查 → 签 access token →
+// rotate()（最后一个可失败步骤，同事务消费旧枚+落库新枚）→ 纯组装。
+// 钉的不变量：轮换之前任何一步失败都**零 DB 副作用**——旧枚不被消费、不落孤儿新枚，
+// 客户端重试无恙。若顺序回退成「先 rotate 再校验」，一次瞬时服务端故障（DB 抖动/
+// 签名失败/禁用检查）会烧掉客户端唯一的凭证，掉进 service.rs 验尸分支：宽限窗口内
+// 重试 401 被迫重登，窗口外重试被判重放 → revoke_all 全端连坐。下面三条按此顺序红灯。
+//
+// 注入手段：禁用账号。状态检查是唯一无需 mock 就能确定性触发的可失败步骤，
+// 代表这一类失败（DB 抖动/签名出错）的共同结局。
+
+/// 轮换后步骤失败 → 旧枚**不得**被消费、不得落库无人持有的孤儿新枚。
+/// 现状：rotate 已先行提交——旧枚被打上 rotated_at，另多出一行孤儿新枚。
+#[sqlx::test]
+async fn failed_refresh_must_not_consume_the_old_token(pool: PgPool) {
+    let user_id = register_user(&pool, "13800138000").await;
+    let r0 = login_for_refresh(&pool, "13800138000").await;
+
+    sqlx::query!(
+        "UPDATE users SET status = 'disabled' WHERE id = $1",
+        user_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, set_cookie, _) =
+        post(pool.clone(), "/api/v1/auth/refresh", Some(&r0), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "禁用账号 refresh 应 401");
+    assert!(set_cookie.is_none(), "失败路径不得下发新 cookie");
+
+    // 期望：失败的 refresh 零 DB 副作用——登录那一枚原样未消费，也没有孤儿新枚。
+    let rows = sqlx::query!(
+        "SELECT rotated_at FROM refresh_tokens WHERE user_id = $1",
+        user_id
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "失败的 refresh 不得落库孤儿新枚（应仍只有登录那一枚），实际 {} 行",
+        rows.len()
+    );
+    assert!(
+        rows[0].rotated_at.is_none(),
+        "失败的 refresh 不得消费旧枚（rotated_at 应仍为 NULL），实际 {:?}",
+        rows[0].rotated_at
+    );
+}
+
+/// 瞬时故障恢复后，客户端拿着**唯一持有的**旧枚重试 → 应能刷新成功。
+/// 现状：旧枚在失败那次已被消费，重试落在 20s 宽限窗口内 → 401 不发新枚，该设备被迫重登。
+#[sqlx::test]
+async fn retry_after_transient_failure_should_recover(pool: PgPool) {
+    let user_id = register_user(&pool, "13800138000").await;
+    let r0 = login_for_refresh(&pool, "13800138000").await;
+
+    // 故障期：轮换后的状态检查失败（代表任何轮换后瞬时失败）
+    sqlx::query!(
+        "UPDATE users SET status = 'disabled' WHERE id = $1",
+        user_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (s1, _, _) = post(pool.clone(), "/api/v1/auth/refresh", Some(&r0), None).await;
+    assert_eq!(s1, StatusCode::UNAUTHORIZED, "故障期 refresh 应 401");
+
+    // 故障恢复
+    sqlx::query!("UPDATE users SET status = 'active' WHERE id = $1", user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 客户端只有 r0（失败响应没带新 cookie），立刻重试
+    let (s2, set_cookie, _) = post(pool, "/api/v1/auth/refresh", Some(&r0), None).await;
+    assert_eq!(
+        s2,
+        StatusCode::OK,
+        "故障恢复后用未消费的旧枚重试应成功——服务端失败不该单向消费客户端凭证"
+    );
+    assert!(set_cookie.is_some(), "恢复后的成功刷新应下发新 cookie");
+}
+
+/// 故障后的**迟到**重试（超 20s 宽限窗口）不得被判定为重放而连坐其它设备。
+/// 现状：失败那次已消费旧枚 → 迟到重试触发 revoke_all → 设备二无辜躺枪、全端强制登出。
+#[sqlx::test]
+async fn late_retry_after_transient_failure_must_not_revoke_other_devices(pool: PgPool) {
+    let user_id = register_user(&pool, "13800138000").await;
+    let device1 = login_for_refresh(&pool, "13800138000").await;
+    let device2 = login_for_refresh(&pool, "13800138000").await;
+
+    // 故障期：设备一 refresh 失败
+    sqlx::query!(
+        "UPDATE users SET status = 'disabled' WHERE id = $1",
+        user_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (s1, _, _) = post(pool.clone(), "/api/v1/auth/refresh", Some(&device1), None).await;
+    assert_eq!(s1, StatusCode::UNAUTHORIZED);
+
+    // 故障恢复；把（现状实现里）失败那次留下的轮换时间回拨出宽限窗口，模拟
+    // 「设备一过了 20 秒才重试」。期望行为下没有任何行被消费，此 UPDATE 空转、无影响。
+    sqlx::query!("UPDATE users SET status = 'active' WHERE id = $1", user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query!(
+        "UPDATE refresh_tokens SET rotated_at = rotated_at - interval '25 seconds' WHERE rotated_at IS NOT NULL"
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 设备一迟到重试（现状：验尸判定重放 → revoke_all）
+    let _ = post(pool.clone(), "/api/v1/auth/refresh", Some(&device1), None).await;
+
+    // 设备二从头到尾没做错任何事，它的会话必须还活着
+    let (s3, _, _) = post(pool, "/api/v1/auth/refresh", Some(&device2), None).await;
+    assert_eq!(
+        s3,
+        StatusCode::OK,
+        "服务端自身故障引发的迟到重试不得连坐吊销其它设备的会话"
+    );
 }
 
 // ————————————————————— 登出 —————————————————————

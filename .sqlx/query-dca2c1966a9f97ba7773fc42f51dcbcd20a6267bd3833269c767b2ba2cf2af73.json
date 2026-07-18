@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT expires_at FROM refresh_tokens WHERE rotated_at IS NULL AND revoked_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "refresh_tokens",
+            "name": "expires_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dca2c1966a9f97ba7773fc42f51dcbcd20a6267bd3833269c767b2ba2cf2af73"
+}

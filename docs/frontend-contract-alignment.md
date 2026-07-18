@@ -20,11 +20,22 @@
   "email": "a@b.com",         // 纯手机账号则整个字段省略
   "display_name": "张三",
   "avatar_url": "",           // 未实现头像 → 恒返回空串 ""（不是 null）
-  "status": "active",         // UserStatus::Active→"active"，其余→"disabled"
-  "roles": ["student"],       // Role[] = ("student"|"teacher"|"admin")[]；后端暂只有单角色就返回 [last_active_role]
-  "last_active_role": "student"
+  "roles": ["student"],       // Role[] = ("student"|"teacher"|"admin")[]
+  "active_role": "student"    // ⚠️ 后端拍板（2026-07-18）：放 user 内、顶层不放——偏离
+                              // 前端 AuthResponse/MeResponse 类型（它们标在顶层）；
+                              // 前端消费时需把类型/读取点改为 user.active_role
 }
 ```
+
+> **订正（2026-07-18，对照 `packages/types/src/user.ts` 实核）**：本节初版有两处错——
+> ① `User` 里**没有** `last_active_role` 字段（初版误写了它）；`active_role` 只出现在
+> `AuthResponse`/`MeResponse` **顶层**（后端拍板改放 user 内，见上）。
+> ② `status`/`created_at`/`updated_at` 是前端 `User` 类型的**必填**字段。
+>
+> **偏离拍板（2026-07-18）：`status`/`created_at`/`updated_at` 后端不下发**——前端现无
+> 消费方（仅测试 fixture 在填）。⚠️ 前端类型标必填而实际缺失，TS 编译期不报、读到即
+> `undefined`；前端将来要用时，后端加回是三行（值都现成：`user.status`/`created_at`/
+> `updated_at`），届时同步本节和 `tests/auth_login_handler.rs` 的形状断言。
 
 ### 0.2 refresh token 走 httpOnly Cookie（不是 body！）
 
@@ -90,13 +101,13 @@ cookie，照样拿到 access token。区别在于攻击者必须寄生在受害�
   {
     "user": { UserPublic },          // 见 0.1；不再是扁平的 id/email/phone
     "access_token": "...",           // 顶层，不再套在 token:{} 里
-    "active_role": "student",        // = user.last_active_role
     "expires_in": 900,               // access token 剩余秒数
     "refresh_token_expires_at": 1752566400  // refresh 过期的 Unix 秒
   }
   ```
+  （⚠️ 顶层**没有** `active_role`——0.1 拍板它只在 `user` 内，偏离前端 AuthResponse 类型）
 - refresh token → 走 Cookie（0.2），**不进 body**。
-- 现状：返回 `{id,email,phone,token:{access_token,refresh_token,token_type,expires_in}}`（src/auth/handler.rs `LoginResponse`/`Token`/`build_login_response`）。
+- 现状：✅ 已实现（2026-07-18）——`LoginResponse{user: UserProfile, 平铺 Token, refresh_token_expires_at}`，测试钉在 tests/auth_login_handler.rs。
 - ⚠️ `login` 与 `login_otp` 共用 `build_login_response` —— 这里改好，T8 的响应自动一起对齐。
 
 > P0 依赖 0.1 `UserPublic` + 0.2 cookie 助手。做完 T1 前端登录页即可拿 token、存本地、显示用户。
@@ -113,12 +124,14 @@ cookie，照样拿到 access token。区别在于攻击者必须寄生在受害�
   ```jsonc
   {
     "user": { UserPublic },              // 见 0.1；不再是 Profile{id,name,...}
-    "active_role": "student",
     "learning_settings": null,           // 未实现 → 恒 null（字段必须在，否则前端类型崩）
     "onboarded": false                   // learning_settings==null 时 false
   }
   ```
-- 现状：返回 `Profile{id,name,email,phone,role}`（src/auth/handler.rs）。鉴权提取器 `AuthUser`（Bearer）不变 ✅。
+  （⚠️ 顶层**没有** `active_role`——同 T1，0.1 拍板它只在 `user` 内）
+- 现状：user 形状已对齐（me 现返回 `UserProfile`，字段与 UserPublic 一致、active_role 在内，
+  2026-07-18）；**剩余工作**＝挪路由到 `/api/v1/me` + 外包 `MeResponse{user, learning_settings,
+  onboarded}` 嵌套（tests/auth_me.rs 的断言届时随契约重写）。鉴权提取器 `AuthUser`（Bearer）不变 ✅。
 
 ### T3. refresh：`POST /api/v1/auth/refresh`（路径 ✅，改**入参来源 + 响应**）
 
@@ -127,10 +140,10 @@ cookie，照样拿到 access token。区别在于攻击者必须寄生在受害�
   ```jsonc
   { "access_token": "...", "expires_in": 900, "refresh_token_expires_at": 1752566400 }
   ```
-  （现在返回 `{token:{...}}` 嵌套）
-- 轮换 refresh 后，`Set-Cookie` 下发新 refresh（0.2）。
+- 现状：✅ 已实现（2026-07-18）——`RefreshResponse{平铺 Token, refresh_token_expires_at}`，
+  轮换后 `Set-Cookie` 下发新 refresh（0.2）；rotate 压轴、失败零副作用（tests/auth_refresh_handler.rs）。
 
-#### ⚠️ 顺带补上重放检测（与前端契约无关，但优先级高于 0.2 的 cookie 改造）
+#### ⚠️ 顺带补上重放检测（✅ 已实现，968f2dd：原子轮换 + 20s 宽限窗口 + 窗口外 revoke_all，下述为当时的设计依据）
 
 **现状丢了一个泄露信号。** `SessionService::rotate`（src/session/service.rs:63）拿到 `consume` 的
 `None` 就直接 `InvalidRefreshToken` → 401，把三种情况混成同一个结果：token 不存在 / 已过期 /

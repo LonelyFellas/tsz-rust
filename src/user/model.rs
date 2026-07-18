@@ -94,6 +94,15 @@ pub struct User {
     pub avatar_url: String,
 }
 
+impl User {
+    /// 当前活跃角色，未设置时兜底 Student。
+    /// JWT role claim 与各响应 `active_role`/`role` 的**唯一**策略点——
+    /// 兜底规则要变只改这里，token 里的角色才不会与接口返回的角色漂移。
+    pub fn active_role(&self) -> UserRole {
+        self.last_active_role.unwrap_or(UserRole::Student)
+    }
+}
+
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum DisplayNameError {
     #[error("display name cannot be empty")]

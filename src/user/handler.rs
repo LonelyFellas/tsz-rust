@@ -6,7 +6,7 @@ use utoipa::ToSchema;
 use crate::{
     error::AppError,
     user::{
-        model::{PasswordError, SubjectError, User, UserRole},
+        model::{PasswordError, SubjectError, User},
         repository::UserRepository,
         service::{RegisterError, RegisterInput, UserService},
     },
@@ -70,13 +70,11 @@ pub async fn register(
 }
 
 fn to_response(user: User) -> RegisterResponse {
+    let role = user.active_role().as_str();
     RegisterResponse {
         user_id: user.id.to_string(),
         display_name: user.display_name,
-        role: match user.last_active_role {
-            Some(UserRole::Teacher) => "teacher",
-            _ => "student",
-        },
+        role,
     }
 }
 

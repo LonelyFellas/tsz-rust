@@ -83,16 +83,23 @@ async fn valid_code_active_user_gets_tokens(pool: PgPool) {
         login_otp(&state, json!({"identifier": "13800138000", "code": CODE})).await;
 
     assert_eq!(status, StatusCode::OK, "验码通过 + 活跃用户应 200");
-    // 与密码登录同形状：access 嵌在 `token` 下，refresh 走 httpOnly cookie 不进 body。
+    // 与密码登录同形状（契约 T1，共用 build_login_response）：token 字段平铺顶层、
+    // 用户对象嵌在 user 下，refresh 走 httpOnly cookie 不进 body。
+    // 形状细节（active_role 位置 / 可选字段省略 / expires_at 真值）由 auth_login_handler
+    // 全量钉死，这里只验共用点没漂 + OTP 独有的 cookie 路径。
     assert!(
-        body["token"]["access_token"]
+        body["access_token"]
             .as_str()
             .is_some_and(|s| !s.is_empty()),
-        "应有非空 access_token"
+        "顶层应有非空 access_token"
     );
     assert!(
-        !body.to_string().contains("refresh_token"),
-        "refresh_token 不得出现在响应 body"
+        body["user"]["active_role"].as_str().is_some(),
+        "user.active_role 应存在（与密码登录同形状）"
+    );
+    assert!(
+        body.get("refresh_token").is_none() && body.get("token").is_none(),
+        "body 不得有 refresh_token 键或嵌套 token 对象"
     );
     // OTP 登录的 cookie 下发是独立代码路径（不与密码登录共用），必须单独验
     let cookie = set_cookie.as_deref().expect("OTP 登录也应下发 Set-Cookie");
@@ -100,7 +107,6 @@ async fn valid_code_active_user_gets_tokens(pool: PgPool) {
         cookie.starts_with("refresh_token=") && cookie.contains("HttpOnly"),
         "refresh cookie 应存在且 HttpOnly：{cookie}"
     );
-    assert_eq!(body["token"]["token_type"], "Bearer");
     assert!(
         !body.to_string().contains("$2b$"),
         "响应不得含 bcrypt hash 片段"
@@ -244,7 +250,7 @@ async fn email_login_otp_is_case_insensitive(pool: PgPool) {
         "大写邮箱 + 正确码应 200（大小写不敏感）"
     );
     assert!(
-        body["token"]["access_token"]
+        body["access_token"]
             .as_str()
             .is_some_and(|s| !s.is_empty()),
         "应发出非空 access_token"

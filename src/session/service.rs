@@ -113,6 +113,15 @@ impl SessionService {
         self.repository.revoke_by_hash(&token_hash).await?;
         Ok(())
     }
+
+    pub async fn peek_user_id(&self, plaintext: &str) -> Result<Option<Uuid>, SessionError> {
+        let token_hash = hash_token(plaintext);
+        Ok(self
+            .repository
+            .find_by_hash(&token_hash)
+            .await?
+            .map(|t| t.user_id))
+    }
 }
 
 /// 生成明文

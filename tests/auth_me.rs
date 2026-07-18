@@ -69,15 +69,23 @@ async fn active_user_gets_profile(pool: PgPool) {
         "id 应为该 token 的属主"
     );
     assert_eq!(body["phone"].as_str(), Some("13800138000"));
-    assert!(body["email"].is_null(), "该用户没绑邮箱，email 应为 null");
-    // 新契约：roles 是真实角色表查出的数组，last_active_role 是当前活跃角色
+    // 契约 0.1：None → 整个字段省略（skip_serializing_if），不是 null。
+    // 不能写 body["email"].is_null()——serde_json 对缺失键索引也返回 Null，那断言恒真空转。
+    assert!(
+        !body.as_object()
+            .expect("me 响应应是 JSON 对象")
+            .contains_key("email"),
+        "该用户没绑邮箱，email 应整个字段省略（不是 null）"
+    );
+    // 新契约：roles 是真实角色表查出的数组，active_role 是当前活跃角色
+    // （T2 会把 me 响应改成 MeResponse{user,...} 嵌套，届时这些断言随契约重写）
     assert_eq!(
         body["roles"].as_array().map(|a| a.len()),
         Some(1),
         "注册默认恰好一个角色"
     );
     assert_eq!(body["roles"][0].as_str(), Some("student"));
-    assert_eq!(body["last_active_role"].as_str(), Some("student"));
+    assert_eq!(body["active_role"].as_str(), Some("student"));
     // 不泄露敏感字段
     assert!(
         !body.to_string().contains("$2b$"),
