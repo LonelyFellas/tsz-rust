@@ -80,13 +80,7 @@ pub async fn login(
     // user.id 是 Copy，先留底再把 user 整体交给 build_login_response，省一次 clone
     let user_id = user.id;
     let resp = build_login_response(&state, user).await?;
-    let refresh_token_plaintext = refresh_token_plaintext(&state, user_id).await?;
-    let cookie = refresh_cookie(
-        refresh_token_plaintext,
-        state.refresh_ttl.num_seconds(),
-        state.cookie_secure,
-    );
-    let jar = jar.add(cookie);
+    let jar = issue_refresh_cookie(&state, jar, user_id).await?;
 
     Ok((jar, Json(resp)))
 }
@@ -137,20 +131,10 @@ pub async fn login_otp(
         .await
         .map_err(map_login_error)?;
 
-    // 3) 查角色 + 发 token + 拼响应（与 login 共用）
+    // 3) 查角色 + 发 token + 拼响应 + 发 refresh cookie（与 login 共用）
     let user_id = user.id;
     let resp = build_login_response(&state, user).await?;
-
-    // 生成refresh_token明文
-    let refresh_token_plaintext = refresh_token_plaintext(&state, user_id).await?;
-
-    // 生成cookie
-    let cookie = refresh_cookie(
-        refresh_token_plaintext,
-        state.refresh_ttl.num_seconds(),
-        state.cookie_secure,
-    );
-    let jar = jar.add(cookie);
+    let jar = issue_refresh_cookie(&state, jar, user_id).await?;
 
     Ok((jar, Json(resp)))
 }
@@ -206,25 +190,38 @@ async fn generate_token(state: &AppState, user: &User) -> Result<Token, SessionE
     })
 }
 
-async fn refresh_token_plaintext(state: &AppState, user_id: Uuid) -> Result<String, AppError> {
-    let session_svc = SessionService::new(
+/// 域内统一的 `SessionService` 装配点——repo/ttl 接线只写一次，
+/// 将来 service 加依赖（如 redis）只改这里。
+fn session_service(state: &AppState) -> SessionService {
+    SessionService::new(
         RefreshTokenRepository::new(state.pool.clone()),
         state.refresh_ttl,
-    );
-    let refresh_token = session_svc
+    )
+}
+
+/// 签发一枚新 refresh（落库）并挂上 cookie。`login` / `login_otp`（将来 register
+/// 自动登录）共用；refresh 轮换**不**走这里——新枚由 `rotate` 原子产出，handler 只管装 cookie。
+async fn issue_refresh_cookie(
+    state: &AppState,
+    jar: CookieJar,
+    user_id: Uuid,
+) -> Result<CookieJar, AppError> {
+    let refresh = session_service(state)
         .issue(user_id)
         .await
         .map_err(map_session_error)?;
-    Ok(refresh_token.plaintext)
+    Ok(jar.add(refresh_cookie(refresh.plaintext, state)))
 }
 
-fn refresh_cookie(token: String, max_age_secs: i64, secure: bool) -> Cookie<'static> {
+/// refresh cookie 的唯一构造点：安全属性（HttpOnly/SameSite/Path/Secure/Max-Age）全在这，
+/// TTL 与 Secure 直接读 state，调用方无从传错。
+fn refresh_cookie(token: String, state: &AppState) -> Cookie<'static> {
     Cookie::build((REFRESH_TOKEN_COOKIE, token))
         .http_only(true)
         .same_site(SameSite::Lax)
         .path(AUTH_MOUNT)
-        .secure(secure)
-        .max_age(Duration::seconds(max_age_secs))
+        .secure(state.cookie_secure)
+        .max_age(Duration::seconds(state.refresh_ttl.num_seconds()))
         .build()
 }
 
@@ -254,11 +251,7 @@ pub async fn refresh_token(
         .ok_or(AppError::Unauthenticated("invalid refresh token".into()))?;
 
     // 2） 用旧refresh token 换新refresh token
-    let session_svc = SessionService::new(
-        RefreshTokenRepository::new(state.pool.clone()),
-        state.refresh_ttl,
-    );
-    let rotated_refresh = session_svc
+    let rotated_refresh = session_service(&state)
         .rotate(refresh_token.as_str())
         .await
         .map_err(map_session_error)?;
@@ -281,12 +274,7 @@ pub async fn refresh_token(
         .await
         .map_err(map_session_error)?;
 
-    let cookie = refresh_cookie(
-        rotated_refresh.refresh.plaintext,
-        state.refresh_ttl.num_seconds(),
-        state.cookie_secure,
-    );
-    let jar = jar.add(cookie);
+    let jar = jar.add(refresh_cookie(rotated_refresh.refresh.plaintext, &state));
 
     Ok((jar, Json(token)))
 }
@@ -311,13 +299,9 @@ pub async fn logout(
 ) -> Result<impl IntoResponse, AppError> {
     // 幂等登出(对齐 RFC 7009 语义):cookie 缺失 = 已处于登出态,目标已达成。
     // 有枚就吊销;无论有没有,都下发清除 cookie 并返回 204。
-    if let Some(refresh_token) = jar.get(REFRESH_TOKEN_COOKIE).map(|c| c.value().to_owned()) {
-        let session_svc = SessionService::new(
-            RefreshTokenRepository::new(state.pool.clone()),
-            state.refresh_ttl,
-        );
-        session_svc
-            .logout(refresh_token.as_str())
+    if let Some(cookie) = jar.get(REFRESH_TOKEN_COOKIE) {
+        session_service(&state)
+            .logout(cookie.value())
             .await
             .map_err(map_session_error)?;
     }
