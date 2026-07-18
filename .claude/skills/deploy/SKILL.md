@@ -53,6 +53,10 @@ ssh tshb-test 'systemctl restart tsz-rust && sleep 2 && systemctl is-active tsz-
 2. `POST $B/auth/refresh`（无 cookie）→ **401 `{"error":"invalid refresh token"}`**
    （若返回 422 说明旧二进制没换掉）；
 3. 全链路（用常驻冒烟账号 `19900000001` / `smoke-test-pw-1`，已在库里）：
+   login 请求体字段是 **`identifier`**（统一承接手机号/邮箱，不叫 `phone`——用错必 422）：
+   ```json
+   {"identifier": "19900000001", "password": "smoke-test-pw-1"}
+   ```
    login 200 且 Set-Cookie 含 `HttpOnly; SameSite=Lax; Path=/api/v1/auth`（**不含
    Secure**——服务器 .env 设了 COOKIE_SECURE=false，见下）→ 拿 cookie 刷新 200 且
    轮换出新值 → 带新 cookie logout 204；
