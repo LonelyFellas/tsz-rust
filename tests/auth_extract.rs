@@ -46,7 +46,10 @@ async fn valid_bearer_token_yields_authuser(pool: PgPool) {
     let au = AuthUser::from_request_parts(&mut parts, &state)
         .await
         .expect("合法 Bearer token 应被提取为 AuthUser（而非 401）");
-    assert_eq!(au.subject, subject, "提取出的 subject 应等于签发时的 subject");
+    assert_eq!(
+        au.subject, subject,
+        "提取出的 subject 应等于签发时的 subject"
+    );
     assert_eq!(au.role, "student");
 }
 

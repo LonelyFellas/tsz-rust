@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE refresh_tokens SET rotated_at = rotated_at - make_interval(secs => $1) WHERE token_hash = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eee2ccf9c62d47c2515a899ee8b75a3f7ceb02ccefd91680df71bce9030939cc"
+}

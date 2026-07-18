@@ -1,7 +1,8 @@
-//! `SessionService::issue` 的行为测试（真库，`#[sqlx::test]`）。
+//! `SessionService`（issue / rotate / logout）的行为测试（真库，`#[sqlx::test]`）。
 //!
-//! 验的是 issue 的**落库契约**：存的是哈希不是明文、能按哈希查回、expires_at≈now+ttl、
-//! 每次明文都不同。crypto 纯函数（generate/hash）的性质在 `service.rs` 内联单测覆盖。
+//! 验的是**落库契约**：存的是哈希不是明文、能按哈希查回、expires_at≈now+ttl、
+//! 每次明文都不同、rotate 原子换出新枚。crypto 纯函数（generate/hash）的性质在
+//! `service.rs` 内联单测覆盖。
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
@@ -76,7 +77,7 @@ async fn issue_persists_hashed_token_and_returns_plaintext(pool: PgPool) {
     );
 }
 
-/// 模拟 rotate 将来的动作：拿客户端明文 → 算哈希 → find_by_hash 命中。
+/// rotate 查找路径的最小拆解：拿客户端明文 → 算哈希 → find_by_hash 命中。
 #[sqlx::test]
 async fn issued_token_is_findable_by_its_hash(pool: PgPool) {
     let user_id = seed_user(&pool).await;
@@ -91,7 +92,10 @@ async fn issued_token_is_findable_by_its_hash(pool: PgPool) {
         .expect("查询不应报错");
     let row = found.expect("issue 出的 token 应能按其哈希查回");
     assert_eq!(row.user_id, user_id);
-    assert!(row.revoked_at.is_none() && row.rotated_at.is_none(), "新发的应是活跃态");
+    assert!(
+        row.revoked_at.is_none() && row.rotated_at.is_none(),
+        "新发的应是活跃态"
+    );
 }
 
 /// 两次 issue 明文必须不同（熵够）；DB 里各占一行。
@@ -114,10 +118,12 @@ async fn two_issues_produce_distinct_tokens(pool: PgPool) {
     assert_eq!(count, Some(2), "应有两行");
 }
 
-// ————————————————————— rotate（哈希明文 → CAS 消费旧枚）—————————————————————
-// service 层只验「哈希接线对了 + 错误映射对了」；CAS 状态机本身在 session_repository.rs 钉过。
+// ——————————————— rotate（哈希明文 → 原子轮换：CAS 消费旧枚 + 发新枚）———————————————
+// service 层只验「哈希接线对了 + 一进一出对了 + 错误映射对了」；
+// CAS 状态机与事务回滚在 session_repository.rs 钉过。
 
-/// happy：issue 出的明文能被 rotate 消费 → 返回属主 user_id，且 DB 里对应行被标 rotated。
+/// happy：issue 出的明文能被 rotate 消费 → 返回属主 user_id + **一枚可用的新明文**（原子轮换），
+/// 旧行标 rotated，新行以哈希落库且是活跃态。
 #[sqlx::test]
 async fn rotate_consumes_issued_token_and_returns_owner(pool: PgPool) {
     let user_id = seed_user(&pool).await;
@@ -126,14 +132,30 @@ async fn rotate_consumes_issued_token_and_returns_owner(pool: PgPool) {
 
     let issued = svc.issue(user_id).await.unwrap();
     let got = svc.rotate(&issued.plaintext).await.expect("rotate 应成功");
-    assert_eq!(got, user_id, "rotate 应返回属主 user_id");
+    assert_eq!(got.user_id, user_id, "rotate 应返回属主 user_id");
 
-    let row = repo
+    let old_row = repo
         .find_by_hash(&expected_hash(&issued.plaintext))
         .await
         .unwrap()
         .unwrap();
-    assert!(row.rotated_at.is_some(), "被 rotate 的行应标上 rotated_at");
+    assert!(
+        old_row.rotated_at.is_some(),
+        "被 rotate 的旧行应标上 rotated_at"
+    );
+
+    // 新枚：明文不同于旧枚、按哈希可查回、活跃态（原子轮换「发新」的一半）
+    assert_ne!(got.refresh.plaintext, issued.plaintext, "新旧明文应不同");
+    let new_row = repo
+        .find_by_hash(&expected_hash(&got.refresh.plaintext))
+        .await
+        .unwrap()
+        .expect("轮换出的新枚应已落库");
+    assert_eq!(new_row.user_id, user_id, "新枚属主应不变");
+    assert!(
+        new_row.rotated_at.is_none() && new_row.revoked_at.is_none(),
+        "新枚应是活跃态"
+    );
 }
 
 /// 复用即拒：同一明文 rotate 两次，第二次 InvalidRefreshToken。
@@ -143,11 +165,16 @@ async fn rotate_same_token_twice_is_rejected(pool: PgPool) {
     let svc = service(pool, Duration::days(30));
 
     let issued = svc.issue(user_id).await.unwrap();
-    svc.rotate(&issued.plaintext).await.expect("首次 rotate 应成功");
+    svc.rotate(&issued.plaintext)
+        .await
+        .expect("首次 rotate 应成功");
 
+    // .map(drop)：RotatedRefresh 内含新枚明文，刻意不给它派生 Debug（防日志泄露），
+    // 而 expect_err 要求 Ok 型实现 Debug，先丢弃值再断言。下同。
     let err = svc
         .rotate(&issued.plaintext)
         .await
+        .map(drop)
         .expect_err("复用应被拒");
     assert!(
         matches!(err, SessionError::InvalidRefreshToken),
@@ -162,6 +189,7 @@ async fn rotate_garbage_token_is_invalid(pool: PgPool) {
     let err = svc
         .rotate("definitely-not-a-real-token")
         .await
+        .map(drop)
         .expect_err("垃圾串应被拒");
     assert!(matches!(err, SessionError::InvalidRefreshToken));
 }
@@ -184,7 +212,11 @@ async fn rotate_expired_token_is_invalid(pool: PgPool) {
     .await
     .unwrap();
 
-    let err = svc.rotate(plaintext).await.expect_err("过期应被拒");
+    let err = svc
+        .rotate(plaintext)
+        .await
+        .map(drop)
+        .expect_err("过期应被拒");
     assert!(matches!(err, SessionError::InvalidRefreshToken));
 }
 
@@ -202,6 +234,7 @@ async fn revoked_token_cannot_be_rotated(pool: PgPool) {
     let err = svc
         .rotate(&issued.plaintext)
         .await
+        .map(drop)
         .expect_err("已吊销的不该能 rotate");
     assert!(matches!(err, SessionError::InvalidRefreshToken));
 }
@@ -213,7 +246,9 @@ async fn revoke_is_idempotent_and_silent_on_unknown(pool: PgPool) {
     let svc = service(pool, Duration::days(30));
 
     let issued = svc.issue(user_id).await.unwrap();
-    svc.logout(&issued.plaintext).await.expect("首次 revoke 应 Ok");
+    svc.logout(&issued.plaintext)
+        .await
+        .expect("首次 revoke 应 Ok");
     svc.logout(&issued.plaintext)
         .await
         .expect("再次 revoke 也应 Ok（幂等）");

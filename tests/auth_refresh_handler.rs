@@ -1,7 +1,9 @@
 //! `POST /auth/refresh` 与 `POST /auth/logout` handler 的端到端测试（真库 + `oneshot`）。
 //!
-//! 验 handler 层的编排与翻译：轮换出新 token 对、旧 token 单次使用即失效、失效态不可区分、
-//! 禁用账号发不出 token、登出后 token 立即作废且幂等。
+//! 契约 0.2：refresh token 走 httpOnly Cookie——入参从 `Cookie` 头读、新枚经 `Set-Cookie` 下发、
+//! **body 里不得出现 refresh token 明文**。
+//! 验 handler 层的编排与翻译：轮换出新 cookie、旧 token 单次使用即失效、失效态不可区分、
+//! 禁用账号发不出 token、登出清 cookie 且吊销、缺 cookie 的行为。
 //! CAS 状态机本身在 `tests/session_repository.rs`、rotate/logout 的哈希接线在 `tests/session_service.rs`。
 
 use axum::body::Body;
@@ -28,63 +30,81 @@ async fn register_user(pool: &PgPool, phone: &str) -> uuid::Uuid {
         .id
 }
 
-/// 通用 POST：返回 (状态码, 响应体 JSON)。
-async fn post(pool: PgPool, uri: &str, body: Value) -> (StatusCode, Value) {
+/// 通用 POST：`refresh` 为 Some 时模拟浏览器带上 refresh cookie；`body` 为 None 时不带请求体
+/// （refresh/logout 的新契约就是无 body）。返回 (状态码, Set-Cookie 头, 响应体 JSON)。
+async fn post(
+    pool: PgPool,
+    uri: &str,
+    refresh: Option<&str>,
+    body: Option<Value>,
+) -> (StatusCode, Option<String>, Value) {
+    let mut builder = Request::builder().method("POST").uri(uri);
+    if let Some(token) = refresh {
+        builder = builder.header(header::COOKIE, format!("refresh_token={token}"));
+    }
+    let request = match body {
+        Some(json) => builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json.to_string())),
+        None => builder.body(Body::empty()),
+    }
+    .unwrap();
+
     let resp = tsz_rust::router(AppState::for_test(pool))
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(request)
         .await
         .unwrap();
 
     let status = resp.status();
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .map(|v| v.to_str().unwrap().to_owned());
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        set_cookie,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
-/// 登录拿一枚可用的 refresh token（用户须已注册）。
+/// 从 `Set-Cookie` 头里取出 refresh token 明文（`refresh_token=<值>; ...`）。
+fn cookie_value(set_cookie: &str) -> &str {
+    set_cookie
+        .strip_prefix("refresh_token=")
+        .and_then(|rest| rest.split(';').next())
+        .expect("Set-Cookie 应以 refresh_token= 开头")
+}
+
+/// 登录拿一枚可用的 refresh token（从 Set-Cookie 里取，用户须已注册）。
 async fn login_for_refresh(pool: &PgPool, phone: &str) -> String {
-    let (status, body) = post(
+    let (status, set_cookie, _) = post(
         pool.clone(),
         "/api/v1/auth/login",
-        json!({ "identifier": phone, "password": "password123" }),
+        None,
+        Some(json!({ "identifier": phone, "password": "password123" })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "预置登录应成功");
-    // login 响应把 token 嵌在 `token` 下（refresh 响应才是打平的）。
-    body["token"]["refresh_token"]
-        .as_str()
-        .expect("登录应返回 refresh_token")
-        .to_owned()
+    cookie_value(set_cookie.as_deref().expect("登录应下发 Set-Cookie")).to_owned()
 }
 
 // ————————————————————— 成功 + 轮换 —————————————————————
 
-/// 有效 refresh → 200 + OAuth 四字段齐全，且发的是一枚**新的** refresh（轮换）。
+/// 有效 refresh cookie → 200 + access 字段齐全 + `Set-Cookie` 轮换出一枚**新** refresh，
+/// 且 body 里不得出现 refresh token 明文。
 #[sqlx::test]
-async fn refresh_returns_200_with_rotated_token_pair(pool: PgPool) {
+async fn refresh_returns_200_with_rotated_cookie(pool: PgPool) {
     register_user(&pool, "13800138000").await;
     let r0 = login_for_refresh(&pool, "13800138000").await;
 
-    let (status, body) = post(
-        pool.clone(),
-        "/api/v1/auth/refresh",
-        json!({ "refresh_token": r0 }),
-    )
-    .await;
+    let (status, set_cookie, body) = post(pool, "/api/v1/auth/refresh", Some(&r0), None).await;
 
     assert_eq!(status, StatusCode::OK, "有效 refresh 应 200");
     assert!(
         body["access_token"].as_str().is_some_and(|s| !s.is_empty()),
         "应有非空 access_token"
     );
-    let new_refresh = body["refresh_token"].as_str().expect("应有 refresh_token");
-    assert!(!new_refresh.is_empty(), "应有非空 refresh_token");
     assert_eq!(body["token_type"], "Bearer");
     assert_eq!(body["expires_in"], 900, "for_test 的 access TTL=15min=900s");
     assert_eq!(
@@ -92,7 +112,25 @@ async fn refresh_returns_200_with_rotated_token_pair(pool: PgPool) {
         3,
         "access_token 应是三段式 JWT"
     );
-    assert_ne!(new_refresh, r0, "轮换后应发一枚不同于旧的 refresh token");
+    assert!(
+        !body.to_string().contains("refresh_token"),
+        "refresh token 明文不得出现在响应 body"
+    );
+
+    let cookie = set_cookie.as_deref().expect("轮换后应重新下发 Set-Cookie");
+    assert_ne!(
+        cookie_value(cookie),
+        r0,
+        "轮换后应发一枚不同于旧的 refresh token"
+    );
+    assert!(
+        cookie.contains("HttpOnly"),
+        "轮换下发的 cookie 也必须 HttpOnly：{cookie}"
+    );
+    assert!(
+        cookie.contains("Path=/api/v1/auth"),
+        "轮换下发的 cookie Path 必须与登录一致：{cookie}"
+    );
 }
 
 /// 单次使用：旧 refresh 用一次成功轮换后，再用即 401（旧的一经轮换即作废）。
@@ -101,47 +139,47 @@ async fn old_refresh_is_rejected_after_rotation(pool: PgPool) {
     register_user(&pool, "13800138000").await;
     let r0 = login_for_refresh(&pool, "13800138000").await;
 
-    let (s1, _) = post(
-        pool.clone(),
-        "/api/v1/auth/refresh",
-        json!({ "refresh_token": r0.clone() }),
-    )
-    .await;
+    let (s1, _, _) = post(pool.clone(), "/api/v1/auth/refresh", Some(&r0), None).await;
     assert_eq!(s1, StatusCode::OK, "首次刷新应成功");
 
-    let (s2, body) = post(pool, "/api/v1/auth/refresh", json!({ "refresh_token": r0 })).await;
+    let (s2, set_cookie, body) = post(pool, "/api/v1/auth/refresh", Some(&r0), None).await;
     assert_eq!(s2, StatusCode::UNAUTHORIZED, "已轮换的旧 token 再用应 401");
     assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
+    assert!(set_cookie.is_none(), "刷新失败不得下发新 cookie");
 }
 
-/// 轮换链能续：用轮换出的**新** refresh 再刷，仍成功。
+/// 轮换链能续：用轮换出的**新** refresh cookie 再刷，仍成功。
 #[sqlx::test]
 async fn rotated_new_refresh_is_usable(pool: PgPool) {
     register_user(&pool, "13800138000").await;
     let r0 = login_for_refresh(&pool, "13800138000").await;
 
-    let (s1, b1) = post(
-        pool.clone(),
-        "/api/v1/auth/refresh",
-        json!({ "refresh_token": r0 }),
-    )
-    .await;
+    let (s1, set_cookie, _) = post(pool.clone(), "/api/v1/auth/refresh", Some(&r0), None).await;
     assert_eq!(s1, StatusCode::OK);
-    let r1 = b1["refresh_token"].as_str().unwrap().to_owned();
+    let r1 = cookie_value(set_cookie.as_deref().unwrap()).to_owned();
 
-    let (s2, _) = post(pool, "/api/v1/auth/refresh", json!({ "refresh_token": r1 })).await;
+    let (s2, _, _) = post(pool, "/api/v1/auth/refresh", Some(&r1), None).await;
     assert_eq!(s2, StatusCode::OK, "轮换出的新 refresh 应可继续使用");
 }
 
 // ————————————————————— 失败：失效态不可区分 —————————————————————
 
+/// 不带 cookie → 401（新契约下没有 body 兜底，cookie 缺失即未认证）。
+#[sqlx::test]
+async fn missing_cookie_is_401(pool: PgPool) {
+    let (status, _, body) = post(pool, "/api/v1/auth/refresh", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
+}
+
 /// 纯垃圾串 → 401 invalid refresh token。
 #[sqlx::test]
 async fn garbage_refresh_is_401(pool: PgPool) {
-    let (status, body) = post(
+    let (status, _, body) = post(
         pool,
         "/api/v1/auth/refresh",
-        json!({ "refresh_token": "definitely-not-a-real-token" }),
+        Some("definitely-not-a-real-token"),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -155,23 +193,14 @@ async fn reused_and_garbage_are_identical_401(pool: PgPool) {
     let r0 = login_for_refresh(&pool, "13800138000").await;
 
     // 预热：把 r0 用掉（轮换成新的），r0 变成「已轮换」失效态。
-    let _ = post(
-        pool.clone(),
-        "/api/v1/auth/refresh",
-        json!({ "refresh_token": r0.clone() }),
-    )
-    .await;
+    let _ = post(pool.clone(), "/api/v1/auth/refresh", Some(&r0), None).await;
 
-    let (s_reused, b_reused) = post(
-        pool.clone(),
-        "/api/v1/auth/refresh",
-        json!({ "refresh_token": r0 }),
-    )
-    .await;
-    let (s_garbage, b_garbage) = post(
+    let (s_reused, _, b_reused) = post(pool.clone(), "/api/v1/auth/refresh", Some(&r0), None).await;
+    let (s_garbage, _, b_garbage) = post(
         pool,
         "/api/v1/auth/refresh",
-        json!({ "refresh_token": "definitely-not-a-real-token" }),
+        Some("definitely-not-a-real-token"),
+        None,
     )
     .await;
 
@@ -182,6 +211,46 @@ async fn reused_and_garbage_are_identical_401(pool: PgPool) {
         b_reused, b_garbage,
         "两种失效态响应体必须逐字节一致（不可区分）"
     );
+}
+
+/// 重放检测整链（端到端）：已轮换的旧 cookie 再次出现 → 401 且**该用户全部会话连坐吊销**，
+/// 另一台设备的合法 cookie 也刷不动 → 全端强制重登（RFC 9700 §4.14.2）。
+/// service 层的链吊销细节与宽限窗口规格在 `tests/session_reuse_detection.rs`，这里验 HTTP 全链路接线。
+#[sqlx::test]
+async fn replayed_cookie_revokes_other_devices_sessions(pool: PgPool) {
+    register_user(&pool, "13800138000").await;
+    let device1 = login_for_refresh(&pool, "13800138000").await;
+    let device2 = login_for_refresh(&pool, "13800138000").await; // 第二台设备的独立会话
+
+    // 设备一正常轮换一次，旧枚 device1 进入「已轮换」态
+    let (s1, _, _) = post(pool.clone(), "/api/v1/auth/refresh", Some(&device1), None).await;
+    assert_eq!(s1, StatusCode::OK, "设备一正常轮换应成功");
+
+    // 把轮换时间回拨出 20 秒宽限窗口——窗口内的重放按丢包重试宽待，不触发连坐。
+    // 此时库里唯一 rotated_at 非空的行就是 device1 的旧枚，无需按哈希定位。
+    let n = sqlx::query!(
+        "UPDATE refresh_tokens SET rotated_at = rotated_at - interval '25 seconds' WHERE rotated_at IS NOT NULL"
+    )
+    .execute(&pool)
+    .await
+    .expect("回拨 rotated_at 应成功")
+    .rows_affected();
+    assert_eq!(n, 1, "应恰好回拨设备一那枚已轮换的旧 cookie");
+
+    // 攻击者重放已轮换的 device1 → 401（对外与普通失效不可区分）
+    let (s2, set_cookie, _) =
+        post(pool.clone(), "/api/v1/auth/refresh", Some(&device1), None).await;
+    assert_eq!(s2, StatusCode::UNAUTHORIZED, "重放应 401");
+    assert!(set_cookie.is_none(), "重放不得下发新 cookie");
+
+    // 连坐：设备二的会话也已被吊销，合法 cookie 同样刷不动
+    let (s3, _, body) = post(pool, "/api/v1/auth/refresh", Some(&device2), None).await;
+    assert_eq!(
+        s3,
+        StatusCode::UNAUTHORIZED,
+        "重放被检测后该用户全部会话应吊销，设备二也必须刷不动"
+    );
+    assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
 }
 
 // ————————————————————— 禁用账号 —————————————————————
@@ -203,66 +272,76 @@ async fn disabled_user_refresh_is_401_without_tokens(pool: PgPool) {
     .await
     .unwrap();
 
-    let (status, body) = post(pool, "/api/v1/auth/refresh", json!({ "refresh_token": r0 })).await;
+    let (status, set_cookie, body) = post(pool, "/api/v1/auth/refresh", Some(&r0), None).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED, "禁用账号 refresh 应 401");
     assert!(
         body["access_token"].is_null(),
         "禁用账号不应拿到 access_token"
     );
-    assert!(
-        body["refresh_token"].is_null(),
-        "禁用账号不应拿到新 refresh_token"
-    );
+    assert!(set_cookie.is_none(), "禁用账号不应拿到新 refresh cookie");
 }
 
 // ————————————————————— 登出 —————————————————————
 
-/// 登出后该 refresh 立即失效：logout → 200，再 refresh → 401。
+/// 登出后：204 + `Set-Cookie` 清除 refresh cookie（Max-Age=0），再用该 token 刷新 → 401。
 #[sqlx::test]
-async fn logout_then_refresh_is_401(pool: PgPool) {
+async fn logout_clears_cookie_and_revokes_token(pool: PgPool) {
     register_user(&pool, "13800138000").await;
     let r0 = login_for_refresh(&pool, "13800138000").await;
 
-    let (s_logout, _) = post(
-        pool.clone(),
-        "/api/v1/auth/logout",
-        json!({ "refresh_token": r0.clone() }),
-    )
-    .await;
-    assert_eq!(s_logout, StatusCode::NO_CONTENT, "登出应成功（204 No Content）");
+    let (s_logout, set_cookie, _) =
+        post(pool.clone(), "/api/v1/auth/logout", Some(&r0), None).await;
+    assert_eq!(
+        s_logout,
+        StatusCode::NO_CONTENT,
+        "登出应成功（204 No Content）"
+    );
 
-    let (s_refresh, body) = post(pool, "/api/v1/auth/refresh", json!({ "refresh_token": r0 })).await;
+    // 清除 cookie：同名同 Path、值为空、Max-Age=0（浏览器收到即删除）
+    let cookie = set_cookie.as_deref().expect("登出应下发清除 cookie");
+    assert_eq!(cookie_value(cookie), "", "清除 cookie 的值应为空");
+    assert!(
+        cookie.contains("Max-Age=0"),
+        "清除 cookie 应 Max-Age=0：{cookie}"
+    );
+    assert!(
+        cookie.contains("Path=/api/v1/auth"),
+        "清除 cookie 的 Path 必须与下发时一致，否则浏览器清不掉：{cookie}"
+    );
+
+    let (s_refresh, _, body) = post(pool, "/api/v1/auth/refresh", Some(&r0), None).await;
     assert_eq!(s_refresh, StatusCode::UNAUTHORIZED, "登出后再刷应 401");
     assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
 }
 
-/// 登出幂等且不泄露：重复登出、以及对从不存在的 token 登出，都应 200。
+/// 登出幂等且不泄露：重复登出、以及对从不存在的 token 登出，都应 204。
+/// （缺 cookie 是当前契约里唯一的 401 例外，见下一条。）
 #[sqlx::test]
 async fn logout_is_idempotent_and_silent(pool: PgPool) {
     register_user(&pool, "13800138000").await;
     let r0 = login_for_refresh(&pool, "13800138000").await;
 
-    let (s1, _) = post(
-        pool.clone(),
-        "/api/v1/auth/logout",
-        json!({ "refresh_token": r0.clone() }),
-    )
-    .await;
-    let (s2, _) = post(
-        pool.clone(),
-        "/api/v1/auth/logout",
-        json!({ "refresh_token": r0 }),
-    )
-    .await;
+    let (s1, _, _) = post(pool.clone(), "/api/v1/auth/logout", Some(&r0), None).await;
+    let (s2, _, _) = post(pool.clone(), "/api/v1/auth/logout", Some(&r0), None).await;
     assert_eq!(s1, StatusCode::NO_CONTENT);
     assert_eq!(s2, StatusCode::NO_CONTENT, "重复登出也应 204（幂等）");
 
-    let (s3, _) = post(
-        pool,
-        "/api/v1/auth/logout",
-        json!({ "refresh_token": "never-existed" }),
-    )
-    .await;
-    assert_eq!(s3, StatusCode::NO_CONTENT, "登出未知 token 也应 204，不报错");
+    let (s3, _, _) = post(pool, "/api/v1/auth/logout", Some("never-existed"), None).await;
+    assert_eq!(
+        s3,
+        StatusCode::NO_CONTENT,
+        "登出未知 token 也应 204，不报错"
+    );
+}
+
+/// 缺 cookie 登出 → 401（当前契约选择；前端需把它也当「已登出」处理）。
+#[sqlx::test]
+async fn logout_without_cookie_is_401(pool: PgPool) {
+    let (status, _, _) = post(pool, "/api/v1/auth/logout", None, None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "缺 cookie 登出按当前契约应 401"
+    );
 }

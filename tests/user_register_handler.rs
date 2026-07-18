@@ -18,8 +18,8 @@
 //!   - 手机/邮箱已占 → `409 {"error":"user already exists"}`。
 
 use axum::body::Body;
-use axum::http::{StatusCode, header};
 use axum::http::Request;
+use axum::http::{StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -97,8 +97,11 @@ async fn register_returns_201_with_safe_body(pool: PgPool) {
 /// 只给手机号也能注册（邮箱可选）。
 #[sqlx::test]
 async fn register_succeeds_with_phone_only(pool: PgPool) {
-    let (status, body) =
-        register(pool, json!({ "phone": "13800138000", "password": "password123" })).await;
+    let (status, body) = register(
+        pool,
+        json!({ "phone": "13800138000", "password": "password123" }),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::CREATED, "仅手机号应能注册成功");
     assert_eq!(body["role"], "student");
@@ -136,10 +139,17 @@ async fn missing_phone_and_email_returns_400(pool: PgPool) {
 /// 这条专门网住「传了 `\"\"` 但没真值」这种前端常见畸形输入。
 #[sqlx::test]
 async fn empty_phone_and_email_returns_400(pool: PgPool) {
-    let (status, body) =
-        register(pool, json!({ "phone": "", "email": "", "password": "password123" })).await;
+    let (status, body) = register(
+        pool,
+        json!({ "phone": "", "email": "", "password": "password123" }),
+    )
+    .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "空串标识应等价于缺失 → 400");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "空串标识应等价于缺失 → 400"
+    );
     assert_eq!(body["error"].as_str(), Some("phone or email is missing"));
 }
 
@@ -148,8 +158,7 @@ async fn empty_phone_and_email_returns_400(pool: PgPool) {
 /// 空密码 → 走 `PasswordError::Empty` 分支，文案与「太短/太长」不同。
 #[sqlx::test]
 async fn empty_password_returns_400(pool: PgPool) {
-    let (status, body) =
-        register(pool, json!({ "phone": "13800138000", "password": "" })).await;
+    let (status, body) = register(pool, json!({ "phone": "13800138000", "password": "" })).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
@@ -173,8 +182,7 @@ async fn short_password_returns_400(pool: PgPool) {
 #[sqlx::test]
 async fn too_long_password_returns_400(pool: PgPool) {
     let long = "a".repeat(73);
-    let (status, body) =
-        register(pool, json!({ "phone": "13800138000", "password": long })).await;
+    let (status, body) = register(pool, json!({ "phone": "13800138000", "password": long })).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"].as_str(), Some("invalid password"));

@@ -44,8 +44,8 @@ async fn register_user(pool: &PgPool, phone: &str) -> uuid::Uuid {
         .id
 }
 
-/// POST /api/v1/auth/login-otp，返回 (状态码, body JSON)。
-async fn login_otp(state: &AppState, body: Value) -> (StatusCode, Value) {
+/// POST /api/v1/auth/login-otp，返回 (状态码, Set-Cookie 头, body JSON)。
+async fn login_otp(state: &AppState, body: Value) -> (StatusCode, Option<String>, Value) {
     let resp = tsz_rust::router(state.clone())
         .oneshot(
             Request::builder()
@@ -58,8 +58,16 @@ async fn login_otp(state: &AppState, body: Value) -> (StatusCode, Value) {
         .await
         .unwrap();
     let status = resp.status();
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .map(|v| v.to_str().unwrap().to_owned());
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        set_cookie,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 #[sqlx::test]
@@ -71,17 +79,26 @@ async fn valid_code_active_user_gets_tokens(pool: PgPool) {
         .await
         .unwrap();
 
-    let (status, body) = login_otp(&state, json!({"identifier": "13800138000", "code": CODE})).await;
+    let (status, set_cookie, body) =
+        login_otp(&state, json!({"identifier": "13800138000", "code": CODE})).await;
 
     assert_eq!(status, StatusCode::OK, "验码通过 + 活跃用户应 200");
-    // 与密码登录同形状：token 四字段嵌在 `token` 下。
+    // 与密码登录同形状：access 嵌在 `token` 下，refresh 走 httpOnly cookie 不进 body。
     assert!(
-        body["token"]["access_token"].as_str().is_some_and(|s| !s.is_empty()),
+        body["token"]["access_token"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
         "应有非空 access_token"
     );
     assert!(
-        body["token"]["refresh_token"].as_str().is_some_and(|s| !s.is_empty()),
-        "应有非空 refresh_token"
+        !body.to_string().contains("refresh_token"),
+        "refresh_token 不得出现在响应 body"
+    );
+    // OTP 登录的 cookie 下发是独立代码路径（不与密码登录共用），必须单独验
+    let cookie = set_cookie.as_deref().expect("OTP 登录也应下发 Set-Cookie");
+    assert!(
+        cookie.starts_with("refresh_token=") && cookie.contains("HttpOnly"),
+        "refresh cookie 应存在且 HttpOnly：{cookie}"
     );
     assert_eq!(body["token"]["token_type"], "Bearer");
     assert!(
@@ -99,7 +116,11 @@ async fn wrong_code_is_401(pool: PgPool) {
         .await
         .unwrap();
 
-    let (status, _) = login_otp(&state, json!({"identifier": "13800138000", "code": "000000"})).await;
+    let (status, _, _) = login_otp(
+        &state,
+        json!({"identifier": "13800138000", "code": "000000"}),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "错码应 401");
 }
 
@@ -113,7 +134,8 @@ async fn unknown_identifier_is_401(pool: PgPool) {
         .await
         .unwrap();
 
-    let (status, _) = login_otp(&state, json!({"identifier": "13900139000", "code": CODE})).await;
+    let (status, _, _) =
+        login_otp(&state, json!({"identifier": "13900139000", "code": CODE})).await;
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
@@ -134,7 +156,8 @@ async fn disabled_account_is_403(pool: PgPool) {
         .await
         .unwrap();
 
-    let (status, _) = login_otp(&state, json!({"identifier": "13800138000", "code": CODE})).await;
+    let (status, _, _) =
+        login_otp(&state, json!({"identifier": "13800138000", "code": CODE})).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "验码对但账号禁用应 403");
 }
 
@@ -144,7 +167,8 @@ async fn no_code_sent_is_401(pool: PgPool) {
     let (state, _store) = AppState::for_test_with_otp_store(pool.clone());
     register_user(&pool, "13800138000").await;
 
-    let (status, _) = login_otp(&state, json!({"identifier": "13800138000", "code": CODE})).await;
+    let (status, _, _) =
+        login_otp(&state, json!({"identifier": "13800138000", "code": CODE})).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "没发过码应 401");
 }
 
@@ -158,7 +182,8 @@ async fn wrong_purpose_code_is_401(pool: PgPool) {
         .await
         .unwrap();
 
-    let (status, _) = login_otp(&state, json!({"identifier": "13800138000", "code": CODE})).await;
+    let (status, _, _) =
+        login_otp(&state, json!({"identifier": "13800138000", "code": CODE})).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "purpose 不匹配应 401");
 }
 
@@ -175,7 +200,7 @@ async fn explicit_reset_purpose_in_body_is_ignored_401(pool: PgPool) {
         .await
         .unwrap();
 
-    let (status, _) = login_otp(
+    let (status, _, _) = login_otp(
         &state,
         json!({"identifier": "13800138000", "code": CODE, "purpose": "password_reset"}),
     )
@@ -210,7 +235,7 @@ async fn email_login_otp_is_case_insensitive(pool: PgPool) {
         .unwrap();
 
     // 登录用大写邮箱 + 正确码 → 应 200
-    let (status, body) =
+    let (status, _, body) =
         login_otp(&state, json!({"identifier": "User@X.com", "code": CODE})).await;
 
     assert_eq!(

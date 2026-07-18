@@ -41,8 +41,6 @@ use utoipa::{
             crate::auth::handler::LoginRequest,
             crate::auth::handler::LoginResponse,
             crate::auth::handler::LoginOtpRequest,
-            crate::auth::handler::RefreshTokenRequest,
-            crate::auth::handler::LogoutRequest,
             crate::auth::handler::Token,
             // user
             crate::user::handler::RegisterRequest,

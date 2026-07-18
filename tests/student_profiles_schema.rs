@@ -62,14 +62,20 @@ async fn learning_settings_both_set_is_allowed(pool: PgPool) {
 async fn learning_settings_only_cefr_is_rejected(pool: PgPool) {
     let uid = insert_user(&pool).await;
     let half = insert_profile(&pool, uid, Some("B1"), None).await;
-    assert!(half.is_err(), "只设 cefr_level、不设 english_variant 应被成对约束拒绝");
+    assert!(
+        half.is_err(),
+        "只设 cefr_level、不设 english_variant 应被成对约束拒绝"
+    );
 }
 
 #[sqlx::test]
 async fn learning_settings_only_variant_is_rejected(pool: PgPool) {
     let uid = insert_user(&pool).await;
     let half = insert_profile(&pool, uid, None, Some("AmE")).await;
-    assert!(half.is_err(), "只设 english_variant、不设 cefr_level 应被成对约束拒绝");
+    assert!(
+        half.is_err(),
+        "只设 english_variant、不设 cefr_level 应被成对约束拒绝"
+    );
 }
 
 // —— 各自的值域 CHECK ——
@@ -94,7 +100,9 @@ async fn english_variant_rejects_unknown_value(pool: PgPool) {
 #[sqlx::test]
 async fn one_profile_per_user(pool: PgPool) {
     let uid = insert_user(&pool).await;
-    insert_profile(&pool, uid, None, None).await.expect("首份资料应成功");
+    insert_profile(&pool, uid, None, None)
+        .await
+        .expect("首份资料应成功");
     let dup = insert_profile(&pool, uid, None, None).await;
     assert!(dup.is_err(), "同一用户第二份资料应被主键拒绝（1:1）");
 }
@@ -109,7 +117,9 @@ async fn profile_for_nonexistent_user_is_rejected(pool: PgPool) {
 #[sqlx::test]
 async fn deleting_user_cascades_profile(pool: PgPool) {
     let uid = insert_user(&pool).await;
-    insert_profile(&pool, uid, None, None).await.expect("建资料应成功");
+    insert_profile(&pool, uid, None, None)
+        .await
+        .expect("建资料应成功");
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(uid)
@@ -117,12 +127,11 @@ async fn deleting_user_cascades_profile(pool: PgPool) {
         .await
         .expect("删用户应成功");
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM student_profiles WHERE user_id = $1")
-            .bind(uid)
-            .fetch_one(&pool)
-            .await
-            .expect("查询应成功");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM student_profiles WHERE user_id = $1")
+        .bind(uid)
+        .fetch_one(&pool)
+        .await
+        .expect("查询应成功");
     assert_eq!(count, 0, "删用户应级联删除其资料");
 }
 

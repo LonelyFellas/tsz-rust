@@ -27,8 +27,8 @@ async fn register_user(pool: &PgPool, phone: &str) -> uuid::Uuid {
         .id
 }
 
-/// POST /auth/login，返回 (状态码, 响应体 JSON)。
-async fn login(pool: PgPool, body: Value) -> (StatusCode, Value) {
+/// POST /auth/login，返回 (状态码, Set-Cookie 头, 响应体 JSON)。
+async fn login(pool: PgPool, body: Value) -> (StatusCode, Option<String>, Value) {
     let resp = tsz_rust::router(AppState::for_test(pool))
         .oneshot(
             Request::builder()
@@ -42,18 +42,26 @@ async fn login(pool: PgPool, body: Value) -> (StatusCode, Value) {
         .unwrap();
 
     let status = resp.status();
+    let set_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .map(|v| v.to_str().unwrap().to_owned());
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        set_cookie,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 // ————————————————————— 成功 —————————————————————
 
-/// 正确凭证 → 200 + 四字段齐全、不泄露 hash，且 refresh 已落库。
+/// 正确凭证 → 200 + access 字段齐全、refresh 走 Set-Cookie 不进 body、不泄露 hash、refresh 已落库。
 #[sqlx::test]
 async fn login_returns_200_with_tokens(pool: PgPool) {
     let user_id = register_user(&pool, "13800138000").await;
 
-    let (status, body) = login(
+    let (status, set_cookie, body) = login(
         pool.clone(),
         json!({ "identifier": "13800138000", "password": "password123" }),
     )
@@ -61,15 +69,48 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
 
     assert_eq!(status, StatusCode::OK, "正确凭证应 200");
 
-    // OAuth 形状四字段（登录响应把 token 嵌在 `token` 下，profile 字段在顶层）
+    // access 侧字段（登录响应把 token 嵌在 `token` 下，profile 字段在顶层）
     assert!(
-        body["token"]["access_token"].as_str().is_some_and(|s| !s.is_empty()),
+        body["token"]["access_token"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
         "应有非空 access_token"
     );
+    // refresh token 改走 httpOnly cookie（契约 0.2），body 里任何位置都不得出现明文
     assert!(
-        body["token"]["refresh_token"].as_str().is_some_and(|s| !s.is_empty()),
-        "应有非空 refresh_token"
+        !body.to_string().contains("refresh_token"),
+        "refresh_token 不得出现在响应 body"
     );
+
+    // Set-Cookie 下发 refresh token，属性必须齐全（HttpOnly / SameSite / Path / Max-Age）
+    let cookie = set_cookie.as_deref().expect("登录应下发 Set-Cookie");
+    let value = cookie
+        .strip_prefix("refresh_token=")
+        .and_then(|rest| rest.split(';').next())
+        .expect("Set-Cookie 应以 refresh_token= 开头");
+    assert_eq!(
+        value.len(),
+        43,
+        "refresh token 应为 43 字符 base64url，实际：{value}"
+    );
+    assert!(cookie.contains("HttpOnly"), "必须 HttpOnly，实际：{cookie}");
+    assert!(
+        cookie.contains("SameSite=Lax"),
+        "必须 SameSite=Lax，实际：{cookie}"
+    );
+    assert!(
+        cookie.contains("Path=/api/v1/auth"),
+        "Path 应收窄到 /api/v1/auth，实际：{cookie}"
+    );
+    assert!(
+        cookie.contains("Max-Age=2592000"),
+        "Max-Age 应为 30 天（2592000 秒），实际：{cookie}"
+    );
+    assert!(
+        !cookie.contains("Secure"),
+        "for_test cookie_secure=false，不应带 Secure，实际：{cookie}"
+    );
+
     assert_eq!(body["token"]["token_type"], "Bearer");
     assert_eq!(
         body["token"]["expires_in"], 900,
@@ -78,17 +119,27 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
 
     // access_token 看着像 JWT（三段）
     assert_eq!(
-        body["token"]["access_token"].as_str().unwrap().split('.').count(),
+        body["token"]["access_token"]
+            .as_str()
+            .unwrap()
+            .split('.')
+            .count(),
         3,
         "access_token 应是三段式 JWT"
     );
 
     // role 序列化必须小写，与 JWT 里的 role claim（as_str）一致，别漂成 "Student"
-    assert_eq!(body["last_active_role"], "student", "last_active_role 应小写");
+    assert_eq!(
+        body["last_active_role"], "student",
+        "last_active_role 应小写"
+    );
     assert_eq!(body["roles"][0], "student", "roles 元素应小写");
 
     // 绝不泄露 hash
-    assert!(!body.to_string().contains("$2b$"), "响应不得含 bcrypt hash 片段");
+    assert!(
+        !body.to_string().contains("$2b$"),
+        "响应不得含 bcrypt hash 片段"
+    );
 
     // refresh 确实落库了（该用户名下恰好一行）
     let count = sqlx::query_scalar!(
@@ -108,7 +159,7 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
 async fn login_wrong_password_is_401(pool: PgPool) {
     register_user(&pool, "13800138000").await;
 
-    let (status, body) = login(
+    let (status, set_cookie, body) = login(
         pool,
         json!({ "identifier": "13800138000", "password": "wrong" }),
     )
@@ -116,6 +167,7 @@ async fn login_wrong_password_is_401(pool: PgPool) {
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"].as_str(), Some("invalid credentials"));
+    assert!(set_cookie.is_none(), "登录失败不得下发 cookie");
 }
 
 /// 未知用户 → 401 invalid credentials —— 和密码错**逐字节一致**（不可区分）。
@@ -124,13 +176,13 @@ async fn login_unknown_user_is_identical_401(pool: PgPool) {
     register_user(&pool, "13800138000").await;
 
     // 密码错（用户存在）
-    let (s_wrong, b_wrong) = login(
+    let (s_wrong, _, b_wrong) = login(
         pool.clone(),
         json!({ "identifier": "13800138000", "password": "wrong" }),
     )
     .await;
     // 用户不存在
-    let (s_unknown, b_unknown) = login(
+    let (s_unknown, _, b_unknown) = login(
         pool,
         json!({ "identifier": "19999999999", "password": "password123" }),
     )
@@ -148,18 +200,22 @@ async fn login_unknown_user_is_identical_401(pool: PgPool) {
 #[sqlx::test]
 async fn login_disabled_account_is_403(pool: PgPool) {
     let user_id = register_user(&pool, "13800138000").await;
-    sqlx::query!("UPDATE users SET status = 'disabled' WHERE id = $1", user_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query!(
+        "UPDATE users SET status = 'disabled' WHERE id = $1",
+        user_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    let (status, _) = login(
+    let (status, set_cookie, _) = login(
         pool,
         json!({ "identifier": "13800138000", "password": "password123" }),
     )
     .await;
 
     assert_eq!(status, StatusCode::FORBIDDEN, "密码对+账号禁用应 403");
+    assert!(set_cookie.is_none(), "禁用账号不得下发 cookie");
 }
 
 // ————————————————————— 角色列表 —————————————————————
@@ -177,7 +233,7 @@ async fn login_returns_all_roles_from_table(pool: PgPool) {
         .await
         .expect("追加 teacher 角色应成功");
 
-    let (status, body) = login(
+    let (status, _, body) = login(
         pool,
         json!({ "identifier": "13800138000", "password": "password123" }),
     )

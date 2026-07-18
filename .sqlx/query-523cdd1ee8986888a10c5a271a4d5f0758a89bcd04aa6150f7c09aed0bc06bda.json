@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE refresh_tokens SET rotated_at = rotated_at - interval '25 seconds' WHERE rotated_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "523cdd1ee8986888a10c5a271a4d5f0758a89bcd04aa6150f7c09aed0bc06bda"
+}

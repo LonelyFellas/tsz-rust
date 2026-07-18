@@ -31,10 +31,7 @@ async fn insert_user(
 async fn rejects_row_with_neither_phone_nor_email(pool: PgPool) {
     // 二选一：两者皆空应被 users_phone_or_email_present 拒绝。
     let result = insert_user(&pool, None, None).await;
-    assert!(
-        result.is_err(),
-        "phone 和 email 都为空应被 CHECK 拒绝"
-    );
+    assert!(result.is_err(), "phone 和 email 都为空应被 CHECK 拒绝");
 }
 
 #[sqlx::test]

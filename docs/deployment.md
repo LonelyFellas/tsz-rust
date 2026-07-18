@@ -57,6 +57,11 @@ OTP_TTL_MINUTES=10
 OTP_COOLDOWN_SECONDS=60
 OTP_DAILY_LIMIT=10
 OTP_MAX_ATTEMPTS=5
+# refresh cookie 的 Secure 标志。默认 true（只随 https 发送）。
+# ⚠️ 前面没有 TLS（纯 http 部署、备案未下来等）必须显式设 false，
+# 否则浏览器直接丢弃 Set-Cookie——登录看似成功但 /auth/refresh 永远 401，
+# 且服务端无任何报错（§5 上了 HTTPS 后删掉这行恢复默认）。
+# COOKIE_SECURE=false
 ```
 
 ```bash
@@ -134,6 +139,10 @@ curl localhost:8383/readyz         # {"status":"ready"} 就绪（探 DB+Redis）
   ```
 
 - **nginx**：`proxy_pass http://127.0.0.1:8383;` + certbot 签证书。
+
+**暂时无法上 TLS 时**（如域名备案审核中）：env 文件里显式设 `COOKIE_SECURE=false`（见 §3），
+否则 refresh cookie 带 Secure 会被浏览器在 http 源静默丢弃，登录后刷新永远 401。
+TLS 就位后删掉该行恢复默认 true，无需改代码。
 
 建议把 `PORT` 只绑到 `127.0.0.1`（改 `run()` 里的 bind 地址）或用防火墙只放行反代——目前 bind 的是 `0.0.0.0`，靠防火墙隔离即可。
 

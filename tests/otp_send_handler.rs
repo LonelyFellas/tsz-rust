@@ -47,7 +47,9 @@ async fn status_of(state: &AppState, body: Value) -> StatusCode {
 
 /// 文本里是否有连续 6 位数字（用来抓「码泄进响应体」的回归）。
 fn has_six_digit_run(s: &str) -> bool {
-    s.as_bytes().windows(6).any(|w| w.iter().all(u8::is_ascii_digit))
+    s.as_bytes()
+        .windows(6)
+        .any(|w| w.iter().all(u8::is_ascii_digit))
 }
 
 // ============================ 成功路径 ============================
@@ -55,16 +57,24 @@ fn has_six_digit_run(s: &str) -> bool {
 #[sqlx::test]
 async fn valid_request_is_accepted_and_leaks_no_code(pool: PgPool) {
     let state = AppState::for_test(pool);
-    let (status, body) = post_send(&state, json!({"phone": "13800000000", "purpose": "login"})).await;
+    let (status, body) =
+        post_send(&state, json!({"phone": "13800000000", "purpose": "login"})).await;
     assert_eq!(status, StatusCode::ACCEPTED, "合法请求应 202 Accepted");
     // 码是本域机密（Mock 只把它打进日志）——响应体绝不能带 6 位码。
-    assert!(!has_six_digit_run(&body), "成功响应体不应含验证码，实得 {body:?}");
+    assert!(
+        !has_six_digit_run(&body),
+        "成功响应体不应含验证码，实得 {body:?}"
+    );
 }
 
 #[sqlx::test]
 async fn email_target_is_accepted(pool: PgPool) {
     let state = AppState::for_test(pool);
-    let status = status_of(&state, json!({"email": "user@example.com", "purpose": "login"})).await;
+    let status = status_of(
+        &state,
+        json!({"email": "user@example.com", "purpose": "login"}),
+    )
+    .await;
     assert_eq!(status, StatusCode::ACCEPTED, "email target 也应 202");
 }
 
@@ -74,7 +84,11 @@ async fn email_target_is_accepted(pool: PgPool) {
 async fn second_request_in_cooldown_is_429(pool: PgPool) {
     let state = AppState::for_test(pool);
     let body = json!({"phone": "13800000000", "purpose": "login"});
-    assert_eq!(status_of(&state, body.clone()).await, StatusCode::ACCEPTED, "首次应 202");
+    assert_eq!(
+        status_of(&state, body.clone()).await,
+        StatusCode::ACCEPTED,
+        "首次应 202"
+    );
     assert_eq!(
         status_of(&state, body).await,
         StatusCode::TOO_MANY_REQUESTS,
@@ -97,7 +111,11 @@ async fn cooldown_is_scoped_to_purpose(pool: PgPool) {
         "login 冷却应确实生效"
     );
     assert_eq!(
-        status_of(&state, json!({"phone": "13800000000", "purpose": "password_reset"})).await,
+        status_of(
+            &state,
+            json!({"phone": "13800000000", "purpose": "password_reset"})
+        )
+        .await,
         StatusCode::ACCEPTED,
         "password_reset 不应被 login 的冷却挡住"
     );
@@ -130,7 +148,11 @@ async fn both_phone_and_email_is_400(pool: PgPool) {
         json!({"phone": "13800000000", "email": "user@example.com", "purpose": "login"}),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "phone 与 email 二选一，都给应 400");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "phone 与 email 二选一，都给应 400"
+    );
 }
 
 // ============================ purpose 反序列化（422） ============================
@@ -140,7 +162,11 @@ async fn missing_purpose_is_422(pool: PgPool) {
     // purpose 是必填字段：缺了 → axum Json 反序列化失败 → 422（非 handler 校验的 400）。
     let state = AppState::for_test(pool);
     let status = status_of(&state, json!({"phone": "13800000000"})).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "缺 purpose 应 422");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "缺 purpose 应 422"
+    );
 }
 
 #[sqlx::test]
@@ -148,7 +174,11 @@ async fn unknown_purpose_is_422(pool: PgPool) {
     // 非法枚举值 → 反序列化失败 → 422。
     let state = AppState::for_test(pool);
     let status = status_of(&state, json!({"phone": "13800000000", "purpose": "nope"})).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "非法 purpose 应 422");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "非法 purpose 应 422"
+    );
 }
 
 // ============================ fail-close（503） ============================
@@ -162,5 +192,9 @@ async fn redis_down_is_503(pool: PgPool) {
         .expect("惰性建池即使地址不可达也应 Ok");
     let state = AppState::for_test_with_redis(pool, dead);
     let status = status_of(&state, json!({"phone": "13800000000", "purpose": "login"})).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "Redis 不可达时应 fail-close 503");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Redis 不可达时应 fail-close 503"
+    );
 }

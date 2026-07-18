@@ -19,11 +19,7 @@ async fn insert_user(pool: &PgPool) -> Uuid {
 }
 
 /// 插入一个 refresh token，成功返回其 id。expires_at 固定给未来 30 天。
-async fn insert_token(
-    pool: &PgPool,
-    user_id: Uuid,
-    token_hash: &str,
-) -> Result<Uuid, sqlx::Error> {
+async fn insert_token(pool: &PgPool, user_id: Uuid, token_hash: &str) -> Result<Uuid, sqlx::Error> {
     let id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) \
@@ -40,7 +36,9 @@ async fn insert_token(
 #[sqlx::test]
 async fn token_hash_must_be_unique(pool: PgPool) {
     let uid = insert_user(&pool).await;
-    insert_token(&pool, uid, "same-hash").await.expect("首个 token 应成功");
+    insert_token(&pool, uid, "same-hash")
+        .await
+        .expect("首个 token 应成功");
     let dup = insert_token(&pool, uid, "same-hash").await;
     assert!(dup.is_err(), "重复 token_hash 应被唯一索引拒绝");
 }
@@ -55,8 +53,12 @@ async fn token_for_nonexistent_user_is_rejected(pool: PgPool) {
 #[sqlx::test]
 async fn user_can_have_multiple_tokens(pool: PgPool) {
     let uid = insert_user(&pool).await;
-    insert_token(&pool, uid, "hash-a").await.expect("token A 应成功");
-    insert_token(&pool, uid, "hash-b").await.expect("token B 应成功");
+    insert_token(&pool, uid, "hash-a")
+        .await
+        .expect("token A 应成功");
+    insert_token(&pool, uid, "hash-b")
+        .await
+        .expect("token B 应成功");
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM refresh_tokens WHERE user_id = $1")
         .bind(uid)
@@ -69,7 +71,9 @@ async fn user_can_have_multiple_tokens(pool: PgPool) {
 #[sqlx::test]
 async fn deleting_user_cascades_tokens(pool: PgPool) {
     let uid = insert_user(&pool).await;
-    insert_token(&pool, uid, "h").await.expect("建 token 应成功");
+    insert_token(&pool, uid, "h")
+        .await
+        .expect("建 token 应成功");
 
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(uid)
@@ -88,7 +92,9 @@ async fn deleting_user_cascades_tokens(pool: PgPool) {
 #[sqlx::test]
 async fn revoked_and_rotated_default_null(pool: PgPool) {
     let uid = insert_user(&pool).await;
-    let id = insert_token(&pool, uid, "h").await.expect("建 token 应成功");
+    let id = insert_token(&pool, uid, "h")
+        .await
+        .expect("建 token 应成功");
 
     let (revoked_null, rotated_null): (bool, bool) = sqlx::query_as(
         "SELECT revoked_at IS NULL, rotated_at IS NULL FROM refresh_tokens WHERE id = $1",

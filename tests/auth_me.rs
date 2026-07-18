@@ -47,7 +47,10 @@ async fn get_me(state: &AppState, auth: Option<&str>) -> (StatusCode, Value) {
         .unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 #[sqlx::test]
@@ -67,7 +70,14 @@ async fn active_user_gets_profile(pool: PgPool) {
     );
     assert_eq!(body["phone"].as_str(), Some("13800138000"));
     assert!(body["email"].is_null(), "该用户没绑邮箱，email 应为 null");
-    assert_eq!(body["role"].as_str(), Some("student"));
+    // 新契约：roles 是真实角色表查出的数组，last_active_role 是当前活跃角色
+    assert_eq!(
+        body["roles"].as_array().map(|a| a.len()),
+        Some(1),
+        "注册默认恰好一个角色"
+    );
+    assert_eq!(body["roles"][0].as_str(), Some("student"));
+    assert_eq!(body["last_active_role"].as_str(), Some("student"));
     // 不泄露敏感字段
     assert!(
         !body.to_string().contains("$2b$"),
@@ -102,10 +112,13 @@ async fn expired_token_is_401(pool: PgPool) {
 async fn disabled_account_is_401(pool: PgPool) {
     // token 签名有效，但账号被禁 → handler load user 后拦成 401（决策③）。
     let user_id = register_user(&pool, "13800138000").await;
-    sqlx::query!("UPDATE users SET status = 'disabled' WHERE id = $1", user_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query!(
+        "UPDATE users SET status = 'disabled' WHERE id = $1",
+        user_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let state = AppState::for_test(pool);
     let token = state.token_manager.generate(user_id, "student").unwrap();
 

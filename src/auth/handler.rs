@@ -15,9 +15,17 @@ use crate::{
     },
 };
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum_extra::extract::{
+    CookieJar,
+    cookie::{Cookie, SameSite},
+};
 use serde::{Deserialize, Serialize};
+use time::Duration;
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+const REFRESH_TOKEN_COOKIE: &str = "refresh_token";
+const REFRESH_TOKEN_COOKIE_PATH: &str = "/api/v1/auth";
 
 #[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
@@ -59,6 +67,7 @@ pub struct LoginResponse {
 )]
 pub async fn login(
     State(state): State<AppState>,
+    jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // 1) 验凭证：业务全在 user 域，handler 只调。失败→统一错误（不可区分）
@@ -69,8 +78,18 @@ pub async fn login(
         .map_err(map_login_error)?;
 
     // 2) 查角色 + 发 token + 拼响应（与 login_otp 共用 build_login_response）
+    // user.id 是 Copy，先留底再把 user 整体交给 build_login_response，省一次 clone
+    let user_id = user.id;
     let resp = build_login_response(&state, user).await?;
-    Ok((StatusCode::OK, Json(resp)))
+    let refresh_token_plaintext = refresh_token_plaintext(&state, user_id).await?;
+    let cookie = refresh_cookie(
+        refresh_token_plaintext,
+        state.refresh_ttl.num_seconds(),
+        state.cookie_secure,
+    );
+    let jar = jar.add(cookie);
+
+    Ok((jar, Json(resp)))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -97,6 +116,7 @@ pub struct LoginOtpRequest {
 )]
 pub async fn login_otp(
     State(state): State<AppState>,
+    jar: CookieJar,
     Json(req): Json<LoginOtpRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // 1) 先验码——purpose 写死 Login，不接受客户端传入：
@@ -117,8 +137,21 @@ pub async fn login_otp(
         .map_err(map_login_error)?;
 
     // 3) 查角色 + 发 token + 拼响应（与 login 共用）
+    let user_id = user.id;
     let resp = build_login_response(&state, user).await?;
-    Ok((StatusCode::OK, Json(resp)))
+
+    // 生成refresh_token明文
+    let refresh_token_plaintext = refresh_token_plaintext(&state, user_id).await?;
+
+    // 生成cookie
+    let cookie = refresh_cookie(
+        refresh_token_plaintext,
+        state.refresh_ttl.num_seconds(),
+        state.cookie_secure,
+    );
+    let jar = jar.add(cookie);
+
+    Ok((jar, Json(resp)))
 }
 
 /// 组装登录响应：查角色 + 发 token + 拼 `LoginResponse`。
@@ -132,6 +165,7 @@ async fn build_login_response(state: &AppState, user: User) -> Result<LoginRespo
     let token = generate_token(state, &user)
         .await
         .map_err(map_session_error)?;
+
     Ok(LoginResponse {
         id: user.id,
         email: user.email,
@@ -148,8 +182,6 @@ async fn build_login_response(state: &AppState, user: User) -> Result<LoginRespo
 pub struct Token {
     #[schema(example = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMTk4Zi4uLiJ9.sig")]
     access_token: String,
-    #[schema(example = "kU3n7pQ2xR9vTfLmA1sB4dW6yZ0cE8gHjKlNoP-qRsT")]
-    refresh_token: String,
     #[schema(example = "Bearer")]
     token_type: &'static str,
     /// access token 有效期（秒）
@@ -166,26 +198,33 @@ async fn generate_token(state: &AppState, user: &User) -> Result<Token, SessionE
         .generate(user.id, role)
         .map_err(SessionError::Signing)?;
 
-    // 3) 生成 refresh token
-    let session_svc = SessionService::new(
-        RefreshTokenRepository::new(state.pool.clone()),
-        state.refresh_ttl,
-    );
-    let refresh = session_svc.issue(user.id).await?;
-
     Ok(Token {
         access_token,
-        refresh_token: refresh.plaintext,
         token_type: TOKEN_SCHEMA,
         expires_in: state.token_manager.ttl_seconds(),
     })
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct RefreshTokenRequest {
-    /// 登录/轮换时下发的不透明 refresh token（base64url 随机串，非 JWT）
-    #[schema(example = "kU3n7pQ2xR9vTfLmA1sB4dW6yZ0cE8gHjKlNoP-qRsT")]
-    pub refresh_token: String,
+async fn refresh_token_plaintext(state: &AppState, user_id: Uuid) -> Result<String, AppError> {
+    let session_svc = SessionService::new(
+        RefreshTokenRepository::new(state.pool.clone()),
+        state.refresh_ttl,
+    );
+    let refresh_token = session_svc
+        .issue(user_id)
+        .await
+        .map_err(map_session_error)?;
+    Ok(refresh_token.plaintext)
+}
+
+fn refresh_cookie(token: String, max_age_secs: i64, secure: bool) -> Cookie<'static> {
+    Cookie::build((REFRESH_TOKEN_COOKIE, token))
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .path(REFRESH_TOKEN_COOKIE_PATH)
+        .secure(secure)
+        .max_age(Duration::seconds(max_age_secs))
+        .build()
 }
 
 /// POST /api/v1/auth/refresh
@@ -193,7 +232,6 @@ pub struct RefreshTokenRequest {
     post,
     path = "/api/v1/auth/refresh",
     tag = "auth",
-    request_body = RefreshTokenRequest,
     responses(
         (status = 200, description = "轮换成功，返回新令牌", body = Token),
         (status = 401, description = "refresh token 无效、已过期或用户被禁用"),
@@ -201,24 +239,33 @@ pub struct RefreshTokenRequest {
 )]
 pub async fn refresh_token(
     State(state): State<AppState>,
-    Json(req): Json<RefreshTokenRequest>,
+    jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
-    // 1)
+    // 1） 拿旧refresh token
+    let refresh_token = jar
+        .get(REFRESH_TOKEN_COOKIE)
+        .map(|c| c.value().to_owned())
+        .ok_or(AppError::Unauthenticated("invalid refresh token".into()))?;
+
+    // 2） 用旧refresh token 换新refresh token
     let session_svc = SessionService::new(
         RefreshTokenRepository::new(state.pool.clone()),
         state.refresh_ttl,
     );
-    let user_id = session_svc
-        .rotate(&req.refresh_token)
+    let rotated_refresh = session_svc
+        .rotate(refresh_token.as_str())
         .await
         .map_err(map_session_error)?;
 
     let user_repo = UserRepository::new(state.pool.clone());
 
-    let user = user_repo.get_by_id(&user_id).await.map_err(|e| match e {
-        UserError::NotFound => AppError::Unauthenticated("invalid refresh token".into()),
-        _ => AppError::internal(e),
-    })?;
+    let user = user_repo
+        .get_by_id(&rotated_refresh.user_id)
+        .await
+        .map_err(|e| match e {
+            UserError::NotFound => AppError::Unauthenticated("invalid refresh token".into()),
+            _ => AppError::internal(e),
+        })?;
 
     if user.status != UserStatus::Active {
         return Err(AppError::Unauthenticated("invalid refresh token".into()));
@@ -228,21 +275,21 @@ pub async fn refresh_token(
         .await
         .map_err(map_session_error)?;
 
-    Ok((StatusCode::OK, Json(token)))
+    let cookie = refresh_cookie(
+        rotated_refresh.refresh.plaintext,
+        state.refresh_ttl.num_seconds(),
+        state.cookie_secure,
+    );
+    let jar = jar.add(cookie);
+
+    Ok((jar, Json(token)))
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct LogoutRequest {
-    /// 要作废的 refresh token（不透明串，同登录下发的那枚）
-    #[schema(example = "kU3n7pQ2xR9vTfLmA1sB4dW6yZ0cE8gHjKlNoP-qRsT")]
-    pub refresh_token: String,
-}
 /// POST /api/v1/auth/logout
 #[utoipa::path(
     post,
     path = "/api/v1/auth/logout",
     tag = "auth",
-    request_body = LogoutRequest,
     responses(
         (status = 204, description = "登出成功，refresh token 已失效"),
         (status = 401, description = "refresh token 无效"),
@@ -250,18 +297,34 @@ pub struct LogoutRequest {
 )]
 pub async fn logout(
     State(state): State<AppState>,
-    Json(req): Json<LogoutRequest>,
+    jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
+    // 1) 拿旧refresh token
+    let refresh_token = jar
+        .get(REFRESH_TOKEN_COOKIE)
+        .map(|c| c.value().to_owned())
+        .ok_or(AppError::Unauthenticated("invalid refresh token".into()))?;
+
+    // 2) 作废旧refresh token
     let session_svc = SessionService::new(
         RefreshTokenRepository::new(state.pool.clone()),
         state.refresh_ttl,
     );
 
     session_svc
-        .logout(&req.refresh_token)
+        .logout(refresh_token.as_str())
         .await
         .map_err(map_session_error)?;
-    Ok(StatusCode::NO_CONTENT)
+    let jar = jar.remove(clean_refresh_token_cookie());
+    Ok((jar, StatusCode::NO_CONTENT))
+}
+
+/// `jar.remove` 按「名字 + Path」生成删除 cookie（Max-Age=0 由它自己设），
+/// 只需这两项与下发时一致；Path 不匹配则浏览器视为另一枚 cookie，清不掉。
+fn clean_refresh_token_cookie() -> Cookie<'static> {
+    Cookie::build(REFRESH_TOKEN_COOKIE)
+        .path(REFRESH_TOKEN_COOKIE_PATH)
+        .build()
 }
 
 #[derive(Serialize, ToSchema)]
@@ -274,8 +337,9 @@ pub struct Profile {
     pub email: Option<String>,
     #[schema(example = "13800138000")]
     pub phone: Option<String>,
-    #[schema(example = "student")]
-    pub role: String,
+    pub roles: Vec<UserRole>,
+
+    pub last_active_role: UserRole,
 }
 
 /// GET /api/v1/auth/me
@@ -293,7 +357,7 @@ pub async fn me(
     user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    let user = UserRepository::new(state.pool)
+    let user = UserRepository::new(state.pool.clone())
         .get_by_id(&user.subject)
         .await
         .map_err(map_user_error)?;
@@ -302,6 +366,12 @@ pub async fn me(
         return Err(AppError::Unauthenticated("user is not active".into()));
     }
 
+    let roles = UserRepository::new(state.pool.clone())
+        .get_roles_by_user_id(&user.id)
+        .await
+        .map_err(map_user_error)?;
+    let last_active_role = user.last_active_role.unwrap_or(UserRole::Student);
+
     Ok((
         StatusCode::OK,
         Json(Profile {
@@ -309,11 +379,8 @@ pub async fn me(
             name: user.display_name,
             email: user.email,
             phone: user.phone,
-            role: user
-                .last_active_role
-                .unwrap_or(UserRole::Student)
-                .as_str()
-                .to_string(),
+            roles,
+            last_active_role,
         }),
     ))
 }

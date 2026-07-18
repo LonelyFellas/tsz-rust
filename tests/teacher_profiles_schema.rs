@@ -53,12 +53,11 @@ async fn deleting_user_cascades_profile(pool: PgPool) {
         .await
         .expect("删用户应成功");
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM teacher_profiles WHERE user_id = $1")
-            .bind(uid)
-            .fetch_one(&pool)
-            .await
-            .expect("查询应成功");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM teacher_profiles WHERE user_id = $1")
+        .bind(uid)
+        .fetch_one(&pool)
+        .await
+        .expect("查询应成功");
     assert_eq!(count, 0, "删用户应级联删除其资料");
 }
 

@@ -1,7 +1,7 @@
 //! `RefreshTokenRepository` 的行为测试（真库，`#[sqlx::test]`）。
 //!
 //! 每个测试拿独立临时库、自动跑 `migrations/`、结束回滚。验的是**仓储层的 SQL 行为**：
-//! 插入/按哈希查回、轮换/吊销的时间戳落位、`revoke_all_for_user` 的范围与计数。
+//! 插入/按哈希查回、轮换/吊销的时间戳落位、`revoke_all_by_user_id` 的范围与计数。
 //!
 //! ⚠️ 边界划分（重要）：repository **只搬 SQL**——
 //!   - 不做哈希：`token_hash` 存的就是入参原值（明文→哈希是 service 的活），这里用普通字符串当
@@ -36,7 +36,11 @@ fn new_token(user_id: Uuid, token_hash: &str) -> NewRefreshToken {
     new_token_expiring(user_id, token_hash, Utc::now() + Duration::days(30))
 }
 
-fn new_token_expiring(user_id: Uuid, token_hash: &str, expires_at: DateTime<Utc>) -> NewRefreshToken {
+fn new_token_expiring(
+    user_id: Uuid,
+    token_hash: &str,
+    expires_at: DateTime<Utc>,
+) -> NewRefreshToken {
     NewRefreshToken {
         id: Uuid::now_v7(),
         user_id,
@@ -120,7 +124,9 @@ async fn mark_rotated_sets_only_rotated_at(pool: PgPool) {
     let repo = RefreshTokenRepository::new(pool);
     let row = repo.insert(new_token(user_id, "hash-rot")).await.unwrap();
 
-    repo.mark_rotated(row.id).await.expect("mark_rotated 应成功");
+    repo.mark_rotated(row.id)
+        .await
+        .expect("mark_rotated 应成功");
 
     let found = repo.find_by_hash("hash-rot").await.unwrap().unwrap();
     assert!(found.rotated_at.is_some(), "rotated_at 应被置上");
@@ -156,7 +162,7 @@ async fn revoke_all_for_user_revokes_only_that_users_active_tokens(pool: PgPool)
     repo.insert(new_token(bob, "b1")).await.unwrap();
 
     let n = repo
-        .revoke_all_for_user(alice)
+        .revoke_all_by_user_id(alice)
         .await
         .expect("revoke_all 应成功");
     assert_eq!(n, 2, "应恰好吊销 Alice 的 2 枚");
@@ -179,7 +185,7 @@ async fn revoke_all_for_user_is_idempotent(pool: PgPool) {
     let repo = RefreshTokenRepository::new(pool);
     repo.insert(new_token(user_id, "h1")).await.unwrap();
 
-    let first = repo.revoke_all_for_user(user_id).await.unwrap();
+    let first = repo.revoke_all_by_user_id(user_id).await.unwrap();
     assert_eq!(first, 1, "首次应吊销 1 枚");
 
     // 记下首次吊销时刻。
@@ -191,7 +197,7 @@ async fn revoke_all_for_user_is_idempotent(pool: PgPool) {
         .revoked_at
         .expect("应已吊销");
 
-    let second = repo.revoke_all_for_user(user_id).await.unwrap();
+    let second = repo.revoke_all_by_user_id(user_id).await.unwrap();
     assert_eq!(second, 0, "已全吊销后再调应返回 0（守卫生效）");
 
     // 第二次不应覆盖 revoked_at。
@@ -380,4 +386,100 @@ async fn revoked_by_hash_token_cannot_be_consumed(pool: PgPool) {
 async fn revoke_by_hash_unknown_returns_zero(pool: PgPool) {
     let repo = RefreshTokenRepository::new(pool);
     assert_eq!(repo.revoke_by_hash("no-such").await.unwrap(), 0);
+}
+
+// ————————————————————— consume_and_insert（原子轮换） —————————————————————
+// 「消费旧枚 + 插入新枚」必须同生共死：这是 refresh 轮换不留中间态的根基。
+
+/// happy：旧枚被标 rotated、新枚同时落库且活跃，返回属主 user_id。
+#[sqlx::test]
+async fn consume_and_insert_swaps_old_for_new_atomically(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+
+    repo.insert(new_token(user_id, "old-hash")).await.unwrap();
+
+    let got = repo
+        .consume_and_insert(
+            "old-hash",
+            "new-hash",
+            Uuid::now_v7(),
+            Utc::now() + Duration::days(30),
+        )
+        .await
+        .expect("原子轮换应成功");
+    assert_eq!(got, Some(user_id), "应返回属主 user_id");
+
+    let old = repo.find_by_hash("old-hash").await.unwrap().unwrap();
+    assert!(old.rotated_at.is_some(), "旧枚应已标记轮换");
+
+    let new = repo.find_by_hash("new-hash").await.unwrap().unwrap();
+    assert_eq!(new.user_id, user_id, "新枚属主应不变");
+    assert!(
+        new.rotated_at.is_none() && new.revoked_at.is_none(),
+        "新枚应是活跃态"
+    );
+}
+
+/// CAS 落空（旧枚不存在/已消费/已吊销/已过期）→ Ok(None)，且**不插入**新枚。
+#[sqlx::test]
+async fn consume_and_insert_miss_inserts_nothing(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+
+    // 制造一枚已消费的旧枚
+    repo.insert(new_token(user_id, "used-hash")).await.unwrap();
+    repo.consume("used-hash").await.unwrap();
+
+    let got = repo
+        .consume_and_insert(
+            "used-hash",
+            "should-not-exist",
+            Uuid::now_v7(),
+            Utc::now() + Duration::days(30),
+        )
+        .await
+        .expect("落空不是错误");
+    assert_eq!(got, None, "已消费的旧枚应落空");
+
+    assert!(
+        repo.find_by_hash("should-not-exist")
+            .await
+            .unwrap()
+            .is_none(),
+        "落空时新枚绝不能落库（否则出现无主孤儿行）"
+    );
+}
+
+/// **回滚**：INSERT 失败（token_hash 撞唯一索引）→ 整个事务回滚，旧枚必须完好如初、
+/// 之后仍可正常消费。这条钉的就是「烧旧成功、发新失败」中间态的不可能性——
+/// 若 UPDATE 与 INSERT 不在同一事务里，本测试会挂在 rotated_at 上。
+#[sqlx::test]
+async fn consume_and_insert_rolls_back_old_when_insert_fails(pool: PgPool) {
+    let user_id = seed_user(&pool).await;
+    let repo = RefreshTokenRepository::new(pool);
+
+    repo.insert(new_token(user_id, "old-hash")).await.unwrap();
+    // 预先占住 new-hash，让事务内的 INSERT 必然撞唯一索引
+    repo.insert(new_token(user_id, "taken-hash")).await.unwrap();
+
+    repo.consume_and_insert(
+        "old-hash",
+        "taken-hash",
+        Uuid::now_v7(),
+        Utc::now() + Duration::days(30),
+    )
+    .await
+    .expect_err("撞唯一索引应报错");
+
+    // 关键断言：UPDATE 已回滚，旧枚仍是活跃态
+    let old = repo.find_by_hash("old-hash").await.unwrap().unwrap();
+    assert!(
+        old.rotated_at.is_none() && old.revoked_at.is_none(),
+        "INSERT 失败必须连带回滚 UPDATE——旧枚不能留在已轮换态"
+    );
+
+    // 活着要是真的：旧枚之后仍可正常消费（客户端重试即普通刷新）
+    let got = repo.consume("old-hash").await.unwrap();
+    assert_eq!(got, Some(user_id), "回滚后的旧枚应仍可消费");
 }

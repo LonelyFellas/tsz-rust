@@ -145,6 +145,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         refresh_ttl: Duration::days(config.refresh_ttl_days as i64),
         redis,
         otp_service,
+        cookie_secure: config.cookie_secure,
     };
 
     // 接优雅停机：systemctl stop / 容器停止发 SIGTERM，Ctrl+C 发 SIGINT。

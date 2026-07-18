@@ -43,7 +43,9 @@ async fn role_rejects_unknown_value(pool: PgPool) {
 async fn duplicate_user_role_is_rejected(pool: PgPool) {
     // 复合主键 (user_id, role)：同一用户同一角色不可重复。
     let uid = insert_user(&pool).await;
-    add_role(&pool, uid, "student").await.expect("首次加 student 应成功");
+    add_role(&pool, uid, "student")
+        .await
+        .expect("首次加 student 应成功");
     let dup = add_role(&pool, uid, "student").await;
     assert!(dup.is_err(), "重复的 (user_id, role) 应被复合主键拒绝");
 }
@@ -60,8 +62,12 @@ async fn role_for_nonexistent_user_is_rejected(pool: PgPool) {
 async fn user_can_hold_both_roles(pool: PgPool) {
     // 一个账号可同时是 student + teacher（参照§2 的核心需求）。
     let uid = insert_user(&pool).await;
-    add_role(&pool, uid, "student").await.expect("student 应成功");
-    add_role(&pool, uid, "teacher").await.expect("teacher 应成功");
+    add_role(&pool, uid, "student")
+        .await
+        .expect("student 应成功");
+    add_role(&pool, uid, "teacher")
+        .await
+        .expect("teacher 应成功");
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM user_roles WHERE user_id = $1")
         .bind(uid)

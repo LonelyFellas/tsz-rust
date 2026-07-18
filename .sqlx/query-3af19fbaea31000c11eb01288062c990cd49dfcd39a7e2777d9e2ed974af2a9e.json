@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE refresh_tokens SET rotated_at = NOW()\n               WHERE token_hash = $1 AND rotated_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()\n               RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "refresh_tokens",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3af19fbaea31000c11eb01288062c990cd49dfcd39a7e2777d9e2ed974af2a9e"
+}

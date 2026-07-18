@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::user::repository::UserError;
 
-#[derive(sqlx::Type, Debug, PartialEq)]
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 pub enum UserStatus {
     Active,
@@ -80,7 +80,7 @@ pub enum SubjectError {
     Repository(#[from] UserError),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct User {
     pub id: Uuid,
     pub phone: Option<String>,

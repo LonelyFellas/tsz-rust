@@ -44,7 +44,14 @@ async fn service_with(cooldown: Duration, daily_limit: u64) -> (OtpService, Pool
         .expect("测试 Redis 连接池应能创建");
     let prefix = format!("test:{}:", Uuid::now_v7());
     let store = OtpStore::with_prefix(pool.clone(), prefix.clone());
-    let service = OtpService::new(store, OtpSender::Mock, cooldown, daily_limit, TTL, MAX_ATTEMPTS);
+    let service = OtpService::new(
+        store,
+        OtpSender::Mock,
+        cooldown,
+        daily_limit,
+        TTL,
+        MAX_ATTEMPTS,
+    );
     (service, pool, prefix)
 }
 
@@ -76,15 +83,22 @@ fn wrong_of(code: &str) -> String {
 #[tokio::test]
 async fn request_saves_a_verifiable_six_digit_code() {
     let (svc, pool, prefix) = service_with(Duration::from_secs(60), 10).await;
-    svc.request(T, Purpose::Login).await.expect("首次请求应成功");
+    svc.request(T, Purpose::Login)
+        .await
+        .expect("首次请求应成功");
 
     // request 生成的码落进了 Redis，且是 6 位数字。
     let code = saved_code(&pool, &prefix, T, Purpose::Login).await;
     assert_eq!(code.len(), 6, "码应为 6 位（含前导零），实得 {code:?}");
-    assert!(code.chars().all(|c| c.is_ascii_digit()), "码应全为数字，实得 {code:?}");
+    assert!(
+        code.chars().all(|c| c.is_ascii_digit()),
+        "码应全为数字，实得 {code:?}"
+    );
 
     // 该码可被 verify 通过 —— 证明 request 存的和 verify 读的是同一枚。
-    svc.verify(T, Purpose::Login, &code).await.expect("正确码应校验通过");
+    svc.verify(T, Purpose::Login, &code)
+        .await
+        .expect("正确码应校验通过");
 }
 
 // ============================ verify 映射 ============================
@@ -112,7 +126,9 @@ async fn verify_is_single_use() {
     svc.request(T, Purpose::Login).await.unwrap();
     let code = saved_code(&pool, &prefix, T, Purpose::Login).await;
 
-    svc.verify(T, Purpose::Login, &code).await.expect("首次应通过");
+    svc.verify(T, Purpose::Login, &code)
+        .await
+        .expect("首次应通过");
     let err = svc.verify(T, Purpose::Login, &code).await.unwrap_err();
     assert!(
         matches!(err, OtpServiceError::InvalidCode),
@@ -189,7 +205,14 @@ async fn store_error_fails_closed_not_masked() {
         .await
         .expect("惰性建池即使地址不可达也应 Ok");
     let store = OtpStore::with_prefix(dead, format!("test:{}:", Uuid::now_v7()));
-    let svc = OtpService::new(store, OtpSender::Mock, Duration::from_secs(60), 10, TTL, MAX_ATTEMPTS);
+    let svc = OtpService::new(
+        store,
+        OtpSender::Mock,
+        Duration::from_secs(60),
+        10,
+        TTL,
+        MAX_ATTEMPTS,
+    );
 
     let req_err = svc.request(T, Purpose::Login).await.unwrap_err();
     assert!(

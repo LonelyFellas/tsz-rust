@@ -99,7 +99,7 @@ impl UserRepository {
             FROM users
             WHERE phone = $1 OR email = $1
             "#,
-            identifier   
+            identifier
         )
         .fetch_optional(&self.pool)
         .await?
@@ -125,7 +125,6 @@ impl UserRepository {
         Ok(user)
     }
 
-   
     // 查询用户用户的角色列表
     pub async fn get_roles_by_user_id(&self, user_id: &Uuid) -> Result<Vec<UserRole>, UserError> {
         let roles = sqlx::query_scalar!(
@@ -134,7 +133,7 @@ impl UserRepository {
             FROM user_roles
             WHERE user_id = $1
             "#,
-            user_id   
+            user_id
         )
         .fetch_all(&self.pool)
         .await?;

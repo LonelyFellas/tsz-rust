@@ -3,5 +3,11 @@
         "cooldown",
         "deadpool",
         "utoipa"
-    ]
+    ],
+    "rust-analyzer.cargo.extraEnv": {
+        "DATABASE_URL": "postgres://postgres:postgres@localhost:5433/tsz_rust"
+    },
+    "rust-analyzer.server.extraEnv": {
+        "DATABASE_URL": "postgres://postgres:postgres@localhost:5433/tsz_rust"
+    }
 }

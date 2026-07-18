@@ -17,6 +17,7 @@ pub struct AppState {
     pub refresh_ttl: Duration,
     pub redis: deadpool_redis::Pool,
     pub otp_service: Arc<OtpService>,
+    pub cookie_secure: bool,
 }
 
 impl AppState {
@@ -49,6 +50,7 @@ impl AppState {
                 Realm::Web,
                 Duration::minutes(15),
             )),
+            cookie_secure: false,
             refresh_ttl: Duration::days(30),
             redis,
             otp_service,
@@ -75,6 +77,7 @@ impl AppState {
         ));
         let state = Self {
             pool,
+            cookie_secure: false,
             token_manager: Arc::new(TokenManager::new(
                 "test-secret",
                 Realm::Web,

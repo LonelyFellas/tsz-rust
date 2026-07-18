@@ -1,0 +1,4 @@
+# Local builds talk to Postgres via DATABASE_URL / `.env`.
+# CI / offline builds should set SQLX_OFFLINE=true explicitly and rely on
+# the committed `.sqlx/` cache. Refresh that cache with:
+#   cargo sqlx prepare -- --all-targets

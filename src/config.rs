@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::num::{NonZeroU8, NonZeroU16};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_port")]
     pub port: NonZeroU16,
@@ -22,6 +22,8 @@ pub struct Config {
     #[serde(default = "default_otp_max_attempts")]
     pub otp_max_attempts: NonZeroU8,
     pub redis_url: String,
+    #[serde(default = "default_cookie_secure")]
+    pub cookie_secure: bool,
 }
 
 fn default_refresh_ttl_days() -> u64 {
@@ -46,6 +48,10 @@ fn default_otp_max_attempts() -> NonZeroU8 {
 }
 fn default_port() -> NonZeroU16 {
     NonZeroU16::new(8383).unwrap()
+}
+
+fn default_cookie_secure() -> bool {
+    true // 生产环境配置成true
 }
 
 impl Config {

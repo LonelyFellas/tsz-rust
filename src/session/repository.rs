@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -18,6 +19,43 @@ pub struct RefreshTokenRepository {
 impl RefreshTokenRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    pub async fn consume_and_insert(
+        &self,
+        old_hash: &str,
+        new_hash: &str,
+        new_id: Uuid,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Option<Uuid>, RefreshTokenError> {
+        let mut tx = self.pool.begin().await?;
+        let user_id = sqlx::query_scalar!(
+            r#"UPDATE refresh_tokens SET rotated_at = NOW()
+               WHERE token_hash = $1 AND rotated_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()
+               RETURNING user_id"#,
+            old_hash
+        )
+        .fetch_optional(&mut *tx)   // ← sqlx 0.9 事务执行器写法:&mut *tx
+        .await?;
+
+        let Some(user_id) = user_id else {
+            return Ok(None); // 提前 return,tx drop = 回滚
+        };
+
+        sqlx::query!(
+            r#"INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
+               VALUES ($1, $2, $3, $4)"#,
+            new_id,
+            user_id,
+            new_hash,
+            expires_at
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?; // 只有走到这里,旧枚的死亡才生效
+
+        Ok(Some(user_id))
     }
 
     // issue 用: 插入一行。（login 只需要这个方法就能跑
@@ -83,7 +121,7 @@ impl RefreshTokenRepository {
         Ok(())
     }
     /// 改密 / 全设备登出用。返回吊销行数
-    pub async fn revoke_all_for_user(&self, user_id: Uuid) -> Result<u64, RefreshTokenError> {
+    pub async fn revoke_all_by_user_id(&self, user_id: Uuid) -> Result<u64, RefreshTokenError> {
         let row = sqlx::query!(
             r#"
             UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL
