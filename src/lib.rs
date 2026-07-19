@@ -127,11 +127,16 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on {addr}");
 
-    // 建web realm 的TokenManager, secret + access TTL 从 config 读取
-    let token_manager = std::sync::Arc::new(TokenManager::new(
+    // 建两个 realm 的TokenManager, secret + access TTL 从 config 读取
+    let token_manager = Arc::new(TokenManager::new(
         &config.jwt_secret,
         Realm::Web,
         Duration::minutes(config.access_ttl_minutes as i64),
+    ));
+    let admin_token_manager = Arc::new(TokenManager::new(
+        &config.admin_jwt_secret,
+        Realm::Admin,
+        Duration::minutes(config.admin_access_ttl_minutes as i64),
     ));
 
     let otp_service = Arc::new(OtpService::new(
@@ -145,7 +150,9 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     let state = AppState {
         pool,
         token_manager,
+        admin_token_manager,
         refresh_ttl: Duration::days(config.refresh_ttl_days as i64),
+        admin_refresh_ttl: Duration::days(config.admin_refresh_ttl_days as i64),
         redis,
         otp_service,
         cookie_secure: config.cookie_secure,

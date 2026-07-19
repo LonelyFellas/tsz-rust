@@ -14,7 +14,9 @@ use axum::extract::FromRef;
 pub struct AppState {
     pub pool: PgPool,
     pub token_manager: Arc<TokenManager>,
+    pub admin_token_manager: Arc<TokenManager>,
     pub refresh_ttl: Duration,
+    pub admin_refresh_ttl: Duration,
     pub redis: deadpool_redis::Pool,
     pub otp_service: Arc<OtpService>,
     pub cookie_secure: bool,
@@ -50,10 +52,16 @@ impl AppState {
                 Realm::Web,
                 Duration::minutes(15),
             )),
-            cookie_secure: false,
+            admin_token_manager: Arc::new(TokenManager::new(
+                "test-admin-secret",
+                Realm::Admin,
+                Duration::minutes(15),
+            )),
             refresh_ttl: Duration::days(30),
+            admin_refresh_ttl: Duration::days(7),
             redis,
             otp_service,
+            cookie_secure: false,
         }
     }
 
@@ -83,7 +91,13 @@ impl AppState {
                 Realm::Web,
                 Duration::minutes(15),
             )),
+            admin_token_manager: Arc::new(TokenManager::new(
+                "test-admin-secret",
+                Realm::Admin,
+                Duration::minutes(15),
+            )),
             refresh_ttl: Duration::days(30),
+            admin_refresh_ttl: Duration::days(7),
             redis,
             otp_service,
         };
