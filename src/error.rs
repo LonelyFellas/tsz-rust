@@ -14,6 +14,8 @@ pub enum AppError {
     BadRequest(String),
     #[error("forbidden")]
     Forbidden,
+    #[error("{message}")]
+    ForbiddenCode { message: String, code: String },
     #[error("{0}")]
     Conflict(String),
     #[error("{0}")]
@@ -22,6 +24,8 @@ pub enum AppError {
     TooManyRequests,
     #[error("service unavailable")]
     ServiceUnavailable,
+    #[error("{0}")]
+    Locked(String),
 
     /// 内部错误：真实原因藏在 anyhow 里，只进日志，不进响应。
     #[error("internal error")]
@@ -41,12 +45,14 @@ impl AppError {
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Forbidden => StatusCode::FORBIDDEN,
+            AppError::ForbiddenCode { .. } => StatusCode::FORBIDDEN,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Unauthenticated(_) => StatusCode::UNAUTHORIZED,
             // status_code() —— 这是 exhaustive match，不加会编译不过（好，漏不掉）
             AppError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS, // 429
             AppError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE, // 503
+            AppError::Locked(_) => StatusCode::LOCKED,                  // 423
         }
     }
 }
@@ -55,6 +61,8 @@ impl AppError {
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
 }
 
 impl IntoResponse for AppError {
@@ -67,9 +75,15 @@ impl IntoResponse for AppError {
         }
 
         // Internal 的 Display 固定是 "internal error"，天然隐藏 cause
+        let code = match &self {
+            AppError::ForbiddenCode { code, .. } => Some(code.clone()),
+            _ => None,
+        };
         let body = ErrorBody {
             error: self.to_string(),
+            code,
         };
+
         (status, Json(body)).into_response()
     }
 }
@@ -129,6 +143,88 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body, serde_json::json!({ "error": "not found" }));
+    }
+
+    // —— admin 域扩展（admin-design.md §12）：Locked 423 + 带 code 的 403 ——
+
+    #[test]
+    fn locked_maps_to_423() {
+        assert_eq!(
+            AppError::Locked("x".into()).status_code(),
+            StatusCode::LOCKED
+        );
+    }
+
+    #[tokio::test]
+    async fn locked_response_body_is_error_only() {
+        // §12 锁定行的契约文案由调用方传入，error.rs 不硬编码业务文案
+        let resp = AppError::Locked(
+            "account temporarily locked due to too many failed login attempts".into(),
+        )
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::LOCKED);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "account temporarily locked due to too many failed login attempts"
+            }),
+            "Locked 与其它变体同形：只有 error 键，不得多出 code"
+        );
+    }
+
+    #[test]
+    fn forbidden_code_maps_to_403() {
+        assert_eq!(
+            AppError::ForbiddenCode {
+                message: "x".into(),
+                code: "y".into(),
+            }
+            .status_code(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn forbidden_code_body_carries_code_field() {
+        // 硬契约：前端靠 code=must_change_password 整页跳改密页（admin-design.md §7/§12）
+        let resp = AppError::ForbiddenCode {
+            message: "password change required".into(),
+            code: "must_change_password".into(),
+        }
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": "password change required",
+                "code": "must_change_password"
+            }),
+            "body 形状是前端路由依据，逐字节钉死"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_variants_do_not_leak_code_key() {
+        // ErrorBody 若加 Option<code>，普通变体序列化时必须 skip——否则全站错误响应都多出 "code": null
+        for err in [
+            AppError::Forbidden,
+            AppError::Unauthenticated("invalid credentials".into()),
+            AppError::BadRequest("weak password".into()),
+        ] {
+            let resp = err.into_response();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                body.as_object().unwrap().get("code").is_none(),
+                "无 code 语义的变体不得出现 code 键: {body}"
+            );
+        }
     }
 
     #[tokio::test]
