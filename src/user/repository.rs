@@ -1,7 +1,10 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::user::model::{User, UserRole, UserStatus};
+use crate::{
+    platform::is_unique_violation,
+    user::model::{User, UserRole, UserStatus},
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum UserError {
@@ -92,7 +95,7 @@ impl UserRepository {
 
     /// 通过手机号/邮箱进行查询用户
     pub async fn get_by_identifier(&self, identifier: &str) -> Result<User, UserError> {
-        let user = sqlx::query_as!(
+        sqlx::query_as!(
             User,
             r#"
             SELECT id, phone, email, password_hash, display_name, last_active_role as "last_active_role: UserRole", created_at, updated_at, status AS "status: UserStatus", avatar_url
@@ -103,9 +106,7 @@ impl UserRepository {
         )
         .fetch_optional(&self.pool)
         .await?
-        .ok_or(UserError::NotFound)?;
-
-        Ok(user)
+        .ok_or(UserError::NotFound)
     }
     /// 通过user_id 查询用户
     pub async fn get_by_id(&self, id: &Uuid) -> Result<User, UserError> {
@@ -143,14 +144,12 @@ impl UserRepository {
 }
 
 fn map_unique_violation(e: sqlx::Error) -> UserError {
-    if let sqlx::Error::Database(db) = &e
-        && db.code().as_deref() == Some("23505")
-    {
-        match db.constraint() {
-            Some("users_phone_key") => return UserError::PhoneNumberAlreadyExists,
-            Some("users_email_key") => return UserError::EmailAlreadyExists,
-            _ => {}
-        }
+    if is_unique_violation(&e, "users_phone_key") {
+        return UserError::PhoneNumberAlreadyExists;
     }
+    if is_unique_violation(&e, "users_email_key") {
+        return UserError::EmailAlreadyExists;
+    }
+
     UserError::Db(e)
 }

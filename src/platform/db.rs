@@ -11,3 +11,11 @@ pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
         .await?;
     Ok(pool)
 }
+/// 判断 sqlx 错误是否为「撞了指定唯一约束」的 23505 冲突。
+/// 只做判断不做映射——映射成哪个领域错误归各域自己。
+pub fn is_unique_violation(e: &sqlx::Error, constraint: &str) -> bool {
+    if let sqlx::Error::Database(db) = e {
+        return db.code().as_deref() == Some("23505") && db.constraint() == Some(constraint);
+    }
+    false
+}
