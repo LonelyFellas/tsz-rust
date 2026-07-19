@@ -1,6 +1,6 @@
 # admin 域设计(后台身份系统)
 
-> 状态:已定稿(Q1–Q6 拍板见 §18,2026-07-19),一期实现中。
+> 状态:已定稿(Q1–Q12 拍板见 §18,2026-07-19),一期实现中。
 > 参照:tsz-go `internal/{admin,authz}` + `docs/admin-{account-management,auth-hardening,rbac,user-management}-design.md`(业务规则事实来源,**不是代码结构模板**);前端契约 `tsz/packages/api-client/src/admin.ts` + `packages/types/src/{admin,admin-role,admin-user}.ts`(wire 形状事实来源)。
 > tsz-go 侧的编号决策(D 系列)在本文引用时标注出处,如「hardening-D8」。
 
@@ -10,7 +10,7 @@
 
 - 一期:`admins`/`admin_refresh_tokens` 表 + admin auth 五件套(login/refresh/logout/logout-all/change-password)+ `GET /admin/profile` + 账号锁定 + must_change_password 守卫。
 - 二期:super_admin 管理 admins(创建/启禁用/重置密码)+ seed 机制。
-- 三期:RBAC(roles/permissions 三表 + 派角色)+ admin 管理 web 用户(4 端点)。
+- 三期:admin 管理 web 用户(4 端点)。(原三期的 RBAC 已整体取消,见 Q10。)
 
 **非目标**(继承 go 侧已拍板的负向决策,重写时同样视为已定,勿返工):
 
@@ -19,7 +19,8 @@
 - 管理员改级(promote/demote)、admins 侧昵称编辑。
 - web 用户删除、level 字段、coin_balance 填充、手机/邮箱换绑(user-mgmt-D1/D3/D4)。
 - 禁用 web 用户/admin 即时踢线(接受一个 access TTL 延迟,user-mgmt-D6)。
-- RBAC 读写细分(.read/.write)、角色嵌套、权限缓存(每请求查库,后台 QPS 低)。
+- **RBAC 整体**(角色/权限委派/roles 与 permissions 端点/派角色,Q10 产品定案):只有 admin/super_admin 两级身份,全体 admin 全功能;「管理员管理」按 `role == super_admin` 门禁。go 侧已落地的 RBAC 不移植。
+- **email 字段**(Q9 产品定案):admin 只有手机号,无邮箱——连联系资料都不留,登录/找回/展示全线无 email。
 - admin words 管理 10 端点(word 域,另立文档)。
 - 审计表、per-IP 限流、失败登录告警(→ §15 偏离清单,生产上线前重估)。
 
@@ -29,7 +30,7 @@
 |---|------|-----------|
 | 1 | admin 与 web 用户**完全隔离的身份存储**:独立表、独立登录、独立签名密钥,同手机号互不相通 | go 侧铁律;后台泄露不波及 C 端,反之亦然 |
 | 2 | 第二把 JWT 密钥 `ADMIN_JWT_SECRET`(必填),`TokenManager::new(secret, Realm::Admin, ttl)` 第二实例 | 双防线 = per-realm secret + aud 校验;`Realm::Admin` 枚举早已就位 |
-| 3 | 两级 `super_admin`/`admin`,单 level 身份(非 web 的多角色) | super 是治理顶点:仅 seed 可造、不可被启禁用/重置/派角色 |
+| 3 | 两级 `super_admin`/`admin`,列/枚举/wire 统一命名 **`role`**(单一身份,非 web 的多角色;RBAC 已取消无撞车) | super 是治理顶点:仅 seed 可造、不可被启禁用/重置;与 JWT claim 名天然一致 |
 | 4 | refresh cookie:`admin_refresh_token`,`Path=/api/v1/admin`,SameSite=**Strict** | 名字+Path 与 web cookie 双向隔离;后台无跨站跳转需求,比 web 的 Lax 更严 |
 | 5 | 会话策略:**严格单登录**——issue 前 `revoke_all`(Q1 已定) | go 侧语义;后台账号不该多处同时在线 |
 | 6 | 轮换/重放语义**复刻 tsz-rust web 侧**(CAS 原子轮换 + 20s 宽限不铸币 + 窗口外连坐),不照搬 go 的「宽限内铸新币」 | 同一套已验证的模式;前端 refresh 已 single-flight,不需要铸币宽限 |
@@ -37,7 +38,7 @@
 | 8 | must_change_password = DB 列 + **逐请求查库的守卫**(非 token claim),白名单仅 change-password/logout/logout-all(hardening-D6) | 重置后即时生效,零 TTL 滞后 |
 | 9 | 临时密码:后端生成 20 位(charset 去 `0O1lI`)、明文仅随响应返回一次、不落库不进日志(hardening-D2/D3) | 创建与重置共用同一内核;charset 无 `1` ⇒ 必不含手机号 |
 | 10 | 密码策略:≥12 字符、≤72 字节、非纯数字、弱子串黑名单、不含本人手机号(hardening-D7) | 后台密码强度必做;违规统一 400 |
-| 11 | RBAC:权限目录 = **Rust 常量表**(单一事实来源),DB 只存 role→key 映射;super 恒 bypass 不查库(rbac-D5) | 目录与端点是代码契约,防 DB 漂移;退出目录的 key 即刻停止授权 |
+| 11 | **无 RBAC**(Q10):全体 admin 全功能;`profile.permissions` 恒返全量菜单 key(死数据,保前端菜单渲染零改动) | 产品定案只有两级身份;权限委派体系整体取消 |
 | 12 | 错误不可区分与 web 侧同纪律:账号不存在≡密码错(401);refresh 无效态全笼统(401);错密码先于 disabled 检查 | 防探测;安全语义与 web 域一以贯之 |
 | 13 | repository 仍是**具体 struct + `#[sqlx::test]`**,admin 会话仓库平行复刻(不抽 trait 泛化两张表) | 项目铁律;5 个方法的重复远便宜于泛型 SQL 的扭曲(query! 宏要静态 SQL) |
 | 14 | **登录 2FA**:仅手机号标识,`{phone, password, code}` 三参数必填(Q7);发码端点恒 202 反枚举;码错≡密码错逐字节一致 | 后台账号是高价值目标,双因子缺一不可;go 侧无此设计,tsz-rust 主动升级 |
@@ -48,37 +49,38 @@
 go 迁移注释原文:admins 是「与 users 完全独立的后台身份库」——同一手机号可以既是学员又是管理员,两个身份毫无关联,各自唯一约束、各自登录、各自签名密钥。**不是** users 表加一个 `admin` 角色:
 
 - 爆炸半径隔离:C 端任何漏洞(如 OTP 逻辑)不可能变成后台提权入口;
-- 生命周期不同:web 用户自助注册、多角色可切换;admin 由超管 provision、单 level、强制改密;
+- 生命周期不同:web 用户自助注册、多角色可切换;admin 由超管 provision、单一 role、强制改密;
 - 会话策略不同:web 多设备,admin 严格单登录。
 
-`level` 语义(account-D1/D2):
+`role` 语义(account-D1/D2;Q10 后无权限委派,两级即全部):
 
-| | 怎么产生 | 可被启禁用? | 可被重置密码? | 可被派角色? | 权限 |
-|---|---|---|---|---|---|
-| `super_admin` | 仅 seed(带外) | ✗ 一律 403 | ✗ 一律 403(含自己) | ✗ 403(无意义) | bypass 一切校验 |
-| `admin` | 超管经 API 创建 | ✓ | ✓(⇒ 强制改密+踢会话) | ✓ | 按角色 key 集 |
+| | 怎么产生 | 可被启禁用? | 可被重置密码? | 权限 |
+|---|---|---|---|---|
+| `super_admin` | 仅 seed(带外) | ✗ 一律 403 | ✗ 一律 403(含自己) | 全功能 + 管理员管理 |
+| `admin` | 超管经 API 创建 | ✓ | ✓(⇒ 强制改密+踢会话) | 全功能(除管理员管理) |
 
 「一律 403」是毯式规则,好处是「最后一个活跃 super 被禁」状态**根本不可达**,无需 last-super-admin 保护护栏(account-D4:go 曾做过又删掉,我们直接不做)。
 
 ## 3. schema(迁移草案)
 
-tsz-rust schema 从零重画的红利:go 分四次迁移补的列(must_change_password、lockout、role_id)我们**一步到位**。三期的 RBAC 表放第三期迁移,前两期只建两张:
+tsz-rust schema 从零重画的红利:go 分多次迁移补的列(must_change_password、lockout)我们**一步到位**。共两张表(RBAC 三表已随 Q10 取消):
 
 ```sql
 -- 一期迁移 create_admins:
--- 后台身份库,与 users 完全独立(见 docs/admin-design.md §2)。TEXT + CHECK 沿用 users 惯例。
+-- 后台身份库,与 users 完全独立(见 docs/admin-design.md §2)。无 email(Q9,仅手机号)。
 CREATE TABLE admins (
     id                   UUID        PRIMARY KEY,          -- Rust 侧 Uuid::now_v7()
     phone                TEXT        NOT NULL,
-    email                TEXT,                             -- 可选
     password_hash        TEXT        NOT NULL,
     display_name         TEXT        NOT NULL,
-    level                TEXT        NOT NULL DEFAULT 'admin'
-                         CHECK (level IN ('admin', 'super_admin')),
+    role                 TEXT        NOT NULL DEFAULT 'admin'
+                         CHECK (role IN ('admin', 'super_admin')),
+    -- 状态:active 正常,disabled 已被禁用(超管管理动作,403)——区别于 locked_until 的自动锁定(423)。
     status               TEXT        NOT NULL DEFAULT 'active'
                          CHECK (status IN ('active', 'disabled')),
-    -- 强制改密标志(hardening-D6):创建/重置置 true,change-password 原子清除。
-    must_change_password BOOLEAN     NOT NULL DEFAULT false,
+    -- 强制改密标志(hardening-D6):默认 true 是 fail-secure(漏赋值的路径最多逼人改密);
+    -- seed 建超管必须显式写 false;change-password 与写 hash 同条 UPDATE 原子清除。
+    must_change_password BOOLEAN     NOT NULL DEFAULT true,
     -- 账号锁定(hardening-D8):连续失败计数 + 锁定截止。过去的 locked_until 不是锁(自动解锁,无 cron)。
     failed_login_count   INT         NOT NULL DEFAULT 0,
     locked_until         TIMESTAMPTZ,
@@ -86,7 +88,6 @@ CREATE TABLE admins (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX admins_phone_unique ON admins (phone);
-CREATE UNIQUE INDEX admins_email_unique ON admins (lower(email)) WHERE email IS NOT NULL;
 
 -- 一期迁移 create_admin_refresh_tokens:形状 = refresh_tokens 平行复刻,仅 FK 指向不同。
 CREATE TABLE admin_refresh_tokens (
@@ -102,40 +103,14 @@ CREATE INDEX admin_refresh_tokens_admin ON admin_refresh_tokens (admin_id);
 CREATE UNIQUE INDEX admin_refresh_tokens_hash ON admin_refresh_tokens (token_hash);
 ```
 
-```sql
--- 三期迁移 create_admin_rbac(草案,三期再细审):
-CREATE TABLE admin_roles (
-    id          UUID        PRIMARY KEY,
-    name        TEXT        NOT NULL,
-    description TEXT        NOT NULL DEFAULT '',
-    is_system   BOOLEAN     NOT NULL DEFAULT false,        -- 系统预置角色禁删禁改(rbac-D11)
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE UNIQUE INDEX admin_roles_name_unique ON admin_roles (lower(name));  -- 重名大小写不敏感
-
-CREATE TABLE admin_role_permissions (
-    role_id        UUID NOT NULL REFERENCES admin_roles(id) ON DELETE CASCADE,
-    permission_key TEXT NOT NULL,       -- 合法集以 Rust 常量目录为准(rbac-D5),不加 CHECK
-    PRIMARY KEY (role_id, permission_key)
-);
-
--- 删自定义角色 ⇒ 成员自动降为「仅首页」(rbac-D11,DB 声明式解绑,无应用层跨表事务)。
-ALTER TABLE admins ADD COLUMN role_id UUID REFERENCES admin_roles(id) ON DELETE SET NULL;
-CREATE INDEX admins_role_id_idx ON admins (role_id);
-
--- 系统预置「全功能管理员」,固定 UUID 与 Rust 常量 FULL_ACCESS_ROLE_ID 锁步。
-INSERT INTO admin_roles (id, name, description, is_system) VALUES
-    ('00000000-0000-0000-0000-00000000f001', '全功能管理员', '系统预置:拥有全部可委派菜单权限', true);
--- 权限 key 快照(rbac-D10:迁移时点快照,新菜单由其自身迁移补授,不自动跟随)+ 存量 admin backfill,三期照 go 000025 铺。
-```
+(原三期 RBAC 三表迁移草案已随 Q10 取消删除。)
 
 ## 4. JWT:第二把密钥
 
 - config 新增**必填** `admin_jwt_secret`(⚠️ 部署面:上这版前生产 `.env` 必须先加此项,否则重启即失败——与 `redis_url` 同为「缺则启动失败」纪律,deployment.md/.env.example 同步)。
 - `AppState` 加 `admin_token_manager: Arc<TokenManager>`,构造 `TokenManager::new(&cfg.admin_jwt_secret, Realm::Admin, Duration::minutes(admin_access_ttl))`。**零新代码**——`Realm::Admin` 的 aud 校验、防跨 realm、防算法混淆全在既有 `TokenManager` 单测覆盖内。
-- claims:`sub` = admin id;`role` claim 在 admin realm 承载 **level**(`"admin"`/`"super_admin"`)——与 web realm 的 `role`=当前激活角色平行,同一个字段名、不同 realm 各自语义。
-- 提取器:新写 `AdminAuth { subject: Uuid, level: AdminLevel }`(`admin/extract.rs`),逻辑同 `AuthUser` 但走 `state.admin_token_manager`。**已知取舍**(go 同):level 从 token 读,15 分钟内可陈旧;must_change 与 RBAC 都逐请求查库补真,disabled 由 refresh 拒绝在一个 TTL 内兜底。
+- claims:`sub` = admin id;`role` claim 承载 `"admin"`/`"super_admin"`——与 admins.role 列、wire 字段同名同值(Q11 统一命名),与 web realm 的 `role`=当前激活角色平行,同一个字段名、不同 realm 各自语义。
+- 提取器:新写 `AdminAuth { subject: Uuid, role: AdminRole }`(`admin/extract.rs`),逻辑同 `AuthUser` 但走 `state.admin_token_manager`。**已知取舍**(go 同):role 从 token 读,15 分钟内可陈旧;must_change 逐请求查库补真,disabled 由 refresh 拒绝在一个 TTL 内兜底。
 
 ## 5. 会话:admin_refresh_tokens
 
@@ -211,53 +186,43 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 
 ## 9. super_admin 治理矩阵(二期)
 
-全部 `/admins/*` 端点套 `RequireSuperAdmin`(从 `AdminAuth.level` 判,非 super ⇒ 403 "super admin required"):
+全部 `/admins/*` 端点套 `RequireSuperAdmin`(从 `AdminAuth.role` 判,非 super ⇒ 403 "super admin required"):
 
 | 操作 | 目标=admin | 目标=super_admin |
 |---|---|---|
-| `POST /admins`(provision) | 只能造 level=admin(**请求根本没有 level 字段**,account-D2 的「结构上杜绝」——同 web 注册无 role 字段的手法) | 不可达(造不出来) |
+| `POST /admins`(provision) | 只能造 role=admin(**请求根本没有 role 字段**,account-D2 的「结构上杜绝」——同 web 注册无 role 字段的手法) | 不可达(造不出来) |
 | `PATCH /admins/{id}/status` | ✓,返回更新后 Admin | 403 "cannot change a super admin's status" |
 | `POST /admins/{id}/reset-password` | ✓,返回一次性临时密码 | 403 "cannot reset a super admin"(含 super 重置自己) |
-| `PATCH /admins/{id}/role`(三期) | ✓(null=收回,降为仅首页) | 403 "cannot assign a role to a super admin" |
 
 **reset 副作用链的顺序有讲究**(hardening-D5):先 `revoke_all`(踢目标全部会话)再 `set_password(hash, must_change=true)`。两步不共事务:revoke 成功而 set 失败 = 目标被登出但旧密码仍可登录,自愈;**反序**则可能出现「会话没踢、临时密码没人知道」的死锁窗口。
 
-**provision**:phone 必填(5–20)、email 可选、display_name 必填(1–50,trim,拒 `<>`/控制符/Cf——约束与 web `DisplayName::parse` 高度重合,实现时评估直接复用);判重**不先查**、直接 insert 靠唯一索引 + 23505 映射 409(user 域同哲学);置 must_change=true;201 返 `{admin, temporary_password}`。三期后默认绑全功能角色(rbac-D6)。
+**provision**:phone 必填(5–20)、display_name 必填(1–50,trim,拒 `<>`/控制符/Cf——约束与 web `DisplayName::parse` 高度重合,实现时评估直接复用);**无 email(Q9)**;判重**不先查**、直接 insert 靠唯一索引 + 23505 映射 409(user 域同哲学);置 must_change=true(列默认即 true,显式写更稳);201 返 `{admin, temporary_password}`。
 
 **seed super_admin**(带外,Q5 已定:独立 bin `seed_admin`,服务器上跑,密码运行时传入不进 .env):幂等语义照 go——phone 不存在 ⇒ 建 active super(密码须过策略,must_change=false);已存在 ⇒ 自愈提升 level、重激活 status、**不动密码**。⚠️ 2FA 之后 seed 的 phone 必须是**真实可收码的手机号**(登录要过验证码因子;测试环境码在 journald,生产必须真短信)。
 
-## 10. RBAC(三期)
+## 10. 权限模型(RBAC 已取消,Q10)
 
-- **权限目录 = Rust 常量表**(`admin/authz.rs`,rbac-D5),key + 中文 label,顺序即侧栏顺序:`users.access 用户管理 / classes.access 班级管理 / words.access 智能词库 / customdict.access 自定义词库 / sentences.access 多维例句 / wordlists.access 智能词表 / customwordlist.access 自定义词表 / tasks.access 任务管理 / reviews.access 词表审核 / teacherapply.access 教师申请审核 / comments.access 评论审核 / coins.access 天生币管理`。「首页」无 key(恒可见);「管理员管理」**不入目录**(rbac-D9,前端按 level 门禁,永不可委派)。
-- **双向执法**:写入时未知 key ⇒ 400 `{"code":"unknown_permission_key"}`;读取/执法时也过 delegable 过滤——key 退出目录即刻停止授权,DB 残留无效。
-- **判定顺序**(执法点,fail-closed):① level==super ⇒ 放行不查库;② 无 AdminAuth(装配 bug)⇒ 401;③ key 不在目录 ⇒ false;④ 查库出错 ⇒ 500(**不是**放行);⑤ 无权 ⇒ 403 `{"error":"insufficient permission","code":"permission_denied"}`。无角色(role_id NULL)= 空 key 集 = 仅首页,非错误。
-- **两层闸正交**:RequireSuperAdmin 写端点(admins 管理、users 写操作)不入 key 体系,普通 admin 有相关 key 也 403。
-- 角色治理:重名 409(大小写不敏感);is_system 禁删禁改 403;PATCH 部分更新但 `permissions` 一旦出现(含 `[]`)= 全量替换,校验先行、写入单事务;DELETE ⇒ 204,成员由 `ON DELETE SET NULL` 原子降为仅首页。
-- **一、二期的 profile.permissions 过渡**:RBAC 表未建时,所有 admin 一律返回**全量目录 key**(= go rbac-D6「backfill 全功能角色」的零行为变化语义,前端菜单全开);三期接真表后 super 返全集、admin 按角色。前端契约「permissions 恒为数组不为 null」从一期起就成立。
+产品定案:**只有 admin/super_admin 两级身份,没有角色/权限委派概念**。go 侧已落地的 RBAC(admin_roles 三表、roles/permissions 端点、派角色)不移植;权限执法只剩一道闸——`RequireSuperAdmin`(管理员管理、users 写操作),从 `AdminAuth.role` 判,全体 admin 其余功能全开。
+
+**`profile.permissions` 的处置**:前端菜单渲染依赖此数组(恒为数组不为 null 的契约),保留字段、**恒返全量菜单 key 死数据**(Rust 常量表,12 个 `*.access` key,顺序即侧栏顺序)——前端零改动,菜单全开;「管理员管理」菜单继续按 `role == super_admin` 前端门禁(rbac-D9 的残余语义)。若日后前端决定砍掉 permissions 渲染逻辑,该字段随 openapi sync 一起删,只动一处常量。
 
 ## 11. 端点契约总表(前端对齐硬指标)
 
-挂载 `ADMIN_MOUNT = /api/v1/admin`。wire 字段全 snake_case。`Admin` 对象序列化:`id, phone, email(缺省省略), display_name, level, status, created_at, updated_at`——**手挑字段,绝不序列化 password_hash/must_change_password/role_id/锁定列**(web 侧防泄惯例)。
+挂载 `ADMIN_MOUNT = /api/v1/admin`。wire 字段全 snake_case。`Admin` 对象序列化:`id, phone, display_name, role, status, created_at, updated_at`(**wire 字段名统一 `role`,偏离 go/存量前端类型的 `level`**,前端随 openapi sync 改)——**手挑字段,绝不序列化 password_hash/must_change_password/锁定列**(web 侧防泄惯例)。
 
 | 端点 | 鉴权 | 请求 | 成功响应 |
 |---|---|---|---|
 | `POST /auth/login-code` | 公开 | `{phone}` | **恒 202** 空 body(反枚举,见 §6;仅基础设施故障 503) |
-| `POST /auth/login` | 公开 | `{phone, password, code}`(2FA 三必填,Q7) | 200 `{admin, access_token, level, expires_in, refresh_token_expires_at, must_change_password}` + Set-Cookie |
+| `POST /auth/login` | 公开 | `{phone, password, code}`(2FA 三必填,Q7) | 200 `{admin, access_token, role, expires_in, refresh_token_expires_at, must_change_password}` + Set-Cookie |
 | `POST /auth/refresh` | cookie | 无 body | 200 `{access_token, expires_in, refresh_token_expires_at}` + 新 cookie |
 | `POST /auth/logout` | cookie | 无 body | 204,清 cookie(幂等,web 侧 T4 同语义) |
 | `POST /auth/logout-all` | Bearer(逃生组) | 无 body | 204 |
 | `POST /auth/change-password` | Bearer(逃生组) | `{current_password, new_password}` | 204 |
-| `GET /profile` | Bearer(守卫组) | — | 200 `{id, phone, display_name, level, permissions:[key]}` |
-| `GET /admins` | super | `?page&page_size&level&q` | 200 `{items:[Admin], page:{page,page_size,total}}` |
-| `POST /admins` | super | `{phone, email?, display_name}` | 201 `{admin, temporary_password}` |
+| `GET /profile` | Bearer(守卫组) | — | 200 `{id, phone, display_name, role, permissions:[key]}`(permissions 恒全量死数据,§10) |
+| `GET /admins` | super | `?page&page_size&role&q` | 200 `{items:[Admin], page:{page,page_size,total}}` |
+| `POST /admins` | super | `{phone, display_name}`(无 email,Q9) | 201 `{admin, temporary_password}` |
 | `PATCH /admins/{id}/status` | super | `{status}` | 200 更新后 Admin |
 | `POST /admins/{id}/reset-password` | super | 无 body | 200 `{temporary_password}` |
-| `PATCH /admins/{id}/role` | super(三期) | `{role_id: uuid\|null}` | 204 |
-| `GET /permissions` | super(三期) | — | 200 `{items:[{key,label}]}`(目录顺序) |
-| `GET /roles` | super(三期) | — | 200 `{items:[AdminRole]}`(系统角色最前) |
-| `POST /roles` | super(三期) | `{name, description?, permissions?}` | 201 AdminRole |
-| `PATCH /roles/{id}` | super(三期) | `{name?, description?, permissions?}` | 200 AdminRole |
-| `DELETE /roles/{id}` | super(三期) | — | 204 |
 | `GET /users` | admin(三期) | `?role&q&registered_from&registered_to&page&page_size` | 200 `{items:[AdminUser], page}` |
 | `GET /users/{id}` | admin(三期) | — | 200 AdminUser |
 | `PATCH /users/{id}/status` | super(三期) | `{status}` | 200 更新后 AdminUser |
@@ -266,7 +231,7 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 补充契约点:
 
 - 前端 access token **仅存内存**、refresh 全靠 cookie(`credentials:"include"`),从不接触 refresh 明文——cookie 契约是硬前提,无 body 双轨。
-- 分页:`page` 默认 1(clamp≥1)、`page_size` 默认 20(clamp 1..100);`q` = phone/email/display_name ILIKE 子串(`%`/`_` 不作通配,入参转义);列表按 `created_at DESC`;`items` 空为 `[]` 恒非 null。
+- 分页:`page` 默认 1(clamp≥1)、`page_size` 默认 20(clamp 1..100);`q` ILIKE 子串检索(`%`/`_` 不作通配,入参转义)——admins 列表查 phone/display_name(无 email,Q9),users 列表查 phone/email/display_name;列表按 `created_at DESC`;`items` 空为 `[]` 恒非 null。
 - `registered_from/to`:RFC3339,**半开区间 `[from, to)`** 过滤 created_at。
 - `AdminUser`(三期):`{id, phone?, email?, display_name, avatar_url(未设为 ""), roles:[student|teacher], status, created_at, updated_at}`——复用 web 侧 `get_roles_by_user_id`;不含 level/coin_balance。
 - OpenAPI:每落一条端点同步 utoipa 注解 + `docs/openapi.json` 重导出 → 前端 `sync:openapi` → 从 PENDING 白名单移除(契约测试强制)。cookie 参数声明沿用 web 侧 ⑧ 的手法。
@@ -284,9 +249,7 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 | 新旧相同 / 弱密码 | 400 | message 说明具体规则 |
 | 非 super 碰 super 端点 | 403 | `{"error":"super admin required"}` |
 | 被强制改密碰守卫组 | 403 | `{"error":"password change required","code":"must_change_password"}` |
-| 无权限 key(三期) | 403 | `{"error":"insufficient permission","code":"permission_denied"}` |
-| 未知权限 key(三期) | 400 | `{"error":"\"xxx\": unknown permission key","code":"unknown_permission_key"}` |
-| provision 撞手机/邮箱 | 409 | `{"error":"phone already registered"}` / `"email already registered"`(**不带 go 的 `field` 字段**,message 已可区分,见 §15) |
+| provision 撞手机号 | 409 | `{"error":"phone already registered"}`(**不带 go 的 `field` 字段**;email 冲突态已随 Q9 消失) |
 
 **`AppError` 需两处扩展**:① `Locked(String)` → 423;② 带 `code` 的 403/400 变体(如 `ForbiddenCode{error, code}` / `BadRequestCode{...}`,或 admin 域局部响应类型——实现时选,前端只认 body 形状)。`code` 是前端路由依据(`must_change_password` ⇒ 跳改密页),属硬契约。
 
@@ -295,16 +258,17 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 ```
 src/admin/
   mod.rs          // pub const ADMIN_MOUNT: &str = "/api/v1/admin"; re-exports
-  model.rs        // Admin 行结构 + AdminLevel/AdminStatus 枚举(sqlx TEXT 映射)
+  model.rs        // Admin 行结构 + AdminRole/AdminStatus 枚举(sqlx TEXT 映射)
                   //   + validate_admin_password + generate_temporary_password
-  repository.rs   // AdminRepository{pool}: create/get_by_id/get_by_identifier/list(分页筛选)
-                  //   /set_status/set_password(hash,must_change 原子)/set_role(三期)
+  repository.rs   // AdminRepository{pool}: create/get_by_id/get_by_phone(仅手机号,Q7/Q9)
+                  //   /list(分页筛选)/set_status/set_password(hash,must_change 原子)
                   //   /register_failed_login/clear_failed_logins
-  session.rs      // AdminRefreshTokenRepository + AdminSessionService(web session 平行复刻)
-  service.rs      // AdminService: login/change_password/provision/reset_password(编排+治理矩阵)
+  session.rs      // AdminRefreshTokenRepository + AdminSessionService(web session 平行复刻,
+                  //   consume_and_insert 继承 expires_at,Q8)
+  service.rs      // AdminService: login(2FA)/change_password/provision/reset_password(编排+治理矩阵)
   extract.rs      // AdminAuth 提取器 + RequireSuperAdmin + MustChangeGuard
   handler.rs      // 三组路由:公开/逃生/守卫 + DTO + 错误映射 + cookie helpers
-  authz.rs        // (三期)权限目录常量 + RoleRepository + 执法层
+                  //   + MENU_PERMISSIONS 全量菜单 key 常量(profile 死数据,§10)
 ```
 
 装配(`state.rs`/`lib.rs`):
@@ -349,13 +313,17 @@ config 新增:
 | 5 | 失败登录 Grafana 告警(hardening-D9) | 推迟 | 观测栈未搬;423/401 计数进 tracing,接观测时补规则 |
 | 6 | nginx Basic Auth 门控时序(hardening-D10) | 不适用 | tsz-rust 生产没有这层;admin 端点上线即裸奔于公网,**一期上生产前必须确认锁定+密码策略已就位** |
 | 7 | seed 是独立 Go cmd | 独立 Rust bin(Q5 已定,密码运行时传入) | — |
-| 8 | admin login = identifier(手机/邮箱)+密码**单因子** | **手机号+密码+验证码 2FA**,仅手机号标识(Q7,2026-07-19) | 后台安全主动升级;email 降为纯联系资料 |
+| 8 | admin login = identifier(手机/邮箱)+密码**单因子** | **手机号+密码+验证码 2FA**,仅手机号标识(Q7,2026-07-19) | 后台安全主动升级 |
 | 9 | (web 侧)`/otp/send` 冷却中返 429 | admin `login-code` **恒 202 压平**(含冷却/日限/查无此号) | 反管理员名录枚举;前端本地倒计时,不依赖 429 |
 | 10 | refresh 滑动续期,TTL 默认 30 天(go admin 与 web 同) | **绝对上限 7 天,轮换继承 expires_at 不续期**(Q8) | 后台会话定期强制重认证;2FA 下重登成本可控 |
+| 11 | admins 有可选 email 列(可用于登录) | **无 email 列**(Q9) | 产品定案:admin 仅手机号,连联系资料都不留 |
+| 12 | RBAC 全套已落地(角色/权限/派角色) | **整体取消**(Q10):两级身份 + `RequireSuperAdmin` 单闸;permissions 恒全量死数据 | 产品定案:无角色概念 |
+| 13 | 身份列/wire 字段名 `level` | 列/枚举/claim/wire **统一 `role`**(Q11) | 与 JWT claim 同名;RBAC 取消后无 role_id 撞车 |
+| 14 | must_change_password 列默认 false | 默认 **true**(fail-secure,漏赋值路径最多逼人改密);**seed 必须显式写 false** | 绿地建表,方向可以选更稳的 |
 
 ## 16. 可测性(我写测试要用)
 
-- schema 约束:两张新表的 CHECK/UNIQUE/部分索引(`lower(email)`)/FK 级联,`tests/admin_schema.rs`。
+- schema 约束:两张新表的 CHECK/UNIQUE/FK 级联/默认值(含 must_change 默认 **true**),`tests/admin_schema.rs`。
 - repository:锁定状态机(计数累积/第 5 次触锁+归零/过期锁清理/成功清零,**并发 register_failed_login 原子性**)、`set_password` 的 hash+flag 同条 UPDATE、分页筛选(q 转义 `%_`)、23505 映射;admin 会话仓库对照 `session_repository.rs` 全套(含 CAS 三条:happy/落空不插/回滚)。
 - service:login 2FA 顺序矩阵(锁定先于一切因子/密码先于 disabled/disabled 先于验证码且不烧码/码错也累计锁定/锁内全对也 423 且不累计)、验证码注入走 `for_test_with_otp_store` 手法(login-otp 测试同款)、密码策略逐条、临时密码(长度/charset/回验重试)、change-password 新旧相同拦截、治理矩阵全部 403。
 - login-code 反枚举:查无此号/已禁用/冷却中/日限满四态**响应逐字节一致恒 202**;仅 active admin 真正落码(用注入 store 反查 Redis 键存在性断言);Redis 挂 503。
@@ -365,10 +333,11 @@ config 新增:
 
 ## 17. 落地顺序
 
-1. **一期(auth 闭环)**:迁移两张表 → config 三键 + AppState 装配 → `AppError` 扩展(423 + code 变体)→ model(枚举/密码策略)→ OTP 域 `Purpose::AdminLogin` 变体 → AdminRepository(含锁定方法)→ admin session 平移 → login-code/login(2FA)/refresh/logout/logout-all/change-password/profile(permissions 暂全量目录)→ must_change 守卫(机制先就位,flag 触发点在二期)→ CORS(Q6)→ OpenAPI + 前端白名单移除 6 条 + **新增 login-code 契约**(admin 前端登录页需加发码按钮+验证码栏,本地 60s 倒计时)。
+1. **一期(auth 闭环)**:迁移两张表 → config 三键 + AppState 装配 → `AppError` 扩展(423 + code 变体)→ model(枚举/密码策略)→ OTP 域 `Purpose::AdminLogin` 变体 → AdminRepository(含锁定方法)→ admin session 平移 → login-code/login(2FA)/refresh/logout/logout-all/change-password/profile(permissions 恒全量死数据)→ must_change 守卫(机制先就位,flag 触发点在二期)→ CORS(Q6)→ OpenAPI + 前端白名单移除 6 条 + **新增 login-code 契约**(admin 前端登录页需加发码按钮+验证码栏,本地 60s 倒计时)。
    ⚠️ **真短信 sender 从「web 线待办」升格为 admin 一期的生产前置**:2FA 下验证码是登录必经因子,`OtpSender::Mock`(码打 journald)意味着生产环境后台无法登录——admin 线上生产前必须接真短信通道(测试环境可 `journalctl -u tsz-rust | grep otp_code_sent` 取码过渡)。
 2. **二期(admins 管理)**:provision/list/status/reset-password + 临时密码内核 + seed 机制 → 白名单再移 4 条。
-3. **三期(RBAC + users 管理)**:RBAC 迁移 + authz.rs 目录与执法 + roles 5 端点 + 派角色 + users 4 端点 → 白名单清空 admin 身份区。
+3. **三期(users 管理)**:users 4 端点(list/详情/status/编辑昵称)→ 白名单清空 admin 身份区。
+   (原三期的 RBAC 已取消,Q10:白名单里 6 条 RBAC 端点——roles×4、permissions、派角色——属「取消」而非「待实现」,待前端下架 Roles 页面后从白名单与 admin.ts 一并删除。)
 
 每期节奏照旧:设计核对 → 我出测试骨架/红灯 → 你实现 → 全绿 → clippy → 部署冒烟。
 
@@ -380,5 +349,9 @@ config 新增:
 - **Q4 profile 过渡期 permissions:定案「返回死数据」**——一、二期恒返全量目录 key(前端菜单全开,= go backfill 零行为变化语义);三期接真 RBAC 表。
 - **Q5 seed 形态:定案「独立 bin,服务器上跑,密码运行时传入」**——`src/bin/seed_admin.rs`,`cargo run --bin seed_admin`,密码走命令行参数/交互输入,**不进 .env**(避免明文残留);幂等语义照 §9(存在则自愈提升,不动密码)。
 - **Q6 CORS:定案「一期顺带做」**——tower-http `CorsLayer`,一次配好 web + admin 两个来源,允许 credentials(cookie 契约需要);配置与加固细节补进 deployment.md。
+- **Q9 无 email(2026-07-19 产品定案)**:admins 无 email 列——不作登录标识,连联系资料都不留。provision 请求、Admin 序列化、409 冲突态、`lower(email)` 部分索引全线随之删除;admins 列表 `q` 只查 phone/display_name。
+- **Q10 无 RBAC(2026-07-19 产品定案)**:没有角色/权限委派概念,只有 admin/super_admin 两级身份。原三期 RBAC(三表迁移、roles/permissions 端点、派角色)整体取消;权限执法只剩 `RequireSuperAdmin` 单闸;`profile.permissions` 保留字段恒返全量菜单 key 死数据(§10)。
+- **Q11 身份命名统一 `role`(2026-07-19)**:列/Rust 枚举(`AdminRole`)/JWT claim/wire 字段四处同名——RBAC 取消后无 `role_id` 撞车,且与 claim 名天然一致。**偏离 go 与存量前端类型的 `level`**,前端随 openapi sync 一并改。
+- **Q12 must_change_password 列默认 true(2026-07-19,采纳用户迁移方案)**:fail-secure——漏赋值的路径最多逼人改一次密码(反之 false 是 fail-open)。纪律:**seed 建超管必须显式写 false**;provision 显式写 true(不依赖列默认,双保险)。
 - **Q8 会话寿命:定案「绝对上限 7 天,轮换不续期」(2026-07-19 追加拍板)**——`ADMIN_REFRESH_TTL_DAYS` 默认 7;`rotate` 继承旧枚 `expires_at` 不重算(admin 版 `consume_and_insert` 不收 expires_at 参数,CTE 在 DB 层原子继承);到期 refresh 401 ⇒ 必重走 2FA。与 web 的滑动续期刻意相反(§15 偏离 10);cookie Max-Age 随剩余寿命。
 - **Q7 登录因子:定案「手机号+密码+验证码 2FA,三参数必填」(2026-07-19 追加拍板)**。背景:曾评估四方案——仅密码 / 仅验证码 / 双轨任选 / 双因子;「仅验证码」因 SIM 攻击面+可用性耦合+Mock 阻塞被否,「双轨任选」安全性=两通道最弱者也被否,最终取最强的双因子。admin 仅以**手机号**为登录标识(email 降为纯联系资料)。随之的执行细则(§6,如有异议再议):①码错≡密码错≡账号不存在,401 逐字节一致(防密码爆破 oracle);②码错也累计账号锁定;③disabled 在验证码之前检查(禁用账号不烧码);④发码端点 `login-code` 恒 202 压平一切非基础设施结果(反名录枚举,含冷却/日限);⑤真短信 sender 升格为 admin 生产前置。

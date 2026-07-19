@@ -1,7 +1,8 @@
 //! admins / admin_refresh_tokens 表的 schema 约束测试(admin-design.md §3)。
 //! 红灯驱动:迁移落地前全部失败(表不存在),落地后应全绿。
-//! 验证:默认值、phone 唯一、email 大小写不敏感部分唯一、level/status CHECK、
+//! 验证:默认值(含 must_change 默认 true,Q12)、phone 唯一、role/status CHECK、
 //! token_hash 唯一、FK 级联、以及「与 web 身份库完全隔离」的两条边界断言。
+//! 注意:admin **无 email 列**(Q9)、身份列名为 **role**(Q11)。
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -68,29 +69,25 @@ async fn insert_admin_token(
 async fn admin_defaults_are_correct(pool: PgPool) {
     let id = insert_admin(&pool, "13800000001").await;
 
-    let (level, status, must_change, failed_count, locked_null, email_null): (
-        String,
-        String,
-        bool,
-        i32,
-        bool,
-        bool,
-    ) = sqlx::query_as(
-        "SELECT level, status, must_change_password, failed_login_count, \
-                locked_until IS NULL, email IS NULL \
+    let (role, status, must_change, failed_count, locked_null): (String, String, bool, i32, bool) =
+        sqlx::query_as(
+            "SELECT role, status, must_change_password, failed_login_count, \
+                locked_until IS NULL \
          FROM admins WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&pool)
-    .await
-    .expect("查询应成功");
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("查询应成功");
 
-    assert_eq!(level, "admin", "level 默认应为 admin(super 仅 seed 可造)");
+    assert_eq!(role, "admin", "role 默认应为 admin(super 仅 seed 可造)");
     assert_eq!(status, "active", "status 默认应为 active");
-    assert!(!must_change, "must_change_password 默认应为 false");
+    assert!(
+        must_change,
+        "must_change_password 默认应为 true(Q12 fail-secure;seed 必须显式写 false)"
+    );
     assert_eq!(failed_count, 0, "failed_login_count 默认应为 0");
     assert!(locked_null, "locked_until 默认应为 NULL(未锁定)");
-    assert!(email_null, "email 未给时应为 NULL(可选列)");
 }
 
 // ===== admins:唯一约束 =====
@@ -109,63 +106,43 @@ async fn admin_phone_must_be_unique(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn admin_email_unique_is_case_insensitive(pool: PgPool) {
-    sqlx::query(
-        "INSERT INTO admins (id, phone, email, password_hash, display_name) \
-         VALUES ($1, '13800000001', 'Admin@Example.com', 'hash', 'a')",
+async fn admin_has_no_email_column(pool: PgPool) {
+    // Q9 产品定案:admin 仅手机号,无 email。此测试防止将来有人「顺手」把列加回来
+    // 而绕过设计评审——加列必须先回到 admin-design.md 推翻 Q9。
+    let has_email: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_name = 'admins' AND column_name = 'email')",
     )
-    .bind(Uuid::now_v7())
-    .execute(&pool)
+    .fetch_one(&pool)
     .await
-    .expect("首个 email 应成功");
-
-    let dup = sqlx::query(
-        "INSERT INTO admins (id, phone, email, password_hash, display_name) \
-         VALUES ($1, '13800000002', 'admin@example.COM', 'hash', 'b')",
-    )
-    .bind(Uuid::now_v7())
-    .execute(&pool)
-    .await;
-    assert_db_error_code(dup, "23505", "email 仅大小写不同也应被 lower(email) 唯一索引拒绝");
-}
-
-#[sqlx::test]
-async fn multiple_admins_without_email_can_coexist(pool: PgPool) {
-    // 部分唯一索引 WHERE email IS NOT NULL:NULL 行不参与唯一性。
-    insert_admin(&pool, "13800000001").await;
-    insert_admin(&pool, "13800000002").await;
-
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM admins WHERE email IS NULL")
-        .fetch_one(&pool)
-        .await
-        .expect("查询应成功");
-    assert_eq!(count, 2, "无 email 的 admin 应可并存(部分索引不拦 NULL)");
+    .expect("查询应成功");
+    assert!(!has_email, "admins 不应有 email 列(Q9:仅手机号)");
 }
 
 // ===== admins:CHECK 约束 =====
 
 #[sqlx::test]
-async fn admin_level_check_rejects_unknown_value(pool: PgPool) {
+async fn admin_role_check_rejects_unknown_value(pool: PgPool) {
     let bad = sqlx::query(
-        "INSERT INTO admins (id, phone, password_hash, display_name, level) \
+        "INSERT INTO admins (id, phone, password_hash, display_name, role) \
          VALUES ($1, '13800000001', 'hash', 'a', 'root')",
     )
     .bind(Uuid::now_v7())
     .execute(&pool)
     .await;
-    assert_db_error_code(bad, "23514", "level CHECK 应拒绝 admin/super_admin 以外的值");
+    assert_db_error_code(bad, "23514", "role CHECK 应拒绝 admin/super_admin 以外的值");
 }
 
 #[sqlx::test]
-async fn admin_level_accepts_super_admin(pool: PgPool) {
+async fn admin_role_accepts_super_admin(pool: PgPool) {
     sqlx::query(
-        "INSERT INTO admins (id, phone, password_hash, display_name, level) \
+        "INSERT INTO admins (id, phone, password_hash, display_name, role) \
          VALUES ($1, '13800000001', 'hash', 'a', 'super_admin')",
     )
     .bind(Uuid::now_v7())
     .execute(&pool)
     .await
-    .expect("level=super_admin 应被 CHECK 放行(seed 路径要用)");
+    .expect("role=super_admin 应被 CHECK 放行(seed 路径要用)");
 }
 
 #[sqlx::test]

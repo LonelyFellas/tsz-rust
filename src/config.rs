@@ -24,6 +24,11 @@ pub struct Config {
     pub redis_url: String,
     #[serde(default = "default_cookie_secure")]
     pub cookie_secure: bool,
+    pub admin_jwt_secret: String,
+    #[serde(default = "default_admin_access_ttl_minutes")]
+    pub admin_access_ttl_minutes: u64,
+    #[serde(default = "default_admin_refresh_ttl_days")]
+    pub admin_refresh_ttl_days: u64,
 }
 
 fn default_refresh_ttl_days() -> u64 {
@@ -52,6 +57,12 @@ fn default_port() -> NonZeroU16 {
 
 fn default_cookie_secure() -> bool {
     true // 生产环境配置成true
+}
+fn default_admin_access_ttl_minutes() -> u64 {
+    15
+}
+fn default_admin_refresh_ttl_days() -> u64 {
+    7
 }
 
 impl Config {
@@ -85,6 +96,9 @@ mod tests {
             // Redis 是硬依赖（见 docs/redis-design.md §4），与 DATABASE_URL 同级必填，
             // 故基线里备齐，其余测试才能只声明「与基线的差异」。
             ("REDIS_URL", "redis://localhost:6379/0"),
+            // admin realm 第二把签名密钥（admin-design.md §4）：与 JWT_SECRET 同级必填——
+            // 双防线 = per-realm secret + aud 校验，密钥不分离则防线塌一半。
+            ("ADMIN_JWT_SECRET", "adm1n-s3cret"),
         ]
     }
 
@@ -125,6 +139,7 @@ mod tests {
         assert_eq!(cfg.database_url, "postgres://localhost/tsz");
         assert_eq!(cfg.jwt_secret, "s3cret");
         assert_eq!(cfg.redis_url, "redis://localhost:6379/0");
+        assert_eq!(cfg.admin_jwt_secret, "adm1n-s3cret");
     }
 
     #[test]
@@ -178,6 +193,49 @@ mod tests {
     }
 
     #[test]
+    fn missing_admin_jwt_secret_errors() {
+        // ADMIN_JWT_SECRET 无 default，必填（admin-design.md §4）：缺了必须启动即失败，
+        // 而不是 admin 登录时才发现签不出 token。⚠️ 部署面：上 admin 版前生产 .env 先加此项。
+        let input = [
+            ("DATABASE_URL", "postgres://localhost/tsz"),
+            ("JWT_SECRET", "s3cret"),
+            ("REDIS_URL", "redis://localhost:6379/0"),
+        ];
+        assert!(
+            parse(&input).is_err(),
+            "缺少必填的 ADMIN_JWT_SECRET 应返回错误"
+        );
+    }
+
+    #[test]
+    fn admin_ttls_fall_back_to_defaults() {
+        // admin 双 TTL 默认值（admin-design.md §13）：access 15 分钟；
+        // refresh 7 天——注意语义是绝对上限非滑动（Q8），轮换不续期。
+        let input = valid_baseline();
+        let cfg = parse(&input).expect("必填项齐全应能解析");
+        assert_eq!(
+            cfg.admin_access_ttl_minutes, 15,
+            "省略时 admin access TTL 默认 15 分钟"
+        );
+        assert_eq!(
+            cfg.admin_refresh_ttl_days, 7,
+            "省略时 admin refresh TTL 默认 7 天（绝对上限）"
+        );
+    }
+
+    #[test]
+    fn explicit_admin_ttls_override_defaults() {
+        let mut input = valid_baseline();
+        input.push(("ADMIN_ACCESS_TTL_MINUTES", "30"));
+        input.push(("ADMIN_REFRESH_TTL_DAYS", "14"));
+
+        let cfg = parse(&input).expect("字段齐全应能解析");
+
+        assert_eq!(cfg.admin_access_ttl_minutes, 30, "显式值应覆盖默认");
+        assert_eq!(cfg.admin_refresh_ttl_days, 14, "显式值应覆盖默认");
+    }
+
+    #[test]
     fn env_key_is_case_insensitive() {
         // envy 把键统一小写化后匹配字段名，用小写键验证这一行为。
         // 备齐全部必填项（含 redis_url），否则会因缺项报错而非验证到大小写匹配。
@@ -185,6 +243,7 @@ mod tests {
             ("database_url", "postgres://localhost/tsz"),
             ("jwt_secret", "s3cret"),
             ("redis_url", "redis://localhost:6379/0"),
+            ("admin_jwt_secret", "adm1n-s3cret"),
         ];
         let cfg = parse(&input).expect("小写键也应能匹配到字段");
         assert_eq!(cfg.database_url, "postgres://localhost/tsz");
