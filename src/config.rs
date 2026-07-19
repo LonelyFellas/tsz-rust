@@ -72,7 +72,14 @@ impl Config {
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        envy::from_iter(pairs)
+        let cfg: Self = envy::from_iter(pairs)?;
+        // 两把密钥相同 = per-realm 隔离塌一半,启动即失败(admin-design.md §13)
+        if cfg.admin_jwt_secret == cfg.jwt_secret {
+            return Err(envy::Error::Custom(
+                "ADMIN_JWT_SECRET must differ from JWT_SECRET".into(),
+            ));
+        }
+        Ok(cfg)
     }
 }
 
@@ -204,6 +211,23 @@ mod tests {
         assert!(
             parse(&input).is_err(),
             "缺少必填的 ADMIN_JWT_SECRET 应返回错误"
+        );
+    }
+
+    #[test]
+    fn admin_jwt_secret_must_differ_from_jwt_secret() {
+        // 加固（admin-design.md §4，用户拍板 2026-07-19）：两把密钥相同 = per-realm 隔离
+        // 塌掉一半（只剩 aud 校验一道墙），而「复制粘贴同一串」恰是最易犯的部署失误——
+        // 解析后校验，相同则启动即失败。
+        let input = [
+            ("DATABASE_URL", "postgres://localhost/tsz"),
+            ("JWT_SECRET", "same-secret"),
+            ("REDIS_URL", "redis://localhost:6379/0"),
+            ("ADMIN_JWT_SECRET", "same-secret"),
+        ];
+        assert!(
+            parse(&input).is_err(),
+            "ADMIN_JWT_SECRET 与 JWT_SECRET 相同应解析失败（密钥必须分离）"
         );
     }
 

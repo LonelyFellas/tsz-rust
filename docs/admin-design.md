@@ -290,6 +290,8 @@ config 新增:
 | `ADMIN_ACCESS_TTL_MINUTES` | 默认 15 | 独立于 web,默认相同 |
 | `ADMIN_REFRESH_TTL_DAYS` | 默认 **7** | **绝对上限非滑动**(Q8):轮换不续期,到期必重登 |
 
+**解析后校验(用户拍板 2026-07-19)**:`admin_jwt_secret == jwt_secret` ⇒ 启动即失败——两把密钥相同则 per-realm 隔离塌一半(只剩 aud 一道墙),而复制粘贴同一串恰是最易犯的部署失误。校验放 `Config::from_pairs`(生产与测试共用的接缝),错误可用 `envy::Error::Custom` 免改签名。
+
 锁定参数(5 次/15 分钟)与宽限(20s)**硬编码 service 层**,镜像测试常量——go 也未做成配置,无场景要热调。
 
 ## 14. 与 web 域的复用清单(实现时照抄,别重造)
