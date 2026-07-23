@@ -1,0 +1,372 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug unit tests in library 'tsz_rust'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'seed'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=seed"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'seed'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=seed"
+                ]
+            }
+        },
+        {
+            "name": "Debug executable 'tsz-rust'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=tsz-rust"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in executable 'tsz-rust'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=tsz-rust"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'admin_repository'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=admin_repository"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'admin_schema'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=admin_schema"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'admin_seed_service'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=admin_seed_service"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'admin_session_repository'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=admin_session_repository"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'admin_session_reuse_detection'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=admin_session_reuse_detection"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'admin_session_service'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=admin_session_service"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'auth_extract'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=auth_extract"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'auth_login_handler'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=auth_login_handler"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'auth_login_otp_handler'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=auth_login_otp_handler"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'auth_me'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=auth_me"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'auth_refresh_handler'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=auth_refresh_handler"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'health'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=health"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'otp_send_handler'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=otp_send_handler"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'otp_service'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=otp_service"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'otp_store'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=otp_store"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'redis_readiness'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=redis_readiness"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'refresh_tokens_schema'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=refresh_tokens_schema"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'session_repository'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=session_repository"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'session_reuse_detection'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=session_reuse_detection"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'session_service'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=session_service"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'student_profiles_schema'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=student_profiles_schema"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'teacher_profiles_schema'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=teacher_profiles_schema"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'user_authenticate'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=user_authenticate"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'user_register_handler'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=user_register_handler"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'user_repository'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=user_repository"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'user_roles_schema'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=user_roles_schema"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'user_service'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=user_service"
+                ]
+            }
+        },
+        {
+            "name": "Debug integration test 'users_schema'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--test=users_schema"
+                ]
+            }
+        }
+    ]
+}

@@ -33,8 +33,9 @@
 
 use sqlx::PgPool;
 
+use tsz_rust::platform::PasswordError;
 use tsz_rust::user::model::DisplayName;
-use tsz_rust::user::model::{PasswordError, SubjectError, UserRole, UserStatus};
+use tsz_rust::user::model::{SubjectError, UserRole, UserStatus};
 use tsz_rust::user::repository::UserRepository;
 use tsz_rust::user::service::{RegisterError, RegisterInput, UserService};
 

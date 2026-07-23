@@ -43,6 +43,14 @@ pub fn router(state: AppState) -> Router {
             Router::new().route("/register", post(user::handler::register)),
         )
         .nest(
+            // admin 认证端点单独挂在 /auth 子路径下，与未来 ADMIN_MOUNT(/api/v1/admin)
+            // 下的业务路由分离——refresh cookie 只钉这层，不随业务请求外泄。
+            admin::ADMIN_AUTH_MOUNT,
+            Router::new()
+                .route("/login", post(admin::admin_login))
+                .route("/logout", post(admin::admin_logout)),
+        )
+        .nest(
             auth::AUTH_MOUNT,
             Router::new()
                 .route("/login", post(auth::handler::login))
@@ -123,6 +131,11 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     // 并发安全：sqlx 迁移持有 Postgres advisory lock，多实例同时启动只有一个真正执行。
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("database migrations applied");
+
+    // 预热 dummy_hash 的 OnceLock：它是 not-found 登录分支做时序平衡用的 bcrypt 哈希，
+    // 首次调用会同步算 ~250ms。放在 bind 之前、于启动线程上一次性付清，
+    // 免得第一个打到不存在账号的登录请求在 async worker 上现算、拖慢当时的在途请求。
+    let _ = platform::dummy_hash();
 
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

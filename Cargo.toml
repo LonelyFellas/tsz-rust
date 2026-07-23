@@ -2,6 +2,8 @@
 name = "tsz-rust"
 version = "0.1.0"
 edition = "2024"
+# 裸 `cargo run` 起服务器；seed 等一次性命令用 `cargo run --bin <name>` 显式指定
+default-run = "tsz-rust"
 
 [dependencies]
 anyhow = "1.0.103"

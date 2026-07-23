@@ -5,8 +5,9 @@ use utoipa::ToSchema;
 
 use crate::{
     error::AppError,
+    platform::PasswordError,
     user::{
-        model::{PasswordError, SubjectError, User},
+        model::{SubjectError, User},
         repository::UserRepository,
         service::{RegisterError, RegisterInput, UserService},
     },

@@ -76,6 +76,22 @@ impl AdminRepository {
         .await?
         .ok_or(AdminRepositoryError::NotFound)
     }
+    pub async fn get_roles_by_admin_id(
+        &self,
+        id: &Uuid,
+    ) -> Result<AdminRole, AdminRepositoryError> {
+        let role = sqlx::query_scalar!(
+            r#"
+            SELECT role as "role: AdminRole" FROM admins WHERE id = $1
+            "#,
+            id,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(AdminRepositoryError::NotFound)?;
+
+        Ok(role)
+    }
     pub async fn set_password(
         &self,
         id: &Uuid,

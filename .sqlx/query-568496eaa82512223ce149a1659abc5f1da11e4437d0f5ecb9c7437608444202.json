@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE admin_refresh_tokens SET rotated_at = rotated_at - make_interval(secs => $1) WHERE token_hash = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "568496eaa82512223ce149a1659abc5f1da11e4437d0f5ecb9c7437608444202"
+}

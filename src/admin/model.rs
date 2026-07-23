@@ -1,11 +1,22 @@
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy)]
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize, Deserialize, utoipa::ToSchema)]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum AdminRole {
     SuperAdmin,
     Admin,
+}
+
+impl AdminRole {
+    pub fn as_str(&self) -> &str {
+        match self {
+            AdminRole::SuperAdmin => "super_admin",
+            AdminRole::Admin => "admin",
+        }
+    }
 }
 
 #[derive(sqlx::Type, Debug, PartialEq, Clone, Copy)]
@@ -37,4 +48,10 @@ pub struct NewAdmin {
     pub password_hash: String,
     pub role: AdminRole,
     pub must_change_password: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SeedOutcome {
+    Created(Admin),   // 新建超管
+    Unchanged(Admin), // 手机号已是超管，什么都没改（超管恒 active，无需自愈）
 }

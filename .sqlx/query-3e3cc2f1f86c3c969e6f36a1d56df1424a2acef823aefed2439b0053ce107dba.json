@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) FROM admin_refresh_tokens\n         WHERE admin_id = $1 AND rotated_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3e3cc2f1f86c3c969e6f36a1d56df1424a2acef823aefed2439b0053ce107dba"
+}

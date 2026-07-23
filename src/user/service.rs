@@ -1,21 +1,16 @@
-use std::sync::OnceLock;
-
-use bcrypt::{DEFAULT_COST, hash, verify};
 use uuid::Uuid;
 
+use crate::platform::{
+    Password, PasswordError, dummy_hash, hash_password, normalize_email, normalize_phone,
+    verify_password,
+};
 use crate::user::display_name::generate_display_name;
 use crate::user::model::UserStatus;
 use crate::user::{
-    model::{Password, PasswordError, SubjectError, User, UserRole},
+    model::{SubjectError, User, UserRole},
     repository::{NewUser, UserError, UserRepository},
 };
 
-fn normalize_phone(phone: &str) -> String {
-    phone.trim().to_string()
-}
-fn normalize_email(email: &str) -> String {
-    email.trim().to_lowercase()
-}
 pub fn normalize_identifier(identifier: &str) -> String {
     if identifier.contains('@') {
         normalize_email(identifier)
@@ -58,14 +53,6 @@ pub enum LoginError {
     Repository(#[from] UserError),
 }
 
-fn verify_password(password: &str, password_hash: &str) -> bool {
-    verify(password, password_hash).unwrap_or(false)
-}
-
-fn dummy_hash() -> &'static str {
-    static H: OnceLock<String> = OnceLock::new();
-    H.get_or_init(|| hash("timing-balance", DEFAULT_COST).expect("系统错误：dummy hash 生成失败"))
-}
 impl UserService {
     pub fn new(repository: UserRepository) -> Self {
         Self { repository }
@@ -90,8 +77,8 @@ impl UserService {
         }
 
         // 2) 密码哈希
-        let password = Password::parse(&input.password)?;
-        let password_hash = password.hash_password()?;
+        let password = Password::parse(&input.password).map_err(RegisterError::Password)?;
+        let password_hash = hash_password(password.into_string()).await?;
 
         // 3) 验证码校验
         // let _ = Code::parse(&input.code)?;
@@ -123,7 +110,7 @@ impl UserService {
         match self.repository.get_by_identifier(&id).await {
             Ok(user) => {
                 // 先验证密码
-                if !verify_password(password, &user.password_hash) {
+                if !verify_password(password.to_string(), user.password_hash.clone()).await {
                     return Err(LoginError::InvalidCredentials);
                 }
                 // 密码对了，身份已证实 -> 再看状态（禁用只透传给证明了拥有改账号的人）
@@ -134,7 +121,7 @@ impl UserService {
             }
             // 查无此人：也跑一次假 verify 平衡时序，然后返回【和密码错同一个】错误
             Err(UserError::NotFound) => {
-                verify_password(password, dummy_hash());
+                verify_password(password.to_string(), dummy_hash().to_string()).await;
                 Err(LoginError::InvalidCredentials)
             }
             // 其余底层错 -> 如实透传

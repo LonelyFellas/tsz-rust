@@ -1,4 +1,3 @@
-use bcrypt::{DEFAULT_COST, hash};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -54,18 +53,6 @@ pub enum CodeError {
     Empty,
     #[error("code is invalid")]
     Invalid,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum PasswordError {
-    #[error("password is empty")]
-    Empty,
-    #[error("password is too short")]
-    TooShort,
-    #[error("password is too long")]
-    TooLong,
-    #[error("failed to hash password")]
-    HashFailed,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -175,30 +162,3 @@ impl DisplayName {
 //     }
 // }
 
-pub struct Password(String);
-
-impl Password {
-    pub fn parse(raw: &str) -> Result<Self, PasswordError> {
-        // 2) empty
-        if raw.is_empty() {
-            return Err(PasswordError::Empty);
-        }
-        // 3) 长度至少8位
-        if raw.len() < 8 {
-            return Err(PasswordError::TooShort);
-        }
-        // 4) 长度不超过72位
-        if raw.len() > 72 {
-            return Err(PasswordError::TooLong);
-        }
-        Ok(Password(raw.to_string()))
-    }
-
-    pub fn hash_password(&self) -> Result<String, PasswordError> {
-        hash(&self.0, DEFAULT_COST).map_err(|_| PasswordError::HashFailed)
-    }
-
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}

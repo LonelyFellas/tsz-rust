@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH consumed AS (\n                UPDATE admin_refresh_tokens SET rotated_at = NOW()\n                WHERE token_hash = $1 AND rotated_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()\n                RETURNING admin_id, expires_at\n            )\n            INSERT INTO admin_refresh_tokens (id, admin_id, token_hash, expires_at)\n            SELECT $3::uuid, admin_id, $2::text, expires_at FROM consumed\n            RETURNING admin_id AS \"admin_id!\", expires_at AS \"expires_at!\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "admin_id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "admin_refresh_tokens",
+            "name": "admin_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "expires_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "admin_refresh_tokens",
+            "name": "expires_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1ab44f3bc6f09d574403973e8349fb772461d974ef993505ca68b9bf62decd7e"
+}
