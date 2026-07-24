@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE admins SET locked_until = NOW() + interval '10 minutes' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ec52d2b058faa4491f663c0dec02e91ac6114811d6918f14dca5eb53f1db6096"
+}

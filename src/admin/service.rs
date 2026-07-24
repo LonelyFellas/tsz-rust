@@ -1,3 +1,5 @@
+use chrono::{Duration, Utc};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
@@ -5,10 +7,17 @@ use crate::{
         Admin, AdminRepository, AdminRepositoryError, AdminRole, AdminStatus, NewAdmin,
         model::SeedOutcome,
     },
+    otp::{
+        model::Purpose,
+        service::{OtpService, OtpServiceError},
+    },
     platform::{
         Password, PasswordError, dummy_hash, hash_password, normalize_phone, verify_password,
     },
 };
+
+pub const FAILED_LOGIN_THRESHOLD: i32 = 5;
+pub const FAILED_LOGIN_LOCK_DURATION: Duration = Duration::seconds(60 * 15);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdminLoginError {
@@ -16,6 +25,10 @@ pub enum AdminLoginError {
     InvalidCredentials,
     #[error("account is disabled")]
     AccountDisabled,
+    #[error("account temporarily locked")]
+    Locked,
+    #[error(transparent)]
+    OtpUnavailable(#[from] OtpServiceError),
     #[error(transparent)]
     Repository(#[from] AdminRepositoryError),
 }
@@ -35,35 +48,89 @@ pub enum AdminSeedError {
 
 pub struct AdminService {
     repository: AdminRepository,
+    /// `None` 仅用于 seed/CLI（不走 login）；登录路径必须注入。
+    otp_service: Option<Arc<OtpService>>,
 }
 
 impl AdminService {
-    pub fn new(repository: AdminRepository) -> Self {
-        Self { repository }
+    pub fn new(repository: AdminRepository, otp_service: Arc<OtpService>) -> Self {
+        Self {
+            repository,
+            otp_service: Some(otp_service),
+        }
     }
-    pub async fn authenticate(
+
+    /// seed/CLI：不涉及 OTP 校验。
+    pub fn for_seed(repository: AdminRepository) -> Self {
+        Self {
+            repository,
+            otp_service: None,
+        }
+    }
+    pub async fn login(
         &self,
         phone: &str,
         password: &str,
+        code: &str,
     ) -> Result<Admin, AdminLoginError> {
         let phone = normalize_phone(phone);
-        match self.repository.get_by_phone(&phone).await {
-            Ok(admin) => {
-                if !verify_password(password.to_string(), admin.password_hash.clone()).await {
-                    return Err(AdminLoginError::InvalidCredentials);
-                }
-                if admin.status == AdminStatus::Disabled {
-                    return Err(AdminLoginError::AccountDisabled);
-                }
-                Ok(admin)
-            }
+        let admin = match self.repository.get_by_phone(&phone).await {
+            Ok(admin) => admin,
             Err(AdminRepositoryError::NotFound) => {
+                // 账号不存在，假设是密码错误, 安全起见，不返回具体错误信息
                 verify_password(password.to_string(), dummy_hash().to_string()).await;
-                Err(AdminLoginError::InvalidCredentials)
+                return Err(AdminLoginError::InvalidCredentials);
             }
-            Err(e) => Err(AdminLoginError::Repository(e)),
+            Err(e) => return Err(e.into()),
+        };
+        // 1) 第一步 检查账号是否被锁定
+        if admin.locked_until.is_some_and(|t| t > Utc::now()) {
+            return Err(AdminLoginError::Locked);
         }
+
+        // 2) 第二步 检查密码是否正确
+        if !verify_password(password.to_string(), admin.password_hash.clone()).await {
+            // 2.1) 密码错误，进行累计
+            self.repository
+                .register_failed_login(
+                    &admin.id,
+                    FAILED_LOGIN_THRESHOLD,
+                    FAILED_LOGIN_LOCK_DURATION,
+                )
+                .await?;
+            return Err(AdminLoginError::InvalidCredentials);
+        }
+        // 3) 第三步 检查账号是否被禁用
+        if admin.status == AdminStatus::Disabled {
+            return Err(AdminLoginError::AccountDisabled);
+        }
+
+        // 4) 第四步 验证码验证
+        let otp_service = self
+            .otp_service
+            .as_ref()
+            .expect("AdminService::login 需要 otp_service");
+        match otp_service.verify(&phone, Purpose::AdminLogin, code).await {
+            Ok(_) => (),
+            Err(OtpServiceError::InvalidCode) => {
+                // 4.1) 验证码错误, 进行累计
+                self.repository
+                    .register_failed_login(
+                        &admin.id,
+                        FAILED_LOGIN_THRESHOLD,
+                        FAILED_LOGIN_LOCK_DURATION,
+                    )
+                    .await?;
+                return Err(AdminLoginError::InvalidCredentials);
+            }
+            Err(e) => return Err(AdminLoginError::OtpUnavailable(e)),
+        }
+
+        // 5) 第五步 清零失败计数
+        self.repository.clear_failed_login(&admin.id).await?;
+        Ok(admin)
     }
+
     /// 幂等种子：保证 phone 对应一个**可登录的**超管（role=super_admin 且 status=active）。
     ///
     /// - 不存在 → 新建超管。密码是人挑的且过了策略校验，`must_change_password` 显式置 false

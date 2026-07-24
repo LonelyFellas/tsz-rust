@@ -23,6 +23,7 @@ impl Channel {
 #[schema(example = "login")]
 pub enum Purpose {
     Login,           // 登录
+    AdminLogin,      // 管理员登录
     PasswordReset,   // 密码重置
     AccountDeletion, // 账户注销
     ContactBind,     // 联系方式绑定
@@ -35,6 +36,7 @@ impl Purpose {
     pub fn as_key_segment(&self) -> &'static str {
         match self {
             Purpose::Login => "login",
+            Purpose::AdminLogin => "admin_login",
             Purpose::PasswordReset => "password_reset",
             Purpose::AccountDeletion => "account_deletion",
             Purpose::ContactBind => "contact_bind",

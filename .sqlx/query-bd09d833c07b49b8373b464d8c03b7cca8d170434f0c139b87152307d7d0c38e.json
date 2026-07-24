@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT failed_login_count FROM admins WHERE phone = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "failed_login_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "failed_login_count"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bd09d833c07b49b8373b464d8c03b7cca8d170434f0c139b87152307d7d0c38e"
+}

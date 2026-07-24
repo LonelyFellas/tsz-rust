@@ -24,7 +24,7 @@ const EXISTING_HASH: &str = "existing-hash";
 const EXISTING_NAME: &str = "存量管理员";
 
 fn service(pool: &PgPool) -> AdminService {
-    AdminService::new(AdminRepository::new(pool.clone()))
+    AdminService::for_seed(AdminRepository::new(pool.clone()))
 }
 
 /// 造一个指定 role 的 active 存量管理员，返回 (id, phone)。

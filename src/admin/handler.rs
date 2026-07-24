@@ -5,7 +5,7 @@ use axum_extra::extract::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use time::Duration;
+use time::Duration as TimeDuration;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -41,17 +41,19 @@ pub async fn admin_login(
     jar: CookieJar,
     Json(req): Json<AdminLoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // 1) TODO 验证码（req.code）
-
-    // 2) 验凭证：业务全在 admin 域，handler 只调
-    let admin = AdminService::new(AdminRepository::new(state.pool.clone()))
-        .authenticate(&req.phone, &req.password)
+    let admin_svc = AdminService::new(
+        AdminRepository::new(state.pool.clone()),
+        state.otp_service.clone(),
+    );
+    let admin = admin_svc
+        .login(&req.phone, &req.password, &req.code)
         .await
         .map_err(map_admin_login_error)?;
 
-    // 3) 拼响应：签 access（可失败、无副作用）→ 发 refresh cookie（唯一 DB 副作用，压轴）
+    // 拼响应：签 access（可失败、无副作用）→ 发 refresh cookie（唯一 DB 副作用，压轴）
     let (jar, resp) = build_admin_login_response(&state, admin, jar).await?;
 
+    // 返回响应
     Ok((jar, Json(resp)))
 }
 
@@ -167,7 +169,7 @@ fn admin_refresh_cookie(token: String, state: &AppState) -> Cookie<'static> {
         .same_site(SameSite::Lax)
         .path(ADMIN_AUTH_MOUNT)
         .secure(state.cookie_secure)
-        .max_age(Duration::seconds(state.admin_refresh_ttl.num_seconds()))
+        .max_age(TimeDuration::seconds(state.admin_refresh_ttl.num_seconds()))
         .build()
 }
 
@@ -186,6 +188,17 @@ fn map_admin_login_error(err: AdminLoginError) -> AppError {
             AppError::Unauthenticated("invalid credentials".into())
         }
         AdminLoginError::AccountDisabled => AppError::Forbidden,
+        AdminLoginError::Locked => AppError::Locked(
+            "account temporarily locked due to too many failed login attempts".into(),
+        ),
+        AdminLoginError::OtpUnavailable(e) => match e {
+            crate::otp::service::OtpServiceError::RateLimited => AppError::TooManyRequests,
+            crate::otp::service::OtpServiceError::Store(_)
+            | crate::otp::service::OtpServiceError::Send(_) => AppError::ServiceUnavailable,
+            crate::otp::service::OtpServiceError::InvalidCode => {
+                AppError::internal(anyhow::anyhow!("InvalidCode 应已映射为 InvalidCredentials"))
+            }
+        },
         AdminLoginError::Repository(e) => AppError::internal(e),
     }
 }

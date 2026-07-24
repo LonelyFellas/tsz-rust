@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     // 迁移幂等且持 Postgres advisory lock，与 server 的启动迁移重复执行无害。
     sqlx::migrate!("./migrations").run(&pool).await?;
 
-    let svc = AdminService::new(AdminRepository::new(pool));
+    let svc = AdminService::for_seed(AdminRepository::new(pool));
     match svc
         .seed_super_admin(&phone, &password, &display_name)
         .await?

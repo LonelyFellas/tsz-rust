@@ -42,13 +42,13 @@ impl AppError {
     /// 领域错误 -> HTTP 状态码。抽成纯函数，方便直接单侧
     fn status_code(&self) -> StatusCode {
         match self {
-            AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            AppError::Forbidden => StatusCode::FORBIDDEN,
-            AppError::ForbiddenCode { .. } => StatusCode::FORBIDDEN,
-            AppError::Conflict(_) => StatusCode::CONFLICT,
-            AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::Unauthenticated(_) => StatusCode::UNAUTHORIZED,
+            AppError::NotFound => StatusCode::NOT_FOUND, // 404
+            AppError::BadRequest(_) => StatusCode::BAD_REQUEST, //400
+            AppError::Forbidden => StatusCode::FORBIDDEN, // 403
+            AppError::ForbiddenCode { .. } => StatusCode::FORBIDDEN, // 403
+            AppError::Conflict(_) => StatusCode::CONFLICT, // 409
+            AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR, // 500
+            AppError::Unauthenticated(_) => StatusCode::UNAUTHORIZED, // 401
             // status_code() —— 这是 exhaustive match，不加会编译不过（好，漏不掉）
             AppError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS, // 429
             AppError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE, // 503
