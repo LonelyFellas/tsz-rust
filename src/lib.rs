@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
             admin::ADMIN_AUTH_MOUNT,
             Router::new()
                 .route("/login", post(admin::admin_login))
+                .route("/login-code", post(admin::admin_login_code))
                 .route("/logout", post(admin::admin_logout)),
         )
         .nest(

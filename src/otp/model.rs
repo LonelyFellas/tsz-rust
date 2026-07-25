@@ -1,5 +1,3 @@
-use serde::Deserialize;
-
 #[derive(sqlx::Type, PartialEq, Debug)]
 #[sqlx(type_name = "channel", rename_all = "lowercase")]
 pub enum Channel {
@@ -17,13 +15,14 @@ impl Channel {
     }
 }
 
-#[derive(sqlx::Type, PartialEq, Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
+#[derive(sqlx::Type, PartialEq, Debug, Clone, Copy, utoipa::ToSchema)]
 #[sqlx(type_name = "purpose", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[schema(example = "login")]
 pub enum Purpose {
     Login,           // 登录
     AdminLogin,      // 管理员登录
+    AdminCreate,     // 管理员创建
     PasswordReset,   // 密码重置
     AccountDeletion, // 账户注销
     ContactBind,     // 联系方式绑定
@@ -37,6 +36,7 @@ impl Purpose {
         match self {
             Purpose::Login => "login",
             Purpose::AdminLogin => "admin_login",
+            Purpose::AdminCreate => "admin_create",
             Purpose::PasswordReset => "password_reset",
             Purpose::AccountDeletion => "account_deletion",
             Purpose::ContactBind => "contact_bind",

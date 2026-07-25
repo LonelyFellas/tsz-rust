@@ -153,6 +153,47 @@ async fn empty_phone_and_email_returns_400(pool: PgPool) {
     assert_eq!(body["error"].as_str(), Some("phone or email is missing"));
 }
 
+// ————————————————————— 400：标识格式非法（创建侧严格校验）—————————————————————
+
+/// 非空但**格式非法**的手机号 → 400（`invalid phone`）。
+/// 与「空串 = 缺失 → phone or email is missing」是两条不同路径：空是「没提供」，
+/// 非空非法是「提供了但不合规」。注册在**创建边界**严格 `Phone::parse`。
+#[sqlx::test]
+async fn invalid_phone_format_returns_400(pool: PgPool) {
+    // 12345 非 1[3-9] 开头的 11 位号；也顺带覆盖 #6：畸形输入在 parse 处被挡成 400，
+    // 不会裸奔到 DB 触发 500。
+    let (status, body) =
+        register(pool, json!({ "phone": "12345", "password": "password123" })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法手机号应 400");
+    assert_eq!(body["error"].as_str(), Some("invalid phone"));
+}
+
+/// 含 NUL 字节的手机号 → 400（#6 回归：绝不能裸奔到 Postgres 触发 500）。
+#[sqlx::test]
+async fn nul_byte_phone_returns_400_not_500(pool: PgPool) {
+    let (status, _) =
+        register(pool, json!({ "phone": "138\u{0000}0138000", "password": "password123" })).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "含 NUL 的手机号应在 parse 处被拒 400，而非落到 DB 报 500"
+    );
+}
+
+/// 非空但**格式非法**的邮箱 → 400（`invalid email`）。
+#[sqlx::test]
+async fn invalid_email_format_returns_400(pool: PgPool) {
+    let (status, body) = register(
+        pool,
+        json!({ "email": "not-an-email", "password": "password123" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "非法邮箱应 400");
+    assert_eq!(body["error"].as_str(), Some("invalid email"));
+}
+
 // ————————————————————— 400：密码不合规 —————————————————————
 
 /// 空密码 → 走 `PasswordError::Empty` 分支，文案与「太短/太长」不同。

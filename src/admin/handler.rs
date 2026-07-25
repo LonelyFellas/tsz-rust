@@ -12,10 +12,12 @@ use uuid::Uuid;
 use crate::{
     admin::{
         ADMIN_AUTH_MOUNT, ADMIN_REFRESH_TOKEN_COOKIE, Admin, AdminRefreshTokenRepository,
-        AdminRepository, AdminRole, AdminService, AdminSessionError, AdminSessionService,
-        service::AdminLoginError,
+        AdminRepository, AdminRepositoryError, AdminRole, AdminService, AdminSessionError,
+        AdminSessionService, service::AdminLoginError,
     },
     error::AppError,
+    otp::{model::Purpose, service::OtpServiceError},
+    platform::Phone,
     state::AppState,
 };
 
@@ -73,6 +75,48 @@ pub async fn admin_logout(
 
     let jar = jar.remove(clean_admin_refresh_cookie());
     Ok((jar, StatusCode::NO_CONTENT))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct AdminLoginOtpRequest {
+    /// 登录标识：手机号
+    #[schema(example = "13800138000")]
+    pub phone: String,
+}
+
+/// POST /admin/auth/login-code
+///
+/// 返回类型刻意钉成具体的 `StatusCode`（而非 `impl IntoResponse`）：本端点的反枚举契约
+/// 是「一切非基础设施结果恒返 202 空 body」，具体类型让「某分支误返 Json(..) 破坏该契约」
+/// 变成编译错误。
+pub async fn admin_login_code(
+    State(state): State<AppState>,
+    Json(req): Json<AdminLoginOtpRequest>,
+) -> Result<StatusCode, AppError> {
+    let phone = Phone::parse(&req.phone).map_err(|e| AppError::BadRequest(e.to_string()))?;
+
+    // 只有 active 且未锁的 admin 才真正发码；其余一律静默压平成 202（反名录枚举）。
+    // 用 or-pattern 把「行为相同」的分支并到一起，让它们必须一起改——避免有人日后给
+    // 其中一条静默分支加日志/指标而漏掉孪生分支，重新打开时序/行为侧信道。
+    match AdminRepository::new(state.pool.clone())
+        .get_by_phone(phone.as_str())
+        .await
+    {
+        Ok(admin) if admin.is_normal(Utc::now()) => {
+            match state
+                .otp_service
+                .request(phone.as_str(), Purpose::AdminLogin)
+                .await
+            {
+                Ok(()) | Err(OtpServiceError::RateLimited) => {} // 已发 / 冷却·日限：静默
+                Err(_) => return Err(AppError::ServiceUnavailable), // Redis/sender 故障：503
+            }
+        }
+        Ok(_) | Err(AdminRepositoryError::NotFound) => {} // 禁用·锁定 / 查无此号：静默
+        Err(e) => return Err(AppError::internal(e)),       // DB 真故障：500
+    };
+
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[derive(Serialize, ToSchema)]
@@ -187,6 +231,7 @@ fn map_admin_login_error(err: AdminLoginError) -> AppError {
         AdminLoginError::InvalidCredentials => {
             AppError::Unauthenticated("invalid credentials".into())
         }
+        AdminLoginError::Phone(e) => AppError::BadRequest(e.to_string()),
         AdminLoginError::AccountDisabled => AppError::Forbidden,
         AdminLoginError::Locked => AppError::Locked(
             "account temporarily locked due to too many failed login attempts".into(),

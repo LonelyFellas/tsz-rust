@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
+use tsz_rust::otp::model::Purpose;
 use tsz_rust::state::AppState;
 
 /// POST /otp/send，返回 (状态码, 响应体文本)。每次用 `state.clone()` 新建 router（oneshot 消费它）；
@@ -178,6 +179,55 @@ async fn unknown_purpose_is_422(pool: PgPool) {
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
         "非法 purpose 应 422"
+    );
+}
+
+// ================ admin 用途隔离：公开端点铸不出 admin 码（安全回归） ================
+//
+// 背景（code-review #1）：`/otp/send` 曾接受客户端传入的 `purpose: Purpose`（含 admin_login），
+// 而 admin 登录 verify 读的是同一 Redis keyspace（otp:code:<target>:admin_login）。
+// 于是任何人 POST {"phone":任意号,"purpose":"admin_login"} 就能在公网铸出一枚 admin 码，
+// 并刷爆某管理员的 admin_login 冷却/日限（login-code 把 RateLimited 压成 202，管理员看不到异常）。
+// C 方案修复：公开端点改用只含公开用途的 `PublicOtpPurpose`，`Purpose` 摘掉 Deserialize——
+// admin_login 在类型上就无法从 body 反序列化出来。这两条测试钉死该不变量。
+
+#[sqlx::test]
+async fn public_send_cannot_request_admin_login_purpose(pool: PgPool) {
+    // admin_login 对公开端点是非法枚举值 → 反序列化失败 → 422（与 unknown_purpose_is_422 同语义）。
+    let (state, store) = AppState::for_test_with_otp_store(pool);
+    let (status, _) =
+        post_send(&state, json!({"phone": "13800138000", "purpose": "admin_login"})).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "公开端点不得接受 admin_login 用途（应视为非法枚举值 422）"
+    );
+    // 载荷性断言：不只看状态码，要证明 Redis 里**确实没落 admin 码**——
+    // 挡住「返 422 但 save 已先发生」这类假修复。
+    assert!(
+        !store
+            .code_exists("13800138000", Purpose::AdminLogin)
+            .await
+            .unwrap(),
+        "公开端点被拒后不得在 admin_login keyspace 留下任何码"
+    );
+}
+
+#[sqlx::test]
+async fn public_send_still_mints_public_purpose_code(pool: PgPool) {
+    // 正向对照：同一个 store、同一套断言机制下，公开用途 login 必须真落码。
+    // 否则上一条的 code_exists==false 可能只是「这机制恒为假」的假绿。
+    let (state, store) = AppState::for_test_with_otp_store(pool);
+    let (status, _) = post_send(&state, json!({"phone": "13800138000", "purpose": "login"})).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "公开用途 login 应 202");
+    assert!(
+        store
+            .code_exists("13800138000", Purpose::Login)
+            .await
+            .unwrap(),
+        "login 应真正落码（对照 code_exists 机制本身工作正常）"
     );
 }
 

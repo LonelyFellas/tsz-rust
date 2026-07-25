@@ -108,7 +108,8 @@ pub async fn login_otp(
     // 1) 先验码——purpose 写死 Login，不接受客户端传入：
     //    否则持一枚 password_reset 码的人可显式指定 purpose，拿重置码换登录会话，
     //    绕过 purpose 隔离。请求体里多带的 purpose 字段会被 serde 直接忽略。
-    let id = normalize_identifier(&req.identifier);
+    let id =
+        normalize_identifier(&req.identifier).map_err(|e| AppError::BadRequest(e.to_string()))?;
     state
         .otp_service
         .verify(&id, Purpose::Login, &req.code)
@@ -427,6 +428,7 @@ fn map_login_error(err: LoginError) -> AppError {
         LoginError::InvalidCredentials => AppError::Unauthenticated("invalid credentials".into()),
         // 账号被禁：密码已验证后才可能到这，可如实告知
         LoginError::AccountDisabled => AppError::Forbidden,
+        LoginError::IdentifierInvalid => AppError::BadRequest("identifier is invalid".into()),
         // 仓储错 → 500，隐藏 cause
         LoginError::Repository(e) => AppError::internal(e),
     }

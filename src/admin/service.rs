@@ -11,9 +11,7 @@ use crate::{
         model::Purpose,
         service::{OtpService, OtpServiceError},
     },
-    platform::{
-        Password, PasswordError, dummy_hash, hash_password, normalize_phone, verify_password,
-    },
+    platform::{Password, PasswordError, Phone, PhoneError, dummy_hash},
 };
 
 pub const FAILED_LOGIN_THRESHOLD: i32 = 5;
@@ -21,6 +19,8 @@ pub const FAILED_LOGIN_LOCK_DURATION: Duration = Duration::seconds(60 * 15);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdminLoginError {
+    #[error(transparent)]
+    Phone(#[from] PhoneError),
     #[error("invalid credentials")]
     InvalidCredentials,
     #[error("account is disabled")]
@@ -35,6 +35,8 @@ pub enum AdminLoginError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdminSeedError {
+    #[error(transparent)]
+    Phone(#[from] PhoneError),
     // 透传策略/哈希错误——seed 是 CLI 场景，操作者需要知道具体哪条规则没过
     #[error(transparent)]
     Password(#[from] PasswordError),
@@ -73,23 +75,26 @@ impl AdminService {
         password: &str,
         code: &str,
     ) -> Result<Admin, AdminLoginError> {
-        let phone = normalize_phone(phone);
-        let admin = match self.repository.get_by_phone(&phone).await {
+        let phone = Phone::parse(phone).map_err(AdminLoginError::Phone)?;
+
+        let admin = match self.repository.get_by_phone(phone.as_str()).await {
             Ok(admin) => admin,
             Err(AdminRepositoryError::NotFound) => {
-                // 账号不存在，假设是密码错误, 安全起见，不返回具体错误信息
-                verify_password(password.to_string(), dummy_hash().to_string()).await;
+                // 账号不存在，假设是密码错误, 安全起见，不返回具体错误信息。
+                // 跑一次假 verify 平衡时序（不透明验哈希，不校验密码策略）。
+                Password::verify_raw(password.to_string(), dummy_hash().to_string()).await;
                 return Err(AdminLoginError::InvalidCredentials);
             }
             Err(e) => return Err(e.into()),
         };
-        // 1) 第一步 检查账号是否被锁定
-        if admin.locked_until.is_some_and(|t| t > Utc::now()) {
+
+        // 1) 检查账号是否正常
+        if admin.is_locked(Utc::now()) {
             return Err(AdminLoginError::Locked);
         }
 
-        // 2) 第二步 检查密码是否正确
-        if !verify_password(password.to_string(), admin.password_hash.clone()).await {
+        // 2) 第二步 检查密码是否正确（不透明验哈希，不跑注册策略）
+        if !Password::verify_raw(password.to_string(), admin.password_hash.clone()).await {
             // 2.1) 密码错误，进行累计
             self.repository
                 .register_failed_login(
@@ -100,7 +105,8 @@ impl AdminService {
                 .await?;
             return Err(AdminLoginError::InvalidCredentials);
         }
-        // 3) 第三步 检查账号是否被禁用
+
+        // 3) 检查账号是否激活
         if admin.status == AdminStatus::Disabled {
             return Err(AdminLoginError::AccountDisabled);
         }
@@ -110,7 +116,10 @@ impl AdminService {
             .otp_service
             .as_ref()
             .expect("AdminService::login 需要 otp_service");
-        match otp_service.verify(&phone, Purpose::AdminLogin, code).await {
+        match otp_service
+            .verify(phone.as_str(), Purpose::AdminLogin, code)
+            .await
+        {
             Ok(_) => (),
             Err(OtpServiceError::InvalidCode) => {
                 // 4.1) 验证码错误, 进行累计
@@ -128,6 +137,7 @@ impl AdminService {
 
         // 5) 第五步 清零失败计数
         self.repository.clear_failed_login(&admin.id).await?;
+
         Ok(admin)
     }
 
@@ -147,17 +157,21 @@ impl AdminService {
         password: &str,
         display_name: &str,
     ) -> Result<SeedOutcome, AdminSeedError> {
-        let phone = normalize_phone(phone);
-        match self.repository.get_by_phone(&phone).await {
+        let phone = Phone::parse(phone).map_err(AdminSeedError::Phone)?;
+        let psd = Password::parse(password).map_err(AdminSeedError::Password)?;
+        match self
+            .repository
+            .get_by_phone(&phone.clone().into_string())
+            .await
+        {
             Ok(admin) => classify_existing(admin),
             Err(AdminRepositoryError::NotFound) => {
-                let password = Password::parse(password).map_err(AdminSeedError::Password)?;
-                let password_hash = hash_password(password.into_string()).await?;
+                let password_hash = psd.hash().await?;
 
                 let new_admin = NewAdmin {
                     id: Uuid::now_v7(),
                     display_name: display_name.to_string(),
-                    phone: phone.clone(),
+                    phone: phone.clone().into_string(),
                     password_hash,
                     role: AdminRole::SuperAdmin,
                     must_change_password: false,
@@ -166,9 +180,11 @@ impl AdminService {
                     Ok(admin) => Ok(SeedOutcome::Created(admin)),
                     // 并发竞态：另一个 seed/console 抢先建了同手机号。回查分类，
                     // 转成幂等结果（赢家建的是超管→Unchanged；是普通 admin→拒绝）。
-                    Err(AdminRepositoryError::AlreadyExists) => {
-                        classify_existing(self.repository.get_by_phone(&phone).await?)
-                    }
+                    Err(AdminRepositoryError::AlreadyExists) => classify_existing(
+                        self.repository
+                            .get_by_phone(&phone.clone().into_string())
+                            .await?,
+                    ),
                     Err(e) => Err(AdminSeedError::Repository(e)),
                 }
             }

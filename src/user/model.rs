@@ -140,25 +140,3 @@ impl DisplayName {
         self.0
     }
 }
-
-// pub struct Code(String);
-
-// impl Code {
-//     pub fn parse(raw: &str) -> Result<Self, CodeError> {
-//         // 1) trim
-//         let code = raw.trim();
-//         if code.is_empty() {
-//             return Err(CodeError::Empty);
-//         }
-//         // 2) 必须6位数字
-//         if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
-//             return Err(CodeError::Invalid);
-//         }
-//         // 3) 验证码必须唯一, TODO: 实现
-//         Ok(Code(code.to_string()))
-//     }
-//     pub fn into_string(self) -> String {
-//         self.0
-//     }
-// }
-

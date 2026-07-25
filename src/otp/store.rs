@@ -95,6 +95,20 @@ impl OtpStore {
         Ok(outcome == 1)
     }
 
+    /// 【测试接缝】只读探测 code 键是否存在——不校验、不消费、不动 attempts。
+    /// 供「恒 202 压平」类测试断言：静默分支确实没落码 / 真发分支确实落了
+    /// （`OtpSender::Mock` 不回传码，生成的码测试拿不到，只能验键存在性）。
+    /// 生产代码不得调用：判码一律走 `verify_code`（CAS 单次消费）。
+    pub async fn code_exists(&self, target: &str, purpose: Purpose) -> Result<bool, OtpStoreError> {
+        let key = self.code_key(target, purpose);
+        let mut conn = self.redis.get().await?;
+        let n: i64 = deadpool_redis::redis::cmd("EXISTS")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await?;
+        Ok(n == 1)
+    }
+
     pub async fn check_cooldown(
         &self,
         target: &str,

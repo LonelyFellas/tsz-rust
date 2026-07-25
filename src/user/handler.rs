@@ -91,6 +91,10 @@ fn map_register_error(err: RegisterError) -> AppError {
         }
         // 其余 SubjectError 错误
         RegisterError::Register(_) => AppError::BadRequest("unknown subject error".into()),
+        // 手机号格式非法（非空但不是合法手机号）
+        RegisterError::Phone(_) => AppError::BadRequest("invalid phone".into()),
+        // 邮箱格式非法（非空但不是合法邮箱）
+        RegisterError::Email(_) => AppError::BadRequest("invalid email".into()),
         // 密码格式为空
         RegisterError::Password(PasswordError::Empty) => {
             AppError::BadRequest("password is missing".into())

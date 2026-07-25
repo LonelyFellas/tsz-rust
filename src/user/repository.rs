@@ -2,12 +2,16 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    platform::is_unique_violation,
+    platform::{EmailError, PhoneError, is_unique_violation},
     user::model::{User, UserRole, UserStatus},
 };
 
 #[derive(Debug, thiserror::Error)]
 pub enum UserError {
+    #[error(transparent)]
+    Phone(#[from] PhoneError),
+    #[error(transparent)]
+    Email(#[from] EmailError),
     #[error("user not found")]
     NotFound,
     #[error("phone number already exists")]

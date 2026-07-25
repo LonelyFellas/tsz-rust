@@ -1,70 +1,12 @@
 use std::sync::OnceLock;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use bcrypt::{DEFAULT_COST, hash, verify};
+use bcrypt::{DEFAULT_COST, hash};
 use sha2::{Digest, Sha256};
-use tokio::task::spawn_blocking;
-
-pub fn normalize_phone(phone: &str) -> String {
-    phone.trim().to_string()
-}
-pub fn normalize_email(email: &str) -> String {
-    email.trim().to_lowercase()
-}
-pub async fn verify_password(password: String, password_hash: String) -> bool {
-    spawn_blocking(move || verify(&password, &password_hash).unwrap_or(false))
-        .await
-        .unwrap_or(false)
-}
 
 pub fn dummy_hash() -> &'static str {
     static H: OnceLock<String> = OnceLock::new();
     H.get_or_init(|| hash("timing-balance", DEFAULT_COST).expect("系统错误：dummy hash 生成失败"))
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum PasswordError {
-    #[error("password is empty")]
-    Empty,
-    #[error("password is too short")]
-    TooShort,
-    #[error("password is too long")]
-    TooLong,
-    #[error("failed to hash password")]
-    HashFailed,
-}
-
-/// 密码策略 + 哈希的唯一入口，user（注册）与 admin（seed，将来 Provision/改密）共用。
-/// 放 platform 是因为它是纯机制、不含任何域知识——域层只见「已解析的合法密码」。
-pub struct Password(String);
-
-impl Password {
-    pub fn parse(raw: &str) -> Result<Self, PasswordError> {
-        if raw.is_empty() {
-            return Err(PasswordError::Empty);
-        }
-        // 长度至少8位
-        // 为啥不用len()？因为len()是字节数，而chars().count()是字符数
-        // 比如："12345678" 是 8 个字符，但 len() 是 16
-        if raw.chars().count() < 8 {
-            return Err(PasswordError::TooShort);
-        }
-        // bcrypt 只取前 72 字节，超长直接拒绝而不是静默截断
-        if raw.len() > 72 {
-            return Err(PasswordError::TooLong);
-        }
-        Ok(Password(raw.to_string()))
-    }
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-pub async fn hash_password(password: String) -> Result<String, PasswordError> {
-    spawn_blocking(move || hash(&password, DEFAULT_COST))
-        .await
-        .expect("系统错误：密码哈希生成失败")
-        .map_err(|_| PasswordError::HashFailed)
 }
 
 /// 生成 refresh token 明文：32 字节系统级 CSPRNG → base64url（无 padding，43 字符）。

@@ -16,7 +16,7 @@ use uuid::Uuid;
 use tsz_rust::admin::{
     AdminRepository, AdminRole, AdminSeedError, AdminService, AdminStatus, NewAdmin, SeedOutcome,
 };
-use tsz_rust::platform::{PasswordError, verify_password};
+use tsz_rust::platform::{Password, PasswordError};
 
 const PASSWORD: &str = "S3cure-Pa55word";
 /// 存量账号的"假哈希"——repository 不做 bcrypt，原样落库，正好用来断言"未被覆盖"。
@@ -31,10 +31,13 @@ fn service(pool: &PgPool) -> AdminService {
 /// phone 用 UUIDv7 串保证并行测试不撞唯一索引。
 async fn seed_existing(pool: &PgPool, role: AdminRole) -> (Uuid, String) {
     let id = Uuid::now_v7();
+    // 必须是合法 CN 手机号——seed_super_admin 现在会 Phone::parse 校验（原来用 UUID 串占位，
+    // 严格校验落地后会被判 Invalid）。每个 #[sqlx::test] 独立库，固定号不会跨测试冲突。
+    let phone = "13800138000".to_string();
     AdminRepository::new(pool.clone())
         .create(NewAdmin {
             id,
-            phone: id.to_string(),
+            phone: phone.clone(),
             display_name: EXISTING_NAME.to_owned(),
             password_hash: EXISTING_HASH.to_owned(),
             role,
@@ -42,7 +45,7 @@ async fn seed_existing(pool: &PgPool, role: AdminRole) -> (Uuid, String) {
         })
         .await
         .expect("造存量管理员应成功");
-    (id, id.to_string())
+    (id, phone)
 }
 
 #[sqlx::test]
@@ -62,7 +65,7 @@ async fn creates_active_super_admin_on_fresh_db(pool: PgPool) {
         "seed 的密码是人挑的，不应强制首登改密（表默认 TRUE 是给 Provision 的）"
     );
     assert!(
-        verify_password(PASSWORD.to_string(), admin.password_hash.clone()).await,
+        Password::verify_raw(PASSWORD.to_string(), admin.password_hash.clone()).await,
         "落库哈希应能验证原密码"
     );
 }

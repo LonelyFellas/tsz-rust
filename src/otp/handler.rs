@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 
 use crate::{
     error::AppError,
-    otp::{model::Purpose, service::OtpServiceError},
+    otp::{PublicOtpPurpose, service::OtpServiceError},
     state::AppState,
     user::service::normalize_identifier,
 };
@@ -18,7 +18,7 @@ pub struct SendOtpRequest {
     pub email: Option<String>,
     // 注：purpose 是枚举 $ref，字段级 #[schema(example=...)] 会被 utoipa 丢弃，
     // 示例值放在 Purpose 枚举定义上（见 otp::model::Purpose）。
-    pub purpose: Purpose,
+    pub purpose: PublicOtpPurpose,
 }
 
 // 映射 OtpServiceError→HTTP（RateLimited 429 / Store 503 fail-close / Send 503）。
@@ -56,11 +56,12 @@ pub async fn send_otp(
                 "exactly one of phone or email is required".into(),
             ));
         }
-    };
+    }
+    .map_err(|e| AppError::BadRequest(e.to_string()))?;
 
     state
         .otp_service
-        .request(&target, req.purpose)
+        .request(&target, req.purpose.into())
         .await
         .map_err(map_otp_error)?;
     Ok(StatusCode::ACCEPTED) // 202

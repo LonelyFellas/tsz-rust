@@ -1,9 +1,6 @@
 use uuid::Uuid;
 
-use crate::platform::{
-    Password, PasswordError, dummy_hash, hash_password, normalize_email, normalize_phone,
-    verify_password,
-};
+use crate::platform::{Email, EmailError, Password, PasswordError, Phone, PhoneError, dummy_hash};
 use crate::user::display_name::generate_display_name;
 use crate::user::model::UserStatus;
 use crate::user::{
@@ -11,11 +8,15 @@ use crate::user::{
     repository::{NewUser, UserError, UserRepository},
 };
 
-pub fn normalize_identifier(identifier: &str) -> String {
+pub fn normalize_identifier(identifier: &str) -> Result<String, UserError> {
     if identifier.contains('@') {
-        normalize_email(identifier)
+        Email::parse(identifier)
+            .map_err(UserError::Email)
+            .map(|e| e.into_string())
     } else {
-        normalize_phone(identifier)
+        Phone::parse(identifier)
+            .map_err(UserError::Phone)
+            .map(|e| e.into_string())
     }
 }
 
@@ -36,6 +37,10 @@ pub enum RegisterError {
     #[error(transparent)]
     Register(#[from] SubjectError),
     #[error(transparent)]
+    Phone(#[from] PhoneError),
+    #[error(transparent)]
+    Email(#[from] EmailError),
+    #[error(transparent)]
     Password(#[from] PasswordError),
     // #[error(transparent)]
     // Code(#[from] CodeError),
@@ -49,6 +54,8 @@ pub enum LoginError {
     InvalidCredentials, // 用户不存在或者密码不正确
     #[error("account is disabled")]
     AccountDisabled,
+    #[error("identifier is invalid")]
+    IdentifierInvalid,
     #[error(transparent)]
     Repository(#[from] UserError),
 }
@@ -61,24 +68,33 @@ impl UserService {
     /// 注册用户
     pub async fn register(&self, input: RegisterInput) -> Result<User, RegisterError> {
         // 1) 手机号 / 邮箱
+        // 先 trim+滤空判「有没有提供」，非空的才严格 parse 校验格式。
+        // 空串/纯空格视为**未提供**（→ 下方 PhoneOrEmailMissing），不是格式错——
+        // 这是既有契约（tests/user_register_handler.rs::empty_phone_and_email_returns_400）。
         let phone = input
             .phone
             .as_deref()
-            .map(normalize_phone)
-            .filter(|s| !s.is_empty());
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(Phone::parse)
+            .transpose()?
+            .map(Phone::into_string);
         let email = input
             .email
             .as_deref()
-            .map(normalize_email)
-            .filter(|s| !s.is_empty());
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(Email::parse)
+            .transpose()?
+            .map(Email::into_string);
         // 1.1) phone or email empty
         if phone.is_none() && email.is_none() {
             return Err(RegisterError::Register(SubjectError::PhoneOrEmailMissing));
         }
 
         // 2) 密码哈希
-        let password = Password::parse(&input.password).map_err(RegisterError::Password)?;
-        let password_hash = hash_password(password.into_string()).await?;
+        let psd = Password::parse(&input.password).map_err(RegisterError::Password)?;
+        let password_hash = psd.hash().await?;
 
         // 3) 验证码校验
         // let _ = Code::parse(&input.code)?;
@@ -105,12 +121,12 @@ impl UserService {
     }
 
     pub async fn authenticate(&self, identifier: &str, password: &str) -> Result<User, LoginError> {
-        let id = normalize_identifier(identifier);
+        let id = normalize_identifier(identifier).map_err(|_| LoginError::IdentifierInvalid)?;
 
         match self.repository.get_by_identifier(&id).await {
             Ok(user) => {
-                // 先验证密码
-                if !verify_password(password.to_string(), user.password_hash.clone()).await {
+                // 先验证密码（不透明验哈希，不跑注册策略——见 Password::verify_raw 注释）
+                if !Password::verify_raw(password.to_string(), user.password_hash.clone()).await {
                     return Err(LoginError::InvalidCredentials);
                 }
                 // 密码对了，身份已证实 -> 再看状态（禁用只透传给证明了拥有改账号的人）
@@ -121,7 +137,7 @@ impl UserService {
             }
             // 查无此人：也跑一次假 verify 平衡时序，然后返回【和密码错同一个】错误
             Err(UserError::NotFound) => {
-                verify_password(password.to_string(), dummy_hash().to_string()).await;
+                Password::verify_raw(password.to_string(), dummy_hash().to_string()).await;
                 Err(LoginError::InvalidCredentials)
             }
             // 其余底层错 -> 如实透传
