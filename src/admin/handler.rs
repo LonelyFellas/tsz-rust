@@ -21,14 +21,20 @@ use crate::{
     state::AppState,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct AdminLoginRequest {
+    /// 登录标识：手机号
+    #[schema(example = "13800138000")]
     pub phone: String,
+    /// 短信验证码（6 位；`login-code` 端点发出）
+    #[schema(example = "123456")]
     pub code: String,
+    /// 登录密码
+    #[schema(example = "password123")]
     pub password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct AdminLoginResponse {
     admin_profile: AdminProfile,
     #[serde(flatten)]
@@ -37,7 +43,28 @@ pub struct AdminLoginResponse {
     refresh_token_expires_at: i64,
 }
 
-/// POST /admin/login
+/// POST /api/v1/admin/auth/login
+///
+/// admin 登录须**三要素齐全**：手机号 + 密码 + 短信验证码（先调 `login-code` 取码）。
+/// 失败一律压成逐字节一致的 401（密码错 / 码错 / 查无此号不可区分，反枚举）；
+/// 禁用 403、锁定 423、验证码基础设施抖动 503 是仅有的可区分分支。
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/auth/login",
+    tag = "admin",
+    request_body = AdminLoginRequest,
+    responses(
+        (status = 200, description = "登录成功，返回管理员档案与令牌", body = AdminLoginResponse,
+            headers(("Set-Cookie" = String,
+                description = "admin_refresh_token cookie（HttpOnly; SameSite=Lax; Path=/api/v1/admin/auth; Max-Age=refresh TTL 秒）"))),
+        (status = 400, description = "手机号格式非法"),
+        (status = 401, description = "凭证无效（密码/验证码错误或账号不存在，逐字节不可区分）"),
+        (status = 403, description = "账号被禁用"),
+        (status = 423, description = "账号因多次登录失败被临时锁定"),
+        (status = 429, description = "验证码请求过于频繁"),
+        (status = 503, description = "验证码基础设施不可用（Redis/短信）"),
+    )
+)]
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -59,9 +86,22 @@ pub async fn admin_login(
     Ok((jar, Json(resp)))
 }
 
-/// POST /admin/logout
+/// POST /api/v1/admin/auth/logout
 /// 幂等登出（对齐 RFC 7009 语义）：cookie 缺失 = 已处于登出态，目标已达成。
 /// 有枚就吊销；无论有没有，都下发清除 cookie 并返回 204。
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/auth/logout",
+    tag = "admin",
+    params(
+        ("admin_refresh_token" = Option<String>, Cookie,
+            description = "要吊销的 admin refresh token；缺失时仍 204（幂等）"),
+    ),
+    responses(
+        (status = 204, description = "登出成功（幂等，无失败分支）；带 cookie 时附清除 Set-Cookie",
+            headers(("Set-Cookie" = String, description = "清除 admin_refresh_token 的 cookie（Max-Age=0）"))),
+    )
+)]
 pub async fn admin_logout(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -84,11 +124,22 @@ pub struct AdminLoginOtpRequest {
     pub phone: String,
 }
 
-/// POST /admin/auth/login-code
+/// POST /api/v1/admin/auth/login-code
 ///
 /// 返回类型刻意钉成具体的 `StatusCode`（而非 `impl IntoResponse`）：本端点的反枚举契约
 /// 是「一切非基础设施结果恒返 202 空 body」，具体类型让「某分支误返 Json(..) 破坏该契约」
 /// 变成编译错误。
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/auth/login-code",
+    tag = "admin",
+    request_body = AdminLoginOtpRequest,
+    responses(
+        (status = 202, description = "已受理（反枚举：查无此号/禁用/锁定/冷却中一律 202 空 body，仅 active admin 真正发码）"),
+        (status = 400, description = "手机号格式非法"),
+        (status = 503, description = "验证码基础设施不可用（Redis/短信）"),
+    )
+)]
 pub async fn admin_login_code(
     State(state): State<AppState>,
     Json(req): Json<AdminLoginOtpRequest>,

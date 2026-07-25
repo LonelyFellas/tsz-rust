@@ -33,6 +33,10 @@ use utoipa::{
         crate::user::handler::register,
         // otp 域
         crate::otp::handler::send_otp,
+        // admin 域
+        crate::admin::handler::admin_login,
+        crate::admin::handler::admin_login_code,
+        crate::admin::handler::admin_logout,
     ),
     components(
         schemas(
@@ -50,12 +54,20 @@ use utoipa::{
             // otp
             crate::otp::handler::SendOtpRequest,
             crate::otp::model::Purpose,
+            // admin
+            crate::admin::handler::AdminLoginRequest,
+            crate::admin::handler::AdminLoginResponse,
+            crate::admin::handler::AdminLoginOtpRequest,
+            crate::admin::handler::AdminProfile,
+            crate::admin::handler::AdminToken,
+            crate::admin::AdminRole,
         )
     ),
     tags(
         (name = "auth", description = "认证 / 会话"),
         (name = "user", description = "用户"),
         (name = "otp", description = "验证码"),
+        (name = "admin", description = "管理后台认证 / 会话"),
     )
 )]
 pub struct ApiDoc;
@@ -101,6 +113,9 @@ mod tests {
             ("get", "/api/v1/auth/me"),
             ("post", "/api/v1/user/register"),
             ("post", "/api/v1/otp/send"),
+            ("post", "/api/v1/admin/auth/login"),
+            ("post", "/api/v1/admin/auth/login-code"),
+            ("post", "/api/v1/admin/auth/logout"),
         ] {
             assert!(
                 json["paths"][path][method].is_object(),
@@ -165,5 +180,39 @@ mod tests {
             json["paths"]["/api/v1/auth/logout"]["post"]["responses"]["401"].is_null(),
             "logout 无失败分支，401 应从 spec 移除"
         );
+
+        // —— admin 域同样的 cookie 契约（名字/路径与 C 端隔离，见 ADMIN_REFRESH_TOKEN_COOKIE）——
+        // admin logout 声明了 admin_refresh_token cookie 参数
+        let admin_logout_params = json["paths"]["/api/v1/admin/auth/logout"]["post"]["parameters"]
+            .as_array()
+            .expect("admin logout 应声明 parameters（admin_refresh_token cookie）");
+        assert!(
+            admin_logout_params
+                .iter()
+                .any(|p| p["name"] == "admin_refresh_token" && p["in"] == "cookie"),
+            "admin logout 的 parameters 里应有 in=cookie 的 admin_refresh_token，实际：{admin_logout_params:?}"
+        );
+
+        // admin login 200 / logout 204 都声明了 Set-Cookie 头
+        for (path, status) in [
+            ("/api/v1/admin/auth/login", "200"),
+            ("/api/v1/admin/auth/logout", "204"),
+        ] {
+            assert!(
+                json["paths"][path]["post"]["responses"][status]["headers"]["Set-Cookie"]
+                    .is_object(),
+                "{path} 的 {status} 响应应声明 Set-Cookie 头"
+            );
+        }
+
+        // admin login-code 的反枚举契约：只有 202 成功态，绝不能出现 401/403/429 等
+        // 可探测态（那会把「这号是不是管理员」暴露成 oracle）。
+        for leaky in ["401", "403", "423", "429"] {
+            assert!(
+                json["paths"]["/api/v1/admin/auth/login-code"]["post"]["responses"][leaky]
+                    .is_null(),
+                "admin login-code 反枚举契约：不得声明可探测状态码 {leaky}"
+            );
+        }
     }
 }
