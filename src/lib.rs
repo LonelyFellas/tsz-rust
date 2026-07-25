@@ -25,6 +25,11 @@ use config::Config;
 use deadpool_redis::Pool as RedisPool;
 use serde_json::json;
 use sqlx::PgPool;
+use tower_http::{
+    LatencyUnit,
+    trace::{DefaultOnFailure, DefaultOnResponse, TraceLayer},
+};
+use tracing::Level;
 
 use crate::{
     auth::{Realm, TokenManager},
@@ -65,6 +70,20 @@ pub fn router(state: AppState) -> Router {
             otp::OTP_MOUNT,
             Router::new().route("/send", post(otp::handler::send_otp)),
         );
+    let router = router.layer(
+        TraceLayer::new_for_http()
+            // 自定义 span：只带 method 和 path。不要开 include_headers——Cookie 里有 refresh token
+             .make_span_with(|req: &axum::http::Request<_>| {
+                 tracing::info_span!("http", method = %req.method(), path = %req.uri().path())
+             })
+             // 默认是 DEBUG，生产 INFO 级别下看不见，必须提到 INFO
+             .on_response(
+                 DefaultOnResponse::new()
+                     .level(Level::INFO)
+                     .latency_unit(LatencyUnit::Millis),
+             )
+             .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+    );
 
     // Swagger UI 仅在 `swagger` feature 开启时挂载：/swagger-ui 页面，spec 在 /api-docs/openapi.json。
     // release 默认不带此 feature —— 不暴露接口清单、二进制也不含 UI 资源。

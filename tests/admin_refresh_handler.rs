@@ -77,7 +77,11 @@ async fn refresh(state: &AppState, cookie: Option<&str>) -> (StatusCode, Option<
         .get(header::SET_COOKIE)
         .map(|v| v.to_str().unwrap().to_owned());
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, set_cookie, String::from_utf8(bytes.to_vec()).unwrap())
+    (
+        status,
+        set_cookie,
+        String::from_utf8(bytes.to_vec()).unwrap(),
+    )
 }
 
 // ============================== ④ 成功路径 ==============================
@@ -109,7 +113,9 @@ async fn valid_refresh_rotates_inherits_deadline_and_sets_new_cookie(pool: PgPoo
     );
 
     // 新 cookie 的安全属性与隔离 path。
-    let cookie = set_cookie.as_deref().expect("应下发新 admin refresh cookie");
+    let cookie = set_cookie
+        .as_deref()
+        .expect("应下发新 admin refresh cookie");
     assert!(
         cookie.starts_with("admin_refresh_token=") && cookie.contains("HttpOnly"),
         "cookie 应为 admin_refresh_token 且 HttpOnly：{cookie}"

@@ -110,7 +110,11 @@ async fn disabled_admin_is_silent_202_and_no_code(pool: PgPool) {
 
     let (status, body) = login_code(&state, PHONE).await;
 
-    assert_eq!(status, StatusCode::ACCEPTED, "禁用账号也应 202（不暴露禁用态）");
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "禁用账号也应 202（不暴露禁用态）"
+    );
     assert!(body.is_empty());
     assert!(
         !store.code_exists(PHONE, Purpose::AdminLogin).await.unwrap(),
@@ -135,7 +139,11 @@ async fn locked_admin_is_silent_202_and_no_code(pool: PgPool) {
 
     let (status, body) = login_code(&state, PHONE).await;
 
-    assert_eq!(status, StatusCode::ACCEPTED, "锁定 admin 也应静默 202（不暴露锁定态）");
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "锁定 admin 也应静默 202（不暴露锁定态）"
+    );
     assert!(body.is_empty());
     assert!(
         !store.code_exists(PHONE, Purpose::AdminLogin).await.unwrap(),

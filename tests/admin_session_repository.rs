@@ -319,7 +319,9 @@ async fn consume_and_insert_rolls_back_old_when_insert_fails(pool: PgPool) {
 
     repo.insert(new_token(admin_id, "old-hash")).await.unwrap();
     // 预先占住 taken-hash，让 INSERT 必然撞唯一索引
-    repo.insert(new_token(admin_id, "taken-hash")).await.unwrap();
+    repo.insert(new_token(admin_id, "taken-hash"))
+        .await
+        .unwrap();
 
     repo.consume_and_insert("old-hash", "taken-hash", Uuid::now_v7())
         .await

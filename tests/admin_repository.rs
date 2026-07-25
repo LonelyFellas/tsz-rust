@@ -335,7 +335,9 @@ async fn concurrent_failures_trigger_exactly_one_lock(pool: PgPool) {
         let task_repo = AdminRepository::new(pool.clone());
         let id = created.id;
         handles.push(tokio::spawn(async move {
-            task_repo.register_failed_login(&id, THRESHOLD, lock_for()).await
+            task_repo
+                .register_failed_login(&id, THRESHOLD, lock_for())
+                .await
         }));
     }
     let mut in_lock = 0;

@@ -88,9 +88,7 @@ async fn valid_code_active_user_gets_tokens(pool: PgPool) {
     // 形状细节（active_role 位置 / 可选字段省略 / expires_at 真值）由 auth_login_handler
     // 全量钉死，这里只验共用点没漂 + OTP 独有的 cookie 路径。
     assert!(
-        body["access_token"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty()),
+        body["access_token"].as_str().is_some_and(|s| !s.is_empty()),
         "顶层应有非空 access_token"
     );
     assert!(
@@ -250,9 +248,7 @@ async fn email_login_otp_is_case_insensitive(pool: PgPool) {
         "大写邮箱 + 正确码应 200（大小写不敏感）"
     );
     assert!(
-        body["access_token"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty()),
+        body["access_token"].as_str().is_some_and(|s| !s.is_empty()),
         "应发出非空 access_token"
     );
 }

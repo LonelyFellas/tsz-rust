@@ -72,9 +72,7 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
 
     // ——— 顶层：token 字段平铺（契约 T1，不再嵌套 token:{}） ———
     assert!(
-        body["access_token"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty()),
+        body["access_token"].as_str().is_some_and(|s| !s.is_empty()),
         "顶层应有非空 access_token"
     );
     assert!(
@@ -125,10 +123,7 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
         "for_test cookie_secure=false，不应带 Secure，实际：{cookie}"
     );
 
-    assert_eq!(
-        body["expires_in"], 900,
-        "for_test 的 access TTL=15min=900s"
-    );
+    assert_eq!(body["expires_in"], 900, "for_test 的 access TTL=15min=900s");
 
     // access_token 看着像 JWT（三段）
     assert_eq!(
@@ -161,7 +156,10 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
 
     // ——— user 对象（契约 0.1 UserPublic） ———
     let user = body["user"].as_object().expect("应有 user 对象");
-    assert_eq!(body["user"]["id"].as_str(), Some(user_id.to_string().as_str()));
+    assert_eq!(
+        body["user"]["id"].as_str(),
+        Some(user_id.to_string().as_str())
+    );
     assert!(
         body["user"]["display_name"]
             .as_str()

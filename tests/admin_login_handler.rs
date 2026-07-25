@@ -75,7 +75,11 @@ async fn admin_login(state: &AppState, body: Value) -> (StatusCode, Option<Strin
         .get(header::SET_COOKIE)
         .map(|v| v.to_str().unwrap().to_owned());
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, set_cookie, String::from_utf8(bytes.to_vec()).unwrap())
+    (
+        status,
+        set_cookie,
+        String::from_utf8(bytes.to_vec()).unwrap(),
+    )
 }
 
 fn login_body(phone: &str, password: &str, code: &str) -> Value {
@@ -83,10 +87,13 @@ fn login_body(phone: &str, password: &str, code: &str) -> Value {
 }
 
 async fn failed_count(pool: &PgPool, phone: &str) -> i32 {
-    sqlx::query_scalar!("SELECT failed_login_count FROM admins WHERE phone = $1", phone)
-        .fetch_one(pool)
-        .await
-        .expect("admin 行应存在")
+    sqlx::query_scalar!(
+        "SELECT failed_login_count FROM admins WHERE phone = $1",
+        phone
+    )
+    .fetch_one(pool)
+    .await
+    .expect("admin 行应存在")
 }
 
 async fn locked_until(pool: &PgPool, phone: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -107,10 +114,12 @@ async fn valid_factors_login_succeeds_and_clears_counter(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    store.save_code(PHONE, Purpose::AdminLogin, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+        .await
+        .unwrap();
 
-    let (status, set_cookie, body) =
-        admin_login(&state, login_body(PHONE, PASSWORD, CODE)).await;
+    let (status, set_cookie, body) = admin_login(&state, login_body(PHONE, PASSWORD, CODE)).await;
 
     assert_eq!(status, StatusCode::OK, "三因子全对应 200：{body}");
     let json: Value = serde_json::from_str(&body).unwrap();
@@ -154,7 +163,10 @@ async fn three_failure_modes_are_byte_identical_401(pool: PgPool) {
     // 否则验证码层就成了「密码对不对」的确认器（§6④）。
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     create_admin(&pool, PHONE).await;
-    store.save_code(PHONE, Purpose::AdminLogin, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+        .await
+        .unwrap();
 
     // 未注册手机号（连码都没有）
     let (s1, _, b1) = admin_login(&state, login_body("13999990000", PASSWORD, CODE)).await;
@@ -165,7 +177,11 @@ async fn three_failure_modes_are_byte_identical_401(pool: PgPool) {
 
     assert_eq!(s1, StatusCode::UNAUTHORIZED, "查无此号应 401");
     assert_eq!(s2, StatusCode::UNAUTHORIZED, "密码错应 401");
-    assert_eq!(s3, StatusCode::UNAUTHORIZED, "码错应 401（不是 500，也不是别的文案）");
+    assert_eq!(
+        s3,
+        StatusCode::UNAUTHORIZED,
+        "码错应 401（不是 500，也不是别的文案）"
+    );
     assert_eq!(b1, b2, "查无此号与密码错的 body 应逐字节一致");
     assert_eq!(b2, b3, "密码错与码错的 body 应逐字节一致");
     assert_eq!(
@@ -179,7 +195,10 @@ async fn three_failure_modes_are_byte_identical_401(pool: PgPool) {
 async fn wrong_password_accumulates_and_does_not_burn_code(pool: PgPool) {
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     create_admin(&pool, PHONE).await;
-    store.save_code(PHONE, Purpose::AdminLogin, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+        .await
+        .unwrap();
 
     let (status, _, _) = admin_login(&state, login_body(PHONE, "wrong-password", CODE)).await;
 
@@ -203,7 +222,10 @@ async fn wrong_password_accumulates_and_does_not_burn_code(pool: PgPool) {
 async fn wrong_code_accumulates_lockout(pool: PgPool) {
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     create_admin(&pool, PHONE).await;
-    store.save_code(PHONE, Purpose::AdminLogin, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+        .await
+        .unwrap();
 
     let (status, _, _) = admin_login(&state, login_body(PHONE, PASSWORD, WRONG_CODE)).await;
 
@@ -222,7 +244,10 @@ async fn web_login_code_cannot_cross_into_admin_realm(pool: PgPool) {
     // 正解：admin 用 Purpose::AdminLogin，key 不同 → 验不过 → 401。
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     create_admin(&pool, PHONE).await;
-    store.save_code(PHONE, Purpose::Login, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::Login, CODE, ttl())
+        .await
+        .unwrap();
 
     let (status, _, _) = admin_login(&state, login_body(PHONE, PASSWORD, CODE)).await;
     assert_eq!(
@@ -242,7 +267,10 @@ async fn disabled_admin_is_403_and_code_not_burned(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    store.save_code(PHONE, Purpose::AdminLogin, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+        .await
+        .unwrap();
 
     let (status, _, _) = admin_login(&state, login_body(PHONE, PASSWORD, CODE)).await;
 
@@ -255,7 +283,11 @@ async fn disabled_admin_is_403_and_code_not_burned(pool: PgPool) {
             .unwrap(),
         "禁用账号的登录尝试不应消费验证码"
     );
-    assert_eq!(failed_count(&pool, PHONE).await, 0, "disabled 不是失败因子，不累计");
+    assert_eq!(
+        failed_count(&pool, PHONE).await,
+        0,
+        "disabled 不是失败因子，不累计"
+    );
 }
 
 // ============================== ① 锁定 ==============================
@@ -272,11 +304,18 @@ async fn locked_admin_is_423_even_with_all_factors_valid(pool: PgPool) {
     .await
     .unwrap();
     let deadline_before = locked_until(&pool, PHONE).await;
-    store.save_code(PHONE, Purpose::AdminLogin, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+        .await
+        .unwrap();
 
     let (status, _, body) = admin_login(&state, login_body(PHONE, PASSWORD, CODE)).await;
 
-    assert_eq!(status, StatusCode::LOCKED, "锁定中三因子全对也应 423，不是 401/403");
+    assert_eq!(
+        status,
+        StatusCode::LOCKED,
+        "锁定中三因子全对也应 423，不是 401/403"
+    );
     assert_eq!(
         serde_json::from_str::<Value>(&body).unwrap(),
         json!({ "error": "account temporarily locked due to too many failed login attempts" }),
@@ -329,7 +368,10 @@ async fn expired_lock_auto_unlocks(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    store.save_code(PHONE, Purpose::AdminLogin, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+        .await
+        .unwrap();
 
     let (status, _, body) = admin_login(&state, login_body(PHONE, PASSWORD, CODE)).await;
     assert_eq!(status, StatusCode::OK, "锁已过期应可正常登录：{body}");
@@ -346,12 +388,17 @@ async fn fifth_wrong_code_trips_the_lock(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    store.save_code(PHONE, Purpose::AdminLogin, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+        .await
+        .unwrap();
 
     let (status, _, _) = admin_login(&state, login_body(PHONE, PASSWORD, WRONG_CODE)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "第 5 次失败本身仍 401");
     assert!(
-        locked_until(&pool, PHONE).await.is_some_and(|t| t > chrono::Utc::now()),
+        locked_until(&pool, PHONE)
+            .await
+            .is_some_and(|t| t > chrono::Utc::now()),
         "第 5 次失败应触发锁定（locked_until 进未来）"
     );
 
@@ -368,7 +415,10 @@ async fn phone_is_normalized_before_code_verification(pool: PgPool) {
     // 密码路径 normalize 了而 verify 用原始串的话，key 对不上 → 永远 401 还累计——本用例立红。
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     create_admin(&pool, PHONE).await;
-    store.save_code(PHONE, Purpose::AdminLogin, CODE, ttl()).await.unwrap();
+    store
+        .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+        .await
+        .unwrap();
 
     let padded = format!("  {PHONE}  ");
     let (status, _, body) = admin_login(&state, login_body(&padded, PASSWORD, CODE)).await;

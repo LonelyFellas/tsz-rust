@@ -329,8 +329,7 @@ async fn failed_refresh_must_not_consume_the_old_token(pool: PgPool) {
     .await
     .unwrap();
 
-    let (status, set_cookie, _) =
-        post(pool.clone(), "/api/v1/auth/refresh", Some(&r0), None).await;
+    let (status, set_cookie, _) = post(pool.clone(), "/api/v1/auth/refresh", Some(&r0), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "禁用账号 refresh 应 401");
     assert!(set_cookie.is_none(), "失败路径不得下发新 cookie");
 

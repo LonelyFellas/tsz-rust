@@ -172,8 +172,11 @@ async fn invalid_phone_format_returns_400(pool: PgPool) {
 /// 含 NUL 字节的手机号 → 400（#6 回归：绝不能裸奔到 Postgres 触发 500）。
 #[sqlx::test]
 async fn nul_byte_phone_returns_400_not_500(pool: PgPool) {
-    let (status, _) =
-        register(pool, json!({ "phone": "138\u{0000}0138000", "password": "password123" })).await;
+    let (status, _) = register(
+        pool,
+        json!({ "phone": "138\u{0000}0138000", "password": "password123" }),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,

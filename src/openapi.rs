@@ -186,13 +186,12 @@ mod tests {
 
         // —— admin 域同样的 cookie 契约（名字/路径与 C 端隔离，见 ADMIN_REFRESH_TOKEN_COOKIE）——
         // admin refresh 与 logout 都声明了 admin_refresh_token cookie 参数
-        for path in [
-            "/api/v1/admin/auth/refresh",
-            "/api/v1/admin/auth/logout",
-        ] {
+        for path in ["/api/v1/admin/auth/refresh", "/api/v1/admin/auth/logout"] {
             let params = json["paths"][path]["post"]["parameters"]
                 .as_array()
-                .unwrap_or_else(|| panic!("{path} 应声明 parameters（admin_refresh_token cookie）"));
+                .unwrap_or_else(|| {
+                    panic!("{path} 应声明 parameters（admin_refresh_token cookie）")
+                });
             assert!(
                 params
                     .iter()

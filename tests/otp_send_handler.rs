@@ -195,8 +195,11 @@ async fn unknown_purpose_is_422(pool: PgPool) {
 async fn public_send_cannot_request_admin_login_purpose(pool: PgPool) {
     // admin_login 对公开端点是非法枚举值 → 反序列化失败 → 422（与 unknown_purpose_is_422 同语义）。
     let (state, store) = AppState::for_test_with_otp_store(pool);
-    let (status, _) =
-        post_send(&state, json!({"phone": "13800138000", "purpose": "admin_login"})).await;
+    let (status, _) = post_send(
+        &state,
+        json!({"phone": "13800138000", "purpose": "admin_login"}),
+    )
+    .await;
 
     assert_eq!(
         status,

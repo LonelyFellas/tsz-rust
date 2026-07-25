@@ -235,7 +235,10 @@ async fn admin_can_hold_multiple_tokens_at_schema_level(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .expect("查询应成功");
-    assert_eq!(count, 2, "schema 层允许同 admin 多行 token(单登录归 service 管)");
+    assert_eq!(
+        count, 2,
+        "schema 层允许同 admin 多行 token(单登录归 service 管)"
+    );
 }
 
 // ===== 与 web 身份库的隔离边界 =====

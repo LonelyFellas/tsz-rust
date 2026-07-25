@@ -72,7 +72,8 @@ async fn active_user_gets_profile(pool: PgPool) {
     // 契约 0.1：None → 整个字段省略（skip_serializing_if），不是 null。
     // 不能写 body["email"].is_null()——serde_json 对缺失键索引也返回 Null，那断言恒真空转。
     assert!(
-        !body.as_object()
+        !body
+            .as_object()
             .expect("me 响应应是 JSON 对象")
             .contains_key("email"),
         "该用户没绑邮箱，email 应整个字段省略（不是 null）"
