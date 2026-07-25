@@ -35,6 +35,7 @@ use utoipa::{
         crate::otp::handler::send_otp,
         // admin 域
         crate::admin::handler::admin_login,
+        crate::admin::handler::admin_refresh,
         crate::admin::handler::admin_login_code,
         crate::admin::handler::admin_logout,
     ),
@@ -57,6 +58,7 @@ use utoipa::{
             // admin
             crate::admin::handler::AdminLoginRequest,
             crate::admin::handler::AdminLoginResponse,
+            crate::admin::handler::AdminRefreshResponse,
             crate::admin::handler::AdminLoginOtpRequest,
             crate::admin::handler::AdminProfile,
             crate::admin::handler::AdminToken,
@@ -114,6 +116,7 @@ mod tests {
             ("post", "/api/v1/user/register"),
             ("post", "/api/v1/otp/send"),
             ("post", "/api/v1/admin/auth/login"),
+            ("post", "/api/v1/admin/auth/refresh"),
             ("post", "/api/v1/admin/auth/login-code"),
             ("post", "/api/v1/admin/auth/logout"),
         ] {
@@ -182,20 +185,26 @@ mod tests {
         );
 
         // —— admin 域同样的 cookie 契约（名字/路径与 C 端隔离，见 ADMIN_REFRESH_TOKEN_COOKIE）——
-        // admin logout 声明了 admin_refresh_token cookie 参数
-        let admin_logout_params = json["paths"]["/api/v1/admin/auth/logout"]["post"]["parameters"]
-            .as_array()
-            .expect("admin logout 应声明 parameters（admin_refresh_token cookie）");
-        assert!(
-            admin_logout_params
-                .iter()
-                .any(|p| p["name"] == "admin_refresh_token" && p["in"] == "cookie"),
-            "admin logout 的 parameters 里应有 in=cookie 的 admin_refresh_token，实际：{admin_logout_params:?}"
-        );
+        // admin refresh 与 logout 都声明了 admin_refresh_token cookie 参数
+        for path in [
+            "/api/v1/admin/auth/refresh",
+            "/api/v1/admin/auth/logout",
+        ] {
+            let params = json["paths"][path]["post"]["parameters"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{path} 应声明 parameters（admin_refresh_token cookie）"));
+            assert!(
+                params
+                    .iter()
+                    .any(|p| p["name"] == "admin_refresh_token" && p["in"] == "cookie"),
+                "{path} 的 parameters 里应有 in=cookie 的 admin_refresh_token，实际：{params:?}"
+            );
+        }
 
-        // admin login 200 / logout 204 都声明了 Set-Cookie 头
+        // admin login 200 / refresh 200 / logout 204 都声明了 Set-Cookie 头
         for (path, status) in [
             ("/api/v1/admin/auth/login", "200"),
+            ("/api/v1/admin/auth/refresh", "200"),
             ("/api/v1/admin/auth/logout", "204"),
         ] {
             assert!(

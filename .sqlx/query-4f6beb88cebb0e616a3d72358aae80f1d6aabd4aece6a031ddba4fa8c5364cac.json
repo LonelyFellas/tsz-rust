@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            RETURNING id, phone, display_name, password_hash, \n                      role as \"role: AdminRole\", \n                      status as \"status: AdminStatus\",\n                      must_change_password, failed_login_count, locked_until, \n                      created_at, updated_at\n            ",
+  "query": "\n            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            RETURNING id, phone, display_name, password_hash,\n                      role as \"role: AdminRole\",\n                      status as \"status: AdminStatus\",\n                      must_change_password, failed_login_count, locked_until,\n                      created_at, updated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -149,5 +149,5 @@
       false
     ]
   },
-  "hash": "a2cb3716287ee5d08b06253bd6c0ad2562acc231707235aedeb238bb56aa624e"
+  "hash": "4f6beb88cebb0e616a3d72358aae80f1d6aabd4aece6a031ddba4fa8c5364cac"
 }

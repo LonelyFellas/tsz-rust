@@ -46,6 +46,9 @@ impl Admin {
         self.locked_until
             .is_some_and(|locked_until| locked_until > now)
     }
+    pub fn is_active(&self) -> bool {
+        self.status == AdminStatus::Active
+    }
     pub fn is_normal(&self, now: DateTime<Utc>) -> bool {
         self.status != AdminStatus::Disabled && !self.is_locked(now)
     }

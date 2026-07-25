@@ -36,6 +36,9 @@ cargo fmt                                   # 格式化
 # 验证服务
 curl localhost:8383/healthz                 # 存活（不碰库）
 curl localhost:8383/readyz                  # 就绪（连库探活）
+
+# sqlx
+cargo sqlx prepare
 ```
 
 ## 数据库

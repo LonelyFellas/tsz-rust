@@ -21,6 +21,103 @@ use crate::{
     state::AppState,
 };
 
+fn admin_svc(state: &AppState) -> AdminService {
+    AdminService::new(
+        AdminRepository::new(state.pool.clone()),
+        state.otp_service.clone(),
+    )
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct AdminRefreshResponse {
+    #[serde(flatten)]
+    token: AdminToken,
+    /// refresh token 过期时间（Unix 秒，绝对时间戳，与轮换出的新枚落库值一致）
+    #[schema(example = 1752566400)]
+    refresh_token_expires_at: i64,
+}
+
+/// POST /api/v1/admin/auth/refresh
+///
+/// 用 admin_refresh_token cookie 轮换会话：签发新 access token，并经 Set-Cookie
+/// 下发轮换出的新 refresh token（继承旧枚绝对死线，Q8 不续命）。旧枚原子消费作废；
+/// 窗口外重放会连坐吊销该 admin 全部会话。
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/auth/refresh",
+    tag = "admin",
+    params(
+        ("admin_refresh_token" = String, Cookie,
+            description = "登录时经 Set-Cookie 下发的 admin refresh token，浏览器自动携带（HttpOnly；Path=/api/v1/admin/auth，仅认证端点可见）"),
+    ),
+    responses(
+        (status = 200, description = "轮换成功，返回新 access token；新 refresh token 经 Set-Cookie 下发", body = AdminRefreshResponse,
+            headers(("Set-Cookie" = String, description = "轮换出的新 admin_refresh_token cookie"))),
+        (status = 401, description = "refresh token 缺失、无效、已过期或重放"),
+        (status = 403, description = "账号被禁用"),
+        (status = 423, description = "账号被临时锁定"),
+    )
+)]
+pub async fn admin_refresh(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, AppError> {
+    // 1） 拿refresh plaintext
+    let refresh_plaintext = jar
+        .get(ADMIN_REFRESH_TOKEN_COOKIE)
+        .map(|c| c.value().to_owned())
+        .ok_or(AppError::Unauthenticated("invalid refresh token".into()))?;
+    // 2) 先查用户id
+    let admin_id = admin_session_svc(&state)
+        .peek_admin_id(&refresh_plaintext)
+        .await
+        .map_err(map_admin_session_error)?;
+
+    // 3) 查用户
+    let admin_id = admin_id.ok_or(AppError::Unauthenticated("invalid refresh token".into()))?;
+    let admin = AdminRepository::new(state.pool.clone())
+        .get_by_id(&admin_id)
+        .await
+        .map_err(|e| match e {
+            AdminRepositoryError::NotFound => {
+                AppError::Unauthenticated("invalid refresh token".into())
+            }
+            _ => AppError::internal(e),
+        })?;
+
+    // 4) 查看状态
+    if !admin.is_active() {
+        return Err(AppError::Forbidden);
+    }
+    // 5) 查看是否被锁住
+    if admin.is_locked(Utc::now()) {
+        return Err(AppError::Locked("admin is locked".into()));
+    }
+    // 6) 签发token
+    let token = generate_admin_token(&state, &admin).map_err(map_admin_session_error)?;
+
+    // 7） 用旧refresh token 换新refresh token
+    let rotated_refresh = admin_session_svc(&state)
+        .rotate(&refresh_plaintext)
+        .await
+        .map_err(map_admin_session_error)?;
+
+    // 8) 下发新refresh token
+    let jar = jar.add(admin_refresh_cookie(
+        rotated_refresh.refresh.plaintext,
+        &state,
+    ));
+
+    // 9) 返回响应
+    Ok((
+        jar,
+        Json(AdminRefreshResponse {
+            token,
+            refresh_token_expires_at: rotated_refresh.refresh.expires_at.timestamp(),
+        }),
+    ))
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct AdminLoginRequest {
     /// 登录标识：手机号
@@ -70,11 +167,7 @@ pub async fn admin_login(
     jar: CookieJar,
     Json(req): Json<AdminLoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let admin_svc = AdminService::new(
-        AdminRepository::new(state.pool.clone()),
-        state.otp_service.clone(),
-    );
-    let admin = admin_svc
+    let admin = admin_svc(&state)
         .login(&req.phone, &req.password, &req.code)
         .await
         .map_err(map_admin_login_error)?;
@@ -107,7 +200,7 @@ pub async fn admin_logout(
     jar: CookieJar,
 ) -> Result<impl IntoResponse, AppError> {
     if let Some(cookie) = jar.get(ADMIN_REFRESH_TOKEN_COOKIE) {
-        admin_session_service(&state)
+        admin_session_svc(&state)
             .logout(cookie.value())
             .await
             .map_err(map_admin_session_error)?;
@@ -164,7 +257,7 @@ pub async fn admin_login_code(
             }
         }
         Ok(_) | Err(AdminRepositoryError::NotFound) => {} // 禁用·锁定 / 查无此号：静默
-        Err(e) => return Err(AppError::internal(e)),       // DB 真故障：500
+        Err(e) => return Err(AppError::internal(e)),      // DB 真故障：500
     };
 
     Ok(StatusCode::ACCEPTED)
@@ -230,7 +323,7 @@ fn generate_admin_token(state: &AppState, admin: &Admin) -> Result<AdminToken, A
 }
 
 /// 域内统一的 `AdminSessionService` 装配点——repo/ttl 接线只写一次。
-fn admin_session_service(state: &AppState) -> AdminSessionService {
+fn admin_session_svc(state: &AppState) -> AdminSessionService {
     AdminSessionService::new(
         AdminRefreshTokenRepository::new(state.pool.clone()),
         state.admin_refresh_ttl,
@@ -244,7 +337,7 @@ async fn issue_admin_refresh_cookie(
     jar: CookieJar,
     admin_id: Uuid,
 ) -> Result<(CookieJar, DateTime<Utc>), AppError> {
-    let refresh = admin_session_service(state)
+    let refresh = admin_session_svc(state)
         .issue(&admin_id)
         .await
         .map_err(map_admin_session_error)?;

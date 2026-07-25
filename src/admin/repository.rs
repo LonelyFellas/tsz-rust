@@ -31,10 +31,10 @@ impl AdminRepository {
             r#"
             INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password)
             VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id, phone, display_name, password_hash, 
-                      role as "role: AdminRole", 
+            RETURNING id, phone, display_name, password_hash,
+                      role as "role: AdminRole",
                       status as "status: AdminStatus",
-                      must_change_password, failed_login_count, locked_until, 
+                      must_change_password, failed_login_count, locked_until,
                       created_at, updated_at
             "#,
             admin.id,
@@ -62,6 +62,7 @@ impl AdminRepository {
         .await?
         .ok_or(AdminRepositoryError::NotFound)
     }
+
     pub async fn get_by_phone(&self, phone: &str) -> Result<Admin, AdminRepositoryError> {
         sqlx::query_as!(
             Admin,
@@ -131,11 +132,11 @@ impl AdminRepository {
                 locked_until = CASE
                     WHEN locked_until > NOW() THEN locked_until
                     WHEN failed_login_count + 1 >= $2 THEN $3
-                    ELSE NULL 
+                    ELSE NULL
                 END,
                 updated_at = NOW()
             WHERE id = $1
-            RETURNING (locked_until IS NOT NULL AND locked_until > NOW()) AS "locked!" 
+            RETURNING (locked_until IS NOT NULL AND locked_until > NOW()) AS "locked!"
             "#,
             id,
             threshold,
