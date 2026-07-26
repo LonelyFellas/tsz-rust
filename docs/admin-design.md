@@ -206,6 +206,21 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 
 **`profile.permissions` 的处置**:前端菜单渲染依赖此数组(恒为数组不为 null 的契约),保留字段、**恒返全量菜单 key 死数据**(Rust 常量表,12 个 `*.access` key,顺序即侧栏顺序)——前端零改动,菜单全开;「管理员管理」菜单继续按 `role == super_admin` 前端门禁(rbac-D9 的残余语义)。若日后前端决定砍掉 permissions 渲染逻辑,该字段随 openapi sync 一起删,只动一处常量。
 
+**profile 端点落地记录(2026-07-26,`GET /admin/profile` 已上线,全绿)**:
+
+- **permissions 只在 profile 下发、login 概要不带**(用户拍板)。曾议 login-only 方案,被 F5 否决:
+  会话恢复走 refresh→profile,login 一次性下发撑不住该链路;「任何 F5 后仍需要的数据必须
+  可从查询端点获得」。login 侧有防回潮测试钉死(admin_login_handler)。
+- **profile 刻意不查 locked_until**(有 `locked_admin_still_gets_200` 正向钉子):锁定语义
+  只挡新登录/refresh 轮换(防爆破),不打断已认证的短命 access token——否则错码轰炸可把
+  在线管理员打下线(DoS)。refresh 查锁(423)的拍板不变,两者语义不同勿混。
+- must_change 守卫按 §7 内联在 handler(当前唯一守卫组端点);扩员时再抽 middleware。
+- `AdminAuth` 提取器落 `admin/extract.rs`,role claim 认不出 fail-closed 401。
+- `AdminProfileResponse` 平铺 5 字段(不用 serde flatten——utoipa 对 flatten 生成 allOf,
+  平铺才有干净 properties);与 login 概要 `AdminProfile`(4 字段)是两个类型。
+- 前端已同步:`AdminProfile.level→role`(Q11 收尾,store/守卫/顶栏/夹具全改),契约测试
+  移出 PENDING;`Admin` 管理列表类型的 level 留待 admins 管理批次一并改。
+
 ## 11. 端点契约总表(前端对齐硬指标)
 
 挂载 `ADMIN_MOUNT = /api/v1/admin`。wire 字段全 snake_case。`Admin` 对象序列化:`id, phone, display_name, role, status, created_at, updated_at`(**wire 字段名统一 `role`,偏离 go/存量前端类型的 `level`**,前端随 openapi sync 改)——**手挑字段,绝不序列化 password_hash/must_change_password/锁定列**(web 侧防泄惯例)。

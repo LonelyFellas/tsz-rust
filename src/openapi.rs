@@ -38,6 +38,7 @@ use utoipa::{
         crate::admin::handler::admin_refresh,
         crate::admin::handler::admin_login_code,
         crate::admin::handler::admin_logout,
+        crate::admin::handler::admin_profile,
     ),
     components(
         schemas(
@@ -61,6 +62,7 @@ use utoipa::{
             crate::admin::handler::AdminRefreshResponse,
             crate::admin::handler::AdminLoginOtpRequest,
             crate::admin::handler::AdminProfile,
+            crate::admin::handler::AdminProfileResponse,
             crate::admin::handler::AdminToken,
             crate::admin::AdminRole,
         )
@@ -119,6 +121,7 @@ mod tests {
             ("post", "/api/v1/admin/auth/refresh"),
             ("post", "/api/v1/admin/auth/login-code"),
             ("post", "/api/v1/admin/auth/logout"),
+            ("get", "/api/v1/admin/profile"),
         ] {
             assert!(
                 json["paths"][path][method].is_object(),
@@ -141,6 +144,15 @@ mod tests {
             json["components"]["schemas"]["RefreshResponse"].is_object(),
             "RefreshResponse schema 应出现在 spec 中（refresh 响应含 refresh_token_expires_at，不是裸 Token）"
         );
+        // profile 响应：flatten+inline 的 4 字段概要 + permissions 必须都出现在 schema 里
+        // （utoipa 对 serde flatten 字段需要 #[schema(inline)]，漏了 spec 会缺概要字段）。
+        let profile_props = &json["components"]["schemas"]["AdminProfileResponse"]["properties"];
+        for field in ["id", "phone", "display_name", "role", "permissions"] {
+            assert!(
+                profile_props[field].is_object(),
+                "AdminProfileResponse schema 应含 {field} 字段（flatten 展开后），实际：{profile_props}"
+            );
+        }
     }
 
     /// cookie 契约必须写进 spec：refresh/logout 的入参是 Cookie 而非 body——

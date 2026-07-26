@@ -17,6 +17,13 @@ impl AdminRole {
             AdminRole::Admin => "admin",
         }
     }
+    pub fn parse(role: &str) -> Option<AdminRole> {
+        match role {
+            "super_admin" => Some(AdminRole::SuperAdmin),
+            "admin" => Some(AdminRole::Admin),
+            _ => None,
+        }
+    }
 }
 
 #[derive(sqlx::Type, Debug, PartialEq, Clone, Copy)]

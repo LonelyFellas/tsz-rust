@@ -137,6 +137,12 @@ async fn valid_factors_login_succeeds_and_clears_counter(pool: PgPool) {
         "refresh token 只走 cookie，不得进 body"
     );
     assert!(!body.contains("$2b$"), "响应不得含 bcrypt hash 片段");
+    // Q10 处置（2026-07-26）：permissions 死数据字段已整删（连同前端菜单 key 过滤），
+    // login 响应顶层与 admin_profile 概要内都不得回潮。
+    assert!(
+        json.get("permissions").is_none() && json["admin_profile"].get("permissions").is_none(),
+        "permissions 已随 Q10 处置删除，不得出现在 login 响应任何层级：{body}"
+    );
 
     let cookie = set_cookie.as_deref().expect("应下发 admin refresh cookie");
     assert!(

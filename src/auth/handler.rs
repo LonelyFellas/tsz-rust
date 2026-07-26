@@ -380,8 +380,8 @@ pub struct UserProfile {
     )
 )]
 pub async fn me(
-    user: AuthUser,
     State(state): State<AppState>,
+    user: AuthUser,
 ) -> Result<impl IntoResponse, AppError> {
     let user = UserRepository::new(state.pool.clone())
         .get_by_id(&user.subject)
