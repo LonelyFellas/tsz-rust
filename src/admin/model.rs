@@ -42,13 +42,16 @@ pub struct Admin {
 }
 
 impl Admin {
+    // 用户是否被锁定🔒
     pub fn is_locked(&self, now: DateTime<Utc>) -> bool {
         self.locked_until
             .is_some_and(|locked_until| locked_until > now)
     }
+    // 用户是否是正常活跃状态
     pub fn is_active(&self) -> bool {
         self.status == AdminStatus::Active
     }
+    // 用户是否是正常状态。即没有被锁定，也没有活跃状态。
     pub fn is_normal(&self, now: DateTime<Utc>) -> bool {
         self.status != AdminStatus::Disabled && !self.is_locked(now)
     }
