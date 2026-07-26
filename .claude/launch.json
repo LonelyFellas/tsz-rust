@@ -15,6 +15,16 @@
       "autoPort": true
     },
     {
+      "name": "tsz-admin",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/darwish/Dev/tsz-core/tsz/apps/admin && pnpm dev"
+      ],
+      "port": 3001,
+      "autoPort": true
+    },
+    {
       "name": "tsz-web-start",
       "runtimeExecutable": "sh",
       "runtimeArgs": [
