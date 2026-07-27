@@ -5,7 +5,9 @@ mod repository;
 mod service;
 mod session;
 
-pub use handler::{admin_login, admin_login_code, admin_logout, admin_profile, admin_refresh};
+pub use handler::{
+    admin_login, admin_login_code, admin_logout, admin_profile, admin_refresh, change_password,
+};
 pub use model::{Admin, AdminRole, AdminStatus, NewAdmin, SeedOutcome};
 pub use repository::{AdminRepository, AdminRepositoryError};
 pub use service::{AdminSeedError, AdminService};

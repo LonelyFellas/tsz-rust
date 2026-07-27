@@ -38,6 +38,7 @@ use utoipa::{
         crate::admin::handler::admin_refresh,
         crate::admin::handler::admin_login_code,
         crate::admin::handler::admin_logout,
+        crate::admin::handler::change_password,
         crate::admin::handler::admin_profile,
     ),
     components(
@@ -61,6 +62,7 @@ use utoipa::{
             crate::admin::handler::AdminLoginResponse,
             crate::admin::handler::AdminRefreshResponse,
             crate::admin::handler::AdminLoginOtpRequest,
+            crate::admin::handler::ChangePasswordRequest,
             crate::admin::handler::AdminProfile,
             crate::admin::handler::AdminProfileResponse,
             crate::admin::handler::AdminToken,
@@ -121,6 +123,7 @@ mod tests {
             ("post", "/api/v1/admin/auth/refresh"),
             ("post", "/api/v1/admin/auth/login-code"),
             ("post", "/api/v1/admin/auth/logout"),
+            ("post", "/api/v1/admin/auth/change-password"),
             ("get", "/api/v1/admin/profile"),
         ] {
             assert!(
@@ -144,6 +147,27 @@ mod tests {
             json["components"]["schemas"]["RefreshResponse"].is_object(),
             "RefreshResponse schema 应出现在 spec 中（refresh 响应含 refresh_token_expires_at，不是裸 Token）"
         );
+        let change_password = &json["paths"]["/api/v1/admin/auth/change-password"]["post"];
+        assert_eq!(
+            change_password["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ChangePasswordRequest",
+            "change-password 应引用明确的请求 DTO"
+        );
+        assert_eq!(
+            change_password["security"][0]["bearer_auth"],
+            serde_json::json!([]),
+            "change-password 必须声明 Bearer 鉴权"
+        );
+        let change_password_required =
+            json["components"]["schemas"]["ChangePasswordRequest"]["required"]
+                .as_array()
+                .expect("ChangePasswordRequest 应声明必填字段");
+        for field in ["current_password", "new_password"] {
+            assert!(
+                change_password_required.iter().any(|value| value == field),
+                "ChangePasswordRequest 应要求 {field}"
+            );
+        }
         // profile 响应：flatten+inline 的 4 字段概要 + permissions 必须都出现在 schema 里
         // （utoipa 对 serde flatten 字段需要 #[schema(inline)]，漏了 spec 会缺概要字段）。
         let profile_props = &json["components"]["schemas"]["AdminProfileResponse"]["properties"];

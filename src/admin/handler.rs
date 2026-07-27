@@ -17,7 +17,7 @@ use crate::{
     },
     error::AppError,
     otp::{model::Purpose, service::OtpServiceError},
-    platform::Phone,
+    platform::{Password, Phone, validate_password},
     state::AppState,
 };
 
@@ -43,6 +43,84 @@ fn admin_svc(state: &AppState) -> AdminService {
         AdminRepository::new(state.pool.clone()),
         state.otp_service.clone(),
     )
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    /// 当前密码，用于在改密前重新验证管理员身份
+    #[schema(example = "CurrentPassword123!")]
+    current_password: String,
+    /// 符合管理员密码策略的新密码
+    #[schema(example = "NewStrongPassword456!")]
+    new_password: String,
+}
+
+/// POST /api/v1/admin/auth/change-password
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/auth/change-password",
+    tag = "admin",
+    security(("bearer_auth" = [])),
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 204, description = "密码修改成功，must_change_password 标志已清除"),
+        (status = 400, description = "新旧密码相同，或新密码不符合管理员密码策略"),
+        (status = 401, description = "缺少/无效/过期 token，账号不存在，或当前密码错误"),
+    )
+)]
+pub async fn change_password(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let repo = AdminRepository::new(state.pool.clone());
+    // 1) 查询当前管理员
+    let admin = repo
+        .get_by_id(&auth.subject)
+        .await
+        .map_err(map_admin_error)?;
+
+    // 2) 验证当前密码
+    let current_password_valid =
+        Password::verify_raw(req.current_password, admin.password_hash.clone()).await;
+
+    if !current_password_valid {
+        return Err(AppError::Unauthenticated(
+            "current password is incorrect".into(),
+        ));
+    }
+
+    // 3) 新密码不能与旧密码相同
+    let unchanged =
+        Password::verify_raw(req.new_password.clone(), admin.password_hash.clone()).await;
+
+    if unchanged {
+        return Err(AppError::BadRequest(
+            "new password must differ from the current one".into(),
+        ));
+    }
+
+    // 4) 执行管理员新密码策略校验
+    validate_password(&req.new_password, &admin.phone)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let password = Password::parse(&req.new_password)
+        .map_err(|_| AppError::BadRequest("new password is invalid".into()))?;
+
+    // 5) 校验通过后在计算新密码的哈希
+    let password_hash = password.hash().await.map_err(AppError::internal)?;
+
+    // 6) 更新密码, 并清除原子清除轻质改密标志
+    let affected = repo
+        .set_password_if_unchanged(&admin.id, &admin.password_hash, &password_hash, false)
+        .await
+        .map_err(map_admin_error)?;
+    if affected == 0 {
+        return Err(AppError::Unauthenticated(
+            "current password is incorrect".into(),
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// GET /api/v1/admin/profile

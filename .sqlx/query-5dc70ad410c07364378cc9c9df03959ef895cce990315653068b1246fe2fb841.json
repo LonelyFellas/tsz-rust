@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE admins\n            SET password_hash = $2, must_change_password = $3, updated_at = NOW()\n            WHERE id = $1 AND password_hash = $4\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5dc70ad410c07364378cc9c9df03959ef895cce990315653068b1246fe2fb841"
+}

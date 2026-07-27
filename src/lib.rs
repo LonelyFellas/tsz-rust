@@ -53,6 +53,7 @@ pub fn router(state: AppState) -> Router {
             admin::ADMIN_AUTH_MOUNT,
             Router::new()
                 .route("/login", post(admin::admin_login))
+                .route("/change-password", post(admin::change_password))
                 .route("/refresh", post(admin::admin_refresh))
                 .route("/login-code", post(admin::admin_login_code))
                 .route("/logout", post(admin::admin_logout)),

@@ -139,3 +139,120 @@ impl Email {
         self.0
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum ValidatePasswordError {
+    #[error("password must contain at least 12 characters")]
+    TooShort,
+    #[error("password must not be numeric only")]
+    NumericOnly,
+    #[error("password is too weak")]
+    WeakPassword,
+    #[error("password must not contain your subject")]
+    ContainsSubject,
+}
+pub fn validate_password(password: &str, subject: &str) -> Result<(), ValidatePasswordError> {
+    if password.chars().count() < 12 {
+        return Err(ValidatePasswordError::TooShort);
+    }
+
+    if password.chars().all(|e| e.is_ascii_digit()) {
+        return Err(ValidatePasswordError::NumericOnly);
+    }
+
+    let lowercase = password.to_lowercase();
+
+    const WEAK_PATTERNS: &[&str] = &[
+        "password", "qwerty", "asdfgh", "zxcvbn", "123456", "654321", "letmein", "iloveyou",
+        "welcome", "admin123",
+    ];
+
+    if WEAK_PATTERNS
+        .iter()
+        .any(|pattern| lowercase.contains(pattern))
+    {
+        return Err(ValidatePasswordError::WeakPassword);
+    }
+
+    if !subject.is_empty() && password.contains(subject) {
+        return Err(ValidatePasswordError::ContainsSubject);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod admin_password_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_password_meeting_admin_and_common_policies() {
+        let password = "Strong!Code42";
+
+        assert!(validate_password(password, "13800138000").is_ok());
+        assert!(Password::parse(password).is_ok());
+    }
+
+    #[test]
+    fn admin_minimum_length_is_twelve_unicode_characters() {
+        assert!(matches!(
+            validate_password("Abcdef!2345", "13800138000"),
+            Err(ValidatePasswordError::TooShort)
+        ));
+
+        // 管理员长度按字符而非 UTF-8 字节计算。
+        let twelve_characters = format!("{}A", "界".repeat(11));
+        assert_eq!(twelve_characters.chars().count(), 12);
+        assert!(validate_password(&twelve_characters, "13800138000").is_ok());
+    }
+
+    #[test]
+    fn rejects_numeric_only_password() {
+        assert!(matches!(
+            validate_password("987654321098", "13800138000"),
+            Err(ValidatePasswordError::NumericOnly)
+        ));
+    }
+
+    #[test]
+    fn rejects_every_weak_pattern_case_insensitively() {
+        for pattern in [
+            "PASSWORD", "QWERTY", "ASDFGH", "ZXCVBN", "123456", "654321", "LETMEIN", "ILOVEYOU",
+            "WELCOME", "ADMIN123",
+        ] {
+            let password = format!("Safe-{pattern}-X9!");
+            assert!(
+                matches!(
+                    validate_password(&password, "13800138000"),
+                    Err(ValidatePasswordError::WeakPassword)
+                ),
+                "weak pattern should be rejected: {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_password_containing_owners_phone() {
+        assert!(matches!(
+            validate_password("Safe!13800138000X", "13800138000"),
+            Err(ValidatePasswordError::ContainsSubject)
+        ));
+    }
+
+    #[test]
+    fn empty_subject_does_not_reject_every_password() {
+        assert!(validate_password("Strong!Code42", "").is_ok());
+    }
+
+    #[test]
+    fn common_policy_still_enforces_bcrypt_byte_limit() {
+        let password = format!("A!{}", "x".repeat(71));
+
+        assert_eq!(password.len(), 73);
+        assert!(validate_password(&password, "13800138000").is_ok());
+        assert!(matches!(
+            Password::parse(&password),
+            Err(PasswordError::TooLong)
+        ));
+    }
+}

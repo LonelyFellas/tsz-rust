@@ -93,6 +93,8 @@ impl AdminRepository {
 
         Ok(role)
     }
+
+    // 强制重置等场景，无条件更新，比如超级管理员给管理员重置密码等情况
     pub async fn set_password(
         &self,
         id: &Uuid,
@@ -101,10 +103,10 @@ impl AdminRepository {
     ) -> Result<(), AdminRepositoryError> {
         let result = sqlx::query!(
             r#"
-            UPDATE admins
-            SET password_hash = $2, must_change_password = $3, updated_at = NOW()
-            WHERE id = $1
-            "#,
+                   UPDATE admins
+                   SET password_hash = $2, must_change_password = $3, updated_at = NOW()
+                   WHERE id = $1
+                   "#,
             id,
             password_hash,
             must_change_password,
@@ -113,6 +115,31 @@ impl AdminRepository {
         .await?;
 
         ensure_found(result)
+    }
+
+    /// 用户自主改密，带旧哈希CAS
+    pub async fn set_password_if_unchanged(
+        &self,
+        id: &Uuid,
+        current_password_hash: &str,
+        new_password_hash: &str,
+        must_change_password: bool,
+    ) -> Result<u64, AdminRepositoryError> {
+        let result = sqlx::query!(
+            r#"
+            UPDATE admins
+            SET password_hash = $2, must_change_password = $3, updated_at = NOW()
+            WHERE id = $1 AND password_hash = $4
+            "#,
+            id,
+            new_password_hash,
+            must_change_password,
+            current_password_hash
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
     }
 
     pub async fn register_failed_login(
