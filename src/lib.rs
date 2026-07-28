@@ -47,21 +47,7 @@ pub fn router(state: AppState) -> Router {
             user::USER_MOUNT,
             Router::new().route("/register", post(user::handler::register)),
         )
-        .nest(
-            // admin 认证端点单独挂在 /auth 子路径下，与未来 ADMIN_MOUNT(/api/v1/admin)
-            // 下的业务路由分离——refresh cookie 只钉这层，不随业务请求外泄。
-            admin::ADMIN_AUTH_MOUNT,
-            Router::new()
-                .route("/login", post(admin::admin_login))
-                .route("/change-password", post(admin::change_password))
-                .route("/refresh", post(admin::admin_refresh))
-                .route("/login-code", post(admin::admin_login_code))
-                .route("/logout", post(admin::admin_logout)),
-        )
-        .nest(
-            admin::ADMIN_MOUNT,
-            Router::new().route("/profile", get(admin::admin_profile)),
-        )
+        .nest(admin::ADMIN_MOUNT, admin::router())
         .nest(
             auth::AUTH_MOUNT,
             Router::new()

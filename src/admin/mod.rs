@@ -1,15 +1,15 @@
+pub mod auth;
 mod extract;
-pub mod handler;
 mod model;
+pub mod profile;
 mod repository;
+mod router;
 mod service;
 mod session;
 
-pub use handler::{
-    admin_login, admin_login_code, admin_logout, admin_profile, admin_refresh, change_password,
-};
 pub use model::{Admin, AdminRole, AdminStatus, NewAdmin, SeedOutcome};
 pub use repository::{AdminRepository, AdminRepositoryError};
+pub use router::router;
 pub use service::{AdminSeedError, AdminService};
 pub use session::{
     AdminRefreshToken, AdminRefreshTokenError, AdminRefreshTokenRepository, AdminSessionError,

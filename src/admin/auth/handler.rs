@@ -21,23 +21,6 @@ use crate::{
     state::AppState,
 };
 
-/// 侧栏菜单权限 key 全量目录（顺序即侧栏顺序）。Q10 取消 RBAC 后全员全功能，
-/// profile 恒返这份死数据，仅为保前端菜单渲染逻辑零改动。
-pub const MENU_PERMISSIONS: [&str; 12] = [
-    "users.access",
-    "classes.access",
-    "words.access",
-    "customdict.access",
-    "sentences.access",
-    "wordlists.access",
-    "customwordlist.access",
-    "tasks.access",
-    "reviews.access",
-    "teacherapply.access",
-    "comments.access",
-    "coins.access",
-];
-
 fn admin_svc(state: &AppState) -> AdminService {
     AdminService::new(
         AdminRepository::new(state.pool.clone()),
@@ -74,42 +57,33 @@ pub async fn change_password(
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let repo = AdminRepository::new(state.pool.clone());
-    // 1) 查询当前管理员
     let admin = repo
         .get_by_id(&auth.subject)
         .await
         .map_err(map_admin_error)?;
 
-    // 2) 验证当前密码
     let current_password_valid =
         Password::verify_raw(req.current_password, admin.password_hash.clone()).await;
-
     if !current_password_valid {
         return Err(AppError::Unauthenticated(
             "current password is incorrect".into(),
         ));
     }
 
-    // 3) 新密码不能与旧密码相同
     let unchanged =
         Password::verify_raw(req.new_password.clone(), admin.password_hash.clone()).await;
-
     if unchanged {
         return Err(AppError::BadRequest(
             "new password must differ from the current one".into(),
         ));
     }
 
-    // 4) 执行管理员新密码策略校验
     validate_password(&req.new_password, &admin.phone)
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
     let password = Password::parse(&req.new_password)
         .map_err(|_| AppError::BadRequest("new password is invalid".into()))?;
-
-    // 5) 校验通过后在计算新密码的哈希
     let password_hash = password.hash().await.map_err(AppError::internal)?;
 
-    // 6) 更新密码, 并清除原子清除轻质改密标志
     let affected = repo
         .set_password_if_unchanged(&admin.id, &admin.password_hash, &password_hash, false)
         .await
@@ -121,71 +95,6 @@ pub async fn change_password(
     }
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// GET /api/v1/admin/profile
-///
-/// 登录管理员自身档案（/me 型身份探针）：前端用它确认会话有效、渲染顶栏与侧栏菜单。
-/// 刻意**不查** locked_until——锁定语义只挡新登录/refresh 轮换（防爆破），不打断
-/// 已认证的短命 access token，否则错码轰炸可把在线管理员打下线（DoS）。
-#[utoipa::path(
-    get,
-    path = "/api/v1/admin/profile",
-    tag = "admin",
-    security(("bearer_auth" = [])),
-    responses(
-        (status = 200, description = "登录管理员完整档案", body = AdminProfileResponse),
-        (status = 401, description = "缺/无效/过期 token，或账号已不存在（视为过期会话）"),
-        (status = 403, description = "账号已禁用（无 code）；或须先改密（code=must_change_password，前端据此跳改密页）"),
-    )
-)]
-pub async fn admin_profile(
-    State(state): State<AppState>,
-    admin: AdminAuth,
-) -> Result<impl IntoResponse, AppError> {
-    let admin = AdminRepository::new(state.pool.clone())
-        .get_by_id(&admin.subject)
-        .await
-        .map_err(map_admin_error)?;
-
-    if !admin.is_active() {
-        return Err(AppError::Forbidden);
-    }
-
-    // must_change 守卫（§7 守卫组）：目前 profile 是唯一守卫组端点，内联在此；
-    // change-password/logout-all 落地后若守卫组扩员，再抽成 middleware/组合提取器。
-    if admin.must_change_password {
-        return Err(AppError::ForbiddenCode {
-            message: "password change required".into(),
-            code: "must_change_password".into(),
-        });
-    }
-
-    Ok((
-        StatusCode::OK,
-        Json(AdminProfileResponse {
-            id: admin.id,
-            phone: admin.phone,
-            display_name: admin.display_name,
-            role: admin.role,
-            permissions: MENU_PERMISSIONS.to_vec(),
-        }),
-    ))
-}
-
-/// GET /profile 的响应：login 的 4 字段概要 + 菜单权限目录。
-/// 与 login 概要（`AdminProfile`）刻意分成两个类型——permissions **只**在 profile
-/// 下发（F5 会话恢复走 refresh→profile，login 一次性下发撑不住这条链路）。
-/// 字段平铺而非 flatten 内嵌：utoipa 对 serde flatten 生成 allOf 组合 schema，
-/// 平铺才能让前端 codegen 拿到干净的 5 字段 properties。
-#[derive(Serialize, ToSchema)]
-pub struct AdminProfileResponse {
-    pub id: Uuid,
-    pub phone: String,
-    pub display_name: String,
-    pub role: AdminRole,
-    /// 菜单权限 key 全量目录（恒为数组，Q10 死数据；顺序即侧栏顺序）
-    pub permissions: Vec<&'static str>,
 }
 
 #[derive(Serialize, ToSchema)]

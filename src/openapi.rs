@@ -34,12 +34,12 @@ use utoipa::{
         // otp 域
         crate::otp::handler::send_otp,
         // admin 域
-        crate::admin::handler::admin_login,
-        crate::admin::handler::admin_refresh,
-        crate::admin::handler::admin_login_code,
-        crate::admin::handler::admin_logout,
-        crate::admin::handler::change_password,
-        crate::admin::handler::admin_profile,
+        crate::admin::auth::handler::admin_login,
+        crate::admin::auth::handler::admin_refresh,
+        crate::admin::auth::handler::admin_login_code,
+        crate::admin::auth::handler::admin_logout,
+        crate::admin::auth::handler::change_password,
+        crate::admin::profile::handler::admin_profile,
     ),
     components(
         schemas(
@@ -58,14 +58,14 @@ use utoipa::{
             crate::otp::handler::SendOtpRequest,
             crate::otp::model::Purpose,
             // admin
-            crate::admin::handler::AdminLoginRequest,
-            crate::admin::handler::AdminLoginResponse,
-            crate::admin::handler::AdminRefreshResponse,
-            crate::admin::handler::AdminLoginOtpRequest,
-            crate::admin::handler::ChangePasswordRequest,
-            crate::admin::handler::AdminProfile,
-            crate::admin::handler::AdminProfileResponse,
-            crate::admin::handler::AdminToken,
+            crate::admin::auth::handler::AdminLoginRequest,
+            crate::admin::auth::handler::AdminLoginResponse,
+            crate::admin::auth::handler::AdminRefreshResponse,
+            crate::admin::auth::handler::AdminLoginOtpRequest,
+            crate::admin::auth::handler::ChangePasswordRequest,
+            crate::admin::auth::handler::AdminProfile,
+            crate::admin::profile::handler::AdminProfileResponse,
+            crate::admin::auth::handler::AdminToken,
             crate::admin::AdminRole,
         )
     ),
