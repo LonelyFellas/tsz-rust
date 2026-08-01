@@ -41,6 +41,7 @@ use utoipa::{
         crate::admin::auth::handler::change_password,
         crate::admin::profile::handler::admin_profile,
         crate::admin::accounts::handler::create_admin,
+        crate::admin::accounts::handler::request_create_admin_code,
         crate::admin::accounts::handler::list_admins,
     ),
     components(
@@ -136,6 +137,7 @@ mod tests {
             ("post", "/api/v1/admin/auth/change-password"),
             ("get", "/api/v1/admin/profile"),
             ("post", "/api/v1/admin/admins"),
+            ("post", "/api/v1/admin/admins/create-code"),
             ("get", "/api/v1/admin/admins"),
         ] {
             assert!(
@@ -225,6 +227,19 @@ mod tests {
             !required.iter().any(|value| value == "display_name"),
             "display_name 可由系统生成，不应标记为必填"
         );
+
+        let create_admin_code = &json["paths"]["/api/v1/admin/admins/create-code"]["post"];
+        assert_eq!(
+            create_admin_code["security"][0]["bearer_auth"],
+            serde_json::json!([]),
+            "创建管理员发码接口必须声明 Bearer 鉴权"
+        );
+        for status in ["202", "401", "403", "429", "503"] {
+            assert!(
+                create_admin_code["responses"][status].is_object(),
+                "创建管理员发码接口应声明 {status} 响应"
+            );
+        }
 
         let list_admins = &json["paths"]["/api/v1/admin/admins"]["get"];
         assert_eq!(

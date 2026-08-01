@@ -87,9 +87,9 @@ pub async fn create_admin(
 
     state
         .otp_service
-        .verify(phone.as_str(), Purpose::AdminCreate, &req.code)
+        .verify(admin.phone.as_str(), Purpose::AdminCreate, &req.code)
         .await
-        .map_err(map_otp_error)?;
+        .map_err(map_otp_verify_error)?;
 
     let admin_accounts_service =
         AdminAccountsService::new(AdminAccountsRepository::new(state.pool.clone()));
@@ -144,7 +144,37 @@ pub async fn list_admins(
 
     let response = service.list(query).await.map_err(map_list_error)?;
 
-    Ok(Json(response))
+    Ok((StatusCode::OK, Json(response)))
+}
+
+/// POST /api/v1/admin/admins/create-code
+/// 向当前超级管理员的数据库手机号发送创建管理员确认码。
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/admins/create-code",
+    tag = "admin-accounts",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 202, description = "创建管理员验证码已发送至当前超级管理员手机号"),
+        (status = 401, description = "缺少/无效/过期 token，管理员不存在或账号被锁定"),
+        (status = 403, description = "账号已禁用、必须先改密或不是超级管理员"),
+        (status = 429, description = "验证码请求过于频繁"),
+        (status = 503, description = "验证码存储或短信服务不可用"),
+    )
+)]
+pub async fn request_create_admin_code(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+) -> Result<StatusCode, AppError> {
+    let admin = require_super_admin(&state, &auth).await?;
+
+    state
+        .otp_service
+        .request(&admin.phone, Purpose::AdminCreate)
+        .await
+        .map_err(map_otp_request_error)?;
+
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// PATCH /api/v1/admin/admins/{id}/status
@@ -194,10 +224,28 @@ fn map_admin_error(err: AdminRepositoryError) -> AppError {
     }
 }
 
-fn map_otp_error(err: OtpServiceError) -> AppError {
-    match err {
+fn map_otp_verify_error(error: OtpServiceError) -> AppError {
+    match error {
         OtpServiceError::InvalidCode => AppError::BadRequest("当前验证码非法".into()),
-        e => AppError::Internal(e.into()),
+        OtpServiceError::Store(_) => AppError::ServiceUnavailable,
+        OtpServiceError::Send(_) | OtpServiceError::RateLimited => {
+            AppError::internal(anyhow::anyhow!("OTP verify returned an unexpected error"))
+        }
+    }
+}
+
+fn map_otp_request_error(error: OtpServiceError) -> AppError {
+    match error {
+        // 冷却期或每日发送次数超限
+        OtpServiceError::RateLimited => AppError::TooManyRequests,
+
+        // Redis 或短信服务不可用
+        OtpServiceError::Store(_) | OtpServiceError::Send(_) => AppError::ServiceUnavailable,
+
+        // request() 不会产生 InvalidCode
+        OtpServiceError::InvalidCode => AppError::internal(anyhow::anyhow!(
+            "OTP request unexpectedly returned InvalidCode"
+        )),
     }
 }
 

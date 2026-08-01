@@ -282,7 +282,7 @@ pub enum AdminStatus {
 
 ### 7.1 认证链
 
-四个端点统一执行：
+管理员账号治理端点统一执行：
 
 ```text
 Bearer admin access token
@@ -350,6 +350,17 @@ pub struct SuperAdminAuth {
 
 ### 8.1 创建普通管理员
 
+创建前先由当前超级管理员请求确认码：
+
+```http
+POST /api/v1/admin/admins/create-code
+Authorization: Bearer <admin_access_token>
+```
+
+该请求无 body。服务端从认证对应的数据库记录读取超级管理员手机号，并以
+`Purpose::AdminCreate` 发码；客户端不能传手机号或 purpose。成功返回 `202 Accepted`，
+限流返回 429，OTP 存储或短信服务故障返回 503。
+
 ```http
 POST /api/v1/admin/admins
 ```
@@ -359,7 +370,8 @@ POST /api/v1/admin/admins
 ```json
 {
   "phone": "13800138000",
-  "display_name": "运营管理员"
+  "display_name": "运营管理员",
+  "code": "123456"
 }
 ```
 
@@ -368,7 +380,8 @@ POST /api/v1/admin/admins
 | 字段 | 必填 | 规则 |
 | --- | --- | --- |
 | `phone` | 是 | 使用现有 `Phone::parse`，归一化后必须为合法手机号 |
-| `display_name` | 是 | trim 后 1–50 字符，拒绝 `<`、`>`、控制字符和 Unicode Cf |
+| `display_name` | 否 | 不传时自动生成；传入时 trim 后 1–50 字符，拒绝 `<`、`>`、控制字符和 Unicode Cf |
+| `code` | 是 | 当前超级管理员手机号收到的 `admin_create` 验证码 |
 
 请求中没有：
 
@@ -382,13 +395,14 @@ POST /api/v1/admin/admins
 
 1. 从 `SuperAdminAuth` 取得可信的 `actor_admin_id`；
 2. 校验并归一化手机号与昵称；
-3. 使用 CSPRNG 生成 20 位临时密码；
-4. 用管理员密码策略回验临时密码；
-5. 在阻塞线程池中计算 bcrypt hash；
-6. 插入固定 `role=admin`、`status=active`、`must_change_password=true`，
+3. 使用数据库中当前超级管理员的手机号和 `Purpose::AdminCreate` 验证并消费确认码；
+4. 使用 CSPRNG 生成 20 位临时密码；
+5. 用管理员密码策略回验临时密码；
+6. 在阻塞线程池中计算 bcrypt hash；
+7. 插入固定 `role=admin`、`status=active`、`must_change_password=true`，
    且 `created_by_admin_id=actor_admin_id` 的账号；
-7. 返回公开管理员对象、创建人和一次性临时密码；
-8. 记录不含秘密的结构化事件。
+8. 返回公开管理员对象、创建人和一次性临时密码；
+9. 记录不含秘密的结构化事件。
 
 成功：
 
