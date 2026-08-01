@@ -41,6 +41,7 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
             password_hash: "hashed-pw".to_owned(),
             role: AdminRole::Admin,
             must_change_password: true,
+            created_by_admin_id: None,
         })
         .await
         .expect("seed admin 应成功");

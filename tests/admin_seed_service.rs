@@ -42,6 +42,7 @@ async fn seed_existing(pool: &PgPool, role: AdminRole) -> (Uuid, String) {
             password_hash: EXISTING_HASH.to_owned(),
             role,
             must_change_password: true,
+            created_by_admin_id: None,
         })
         .await
         .expect("造存量管理员应成功");

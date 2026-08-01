@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, phone, display_name, password_hash, role as \"role: AdminRole\", status as \"status: AdminStatus\", must_change_password, failed_login_count, locked_until, created_at, updated_at\n            FROM admins\n            WHERE id = $1\n            ",
+  "query": "\n            SELECT id, phone, display_name, password_hash, role as \"role: AdminRole\", status as \"status: AdminStatus\", must_change_password, failed_login_count, locked_until, created_by_admin_id, created_at, updated_at\n            FROM admins\n            WHERE phone = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,17 @@
       },
       {
         "ordinal": 9,
+        "name": "created_by_admin_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "created_by_admin_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -127,7 +138,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Text"
       ]
     },
     "nullable": [
@@ -140,9 +151,10 @@
       false,
       false,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "fdbdfd30dbd00a7bfaf7df705a612c6d4c7535b053c6e4f39d31220374987cbb"
+  "hash": "cc6945ae7d14bc6013573e305df910a4fa3f71791f9749aecc14eef6fd150c7e"
 }

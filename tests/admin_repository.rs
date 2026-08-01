@@ -35,6 +35,7 @@ fn new_admin() -> NewAdmin {
         password_hash: "hashed-pw".to_owned(),
         role: AdminRole::Admin,
         must_change_password: true,
+        created_by_admin_id: None,
     }
 }
 
@@ -75,6 +76,10 @@ async fn create_then_get_by_id_roundtrips(pool: PgPool) {
 
     assert_eq!(found.failed_login_count, 0, "出厂计数必须为 0");
     assert!(found.locked_until.is_none(), "出厂不得带锁");
+    assert!(
+        found.created_by_admin_id.is_none(),
+        "seed/历史管理员默认没有后台创建人"
+    );
     // 下界放宽到 -5s：created_at 由 DB 时钟落值，DB 快于测试机（远端库/CI 容器）时差为负不算缺陷
     let age = Utc::now() - found.created_at;
     assert!(
@@ -100,6 +105,38 @@ async fn create_super_admin_roundtrips_role(pool: PgPool) {
     let created = repo.create(input).await.expect("create 应成功");
     assert_eq!(created.role, AdminRole::SuperAdmin);
     assert!(!created.must_change_password);
+}
+
+/// API 创建普通管理员时，创建人应从 INSERT RETURNING 以及两个查询入口完整带回。
+#[sqlx::test]
+async fn created_by_admin_id_roundtrips_through_repository(pool: PgPool) {
+    let repo = AdminRepository::new(pool);
+    let creator = repo
+        .create(NewAdmin {
+            role: AdminRole::SuperAdmin,
+            must_change_password: false,
+            ..new_admin()
+        })
+        .await
+        .expect("创建超级管理员应成功");
+
+    let created = repo
+        .create(NewAdmin {
+            created_by_admin_id: Some(creator.id),
+            ..new_admin()
+        })
+        .await
+        .expect("创建普通管理员应成功");
+    assert_eq!(created.created_by_admin_id, Some(creator.id));
+
+    let found_by_id = repo.get_by_id(&created.id).await.expect("按 id 应能查回");
+    assert_eq!(found_by_id.created_by_admin_id, Some(creator.id));
+
+    let found_by_phone = repo
+        .get_by_phone(&created.phone)
+        .await
+        .expect("按 phone 应能查回");
+    assert_eq!(found_by_phone.created_by_admin_id, Some(creator.id));
 }
 
 /// 撞已有手机号 → AlreadyExists（判重不先查，靠 admins_phone_key 唯一约束 + 23505 映射）。

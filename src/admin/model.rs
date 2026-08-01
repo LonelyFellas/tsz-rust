@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize, Deserialize, utoipa::ToSchema)]
@@ -26,7 +27,8 @@ impl AdminRole {
     }
 }
 
-#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy)]
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum AdminStatus {
     Active,
@@ -44,6 +46,7 @@ pub struct Admin {
     pub must_change_password: bool,
     pub failed_login_count: i32,
     pub locked_until: Option<DateTime<Utc>>,
+    pub created_by_admin_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -62,6 +65,10 @@ impl Admin {
     pub fn is_normal(&self, now: DateTime<Utc>) -> bool {
         self.status != AdminStatus::Disabled && !self.is_locked(now)
     }
+
+    pub fn is_super_admin(&self) -> bool {
+        self.role == AdminRole::SuperAdmin
+    }
 }
 
 pub struct NewAdmin {
@@ -71,6 +78,7 @@ pub struct NewAdmin {
     pub password_hash: String,
     pub role: AdminRole,
     pub must_change_password: bool,
+    pub created_by_admin_id: Option<Uuid>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -96,6 +104,7 @@ mod tests {
             must_change_password: false,
             failed_login_count: 0,
             locked_until,
+            created_by_admin_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

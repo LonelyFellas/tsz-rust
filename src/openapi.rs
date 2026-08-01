@@ -40,6 +40,8 @@ use utoipa::{
         crate::admin::auth::handler::admin_logout,
         crate::admin::auth::handler::change_password,
         crate::admin::profile::handler::admin_profile,
+        crate::admin::accounts::handler::create_admin,
+        crate::admin::accounts::handler::list_admins,
     ),
     components(
         schemas(
@@ -67,6 +69,13 @@ use utoipa::{
             crate::admin::profile::handler::AdminProfileResponse,
             crate::admin::auth::handler::AdminToken,
             crate::admin::AdminRole,
+            crate::admin::AdminStatus,
+            crate::admin::accounts::AdminAccountResponse,
+            crate::admin::accounts::AdminCreatorResponse,
+            crate::api::PaginationMeta,
+            crate::api::PaginatedResponse<crate::admin::accounts::AdminAccountResponse>,
+            crate::admin::accounts::handler::CreateAdminRequest,
+            crate::admin::accounts::handler::CreateAdminResponse,
         )
     ),
     tags(
@@ -74,6 +83,7 @@ use utoipa::{
         (name = "user", description = "用户"),
         (name = "otp", description = "验证码"),
         (name = "admin", description = "管理后台认证 / 会话"),
+        (name = "admin-accounts", description = "管理后台管理员账号治理"),
     )
 )]
 pub struct ApiDoc;
@@ -125,6 +135,8 @@ mod tests {
             ("post", "/api/v1/admin/auth/logout"),
             ("post", "/api/v1/admin/auth/change-password"),
             ("get", "/api/v1/admin/profile"),
+            ("post", "/api/v1/admin/admins"),
+            ("get", "/api/v1/admin/admins"),
         ] {
             assert!(
                 json["paths"][path][method].is_object(),
@@ -177,6 +189,104 @@ mod tests {
                 "AdminProfileResponse schema 应含 {field} 字段（flatten 展开后），实际：{profile_props}"
             );
         }
+
+        let create_admin = &json["paths"]["/api/v1/admin/admins"]["post"];
+        assert_eq!(
+            create_admin["security"][0]["bearer_auth"],
+            serde_json::json!([]),
+            "创建管理员接口必须声明 Bearer 鉴权"
+        );
+        assert_eq!(
+            create_admin["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/CreateAdminRequest",
+            "创建管理员接口应引用明确的请求 DTO"
+        );
+        assert_eq!(
+            create_admin["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/CreateAdminResponse",
+            "创建管理员接口的 201 应引用明确的响应 DTO"
+        );
+        for status in ["400", "401", "403", "409", "500", "503"] {
+            assert!(
+                create_admin["responses"][status].is_object(),
+                "创建管理员接口应声明 {status} 响应"
+            );
+        }
+        let required = json["components"]["schemas"]["CreateAdminRequest"]["required"]
+            .as_array()
+            .expect("CreateAdminRequest 应声明必填字段");
+        for field in ["phone", "code"] {
+            assert!(
+                required.iter().any(|value| value == field),
+                "CreateAdminRequest 应要求 {field}"
+            );
+        }
+        assert!(
+            !required.iter().any(|value| value == "display_name"),
+            "display_name 可由系统生成，不应标记为必填"
+        );
+
+        let list_admins = &json["paths"]["/api/v1/admin/admins"]["get"];
+        assert_eq!(
+            list_admins["security"][0]["bearer_auth"],
+            serde_json::json!([]),
+            "管理员列表接口必须声明 Bearer 鉴权"
+        );
+        for status in ["200", "400", "401", "403", "500"] {
+            assert!(
+                list_admins["responses"][status].is_object(),
+                "管理员列表接口应声明 {status} 响应"
+            );
+        }
+
+        let parameters = list_admins["parameters"]
+            .as_array()
+            .expect("管理员列表接口应声明查询参数");
+        for name in ["role", "phone", "display_name", "page", "page_size"] {
+            assert!(
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["name"] == name && parameter["in"] == "query"),
+                "管理员列表接口应声明 query 参数 {name}"
+            );
+        }
+        let page = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "page")
+            .expect("管理员列表接口应声明 page");
+        assert_eq!(page["schema"]["default"], 1);
+        assert_eq!(page["schema"]["minimum"], 1);
+        let page_size = parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "page_size")
+            .expect("管理员列表接口应声明 page_size");
+        assert_eq!(page_size["schema"]["default"], 20);
+        assert_eq!(page_size["schema"]["minimum"], 1);
+        assert_eq!(page_size["schema"]["maximum"], 100);
+
+        let list_schema_ref =
+            list_admins["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+                .as_str()
+                .expect("管理员列表 200 响应应引用分页响应 schema");
+        let list_schema_name = list_schema_ref
+            .strip_prefix("#/components/schemas/")
+            .expect("管理员列表响应应引用 components schema");
+        let list_properties = &json["components"]["schemas"][list_schema_name]["properties"];
+        assert!(list_properties["items"].is_object());
+        assert!(list_properties["pagination"].is_object());
+
+        let pagination_properties = &json["components"]["schemas"]["PaginationMeta"]["properties"];
+        for field in ["page", "page_size", "total", "total_pages"] {
+            assert!(
+                pagination_properties[field].is_object(),
+                "PaginationMeta schema 应包含 {field}"
+            );
+        }
+        assert!(
+            json["components"]["schemas"]["AdminAccountResponse"]["properties"]["created_by"]
+                .is_object(),
+            "管理员公开响应 schema 应包含 created_by"
+        );
     }
 
     /// cookie 契约必须写进 spec：refresh/logout 的入参是 Cookie 而非 body——

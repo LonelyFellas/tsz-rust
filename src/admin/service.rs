@@ -94,7 +94,6 @@ impl AdminService {
             return Err(AdminLoginError::Locked);
         }
 
-        // 2) 第二步 检查密码是否正确（不透明验哈希，不跑注册策略）
         if !Password::verify_raw(password.to_string(), admin.password_hash.clone()).await {
             // 2.1) 密码错误，进行累计
             self.repository
@@ -176,6 +175,7 @@ impl AdminService {
                     password_hash,
                     role: AdminRole::SuperAdmin,
                     must_change_password: false,
+                    created_by_admin_id: None,
                 };
                 match self.repository.create(new_admin).await {
                     Ok(admin) => Ok(SeedOutcome::Created(admin)),

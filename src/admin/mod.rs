@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod auth;
 mod extract;
 mod model;

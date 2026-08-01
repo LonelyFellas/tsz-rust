@@ -69,16 +69,22 @@ async fn insert_admin_token(
 async fn admin_defaults_are_correct(pool: PgPool) {
     let id = insert_admin(&pool, "13800000001").await;
 
-    let (role, status, must_change, failed_count, locked_null): (String, String, bool, i32, bool) =
-        sqlx::query_as(
-            "SELECT role, status, must_change_password, failed_login_count, \
-                locked_until IS NULL \
+    let (role, status, must_change, failed_count, locked_null, created_by_null): (
+        String,
+        String,
+        bool,
+        i32,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT role, status, must_change_password, failed_login_count, \
+                locked_until IS NULL, created_by_admin_id IS NULL \
          FROM admins WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_one(&pool)
-        .await
-        .expect("查询应成功");
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .expect("查询应成功");
 
     assert_eq!(role, "admin", "role 默认应为 admin(super 仅 seed 可造)");
     assert_eq!(status, "active", "status 默认应为 active");
@@ -88,6 +94,10 @@ async fn admin_defaults_are_correct(pool: PgPool) {
     );
     assert_eq!(failed_count, 0, "failed_login_count 默认应为 0");
     assert!(locked_null, "locked_until 默认应为 NULL(未锁定)");
+    assert!(
+        created_by_null,
+        "seed/迁移前历史管理员的 created_by_admin_id 默认应为 NULL"
+    );
 }
 
 // ===== admins:唯一约束 =====
@@ -117,6 +127,44 @@ async fn admin_has_no_email_column(pool: PgPool) {
     .await
     .expect("查询应成功");
     assert!(!has_email, "admins 不应有 email 列(Q9:仅手机号)");
+}
+
+// ===== admins:创建人外键 =====
+
+#[sqlx::test]
+async fn created_by_admin_id_must_reference_existing_admin(pool: PgPool) {
+    let bad = sqlx::query(
+        "INSERT INTO admins \
+         (id, phone, password_hash, display_name, created_by_admin_id) \
+         VALUES ($1, '13800000001', 'hash', 'name', $2)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await;
+
+    assert_db_error_code(bad, "23503", "创建人不存在时应被外键拒绝");
+}
+
+#[sqlx::test]
+async fn creator_cannot_be_deleted_while_created_admin_exists(pool: PgPool) {
+    let creator_id = insert_admin(&pool, "13800000001").await;
+    sqlx::query(
+        "INSERT INTO admins \
+         (id, phone, password_hash, display_name, created_by_admin_id) \
+         VALUES ($1, '13800000002', 'hash', 'child', $2)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(creator_id)
+    .execute(&pool)
+    .await
+    .expect("创建带创建人的管理员应成功");
+
+    let deleted = sqlx::query("DELETE FROM admins WHERE id = $1")
+        .bind(creator_id)
+        .execute(&pool)
+        .await;
+    assert_db_error_code(deleted, "23503", "存在被创建管理员时不应删除创建人");
 }
 
 // ===== admins:CHECK 约束 =====

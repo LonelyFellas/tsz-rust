@@ -29,12 +29,13 @@ impl AdminRepository {
         sqlx::query_as!(
             Admin,
             r#"
-            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING id, phone, display_name, password_hash,
                       role as "role: AdminRole",
                       status as "status: AdminStatus",
                       must_change_password, failed_login_count, locked_until,
+                      created_by_admin_id,
                       created_at, updated_at
             "#,
             admin.id,
@@ -43,6 +44,7 @@ impl AdminRepository {
             admin.password_hash,
             admin.role as AdminRole,
             admin.must_change_password,
+            admin.created_by_admin_id
         )
         .fetch_one(&self.pool)
         .await
@@ -52,7 +54,7 @@ impl AdminRepository {
         sqlx::query_as!(
             Admin,
             r#"
-            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_at, updated_at
+            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, created_at, updated_at
             FROM admins
             WHERE id = $1
             "#,
@@ -67,7 +69,7 @@ impl AdminRepository {
         sqlx::query_as!(
             Admin,
             r#"
-            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_at, updated_at
+            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, created_at, updated_at
             FROM admins
             WHERE phone = $1
             "#,
