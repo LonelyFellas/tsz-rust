@@ -298,7 +298,7 @@ mod tests {
             );
         }
         assert!(
-            json["components"]["schemas"]["AdminAccountResponse"]["properties"]["created_by"]
+            json["components"]["schemas"]["AdminAccountAdminResponse"]["properties"]["created_by"]
                 .is_object(),
             "管理员公开响应 schema 应包含 created_by"
         );
