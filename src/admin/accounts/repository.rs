@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use crate::{
     admin::{
         Admin, AdminRole, AdminStatus, NewAdmin,
-        accounts::model::{AdminAccountListFilter, AdminAccountRecord},
+        accounts::model::{AdminAccountAdminListFilter, AdminAccountRecord},
     },
     platform::is_unique_violation,
 };
@@ -52,9 +52,9 @@ impl AdminAccountsRepository {
         .map_err(map_create_error)
     }
 
-    pub(crate) async fn list(
+    pub(crate) async fn admin_list(
         &self,
-        filter: &AdminAccountListFilter,
+        filter: &AdminAccountAdminListFilter,
     ) -> Result<(Vec<AdminAccountRecord>, i64), AdminAccountsRepositoryError> {
         // 创建一个事务
         let mut tx = self

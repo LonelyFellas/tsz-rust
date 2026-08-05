@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     platform::{EmailError, PhoneError, is_unique_violation},
-    user::model::{User, UserRole, UserStatus},
+    user::model::{User, UserListFilter, UserListRecord, UserRole, UserStatus},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -144,6 +144,84 @@ impl UserRepository {
         .await?;
 
         Ok(roles)
+    }
+
+    pub(crate) async fn user_list(
+        &self,
+        filter: &UserListFilter,
+    ) -> Result<(Vec<UserListRecord>, i64), UserError> {
+        // 创建一个事务
+        let mut tx = self.pool.begin().await.map_err(UserError::Db)?;
+
+        // 使用同一个只读事务
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .map_err(UserError::Db)?;
+
+        // 查询总数
+        let role = filter.role.as_ref().map(UserRole::as_str);
+        let phone_pattern = filter.phone_pattern.as_deref();
+        let email_pattern = filter.email_pattern.as_deref();
+        let display_name_pattern = filter.display_name_pattern.as_deref();
+
+        // 查询当前总数
+        let total = sqlx::query_scalar::<_, i64>(
+            r#"
+            select count(*)
+            from users a
+            where ($1::text is null or a.role = $1)
+              and ($2::text is null or a.phone ilike $2 escape '\')
+              and ($3::text is null or a.email ilike $3 escape '\')
+              and ($4::text is null or a.display_name ilike $4 escape '\')
+            "#,
+        )
+        .bind(role)
+        .bind(phone_pattern)
+        .bind(email_pattern)
+        .bind(display_name_pattern)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(UserError::Db)?;
+
+        // 查询当前页
+        let records = sqlx::query_as::<_, UserListRecord>(
+            r#"
+            SELECT
+                a.id,
+                a.phone,
+                a.email,
+                a.display_name,
+                a.status,
+                s.cefr_level AS cefr_level,
+                s.english_variant AS english_variant,
+                a.avatar_url,
+                a.created_at,
+                a.updated_at
+            FROM users a
+            LEFT JOIN status_profiles s
+                on a.id = s.user_id
+            WHERE ($1::text IS NULL OR a.role = $1)
+              AND ($2::text IS NULL OR a.phone ILIKE $2 ESCAPE '\')
+              AND ($3::text IS NULL OR a.email ILIKE $3 ESCAPE '\')
+              AND ($4::text IS NULL OR a.display_name ILIKE $4 ESCAPE '\')
+            ORDER BY a.created_at DESC, a.id DESC
+            LIMIT $5 OFFSET $6
+            "#,
+        )
+        .bind(role)
+        .bind(phone_pattern)
+        .bind(email_pattern)
+        .bind(display_name_pattern)
+        .bind(filter.limit)
+        .bind(filter.offset)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(UserError::Db)?;
+
+        tx.commit().await.map_err(UserError::Db)?;
+
+        Ok((records, total))
     }
 }
 

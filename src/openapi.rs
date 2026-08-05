@@ -71,10 +71,10 @@ use utoipa::{
             crate::admin::auth::handler::AdminToken,
             crate::admin::AdminRole,
             crate::admin::AdminStatus,
-            crate::admin::accounts::AdminAccountResponse,
+            crate::admin::accounts::AdminAccountAdminResponse,
             crate::admin::accounts::AdminCreatorResponse,
             crate::api::PaginationMeta,
-            crate::api::PaginatedResponse<crate::admin::accounts::AdminAccountResponse>,
+            crate::api::PaginatedResponse<crate::admin::accounts::AdminAccountAdminResponse>,
             crate::admin::accounts::handler::CreateAdminRequest,
             crate::admin::accounts::handler::CreateAdminResponse,
         )

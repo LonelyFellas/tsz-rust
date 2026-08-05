@@ -1,18 +1,20 @@
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use unicode_general_category::{GeneralCategory, get_general_category};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::user::repository::UserError;
 
-#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy)]
-#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[derive(sqlx::Type, Debug, Serialize, PartialEq, Clone, Copy, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum UserStatus {
     Active,
     Disabled,
 }
 
-#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize, utoipa::ToSchema)]
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize, utoipa::ToSchema, Deserialize)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {
@@ -29,7 +31,7 @@ impl UserRole {
     }
 }
 
-#[derive(sqlx::Type, Debug, PartialEq)]
+#[derive(sqlx::Type, Debug, Serialize, PartialEq, ToSchema)]
 #[sqlx(type_name = "text")]
 pub enum CefrLevel {
     A1,
@@ -40,7 +42,7 @@ pub enum CefrLevel {
     C2,
 }
 
-#[derive(sqlx::Type, Debug, PartialEq)]
+#[derive(sqlx::Type, Debug, Serialize, PartialEq, ToSchema)]
 #[sqlx(type_name = "text")]
 pub enum EnglishVariant {
     BrE,
@@ -139,4 +141,27 @@ impl DisplayName {
     pub fn into_string(self) -> String {
         self.0
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct UserListFilter {
+    pub role: Option<UserRole>,
+    pub phone_pattern: Option<String>,
+    pub display_name_pattern: Option<String>,
+    pub email_pattern: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct UserListRecord {
+    pub id: Uuid,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub cefr_level: CefrLevel,
+    pub english_variant: EnglishVariant,
+    pub avatar_url: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
