@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     admin::{AdminRepository, AdminRepositoryError, AdminRole, extract::AdminAuth},
-    error::AppError,
+    error::{AppError, ErrorCode},
     state::AppState,
 };
 
@@ -50,7 +50,7 @@ pub struct AdminProfileResponse {
     responses(
         (status = 200, description = "登录管理员完整档案", body = AdminProfileResponse),
         (status = 401, description = "缺/无效/过期 token，或账号已不存在（视为过期会话）"),
-        (status = 403, description = "账号已禁用（无 code）；或须先改密（code=must_change_password，前端据此跳改密页）"),
+        (status = 403, description = "Account disabled (code=account_disabled), or password change required (code=must_change_password)"),
     )
 )]
 pub async fn admin_profile(
@@ -63,16 +63,16 @@ pub async fn admin_profile(
         .map_err(map_admin_error)?;
 
     if !admin.is_active() {
-        return Err(AppError::Forbidden);
+        return Err(AppError::forbidden(ErrorCode::AccountDisabled, "forbidden"));
     }
 
     // must_change 守卫（§7 守卫组）：目前 profile 是唯一守卫组端点，内联在此；
     // change-password/logout-all 落地后若守卫组扩员，再抽成 middleware/组合提取器。
     if admin.must_change_password {
-        return Err(AppError::ForbiddenCode {
-            message: "password change required".into(),
-            code: "must_change_password".into(),
-        });
+        return Err(AppError::forbidden(
+            ErrorCode::MustChangePassword,
+            "password change required",
+        ));
     }
 
     Ok((
@@ -89,7 +89,9 @@ pub async fn admin_profile(
 
 fn map_admin_error(err: AdminRepositoryError) -> AppError {
     match err {
-        AdminRepositoryError::NotFound => AppError::Unauthenticated("admin not found".into()),
-        _ => AppError::Internal(err.into()),
+        AdminRepositoryError::NotFound => {
+            AppError::unauthorized(ErrorCode::AdminNotFound, "admin not found")
+        }
+        _ => AppError::internal(err),
     }
 }

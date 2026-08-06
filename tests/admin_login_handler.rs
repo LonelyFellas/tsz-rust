@@ -192,7 +192,13 @@ async fn three_failure_modes_are_byte_identical_401(pool: PgPool) {
     assert_eq!(b2, b3, "密码错与码错的 body 应逐字节一致");
     assert_eq!(
         serde_json::from_str::<Value>(&b1).unwrap(),
-        json!({ "error": "invalid credentials" }),
+        json!({
+            "type": "urn:tsz:problem:invalid_credentials",
+            "title": "Invalid credentials",
+            "status": 401,
+            "detail": "invalid credentials",
+            "code": "invalid_credentials"
+        }),
         "统一文案为契约文案"
     );
 }
@@ -324,7 +330,13 @@ async fn locked_admin_is_423_even_with_all_factors_valid(pool: PgPool) {
     );
     assert_eq!(
         serde_json::from_str::<Value>(&body).unwrap(),
-        json!({ "error": "account temporarily locked due to too many failed login attempts" }),
+        json!({
+            "type": "urn:tsz:problem:account_locked",
+            "title": "Account locked",
+            "status": 423,
+            "detail": "account temporarily locked due to too many failed login attempts",
+            "code": "account_locked",
+        }),
         "423 文案是契约（§10），前端据此提示"
     );
     // 锁定先于一切因子：不烧码、不累计、不续锁（①）

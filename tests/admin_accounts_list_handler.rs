@@ -265,13 +265,13 @@ async fn invalid_pagination_returns_json_400(pool: PgPool) {
     for (query, expected) in [
         ("page=0", "page must be at least 1"),
         ("page_size=101", "page_size must be between 1 and 100"),
-        ("role=owner", "Failed to deserialize query string"),
+        ("role=owner", "invalid query parameters"),
     ] {
         let (status, body) = get_admins(&state, Some(&token), query).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
         let json: Value = serde_json::from_str(&body).expect("错误响应应为 JSON");
         assert!(
-            json["error"]
+            json["detail"]
                 .as_str()
                 .is_some_and(|message| message.contains(expected)),
             "{query} 应返回对应错误：{body}"
@@ -290,12 +290,16 @@ async fn governance_guard_rejects_invalid_callers(pool: PgPool) {
     let plain_token = admin_token(&state, plain_id, AdminRole::Admin);
     let (status, body) = get_admins(&state, Some(&plain_token), "").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body, r#"{"error":"forbidden"}"#);
+    let json: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["code"], "forbidden");
+    assert_eq!(json["status"], 403);
 
     let forged_super_token = admin_token(&state, plain_id, AdminRole::SuperAdmin);
     let (status, body) = get_admins(&state, Some(&forged_super_token), "").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body, r#"{"error":"forbidden"}"#);
+    let json: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["code"], "forbidden");
+    assert_eq!(json["status"], 403);
 
     let must_change_id = seed_admin(
         &pool,
@@ -309,10 +313,9 @@ async fn governance_guard_rejects_invalid_callers(pool: PgPool) {
     let must_change_token = admin_token(&state, must_change_id, AdminRole::SuperAdmin);
     let (status, body) = get_admins(&state, Some(&must_change_token), "").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(
-        body,
-        r#"{"error":"password change required","code":"must_change_password"}"#
-    );
+    let json: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["code"], "must_change_password");
+    assert_eq!(json["status"], 403);
 
     let disabled_id = seed_admin(
         &pool,

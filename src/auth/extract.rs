@@ -2,7 +2,10 @@ use axum::extract::FromRequestParts;
 use uuid::Uuid;
 
 use crate::constant::TOKEN_SCHEMA;
-use crate::{error::AppError, state::AppState};
+use crate::{
+    error::{AppError, ErrorCode},
+    state::AppState,
+};
 
 #[derive(Debug)]
 pub struct AuthUser {
@@ -21,18 +24,16 @@ impl FromRequestParts<AppState> for AuthUser {
         let header_value = parts
             .headers
             .get("Authorization")
-            .ok_or(AppError::Unauthenticated(
-                "missing authorization header".into(),
-            ))?;
+            .ok_or_else(invalid_token)?;
         // 2) 拆“Bearer ” -> 缺 -> Error(Unauthenticated)
         let (scheme, token) = header_value
             .to_str()
-            .map_err(|_| AppError::Unauthenticated("invalid authorization header".into()))?
+            .map_err(|_| invalid_token())?
             .split_once(' ')
-            .ok_or(AppError::Unauthenticated("missing token schema".into()))?;
+            .ok_or_else(invalid_token)?;
 
         if !scheme.eq_ignore_ascii_case(TOKEN_SCHEMA) {
-            return Err(AppError::Unauthenticated("invalid token schema".into()));
+            return Err(invalid_token());
         }
 
         // 3) state.token_manager.parse(token) → Expired/Invalid 都 → Err(Unauthenticated)
@@ -40,11 +41,15 @@ impl FromRequestParts<AppState> for AuthUser {
         let user = state
             .token_manager
             .parse(token)
-            .map_err(|_| AppError::Unauthenticated("invalid token".into()))?;
+            .map_err(|_| invalid_token())?;
         // 4) Ok(AuthUser { subject: claims.subject, role: claims.role })
         Ok(AuthUser {
             subject: user.subject,
             role: user.role,
         })
     }
+}
+
+fn invalid_token() -> AppError {
+    AppError::unauthorized(ErrorCode::InvalidToken, "invalid token")
 }

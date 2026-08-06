@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::{
@@ -48,9 +48,18 @@ impl UserRepository {
     }
     /// 创建用户
     pub async fn create(&self, input: NewUser) -> Result<User, UserError> {
-        // 开事务
         let mut tx = self.pool.begin().await?;
+        let user = Self::create_in(&mut tx, input).await?;
+        tx.commit().await?;
+        Ok(user)
+    }
 
+    /// 在调用方提供的事务中创建用户及初始角色。
+    /// 注册自动登录需要把这两步与 refresh token 落库一起提交。
+    pub async fn create_in(
+        connection: &mut PgConnection,
+        input: NewUser,
+    ) -> Result<User, UserError> {
         // 1) 插入users， RETURNING 拿回 DB 填的列
         let row = sqlx::query!(
             r#"
@@ -64,7 +73,7 @@ impl UserRepository {
             input.display_name,
             input.first_role as UserRole
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *connection)
         .await
         .map_err(map_unique_violation)?;
 
@@ -77,7 +86,7 @@ impl UserRepository {
             input.id,
             input.first_role as UserRole
         )
-        .execute(&mut *tx)
+        .execute(&mut *connection)
         .await?;
 
         let user = User {
@@ -93,7 +102,6 @@ impl UserRepository {
             updated_at: row.updated_at,
         };
 
-        tx.commit().await?;
         Ok(user)
     }
 

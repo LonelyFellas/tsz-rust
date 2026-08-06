@@ -21,6 +21,7 @@ impl Channel {
 #[schema(example = "login")]
 pub enum Purpose {
     Login,           // 登录
+    Register,        // 用户注册
     AdminLogin,      // 管理员登录
     AdminCreate,     // 管理员创建
     PasswordReset,   // 密码重置
@@ -36,6 +37,7 @@ impl Purpose {
         match self {
             Purpose::Login => "login",
             Purpose::AdminLogin => "admin_login",
+            Purpose::Register => "register",
             Purpose::AdminCreate => "admin_create",
             Purpose::PasswordReset => "password_reset",
             Purpose::AccountDeletion => "account_deletion",

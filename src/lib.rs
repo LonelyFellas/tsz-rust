@@ -44,10 +44,10 @@ pub fn router(state: AppState) -> Router {
     let router = Router::new()
         .route("/healthz", get(liveness))
         .route("/readyz", get(readiness))
-        .nest(
-            user::USER_MOUNT,
-            Router::new().route("/register", post(user::handler::register)),
-        )
+        // .nest(
+        //     user::USER_MOUNT,
+        //     Router::new().route("/register", post(user::handler::register)),
+        // )
         .nest(admin::ADMIN_MOUNT, admin::router())
         .nest(
             auth::AUTH_MOUNT,
@@ -55,6 +55,7 @@ pub fn router(state: AppState) -> Router {
                 .route("/login", post(auth::handler::login))
                 .route("/refresh", post(auth::handler::refresh_token))
                 .route("/logout", post(auth::handler::logout))
+                .route("/register", post(auth::handler::register))
                 .route("/login-otp", post(auth::handler::login_otp))
                 .route("/me", get(auth::handler::me)),
         )

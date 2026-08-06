@@ -15,7 +15,8 @@ use crate::{
         AdminRepository, AdminRepositoryError, AdminRole, AdminService, AdminSessionError,
         AdminSessionService, extract::AdminAuth, service::AdminLoginError,
     },
-    error::AppError,
+    api::ApiJson,
+    error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
     platform::{Password, Phone, validate_password},
     state::AppState,
@@ -54,7 +55,7 @@ pub struct ChangePasswordRequest {
 pub async fn change_password(
     State(state): State<AppState>,
     auth: AdminAuth,
-    Json(req): Json<ChangePasswordRequest>,
+    ApiJson(req): ApiJson<ChangePasswordRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let repo = AdminRepository::new(state.pool.clone());
     let admin = repo
@@ -65,32 +66,52 @@ pub async fn change_password(
     let current_password_valid =
         Password::verify_raw(req.current_password, admin.password_hash.clone()).await;
     if !current_password_valid {
-        return Err(AppError::Unauthenticated(
-            "current password is incorrect".into(),
+        return Err(AppError::unauthorized(
+            ErrorCode::InvalidCredentials,
+            "current password is incorrect",
         ));
     }
 
     let unchanged =
         Password::verify_raw(req.new_password.clone(), admin.password_hash.clone()).await;
     if unchanged {
-        return Err(AppError::BadRequest(
-            "new password must differ from the current one".into(),
+        return Err(AppError::validation(
+            ErrorCode::PasswordUnchanged,
+            "new_password",
+            "new password must differ from the current one",
         ));
     }
 
-    validate_password(&req.new_password, &admin.phone)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let password = Password::parse(&req.new_password)
-        .map_err(|_| AppError::BadRequest("new password is invalid".into()))?;
-    let password_hash = password.hash().await.map_err(AppError::internal)?;
+    validate_password(&req.new_password, &admin.phone).map_err(|error| {
+        AppError::validation(
+            ErrorCode::InvalidPassword,
+            "new_password",
+            error.to_string(),
+        )
+    })?;
+    let password = Password::parse(&req.new_password).map_err(|_| {
+        AppError::validation(
+            ErrorCode::InvalidPassword,
+            "new_password",
+            "new password is invalid",
+        )
+    })?;
+    let password_hash = password.hash().await.map_err(|error| {
+        AppError::unavailable_with_source(
+            ErrorCode::PasswordHashUnavailable,
+            "password hash unavailable",
+            error,
+        )
+    })?;
 
     let affected = repo
         .set_password_if_unchanged(&admin.id, &admin.password_hash, &password_hash, false)
         .await
         .map_err(map_admin_error)?;
     if affected == 0 {
-        return Err(AppError::Unauthenticated(
-            "current password is incorrect".into(),
+        return Err(AppError::unauthorized(
+            ErrorCode::InvalidCredentials,
+            "current password is incorrect",
         ));
     }
 
@@ -135,7 +156,7 @@ pub async fn admin_refresh(
     let refresh_plaintext = jar
         .get(ADMIN_REFRESH_TOKEN_COOKIE)
         .map(|c| c.value().to_owned())
-        .ok_or(AppError::Unauthenticated("invalid refresh token".into()))?;
+        .ok_or_else(invalid_refresh_token)?;
     // 2) 先查用户id
     let admin_id = admin_session_svc(&state)
         .peek_admin_id(&refresh_plaintext)
@@ -143,24 +164,22 @@ pub async fn admin_refresh(
         .map_err(map_admin_session_error)?;
 
     // 3) 查用户
-    let admin_id = admin_id.ok_or(AppError::Unauthenticated("invalid refresh token".into()))?;
+    let admin_id = admin_id.ok_or_else(invalid_refresh_token)?;
     let admin = AdminRepository::new(state.pool.clone())
         .get_by_id(&admin_id)
         .await
         .map_err(|e| match e {
-            AdminRepositoryError::NotFound => {
-                AppError::Unauthenticated("invalid refresh token".into())
-            }
+            AdminRepositoryError::NotFound => invalid_refresh_token(),
             _ => AppError::internal(e),
         })?;
 
     // 4) 查看状态
     if !admin.is_active() {
-        return Err(AppError::Forbidden);
+        return Err(AppError::forbidden(ErrorCode::AccountDisabled, "forbidden"));
     }
     // 5) 查看是否被锁住
     if admin.is_locked(Utc::now()) {
-        return Err(AppError::Locked("admin is locked".into()));
+        return Err(AppError::locked("admin is locked"));
     }
     // 6) 签发token
     let token = generate_admin_token(&state, &admin).map_err(map_admin_session_error)?;
@@ -234,7 +253,7 @@ pub struct AdminLoginResponse {
 pub async fn admin_login(
     State(state): State<AppState>,
     jar: CookieJar,
-    Json(req): Json<AdminLoginRequest>,
+    ApiJson(req): ApiJson<AdminLoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let admin = admin_svc(&state)
         .login(&req.phone, &req.password, &req.code)
@@ -304,9 +323,11 @@ pub struct AdminLoginOtpRequest {
 )]
 pub async fn admin_login_code(
     State(state): State<AppState>,
-    Json(req): Json<AdminLoginOtpRequest>,
+    ApiJson(req): ApiJson<AdminLoginOtpRequest>,
 ) -> Result<StatusCode, AppError> {
-    let phone = Phone::parse(&req.phone).map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let phone = Phone::parse(&req.phone).map_err(|error| {
+        AppError::validation(ErrorCode::InvalidPhone, "phone", error.to_string())
+    })?;
 
     // 只有 active 且未锁的 admin 才真正发码；其余一律静默压平成 202（反名录枚举）。
     // 用 or-pattern 把「行为相同」的分支并到一起，让它们必须一起改——避免有人日后给
@@ -322,7 +343,13 @@ pub async fn admin_login_code(
                 .await
             {
                 Ok(()) | Err(OtpServiceError::RateLimited) => {} // 已发 / 冷却·日限：静默
-                Err(_) => return Err(AppError::ServiceUnavailable), // Redis/sender 故障：503
+                Err(error) => {
+                    return Err(AppError::unavailable_with_source(
+                        ErrorCode::OtpUnavailable,
+                        "OTP unavailable",
+                        error,
+                    ));
+                }
             }
         }
         Ok(_) | Err(AdminRepositoryError::NotFound) => {} // 禁用·锁定 / 查无此号：静默
@@ -442,17 +469,27 @@ fn clean_admin_refresh_cookie() -> Cookie<'static> {
 fn map_admin_login_error(err: AdminLoginError) -> AppError {
     match err {
         AdminLoginError::InvalidCredentials => {
-            AppError::Unauthenticated("invalid credentials".into())
+            AppError::unauthorized(ErrorCode::InvalidCredentials, "invalid credentials")
         }
-        AdminLoginError::Phone(e) => AppError::BadRequest(e.to_string()),
-        AdminLoginError::AccountDisabled => AppError::Forbidden,
-        AdminLoginError::Locked => AppError::Locked(
-            "account temporarily locked due to too many failed login attempts".into(),
-        ),
+        AdminLoginError::Phone(error) => {
+            AppError::validation(ErrorCode::InvalidPhone, "phone", error.to_string())
+        }
+        AdminLoginError::AccountDisabled => {
+            AppError::forbidden(ErrorCode::AccountDisabled, "forbidden")
+        }
+        AdminLoginError::Locked => {
+            AppError::locked("account temporarily locked due to too many failed login attempts")
+        }
         AdminLoginError::OtpUnavailable(e) => match e {
-            crate::otp::service::OtpServiceError::RateLimited => AppError::TooManyRequests,
-            crate::otp::service::OtpServiceError::Store(_)
-            | crate::otp::service::OtpServiceError::Send(_) => AppError::ServiceUnavailable,
+            crate::otp::service::OtpServiceError::RateLimited => {
+                AppError::rate_limited(ErrorCode::OtpRateLimited, "too many requests")
+            }
+            error @ (crate::otp::service::OtpServiceError::Store(_)
+            | crate::otp::service::OtpServiceError::Send(_)) => AppError::unavailable_with_source(
+                ErrorCode::OtpUnavailable,
+                "OTP unavailable",
+                error,
+            ),
             crate::otp::service::OtpServiceError::InvalidCode => {
                 AppError::internal(anyhow::anyhow!("InvalidCode 应已映射为 InvalidCredentials"))
             }
@@ -463,9 +500,7 @@ fn map_admin_login_error(err: AdminLoginError) -> AppError {
 
 fn map_admin_session_error(err: AdminSessionError) -> AppError {
     match err {
-        AdminSessionError::InvalidRefreshToken => {
-            AppError::Unauthenticated("invalid refresh token".into())
-        }
+        AdminSessionError::InvalidRefreshToken => invalid_refresh_token(),
         AdminSessionError::Repository(e) => AppError::internal(e),
         AdminSessionError::Signing(e) => AppError::internal(e),
     }
@@ -473,7 +508,13 @@ fn map_admin_session_error(err: AdminSessionError) -> AppError {
 
 fn map_admin_error(err: AdminRepositoryError) -> AppError {
     match err {
-        AdminRepositoryError::NotFound => AppError::Unauthenticated("admin not found".into()),
-        _ => AppError::Internal(err.into()),
+        AdminRepositoryError::NotFound => {
+            AppError::unauthorized(ErrorCode::AdminNotFound, "admin not found")
+        }
+        _ => AppError::internal(err),
     }
+}
+
+fn invalid_refresh_token() -> AppError {
+    AppError::unauthorized(ErrorCode::InvalidRefreshToken, "invalid refresh token")
 }

@@ -14,6 +14,7 @@ pub const OTP_MOUNT: &str = "/api/v1/otp";
 #[serde(rename_all = "snake_case")]
 pub enum PublicOtpPurpose {
     Login,
+    Register,
     PasswordReset,
     AccountDeletion,
     ContactBind,
@@ -23,6 +24,7 @@ impl From<PublicOtpPurpose> for Purpose {
     fn from(purpose: PublicOtpPurpose) -> Self {
         match purpose {
             PublicOtpPurpose::Login => Purpose::Login,
+            PublicOtpPurpose::Register => Purpose::Register,
             PublicOtpPurpose::PasswordReset => Purpose::PasswordReset,
             PublicOtpPurpose::AccountDeletion => Purpose::AccountDeletion,
             PublicOtpPurpose::ContactBind => Purpose::ContactBind,

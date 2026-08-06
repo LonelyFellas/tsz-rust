@@ -61,22 +61,35 @@ async rewrites() {
 
 ## 3. 端点参考
 
-### 3.1 `POST /api/v1/user/register` — 注册
+### 3.1 `POST /api/v1/auth/register` — 手机号注册并登录
 
 ```jsonc
-// 请求：phone / email 二选一（恰好一个），没有 display_name（后端随机生成昵称）
-{ "phone": "13800138000", "password": "P@ssw0rd!" }
-// 或 { "email": "a@b.com", "password": "P@ssw0rd!" }
+// code 由 3.4 的 /otp/send 以 purpose="register" 获取
+{ "phone": "13800138000", "password": "P@ssw0rd!", "code": "123456" }
 ```
 
 ```jsonc
-// 201
-{ "user_id": "019f731b-...", "display_name": "文艺天鹅0329", "role": "student" }
+// 201：响应与 3.2 登录完全同形状
+{
+  "user": {
+    "id": "019f731b-bdad-7881-a309-28730af7ce8d",
+    "display_name": "文艺天鹅0329",
+    "phone": "13800138000",
+    "avatar_url": "",
+    "roles": ["student"],
+    "active_role": "student"
+  },
+  "access_token": "eyJ0eXAiOiJKV1Qi...",
+  "expires_in": 900,
+  "refresh_token_expires_at": 1786957219
+}
+// + Set-Cookie: refresh_token=...; HttpOnly; SameSite=Lax; Path=/api/v1/auth
 ```
 
-- 注册**只能是 student**（无 role 字段可传）。
-- **注册不会自动登录**（无 Set-Cookie、无 token）——注册成功后前端需引导/自动调一次 login。
-- 错误：409 手机/邮箱已占用；400 缺 phone+email / 密码非法。
+- 当前注册**只支持手机号**，不接收 email；注册角色恒为 student，昵称由后端生成。
+- 注册成功已经建立会话，前端不得再调用一次 login。
+- 错误：400 手机号/密码非法；401 验证码无效或过期；409 手机号已占用；
+  429 验码频控；503 验证码基础设施或密码哈希不可用。
 
 ### 3.2 `POST /api/v1/auth/login` — 密码登录
 
@@ -103,7 +116,7 @@ async rewrites() {
 // + Set-Cookie: refresh_token=...; HttpOnly; SameSite=Lax; Path=/api/v1/auth; Max-Age=2592000
 ```
 
-- 错误：401 `{"error":"invalid credentials"}`——账号不存在与密码错误**响应逐字节一致**、
+- 错误：401 `invalid_credentials` Problem（完整结构见 `docs/api-errors.md`）——账号不存在与密码错误**响应逐字节一致**、
   不可区分（前端别试图提示"账号不存在"）；403——密码正确但账号被禁用（密码已验证过，
   这一种可如实提示"账号已被禁用"）。
 
@@ -119,7 +132,7 @@ async rewrites() {
 
 ```jsonc
 // phone / email 二选一；purpose 为 snake_case 枚举：
-// "login" | "password_reset" | "account_deletion" | "contact_bind"
+// "login" | "register" | "password_reset" | "account_deletion" | "contact_bind"
 { "phone": "13800138000", "purpose": "login" }
 ```
 
@@ -138,7 +151,7 @@ async rewrites() {
 // + Set-Cookie: 新 refresh_token（旧枚已作废）
 ```
 
-- 401 `{"error":"invalid refresh token"}`：cookie 缺失/过期/已用过/用户被禁用，
+- 401 `invalid_refresh_token` Problem：cookie 缺失/过期/已用过/用户被禁用，
   **一律同一响应不可区分** → 前端统一当"会话失效"处理：清内存 token、跳登录页。
 
 ### 3.6 `POST /api/v1/auth/logout` — 登出
@@ -250,10 +263,10 @@ function refreshOnce(): Promise<boolean> {
 
 其它注意：
 
-- **错误 body 统一是 `{"error": "..."}`**；422 是 axum 反序列化层的（字段名错/类型错），
-  body 不是这个形状，遇到 422 先检查请求字段拼写（最常见：把 `identifier` 写成 `phone`）。
+- **错误 body 统一使用 Problem Details**：`type/title/status/detail/code` 与可选 `field`，媒体类型为
+  `application/problem+json`。422 使用同一结构，且固定为 `invalid_request_body`，遇到时先检查请求字段拼写或类型。
 - 各失败态文案刻意**不可区分**（防账号枚举/防 token 状态探测），前端按状态码处理即可，
-  不要解析 error 文案做分支。
+  不要解析 `title` 或 `detail` 文案做分支；业务判断读取稳定 `code`。
 - JWT 的 payload 前端可以解出来看（sub/role/exp），但**不要**据此做权限判断，
   以 `user.roles`/`user.active_role` 为准。
 

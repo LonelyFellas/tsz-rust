@@ -10,7 +10,11 @@
 
 use utoipa::{
     Modify, OpenApi,
-    openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+    openapi::{
+        Content, Ref, RefOr,
+        path::Operation,
+        security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
+    },
 };
 
 /// 全局 API 文档。新增接口只需在 `paths` / `components.schemas` 两处登记。
@@ -21,7 +25,7 @@ use utoipa::{
         version = "0.1.0",
         description = "tsz 核心服务（Rust 版）接口文档"
     ),
-    modifiers(&SecurityAddon),
+    modifiers(&SecurityAddon, &ProblemDetailsAddon),
     paths(
         // auth 域
         crate::auth::handler::login,
@@ -29,8 +33,7 @@ use utoipa::{
         crate::auth::handler::refresh_token,
         crate::auth::handler::logout,
         crate::auth::handler::me,
-        // user 域
-        crate::user::handler::register,
+        crate::auth::handler::register,
         // otp 域
         crate::otp::handler::send_otp,
         // admin 域
@@ -46,16 +49,17 @@ use utoipa::{
     ),
     components(
         schemas(
+            crate::error::ErrorCode,
+            crate::error::ProblemDetails,
             // auth
             crate::auth::handler::UserProfile,
             crate::auth::handler::LoginRequest,
             crate::auth::handler::LoginResponse,
             crate::auth::handler::LoginOtpRequest,
+            crate::auth::handler::RegisterRequest,
             crate::auth::handler::Token,
             crate::auth::handler::RefreshResponse,
             // user
-            crate::user::handler::RegisterRequest,
-            crate::user::handler::RegisterResponse,
             crate::user::model::UserRole,
             // otp
             crate::otp::handler::SendOtpRequest,
@@ -110,6 +114,46 @@ impl Modify for SecurityAddon {
     }
 }
 
+/// 给所有已声明的 4xx/5xx 自动挂上统一 ProblemDetails，避免每个 handler 重复标注。
+struct ProblemDetailsAddon;
+
+impl Modify for ProblemDetailsAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        for path in openapi.paths.paths.values_mut() {
+            add_error_response_schema(path.get.as_mut());
+            add_error_response_schema(path.put.as_mut());
+            add_error_response_schema(path.post.as_mut());
+            add_error_response_schema(path.delete.as_mut());
+            add_error_response_schema(path.options.as_mut());
+            add_error_response_schema(path.head.as_mut());
+            add_error_response_schema(path.patch.as_mut());
+            add_error_response_schema(path.trace.as_mut());
+        }
+    }
+}
+
+fn add_error_response_schema(operation: Option<&mut Operation>) {
+    let Some(operation) = operation else {
+        return;
+    };
+    for (status, response) in &mut operation.responses.responses {
+        let is_error = status
+            .parse::<u16>()
+            .is_ok_and(|status| (400..600).contains(&status));
+        if !is_error {
+            continue;
+        }
+        if let RefOr::T(response) = response
+            && response.content.is_empty()
+        {
+            response.content.insert(
+                "application/problem+json".to_owned(),
+                Content::new(Some(Ref::from_schema_name("ProblemDetails"))),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,7 +172,7 @@ mod tests {
             ("post", "/api/v1/auth/refresh"),
             ("post", "/api/v1/auth/logout"),
             ("get", "/api/v1/auth/me"),
-            ("post", "/api/v1/user/register"),
+            ("post", "/api/v1/auth/register"),
             ("post", "/api/v1/otp/send"),
             ("post", "/api/v1/admin/auth/login"),
             ("post", "/api/v1/admin/auth/refresh"),
@@ -160,6 +204,47 @@ mod tests {
         assert!(
             json["components"]["schemas"]["RefreshResponse"].is_object(),
             "RefreshResponse schema 应出现在 spec 中（refresh 响应含 refresh_token_expires_at，不是裸 Token）"
+        );
+        let register = &json["paths"]["/api/v1/auth/register"]["post"];
+        assert_eq!(
+            register["summary"], "POST /api/v1/auth/register",
+            "register 摘要不得残留旧 /user/register 路径"
+        );
+        assert!(
+            register["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("注册成功无需再次调用登录接口")),
+            "register 描述应明确注册成功已经建立会话"
+        );
+        assert_eq!(
+            register["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/RegisterRequest",
+            "register 应引用 auth 域的请求 DTO"
+        );
+        assert_eq!(
+            register["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/LoginResponse",
+            "register 成功应直接返回登录响应"
+        );
+        let register_required = json["components"]["schemas"]["RegisterRequest"]["required"]
+            .as_array()
+            .expect("RegisterRequest 应声明必填字段");
+        for field in ["phone", "password", "code"] {
+            assert!(
+                register_required.iter().any(|value| value == field),
+                "RegisterRequest 应要求 {field}"
+            );
+        }
+        assert!(
+            json["components"]["schemas"]["RegisterRequest"]["properties"]
+                .get("email")
+                .is_none(),
+            "当前注册契约不应暴露 email"
+        );
+        assert_eq!(
+            json["components"]["schemas"]["RegisterRequest"]["properties"]["phone"]["description"],
+            "中国大陆手机号",
+            "注册 phone 描述应明确当前只支持手机号"
         );
         let change_password = &json["paths"]["/api/v1/admin/auth/change-password"]["post"];
         assert_eq!(
@@ -382,6 +467,51 @@ mod tests {
                     .is_null(),
                 "admin login-code 反枚举契约：不得声明可探测状态码 {leaky}"
             );
+        }
+    }
+
+    #[test]
+    fn error_contract_is_documented() {
+        let json = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        assert!(json["components"]["schemas"]["ErrorCode"].is_object());
+        assert!(json["components"]["schemas"]["ProblemDetails"].is_object());
+
+        let properties = &json["components"]["schemas"]["ProblemDetails"]["properties"];
+        for field in ["type", "title", "status", "detail", "code", "field"] {
+            assert!(properties[field].is_object(), "ProblemDetails 缺少 {field}");
+        }
+        assert!(properties["error"].is_null());
+
+        let schema = &json["paths"]["/api/v1/auth/register"]["post"]["responses"]["400"]["content"]
+            ["application/problem+json"]["schema"];
+        assert_eq!(schema["$ref"], "#/components/schemas/ProblemDetails");
+
+        for (path_name, path) in json["paths"].as_object().unwrap() {
+            for (method, operation) in path.as_object().unwrap() {
+                if ![
+                    "get", "put", "post", "delete", "options", "head", "patch", "trace",
+                ]
+                .contains(&method.as_str())
+                {
+                    continue;
+                }
+                for (status, response) in operation["responses"].as_object().unwrap() {
+                    if status
+                        .parse::<u16>()
+                        .is_ok_and(|status| (400..600).contains(&status))
+                    {
+                        assert_eq!(
+                            response["content"]["application/problem+json"]["schema"]["$ref"],
+                            "#/components/schemas/ProblemDetails",
+                            "{method} {path_name} 的 {status} 应使用 ProblemDetails"
+                        );
+                        assert!(
+                            response["content"]["application/json"].is_null(),
+                            "错误响应不得继续声明 application/json"
+                        );
+                    }
+                }
+            }
         }
     }
 }

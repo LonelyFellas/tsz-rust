@@ -165,7 +165,7 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 - 执法(hardening-D6):admin 子路由分三组挂载——
   - **公开组**:login/refresh/logout(仅 cookie,无 Bearer);
   - **逃生组**(有 Bearer、守卫外):logout-all、change-password——被强制改密者的唯一出口;
-  - **守卫组**(有 Bearer、守卫内):profile 及其余全部。守卫 = 一层 axum middleware(或组合提取器),`AdminAuth` 之后查库 `must_change_password`,true ⇒ 403 `{"error":"password change required","code":"must_change_password"}`。admin 行消失 ⇒ 401(视为过期会话,非 500)。
+  - **守卫组**(有 Bearer、守卫内):profile 及其余全部。守卫 = 一层 axum middleware(或组合提取器),`AdminAuth` 之后查库 `must_change_password`,true ⇒ 403 `must_change_password` Problem。admin 行消失 ⇒ 401(视为过期会话,非 500)。
 - 每请求一次索引查,后台 QPS 低,不缓存(rbac-D7 同理)。
 - **前端契约**:靠 403 的 `code` 字段整页跳 `/change-password`(刷新后 refresh 响应不带 flag,靠这个 403 重新发现)——`code` 字段是硬契约,见 §12。
 
@@ -255,16 +255,16 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 
 | 场景 | 状态码 | body |
 |---|---|---|
-| 账号不存在 ≡ 密码错 ≡ **验证码错**(login) | 401 | `{"error":"invalid credentials"}` 三态逐字节一致 + dummy_hash 平衡时序(码错可区分 = 密码爆破 oracle,§6④) |
-| 锁定中(密码对错皆然) | **423** | `{"error":"account temporarily locked due to too many failed login attempts"}` |
-| disabled(login,密码对) | 403 | `{"error":"account disabled"}` |
-| refresh:未知/已吊销/过期/重放/属主 disabled | 401 | `{"error":"invalid refresh token"}` 全笼统 + 清 cookie |
+| 账号不存在 ≡ 密码错 ≡ **验证码错**(login) | 401 | `invalid_credentials` Problem 三态逐字节一致 + dummy_hash 平衡时序(码错可区分 = 密码爆破 oracle,§6④) |
+| 锁定中(密码对错皆然) | **423** | `account_locked` Problem |
+| disabled(login,密码对) | 403 | `account_disabled` Problem |
+| refresh:未知/已吊销/过期/重放/属主 disabled | 401 | `invalid_refresh_token` Problem 全笼统 + 清 cookie |
 | refresh/logout 缺 cookie | 401 / 204 | logout 幂等 204(web T4 定案沿用);refresh 401 |
-| 旧密码错(change-password) | 401 | `{"error":"current password is incorrect"}` |
+| 旧密码错(change-password) | 401 | `invalid_credentials` Problem |
 | 新旧相同 / 弱密码 | 400 | message 说明具体规则 |
-| 非 super 碰 super 端点 | 403 | `{"error":"super admin required"}` |
-| 被强制改密碰守卫组 | 403 | `{"error":"password change required","code":"must_change_password"}` |
-| provision 撞手机号 | 409 | `{"error":"phone already registered"}`(**不带 go 的 `field` 字段**;email 冲突态已随 Q9 消失) |
+| 非 super 碰 super 端点 | 403 | `forbidden` Problem |
+| 被强制改密碰守卫组 | 403 | `must_change_password` Problem |
+| provision 撞手机号 | 409 | `phone_already_registered` Problem（email 冲突态已随 Q9 消失） |
 
 **`AppError` 需两处扩展**:① `Locked(String)` → 423;② 带 `code` 的 403/400 变体(如 `ForbiddenCode{error, code}` / `BadRequestCode{...}`,或 admin 域局部响应类型——实现时选,前端只认 body 形状)。`code` 是前端路由依据(`must_change_password` ⇒ 跳改密页),属硬契约。
 

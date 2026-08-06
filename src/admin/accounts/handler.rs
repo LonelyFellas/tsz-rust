@@ -1,9 +1,4 @@
-use axum::{
-    Json,
-    extract::{Query, State, rejection::QueryRejection},
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -17,12 +12,16 @@ use crate::{
         },
         extract::AdminAuth,
     },
-    api::{ListQuery, PaginatedResponse, PaginationQuery},
-    error::AppError,
+    api::{ApiJson, ApiQuery, ListQuery, PaginatedResponse, PaginationQuery},
+    error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
-    platform::Phone,
+    platform::{Phone, PhoneError},
     state::AppState,
-    user::{display_name::generate_display_name, model::DisplayName, repository::UserRepository},
+    user::{
+        display_name::generate_display_name,
+        model::{DisplayName, DisplayNameError},
+        repository::UserRepository,
+    },
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -68,18 +67,17 @@ pub struct CreateAdminResponse {
 pub async fn create_admin(
     State(state): State<AppState>,
     auth: AdminAuth,
-    Json(req): Json<CreateAdminRequest>,
+    ApiJson(req): ApiJson<CreateAdminRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_super_admin(&state, &auth).await?;
 
     // 2) 验证合法phone
-    let phone =
-        Phone::parse(&req.phone).map_err(|_| AppError::BadRequest("当前手机号码非法".into()))?;
+    let phone = Phone::parse(&req.phone).map_err(map_phone_error)?;
 
     // 3) 如何display_name 不为空 则验证display_name
     let display_name = match &req.display_name {
         Some(display_name) => DisplayName::parse(display_name)
-            .map_err(|_| AppError::BadRequest("当前用户名非法".into()))?
+            .map_err(map_display_name_error)?
             .into_string(),
         // 自动系统帮生成一个
         _ => generate_display_name(),
@@ -126,13 +124,9 @@ pub async fn create_admin(
 pub async fn list_admins(
     State(state): State<AppState>,
     auth: AdminAuth,
-    filters: Result<Query<AdminListQueryParams>, QueryRejection>,
-    pagination: Result<Query<PaginationQuery>, QueryRejection>,
+    ApiQuery(filters): ApiQuery<AdminListQueryParams>,
+    ApiQuery(pagination): ApiQuery<PaginationQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let Query(filters) = filters.map_err(|error| AppError::BadRequest(error.to_string()))?;
-
-    let Query(pagination) = pagination.map_err(|error| AppError::BadRequest(error.to_string()))?;
-
     let query = ListQuery {
         filters,
         pagination,
@@ -150,13 +144,9 @@ pub async fn list_admins(
 pub async fn list_users(
     State(state): State<AppState>,
     auth: AdminAuth,
-    filters: Result<Query<UserListQueryParams>, QueryRejection>,
-    pagination: Result<Query<PaginationQuery>, QueryRejection>,
+    ApiQuery(filters): ApiQuery<UserListQueryParams>,
+    ApiQuery(pagination): ApiQuery<PaginationQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let Query(filters) = filters.map_err(|error| AppError::BadRequest(error.to_string()))?;
-
-    let Query(pagination) = pagination.map_err(|error| AppError::BadRequest(error.to_string()))?;
-
     let query = ListQuery {
         filters,
         pagination,
@@ -224,18 +214,21 @@ async fn require_active_admin(state: &AppState, auth: &AdminAuth) -> Result<Admi
         .map_err(map_admin_error)?;
 
     if !admin.is_active() {
-        return Err(AppError::Forbidden);
+        return Err(AppError::forbidden(ErrorCode::AccountDisabled, "forbidden"));
     }
 
     if admin.must_change_password {
-        return Err(AppError::ForbiddenCode {
-            message: "password change required".into(),
-            code: "must_change_password".into(),
-        });
+        return Err(AppError::forbidden(
+            ErrorCode::MustChangePassword,
+            "password change required",
+        ));
     }
 
     if admin.is_locked(Utc::now()) {
-        return Err(AppError::Unauthenticated("admin was locked".into()));
+        return Err(AppError::unauthorized(
+            ErrorCode::AccountLocked,
+            "admin was locked",
+        ));
     }
 
     Ok(admin)
@@ -245,22 +238,28 @@ async fn require_super_admin(state: &AppState, auth: &AdminAuth) -> Result<Admin
     let admin = require_active_admin(state, auth).await?;
 
     if !admin.is_super_admin() {
-        return Err(AppError::Forbidden);
+        return Err(AppError::forbidden(ErrorCode::Forbidden, "forbidden"));
     }
     Ok(admin)
 }
 
 fn map_admin_error(err: AdminRepositoryError) -> AppError {
     match err {
-        AdminRepositoryError::NotFound => AppError::Unauthenticated("admin not found".into()),
-        _ => AppError::Internal(err.into()),
+        AdminRepositoryError::NotFound => {
+            AppError::unauthorized(ErrorCode::AdminNotFound, "admin not found")
+        }
+        _ => AppError::internal(err),
     }
 }
 
 fn map_otp_verify_error(error: OtpServiceError) -> AppError {
     match error {
-        OtpServiceError::InvalidCode => AppError::BadRequest("当前验证码非法".into()),
-        OtpServiceError::Store(_) => AppError::ServiceUnavailable,
+        OtpServiceError::InvalidCode => {
+            AppError::validation(ErrorCode::InvalidOtpCode, "code", "invalid code")
+        }
+        error @ OtpServiceError::Store(_) => {
+            AppError::unavailable_with_source(ErrorCode::OtpUnavailable, "OTP unavailable", error)
+        }
         OtpServiceError::Send(_) | OtpServiceError::RateLimited => {
             AppError::internal(anyhow::anyhow!("OTP verify returned an unexpected error"))
         }
@@ -270,10 +269,14 @@ fn map_otp_verify_error(error: OtpServiceError) -> AppError {
 fn map_otp_request_error(error: OtpServiceError) -> AppError {
     match error {
         // 冷却期或每日发送次数超限
-        OtpServiceError::RateLimited => AppError::TooManyRequests,
+        OtpServiceError::RateLimited => {
+            AppError::rate_limited(ErrorCode::OtpRateLimited, "too many requests")
+        }
 
         // Redis 或短信服务不可用
-        OtpServiceError::Store(_) | OtpServiceError::Send(_) => AppError::ServiceUnavailable,
+        error @ (OtpServiceError::Store(_) | OtpServiceError::Send(_)) => {
+            AppError::unavailable_with_source(ErrorCode::OtpUnavailable, "OTP unavailable", error)
+        }
 
         // request() 不会产生 InvalidCode
         OtpServiceError::InvalidCode => AppError::internal(anyhow::anyhow!(
@@ -284,8 +287,10 @@ fn map_otp_request_error(error: OtpServiceError) -> AppError {
 
 fn map_list_error(error: AdminAccountsServiceError) -> AppError {
     match error {
-        AdminAccountsServiceError::InvalidQuery(message) => AppError::BadRequest(message),
-        other => AppError::Internal(other.into()),
+        AdminAccountsServiceError::InvalidQuery(message) => {
+            AppError::bad_request(ErrorCode::InvalidQuery, message)
+        }
+        other => AppError::internal(other),
     }
 }
 
@@ -295,11 +300,29 @@ fn map_user_list_error(error: AdminAccountsServiceError) -> AppError {
 
 fn map_provision_err(err: AdminAccountsServiceError) -> AppError {
     match err {
-        AdminAccountsServiceError::AlreadyExists => {
-            AppError::Conflict("phone already registered".into())
-        }
-        other => AppError::Internal(other.into()),
+        AdminAccountsServiceError::AlreadyExists => AppError::conflict(
+            ErrorCode::PhoneAlreadyRegistered,
+            Some("phone"),
+            "phone already registered",
+        ),
+        other => AppError::internal(other),
     }
+}
+
+fn map_phone_error(error: PhoneError) -> AppError {
+    let message = match error {
+        PhoneError::Empty => "phone is missing",
+        PhoneError::Invalid => "invalid phone",
+    };
+    AppError::validation(ErrorCode::InvalidPhone, "phone", message)
+}
+
+fn map_display_name_error(error: DisplayNameError) -> AppError {
+    AppError::validation(
+        ErrorCode::InvalidDisplayName,
+        "display_name",
+        error.to_string(),
+    )
 }
 
 #[cfg(test)]

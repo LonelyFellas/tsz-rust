@@ -84,10 +84,11 @@ cookie，照样拿到 access token。区别在于攻击者必须寄生在受害�
 > Cookie 能否穿透 Next 代理：Next.js `rewrites()` 会转发请求的 `Cookie` 头、也会把后端的
 > `Set-Cookie` 透传回浏览器（作用域落在 localhost:3000）。实现后需实测一次（见 §4 验收）。
 
-### 0.3 错误体 `{"error": "..."}` —— **已吻合，不用改** ✅
+### 0.3 错误体：RFC 9457 正式契约
 
-后端 `AppError`（src/error.rs:60）序列化即 `{"error": msg}`，前端 `parseError` 正好读 `body.error`。
-`code`/`details` 前端视为可选，登录流程用不到。
+后端返回 `type/title/status/detail/code` 与可选 `field`，媒体类型为
+`application/problem+json`。前端 `parseError` 读取 `detail`，业务分支只读取 `code`，表单可读取
+`field`，并忽略未知扩展字段。前后端均不再依赖或声明旧 `error` 字段。
 
 ---
 
@@ -197,22 +198,19 @@ rotate 里要接的逻辑：`consume` 落空 → `find_by_hash` 兜一下 → �
 - 请求 `{ "identifier": "...", "code": "..." }` —— **已吻合** ✅。
 - 响应：与 T1 同（共用 `build_login_response`，T1 改完这里自动对齐）。
 
-### T7. register：`POST /api/v1/user/register` → **改路由为 `POST /api/v1/auth/register`**
+### T7. register：`POST /api/v1/auth/register`（已落地）
 
-- 路由从 `/api/v1/user` nest 挪到 `/api/v1/auth/register`。
-- 请求补齐前端字段（现在只有 `{phone?,email?,password}`）：
+- 当前只支持手机号注册，请求固定为：
   ```jsonc
   {
-    "phone": "...",          // phone/email 二选一
-    "email": "...",
+    "phone": "13800138000",
     "password": "...",
-    "display_name": "张三",   // 必填，trim 后 1–50 字符
-    "role": "student",       // "student" | "teacher"
-    "code": "123456"         // 可选：验证码注册校验
+    "code": "123456"         // /otp/send 的 register 用途验证码，必填
   }
   ```
-- 行为：注册后**自动登录** —— 发 token + Set-Cookie refresh，返回 **`AuthResponse`**（同 T1），
-  不再是 `RegisterResponse{user_id,display_name,role}`。
+- 不接收 `email`、`display_name` 或 `role`；昵称由后端生成，角色恒为 student。
+- 注册后**自动登录**：发 access token + Set-Cookie refresh，返回 **`AuthResponse`**（同 T1），
+  不再返回旧 `RegisterResponse{user_id,display_name,role}`，前端不得链式调用 login。
 
 ---
 
@@ -248,4 +246,4 @@ rotate 里要接的逻辑：`consume` 落空 → `find_by_hash` 兜一下 → �
 | T4 logout | body `{refresh_token}` | cookie 读 + 清 cookie，返回 204 |
 | T5 send-code | `POST /api/v1/otp/send` `{phone?,email?,purpose}` 202空body | `POST /api/v1/auth/send-code` `{identifier}` → `{status}` |
 | T6 login-otp | `POST /api/v1/auth/login-otp` | `POST /api/v1/auth/login/code`，响应 `AuthResponse` |
-| T7 register | `POST /api/v1/user/register` `{phone?,email?,password}` | `POST /api/v1/auth/register` 补 `display_name/role/code?`，自动登录返回 `AuthResponse` |
+| T7 register | `POST /api/v1/user/register` `{phone?,email?,password}` | `POST /api/v1/auth/register` `{phone,password,code}`，自动登录返回 `AuthResponse` |

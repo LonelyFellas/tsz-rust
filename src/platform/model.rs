@@ -90,7 +90,7 @@ impl Password {
     pub async fn hash(self) -> Result<String, PasswordError> {
         spawn_blocking(move || hash(&self.0, DEFAULT_COST))
             .await
-            .expect("系统错误：密码哈希任务 join 失败")
+            .map_err(|_| PasswordError::HashFailed)?
             .map_err(|_| PasswordError::HashFailed)
     }
 

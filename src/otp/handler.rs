@@ -1,9 +1,10 @@
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{extract::State, http::StatusCode};
 use serde::Deserialize;
 use utoipa::ToSchema;
 
 use crate::{
-    error::AppError,
+    api::ApiJson,
+    error::{AppError, ErrorCode},
     otp::{PublicOtpPurpose, service::OtpServiceError},
     state::AppState,
     user::service::normalize_identifier,
@@ -37,7 +38,7 @@ pub struct SendOtpRequest {
 )]
 pub async fn send_otp(
     State(state): State<AppState>,
-    Json(req): Json<SendOtpRequest>,
+    ApiJson(req): ApiJson<SendOtpRequest>,
 ) -> Result<StatusCode, AppError> {
     let target = match (
         req.phone
@@ -49,15 +50,17 @@ pub async fn send_otp(
             .map(str::trim)
             .filter(|s| !s.is_empty()),
     ) {
-        (Some(p), None) => normalize_identifier(p),
-        (None, Some(e)) => normalize_identifier(e),
+        (Some(phone), None) => normalize_identifier(phone)
+            .map_err(|_| AppError::validation(ErrorCode::InvalidPhone, "phone", "invalid phone")),
+        (None, Some(email)) => normalize_identifier(email)
+            .map_err(|_| AppError::validation(ErrorCode::InvalidEmail, "email", "invalid email")),
         _ => {
-            return Err(AppError::BadRequest(
-                "exactly one of phone or email is required".into(),
+            return Err(AppError::bad_request(
+                ErrorCode::InvalidIdentifier,
+                "exactly one of phone or email is required",
             ));
         }
-    }
-    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    }?;
 
     state
         .otp_service
@@ -69,9 +72,12 @@ pub async fn send_otp(
 
 fn map_otp_error(e: OtpServiceError) -> AppError {
     match e {
-        OtpServiceError::RateLimited => AppError::TooManyRequests, // 429
-        OtpServiceError::Store(_) => AppError::ServiceUnavailable, // 503 fail-close，隐藏 cause
-        OtpServiceError::Send(_) => AppError::ServiceUnavailable,  // 503 上游 provider 失败
+        OtpServiceError::RateLimited => {
+            AppError::rate_limited(ErrorCode::OtpRateLimited, "too many requests")
+        }
+        OtpServiceError::Store(_) | OtpServiceError::Send(_) => {
+            AppError::unavailable_with_source(ErrorCode::OtpUnavailable, "OTP unavailable", e)
+        }
         OtpServiceError::InvalidCode => {
             AppError::internal(anyhow::anyhow!("send 不该产生 InvalidCode"))
         } // 不可达，防御性

@@ -164,7 +164,7 @@ async fn old_refresh_is_rejected_after_rotation(pool: PgPool) {
 
     let (s2, set_cookie, body) = post(pool, "/api/v1/auth/refresh", Some(&r0), None).await;
     assert_eq!(s2, StatusCode::UNAUTHORIZED, "已轮换的旧 token 再用应 401");
-    assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
+    assert_eq!(body["detail"].as_str(), Some("invalid refresh token"));
     assert!(set_cookie.is_none(), "刷新失败不得下发新 cookie");
 }
 
@@ -189,7 +189,7 @@ async fn rotated_new_refresh_is_usable(pool: PgPool) {
 async fn missing_cookie_is_401(pool: PgPool) {
     let (status, _, body) = post(pool, "/api/v1/auth/refresh", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
+    assert_eq!(body["detail"].as_str(), Some("invalid refresh token"));
 }
 
 /// 纯垃圾串 → 401 invalid refresh token。
@@ -203,7 +203,7 @@ async fn garbage_refresh_is_401(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
+    assert_eq!(body["detail"].as_str(), Some("invalid refresh token"));
 }
 
 /// 已轮换的旧 token 与纯垃圾串 → 响应**逐字节一致**（不泄露 token 处于哪种失效态）。
@@ -270,7 +270,7 @@ async fn replayed_cookie_revokes_other_devices_sessions(pool: PgPool) {
         StatusCode::UNAUTHORIZED,
         "重放被检测后该用户全部会话应吊销，设备二也必须刷不动"
     );
-    assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
+    assert_eq!(body["detail"].as_str(), Some("invalid refresh token"));
 }
 
 // ————————————————————— 禁用账号 —————————————————————
@@ -462,7 +462,7 @@ async fn logout_clears_cookie_and_revokes_token(pool: PgPool) {
 
     let (s_refresh, _, body) = post(pool, "/api/v1/auth/refresh", Some(&r0), None).await;
     assert_eq!(s_refresh, StatusCode::UNAUTHORIZED, "登出后再刷应 401");
-    assert_eq!(body["error"].as_str(), Some("invalid refresh token"));
+    assert_eq!(body["detail"].as_str(), Some("invalid refresh token"));
 }
 
 /// 登出幂等且不泄露：重复登出、以及对从不存在的 token 登出，都应 204 + 清除 cookie。

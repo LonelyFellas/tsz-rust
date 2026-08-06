@@ -141,6 +141,18 @@ async fn empty_target_is_400(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn invalid_email_reports_stable_code_and_field(pool: PgPool) {
+    let state = AppState::for_test(pool);
+    let (status, body) =
+        post_send(&state, json!({"email": "not-an-email", "purpose": "login"})).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_str(&body).expect("错误响应应为 JSON");
+    assert_eq!(body["code"], "invalid_email");
+    assert_eq!(body["field"], "email");
+}
+
+#[sqlx::test]
 async fn both_phone_and_email_is_400(pool: PgPool) {
     // 一条码只能发一个渠道；两者都给 → 歧义，拒绝。
     let state = AppState::for_test(pool);

@@ -1,16 +1,18 @@
 use crate::{
+    api::ApiJson,
     auth::{AUTH_MOUNT, REFRESH_TOKEN_COOKIE, extract::AuthUser},
-    error::AppError,
+    error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
+    platform::{Password, PasswordError, Phone, PhoneError},
     session::{
         repository::RefreshTokenRepository,
         service::{SessionError, SessionService},
     },
     state::AppState,
     user::{
-        model::{User, UserRole, UserStatus},
+        model::{SubjectError, User, UserRole, UserStatus},
         repository::{UserError, UserRepository},
-        service::{LoginError, UserService, normalize_identifier},
+        service::{LoginError, RegisterError, UserService, normalize_identifier},
     },
 };
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
@@ -60,7 +62,7 @@ pub struct LoginResponse {
 pub async fn login(
     State(state): State<AppState>,
     jar: CookieJar,
-    Json(req): Json<LoginRequest>,
+    ApiJson(req): ApiJson<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // 1) 验凭证：业务全在 user 域，handler 只调。失败→统一错误（不可区分）
     let user_sve = UserService::new(UserRepository::new(state.pool.clone()));
@@ -103,13 +105,18 @@ pub struct LoginOtpRequest {
 pub async fn login_otp(
     State(state): State<AppState>,
     jar: CookieJar,
-    Json(req): Json<LoginOtpRequest>,
+    ApiJson(req): ApiJson<LoginOtpRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // 1) 先验码——purpose 写死 Login，不接受客户端传入：
     //    否则持一枚 password_reset 码的人可显式指定 purpose，拿重置码换登录会话，
     //    绕过 purpose 隔离。请求体里多带的 purpose 字段会被 serde 直接忽略。
-    let id =
-        normalize_identifier(&req.identifier).map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let id = normalize_identifier(&req.identifier).map_err(|_| {
+        AppError::validation(
+            ErrorCode::InvalidIdentifier,
+            "identifier",
+            "invalid identifier",
+        )
+    })?;
     state
         .otp_service
         .verify(&id, Purpose::Login, &req.code)
@@ -126,6 +133,108 @@ pub async fn login_otp(
     // 3) 查角色 + 发 token + 拼响应 + 发 refresh cookie（与 login 共用）
     let (jar, resp) = build_login_response(&state, user, jar).await?;
     Ok((jar, Json(resp)))
+}
+
+/// 手机号注册请求。当前不支持邮箱注册；验证码须由 `/api/v1/otp/send`
+/// 以 `purpose=register` 发送。
+#[derive(Deserialize, ToSchema)]
+pub struct RegisterRequest {
+    /// 中国大陆手机号
+    #[schema(example = "13800138000")]
+    phone: String,
+    /// 登录密码（8–72 字节）
+    #[schema(example = "P@ssw0rd!")]
+    password: String,
+    /// 注册短信验证码（6 位）
+    #[schema(example = "123456")]
+    code: String,
+}
+
+/// POST /api/v1/auth/register
+///
+/// 验证手机号、密码与注册用途短信验证码，创建 student 用户，并直接颁发
+/// access token 与 HttpOnly refresh cookie。注册成功无需再次调用登录接口。
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/register",
+    tag = "auth",
+    request_body = RegisterRequest,
+    responses(
+        (status = 201, description = "注册成功并建立登录会话", body = LoginResponse,
+            headers(("Set-Cookie" = String,
+                description = "refresh_token cookie（HttpOnly; SameSite=Lax; Path=/api/v1/auth; Max-Age=refresh TTL 秒）"))),
+        (status = 400, description = "手机号或密码格式不合法"),
+        (status = 401, description = "注册验证码无效或已过期"),
+        (status = 409, description = "手机号已被占用"),
+        (status = 429, description = "验证码校验请求过于频繁"),
+        (status = 500, description = "数据库或令牌签发失败"),
+        (status = 503, description = "密码哈希或验证码基础设施不可用"),
+    )
+)]
+
+pub async fn register(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    ApiJson(payload): ApiJson<RegisterRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // 1) 解析并归一化手机号。
+    let phone = Phone::parse(&payload.phone)
+        .map_err(map_phone_error)?
+        .into_string();
+
+    // 2) 先做低成本密码格式校验，避免格式错误消耗一次验证码。
+    let psd = Password::parse(&payload.password).map_err(map_password_error)?;
+
+    // 3) 发码端同样以归一化手机号作为 Redis key。
+    state
+        .otp_service
+        .verify(&phone, Purpose::Register, &payload.code)
+        .await
+        .map_err(map_login_otp_error)?;
+
+    // 4) 只有持有有效验证码的请求才执行昂贵的 bcrypt。
+    let password_hash = psd.hash().await.map_err(|error| {
+        AppError::unavailable_with_source(
+            ErrorCode::PasswordHashUnavailable,
+            "password hash unavailable",
+            error,
+        )
+    })?;
+    let service = UserService::new(UserRepository::new(state.pool.clone()));
+
+    // 5) 用户、初始角色和 refresh token 同事务提交。
+    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let user = service
+        .register_verified_phone_in(&mut tx, phone, password_hash)
+        .await
+        .map_err(map_register_error)?;
+
+    let profile = UserProfile {
+        id: user.id,
+        display_name: user.display_name.clone(),
+        email: user.email.clone(),
+        phone: user.phone.clone(),
+        avatar_url: user.avatar_url.clone(),
+        roles: vec![UserRole::Student],
+        active_role: UserRole::Student,
+    };
+    let token = generate_token(&state, &user)
+        .await
+        .map_err(map_session_error)?;
+    let refresh = session_service(&state)
+        .issue_in(&mut tx, user.id)
+        .await
+        .map_err(map_session_error)?;
+
+    tx.commit().await.map_err(AppError::internal)?;
+    let jar = jar.add(refresh_cookie(refresh.plaintext, &state));
+    let resp = LoginResponse {
+        user: profile,
+        token,
+        refresh_token_expires_at: refresh.expires_at.timestamp(),
+    };
+
+    Ok((StatusCode::CREATED, jar, Json(resp)))
 }
 
 /// 组装登录响应：查角色 + 签 access token（可失败、无副作用）→ 签发 refresh cookie
@@ -267,7 +376,7 @@ pub async fn refresh_token(
     let refresh_plaintext = jar
         .get(REFRESH_TOKEN_COOKIE)
         .map(|c| c.value().to_owned())
-        .ok_or(AppError::Unauthenticated("invalid refresh token".into()))?;
+        .ok_or_else(invalid_refresh_token)?;
     // 2) 先查用户id
     let user_id = session_service(&state)
         .peek_user_id(&refresh_plaintext)
@@ -275,17 +384,17 @@ pub async fn refresh_token(
         .map_err(map_session_error)?;
 
     // 3) 查用户
-    let user_id = user_id.ok_or(AppError::Unauthenticated("invalid refresh token".into()))?;
+    let user_id = user_id.ok_or_else(invalid_refresh_token)?;
     let user = UserRepository::new(state.pool.clone())
         .get_by_id(&user_id)
         .await
         .map_err(|e| match e {
-            UserError::NotFound => AppError::Unauthenticated("invalid refresh token".into()),
+            UserError::NotFound => invalid_refresh_token(),
             _ => AppError::internal(e),
         })?;
     // 4) 查用户状态
     if user.status != UserStatus::Active {
-        return Err(AppError::Unauthenticated("invalid refresh token".into()));
+        return Err(invalid_refresh_token());
     }
 
     // 5) 签发token
@@ -389,7 +498,10 @@ pub async fn me(
         .map_err(map_user_error)?;
 
     if user.status != UserStatus::Active {
-        return Err(AppError::Unauthenticated("user is not active".into()));
+        return Err(AppError::unauthorized(
+            ErrorCode::AccountDisabled,
+            "user is not active",
+        ));
     }
 
     let profile = load_user_profile(&state, &user).await?;
@@ -399,24 +511,28 @@ pub async fn me(
 
 fn map_login_otp_error(err: OtpServiceError) -> AppError {
     match err {
-        OtpServiceError::InvalidCode => AppError::Unauthenticated("invalid code".into()),
-        OtpServiceError::RateLimited => AppError::TooManyRequests,
-        _ => AppError::internal(err),
+        OtpServiceError::InvalidCode => {
+            AppError::unauthorized(ErrorCode::InvalidOtpCode, "invalid code")
+        }
+        OtpServiceError::RateLimited => {
+            AppError::rate_limited(ErrorCode::OtpRateLimited, "too many requests")
+        }
+        error @ (OtpServiceError::Store(_) | OtpServiceError::Send(_)) => {
+            AppError::unavailable_with_source(ErrorCode::OtpUnavailable, "OTP unavailable", error)
+        }
     }
 }
 
 fn map_user_error(err: UserError) -> AppError {
     match err {
-        UserError::NotFound => AppError::Unauthenticated("user not found".into()),
+        UserError::NotFound => AppError::unauthorized(ErrorCode::UserNotFound, "user not found"),
         _ => AppError::internal(err),
     }
 }
 
 fn map_session_error(err: SessionError) -> AppError {
     match err {
-        SessionError::InvalidRefreshToken => {
-            AppError::Unauthenticated("invalid refresh token".into())
-        }
+        SessionError::InvalidRefreshToken => invalid_refresh_token(),
         SessionError::Repository(e) => AppError::internal(e),
         SessionError::Signing(e) => AppError::internal(e),
     }
@@ -425,11 +541,77 @@ fn map_session_error(err: SessionError) -> AppError {
 fn map_login_error(err: LoginError) -> AppError {
     match err {
         // 用户不存在 / 密码错 —— 统一 401，不可区分（安全铁律）
-        LoginError::InvalidCredentials => AppError::Unauthenticated("invalid credentials".into()),
+        LoginError::InvalidCredentials => {
+            AppError::unauthorized(ErrorCode::InvalidCredentials, "invalid credentials")
+        }
         // 账号被禁：密码已验证后才可能到这，可如实告知
-        LoginError::AccountDisabled => AppError::Forbidden,
-        LoginError::IdentifierInvalid => AppError::BadRequest("identifier is invalid".into()),
+        LoginError::AccountDisabled => AppError::forbidden(ErrorCode::AccountDisabled, "forbidden"),
+        LoginError::IdentifierInvalid => AppError::validation(
+            ErrorCode::InvalidIdentifier,
+            "identifier",
+            "identifier is invalid",
+        ),
         // 仓储错 → 500，隐藏 cause
         LoginError::Repository(e) => AppError::internal(e),
     }
+}
+
+fn map_register_error(err: RegisterError) -> AppError {
+    match err {
+        // 手机 / 邮箱 已被占用
+        RegisterError::Register(SubjectError::UserAlreadyExists) => AppError::conflict(
+            ErrorCode::UserAlreadyExists,
+            Some("phone"),
+            "user already exists",
+        ),
+        // 手机号 / 邮箱 格式为空
+        RegisterError::Register(SubjectError::PhoneOrEmailMissing) => AppError::validation(
+            ErrorCode::InvalidIdentifier,
+            "phone",
+            "phone or email is missing",
+        ),
+        // 其余 SubjectError 错误
+        RegisterError::Register(_) => {
+            AppError::bad_request(ErrorCode::InvalidIdentifier, "invalid subject")
+        }
+        RegisterError::Phone(error) => map_phone_error(error),
+        RegisterError::Email(_) => {
+            AppError::validation(ErrorCode::InvalidEmail, "email", "invalid email")
+        }
+        // 密码格式为空
+        RegisterError::Password(PasswordError::Empty) => map_password_error(PasswordError::Empty),
+        // 密码格式错误
+        RegisterError::Password(error) => map_password_error(error),
+        // 仓储/DB 错误 -> 500
+        RegisterError::Repository(_) => AppError::internal(err),
+    }
+}
+
+fn map_phone_error(error: PhoneError) -> AppError {
+    let message = match error {
+        PhoneError::Empty => "phone is missing",
+        PhoneError::Invalid => "invalid phone",
+    };
+    AppError::validation(ErrorCode::InvalidPhone, "phone", message)
+}
+
+fn map_password_error(error: PasswordError) -> AppError {
+    let (code, message) = match error {
+        PasswordError::Empty => (ErrorCode::PasswordMissing, "password is missing"),
+        PasswordError::TooShort => (ErrorCode::PasswordTooShort, "password is too short"),
+        PasswordError::TooLong => (ErrorCode::PasswordTooLong, "password is too long"),
+        PasswordError::HashFailed => (
+            ErrorCode::PasswordHashUnavailable,
+            "password hash unavailable",
+        ),
+    };
+    if matches!(error, PasswordError::HashFailed) {
+        AppError::unavailable(code, message)
+    } else {
+        AppError::validation(code, "password", message)
+    }
+}
+
+fn invalid_refresh_token() -> AppError {
+    AppError::unauthorized(ErrorCode::InvalidRefreshToken, "invalid refresh token")
 }

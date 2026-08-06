@@ -25,7 +25,6 @@ pub struct RegisterInput {
     pub phone: Option<String>,
     pub email: Option<String>,
     pub password: String,
-    // pub code: String,
 }
 
 pub struct UserService {
@@ -67,15 +66,11 @@ impl UserService {
 
     /// 注册用户
     pub async fn register(&self, input: RegisterInput) -> Result<User, RegisterError> {
-        // 1) 手机号 / 邮箱
-        // 先 trim+滤空判「有没有提供」，非空的才严格 parse 校验格式。
-        // 空串/纯空格视为**未提供**（→ 下方 PhoneOrEmailMissing），不是格式错——
-        // 这是既有契约（tests/user_register_handler.rs::empty_phone_and_email_returns_400）。
         let phone = input
             .phone
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|value| !value.is_empty())
             .map(Phone::parse)
             .transpose()?
             .map(Phone::into_string);
@@ -83,41 +78,63 @@ impl UserService {
             .email
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|value| !value.is_empty())
             .map(Email::parse)
             .transpose()?
             .map(Email::into_string);
-        // 1.1) phone or email empty
         if phone.is_none() && email.is_none() {
             return Err(RegisterError::Register(SubjectError::PhoneOrEmailMissing));
         }
 
-        // 2) 密码哈希
-        let psd = Password::parse(&input.password).map_err(RegisterError::Password)?;
-        let password_hash = psd.hash().await?;
+        let password_hash = Password::parse(&input.password)?.hash().await?;
+        self.create(NewUser {
+            id: Uuid::now_v7(),
+            phone,
+            email,
+            password_hash,
+            display_name: generate_display_name(),
+            first_role: UserRole::Student,
+        })
+        .await
+    }
 
-        // 3) 验证码校验
-        // let _ = Code::parse(&input.code)?;
-
-        // TODO: 验证码验
-
-        // 3) create user
-        self.repository
-            .create(NewUser {
-                id: Uuid::now_v7(),
-                phone,
-                email,
-                password_hash,
-                display_name: generate_display_name(),
-                first_role: UserRole::Student,
-            })
+    /// 已在 HTTP 编排层验证手机号、密码和 OTP 后，在调用方事务中创建手机号用户。
+    pub async fn register_verified_phone_in(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        phone: String,
+        password_hash: String,
+    ) -> Result<User, RegisterError> {
+        UserRepository::create_in(connection, Self::verified_phone_input(phone, password_hash))
             .await
-            .map_err(|e| match e {
-                UserError::PhoneNumberAlreadyExists | UserError::EmailAlreadyExists => {
-                    RegisterError::Register(SubjectError::UserAlreadyExists)
-                }
-                other => RegisterError::Repository(other),
-            })
+            .map_err(Self::map_create_error)
+    }
+
+    fn verified_phone_input(phone: String, password_hash: String) -> NewUser {
+        NewUser {
+            id: Uuid::now_v7(),
+            phone: Some(phone),
+            email: None,
+            password_hash,
+            display_name: generate_display_name(),
+            first_role: UserRole::Student,
+        }
+    }
+
+    async fn create(&self, input: NewUser) -> Result<User, RegisterError> {
+        self.repository
+            .create(input)
+            .await
+            .map_err(Self::map_create_error)
+    }
+
+    fn map_create_error(error: UserError) -> RegisterError {
+        match error {
+            UserError::PhoneNumberAlreadyExists | UserError::EmailAlreadyExists => {
+                RegisterError::Register(SubjectError::UserAlreadyExists)
+            }
+            other => RegisterError::Repository(other),
+        }
     }
 
     pub async fn authenticate(&self, identifier: &str, password: &str) -> Result<User, LoginError> {

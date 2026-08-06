@@ -1,38 +1,41 @@
-//! `POST /user/register` handler 的端到端行为测试（真库 + `oneshot`）。
+//! `POST /api/v1/auth/register` 端到端测试（真 PG + 真 Redis）。
 //!
-//! 这层只测 **handler 自己负责的翻译**，不重测 service 的业务规则：
-//!   1. 领域结果/错误 → HTTP 状态码（201 / 400 / 409）的映射；
-//!   2. 响应体只暴露**安全字段**、绝不泄露 `password_hash`；
-//!   3. 对外错误文案是 handler 里写死的那几句（契约的一部分）。
-//!
-//! service 的语义细节（昵称随机生成、密码 bcrypt、归一化、判重靠 DB 唯一约束）
-//! 已在 `tests/user_service.rs` 全绿覆盖，这里不再重复——只确认它们经由 HTTP
-//! 暴露出来的**观感**没错。
-//!
-//! ⚠️ 对齐的 handler 契约（改了 handler 记得同步这里）：
-//!   - 路由 `POST /user/register`，请求体 JSON `{phone?, email?, password}`；
-//!   - 成功 `201` + `{user_id, display_name, role}`；
-//!   - 缺 phone&email → `400 {"error":"phone or email is missing"}`；
-//!   - 空密码 → `400 {"error":"password is missing"}`；
-//!   - 其余密码不合规 → `400 {"error":"invalid password"}`；
-//!   - 手机/邮箱已占 → `409 {"error":"user already exists"}`。
+//! 当前契约：仅手机号注册；请求包含 `phone/password/code`；验证码用途固定为
+//! `register`；成功后直接返回登录响应并下发 HttpOnly refresh cookie。
+
+use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::Request;
-use axum::http::{StatusCode, header};
+use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-/// 把 JSON 值打成 `POST /user/register` 请求，过 `router().oneshot()`，
-/// 返回 `(状态码, 响应体 JSON)`。成功体和错误体都是 JSON，统一解析。
-async fn register(pool: PgPool, body: Value) -> (StatusCode, Value) {
-    let resp = tsz_rust::router(tsz_rust::state::AppState::for_test(pool))
+use tsz_rust::otp::{model::Purpose, store::OtpStore};
+use tsz_rust::state::AppState;
+
+const PHONE: &str = "13800138000";
+const PASSWORD: &str = "password123";
+const CODE: &str = "123456";
+
+fn ttl() -> Duration {
+    Duration::from_secs(300)
+}
+
+async fn save_register_code(store: &OtpStore, phone: &str) {
+    store
+        .save_code(phone, Purpose::Register, CODE, ttl())
+        .await
+        .expect("测试验证码应写入成功");
+}
+
+async fn register(state: &AppState, body: Value) -> (StatusCode, Option<String>, Value) {
+    let response = tsz_rust::router(state.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/user/register")
+                .uri("/api/v1/auth/register")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -40,237 +43,188 @@ async fn register(pool: PgPool, body: Value) -> (StatusCode, Value) {
         .await
         .unwrap();
 
-    let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    // 空体（理论上不会有）兜底成 Null，避免 unwrap 崩测试。
-    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, json)
+    let status = response.status();
+    let cookie = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .map(|value| value.to_str().unwrap().to_owned());
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, cookie, body)
 }
 
-// ————————————————————— 成功主线 —————————————————————
-
-/// 手机 + 邮箱齐全 → 201，响应只含安全字段，role 恒为 student，且**绝不含哈希**。
 #[sqlx::test]
-async fn register_returns_201_with_safe_body(pool: PgPool) {
-    let (status, body) = register(
-        pool,
+async fn valid_phone_code_registers_and_issues_session(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, PHONE).await;
+
+    let (status, cookie, body) = register(
+        &state,
+        json!({"phone": PHONE, "password": PASSWORD, "code": CODE}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        body["access_token"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "注册成功应直接返回 access token"
+    );
+    assert_eq!(body["user"]["phone"], PHONE);
+    assert_eq!(body["user"]["active_role"], "student");
+    assert!(body["refresh_token_expires_at"].as_i64().is_some());
+    assert!(body.get("password").is_none());
+    assert!(body.get("password_hash").is_none());
+
+    let cookie = cookie.expect("注册成功应下发 refresh cookie");
+    assert!(cookie.starts_with("refresh_token="));
+    assert!(cookie.contains("HttpOnly"));
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE phone = $1")
+        .bind(PHONE)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn phone_is_normalized_before_otp_verification(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool);
+    save_register_code(&store, PHONE).await;
+
+    let (status, cookie, body) = register(
+        &state,
         json!({
-            "phone": "13800138000",
-            "email": "alice@example.com",
-            "password": "password123",
+            "phone": format!("  {PHONE}  "),
+            "password": PASSWORD,
+            "code": CODE
         }),
     )
     .await;
 
-    assert_eq!(status, StatusCode::CREATED, "注册成功应返回 201");
-
-    // user_id 应是合法 UUID 字符串（DB 用 UUIDv7 主键）。
-    let user_id = body["user_id"].as_str().expect("响应应含 user_id 字符串");
-    assert!(
-        uuid::Uuid::parse_str(user_id).is_ok(),
-        "user_id 应是合法 UUID：{user_id}"
-    );
-
-    // 默认昵称由后端随机生成，非空即可（内容随机，不断言具体值）。
-    assert!(
-        !body["display_name"].as_str().unwrap_or("").is_empty(),
-        "display_name 应非空"
-    );
-
-    // 注册永远是 student（老师须系统内申请，请求里无 role 字段可选）。
-    assert_eq!(body["role"], "student", "注册用户角色恒为 student");
-
-    // —— 核心安全断言：响应绝不能泄露口令相关字段 ——
-    assert!(body.get("password").is_none(), "响应不得含 password 字段");
-    assert!(
-        body.get("password_hash").is_none(),
-        "响应不得含 password_hash 字段"
-    );
-    // 更狠一层：整个响应体里不得出现 bcrypt 哈希前缀（防将来加字段误带出去）。
-    let raw = body.to_string();
-    assert!(
-        !raw.contains("$2b$") && !raw.contains("$2a$") && !raw.contains("$2y$"),
-        "响应体不得出现 bcrypt 哈希片段：{raw}"
-    );
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(cookie.is_some());
+    assert_eq!(body["user"]["phone"], PHONE);
 }
 
-/// 只给手机号也能注册（邮箱可选）。
 #[sqlx::test]
-async fn register_succeeds_with_phone_only(pool: PgPool) {
-    let (status, body) = register(
-        pool,
-        json!({ "phone": "13800138000", "password": "password123" }),
+async fn wrong_register_code_is_401_and_creates_no_user(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, PHONE).await;
+
+    let (status, cookie, _) = register(
+        &state,
+        json!({"phone": PHONE, "password": PASSWORD, "code": "000000"}),
     )
     .await;
 
-    assert_eq!(status, StatusCode::CREATED, "仅手机号应能注册成功");
-    assert_eq!(body["role"], "student");
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(cookie.is_none());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "验证码错误不得创建用户");
 }
 
-/// 只给邮箱也能注册（手机号可选）。
 #[sqlx::test]
-async fn register_succeeds_with_email_only(pool: PgPool) {
-    let (status, body) = register(
-        pool,
-        json!({ "email": "alice@example.com", "password": "password123" }),
+async fn register_code_is_single_use(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool);
+    save_register_code(&store, PHONE).await;
+
+    let first = register(
+        &state,
+        json!({"phone": PHONE, "password": PASSWORD, "code": CODE}),
     )
     .await;
+    assert_eq!(first.0, StatusCode::CREATED);
 
-    assert_eq!(status, StatusCode::CREATED, "仅邮箱应能注册成功");
-    assert_eq!(body["role"], "student");
-}
-
-// ————————————————————— 400：主体缺失 —————————————————————
-
-/// phone 和 email **都不给** → 400，文案固定。
-#[sqlx::test]
-async fn missing_phone_and_email_returns_400(pool: PgPool) {
-    let (status, body) = register(pool, json!({ "password": "password123" })).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST, "缺主体标识应 400");
-    assert_eq!(
-        body["error"].as_str(),
-        Some("phone or email is missing"),
-        "错误文案应对齐 handler 契约"
-    );
-}
-
-/// phone/email **给了空串** → service 归一化成 None → 与「都不给」等价 → 400。
-/// 这条专门网住「传了 `\"\"` 但没真值」这种前端常见畸形输入。
-#[sqlx::test]
-async fn empty_phone_and_email_returns_400(pool: PgPool) {
-    let (status, body) = register(
-        pool,
-        json!({ "phone": "", "email": "", "password": "password123" }),
+    let second = register(
+        &state,
+        json!({"phone": PHONE, "password": PASSWORD, "code": CODE}),
     )
     .await;
-
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "空串标识应等价于缺失 → 400"
-    );
-    assert_eq!(body["error"].as_str(), Some("phone or email is missing"));
+    assert_eq!(second.0, StatusCode::UNAUTHORIZED);
 }
 
-// ————————————————————— 400：标识格式非法（创建侧严格校验）—————————————————————
-
-/// 非空但**格式非法**的手机号 → 400（`invalid phone`）。
-/// 与「空串 = 缺失 → phone or email is missing」是两条不同路径：空是「没提供」，
-/// 非空非法是「提供了但不合规」。注册在**创建边界**严格 `Phone::parse`。
 #[sqlx::test]
-async fn invalid_phone_format_returns_400(pool: PgPool) {
-    // 12345 非 1[3-9] 开头的 11 位号；也顺带覆盖 #6：畸形输入在 parse 处被挡成 400，
-    // 不会裸奔到 DB 触发 500。
-    let (status, body) =
-        register(pool, json!({ "phone": "12345", "password": "password123" })).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法手机号应 400");
-    assert_eq!(body["error"].as_str(), Some("invalid phone"));
-}
-
-/// 含 NUL 字节的手机号 → 400（#6 回归：绝不能裸奔到 Postgres 触发 500）。
-#[sqlx::test]
-async fn nul_byte_phone_returns_400_not_500(pool: PgPool) {
-    let (status, _) = register(
-        pool,
-        json!({ "phone": "138\u{0000}0138000", "password": "password123" }),
+async fn duplicate_phone_is_409(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool);
+    save_register_code(&store, PHONE).await;
+    let first = register(
+        &state,
+        json!({"phone": PHONE, "password": PASSWORD, "code": CODE}),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "含 NUL 的手机号应在 parse 处被拒 400，而非落到 DB 报 500"
-    );
-}
+    assert_eq!(first.0, StatusCode::CREATED);
 
-/// 非空但**格式非法**的邮箱 → 400（`invalid email`）。
-#[sqlx::test]
-async fn invalid_email_format_returns_400(pool: PgPool) {
-    let (status, body) = register(
-        pool,
-        json!({ "email": "not-an-email", "password": "password123" }),
+    // 第二次注册必须使用一枚新验证码，才能真正走到手机号唯一约束。
+    save_register_code(&store, PHONE).await;
+    let (status, cookie, body) = register(
+        &state,
+        json!({"phone": PHONE, "password": PASSWORD, "code": CODE}),
     )
     .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST, "非法邮箱应 400");
-    assert_eq!(body["error"].as_str(), Some("invalid email"));
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(cookie.is_none());
+    assert_eq!(body["detail"], "user already exists");
 }
 
-// ————————————————————— 400：密码不合规 —————————————————————
-
-/// 空密码 → 走 `PasswordError::Empty` 分支，文案与「太短/太长」不同。
 #[sqlx::test]
-async fn empty_password_returns_400(pool: PgPool) {
-    let (status, body) = register(pool, json!({ "phone": "13800138000", "password": "" })).await;
+async fn invalid_phone_and_password_are_400(pool: PgPool) {
+    let (state, _) = AppState::for_test_with_otp_store(pool);
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        body["error"].as_str(),
-        Some("password is missing"),
-        "空密码应报 password is missing"
-    );
-}
-
-/// 太短（<8）→ 400，走通用 `invalid password` 文案（不区分具体原因，防探测）。
-#[sqlx::test]
-async fn short_password_returns_400(pool: PgPool) {
-    let (status, body) =
-        register(pool, json!({ "phone": "13800138000", "password": "short" })).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"].as_str(), Some("invalid password"));
-}
-
-/// 太长（>72 字节，bcrypt 上限）→ 400，同样是 `invalid password`。
-#[sqlx::test]
-async fn too_long_password_returns_400(pool: PgPool) {
-    let long = "a".repeat(73);
-    let (status, body) = register(pool, json!({ "phone": "13800138000", "password": long })).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"].as_str(), Some("invalid password"));
-}
-
-// ————————————————————— 409：唯一冲突 —————————————————————
-
-/// 同一手机号注册两次 → 第二次 409（DB 唯一约束 → UserAlreadyExists → Conflict）。
-/// 第二次故意换邮箱，确保冲突确实由 phone 触发，不是邮箱撞了。
-#[sqlx::test]
-async fn duplicate_phone_returns_409(pool: PgPool) {
-    let (first, _) = register(
-        pool.clone(),
-        json!({ "phone": "13800138000", "email": "a@example.com", "password": "password123" }),
+    let invalid_phone = register(
+        &state,
+        json!({"phone": "12345", "password": PASSWORD, "code": CODE}),
     )
     .await;
-    assert_eq!(first, StatusCode::CREATED, "首次注册应成功");
+    assert_eq!(invalid_phone.0, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_phone.2["code"], "invalid_phone");
+    assert_eq!(invalid_phone.2["field"], "phone");
 
-    let (second, body) = register(
-        pool,
-        json!({ "phone": "13800138000", "email": "b@example.com", "password": "password123" }),
+    let invalid_password = register(
+        &state,
+        json!({"phone": PHONE, "password": "short", "code": CODE}),
     )
     .await;
-
-    assert_eq!(second, StatusCode::CONFLICT, "手机号已占用应 409");
-    assert_eq!(body["error"].as_str(), Some("user already exists"));
+    assert_eq!(invalid_password.0, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_password.2["code"], "password_too_short");
+    assert_eq!(invalid_password.2["field"], "password");
 }
 
-/// 同一邮箱注册两次 → 第二次 409。第二次换手机号，确保冲突由 email 触发。
 #[sqlx::test]
-async fn duplicate_email_returns_409(pool: PgPool) {
-    let (first, _) = register(
-        pool.clone(),
-        json!({ "phone": "13800138000", "email": "alice@example.com", "password": "password123" }),
+async fn email_only_payload_is_rejected(pool: PgPool) {
+    let (state, _) = AppState::for_test_with_otp_store(pool);
+    let (status, cookie, body) = register(
+        &state,
+        json!({"email": "user@example.com", "password": PASSWORD, "code": CODE}),
     )
     .await;
-    assert_eq!(first, StatusCode::CREATED, "首次注册应成功");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(cookie.is_none());
+    assert_eq!(body["code"], "invalid_request_body");
+}
 
-    let (second, body) = register(
-        pool,
-        json!({ "phone": "13900139000", "email": "alice@example.com", "password": "password123" }),
-    )
-    .await;
+#[sqlx::test]
+async fn malformed_json_uses_structured_error_response(pool: PgPool) {
+    let (state, _) = AppState::for_test_with_otp_store(pool);
+    let response = tsz_rust::router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
-    assert_eq!(second, StatusCode::CONFLICT, "邮箱已占用应 409");
-    assert_eq!(body["error"].as_str(), Some("user already exists"));
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["code"], "invalid_json");
 }

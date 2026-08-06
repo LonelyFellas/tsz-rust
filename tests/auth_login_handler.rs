@@ -218,7 +218,7 @@ async fn login_wrong_password_is_401(pool: PgPool) {
     .await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body["error"].as_str(), Some("invalid credentials"));
+    assert_eq!(body["detail"].as_str(), Some("invalid credentials"));
     assert!(set_cookie.is_none(), "登录失败不得下发 cookie");
 }
 

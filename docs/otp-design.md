@@ -263,10 +263,11 @@ impl OtpService {
 
 ## 12. 端点与编排
 
-- **`POST /otp/send` 是真端点**：`{ phone? | email?, purpose }`（phone/email 恰好一个非空，否则 400；`purpose` 缺失/非法 → **422** 由 axum Json 反序列化返回）→ `request(...)` → **202 Accepted**（成功体不含码）。是「发一枚码」的通用入口。错误映射见 §9（`RateLimited`→429、`Store`→503 fail-close、`Send`→隐藏 cause 500）。
+- **`POST /otp/send` 是真端点**：`{ phone? | email?, purpose }`（phone/email 恰好一个非空，否则 400；公开 `purpose` 为 `login | register | password_reset | account_deletion | contact_bind`，缺失/非法 → **422** 由 axum Json 反序列化返回）→ `request(...)` → **202 Accepted**（成功体不含码）。注册目前只使用 phone + `purpose=register`；邮箱通道不等于已开放邮箱注册。错误映射见 §9（`RateLimited`→429、`Store`→503 fail-close、`Send`→隐藏 cause 500）。
 - **verify 不做成独立端点**：因为「验过了」本身没有意义——login/改密等都要在验过的**同一步**里紧接着发 token / 改密码（否则「先验后做」之间有竞态/绕过缺口）。所以 `verify` 是 **service 方法，被 purpose 专属 handler 调用**：
   ```
-  未来 POST /auth/login-otp:  otp_service.verify(target, Login, code)? → user 查/建 → token_manager.generate + session.issue  （像 password 登录那样编排）
+  POST /auth/register:   otp_service.verify(phone, Register, code)? → 创建 student → token_manager.generate + session.issue
+  POST /auth/login-otp:  otp_service.verify(target, Login, code)? → user 查找 → token_manager.generate + session.issue
   未来 POST /auth/password-reset: otp_service.verify(target, PasswordReset, code)? → 更新 password_hash + session.revoke_all_for_user
   ```
   这些 purpose 流程**各自另做**（本域只提供 request 端点 + verify 方法这两块砖）。

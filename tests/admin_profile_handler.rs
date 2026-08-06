@@ -292,8 +292,8 @@ async fn disabled_admin_is_403(pool: PgPool) {
     assert_eq!(status, StatusCode::FORBIDDEN, "禁用账号应 403：{body}");
     let json: Value = serde_json::from_str(&body).unwrap();
     assert!(
-        json.as_object().is_some_and(|o| !o.contains_key("code")),
-        "禁用的 403 不带 code——code 键专属 must_change 契约：{body}"
+        json["code"] == "account_disabled",
+        "disabled response should use account_disabled: {body}"
     );
 }
 
@@ -307,9 +307,10 @@ async fn must_change_password_is_403_with_code(pool: PgPool) {
 
     let (status, body) = get_profile(&state, Some(&token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "被强制改密应 403：{body}");
-    // 逐字节钉死：code 是前端跳改密页的硬契约（admin-design §7 原文文案）。
-    assert_eq!(
-        body, r#"{"error":"password change required","code":"must_change_password"}"#,
-        "403 body 应逐字节等于契约文案"
-    );
+    let json: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["code"], "must_change_password");
+    assert_eq!(json["type"], "urn:tsz:problem:must_change_password");
+    assert_eq!(json["status"], 403);
+    assert_eq!(json["detail"], "password change required");
+    assert!(json.get("error").is_none());
 }

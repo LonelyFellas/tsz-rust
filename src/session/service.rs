@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::{
@@ -44,23 +45,37 @@ impl SessionService {
 
     /// login 调用：为user发一枚refresh。生成明文 -> 哈希 -> 存库 -> 返回明文
     pub async fn issue(&self, user_id: Uuid) -> Result<IssuedRefresh, SessionError> {
+        let (issued, row) = self.prepare_refresh(user_id);
+        self.repository.insert(row).await?;
+        Ok(issued)
+    }
+
+    pub async fn issue_in(
+        &self,
+        connection: &mut PgConnection,
+        user_id: Uuid,
+    ) -> Result<IssuedRefresh, SessionError> {
+        let (issued, row) = self.prepare_refresh(user_id);
+        RefreshTokenRepository::insert_in(connection, row).await?;
+        Ok(issued)
+    }
+
+    fn prepare_refresh(&self, user_id: Uuid) -> (IssuedRefresh, NewRefreshToken) {
         let plaintext = generate_token_plaintext();
         let token_hash = hash_token(&plaintext);
         let expires_at = Utc::now() + self.refresh_ttl;
-
-        self.repository
-            .insert(NewRefreshToken {
+        (
+            IssuedRefresh {
+                plaintext,
+                expires_at,
+            },
+            NewRefreshToken {
                 id: Uuid::now_v7(),
                 user_id,
                 token_hash,
                 expires_at,
-            })
-            .await?;
-
-        Ok(IssuedRefresh {
-            plaintext,
-            expires_at,
-        })
+            },
+        )
     }
 
     ///  /auth/refresh 核心:哈希明文 → **同一事务**内 CAS 消费旧枚 + 落库新枚（`consume_and_insert`）

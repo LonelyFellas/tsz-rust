@@ -316,10 +316,10 @@ pub struct SuperAdminAuth {
 
 | 场景 | HTTP | 响应 |
 | --- | --- | --- |
-| 缺少、无效或过期 token | 401 | `{ "error": "invalid token" }` 等现有认证文案 |
-| token 对应管理员已不存在 | 401 | `{ "error": "admin not found" }` |
-| 必须先修改密码 | 403 | `{ "error": "password change required", "code": "must_change_password" }` |
-| 普通管理员访问 | 403 | `{ "error": "forbidden" }` |
+| 缺少、无效或过期 token | 401 | `invalid_token` Problem |
+| token 对应管理员已不存在 | 401 | `admin_not_found` Problem |
+| 必须先修改密码 | 403 | `must_change_password` Problem |
+| 普通管理员访问 | 403 | `forbidden` Problem |
 | 超级管理员访问 | — | 进入业务 handler |
 
 前端仍应隐藏普通管理员的“管理员管理”入口，但所有安全边界以后端为准。
@@ -342,7 +342,7 @@ pub struct SuperAdminAuth {
 - 基础路径：`/api/v1/admin`；
 - 认证：`Authorization: Bearer <admin_access_token>`；
 - 成功响应：`application/json`，204 接口除外；
-- 错误响应：`{ "error": "..." }`；
+- 错误响应：RFC 9457 Problem Details，业务分支读取稳定 `code`；
 - 强制改密错误额外带 `code`；
 - 请求 DTO 使用 `#[serde(deny_unknown_fields)]` 拒绝未知字段，避免调用方误以为
   `role`、`password` 或 `email` 已生效；
@@ -863,7 +863,7 @@ NotFoundMessage(String),
 不要复用 `ForbiddenCode`，否则普通 403 会多出没有语义的 `code` 字段。
 
 Axum 自带的 `JsonRejection`、`QueryRejection` 和 path 解析失败也需要在 handler 边界映射成
-`AppError`，否则这些失败会绕过统一的 `{ "error": "..." }` 响应格式，并可能返回 422。
+`AppError`，否则这些失败会绕过统一的 RFC 9457 Problem Details 响应，并可能返回错误状态。
 
 统一映射：
 

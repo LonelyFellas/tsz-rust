@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::session::model::{NewRefreshToken, RefreshToken};
@@ -60,6 +60,13 @@ impl RefreshTokenRepository {
 
     // issue 用: 插入一行。（login 只需要这个方法就能跑
     pub async fn insert(&self, row: NewRefreshToken) -> Result<RefreshToken, RefreshTokenError> {
+        Self::insert_in(&mut *self.pool.acquire().await?, row).await
+    }
+
+    pub async fn insert_in(
+        connection: &mut PgConnection,
+        row: NewRefreshToken,
+    ) -> Result<RefreshToken, RefreshTokenError> {
         let row = sqlx::query_as!(
             RefreshToken,
             r#"
@@ -72,7 +79,7 @@ impl RefreshTokenRepository {
             row.token_hash,
             row.expires_at
         )
-        .fetch_one(&self.pool)
+        .fetch_one(connection)
         .await?;
         Ok(row)
     }

@@ -1,243 +1,509 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use std::{error::Error, fmt};
+use utoipa::ToSchema;
 
-/// 领域错误。每个变体对应一类http结果。
-#[derive(Debug, thiserror::Error)]
-pub enum AppError {
-    #[error("not found")]
+/// 对外稳定的机器错误码。前端应依据 code 分支，不能匹配展示文案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
     NotFound,
-    #[error("{0}")]
-    BadRequest(String),
-    #[error("forbidden")]
+    InvalidJson,
+    InvalidRequestBody,
+    InvalidQuery,
+    InvalidPhone,
+    InvalidEmail,
+    InvalidIdentifier,
+    InvalidPassword,
+    PasswordMissing,
+    PasswordTooShort,
+    PasswordTooLong,
+    PasswordUnchanged,
+    InvalidDisplayName,
+    InvalidOtpCode,
+    InvalidCredentials,
+    InvalidToken,
+    InvalidRefreshToken,
+    UserNotFound,
+    AdminNotFound,
+    AccountDisabled,
+    AccountLocked,
+    MustChangePassword,
     Forbidden,
-    #[error("{message}")]
-    ForbiddenCode { message: String, code: String },
-    #[error("{0}")]
-    Conflict(String),
-    #[error("{0}")]
-    Unauthenticated(String),
-    #[error("too many requests")]
-    TooManyRequests,
-    #[error("service unavailable")]
+    OtpRateLimited,
+    OtpUnavailable,
+    PasswordHashUnavailable,
+    UserAlreadyExists,
+    PhoneAlreadyRegistered,
     ServiceUnavailable,
-    #[error("{0}")]
-    Locked(String),
+    InternalError,
+}
 
-    /// 内部错误：真实原因藏在 anyhow 里，只进日志，不进响应。
-    #[error("internal error")]
-    Internal(#[source] anyhow::Error),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorDescriptor {
+    pub slug: &'static str,
+    pub title: &'static str,
+    pub default_status: StatusCode,
+}
+
+impl ErrorCode {
+    pub const ALL: [Self; 30] = [
+        Self::NotFound,
+        Self::InvalidJson,
+        Self::InvalidRequestBody,
+        Self::InvalidQuery,
+        Self::InvalidPhone,
+        Self::InvalidEmail,
+        Self::InvalidIdentifier,
+        Self::InvalidPassword,
+        Self::PasswordMissing,
+        Self::PasswordTooShort,
+        Self::PasswordTooLong,
+        Self::PasswordUnchanged,
+        Self::InvalidDisplayName,
+        Self::InvalidOtpCode,
+        Self::InvalidCredentials,
+        Self::InvalidToken,
+        Self::InvalidRefreshToken,
+        Self::UserNotFound,
+        Self::AdminNotFound,
+        Self::AccountDisabled,
+        Self::AccountLocked,
+        Self::MustChangePassword,
+        Self::Forbidden,
+        Self::OtpRateLimited,
+        Self::OtpUnavailable,
+        Self::PasswordHashUnavailable,
+        Self::UserAlreadyExists,
+        Self::PhoneAlreadyRegistered,
+        Self::ServiceUnavailable,
+        Self::InternalError,
+    ];
+
+    pub const fn descriptor(self) -> ErrorDescriptor {
+        let (slug, title, default_status) = match self {
+            Self::NotFound => ("not_found", "Resource not found", StatusCode::NOT_FOUND),
+            Self::InvalidJson => ("invalid_json", "Invalid JSON", StatusCode::BAD_REQUEST),
+            Self::InvalidRequestBody => (
+                "invalid_request_body",
+                "Invalid request body",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            Self::InvalidQuery => ("invalid_query", "Invalid query", StatusCode::BAD_REQUEST),
+            Self::InvalidPhone => ("invalid_phone", "Invalid phone", StatusCode::BAD_REQUEST),
+            Self::InvalidEmail => ("invalid_email", "Invalid email", StatusCode::BAD_REQUEST),
+            Self::InvalidIdentifier => (
+                "invalid_identifier",
+                "Invalid identifier",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::InvalidPassword => (
+                "invalid_password",
+                "Invalid password",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::PasswordMissing => (
+                "password_missing",
+                "Password missing",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::PasswordTooShort => (
+                "password_too_short",
+                "Password too short",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::PasswordTooLong => (
+                "password_too_long",
+                "Password too long",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::PasswordUnchanged => (
+                "password_unchanged",
+                "Password unchanged",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::InvalidDisplayName => (
+                "invalid_display_name",
+                "Invalid display name",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::InvalidOtpCode => (
+                "invalid_otp_code",
+                "Invalid verification code",
+                StatusCode::UNAUTHORIZED,
+            ),
+            Self::InvalidCredentials => (
+                "invalid_credentials",
+                "Invalid credentials",
+                StatusCode::UNAUTHORIZED,
+            ),
+            Self::InvalidToken => ("invalid_token", "Invalid token", StatusCode::UNAUTHORIZED),
+            Self::InvalidRefreshToken => (
+                "invalid_refresh_token",
+                "Invalid refresh token",
+                StatusCode::UNAUTHORIZED,
+            ),
+            Self::UserNotFound => ("user_not_found", "User not found", StatusCode::UNAUTHORIZED),
+            Self::AdminNotFound => (
+                "admin_not_found",
+                "Administrator not found",
+                StatusCode::UNAUTHORIZED,
+            ),
+            Self::AccountDisabled => (
+                "account_disabled",
+                "Account disabled",
+                StatusCode::FORBIDDEN,
+            ),
+            Self::AccountLocked => ("account_locked", "Account locked", StatusCode::LOCKED),
+            Self::MustChangePassword => (
+                "must_change_password",
+                "Password change required",
+                StatusCode::FORBIDDEN,
+            ),
+            Self::Forbidden => ("forbidden", "Forbidden", StatusCode::FORBIDDEN),
+            Self::OtpRateLimited => (
+                "otp_rate_limited",
+                "Too many verification attempts",
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+            Self::OtpUnavailable => (
+                "otp_unavailable",
+                "Verification service unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::PasswordHashUnavailable => (
+                "password_hash_unavailable",
+                "Password service unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::UserAlreadyExists => (
+                "user_already_exists",
+                "User already exists",
+                StatusCode::CONFLICT,
+            ),
+            Self::PhoneAlreadyRegistered => (
+                "phone_already_registered",
+                "Phone already registered",
+                StatusCode::CONFLICT,
+            ),
+            Self::ServiceUnavailable => (
+                "service_unavailable",
+                "Service unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::InternalError => (
+                "internal_error",
+                "Internal server error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        };
+        ErrorDescriptor {
+            slug,
+            title,
+            default_status,
+        }
+    }
+
+    pub fn type_uri(self) -> String {
+        format!("urn:tsz:problem:{}", self.descriptor().slug)
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProblemDetails {
+    /// RFC 9457 问题类型；同一 code 永久映射到同一 URI。
+    #[serde(rename = "type")]
+    #[schema(rename = "type", example = "urn:tsz:problem:invalid_phone")]
+    pub type_uri: String,
+    /// 类型级稳定短标题；客户端不得据此分支。
+    pub title: &'static str,
+    /// 与 HTTP 状态行一致。
+    pub status: u16,
+    /// 本次错误的安全说明；客户端不得据此分支。
+    pub detail: String,
+    #[schema(example = "invalid_phone")]
+    pub code: ErrorCode,
+    /// 表单错误对应的请求字段；非字段错误省略。
+    #[schema(example = "phone")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<&'static str>,
+}
+
+#[derive(Debug)]
+pub struct AppError {
+    status: StatusCode,
+    response: ProblemDetails,
+    source: Option<anyhow::Error>,
 }
 
 impl AppError {
-    /// 把任意错误（sqlx::Error 等) 包成Internal错误。
-    /// 为什么要这个构造器而不是 impl From: 写 `impl<E> From<E>` 会和标准库冲突
-    pub fn internal<E: Into<anyhow::Error>>(e: E) -> Self {
-        AppError::Internal(e.into())
+    fn new(
+        status: StatusCode,
+        code: ErrorCode,
+        message: impl Into<String>,
+        field: Option<&'static str>,
+    ) -> Self {
+        let descriptor = code.descriptor();
+        Self {
+            status,
+            response: ProblemDetails {
+                type_uri: code.type_uri(),
+                title: descriptor.title,
+                status: status.as_u16(),
+                detail: message.into(),
+                code,
+                field,
+            },
+            source: None,
+        }
     }
 
-    /// 领域错误 -> HTTP 状态码。抽成纯函数，方便直接单侧
-    fn status_code(&self) -> StatusCode {
-        match self {
-            AppError::NotFound => StatusCode::NOT_FOUND, // 404
-            AppError::BadRequest(_) => StatusCode::BAD_REQUEST, //400
-            AppError::Forbidden => StatusCode::FORBIDDEN, // 403
-            AppError::ForbiddenCode { .. } => StatusCode::FORBIDDEN, // 403
-            AppError::Conflict(_) => StatusCode::CONFLICT, // 409
-            AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR, // 500
-            AppError::Unauthenticated(_) => StatusCode::UNAUTHORIZED, // 401
-            // status_code() —— 这是 exhaustive match，不加会编译不过（好，漏不掉）
-            AppError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS, // 429
-            AppError::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE, // 503
-            AppError::Locked(_) => StatusCode::LOCKED,                  // 423
-        }
+    pub(crate) fn request_error(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::new(code.descriptor().default_status, code, message, None)
+    }
+
+    pub fn bad_request(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, code, message, None)
+    }
+
+    pub fn validation(code: ErrorCode, field: &'static str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, code, message, Some(field))
+    }
+
+    pub fn unprocessable(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, code, message, None)
+    }
+
+    pub fn unauthorized(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, code, message, None)
+    }
+
+    pub fn forbidden(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, code, message, None)
+    }
+
+    pub fn conflict(
+        code: ErrorCode,
+        field: Option<&'static str>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(StatusCode::CONFLICT, code, message, field)
+    }
+
+    pub fn locked(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::LOCKED, ErrorCode::AccountLocked, message, None)
+    }
+
+    pub fn rate_limited(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, code, message, None)
+    }
+
+    pub fn unavailable(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, code, message, None)
+    }
+
+    pub fn unavailable_with_source<E: Into<anyhow::Error>>(
+        code: ErrorCode,
+        message: impl Into<String>,
+        source: E,
+    ) -> Self {
+        let mut error = Self::unavailable(code, message);
+        error.source = Some(source.into());
+        error
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message, None)
+    }
+
+    /// 内部原因仅写服务端日志，对外固定为 internal_error。
+    pub fn internal<E: Into<anyhow::Error>>(source: E) -> Self {
+        let mut error = Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::InternalError,
+            "internal error",
+            None,
+        );
+        error.source = Some(source.into());
+        error
+    }
+
+    pub fn status_code(&self) -> StatusCode {
+        self.status
+    }
+
+    pub fn code(&self) -> ErrorCode {
+        self.response.code
     }
 }
 
-/// 统一响应体
-#[derive(Serialize)]
-struct ErrorBody {
-    error: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    code: Option<String>,
+impl fmt::Display for AppError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.response.detail)
+    }
+}
+
+impl Error for AppError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source.as_ref().map(|source| source.as_ref())
+    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let status = self.status_code();
-
-        // 500 的真实原因只记日志，绝不写进响应体
-        if let AppError::Internal(cause) = &self {
-            tracing::error!(error = %cause, "internal server error");
+        if let Some(source) = &self.source {
+            tracing::error!(
+                error = %source,
+                status = %self.status,
+                code = ?self.response.code,
+                "request failed"
+            );
         }
-
-        // Internal 的 Display 固定是 "internal error"，天然隐藏 cause
-        let code = match &self {
-            AppError::ForbiddenCode { code, .. } => Some(code.clone()),
-            _ => None,
-        };
-        let body = ErrorBody {
-            error: self.to_string(),
-            code,
-        };
-
-        (status, Json(body)).into_response()
+        let mut response = (self.status, Json(self.response)).into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/problem+json"),
+        );
+        response
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_body_util::BodyExt; // 读取响应体
+    use axum::http::header;
+    use http_body_util::BodyExt;
+    use serde_json::json;
+    use std::collections::HashSet;
 
-    // —— 纯映射逻辑（同文件测试可访问私有 status_code）——
-
-    #[test]
-    fn status_codes_map_per_variant() {
-        assert_eq!(AppError::NotFound.status_code(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            AppError::BadRequest("x".into()).status_code(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            AppError::Unauthenticated("x".into()).status_code(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(AppError::Forbidden.status_code(), StatusCode::FORBIDDEN);
-        assert_eq!(
-            AppError::Conflict("x".into()).status_code(),
-            StatusCode::CONFLICT
-        );
-        assert_eq!(
-            AppError::internal(anyhow::anyhow!("boom")).status_code(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-    }
-
-    #[test]
-    fn internal_hides_cause_in_message() {
-        let err = AppError::internal(anyhow::anyhow!("db password leaked"));
-        assert_eq!(
-            err.to_string(),
-            "internal error",
-            "内部错误对外只暴露通用文案"
-        );
-    }
-
-    #[test]
-    fn bad_request_preserves_message() {
-        let err = AppError::BadRequest("phone is required".into());
-        assert_eq!(err.to_string(), "phone is required");
-    }
-
-    // —— 走 into_response 的端到端行为 ——
-
-    #[tokio::test]
-    async fn response_sets_status_and_json_body() {
-        let resp = AppError::NotFound.into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body, serde_json::json!({ "error": "not found" }));
-    }
-
-    // —— admin 域扩展（admin-design.md §12）：Locked 423 + 带 code 的 403 ——
-
-    #[test]
-    fn locked_maps_to_423() {
-        assert_eq!(
-            AppError::Locked("x".into()).status_code(),
-            StatusCode::LOCKED
-        );
+    async fn response_json(error: AppError) -> (StatusCode, serde_json::Value) {
+        let response = error.into_response();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
     }
 
     #[tokio::test]
-    async fn locked_response_body_is_error_only() {
-        // §12 锁定行的契约文案由调用方传入，error.rs 不硬编码业务文案
-        let resp = AppError::Locked(
-            "account temporarily locked due to too many failed login attempts".into(),
-        )
-        .into_response();
-        assert_eq!(resp.status(), StatusCode::LOCKED);
-
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    async fn validation_error_has_stable_code_and_field() {
+        let (status, body) = response_json(AppError::validation(
+            ErrorCode::InvalidPhone,
+            "phone",
+            "invalid phone",
+        ))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
             body,
-            serde_json::json!({
-                "error": "account temporarily locked due to too many failed login attempts"
-            }),
-            "Locked 与其它变体同形：只有 error 键，不得多出 code"
+            json!({
+                "type":"urn:tsz:problem:invalid_phone",
+                "title":"Invalid phone",
+                "status":400,
+                "detail":"invalid phone",
+                "code":"invalid_phone",
+                "field":"phone"
+            })
         );
+    }
+
+    #[tokio::test]
+    async fn non_field_error_omits_field() {
+        let (_, body) = response_json(AppError::unauthorized(
+            ErrorCode::InvalidCredentials,
+            "invalid credentials",
+        ))
+        .await;
+        assert_eq!(
+            body,
+            json!({
+                "type":"urn:tsz:problem:invalid_credentials",
+                "title":"Invalid credentials",
+                "status":401,
+                "detail":"invalid credentials",
+                "code":"invalid_credentials"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_error_hides_source() {
+        let (status, body) =
+            response_json(AppError::internal(anyhow::anyhow!("database password"))).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body,
+            json!({
+                "type":"urn:tsz:problem:internal_error",
+                "title":"Internal server error",
+                "status":500,
+                "detail":"internal error",
+                "code":"internal_error"
+            })
+        );
+        assert!(!body.to_string().contains("database password"));
     }
 
     #[test]
-    fn forbidden_code_maps_to_403() {
-        assert_eq!(
-            AppError::ForbiddenCode {
-                message: "x".into(),
-                code: "y".into(),
-            }
-            .status_code(),
-            StatusCode::FORBIDDEN
-        );
+    fn display_never_exposes_internal_source() {
+        let error = AppError::internal(anyhow::anyhow!("secret"));
+        assert_eq!(error.to_string(), "internal error");
     }
 
-    #[tokio::test]
-    async fn forbidden_code_body_carries_code_field() {
-        // 硬契约：前端靠 code=must_change_password 整页跳改密页（admin-design.md §7/§12）
-        let resp = AppError::ForbiddenCode {
-            message: "password change required".into(),
-            code: "must_change_password".into(),
-        }
-        .into_response();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    #[test]
+    fn descriptors_are_complete_unique_and_consistent() {
+        let mut slugs = HashSet::new();
+        let mut type_uris = HashSet::new();
 
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "error": "password change required",
-                "code": "must_change_password"
-            }),
-            "body 形状是前端路由依据，逐字节钉死"
-        );
-    }
-
-    #[tokio::test]
-    async fn plain_variants_do_not_leak_code_key() {
-        // ErrorBody 若加 Option<code>，普通变体序列化时必须 skip——否则全站错误响应都多出 "code": null
-        for err in [
-            AppError::Forbidden,
-            AppError::Unauthenticated("invalid credentials".into()),
-            AppError::BadRequest("weak password".into()),
-        ] {
-            let resp = err.into_response();
-            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for code in ErrorCode::ALL {
+            let descriptor = code.descriptor();
+            let serialized = serde_json::to_value(code).unwrap();
+            assert_eq!(serialized, descriptor.slug);
+            assert!(!descriptor.title.trim().is_empty());
             assert!(
-                body.as_object().unwrap().get("code").is_none(),
-                "无 code 语义的变体不得出现 code 键: {body}"
+                slugs.insert(descriptor.slug),
+                "duplicate slug: {}",
+                descriptor.slug
             );
+            assert!(
+                type_uris.insert(code.type_uri()),
+                "duplicate type URI for {code:?}"
+            );
+            assert!((400..600).contains(&descriptor.default_status.as_u16()));
         }
     }
 
     #[tokio::test]
-    async fn internal_response_body_hides_cause() {
-        let resp = AppError::internal(anyhow::anyhow!("secret cause")).into_response();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    async fn every_descriptor_default_status_matches_http_and_body_status() {
+        for code in ErrorCode::ALL {
+            let expected = code.descriptor().default_status;
+            let (status, body) = response_json(AppError::request_error(code, "safe detail")).await;
+            assert_eq!(status, expected, "default HTTP status for {code:?}");
+            assert_eq!(
+                body["status"],
+                expected.as_u16(),
+                "body status for {code:?}"
+            );
+            assert_eq!(body["type"], code.type_uri(), "type URI for {code:?}");
+        }
+    }
 
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    #[tokio::test]
+    async fn status_body_and_problem_content_type_are_consistent() {
+        let response =
+            AppError::unprocessable(ErrorCode::InvalidRequestBody, "invalid request body")
+                .into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
-            body,
-            serde_json::json!({ "error": "internal error" }),
-            "响应体不得泄露真实原因"
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/problem+json"
         );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["code"], "invalid_request_body");
+        assert!(body.get("error").is_none());
     }
 }
