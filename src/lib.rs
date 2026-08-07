@@ -7,6 +7,7 @@ pub mod error;
 pub mod openapi;
 pub mod otp;
 pub mod platform;
+pub mod request_id;
 pub mod session;
 pub mod state;
 pub mod user;
@@ -18,6 +19,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
+    middleware,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -35,6 +37,7 @@ use tracing::Level;
 use crate::{
     auth::{Realm, TokenManager},
     otp::{sender::OtpSender, service::OtpService, store::OtpStore},
+    request_id::{RequestId, request_id_middleware},
     state::AppState,
 };
 
@@ -63,21 +66,6 @@ pub fn router(state: AppState) -> Router {
             otp::OTP_MOUNT,
             Router::new().route("/send", post(otp::handler::send_otp)),
         );
-    let router = router.layer(
-        TraceLayer::new_for_http()
-            // 自定义 span：只带 method 和 path。不要开 include_headers——Cookie 里有 refresh token
-             .make_span_with(|req: &axum::http::Request<_>| {
-                 tracing::info_span!("http", method = %req.method(), path = %req.uri().path())
-             })
-             // 默认是 DEBUG，生产 INFO 级别下看不见，必须提到 INFO
-             .on_response(
-                 DefaultOnResponse::new()
-                     .level(Level::INFO)
-                     .latency_unit(LatencyUnit::Millis),
-             )
-             .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
-    );
-
     // Swagger UI 仅在 `swagger` feature 开启时挂载：/swagger-ui 页面，spec 在 /api-docs/openapi.json。
     // release 默认不带此 feature —— 不暴露接口清单、二进制也不含 UI 资源。
     #[cfg(feature = "swagger")]
@@ -89,6 +77,36 @@ pub fn router(state: AppState) -> Router {
                 .url("/api-docs/openapi.json", crate::openapi::ApiDoc::openapi()),
         )
     };
+
+    // 全部路由（包括可选的 Swagger UI）组装完成后，再统一挂载观测中间件。
+    // Axum 的 layer 后添加者先执行：Request ID 必须先写入 Extensions，
+    // TraceLayer 的 make_span_with 才能读取并关联后续日志。
+    let router = router
+        .layer(
+            TraceLayer::new_for_http()
+                // 只记录 method/path/request_id；不要记录 headers，Cookie 中含 refresh token。
+                .make_span_with(|req: &axum::http::Request<_>| {
+                    let request_id = req
+                        .extensions()
+                        .get::<RequestId>()
+                        .expect("request id middleware must run first");
+
+                    tracing::info_span!(
+                        "http.request",
+                        request_id = %request_id,
+                        method = %req.method(),
+                        path = %req.uri().path(),
+                    )
+                })
+                // 默认是 DEBUG，生产 INFO 级别下看不见，必须提到 INFO。
+                .on_response(
+                    DefaultOnResponse::new()
+                        .level(Level::INFO)
+                        .latency_unit(LatencyUnit::Millis),
+                )
+                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+        )
+        .layer(middleware::from_fn(request_id_middleware));
 
     router.with_state(state)
 }
