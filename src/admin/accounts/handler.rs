@@ -1,5 +1,4 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -8,7 +7,8 @@ use crate::{
         Admin, AdminRepository, AdminRepositoryError,
         accounts::{
             AdminAccountAdminResponse, AdminAccountsRepository, AdminAccountsService,
-            AdminListQueryParams, model::UserListQueryParams, service::AdminAccountsServiceError,
+            AdminListQueryParams, AdminUserListResponse, model::UserListQueryParams,
+            service::AdminAccountsServiceError,
         },
         extract::AdminAuth,
     },
@@ -141,6 +141,22 @@ pub async fn list_admins(
     Ok((StatusCode::OK, Json(response)))
 }
 
+/// GET /api/v1/admin/users
+/// 查询 C 端用户列表。
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/users",
+    tag = "admin-users",
+    security(("bearer_auth" = [])),
+    params(UserListQueryParams, PaginationQuery),
+    responses(
+        (status = 200, description = "用户列表查询成功", body = AdminUserListResponse),
+        (status = 400, description = "角色、时间、分页或筛选参数非法"),
+        (status = 401, description = "缺少/无效/过期 token，或管理员不存在"),
+        (status = 403, description = "管理员账号已禁用或必须先改密"),
+        (status = 500, description = "数据库查询失败"),
+    )
+)]
 pub async fn list_users(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -221,13 +237,6 @@ async fn require_active_admin(state: &AppState, auth: &AdminAuth) -> Result<Admi
         return Err(AppError::forbidden(
             ErrorCode::MustChangePassword,
             "password change required",
-        ));
-    }
-
-    if admin.is_locked(Utc::now()) {
-        return Err(AppError::unauthorized(
-            ErrorCode::AccountLocked,
-            "admin was locked",
         ));
     }
 

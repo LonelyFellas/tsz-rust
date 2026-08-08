@@ -169,25 +169,35 @@ impl UserRepository {
 
         // 查询总数
         let role = filter.role.as_ref().map(UserRole::as_str);
-        let phone_pattern = filter.phone_pattern.as_deref();
-        let email_pattern = filter.email_pattern.as_deref();
-        let display_name_pattern = filter.display_name_pattern.as_deref();
+        let query_pattern = filter.query_pattern.as_deref();
 
         // 查询当前总数
         let total = sqlx::query_scalar::<_, i64>(
             r#"
-            select count(*)
-            from users a
-            where ($1::text is null or a.role = $1)
-              and ($2::text is null or a.phone ilike $2 escape '\')
-              and ($3::text is null or a.email ilike $3 escape '\')
-              and ($4::text is null or a.display_name ilike $4 escape '\')
+            SELECT COUNT(*)
+            FROM users u
+            WHERE (
+                    $1::text IS NULL
+                    OR EXISTS (
+                        SELECT 1
+                        FROM user_roles ur
+                        WHERE ur.user_id = u.id AND ur.role = $1
+                    )
+                  )
+              AND (
+                    $2::text IS NULL
+                    OR u.phone ILIKE $2 ESCAPE '\'
+                    OR u.email ILIKE $2 ESCAPE '\'
+                    OR u.display_name ILIKE $2 ESCAPE '\'
+                  )
+              AND ($3::timestamptz IS NULL OR u.created_at >= $3)
+              AND ($4::timestamptz IS NULL OR u.created_at < $4)
             "#,
         )
         .bind(role)
-        .bind(phone_pattern)
-        .bind(email_pattern)
-        .bind(display_name_pattern)
+        .bind(query_pattern)
+        .bind(filter.registered_from)
+        .bind(filter.registered_to)
         .fetch_one(&mut *tx)
         .await
         .map_err(UserError::Db)?;
@@ -200,27 +210,41 @@ impl UserRepository {
                 a.phone,
                 a.email,
                 a.display_name,
-                a.status,
-                s.cefr_level AS cefr_level,
-                s.english_variant AS english_variant,
                 a.avatar_url,
+                a.status,
+                ARRAY(
+                    SELECT ur.role
+                    FROM user_roles ur
+                    WHERE ur.user_id = a.id
+                    ORDER BY CASE ur.role WHEN 'student' THEN 1 ELSE 2 END
+                ) AS roles,
                 a.created_at,
                 a.updated_at
             FROM users a
-            LEFT JOIN status_profiles s
-                on a.id = s.user_id
-            WHERE ($1::text IS NULL OR a.role = $1)
-              AND ($2::text IS NULL OR a.phone ILIKE $2 ESCAPE '\')
-              AND ($3::text IS NULL OR a.email ILIKE $3 ESCAPE '\')
-              AND ($4::text IS NULL OR a.display_name ILIKE $4 ESCAPE '\')
+            WHERE (
+                    $1::text IS NULL
+                    OR EXISTS (
+                        SELECT 1
+                        FROM user_roles ur
+                        WHERE ur.user_id = a.id AND ur.role = $1
+                    )
+                  )
+              AND (
+                    $2::text IS NULL
+                    OR a.phone ILIKE $2 ESCAPE '\'
+                    OR a.email ILIKE $2 ESCAPE '\'
+                    OR a.display_name ILIKE $2 ESCAPE '\'
+                  )
+              AND ($3::timestamptz IS NULL OR a.created_at >= $3)
+              AND ($4::timestamptz IS NULL OR a.created_at < $4)
             ORDER BY a.created_at DESC, a.id DESC
             LIMIT $5 OFFSET $6
             "#,
         )
         .bind(role)
-        .bind(phone_pattern)
-        .bind(email_pattern)
-        .bind(display_name_pattern)
+        .bind(query_pattern)
+        .bind(filter.registered_from)
+        .bind(filter.registered_to)
         .bind(filter.limit)
         .bind(filter.offset)
         .fetch_all(&mut *tx)

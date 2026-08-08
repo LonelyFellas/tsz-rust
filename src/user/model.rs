@@ -146,9 +146,9 @@ impl DisplayName {
 #[derive(Debug)]
 pub(crate) struct UserListFilter {
     pub role: Option<UserRole>,
-    pub phone_pattern: Option<String>,
-    pub display_name_pattern: Option<String>,
-    pub email_pattern: Option<String>,
+    pub query_pattern: Option<String>,
+    pub registered_from: Option<DateTime<Utc>>,
+    pub registered_to: Option<DateTime<Utc>>,
     pub limit: i64,
     pub offset: i64,
 }
@@ -158,10 +158,10 @@ pub(crate) struct UserListRecord {
     pub id: Uuid,
     pub phone: Option<String>,
     pub email: Option<String>,
-    pub display_name: Option<String>,
-    pub cefr_level: CefrLevel,
-    pub english_variant: EnglishVariant,
-    pub avatar_url: Option<String>,
+    pub display_name: String,
+    pub avatar_url: String,
+    pub roles: Vec<UserRole>,
+    pub status: UserStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

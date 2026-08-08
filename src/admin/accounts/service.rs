@@ -7,7 +7,8 @@ use crate::{
             AdminAccountAdminResponse, AdminAccountsRepository, AdminAccountsRepositoryError,
             model::{
                 AdminAccountAdminListFilter, AdminAccountUserResponse, AdminCreatorResponse,
-                AdminListQuery, AdminListResponse, UserListQuery, UserListResponse,
+                AdminListQuery, AdminListResponse, AdminUserListResponse, UserListQuery,
+                UserListResponse,
             },
         },
     },
@@ -276,16 +277,22 @@ impl AdminAccountsService {
         let limit = i64::from(page_size);
         let offset = i64::from(page - 1) * limit;
 
-        let display_name_pattern = normalize_search_pattern(query.filters.display_name);
-        let phone_pattern = normalize_search_pattern(query.filters.phone);
-        let email_pattern = normalize_search_pattern(query.filters.email);
-        // TODO 注册时间
+        if matches!(
+            (query.filters.registered_from, query.filters.registered_to),
+            (Some(from), Some(to)) if from >= to
+        ) {
+            return Err(AdminAccountsServiceError::InvalidQuery(
+                "registered_from must be earlier than registered_to".into(),
+            ));
+        }
+
+        let query_pattern = normalize_search_pattern(query.filters.q);
 
         let filter = UserListFilter {
             role: query.filters.role,
-            phone_pattern,
-            display_name_pattern,
-            email_pattern,
+            query_pattern,
+            registered_from: query.filters.registered_from,
+            registered_to: query.filters.registered_to,
             limit,
             offset,
         };
@@ -299,9 +306,9 @@ impl AdminAccountsService {
                 phone: record.phone,
                 email: record.email,
                 display_name: record.display_name,
-                student_role_cefr_level: record.cefr_level,
-                student_role_english_variant: record.english_variant,
                 avatar_url: record.avatar_url,
+                roles: record.roles,
+                status: record.status,
                 created_at: record.created_at,
                 updated_at: record.updated_at,
             })
@@ -312,9 +319,9 @@ impl AdminAccountsService {
             (total + i64::from(page_size) - 1) / i64::from(page_size)
         };
 
-        Ok(PaginatedResponse {
+        Ok(AdminUserListResponse {
             items,
-            pagination: PaginationMeta {
+            page: PaginationMeta {
                 page,
                 page_size,
                 total,

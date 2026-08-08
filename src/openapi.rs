@@ -46,6 +46,7 @@ use utoipa::{
         crate::admin::accounts::handler::create_admin,
         crate::admin::accounts::handler::request_create_admin_code,
         crate::admin::accounts::handler::list_admins,
+        crate::admin::accounts::handler::list_users,
     ),
     components(
         schemas(
@@ -77,10 +78,13 @@ use utoipa::{
             crate::admin::AdminStatus,
             crate::admin::accounts::AdminAccountAdminResponse,
             crate::admin::accounts::AdminCreatorResponse,
+            crate::admin::accounts::AdminAccountUserResponse,
+            crate::admin::accounts::AdminUserListResponse,
             crate::api::PaginationMeta,
             crate::api::PaginatedResponse<crate::admin::accounts::AdminAccountAdminResponse>,
             crate::admin::accounts::handler::CreateAdminRequest,
             crate::admin::accounts::handler::CreateAdminResponse,
+            crate::user::model::UserStatus,
         )
     ),
     tags(
@@ -89,6 +93,7 @@ use utoipa::{
         (name = "otp", description = "验证码"),
         (name = "admin", description = "管理后台认证 / 会话"),
         (name = "admin-accounts", description = "管理后台管理员账号治理"),
+        (name = "admin-users", description = "管理后台 C 端用户管理"),
     )
 )]
 pub struct ApiDoc;
@@ -183,6 +188,7 @@ mod tests {
             ("post", "/api/v1/admin/admins"),
             ("post", "/api/v1/admin/admins/create-code"),
             ("get", "/api/v1/admin/admins"),
+            ("get", "/api/v1/admin/users"),
         ] {
             assert!(
                 json["paths"][path][method].is_object(),
@@ -386,6 +392,87 @@ mod tests {
             json["components"]["schemas"]["AdminAccountAdminResponse"]["properties"]["created_by"]
                 .is_object(),
             "管理员公开响应 schema 应包含 created_by"
+        );
+
+        let list_users = &json["paths"]["/api/v1/admin/users"]["get"];
+        assert_eq!(
+            list_users["security"][0]["bearer_auth"],
+            serde_json::json!([]),
+            "用户列表接口必须声明 Bearer 鉴权"
+        );
+        for status in ["200", "400", "401", "403", "500"] {
+            assert!(
+                list_users["responses"][status].is_object(),
+                "用户列表接口应声明 {status} 响应"
+            );
+        }
+        let user_parameters = list_users["parameters"]
+            .as_array()
+            .expect("用户列表接口应声明查询参数");
+        for name in [
+            "role",
+            "q",
+            "registered_from",
+            "registered_to",
+            "page",
+            "page_size",
+        ] {
+            assert!(
+                user_parameters
+                    .iter()
+                    .any(|parameter| parameter["name"] == name && parameter["in"] == "query"),
+                "用户列表接口应声明 query 参数 {name}"
+            );
+        }
+        for parameter in user_parameters {
+            assert_ne!(
+                parameter["required"],
+                serde_json::json!(true),
+                "用户列表筛选参数都应可选：{parameter}"
+            );
+        }
+        assert_eq!(
+            list_users["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AdminUserListResponse"
+        );
+        let user_list_properties =
+            &json["components"]["schemas"]["AdminUserListResponse"]["properties"];
+        assert!(user_list_properties["items"].is_object());
+        assert!(user_list_properties["page"].is_object());
+        let user_properties =
+            &json["components"]["schemas"]["AdminAccountUserResponse"]["properties"];
+        for field in [
+            "id",
+            "phone",
+            "email",
+            "display_name",
+            "avatar_url",
+            "roles",
+            "status",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                user_properties[field].is_object(),
+                "AdminAccountUserResponse schema 应包含 {field}"
+            );
+        }
+        let user_required = json["components"]["schemas"]["AdminAccountUserResponse"]["required"]
+            .as_array()
+            .expect("AdminAccountUserResponse required 应为数组");
+        for field in ["phone", "email"] {
+            assert_eq!(
+                user_properties[field]["type"], "string",
+                "{field} 应为可选的非 null string"
+            );
+            assert!(
+                !user_required.iter().any(|required| required == field),
+                "{field} 不应出现在 required 中"
+            );
+        }
+        assert!(
+            json["paths"]["/api/v1/admin/admins/users"].is_null(),
+            "用户列表不得继续暴露在错误的 /api/v1/admin/admins/users 路径"
         );
     }
 

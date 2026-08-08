@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     admin::{AdminRole, AdminStatus},
     api::{ListQuery, PaginatedResponse},
-    user::model::{CefrLevel, EnglishVariant, UserRole},
+    user::model::{UserRole, UserStatus},
 };
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -30,14 +30,24 @@ pub struct AdminAccountAdminResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AdminAccountUserResponse {
     pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub phone: Option<String>,
+    #[schema(nullable = false)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-    pub display_name: Option<String>,
-    pub student_role_cefr_level: CefrLevel,
-    pub student_role_english_variant: EnglishVariant,
-    pub avatar_url: Option<String>,
+    pub display_name: String,
+    pub avatar_url: String,
+    pub roles: Vec<UserRole>,
+    pub status: UserStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AdminUserListResponse {
+    pub items: Vec<AdminAccountUserResponse>,
+    pub page: crate::api::PaginationMeta,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -56,22 +66,18 @@ pub struct AdminListQueryParams {
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct UserListQueryParams {
-    /// 用户昵称
-    pub display_name: Option<String>,
-    /// 用户手机号
-    pub phone: Option<String>,
-    /// 用户邮箱
-    pub email: Option<String>,
-    /// 用户角色
+    /// 按用户持有的角色筛选
     pub role: Option<UserRole>,
-    /// 注册开始时间
-    pub registration_start_time: DateTime<Utc>,
-    /// 注册结束时间
-    pub registration_end_time: DateTime<Utc>,
+    /// 手机号、邮箱或昵称的字面子串匹配
+    pub q: Option<String>,
+    /// 注册时间下界（含，RFC 3339）
+    pub registered_from: Option<DateTime<Utc>>,
+    /// 注册时间上界（不含，RFC 3339）
+    pub registered_to: Option<DateTime<Utc>>,
 }
 
 pub type AdminListResponse = PaginatedResponse<AdminAccountAdminResponse>;
-pub type UserListResponse = PaginatedResponse<AdminAccountUserResponse>;
+pub type UserListResponse = AdminUserListResponse;
 pub type AdminListQuery = ListQuery<AdminListQueryParams>;
 pub type UserListQuery = ListQuery<UserListQueryParams>;
 

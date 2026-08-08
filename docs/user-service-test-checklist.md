@@ -123,7 +123,7 @@
 
 - [ ] **given the service returns ErrPhoneTaken or ErrEmailTaken, when the register handler runs, then it responds 409 with a machine-readable 'field' key ('phone' or 'email'), not a substring-matchable English message** `[handler层]` — 客户端据 'field' 确定性标注冲突输入，措辞变更不影响解析  
   <sub>handler.go Register:129-134 (field key); mvp=false: 'field' response shape是增强，MVP 可先返回 409 但保留字段区分</sub>
-- [ ] **given a user with only one of phone/email, when serialized, then the absent identifier is omitted rather than emitted as an empty string** `[handler层]` — 避免把空标识序列化成空串误导客户端  
+- [ ] **given a user with only one of phone/email, when serialized, then the absent identifier is omitted rather than emitted as null or an empty string** `[handler层]` — 保持 `phone?: string` / `email?: string` 的“可选但非 null”契约，避免客户端同时兼容缺省、`null` 和空串
   <sub>model.go User.Phone/Email json omitempty (model.go:44-45); mvp=false: response-shape polish</sub>
 
 > 注：Scope: I kept strictly to Registration + identity + input validation. Login/code/reset/delete/bind/refresh/role flows appear in the same service_test.go but belong to OTHER concerns (auth-login, password-reset, account-deletion, contact-bind, sessions, roles) — I deliberately excluded them except where they share the exact validation rule (e.g. classifyContact mirrors register's phone 5–20 / email-format rule; the identifier-classification assertion overlaps with the login concern and can be de-duped there).

@@ -249,6 +249,10 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 - 分页:`page` 默认 1(clamp≥1)、`page_size` 默认 20(clamp 1..100);`q` ILIKE 子串检索(`%`/`_` 不作通配,入参转义)——admins 列表查 phone/display_name(无 email,Q9),users 列表查 phone/email/display_name;列表按 `created_at DESC`;`items` 空为 `[]` 恒非 null。
 - `registered_from/to`:RFC3339,**半开区间 `[from, to)`** 过滤 created_at。
 - `AdminUser`(三期):`{id, phone?, email?, display_name, avatar_url(未设为 ""), roles:[student|teacher], status, created_at, updated_at}`——复用 web 侧 `get_roles_by_user_id`;不含 level/coin_balance。
+  - `phone`、`email` 各自可缺省，但数据库约束保证至少一个存在。
+  - 缺值时必须省略对应 JSON 键，不得返回 `null` 或 `""`。前端类型保持 `phone?: string`、`email?: string`，无需扩大为 `string | null`。
+  - Rust 响应 DTO 保持 `Option<String>`，并同时标注 `#[serde(skip_serializing_if = "Option::is_none")]` 与 `#[schema(nullable = false)]`，使运行时 JSON 和 OpenAPI 均表达“可选但非 null”。
+  - 回归测试至少覆盖：仅手机号用户的响应不含 `email` 键；仅邮箱用户的响应不含 `phone` 键；OpenAPI 中两字段均不在 `required` 内，且字段类型只有 `string`。
 - OpenAPI:每落一条端点同步 utoipa 注解 + `docs/openapi.json` 重导出 → 前端 `sync:openapi` → 从 PENDING 白名单移除(契约测试强制)。cookie 参数声明沿用 web 侧 ⑧ 的手法。
 
 ## 12. 错误与不可区分汇总
