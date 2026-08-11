@@ -198,7 +198,7 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 
 **provision**:phone 必填(5–20)、display_name 必填(1–50,trim,拒 `<>`/控制符/Cf——约束与 web `DisplayName::parse` 高度重合,实现时评估直接复用);**无 email(Q9)**;判重**不先查**、直接 insert 靠唯一索引 + 23505 映射 409(user 域同哲学);置 must_change=true(列默认即 true,显式写更稳);201 返 `{admin, temporary_password}`。
 
-**seed super_admin**(带外,Q5 已定:独立 bin `seed_admin`,服务器上跑,密码运行时传入不进 .env):幂等语义照 go——phone 不存在 ⇒ 建 active super(密码须过策略,must_change=false);已存在 ⇒ 自愈提升 level、重激活 status、**不动密码**。⚠️ 2FA 之后 seed 的 phone 必须是**真实可收码的手机号**(登录要过验证码因子;测试环境码在 journald,生产必须真短信)。
+**seed super_admin**(带外,Q5 已定:独立 bin `seed_admin`,服务器上跑,密码运行时传入不进 .env):幂等语义照 go——phone 不存在 ⇒ 建 active super(密码须过策略,must_change=false);已存在 ⇒ 自愈提升 level、重激活 status、**不动密码**。⚠️ 2FA 之后 seed 的 phone 必须是**真实可收码的手机号**(登录要过验证码因子;测试环境 Mock 码统一为 `000000`,生产必须真短信)。
 
 ## 10. 权限模型(RBAC 已取消,Q10)
 
@@ -355,7 +355,7 @@ config 新增:
 ## 17. 落地顺序
 
 1. **一期(auth 闭环)**:迁移两张表 → config 三键 + AppState 装配 → `AppError` 扩展(423 + code 变体)→ model(枚举/密码策略)→ OTP 域 `Purpose::AdminLogin` 变体 → AdminRepository(含锁定方法)→ admin session 平移 → login-code/login(2FA)/refresh/logout/logout-all/change-password/profile(permissions 恒全量死数据)→ must_change 守卫(机制先就位,flag 触发点在二期)→ CORS(Q6)→ OpenAPI + 前端白名单移除 6 条 + **新增 login-code 契约**(admin 前端登录页需加发码按钮+验证码栏,本地 60s 倒计时)。
-   ⚠️ **真短信 sender 从「web 线待办」升格为 admin 一期的生产前置**:2FA 下验证码是登录必经因子,`OtpSender::Mock`(码打 journald)意味着生产环境后台无法登录——admin 线上生产前必须接真短信通道(测试环境可 `journalctl -u tsz-rust | grep otp_code_sent` 取码过渡)。
+   ⚠️ **真短信 sender 从「web 线待办」升格为 admin 一期的生产前置**:2FA 下验证码是登录必经因子,`OtpSender::Mock`(固定码 `000000`)意味着生产环境后台无法安全登录——admin 线上生产前必须接真短信通道(测试环境直接输入 `000000` 过渡)。
 2. **二期(admins 管理)**:provision/list/status/reset-password + 临时密码内核 + seed 机制 → 白名单再移 4 条。
 3. **三期(users 管理)**:users 4 端点(list/详情/status/编辑昵称)→ 白名单清空 admin 身份区。
    (原三期的 RBAC 已取消,Q10:白名单里 6 条 RBAC 端点——roles×4、permissions、派角色——属「取消」而非「待实现」,待前端下架 Roles 页面后从白名单与 admin.ts 一并删除。)

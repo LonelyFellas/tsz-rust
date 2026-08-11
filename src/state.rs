@@ -67,7 +67,8 @@ impl AppState {
 
     /// 测试用：返回 `(AppState, OtpStore)`，二者共享**同一 OTP keyspace**（同 key 前缀）。
     /// 供 verify 编排的集成测试（如 login-otp）——先用返回的 `store` 注入一枚**已知** code，
-    /// 再驱动 handler 走真实 `verify`（`OtpSender::Mock` 不回传码，没法从发码流程读回，故走注入）。
+    /// 再驱动 handler 走真实 `verify`。这里保留注入能力，以便测试任意验证码与异常分支，
+    /// 不与 `OtpSender::Mock` 当前使用的固定码耦合。
     pub fn for_test_with_otp_store(pool: PgPool) -> (Self, OtpStore) {
         let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379/0")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))

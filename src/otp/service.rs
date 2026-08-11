@@ -69,8 +69,11 @@ impl OtpService {
             return Err(OtpServiceError::RateLimited);
         }
 
-        // 3) 生成6 位 CSPRNG 码
-        let code = generate_code();
+        // 3) Mock 通道固定为 000000，方便内部联调；真实短信通道仍生成 6 位 CSPRNG 码。
+        let code = self
+            .sender
+            .fixed_code()
+            .map_or_else(generate_code, ToOwned::to_owned);
 
         // 4) 先存后发（send 失败无害：码自然过期，重试受冷却约束——otp-design §6）
         self.store

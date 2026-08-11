@@ -81,19 +81,15 @@ fn wrong_of(code: &str) -> String {
 // ======================= 生成 → 存 → 发 贯通 =======================
 
 #[tokio::test]
-async fn request_saves_a_verifiable_six_digit_code() {
+async fn request_with_mock_sender_saves_fixed_verifiable_code() {
     let (svc, pool, prefix) = service_with(Duration::from_secs(60), 10).await;
     svc.request(T, Purpose::Login)
         .await
         .expect("首次请求应成功");
 
-    // request 生成的码落进了 Redis，且是 6 位数字。
+    // Mock 通道统一落固定码，内部测试环境无需再查日志取码。
     let code = saved_code(&pool, &prefix, T, Purpose::Login).await;
-    assert_eq!(code.len(), 6, "码应为 6 位（含前导零），实得 {code:?}");
-    assert!(
-        code.chars().all(|c| c.is_ascii_digit()),
-        "码应全为数字，实得 {code:?}"
-    );
+    assert_eq!(code, "000000", "Mock 验证码应统一为 000000");
 
     // 该码可被 verify 通过 —— 证明 request 存的和 verify 读的是同一枚。
     svc.verify(T, Purpose::Login, &code)

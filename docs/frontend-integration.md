@@ -138,8 +138,8 @@ Max-Age=2592000`。JS 读不到、也不需要读；只要 fetch 带 `credential
 
 - 202 Accepted（无 body）。
 - 错误：429（60s 冷却 / 24h 日限 10 次）；503（Redis 不可用，fail-close）。
-- **⚠️ 短信通道未接，OTP 是 Mock**：验证码不会真发到手机，打在服务器日志里。
-  联调时后端同学取码：`ssh tshb-test 'journalctl -u tsz-rust -n 50 | grep otp_code_sent'`。
+- **⚠️ 短信通道未接，OTP 是 Mock**：验证码不会真发到手机，测试环境统一输入 `000000`。
+  接入阿里云短信后，真实通道必须恢复为随机验证码。
 
 ### 3.5 `POST /api/v1/auth/refresh` — 静默续期
 

@@ -24,7 +24,7 @@
 |---|---|---|---|
 | 1 | 发送抽象 | **enum `Sender { Mock }`，service 持有** | 封闭 provider 集，enum 躲开 async-trait/dyn/泛型传染；接阿里云=加 variant。见 §3 |
 | 2 | 持久化抽象 | **具体 `OtpRepository{pool}` + `#[sqlx::test]`，无 trait/fake** | 真库可测，沿用 user/session 惯例（**与 go 的 `Store` interface 相反**）。见 §11 |
-| 3 | code 生成 | **6 位数字，CSPRNG，无取模偏置，零填充** | 安全凭证必须 CSPRNG（复用 session 的 `getrandom`，**非** `generate_display_name` 的 ThreadRng）。见 §4 |
+| 3 | code 生成 | **Mock 固定 `000000`；真实通道为 6 位 CSPRNG** | 固定码仅供内部测试；真实安全凭证必须 CSPRNG（复用 session 的 `getrandom`，**非** `generate_display_name` 的 ThreadRng）。见 §4 |
 | 4 | code 存储 | **明文存**（不哈希） | 6 位=10⁶ 低熵，哈希对脱库者≈无用；防线是 TTL+attempts+单次。**与 refresh token 故意相反**。见 §5 |
 | 5 | 限流 | 每 target+purpose **冷却**（两码最小间隔）+ **日限**（滚动 24h 上限），**生成前**先查 | 控短信成本、防刷；派生自 `created_at`，不加列。见 §8 |
 | 6 | attempts | 单条码**错 5 次即锁**（`max_attempts`，可配） | 6 位码在线爆破概率 ≤ 5/10⁶，与 TTL 无关。见 §7 |
@@ -75,12 +75,21 @@ pub enum Purpose { Login, PasswordReset, AccountDeletion, ContactBind }
 **决策：`Sender` 是 enum，`OtpService` 直接持有它。** 这是本域唯一「抽象一个外部依赖」的地方——因为真 provider（阿里云）现在没有、以后测试也不该真发。**和 repository 反着来**（repo 是具体类型 + 真库测，因为真库就在手边）。
 
 ```rust
+const MOCK_CODE: &str = "000000";
+
 pub enum Sender {
-    Mock,                              // 现在：打日志、不真发
+    Mock,                              // 现在：固定码 000000，打日志、不真发
     // Aliyun(AliyunSmsClient),        // 以后：加这一 variant + 一个 match 分支即可
 }
 
 impl Sender {
+    pub(crate) fn fixed_code(&self) -> Option<&'static str> {
+        match self {
+            Sender::Mock => Some(MOCK_CODE),
+            // Sender::Aliyun(_) => None,
+        }
+    }
+
     pub async fn send(&self, channel: Channel, target: &str, code: &str) -> Result<(), SendError> {
         match self {
             Sender::Mock => {
@@ -93,12 +102,14 @@ impl Sender {
 ```
 
 - **为什么 enum 不是 trait**：封闭的少数 provider 集（mock + 阿里云短信 + 也许邮件）。enum 具体、穷尽匹配、无动态分发，**躲开 `async-trait`/`Arc<dyn>`/泛型往 `AppState` 传染**这一堆麻烦，贴项目「清爽、少 trait 仪式」的调性。
-- **接入阿里云 = 加一个 variant + 一个 `match` 分支 + config 里的密钥**，OTP 域其它代码零改动。`run()` 里把 `Sender::Mock` 换成 `Sender::Aliyun(...)` 即切生产。
+- **接入阿里云 = 加一个 variant + 一个 `match` 分支 + config 里的密钥**。`run()` 里把 `Sender::Mock` 换成 `Sender::Aliyun(...)` 即切生产；阿里云通道的 `fixed_code()` 必须返回 `None`，从而恢复下方的 CSPRNG 随机码。
 - ⚠️ **日志安全（真 provider 务必守）**：`Sender::Mock` 是 dev/test-only，故意把 `code`+`target` 都打出来方便本地「我给 X 发的啥码」。**真阿里云 variant 绝不能打 `code`（是活凭证），`target` 要脱敏**（`138****1234` / `a***@x.com`，是 PII）。这条 go 注释里专门警告过。
 
 ---
 
-## 4. 生成：CSPRNG 6 位码
+## 4. 生成：Mock 固定码 / 真实通道 CSPRNG 6 位码
+
+内部测试环境使用 `Sender::Mock` 时统一生成 `000000`，免去查日志取码；此固定码不得用于真实短信通道。
 
 ```
 code = 从 CSPRNG 取 [0, 1_000_000) 的无偏整数，零填充成 6 位字符串
