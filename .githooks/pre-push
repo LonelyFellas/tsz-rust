@@ -1,9 +1,10 @@
 #!/bin/sh
-# 推送前门禁：clippy（警告即拦截）+ 全量测试。任一失败都会拦下推送。
+# 推送前快速门禁：clippy（警告即拦截）+ 不依赖外部服务的单元测试。
+# PostgreSQL / Redis 集成测试由 GitHub CI 负责，避免每次本地推送等待全量测试。
 set -e
 
 echo "▶ pre-push (1/2): cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets --all-features -- -D warnings
 
-echo "▶ pre-push (2/2): cargo test"
-cargo test
+echo "▶ pre-push (2/2): cargo test --locked --lib --bins"
+cargo test --locked --lib --bins

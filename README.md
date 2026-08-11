@@ -59,8 +59,8 @@ docker compose down -v         # 停并删数据（重置）
 
 | Hook | 跑什么 |
 |------|--------|
-| `pre-commit` | `cargo clippy --all-targets -- -D warnings` |
-| `pre-push` | `cargo clippy ...` + `cargo test` |
+| `pre-commit` | 刷新 SQLx 离线缓存 + `cargo clippy --all-targets --all-features -- -D warnings` |
+| `pre-push` | `cargo clippy ...` + `cargo test --locked --lib --bins` |
 
 **启用**（每个新 clone 都要执行一次——`core.hooksPath` 是本机配置，不随仓库提交）：
 
@@ -71,5 +71,4 @@ git config core.hooksPath .githooks
 **注意事项：**
 
 - **clippy 零容忍**：`-D warnings` 把任何警告升级为错误，有警告时 commit / push 会被拦。先跑 `cargo clippy --all-targets -- -D warnings` 修干净。
-- **pre-push 需要 Docker 库在跑**：`cargo test` 里的 `tests/health.rs` 用 `#[sqlx::test]` 连真库，**库没起来时 `git push` 会被拦住**。推送前确保 `docker compose ps` 是 healthy。
-  - 若不想每次推送都依赖库，把 `.githooks/pre-push` 的 `cargo test` 改成 `cargo test --lib`（只跑不连库的单元测试），连库测试留给 CI。
+- **pre-push 不依赖 Docker**：本地只跑库和二进制目标里的快速单元测试；PostgreSQL、Redis 集成测试及全部 feature 由 GitHub CI 统一执行。
