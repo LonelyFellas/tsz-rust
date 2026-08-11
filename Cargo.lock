@@ -2560,6 +2560,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-general-category",
+ "unicode-normalization",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",

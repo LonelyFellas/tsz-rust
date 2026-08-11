@@ -11,6 +11,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy)]
 pub struct RequestId(Uuid);
 
+impl RequestId {
+    pub fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
 impl fmt::Display for RequestId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)

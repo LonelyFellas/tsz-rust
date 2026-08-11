@@ -17,6 +17,8 @@ pub enum ErrorCode {
     InvalidQuery,
     InvalidPathParameter,
     InvalidPartOfSpeech,
+    InvalidHeadword,
+    UnsupportedLanguage,
     InvalidPhone,
     InvalidEmail,
     InvalidIdentifier,
@@ -46,6 +48,18 @@ pub enum ErrorCode {
     PartOfSpeechConflict,
     SubPartOfSpeechConflict,
     RevisionConflict,
+    ReferenceConflict,
+    DetectionMismatch,
+    DetectionExpired,
+    DuplicateWord,
+    IdempotencyConflict,
+    StepNotReachable,
+    ValidationFailed,
+    DownstreamConfirmationRequired,
+    EntryArchived,
+    EntryHasInboundPublicationRefs,
+    EntryHasUnavailablePublicationRefs,
+    WordNotFound,
     PartOfSpeechInUse,
     SubPartOfSpeechInUse,
     ServiceUnavailable,
@@ -60,13 +74,15 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 53] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
         Self::InvalidQuery,
         Self::InvalidPathParameter,
         Self::InvalidPartOfSpeech,
+        Self::InvalidHeadword,
+        Self::UnsupportedLanguage,
         Self::InvalidPhone,
         Self::InvalidEmail,
         Self::InvalidIdentifier,
@@ -96,6 +112,18 @@ impl ErrorCode {
         Self::PartOfSpeechConflict,
         Self::SubPartOfSpeechConflict,
         Self::RevisionConflict,
+        Self::ReferenceConflict,
+        Self::DetectionMismatch,
+        Self::DetectionExpired,
+        Self::DuplicateWord,
+        Self::IdempotencyConflict,
+        Self::StepNotReachable,
+        Self::ValidationFailed,
+        Self::DownstreamConfirmationRequired,
+        Self::EntryArchived,
+        Self::EntryHasInboundPublicationRefs,
+        Self::EntryHasUnavailablePublicationRefs,
+        Self::WordNotFound,
         Self::PartOfSpeechInUse,
         Self::SubPartOfSpeechInUse,
         Self::ServiceUnavailable,
@@ -121,6 +149,16 @@ impl ErrorCode {
                 "invalid_part_of_speech",
                 "Invalid part of speech",
                 StatusCode::BAD_REQUEST,
+            ),
+            Self::InvalidHeadword => (
+                "invalid_headword",
+                "Invalid headword",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::UnsupportedLanguage => (
+                "unsupported_language",
+                "Unsupported language",
+                StatusCode::UNPROCESSABLE_ENTITY,
             ),
             Self::InvalidPhone => ("invalid_phone", "Invalid phone", StatusCode::BAD_REQUEST),
             Self::InvalidEmail => ("invalid_email", "Invalid email", StatusCode::BAD_REQUEST),
@@ -243,6 +281,54 @@ impl ErrorCode {
                 "Revision conflict",
                 StatusCode::CONFLICT,
             ),
+            Self::ReferenceConflict => (
+                "reference_conflict",
+                "Referenced publication changed",
+                StatusCode::CONFLICT,
+            ),
+            Self::DetectionMismatch => (
+                "detection_mismatch",
+                "Detection does not match",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            Self::DetectionExpired => ("detection_expired", "Detection expired", StatusCode::GONE),
+            Self::DuplicateWord => (
+                "duplicate_word",
+                "Word already exists",
+                StatusCode::CONFLICT,
+            ),
+            Self::IdempotencyConflict => (
+                "idempotency_conflict",
+                "Idempotency key conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::StepNotReachable => (
+                "step_not_reachable",
+                "Step not reachable",
+                StatusCode::CONFLICT,
+            ),
+            Self::ValidationFailed => (
+                "validation_failed",
+                "Validation failed",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            Self::DownstreamConfirmationRequired => (
+                "downstream_confirmation_required",
+                "Downstream confirmation required",
+                StatusCode::CONFLICT,
+            ),
+            Self::EntryArchived => ("entry_archived", "Entry archived", StatusCode::CONFLICT),
+            Self::EntryHasInboundPublicationRefs => (
+                "entry_has_inbound_publication_refs",
+                "Entry has inbound publication references",
+                StatusCode::CONFLICT,
+            ),
+            Self::EntryHasUnavailablePublicationRefs => (
+                "entry_has_unavailable_publication_refs",
+                "Entry has unavailable publication references",
+                StatusCode::CONFLICT,
+            ),
+            Self::WordNotFound => ("word_not_found", "Word not found", StatusCode::NOT_FOUND),
             Self::PartOfSpeechInUse => (
                 "part_of_speech_in_use",
                 "Part of speech in use",
@@ -294,6 +380,10 @@ pub struct ProblemDetails {
     #[schema(example = "phone")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<&'static str>,
+    /// 多字段/多节点校验问题；智能词库等复杂表单按稳定 node_id 定位。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub field_issues: Option<Vec<serde_json::Value>>,
     /// 领域错误的结构化上下文；客户端不得解析 detail 文案。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -307,6 +397,9 @@ pub struct ProblemMeta {
     pub current_revision: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub current_lifecycle_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub usage_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -314,6 +407,27 @@ pub struct ProblemMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub word_id: Option<uuid::Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub max_reachable_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub affected_node_ids: Option<Vec<uuid::Uuid>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub reference_locations: Option<Vec<ProblemReferenceLocation>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProblemReferenceLocation {
+    pub target_sense_id: uuid::Uuid,
+    pub source_entry_id: uuid::Uuid,
+    pub source_publication_id: uuid::Uuid,
+    pub source_node_id: uuid::Uuid,
+    pub reference_kind: String,
 }
 
 #[derive(Debug)]
@@ -340,6 +454,7 @@ impl AppError {
                 detail: message.into(),
                 code,
                 field,
+                field_issues: None,
                 meta: None,
             },
             source: None,
@@ -378,6 +493,10 @@ impl AppError {
         Self::new(StatusCode::CONFLICT, code, message, field)
     }
 
+    pub fn gone(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::GONE, code, message, None)
+    }
+
     pub fn locked(message: impl Into<String>) -> Self {
         Self::new(StatusCode::LOCKED, ErrorCode::AccountLocked, message, None)
     }
@@ -411,6 +530,16 @@ impl AppError {
 
     pub fn with_meta(mut self, meta: ProblemMeta) -> Self {
         self.response.meta = Some(meta);
+        self
+    }
+
+    pub fn with_field_issues<T: Serialize>(mut self, issues: &[T]) -> Self {
+        self.response.field_issues = Some(
+            issues
+                .iter()
+                .filter_map(|issue| serde_json::to_value(issue).ok())
+                .collect(),
+        );
         self
     }
 
