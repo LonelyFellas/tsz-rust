@@ -4,13 +4,13 @@ use utoipa::ToSchema;
 
 use crate::{
     admin::{
-        Admin, AdminRepository, AdminRepositoryError,
+        AdminAuth,
         accounts::{
             AdminAccountAdminResponse, AdminAccountsRepository, AdminAccountsService,
             AdminListQueryParams, AdminUserListResponse, model::UserListQueryParams,
             service::AdminAccountsServiceError,
         },
-        extract::AdminAuth,
+        authorization::{require_active_admin, require_super_admin},
     },
     api::{ApiJson, ApiQuery, ListQuery, PaginatedResponse, PaginationQuery},
     error::{AppError, ErrorCode},
@@ -221,44 +221,6 @@ pub async fn set_admin_status() -> Result<impl IntoResponse, AppError> {
 /// 超级管理员对普通管理员密码重置
 pub async fn reset_admin_password() -> Result<impl IntoResponse, AppError> {
     Ok(())
-}
-
-async fn require_active_admin(state: &AppState, auth: &AdminAuth) -> Result<Admin, AppError> {
-    let admin = AdminRepository::new(state.pool.clone())
-        .get_by_id(&auth.subject)
-        .await
-        .map_err(map_admin_error)?;
-
-    if !admin.is_active() {
-        return Err(AppError::forbidden(ErrorCode::AccountDisabled, "forbidden"));
-    }
-
-    if admin.must_change_password {
-        return Err(AppError::forbidden(
-            ErrorCode::MustChangePassword,
-            "password change required",
-        ));
-    }
-
-    Ok(admin)
-}
-
-async fn require_super_admin(state: &AppState, auth: &AdminAuth) -> Result<Admin, AppError> {
-    let admin = require_active_admin(state, auth).await?;
-
-    if !admin.is_super_admin() {
-        return Err(AppError::forbidden(ErrorCode::Forbidden, "forbidden"));
-    }
-    Ok(admin)
-}
-
-fn map_admin_error(err: AdminRepositoryError) -> AppError {
-    match err {
-        AdminRepositoryError::NotFound => {
-            AppError::unauthorized(ErrorCode::AdminNotFound, "admin not found")
-        }
-        _ => AppError::internal(err),
-    }
 }
 
 fn map_otp_verify_error(error: OtpServiceError) -> AppError {

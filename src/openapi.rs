@@ -47,11 +47,22 @@ use utoipa::{
         crate::admin::accounts::handler::request_create_admin_code,
         crate::admin::accounts::handler::list_admins,
         crate::admin::accounts::handler::list_users,
+        // catalog 域
+        crate::catalog::handler::catalog,
+        crate::catalog::handler::list_parts,
+        crate::catalog::handler::create_part,
+        crate::catalog::handler::update_part,
+        crate::catalog::handler::delete_part,
+        crate::catalog::handler::list_sub_parts,
+        crate::catalog::handler::create_sub_part,
+        crate::catalog::handler::update_sub_part,
+        crate::catalog::handler::delete_sub_part,
     ),
     components(
         schemas(
             crate::error::ErrorCode,
             crate::error::ProblemDetails,
+            crate::error::ProblemMeta,
             // auth
             crate::auth::handler::UserProfile,
             crate::auth::handler::LoginRequest,
@@ -85,6 +96,19 @@ use utoipa::{
             crate::admin::accounts::handler::CreateAdminRequest,
             crate::admin::accounts::handler::CreateAdminResponse,
             crate::user::model::UserStatus,
+            // catalog
+            crate::catalog::model::Actor,
+            crate::catalog::model::CatalogResponse,
+            crate::catalog::model::CatalogPart,
+            crate::catalog::model::CatalogSubPart,
+            crate::catalog::model::PartOfSpeechConfig,
+            crate::catalog::model::SubPartOfSpeechConfig,
+            crate::catalog::model::SubPartListResponse,
+            crate::catalog::model::CreatePartRequest,
+            crate::catalog::model::UpdatePartRequest,
+            crate::catalog::model::CreateSubPartRequest,
+            crate::catalog::model::UpdateSubPartRequest,
+            crate::api::PaginatedResponse<crate::catalog::model::PartOfSpeechConfig>,
         )
     ),
     tags(
@@ -94,6 +118,7 @@ use utoipa::{
         (name = "admin", description = "管理后台认证 / 会话"),
         (name = "admin-accounts", description = "管理后台管理员账号治理"),
         (name = "admin-users", description = "管理后台 C 端用户管理"),
+        (name = "admin-catalog", description = "管理后台词性目录配置"),
     )
 )]
 pub struct ApiDoc;
@@ -189,6 +214,27 @@ mod tests {
             ("post", "/api/v1/admin/admins/create-code"),
             ("get", "/api/v1/admin/admins"),
             ("get", "/api/v1/admin/users"),
+            ("get", "/api/v1/admin/settings/parts-of-speech/catalog"),
+            ("get", "/api/v1/admin/settings/parts-of-speech"),
+            ("post", "/api/v1/admin/settings/parts-of-speech"),
+            ("patch", "/api/v1/admin/settings/parts-of-speech/{id}"),
+            ("delete", "/api/v1/admin/settings/parts-of-speech/{id}"),
+            (
+                "get",
+                "/api/v1/admin/settings/parts-of-speech/{id}/sub-parts",
+            ),
+            (
+                "post",
+                "/api/v1/admin/settings/parts-of-speech/{id}/sub-parts",
+            ),
+            (
+                "patch",
+                "/api/v1/admin/settings/parts-of-speech/{id}/sub-parts/{sub_id}",
+            ),
+            (
+                "delete",
+                "/api/v1/admin/settings/parts-of-speech/{id}/sub-parts/{sub_id}",
+            ),
         ] {
             assert!(
                 json["paths"][path][method].is_object(),
@@ -476,6 +522,164 @@ mod tests {
         );
     }
 
+    #[test]
+    fn catalog_contract_is_documented() {
+        let json = serde_json::to_value(ApiDoc::openapi()).unwrap();
+
+        for (method, path, status, schema) in [
+            (
+                "get",
+                "/api/v1/admin/settings/parts-of-speech/catalog",
+                "200",
+                Some("CatalogResponse"),
+            ),
+            (
+                "get",
+                "/api/v1/admin/settings/parts-of-speech",
+                "200",
+                Some("PaginatedResponse_PartOfSpeechConfig"),
+            ),
+            (
+                "post",
+                "/api/v1/admin/settings/parts-of-speech",
+                "201",
+                Some("PartOfSpeechConfig"),
+            ),
+            (
+                "patch",
+                "/api/v1/admin/settings/parts-of-speech/{id}",
+                "200",
+                Some("PartOfSpeechConfig"),
+            ),
+            (
+                "delete",
+                "/api/v1/admin/settings/parts-of-speech/{id}",
+                "204",
+                None,
+            ),
+            (
+                "get",
+                "/api/v1/admin/settings/parts-of-speech/{id}/sub-parts",
+                "200",
+                Some("SubPartListResponse"),
+            ),
+            (
+                "post",
+                "/api/v1/admin/settings/parts-of-speech/{id}/sub-parts",
+                "201",
+                Some("SubPartOfSpeechConfig"),
+            ),
+            (
+                "patch",
+                "/api/v1/admin/settings/parts-of-speech/{id}/sub-parts/{sub_id}",
+                "200",
+                Some("SubPartOfSpeechConfig"),
+            ),
+            (
+                "delete",
+                "/api/v1/admin/settings/parts-of-speech/{id}/sub-parts/{sub_id}",
+                "204",
+                None,
+            ),
+        ] {
+            let operation = &json["paths"][path][method];
+            assert_eq!(
+                operation["security"][0]["bearer_auth"],
+                serde_json::json!([]),
+                "{method} {path} 必须声明管理员 Bearer 鉴权"
+            );
+            let response = &operation["responses"][status];
+            assert!(
+                response.is_object(),
+                "{method} {path} 应声明成功状态 {status}"
+            );
+            match schema {
+                Some(schema) => assert_eq!(
+                    response["content"]["application/json"]["schema"]["$ref"],
+                    format!("#/components/schemas/{schema}"),
+                    "{method} {path} 成功响应 schema 漂移"
+                ),
+                None => assert!(
+                    response.get("content").is_none(),
+                    "{method} {path} 的 204 不得声明响应 body"
+                ),
+            }
+        }
+
+        for path in [
+            "/api/v1/admin/settings/parts-of-speech/{id}",
+            "/api/v1/admin/settings/parts-of-speech/{id}/sub-parts/{sub_id}",
+        ] {
+            let parameters = json["paths"][path]["delete"]["parameters"]
+                .as_array()
+                .expect("DELETE 应声明路径和 revision 参数");
+            assert!(parameters.iter().any(|parameter| {
+                parameter["name"] == "base_revision"
+                    && parameter["in"] == "query"
+                    && parameter["required"] == true
+                    && parameter["schema"]["minimum"] == 1
+            }));
+        }
+
+        for schema in [
+            "CreatePartRequest",
+            "UpdatePartRequest",
+            "CreateSubPartRequest",
+            "UpdateSubPartRequest",
+        ] {
+            assert_eq!(
+                json["components"]["schemas"][schema]["additionalProperties"], false,
+                "{schema} 必须拒绝未知或只读字段"
+            );
+        }
+
+        for schema in ["UpdatePartRequest", "UpdateSubPartRequest"] {
+            assert_eq!(
+                json["components"]["schemas"][schema]["properties"]["base_revision"]["minimum"], 1,
+                "{schema}.base_revision 必须在 OpenAPI 中声明正整数下界"
+            );
+        }
+
+        for (schema, pattern) in [
+            ("CreatePartRequest", "^[a-z][a-z0-9_]{0,31}$"),
+            ("CreateSubPartRequest", "^[A-Z][A-Z0-9_-]{0,31}$"),
+        ] {
+            let code = &json["components"]["schemas"][schema]["properties"]["code"];
+            assert_eq!(code["minLength"], 1);
+            assert_eq!(code["maxLength"], 32);
+            assert_eq!(code["pattern"], pattern);
+        }
+
+        let create_part_properties =
+            &json["components"]["schemas"]["CreatePartRequest"]["properties"];
+        for field in ["name_zh", "name_en"] {
+            assert_eq!(create_part_properties[field]["minLength"], 1);
+            assert_eq!(create_part_properties[field]["maxLength"], 64);
+        }
+        assert_eq!(create_part_properties["abbreviation"]["minLength"], 1);
+        assert_eq!(create_part_properties["abbreviation"]["maxLength"], 16);
+
+        let error_variants = json["components"]["schemas"]["ErrorCode"]["enum"]
+            .as_array()
+            .expect("ErrorCode 应生成枚举 schema");
+        for code in [
+            "invalid_path_parameter",
+            "invalid_part_of_speech",
+            "part_of_speech_not_found",
+            "sub_part_of_speech_not_found",
+            "part_of_speech_conflict",
+            "sub_part_of_speech_conflict",
+            "revision_conflict",
+            "part_of_speech_in_use",
+            "sub_part_of_speech_in_use",
+        ] {
+            assert!(
+                error_variants.iter().any(|value| value == code),
+                "ErrorCode schema 缺少 {code}"
+            );
+        }
+    }
+
     /// cookie 契约必须写进 spec：refresh/logout 的入参是 Cookie 而非 body——
     /// 不声明的话，照 swagger 生成的客户端会以为这两个 POST 无需任何凭证，调用必 401。
     /// login/login-otp/refresh 的 200 同理要声明 Set-Cookie 响应头。
@@ -564,9 +768,10 @@ mod tests {
         assert!(json["components"]["schemas"]["ProblemDetails"].is_object());
 
         let properties = &json["components"]["schemas"]["ProblemDetails"]["properties"];
-        for field in ["type", "title", "status", "detail", "code", "field"] {
+        for field in ["type", "title", "status", "detail", "code", "field", "meta"] {
             assert!(properties[field].is_object(), "ProblemDetails 缺少 {field}");
         }
+        assert!(json["components"]["schemas"]["ProblemMeta"].is_object());
         assert!(properties["error"].is_null());
 
         let schema = &json["paths"]["/api/v1/auth/register"]["post"]["responses"]["400"]["content"]

@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod auth;
+pub(crate) mod authorization;
 mod extract;
 mod model;
 pub mod profile;
@@ -8,6 +9,7 @@ mod router;
 mod service;
 mod session;
 
+pub use extract::AdminAuth;
 pub use model::{Admin, AdminRole, AdminStatus, NewAdmin, SeedOutcome};
 pub use repository::{AdminRepository, AdminRepositoryError};
 pub use router::router;

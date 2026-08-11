@@ -19,3 +19,11 @@ pub fn is_unique_violation(e: &sqlx::Error, constraint: &str) -> bool {
     }
     false
 }
+
+/// 判断 sqlx 错误是否为指定外键约束的 23503；业务映射仍由各领域负责。
+pub fn is_foreign_key_violation(e: &sqlx::Error, constraint: &str) -> bool {
+    if let sqlx::Error::Database(db) = e {
+        return db.code().as_deref() == Some("23503") && db.constraint() == Some(constraint);
+    }
+    false
+}

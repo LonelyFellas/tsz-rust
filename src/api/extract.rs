@@ -1,6 +1,9 @@
 use axum::{
     Json,
-    extract::{FromRequest, FromRequestParts, Query, Request},
+    extract::{
+        FromRequest, FromRequestParts, Path, Query, Request, path::ErrorKind as PathErrorKind,
+        rejection::PathRejection,
+    },
     http::{StatusCode, request::Parts},
 };
 use serde::de::DeserializeOwned;
@@ -50,6 +53,53 @@ where
                 AppError::bad_request(ErrorCode::InvalidQuery, "invalid query parameters")
             })?;
         Ok(Self(value))
+    }
+}
+
+pub struct ApiPath<T>(pub T);
+
+impl<S, T> FromRequestParts<S> for ApiPath<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned + Send,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let Path(value) = Path::<T>::from_request_parts(parts, state)
+            .await
+            .map_err(path_rejection)?;
+
+        Ok(Self(value))
+    }
+}
+
+fn path_rejection(rejection: PathRejection) -> AppError {
+    let field = match &rejection {
+        PathRejection::FailedToDeserializePathParams(error) => match error.kind() {
+            PathErrorKind::ParseErrorAtKey { key, .. }
+            | PathErrorKind::DeserializeError { key, .. }
+            | PathErrorKind::InvalidUtf8InPathParam { key } => known_path_field(key),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    match field {
+        Some(field) => AppError::validation(
+            ErrorCode::InvalidPathParameter,
+            field,
+            "invalid path parameter",
+        ),
+        None => AppError::bad_request(ErrorCode::InvalidPathParameter, "invalid path parameter"),
+    }
+}
+
+fn known_path_field(field: &str) -> Option<&'static str> {
+    match field {
+        "id" => Some("id"),
+        "sub_id" => Some("sub_id"),
+        _ => None,
     }
 }
 

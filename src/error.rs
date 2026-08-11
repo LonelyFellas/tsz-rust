@@ -15,6 +15,8 @@ pub enum ErrorCode {
     InvalidJson,
     InvalidRequestBody,
     InvalidQuery,
+    InvalidPathParameter,
+    InvalidPartOfSpeech,
     InvalidPhone,
     InvalidEmail,
     InvalidIdentifier,
@@ -39,6 +41,13 @@ pub enum ErrorCode {
     PasswordHashUnavailable,
     UserAlreadyExists,
     PhoneAlreadyRegistered,
+    PartOfSpeechNotFound,
+    SubPartOfSpeechNotFound,
+    PartOfSpeechConflict,
+    SubPartOfSpeechConflict,
+    RevisionConflict,
+    PartOfSpeechInUse,
+    SubPartOfSpeechInUse,
     ServiceUnavailable,
     InternalError,
 }
@@ -51,11 +60,13 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 39] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
         Self::InvalidQuery,
+        Self::InvalidPathParameter,
+        Self::InvalidPartOfSpeech,
         Self::InvalidPhone,
         Self::InvalidEmail,
         Self::InvalidIdentifier,
@@ -80,6 +91,13 @@ impl ErrorCode {
         Self::PasswordHashUnavailable,
         Self::UserAlreadyExists,
         Self::PhoneAlreadyRegistered,
+        Self::PartOfSpeechNotFound,
+        Self::SubPartOfSpeechNotFound,
+        Self::PartOfSpeechConflict,
+        Self::SubPartOfSpeechConflict,
+        Self::RevisionConflict,
+        Self::PartOfSpeechInUse,
+        Self::SubPartOfSpeechInUse,
         Self::ServiceUnavailable,
         Self::InternalError,
     ];
@@ -94,6 +112,16 @@ impl ErrorCode {
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
             Self::InvalidQuery => ("invalid_query", "Invalid query", StatusCode::BAD_REQUEST),
+            Self::InvalidPathParameter => (
+                "invalid_path_parameter",
+                "Invalid path parameter",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::InvalidPartOfSpeech => (
+                "invalid_part_of_speech",
+                "Invalid part of speech",
+                StatusCode::BAD_REQUEST,
+            ),
             Self::InvalidPhone => ("invalid_phone", "Invalid phone", StatusCode::BAD_REQUEST),
             Self::InvalidEmail => ("invalid_email", "Invalid email", StatusCode::BAD_REQUEST),
             Self::InvalidIdentifier => (
@@ -190,6 +218,41 @@ impl ErrorCode {
                 "Phone already registered",
                 StatusCode::CONFLICT,
             ),
+            Self::PartOfSpeechNotFound => (
+                "part_of_speech_not_found",
+                "Part of speech not found",
+                StatusCode::NOT_FOUND,
+            ),
+            Self::SubPartOfSpeechNotFound => (
+                "sub_part_of_speech_not_found",
+                "Sub part of speech not found",
+                StatusCode::NOT_FOUND,
+            ),
+            Self::PartOfSpeechConflict => (
+                "part_of_speech_conflict",
+                "Part of speech conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::SubPartOfSpeechConflict => (
+                "sub_part_of_speech_conflict",
+                "Sub part of speech conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::RevisionConflict => (
+                "revision_conflict",
+                "Revision conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::PartOfSpeechInUse => (
+                "part_of_speech_in_use",
+                "Part of speech in use",
+                StatusCode::CONFLICT,
+            ),
+            Self::SubPartOfSpeechInUse => (
+                "sub_part_of_speech_in_use",
+                "Sub part of speech in use",
+                StatusCode::CONFLICT,
+            ),
             Self::ServiceUnavailable => (
                 "service_unavailable",
                 "Service unavailable",
@@ -231,6 +294,26 @@ pub struct ProblemDetails {
     #[schema(example = "phone")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<&'static str>,
+    /// 领域错误的结构化上下文；客户端不得解析 detail 文案。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub meta: Option<ProblemMeta>,
+}
+
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct ProblemMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub current_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub usage_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub part_of_speech_id: Option<uuid::Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub code: Option<String>,
 }
 
 #[derive(Debug)]
@@ -257,6 +340,7 @@ impl AppError {
                 detail: message.into(),
                 code,
                 field,
+                meta: None,
             },
             source: None,
         }
@@ -318,6 +402,16 @@ impl AppError {
 
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message, None)
+    }
+
+    pub fn not_found_with_code(code: ErrorCode, message: impl Into<String>) -> Self {
+        debug_assert_eq!(code.descriptor().default_status, StatusCode::NOT_FOUND);
+        Self::new(StatusCode::NOT_FOUND, code, message, None)
+    }
+
+    pub fn with_meta(mut self, meta: ProblemMeta) -> Self {
+        self.response.meta = Some(meta);
+        self
     }
 
     /// 内部原因仅写服务端日志，对外固定为 internal_error。
