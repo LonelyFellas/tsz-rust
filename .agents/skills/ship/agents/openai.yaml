@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ship tsz-rust"
+  short_description: "审查并安全提交、推送 tsz-rust 后端代码改动"
+  default_prompt: "Use $ship to review and safely push the current tsz-rust backend changes."
