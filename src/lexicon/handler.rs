@@ -1,0 +1,213 @@
+use axum::{
+    Extension, Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
+
+use crate::{
+    admin::{AdminAuth, authorization::require_active_admin},
+    api::{ApiJson, ApiPath, ApiQuery},
+    error::{AppError, ErrorCode, ProblemMeta},
+    lexicon::{
+        detection_store::DetectionStore,
+        dto::{
+            AdminWordListQuery, AdminWordListResponse, AdminWordStats, AdminWordV2Envelope,
+            CreateAdminWordV2Input, DetectWordInputV2, DetectWordResponseV2,
+            DraftValidationResponse, EntryLifecycleBatchInput, EntryLifecycleBatchResponse,
+            EntryLifecycleInput, EntryPath, FormsImpactResponseV2, PreviewFormsImpactInputV2,
+            PublishAdminWordV2Input, RelatedSearchQuery, RelatedSearchResponse, SaveFormsStepInput,
+            SaveMeaningsStepInput, SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2,
+            ValidateAdminWordV2Input,
+        },
+        impact_store::ImpactStore,
+        repository::LexiconRepository,
+        service::{LexiconService, LexiconServiceError},
+    },
+    request_id::RequestId,
+    state::AppState,
+};
+
+pub(crate) mod commands;
+pub(crate) mod lifecycle;
+pub(crate) mod query;
+
+pub use commands::{
+    create, detect, preview_forms_impact, publish, save_forms, save_meanings,
+    suggest_dialect_variants, validate,
+};
+pub use lifecycle::{archive, archive_batch, restore, restore_batch};
+pub use query::{get, list, related_search, stats};
+
+fn service(state: &AppState) -> LexiconService {
+    LexiconService::new(
+        LexiconRepository::new(state.pool.clone()),
+        DetectionStore::new(state.redis.clone()),
+        ImpactStore::new(state.redis.clone()),
+    )
+}
+
+fn required_idempotency_key(headers: &HeaderMap) -> Result<uuid::Uuid, &'static str> {
+    let value = headers
+        .get("Idempotency-Key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or("Idempotency-Key header is required")?;
+    uuid::Uuid::parse_str(value).map_err(|_| "Idempotency-Key header must be a UUID")
+}
+
+fn idempotency_key_error(message: &'static str) -> AppError {
+    AppError::validation(ErrorCode::InvalidRequestBody, "idempotency_key", message)
+}
+
+fn map_error(error: LexiconServiceError) -> AppError {
+    match error {
+        LexiconServiceError::InvalidField { field, message } => {
+            let code = if field == "headword" {
+                ErrorCode::InvalidHeadword
+            } else if matches!(
+                field,
+                "page" | "page_size" | "limit" | "q" | "gloss" | "pos" | "level" | "created_to"
+            ) {
+                ErrorCode::InvalidQuery
+            } else {
+                ErrorCode::InvalidRequestBody
+            };
+            AppError::validation(code, field, message)
+        }
+        LexiconServiceError::UnprocessableField { field, message } => {
+            AppError::unprocessable(ErrorCode::ValidationFailed, message).with_meta(ProblemMeta {
+                code: Some(field.to_owned()),
+                ..ProblemMeta::default()
+            })
+        }
+        LexiconServiceError::UnsupportedLanguage => {
+            AppError::unprocessable(ErrorCode::UnsupportedLanguage, "unsupported language")
+        }
+        LexiconServiceError::DetectionMismatch => AppError::unprocessable(
+            ErrorCode::DetectionMismatch,
+            "detection does not match create request",
+        ),
+        LexiconServiceError::DetectionExpired => {
+            AppError::gone(ErrorCode::DetectionExpired, "detection expired")
+        }
+        LexiconServiceError::DuplicateWord => AppError::conflict(
+            ErrorCode::DuplicateWord,
+            Some("headword"),
+            "word already exists",
+        ),
+        LexiconServiceError::IdempotencyConflict => AppError::conflict(
+            ErrorCode::IdempotencyConflict,
+            None,
+            "idempotency key was reused with a different request",
+        ),
+        LexiconServiceError::WordNotFound => {
+            AppError::not_found_with_code(ErrorCode::WordNotFound, "word not found")
+        }
+        LexiconServiceError::CatalogMismatch => AppError::conflict(
+            ErrorCode::InvalidPartOfSpeech,
+            Some("headwords"),
+            "suggested part of speech is no longer configured",
+        ),
+        LexiconServiceError::RevisionConflict { current_revision } => AppError::conflict(
+            ErrorCode::RevisionConflict,
+            Some("base_revision"),
+            "entry changed since it was loaded",
+        )
+        .with_meta(ProblemMeta {
+            current_revision: Some(current_revision),
+            ..ProblemMeta::default()
+        }),
+        LexiconServiceError::LifecycleRevisionConflict {
+            current_lifecycle_revision,
+        } => AppError::conflict(
+            ErrorCode::RevisionConflict,
+            Some("base_lifecycle_revision"),
+            "entry lifecycle changed since it was loaded",
+        )
+        .with_meta(ProblemMeta {
+            current_lifecycle_revision: Some(current_lifecycle_revision),
+            ..ProblemMeta::default()
+        }),
+        LexiconServiceError::EntryArchived => AppError::conflict(
+            ErrorCode::EntryArchived,
+            None,
+            "entry is archived and must be restored before editing",
+        ),
+        LexiconServiceError::EntryHasInboundPublicationRefs(references) => AppError::conflict(
+            ErrorCode::EntryHasInboundPublicationRefs,
+            None,
+            "entry is referenced by another active current publication",
+        )
+        .with_meta(ProblemMeta {
+            reference_locations: Some(
+                references
+                    .into_iter()
+                    .map(|reference| crate::error::ProblemReferenceLocation {
+                        target_sense_id: reference.target_sense_id,
+                        source_entry_id: reference.source_entry_id,
+                        source_publication_id: reference.source_publication_id,
+                        source_node_id: reference.source_node_id,
+                        reference_kind: reference.reference_kind,
+                    })
+                    .collect(),
+            ),
+            ..ProblemMeta::default()
+        }),
+        LexiconServiceError::EntryHasUnavailablePublicationRefs(references) => AppError::conflict(
+            ErrorCode::EntryHasUnavailablePublicationRefs,
+            None,
+            "entry current publication references an archived or unavailable target",
+        )
+        .with_meta(ProblemMeta {
+            reference_locations: Some(
+                references
+                    .into_iter()
+                    .map(|reference| crate::error::ProblemReferenceLocation {
+                        target_sense_id: reference.target_sense_id,
+                        source_entry_id: reference.source_entry_id,
+                        source_publication_id: reference.source_publication_id,
+                        source_node_id: reference.source_node_id,
+                        reference_kind: reference.reference_kind,
+                    })
+                    .collect(),
+            ),
+            ..ProblemMeta::default()
+        }),
+        LexiconServiceError::ReferenceConflict => AppError::conflict(
+            ErrorCode::ReferenceConflict,
+            None,
+            "a referenced publication is changing; retry the command",
+        ),
+        LexiconServiceError::StepNotReachable => AppError::conflict(
+            ErrorCode::StepNotReachable,
+            None,
+            "previous step is incomplete",
+        ),
+        LexiconServiceError::ValidationFailed(issues) => {
+            AppError::unprocessable(ErrorCode::ValidationFailed, "draft validation failed")
+                .with_field_issues(&issues)
+        }
+        LexiconServiceError::DownstreamConfirmationRequired(affected_node_ids) => {
+            AppError::conflict(
+                ErrorCode::DownstreamConfirmationRequired,
+                Some("confirmed_impact_token"),
+                "downstream confirmation required",
+            )
+            .with_meta(ProblemMeta {
+                affected_node_ids: Some(affected_node_ids),
+                ..ProblemMeta::default()
+            })
+        }
+        LexiconServiceError::DetectionStore(error) => AppError::unavailable_with_source(
+            ErrorCode::ServiceUnavailable,
+            "detection service unavailable",
+            error,
+        ),
+        LexiconServiceError::ImpactStore(error) => AppError::unavailable_with_source(
+            ErrorCode::ServiceUnavailable,
+            "impact confirmation service unavailable",
+            error,
+        ),
+        LexiconServiceError::Repository(error) => AppError::internal(error),
+    }
+}

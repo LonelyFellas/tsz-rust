@@ -512,6 +512,18 @@ FK 串行化。如果要把所属关系也完全交给数据库，可在
 5. 从 canonical 结果派生 `plain_text`、`rich_text_version`、`content_hash`；
 6. 禁止客户端直接提交 `plain_text` 和 `content_hash`。
 
+兼容边界：RichText V1 刻意保持旧 Go wire 语义，`spans` 与 `liaisons` 分别最多 500 条，且
+末位 `liaison`（无法连接后一个码点）必须拒绝；V1 不追加 V2 的跨段落和单一 `annotations`
+总量规则。
+只有 V2 遵循当前 voice-editor 的严格规范。前端若遇到无法安全迁移的极端 V1 数据，应进入
+只读状态并提示修复，不能静默改写。无论 V1/V2，服务端都会在写 PostgreSQL 前拒绝 `text`
+及 V2 `phoneme` 中的 U+0000（NUL）。
+
+HTTP wire 必须把这些稳定内容节点显式带回并原样提交：英语 `TextVariantV2.id`、中文释义
+`content_id`、例句中文译文 `zh_text_id`。编辑已有槽位时不得重新生成 ID；只有从 missing 创建
+新槽位时才生成新 UUID。服务端保存时使用这些 ID 做 diff、发布成员和音频资产绑定，不能在每次
+保存时以 `now_v7()` 替换。
+
 ### 9.7 `lexicon.sentence_links`
 
 - `sentence_id UUID`；
@@ -653,6 +665,23 @@ catalog 管理列表统计基本词性 usage 时按 `entry_id` 去重；统计�
 `source_node_id` 去重，避免同一个词条或 sense 在多次 publication 中重复计数。管理员归档词条
 不会自动清理 publication，因此仍阻止删除相关 catalog 项；只有未来显式、受审计的 publication
 清理流程才能释放这些引用。
+
+### 10.5 publication 的跨词条 sense 引用
+
+`lexicon.entry_publication_sense_refs` 把 relation 和外部 sentence context 同时锚定到来源、目标
+两个不可变 publication：
+
+- `publication_id + entry_id + source_node_id` 必须属于来源 publication；
+- `target_publication_id + target_entry_id + target_sense_id` 必须是目标 publication 中的 sense；
+- 只记录跨词条 `relation` / `sentence_context`，focus 与同词条 context 由本 publication 的节点
+  集合校验；
+- 删除来源 publication 时级联删除引用，目标 publication 仍被引用时禁止删除；
+- 发布目标词条前，只检查其他词条“当前 publication”的入站引用。历史引用继续保留以解释历史
+  快照，但不阻止新版本发布。
+
+草稿允许先移除被引用 sense；发布时若仍存在有效入站引用，返回
+`sense_has_inbound_publication_refs`，并在 `reference_location` 中给出来源 entry、publication、
+node 和引用类型。relation 的词头/释义快照一律从目标当前 publication 生成并覆盖客户端值。
 
 ## 11. `speech` 表设计
 
@@ -950,6 +979,7 @@ TTS 供应商。
 POST /api/v1/admin/lexicon/detections
 POST /api/v1/admin/lexicon/entries
 GET  /api/v1/admin/lexicon/entries/{entry_id}
+GET  /api/v1/admin/lexicon/entries/related-search
 PUT  /api/v1/admin/lexicon/entries/{entry_id}/steps/forms
 PUT  /api/v1/admin/lexicon/entries/{entry_id}/steps/meanings
 POST /api/v1/admin/lexicon/entries/{entry_id}/validate
@@ -963,6 +993,9 @@ POST /api/v1/admin/speech/previews
 
 - GET 可以返回完整创编聚合，写接口按业务步骤提交，不做任意 JSON Patch；
 - 响应携带整数 `revision`，写命令只使用一种乐观锁机制；首期可继续用 `base_revision`；
+- `status=published` 表示存在在线 publication；`published_revision` 表示其来源 revision；
+  `has_unpublished_changes` 表示当前编辑稿已领先在线版本。前端不能仅凭 `status` 把聚合永久锁成
+  只读，必须允许显式继续编辑与再次发布；
 - `updated_at` 只用于展示，不作为并发 token；
 - create/publish/archive 使用 `Idempotency-Key` 请求头，避免把协议字段混进领域内容；
 - 输入 DTO 不接受 `audio_url`、快照、hash、创建人等服务端字段；
@@ -1069,3 +1102,38 @@ Elasticsearch/OpenSearch，不能提前维护双写系统。
 
 每个 migration 必须有对应 down 文件和真实 PostgreSQL 约束测试。启动自动迁移仍沿用项目现有
 `sqlx::migrate!` 机制。
+
+## 19. 第二阶段已落地契约（2026-08-11）
+
+### 19.1 生命周期与 publication
+
+- `entries.revision` 仅表示 V2 内容聚合版本；归档/恢复不修改它，也不制造
+  `has_unpublished_changes`。
+- `entries.lifecycle_revision` 是独立、单调递增的生命周期并发 token。生命周期写命令必须同时
+  提交 `base_revision` 与 `base_lifecycle_revision`；前者阻止在过期内容上操作，后者串行化归档与
+  恢复。
+- 归档只写 `archived_at`、`archived_by_admin_id`、`lifecycle_revision`、审计和 outbox；禁止清空
+  `current_publication_id`，禁止更新或删除 `entry_publications` 及历史 publication refs。
+- 默认列表、统计、related-search 和新的引用目标解析排除归档词条；`status=archived` 是读取归档
+  项的唯一显式列表入口。归档词条仍占用规范词头唯一键。
+- 归档目标时，只有未归档来源的 current publication 入站引用会阻止命令；历史 publication 与
+  已归档来源的引用继续保留但不阻止。批量归档将批内来源视为同时归档。
+- 恢复来源时，其 current publication 的每个出站 sense ref 必须指向已激活且仍含该 sense 的
+  目标 current publication。批量恢复将批内目标视为同时恢复；不满足时返回
+  `entry_has_unavailable_publication_refs`。
+- 单条和批量命令均要求 UUID `Idempotency-Key`，按 actor/scope/key 锁定并保存首次完整响应；
+  同 key 同 hash 重放，同 key 不同 hash 返回 `idempotency_conflict`。批量最多 100 条、拒绝重复
+  ID、按 UUID 顺序锁行，并在单事务中全部成功或全部回滚。
+
+### 19.2 短语与方言建议
+
+- `EntryKind::Phrase` 完整复用 detection、create、forms、meanings、validate、publication 与
+  `AdminWordV2`，不再经过 legacy DTO。dictionary matched phrase 使用真实建议；not-found 多词
+  输入建立 unified、空 forms 的 V2 草稿，再由词形步骤补齐目录词性。
+- `POST /api/v1/admin/lexicon/dialect-variant-suggestions` 使用真实
+  `dictionary_region_rules@1` provider。编排层只批量读取 active dictionary region surface/term；
+  provider 只输出有 evidence 的 form 或 RichText 建议，无 evidence 返回较少建议而不是伪造结果。
+- RichText 替换维护码点边界映射；phoneme 覆盖范围和 token 内部标注边界会阻止该 token 的自动
+  替换。响应显式返回 provider kind/version，未声称调用外部模型、翻译或 TTS 服务。
+
+以上 HTTP wire、枚举和 Problem Details 以 `docs/openapi.json` 为最终权威。

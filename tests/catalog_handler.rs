@@ -88,6 +88,165 @@ async fn call(
     (status, headers, json, bytes)
 }
 
+struct LexiconUsageFixture {
+    entry_id: Uuid,
+    pos_node_id: Uuid,
+    sense_node_id: Uuid,
+}
+
+async fn seed_lexicon_usage(
+    pool: &PgPool,
+    admin_id: Uuid,
+    part_id: Uuid,
+    sub_part_id: Uuid,
+    publication_count: i32,
+    keep_draft: bool,
+) -> LexiconUsageFixture {
+    let entry_id = Uuid::now_v7();
+    let pos_node_id = Uuid::now_v7();
+    let sense_node_id = Uuid::now_v7();
+
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.entries (
+            id, language, kind, headword_mode, detection_snapshot,
+            created_by_admin_id, updated_by_admin_id
+        ) VALUES ($1, 'en', 'word', 'unified', '{}'::jsonb, $2, $2)
+        "#,
+    )
+    .bind(entry_id)
+    .bind(admin_id)
+    .execute(pool)
+    .await
+    .expect("插入 usage 测试词条应成功");
+
+    for (node_id, node_type) in [(pos_node_id, "pos"), (sense_node_id, "sense")] {
+        sqlx::query("INSERT INTO lexicon.nodes (id, entry_id, node_type) VALUES ($1, $2, $3)")
+            .bind(node_id)
+            .bind(entry_id)
+            .bind(node_type)
+            .execute(pool)
+            .await
+            .expect("插入 usage 测试稳定节点应成功");
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.entry_pos (
+            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order
+        ) VALUES ($1, $2, $3, 'unified', 'unified', 0)
+        "#,
+    )
+    .bind(pos_node_id)
+    .bind(entry_id)
+    .bind(part_id)
+    .execute(pool)
+    .await
+    .expect("插入 usage 测试 active draft POS 应成功");
+
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.senses (
+            id, entry_id, entry_pos_id, sub_part_of_speech_id,
+            level, depends_on_context, sort_order
+        ) VALUES ($1, $2, $3, $4, 'A1', FALSE, 0)
+        "#,
+    )
+    .bind(sense_node_id)
+    .bind(entry_id)
+    .bind(pos_node_id)
+    .bind(sub_part_id)
+    .execute(pool)
+    .await
+    .expect("插入 usage 测试 active draft sense 应成功");
+
+    for publication_number in 1..=publication_count {
+        let publication_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entry_publications (
+                id, entry_id, publication_number, source_revision,
+                content_schema_version, snapshot, snapshot_hash, published_by_admin_id
+            ) VALUES ($1, $2, $3, $3, 2, '{}'::jsonb, $4, $5)
+            "#,
+        )
+        .bind(publication_id)
+        .bind(entry_id)
+        .bind(publication_number)
+        .bind(publication_id.as_bytes().to_vec())
+        .bind(admin_id)
+        .execute(pool)
+        .await
+        .expect("插入 usage 测试历史 publication 应成功");
+
+        for (node_id, node_type) in [(pos_node_id, "pos"), (sense_node_id, "sense")] {
+            sqlx::query(
+                r#"
+                INSERT INTO lexicon.entry_publication_nodes (
+                    publication_id, entry_id, node_id, node_type
+                ) VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(publication_id)
+            .bind(entry_id)
+            .bind(node_id)
+            .bind(node_type)
+            .execute(pool)
+            .await
+            .expect("插入 publication 稳定节点应成功");
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entry_publication_part_of_speech_refs (
+                publication_id, entry_id, source_node_id, part_of_speech_id
+            ) VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(publication_id)
+        .bind(entry_id)
+        .bind(pos_node_id)
+        .bind(part_id)
+        .execute(pool)
+        .await
+        .expect("插入 publication POS 引用应成功");
+
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entry_publication_sub_part_of_speech_refs (
+                publication_id, entry_id, source_node_id, sub_part_of_speech_id
+            ) VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(publication_id)
+        .bind(entry_id)
+        .bind(sense_node_id)
+        .bind(sub_part_id)
+        .execute(pool)
+        .await
+        .expect("插入 publication 细分词性引用应成功");
+    }
+
+    if !keep_draft {
+        sqlx::query("DELETE FROM lexicon.senses WHERE id = $1")
+            .bind(sense_node_id)
+            .execute(pool)
+            .await
+            .expect("移除历史 publication 对应 active draft sense 应成功");
+        sqlx::query("DELETE FROM lexicon.entry_pos WHERE id = $1")
+            .bind(pos_node_id)
+            .execute(pool)
+            .await
+            .expect("移除历史 publication 对应 active draft POS 应成功");
+    }
+
+    LexiconUsageFixture {
+        entry_id,
+        pos_node_id,
+        sense_node_id,
+    }
+}
+
 #[sqlx::test]
 async fn catalog_read_allows_active_admin_but_management_requires_super_admin(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
@@ -472,4 +631,168 @@ async fn query_and_path_rejections_follow_problem_details_contract(pool: PgPool)
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "invalid_path_parameter");
     assert_eq!(body["field"], "sub_id");
+}
+
+#[sqlx::test]
+async fn usage_counts_merge_active_drafts_and_all_publications_before_delete(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin_id = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let bearer = token(&state, admin_id, AdminRole::SuperAdmin);
+    let (part_id, sub_part_id): (Uuid, Uuid) = sqlx::query_as(
+        r#"
+        SELECT p.id, s.id
+        FROM catalog.parts_of_speech p
+        JOIN catalog.sub_parts_of_speech s ON s.part_of_speech_id = p.id
+        WHERE p.code = 'noun' AND s.code = 'N-COUNT'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("noun/N-COUNT 种子应存在");
+
+    // 同一稳定节点同时存在于 active draft 和两个 publication，只能计一次。
+    let active = seed_lexicon_usage(&pool, admin_id, part_id, sub_part_id, 2, true).await;
+    // 第二个词条仅保留历史 publication 引用，仍必须计数并阻止删除。
+    let historical = seed_lexicon_usage(&pool, admin_id, part_id, sub_part_id, 1, false).await;
+
+    let (status, _, part_list, _) = call(&state, Method::GET, ROOT, Some(&bearer), None).await;
+    assert_eq!(status, StatusCode::OK, "读取基本词性列表失败：{part_list}");
+    let noun = part_list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == part_id.to_string())
+        .expect("基本词性列表应包含 noun");
+    assert_eq!(noun["usage_count"], 2, "基本词性应按 distinct entry 去重");
+
+    let (status, _, sub_list, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/{part_id}/sub-parts"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "读取细分词性列表失败：{sub_list}");
+    let n_count = sub_list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == sub_part_id.to_string())
+        .expect("细分词性列表应包含 N-COUNT");
+    assert_eq!(
+        n_count["usage_count"], 2,
+        "细分词性应按稳定 sense node 去重"
+    );
+
+    // 写端点回读完整详情时也必须带同一实时计数。
+    let (status, _, part_detail, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{ROOT}/{part_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 1,
+            "name_zh": noun["name_zh"],
+            "name_en": noun["name_en"],
+            "abbreviation": noun["abbreviation"],
+            "sort_order": noun["sort_order"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "基本词性详情回读失败：{part_detail}"
+    );
+    assert_eq!(part_detail["revision"], 2);
+    assert_eq!(part_detail["usage_count"], 2);
+
+    let (status, _, sub_detail, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{ROOT}/{part_id}/sub-parts/{sub_part_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 1,
+            "name_zh": n_count["name_zh"],
+            "name_en": n_count["name_en"],
+            "sort_order": n_count["sort_order"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "细分词性详情回读失败：{sub_detail}");
+    assert_eq!(sub_detail["revision"], 2);
+    assert_eq!(sub_detail["usage_count"], 2);
+
+    let (status, _, body, _) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/{part_id}/sub-parts/{sub_part_id}?base_revision=2"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "引用中的细分词性不可删除：{body}"
+    );
+    assert_eq!(body["code"], "sub_part_of_speech_in_use");
+    assert_eq!(body["meta"]["usage_count"], 2);
+
+    let (status, _, body, _) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/{part_id}?base_revision=2"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "引用中的基本词性不可删除：{body}"
+    );
+    assert_eq!(body["code"], "part_of_speech_in_use");
+    assert_eq!(body["meta"]["usage_count"], 2);
+
+    // 清除所有当前草稿/历史 publication 引用后，预检应允许删除。
+    sqlx::query("DELETE FROM lexicon.entry_publications WHERE entry_id = ANY($1)")
+        .bind(vec![active.entry_id, historical.entry_id])
+        .execute(&pool)
+        .await
+        .expect("清理 usage 测试 publications 应成功");
+    sqlx::query("DELETE FROM lexicon.senses WHERE id = $1")
+        .bind(active.sense_node_id)
+        .execute(&pool)
+        .await
+        .expect("清理 active draft sense 应成功");
+    sqlx::query("DELETE FROM lexicon.entry_pos WHERE id = $1")
+        .bind(active.pos_node_id)
+        .execute(&pool)
+        .await
+        .expect("清理 active draft POS 应成功");
+
+    let (status, _, _, bytes) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/{part_id}/sub-parts/{sub_part_id}?base_revision=2"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(bytes.is_empty());
+
+    let (status, _, _, bytes) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/{part_id}?base_revision=2"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(bytes.is_empty());
 }

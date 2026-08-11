@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS platform.idempotency_records;
+DROP SCHEMA IF EXISTS platform;
+DROP TABLE IF EXISTS lexicon.entry_editor_projection;
+DROP TABLE IF EXISTS lexicon.entry_step_progress;
+DROP TABLE IF EXISTS lexicon.nodes;
+DROP TABLE IF EXISTS lexicon.entry_headword_keys;
+DROP TABLE IF EXISTS lexicon.entry_headwords;
+DROP TABLE IF EXISTS lexicon.entries;
+DROP SCHEMA IF EXISTS lexicon;

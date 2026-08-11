@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod config;
 pub mod constant;
 pub mod error;
+pub mod lexicon;
 pub mod openapi;
 pub mod otp;
 pub mod platform;

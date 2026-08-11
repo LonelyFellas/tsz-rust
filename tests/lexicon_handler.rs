@@ -1,0 +1,2035 @@
+//! 智能词库从检测、建稿、分步保存到不可变发布的主链路契约测试。
+
+use axum::{
+    body::Body,
+    http::{Method, Request, StatusCode, header},
+};
+use chrono::Utc;
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+use tsz_rust::{
+    admin::{AdminRepository, AdminRole, NewAdmin},
+    platform,
+    state::AppState,
+};
+
+const ROOT: &str = "/api/v1/admin/lexicon";
+
+fn test_redis_url() -> String {
+    std::env::var("TEST_REDIS_URL")
+        .or_else(|_| std::env::var("REDIS_URL"))
+        .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_owned())
+}
+
+async fn seed_admin(pool: &PgPool) -> Uuid {
+    let id = Uuid::now_v7();
+    AdminRepository::new(pool.clone())
+        .create(NewAdmin {
+            id,
+            phone: format!("lexicon-{}", id.simple()),
+            display_name: "词库测试管理员".to_owned(),
+            password_hash: "hashed-password".to_owned(),
+            role: AdminRole::Admin,
+            must_change_password: false,
+            created_by_admin_id: None,
+        })
+        .await
+        .expect("seed admin 应成功");
+    id
+}
+
+async fn seed_dictionary_word(pool: &PgPool, word: &str) {
+    seed_dictionary_term(pool, word, "word", "common_unmarked").await;
+}
+
+async fn seed_dictionary_term(pool: &PgPool, term: &str, kind: &str, region_family: &str) {
+    let dataset_id: i64 = if let Some(dataset_id) =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_optional(pool)
+            .await
+            .expect("应能查询 active dictionary dataset")
+    {
+        dataset_id
+    } else {
+        sqlx::query_scalar(
+            r#"
+            INSERT INTO dictionary.datasets (
+                version, source_name, source_version, rules_version,
+                terms_sha256, regions_sha256, status
+            ) VALUES ($1, 'test', 'v1', 'v1', 'terms', 'regions', 'active')
+            RETURNING id
+            "#,
+        )
+        .bind(format!("lexicon-{term}"))
+        .fetch_one(pool)
+        .await
+        .expect("应能插入 active dictionary dataset")
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.terms (
+            dataset_id, normalized_term, term, kind, pos, status,
+            sense_count, filtered_cold_sense_count, region_family
+        ) VALUES ($1, $2, $2, $3, ARRAY['noun'], 'accepted', 1, 0, $4)
+        "#,
+    )
+    .bind(dataset_id)
+    .bind(term)
+    .bind(kind)
+    .bind(region_family)
+    .execute(pool)
+    .await
+    .expect("应能插入 dictionary term");
+}
+
+fn token(state: &AppState, admin_id: Uuid) -> String {
+    state
+        .admin_token_manager
+        .generate(admin_id, AdminRole::Admin.as_str())
+        .expect("测试 token 应能签发")
+}
+
+async fn call(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    bearer: &str,
+    idempotency_key: Option<Uuid>,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    if let Some(idempotency_key) = idempotency_key {
+        builder = builder.header("Idempotency-Key", idempotency_key.to_string());
+    }
+    let body = if let Some(body) = body {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+        Body::from(serde_json::to_vec(&body).unwrap())
+    } else {
+        Body::empty()
+    };
+    let response = tsz_rust::router(state.clone())
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "响应应为 JSON：{error}，body={}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    };
+    (status, body)
+}
+
+async fn call_raw(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    bearer: &str,
+    idempotency_key: Option<&str>,
+    body: &[u8],
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(idempotency_key) = idempotency_key {
+        builder = builder.header("Idempotency-Key", idempotency_key);
+    }
+    let response = tsz_rust::router(state.clone())
+        .oneshot(builder.body(Body::from(body.to_vec())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+        panic!(
+            "Problem Details 响应应为 JSON：{error}，body={}",
+            String::from_utf8_lossy(&bytes)
+        )
+    });
+    (status, body)
+}
+
+fn rich_text(text: &str) -> Value {
+    json!({"version": 1, "text": text, "spans": [], "liaisons": []})
+}
+
+async fn seed_related_search_entry(
+    pool: &PgPool,
+    admin_id: Uuid,
+    headword: &str,
+    kind: &str,
+    gloss: &str,
+    published: bool,
+    archived: bool,
+) -> (Uuid, Uuid) {
+    let entry_id = Uuid::now_v7();
+    let sense_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.entries (
+            id, language, kind, revision, headword_mode, detection_snapshot,
+            created_by_admin_id, updated_by_admin_id
+        ) VALUES ($1, 'en', $2, 1, 'unified', '{}', $3, $3)
+        "#,
+    )
+    .bind(entry_id)
+    .bind(kind)
+    .bind(admin_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    if published {
+        let publication_id = Uuid::now_v7();
+        let now = Utc::now();
+        let snapshot = json!({
+            "schema_version": 2,
+            "id": entry_id,
+            "language": "en",
+            "kind": kind,
+            "status": "published",
+            "revision": 1,
+            "published_revision": 1,
+            "has_unpublished_changes": false,
+            "headwords": {"mode": "unified", "common": headword},
+            "detection_snapshot": {
+                "detection_id": Uuid::now_v7(),
+                "request": {"language": "en", "headword": headword},
+                "normalized_headword": headword,
+                "entry_kind": kind,
+                "matched_dialect": "common",
+                "builtin_dictionary_status": "matched",
+                "smart_dictionary_status": "clear",
+                "headwords": {"mode": "unified", "common": headword},
+                "suggested_pos": ["noun"],
+                "detected_at": now
+            },
+            "forms": {"pos": []},
+            "meanings": {
+                "sense_groups": [],
+                "pos": [{
+                    "pos_id": Uuid::now_v7(),
+                    "grammar_structures": [],
+                    "senses": [{
+                        "id": sense_id,
+                        "sub_pos": "",
+                        "level": "A1",
+                        "depends_on_context": false,
+                        "definitions": [{
+                            "definition_mode": "zh_definition",
+                            "id": Uuid::now_v7(),
+                            "content_id": Uuid::now_v7(),
+                            "level": "A1",
+                            "content": rich_text(gloss)
+                        }],
+                        "sentences": [],
+                        "relations": []
+                    }]
+                }]
+            },
+            "completed_steps": ["basics", "forms", "meanings"],
+            "max_reachable_step": "preview",
+            "created_by": admin_id,
+            "created_at": now,
+            "updated_at": now,
+            "published_at": now
+        });
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entry_publications (
+                id, entry_id, publication_number, source_revision, content_schema_version,
+                snapshot, snapshot_hash, published_by_admin_id, published_at
+            ) VALUES ($1, $2, 1, 1, 2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(publication_id)
+        .bind(entry_id)
+        .bind(snapshot)
+        .bind(publication_id.as_bytes().to_vec())
+        .bind(admin_id)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE lexicon.entries SET current_publication_id = $2, draft_based_on_publication_id = $2 WHERE id = $1",
+        )
+        .bind(entry_id)
+        .bind(publication_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    if archived {
+        sqlx::query("UPDATE lexicon.entries SET archived_at = now() WHERE id = $1")
+            .bind(entry_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    (entry_id, sense_id)
+}
+
+async fn create_ready_draft(
+    state: &AppState,
+    pool: &PgPool,
+    bearer: &str,
+    headword: &str,
+) -> Value {
+    let dictionary_term_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM dictionary.active_terms WHERE normalized_term = $1)",
+    )
+    .bind(headword)
+    .fetch_one(pool)
+    .await
+    .expect("应能检查测试词典词条");
+    if !dictionary_term_exists {
+        seed_dictionary_word(pool, headword).await;
+    }
+    let (status, detection) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        bearer,
+        None,
+        Some(json!({"language": "en", "headword": headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "检测失败：{detection}");
+    let (status, created) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": detection["builtin_dictionary"]["headwords"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建失败：{created}");
+    let entry_id = created["word"]["id"].as_str().unwrap();
+
+    let mut forms = created["word"]["forms"].clone();
+    forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["dict_phonetic"] =
+        json!("/test/");
+    forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["actual_pron"] = json!("test");
+    forms["pos"][0]["form_groups"][0]["slots"] = json!([{
+        "id": Uuid::now_v7(),
+        "form_type": "plural",
+        "variants": [{
+            "id": Uuid::now_v7(),
+            "dialect": "common",
+            "spelling": format!("{headword}s"),
+            "origin": "manual",
+            "pronunciations": [{
+                "id": Uuid::now_v7(),
+                "dict_phonetic": "/tests/",
+                "actual_pron": "tests",
+                "style": "normal"
+            }]
+        }]
+    }]);
+    let (status, forms_saved) = call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        bearer,
+        None,
+        Some(json!({
+            "base_revision": 1,
+            "intent": "complete",
+            "content": forms,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "forms 失败：{forms_saved}");
+
+    let mut meanings = forms_saved["word"]["meanings"].clone();
+    meanings["sense_groups"][0]["name_zh"] = json!("测试含义");
+    meanings["sense_groups"][0]["name_en"] = json!("Test meaning");
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"] =
+        rich_text("used as a noun");
+    meanings["pos"][0]["senses"][0]["sub_pos"] = json!("N-COUNT");
+    meanings["pos"][0]["senses"][0]["frequency"] = json!("50");
+    meanings["pos"][0]["senses"][0]["definitions"][0]["content"] =
+        rich_text(&format!("{headword} 的释义"));
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["value"] =
+        rich_text(&format!("A {headword} example."));
+    meanings["pos"][0]["senses"][0]["sentences"][0]["zh_text"] = rich_text("测试例句。");
+    let (status, meanings_saved) = call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        bearer,
+        None,
+        Some(json!({
+            "base_revision": 2,
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "meanings 失败：{meanings_saved}");
+    meanings_saved
+}
+
+async fn publish_ready(state: &AppState, bearer: &str, word: &Value) -> (StatusCode, Value) {
+    call(
+        state,
+        Method::POST,
+        &format!(
+            "{ROOT}/entries/{}/publications",
+            word["word"]["id"].as_str().unwrap()
+        ),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"base_revision": word["word"]["revision"]})),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let headword = format!("codex{}", admin_id.simple());
+    seed_dictionary_word(&pool, &headword).await;
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "检测失败：{detection}");
+    assert_eq!(detection["builtin_dictionary"]["status"], "matched");
+    assert_eq!(detection["smart_dictionary"]["status"], "clear");
+
+    let create_body = json!({
+        "schema_version": 2,
+        "detection_id": detection["detection_id"],
+        "headwords": detection["builtin_dictionary"]["headwords"],
+    });
+    let (status, missing_key) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        None,
+        Some(create_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(missing_key["field"], "idempotency_key");
+
+    let create_key = Uuid::now_v7();
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(create_key),
+        Some(create_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建失败：{created}");
+    assert_eq!(created["word"]["revision"], 1);
+    let entry_id = Uuid::parse_str(created["word"]["id"].as_str().unwrap()).unwrap();
+
+    let (status, replayed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(create_key),
+        Some(create_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(replayed, created, "创建响应丢失后应可原样重放");
+
+    let mut forms = created["word"]["forms"].clone();
+    forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["dict_phonetic"] =
+        json!("/kəʊdɛks/");
+    forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["actual_pron"] =
+        json!("kəʊdɛks");
+    forms["pos"][0]["form_groups"][0]["slots"] = json!([{
+        "id": Uuid::now_v7(),
+        "form_type": "plural",
+        "variants": [{
+            "id": Uuid::now_v7(),
+            "dialect": "common",
+            "spelling": format!("{headword}s"),
+            "origin": "manual",
+            "pronunciations": [{
+                "id": Uuid::now_v7(),
+                "dict_phonetic": "/kəʊdɛksɪz/",
+                "actual_pron": "kəʊdɛksɪz",
+                "style": "normal"
+            }]
+        }]
+    }]);
+    let (status, forms_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 1,
+            "intent": "complete",
+            "content": forms,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "完成 forms 失败：{forms_saved}");
+    assert_eq!(forms_saved["word"]["revision"], 2);
+    assert_eq!(forms_saved["word"]["max_reachable_step"], "meanings");
+
+    let (status, conflict) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 1,
+            "intent": "save",
+            "content": forms_saved["word"]["forms"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["code"], "revision_conflict");
+    assert_eq!(conflict["meta"]["current_revision"], 2);
+
+    let mut meanings = forms_saved["word"]["meanings"].clone();
+    let definition_content_id =
+        meanings["pos"][0]["senses"][0]["definitions"][0]["content_id"].clone();
+    let sentence_en_text_id =
+        meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["id"].clone();
+    let sentence_zh_text_id = meanings["pos"][0]["senses"][0]["sentences"][0]["zh_text_id"].clone();
+    meanings["sense_groups"][0]["name_zh"] = json!("核心含义");
+    meanings["sense_groups"][0]["name_en"] = json!("Core meaning");
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"] = json!({
+        "version": 2,
+        "text": "used as a test noun",
+        "annotations": [
+            {"type": "emphasis", "start": 2, "end": 4, "level": "strong"},
+            {"type": "emphasis", "start": 0, "end": 2, "level": "strong"}
+        ]
+    });
+    meanings["pos"][0]["senses"][0]["sub_pos"] = json!("N-COUNT");
+    meanings["pos"][0]["senses"][0]["frequency"] = json!("50.00");
+    meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("测试词");
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["value"] =
+        rich_text(&format!("This is a {headword}."));
+    meanings["pos"][0]["senses"][0]["sentences"][0]["zh_text"] = rich_text("这是一个测试词。");
+
+    let mut invalid_rich_text_meanings = meanings.clone();
+    invalid_rich_text_meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"] = json!({
+        "version": 2,
+        "text": "short",
+        "annotations": [
+            {"type": "liaison", "start": 0, "end": 99}
+        ]
+    });
+    let (status, invalid_rich_text) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 2,
+            "intent": "save",
+            "content": invalid_rich_text_meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "非法 V2 富文本在保存草稿时也必须返回 422：{invalid_rich_text}"
+    );
+
+    let mut invalid_focus_meanings = meanings.clone();
+    invalid_focus_meanings["pos"][0]["senses"][0]["sentences"][0]["links"][0]["sense_id"] =
+        json!(Uuid::now_v7());
+    let (status, invalid_focus) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 2,
+            "intent": "save",
+            "content": invalid_focus_meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "草稿保存也必须在写 FK 前拒绝伪造 focus：{invalid_focus}"
+    );
+    assert!(
+        invalid_focus["field_issues"]
+            .as_array()
+            .is_some_and(|issues| issues
+                .iter()
+                .any(|issue| issue["code"] == "sentence_incomplete"))
+    );
+
+    let (status, meanings_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 2,
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "完成 meanings 失败：{meanings_saved}"
+    );
+    assert_eq!(meanings_saved["word"]["revision"], 3);
+    assert_eq!(meanings_saved["word"]["max_reachable_step"], "preview");
+    assert_eq!(
+        meanings_saved["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["content"]
+            ["annotations"],
+        json!([{"type": "emphasis", "start": 0, "end": 4, "level": "strong"}]),
+        "服务端应持久化 canonical V2 富文本"
+    );
+    assert_eq!(
+        meanings_saved["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content_id"],
+        definition_content_id
+    );
+    assert_eq!(
+        meanings_saved["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]
+            ["id"],
+        sentence_en_text_id
+    );
+    assert_eq!(
+        meanings_saved["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["zh_text_id"],
+        sentence_zh_text_id
+    );
+
+    let (status, validation) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/validate"),
+        &bearer,
+        None,
+        Some(json!({"base_revision": 3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "校验失败：{validation}");
+    assert_eq!(validation["valid"], true);
+
+    let publish_key = Uuid::now_v7();
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(publish_key),
+        Some(json!({"base_revision": 3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "发布失败：{published}");
+    assert_eq!(published["word"]["status"], "published");
+    assert!(published["word"]["published_at"].is_string());
+
+    let (status, publish_replay) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(publish_key),
+        Some(json!({"base_revision": 3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(publish_replay, published, "发布命令必须可幂等重放");
+
+    let publication_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications WHERE entry_id = $1")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(publication_count, 1);
+    let outbox_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM platform.outbox_events WHERE aggregate_id = $1 AND event_type = 'lexicon.entry_published'",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outbox_count, 1);
+    let actions: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit.admin_actions WHERE resource_id = $1 ORDER BY occurred_at, id",
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        actions,
+        [
+            "lexicon.entry.create",
+            "lexicon.entry.save",
+            "lexicon.entry.save",
+            "lexicon.entry.publish",
+        ]
+    );
+    let missing_pronunciation_hashes: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM lexicon.entry_publication_nodes
+        WHERE entry_id = $1 AND node_type = 'pronunciation' AND content_hash IS NULL
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(missing_pronunciation_hashes, 0);
+}
+
+#[sqlx::test]
+async fn lexicon_expiry_pagination_and_form_storage_boundaries_are_safe(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis.clone());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let first_headword = format!("expiry{}", admin_id.simple());
+    seed_dictionary_word(&pool, &first_headword).await;
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": first_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "检测失败：{detection}");
+    let detection_id = Uuid::parse_str(detection["detection_id"].as_str().unwrap()).unwrap();
+    let detection_key = format!("lexicon:detection:{admin_id}:{detection_id}");
+    let mut redis_connection = redis.get().await.expect("应能获取 Redis 连接");
+    let redis_ttl: i64 = deadpool_redis::redis::cmd("TTL")
+        .arg(&detection_key)
+        .query_async(&mut redis_connection)
+        .await
+        .expect("应能读取 detection TTL");
+    assert!(
+        redis_ttl > 5 * 60,
+        "Redis 应在五分钟逻辑过期后继续保留 detection，实际 TTL={redis_ttl}"
+    );
+
+    let expired_detection_id = Uuid::now_v7();
+    let mut expired_detection = detection.clone();
+    expired_detection["detection_id"] = json!(expired_detection_id);
+    expired_detection["expires_at"] = json!("2000-01-01T00:00:00Z");
+    deadpool_redis::redis::cmd("SET")
+        .arg(format!(
+            "lexicon:detection:{admin_id}:{expired_detection_id}"
+        ))
+        .arg(serde_json::to_string(&expired_detection).unwrap())
+        .arg("EX")
+        .arg(60 * 60)
+        .query_async::<()>(&mut redis_connection)
+        .await
+        .expect("应能写入逻辑已过期但仍保留的 detection");
+    let (status, expired) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": expired_detection_id,
+            "headwords": detection["builtin_dictionary"]["headwords"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE, "逻辑过期应返回 410：{expired}");
+    assert_eq!(expired["code"], "detection_expired");
+
+    let create_key = Uuid::now_v7();
+    let first_create_body = json!({
+        "schema_version": 2,
+        "detection_id": detection_id,
+        "headwords": detection["builtin_dictionary"]["headwords"],
+    });
+    let (status, first_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(create_key),
+        Some(first_create_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "首次创建失败：{first_created}");
+    let (status, replayed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(create_key),
+        Some(first_create_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(replayed, first_created);
+
+    sqlx::query(
+        r#"
+        UPDATE platform.idempotency_records
+        SET created_at = now() - interval '2 days',
+            expires_at = now() - interval '1 day'
+        WHERE scope = 'lexicon.entry.create'
+          AND actor_id = $1
+          AND idempotency_key = $2
+        "#,
+    )
+    .bind(admin_id)
+    .bind(create_key)
+    .execute(&pool)
+    .await
+    .expect("应能把幂等记录推进到过期状态");
+
+    let second_headword = format!("reuse{}", admin_id.simple());
+    seed_dictionary_word(&pool, &second_headword).await;
+    let (status, second_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": second_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "第二次检测失败：{second_detection}");
+    let (status, second_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(create_key),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": second_detection["detection_id"],
+            "headwords": second_detection["builtin_dictionary"]["headwords"],
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "过期幂等键应可原子清理后复用：{second_created}"
+    );
+    assert_ne!(second_created["word"]["id"], first_created["word"]["id"]);
+
+    let (status, empty_page) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?page=4294967295&page_size=100"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "超大页码不应溢出：{empty_page}");
+    assert_eq!(empty_page["words"], json!([]));
+    assert_eq!(empty_page["page"]["total"], 2);
+
+    let entry_id = Uuid::parse_str(second_created["word"]["id"].as_str().unwrap()).unwrap();
+    let mut invalid_forms = second_created["word"]["forms"].clone();
+    invalid_forms["pos"][0]["base_form"]["variants"][0]["spelling"] =
+        json!(format!(" {} ", "x".repeat(201)));
+    invalid_forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["dict_phonetic"] =
+        json!("d".repeat(201));
+    invalid_forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["actual_pron"] =
+        json!("a".repeat(201));
+    let (status, invalid) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 1,
+            "intent": "save",
+            "content": invalid_forms,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "违反存储约束应返回 422 而非数据库 500：{invalid}"
+    );
+    let issue_codes = invalid["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|issue| issue["code"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "spelling_not_trimmed",
+        "spelling_too_long",
+        "dict_phonetic_too_long",
+        "actual_pron_too_long",
+    ] {
+        assert!(
+            issue_codes.contains(&expected),
+            "缺少字段级问题 {expected}：{invalid}"
+        );
+    }
+
+    let mut cross_entry_forms = second_created["word"]["forms"].clone();
+    cross_entry_forms["pos"][0]["base_form"]["id"] =
+        first_created["word"]["forms"]["pos"][0]["base_form"]["id"].clone();
+    let (status, collision) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 1,
+            "intent": "save",
+            "content": cross_entry_forms,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "复用其他词条节点 ID 应返回 422：{collision}"
+    );
+    assert!(
+        collision["field_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["code"] == "node_id_reused")
+    );
+
+    let mut cross_step_forms = second_created["word"]["forms"].clone();
+    cross_step_forms["pos"][0]["base_form"]["id"] =
+        second_created["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let (status, collision) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 1,
+            "intent": "save",
+            "content": cross_step_forms,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "跨步骤复用节点 ID 应返回 422：{collision}"
+    );
+    assert!(
+        collision["field_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["code"] == "node_id_reused")
+    );
+}
+
+#[sqlx::test]
+async fn published_sense_references_are_resolved_snapshotted_and_protected(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_headword = format!("target{}", admin_id.simple());
+    let mut target_ready = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
+    let target_entry_id = Uuid::parse_str(target_ready["word"]["id"].as_str().unwrap()).unwrap();
+    let first_target_sense_id =
+        target_ready["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+
+    let mut target_meanings = target_ready["word"]["meanings"].clone();
+    let mut second_sense = target_meanings["pos"][0]["senses"][0].clone();
+    let second_target_sense_id = Uuid::now_v7();
+    second_sense["id"] = json!(second_target_sense_id);
+    second_sense["definitions"][0]["id"] = json!(Uuid::now_v7());
+    second_sense["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    second_sense["definitions"][0]["content"] = rich_text("保留的第二词义");
+    second_sense["sentences"][0]["id"] = json!(Uuid::now_v7());
+    second_sense["sentences"][0]["en_text"]["common"]["id"] = json!(Uuid::now_v7());
+    second_sense["sentences"][0]["zh_text_id"] = json!(Uuid::now_v7());
+    second_sense["sentences"][0]["links"][0]["sense_id"] = json!(second_target_sense_id);
+    target_meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_sense);
+    let (status, response) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 3,
+            "intent": "complete",
+            "content": target_meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "添加第二词义失败：{response}");
+    target_ready = response;
+    let (status, target_published) = publish_ready(&state, &bearer, &target_ready).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "目标词发布失败：{target_published}"
+    );
+
+    let source_headword = format!("source{}", admin_id.simple());
+    let source_ready = create_ready_draft(&state, &pool, &bearer, &source_headword).await;
+    let source_entry_id = Uuid::parse_str(source_ready["word"]["id"].as_str().unwrap()).unwrap();
+    let mut source_meanings = source_ready["word"]["meanings"].clone();
+    let relation_id = Uuid::now_v7();
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "synonym",
+        "target_word_id": target_entry_id,
+        "target_sense_id": first_target_sense_id,
+        "target_headword": "客户端伪造词头",
+        "target_gloss": "客户端伪造释义",
+        "score": "88.50"
+    }]);
+    source_meanings["pos"][0]["senses"][0]["sentences"][0]["links"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "word_id": target_entry_id,
+            "sense_id": second_target_sense_id,
+            "role": "context"
+        }));
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 3,
+            "intent": "complete",
+            "content": source_meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "关联保存失败：{source_saved}");
+    let saved_relation = &source_saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(saved_relation["target_headword"], target_headword);
+    assert_eq!(
+        saved_relation["target_gloss"],
+        format!("{target_headword} 的释义")
+    );
+    let (status, source_published) = publish_ready(&state, &bearer, &source_saved).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "来源词发布失败：{source_published}"
+    );
+    let structured_ref_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.entry_publication_sense_refs WHERE entry_id = $1",
+    )
+    .bind(source_entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(structured_ref_count, 2, "relation/context 应分别结构化锚定");
+
+    let target_revision = target_published["word"]["revision"].as_i64().unwrap();
+    let source_revision = source_published["word"]["revision"].as_i64().unwrap();
+    let (status, blocked_archive) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": target_revision,
+            "base_lifecycle_revision": 1
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "当前入站引用必须阻止单独归档：{blocked_archive}"
+    );
+    assert_eq!(
+        blocked_archive["code"],
+        "entry_has_inbound_publication_refs"
+    );
+    assert_eq!(
+        blocked_archive["meta"]["reference_locations"][0]["source_entry_id"],
+        source_entry_id.to_string()
+    );
+
+    let lifecycle_batch = json!({
+        "entries": [
+            {
+                "id": target_entry_id,
+                "base_revision": target_revision,
+                "base_lifecycle_revision": 1
+            },
+            {
+                "id": source_entry_id,
+                "base_revision": source_revision,
+                "base_lifecycle_revision": 1
+            }
+        ]
+    });
+    let (status, archived_batch) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/archive-batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(lifecycle_batch),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "互相依赖的词条应可原子批量归档：{archived_batch}"
+    );
+    assert_eq!(archived_batch["affected"], 2);
+    assert!(
+        archived_batch["words"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|word| word["status"] == "archived" && word["lifecycle_revision"] == 2)
+    );
+
+    let restore_batch = json!({
+        "entries": [
+            {
+                "id": target_entry_id,
+                "base_revision": target_revision,
+                "base_lifecycle_revision": 2
+            },
+            {
+                "id": source_entry_id,
+                "base_revision": source_revision,
+                "base_lifecycle_revision": 2
+            }
+        ]
+    });
+    let batch_key = Uuid::now_v7();
+    let (status, restored_batch) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/restore-batch"),
+        &bearer,
+        Some(batch_key),
+        Some(restore_batch.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "批量恢复失败：{restored_batch}");
+    assert_eq!(restored_batch["affected"], 2);
+    let (status, replayed_batch) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/restore-batch"),
+        &bearer,
+        Some(batch_key),
+        Some(restore_batch),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replayed_batch, restored_batch, "批量命令也必须稳定重放");
+
+    let mut target_without_referenced_sense = target_published["word"]["meanings"].clone();
+    let retained_sense = target_without_referenced_sense["pos"][0]["senses"][1].clone();
+    target_without_referenced_sense["pos"][0]["senses"] = json!([retained_sense]);
+    let (status, target_draft) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": target_published["word"]["revision"],
+            "intent": "complete",
+            "content": target_without_referenced_sense,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "草稿应允许先删除被引用词义：{target_draft}"
+    );
+    assert_eq!(target_draft["word"]["has_unpublished_changes"], true);
+    assert_eq!(
+        target_draft["word"]["published_revision"],
+        target_published["word"]["revision"]
+    );
+
+    let (status, blocked) = publish_ready(&state, &bearer, &target_draft).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "存在当前入站引用时不得发布删除：{blocked}"
+    );
+    let inbound_issue = blocked["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "sense_has_inbound_publication_refs")
+        .expect("应返回稳定的入站引用问题");
+    assert_eq!(inbound_issue["node_id"], first_target_sense_id);
+    assert_eq!(
+        inbound_issue["reference_location"]["source_entry_id"],
+        source_entry_id.to_string()
+    );
+    assert_eq!(
+        inbound_issue["reference_location"]["source_node_id"],
+        relation_id.to_string()
+    );
+
+    let mut source_without_relation = source_published["word"]["meanings"].clone();
+    source_without_relation["pos"][0]["senses"][0]["relations"] = json!([]);
+    let (status, source_updated) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source_published["word"]["revision"],
+            "intent": "complete",
+            "content": source_without_relation,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "移除来源 relation 失败：{source_updated}"
+    );
+    let (status, source_republished) = publish_ready(&state, &bearer, &source_updated).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "来源词重新发布断开 relation 失败：{source_republished}"
+    );
+
+    let (status, target_republished) = publish_ready(&state, &bearer, &target_draft).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "来源当前版本断链后目标应可发布：{target_republished}"
+    );
+    let historical_relation_refs: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM lexicon.entry_publication_sense_refs
+        WHERE entry_id = $1 AND reference_kind = 'relation'
+        "#,
+    )
+    .bind(source_entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        historical_relation_refs, 1,
+        "历史 publication 引用应保留可解释性"
+    );
+
+    let archive_source = json!({
+        "base_revision": source_republished["word"]["revision"],
+        "base_lifecycle_revision": 3
+    });
+    let (status, source_archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(archive_source),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "来源归档失败：{source_archived}");
+    let (status, target_archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": target_republished["word"]["revision"],
+            "base_lifecycle_revision": 3
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "来源已归档后目标应可归档：{target_archived}"
+    );
+
+    let (status, unavailable_restore) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_entry_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": source_republished["word"]["revision"],
+            "base_lifecycle_revision": 4
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "不可用出站目标必须阻止恢复：{unavailable_restore}"
+    );
+    assert_eq!(
+        unavailable_restore["code"],
+        "entry_has_unavailable_publication_refs"
+    );
+}
+
+#[sqlx::test]
+async fn concurrent_node_id_reuse_is_serialized_and_returns_validation_error(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let first = create_ready_draft(&state, &pool, &bearer, "collision-one").await;
+    let second = create_ready_draft(&state, &pool, &bearer, "collision-two").await;
+    let shared_id = Uuid::now_v7();
+    let state_ref = &state;
+    let bearer_ref = &bearer;
+
+    let request = |word: &Value| {
+        let mut content = word["word"]["meanings"].clone();
+        content["sense_groups"]
+            .as_array_mut()
+            .expect("sense_groups 应为数组")
+            .push(json!({
+                "id": shared_id,
+                "name_zh": "并发碰撞",
+                "name_en": "Concurrent collision"
+            }));
+        let entry_id = word["word"]["id"].as_str().unwrap().to_owned();
+        let base_revision = word["word"]["revision"].clone();
+        async move {
+            call(
+                state_ref,
+                Method::PUT,
+                &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+                bearer_ref,
+                None,
+                Some(json!({
+                    "base_revision": base_revision,
+                    "intent": "save",
+                    "content": content,
+                })),
+            )
+            .await
+        }
+    };
+
+    let (first_result, second_result) = tokio::join!(request(&first), request(&second));
+    let results = [first_result, second_result];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(status, _)| *status == StatusCode::OK)
+            .count(),
+        1,
+        "共享节点 ID 的并发保存只能有一个成功：{results:?}"
+    );
+    let rejected = results
+        .iter()
+        .find(|(status, _)| *status == StatusCode::UNPROCESSABLE_ENTITY)
+        .expect("另一个并发请求必须返回 422，而不是数据库 500");
+    assert!(
+        rejected.1["field_issues"]
+            .as_array()
+            .is_some_and(|issues| issues.iter().any(|issue| issue["code"] == "node_id_reused"))
+    );
+}
+
+#[sqlx::test]
+async fn related_search_reads_only_current_published_snapshots(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let (word_id, sense_id) =
+        seed_related_search_entry(&pool, admin_id, "colour", "word", "颜色", true, false).await;
+    seed_related_search_entry(
+        &pool,
+        admin_id,
+        "colour draft",
+        "word",
+        "未发布",
+        false,
+        false,
+    )
+    .await;
+    seed_related_search_entry(
+        &pool,
+        admin_id,
+        "colour archived",
+        "word",
+        "已归档",
+        true,
+        true,
+    )
+    .await;
+    let (phrase_id, phrase_sense_id) = seed_related_search_entry(
+        &pool,
+        admin_id,
+        "colour centre",
+        "phrase",
+        "色彩中心",
+        true,
+        false,
+    )
+    .await;
+
+    let (status, empty) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=%20%20%20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty, json!({"results": []}));
+
+    let (status, words) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=%20COLO%20&kind=word&limit=10"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "关联词搜索失败：{words}");
+    assert_eq!(
+        words,
+        json!({
+            "results": [{
+                "word_id": word_id,
+                "headword": "colour",
+                "kind": "word",
+                "senses": [{"sense_id": sense_id, "gloss": "颜色"}]
+            }]
+        })
+    );
+
+    let (status, phrases) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=colour&kind=phrase"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "短语筛选失败：{phrases}");
+    assert_eq!(
+        phrases,
+        json!({
+            "results": [{
+                "word_id": phrase_id,
+                "headword": "colour centre",
+                "kind": "phrase",
+                "senses": [{"sense_id": phrase_sense_id, "gloss": "色彩中心"}]
+            }]
+        })
+    );
+
+    for limit in [0, 101] {
+        let (status, invalid) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/related-search?q=colour&limit={limit}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["code"], "invalid_query");
+        assert_eq!(invalid["field"], "limit");
+    }
+}
+
+#[sqlx::test]
+async fn nul_text_is_rejected_as_query_or_draft_validation(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    for (uri, field) in [
+        (format!("{ROOT}/entries?q=%00"), "q"),
+        (format!("{ROOT}/entries?gloss=%00"), "gloss"),
+        (format!("{ROOT}/entries?pos=%00"), "pos"),
+        (format!("{ROOT}/entries/related-search?q=%00"), "q"),
+    ] {
+        let (status, invalid) = call(&state, Method::GET, &uri, &bearer, None, None).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "NUL 查询应返回 400：{invalid}"
+        );
+        assert_eq!(invalid["code"], "invalid_query");
+        assert_eq!(invalid["field"], field);
+    }
+
+    let ready = create_ready_draft(&state, &pool, &bearer, "nul-guard").await;
+    let entry_id = ready["word"]["id"].as_str().unwrap();
+    let revision = ready["word"]["revision"].as_i64().unwrap();
+
+    let mut forms = ready["word"]["forms"].clone();
+    forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["actual_pron"] =
+        json!("unsafe\0pronunciation");
+    let (status, invalid_forms) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": forms,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "forms NUL 应在写数据库前返回 422：{invalid_forms}"
+    );
+    assert!(
+        invalid_forms["field_issues"]
+            .as_array()
+            .is_some_and(|issues| {
+                issues
+                    .iter()
+                    .any(|issue| issue["code"] == "nul_character_not_allowed")
+            })
+    );
+
+    let mut meanings = ready["word"]["meanings"].clone();
+    meanings["sense_groups"][0]["name_zh"] = json!("unsafe\0name");
+    meanings["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
+        json!("unsafe\0definition");
+    let (status, invalid_meanings) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "meanings/RichText NUL 应在写数据库前返回 422：{invalid_meanings}"
+    );
+    assert!(
+        invalid_meanings["field_issues"]
+            .as_array()
+            .is_some_and(|issues| {
+                issues
+                    .iter()
+                    .any(|issue| issue["code"] == "nul_character_not_allowed")
+            })
+    );
+}
+
+#[sqlx::test]
+async fn phrase_detection_creation_editing_and_publication_use_the_v2_aggregate(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let phrase = format!("look up {}", admin_id.simple());
+    seed_dictionary_term(&pool, &phrase, "phrase", "common_unmarked").await;
+
+    let ready = create_ready_draft(&state, &pool, &bearer, &phrase).await;
+    assert_eq!(ready["word"]["kind"], "phrase");
+    assert_eq!(ready["word"]["detection_snapshot"]["entry_kind"], "phrase");
+    assert_eq!(ready["word"]["revision"], 3);
+    assert_eq!(ready["word"]["max_reachable_step"], "preview");
+
+    let (status, published) = publish_ready(&state, &bearer, &ready).await;
+    assert_eq!(status, StatusCode::CREATED, "短语发布失败：{published}");
+    assert_eq!(published["word"]["kind"], "phrase");
+    assert_eq!(published["word"]["status"], "published");
+    assert_eq!(published["word"]["published_revision"], 3);
+
+    let missing = format!("unlisted phrase {}", Uuid::now_v7().simple());
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": missing})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "未收录短语检测失败：{detection}");
+    assert_eq!(detection["entry_kind"], "phrase");
+    assert_eq!(detection["builtin_dictionary"]["status"], "not_found");
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {"mode": "unified", "common": missing},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "未收录短语建稿失败：{created}");
+    assert_eq!(created["word"]["kind"], "phrase");
+    assert_eq!(created["word"]["forms"], json!({"pos": []}));
+}
+
+#[sqlx::test]
+async fn lifecycle_commands_preserve_publications_and_are_idempotent_under_double_click(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let ready = create_ready_draft(&state, &pool, &bearer, "archive-safe").await;
+    let (status, published) = publish_ready(&state, &bearer, &ready).await;
+    assert_eq!(status, StatusCode::CREATED, "发布失败：{published}");
+    let entry_id = published["word"]["id"].as_str().unwrap();
+    let entry_uuid = Uuid::parse_str(entry_id).unwrap();
+    let revision = published["word"]["revision"].as_i64().unwrap();
+    let publication_before: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let body = json!({"base_revision": revision, "base_lifecycle_revision": 1});
+    let (status, missing_header) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        &bearer,
+        None,
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "缺少幂等头：{missing_header}"
+    );
+
+    let key = Uuid::now_v7();
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        &bearer,
+        Some(key),
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "归档失败：{archived}");
+    assert_eq!(archived["word"]["status"], "archived");
+    assert_eq!(archived["word"]["revision"], revision);
+    assert_eq!(archived["word"]["lifecycle_revision"], 2);
+    assert_eq!(archived["word"]["published_revision"], revision);
+    assert!(archived["word"]["archived_at"].is_string());
+    assert_eq!(archived["word"]["archived_by"], admin_id.to_string());
+
+    let (status, replayed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        &bearer,
+        Some(key),
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replayed, archived, "同幂等键必须逐字段重放原响应");
+
+    let (status, conflict) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        &bearer,
+        Some(key),
+        Some(json!({"base_revision": revision, "base_lifecycle_revision": 2})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["code"], "idempotency_conflict");
+
+    let (status, editing_archived) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": archived["word"]["meanings"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(editing_archived["code"], "entry_archived");
+
+    let publication_after: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let publication_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications WHERE entry_id = $1")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(publication_after, publication_before);
+    assert_eq!(publication_count, 1, "归档不得删除或复制 publication");
+
+    let (status, restored) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"base_revision": revision, "base_lifecycle_revision": 2})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "恢复失败：{restored}");
+    assert_eq!(restored["word"]["status"], "published");
+    assert_eq!(restored["word"]["lifecycle_revision"], 3);
+    assert!(restored["word"].get("archived_at").is_none());
+
+    let archive_uri = format!("{ROOT}/entries/{entry_id}/archive");
+    let double_click_body = json!({"base_revision": revision, "base_lifecycle_revision": 3});
+    let (first, second) = tokio::join!(
+        call(
+            &state,
+            Method::POST,
+            &archive_uri,
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(double_click_body.clone()),
+        ),
+        call(
+            &state,
+            Method::POST,
+            &archive_uri,
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(double_click_body),
+        )
+    );
+    assert_eq!(first.0, StatusCode::OK, "首次双击归档失败：{}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "第二次双击归档失败：{}", second.1);
+    let lifecycle_revision: i64 =
+        sqlx::query_scalar("SELECT lifecycle_revision FROM lexicon.entries WHERE id = $1")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(lifecycle_revision, 4, "并发双击只能产生一次状态迁移");
+
+    let (status, invalid) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"base_revision": 0, "base_lifecycle_revision": 0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(invalid["code"], "validation_failed");
+
+    let lifecycle_uri = format!("{ROOT}/entries/{entry_id}/restore");
+    let malformed_json_key = Uuid::now_v7().to_string();
+    let invalid_path_key = Uuid::now_v7().to_string();
+    for (label, uri, key, raw_body) in [
+        (
+            "非法幂等头",
+            lifecycle_uri.as_str(),
+            "not-a-uuid",
+            br#"{"base_revision":1,"base_lifecycle_revision":1}"#.as_slice(),
+        ),
+        (
+            "非法 JSON",
+            lifecycle_uri.as_str(),
+            malformed_json_key.as_str(),
+            br#"{"base_revision":"#.as_slice(),
+        ),
+        (
+            "非法路径 UUID",
+            "/api/v1/admin/lexicon/entries/not-a-uuid/restore",
+            invalid_path_key.as_str(),
+            br#"{"base_revision":1,"base_lifecycle_revision":1}"#.as_slice(),
+        ),
+    ] {
+        let (status, problem) =
+            call_raw(&state, Method::POST, uri, &bearer, Some(key), raw_body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}：{problem}");
+        assert_eq!(problem["status"], 400, "{label} 应返回 Problem Details");
+        assert!(problem["code"].is_string(), "{label} 应返回稳定错误码");
+    }
+
+    let duplicate = json!({
+        "entries": [
+            {"id": entry_id, "base_revision": revision, "base_lifecycle_revision": 4},
+            {"id": entry_id, "base_revision": revision, "base_lifecycle_revision": 4}
+        ]
+    });
+    let too_many = (0..101)
+        .map(|_| {
+            json!({
+                "id": Uuid::now_v7(),
+                "base_revision": 1,
+                "base_lifecycle_revision": 1
+            })
+        })
+        .collect::<Vec<_>>();
+    for body in [
+        json!({"entries": []}),
+        duplicate,
+        json!({"entries": too_many}),
+    ] {
+        let (status, problem) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/restore-batch"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+        assert_eq!(problem["code"], "validation_failed");
+    }
+
+    let second = create_ready_draft(&state, &pool, &bearer, "atomic-stale").await;
+    let second_id = second["word"]["id"].as_str().unwrap();
+    let second_revision = second["word"]["revision"].as_i64().unwrap();
+    let (status, stale_batch) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/restore-batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "entries": [
+                {
+                    "id": entry_id,
+                    "base_revision": revision,
+                    "base_lifecycle_revision": 4
+                },
+                {
+                    "id": second_id,
+                    "base_revision": second_revision + 1,
+                    "base_lifecycle_revision": 1
+                }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale_batch}");
+    assert_eq!(stale_batch["code"], "revision_conflict");
+    let lifecycle_after_failed_batch: (i64, bool) = sqlx::query_as(
+        "SELECT lifecycle_revision, archived_at IS NOT NULL FROM lexicon.entries WHERE id = $1",
+    )
+    .bind(entry_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        lifecycle_after_failed_batch,
+        (4, true),
+        "批量中的任意 revision 冲突必须回滚所有生命周期迁移"
+    );
+}
+
+#[sqlx::test]
+async fn dialect_suggestions_use_dictionary_region_evidence_and_preserve_rich_text_offsets(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_term(&pool, "colour", "word", "british_core").await;
+    seed_dictionary_term(&pool, "color", "word", "american_core").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES (
+            $1, 'colour', 'colour', 'british_core', ARRAY['british_core'],
+            ARRAY['GB'], ARRAY['spelling'], ARRAY['noun'], ARRAY['color'], true
+        )
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/dialect-variant-suggestions"),
+        &bearer,
+        None,
+        Some(json!({
+            "source_dialect": "uk",
+            "target_dialect": "us",
+            "items": [
+                {"client_id": "form", "field_kind": "form", "value": "COLOUR"},
+                {
+                    "client_id": "definition",
+                    "field_kind": "definition",
+                    "value": {
+                        "version": 2,
+                        "text": "Colour is vivid",
+                        "annotations": [{"type": "emphasis", "start": 0, "end": 6, "level": "strong"}]
+                    }
+                }
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "方言建议失败：{response}");
+    assert_eq!(response["provider"]["kind"], "dictionary_region_rules");
+    assert_eq!(response["provider"]["version"], "1");
+    assert_eq!(response["suggestions"][0]["value"], "COLOR");
+    assert_eq!(
+        response["suggestions"][1]["value"]["text"],
+        "Color is vivid"
+    );
+    assert_eq!(
+        response["suggestions"][1]["value"]["annotations"][0]["end"],
+        5
+    );
+
+    let (status, invalid) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/dialect-variant-suggestions"),
+        &bearer,
+        None,
+        Some(json!({
+            "source_dialect": "uk",
+            "target_dialect": "uk",
+            "items": [{"client_id": "form", "field_kind": "form", "value": "colour"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(invalid["code"], "validation_failed");
+    assert_eq!(invalid["meta"]["code"], "target_dialect");
+}
