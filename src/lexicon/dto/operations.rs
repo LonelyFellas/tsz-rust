@@ -20,6 +20,7 @@ pub struct DuplicateWordMatchV2 {
     pub word_id: Uuid,
     pub headword: String,
     pub dialect: Dialect,
+    pub status: AdminWordStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -347,6 +347,13 @@ impl LexiconService {
                 word_id: record.entry_id,
                 headword: record.headword,
                 dialect: parse_dialect(&record.dialect).unwrap_or(Dialect::Common),
+                status: if record.is_archived {
+                    AdminWordStatus::Archived
+                } else if record.is_published {
+                    AdminWordStatus::Published
+                } else {
+                    AdminWordStatus::Draft
+                },
             })
             .collect::<Vec<_>>();
         let smart_dictionary = if duplicates.is_empty() {
