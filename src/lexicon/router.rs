@@ -20,7 +20,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/entries/stats", get(handler::stats))
         .route("/entries/related-search", get(handler::related_search))
-        .route("/entries/{id}", get(handler::get))
+        .route(
+            "/entries/{id}",
+            get(handler::get).delete(handler::delete_draft),
+        )
         .route(
             "/entries/{id}/archive",
             axum::routing::post(handler::archive),

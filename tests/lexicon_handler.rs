@@ -2120,6 +2120,621 @@ async fn dialect_suggestions_use_dictionary_region_evidence_and_preserve_rich_te
 }
 
 #[sqlx::test]
+async fn detection_distinguishes_center_and_centre_in_both_directions(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_term(&pool, "center", "word", "british_american").await;
+    seed_dictionary_term(&pool, "centre", "word", "british_core").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES
+            ($1, 'center', 'center', 'british_american', ARRAY['british_core', 'american_core'],
+             ARRAY['GB', 'US'], ARRAY['spelling'], ARRAY['noun'], ARRAY['centre'], true),
+            ($1, 'centre', 'centre', 'british_core', ARRAY['british_core'],
+             ARRAY['GB'], ARRAY['spelling'], ARRAY['noun'], ARRAY['center'], true)
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for (input, source_dialect) in [("center", "us"), ("centre", "uk")] {
+        let (status, response) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({"language": "en", "headword": input})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{input} 检测失败：{response}");
+        assert_eq!(
+            response["builtin_dictionary"]["headwords"],
+            json!({
+                "mode": "distinguish",
+                "uk": "centre",
+                "us": "center",
+                "source_dialect": source_dialect
+            })
+        );
+    }
+
+    seed_dictionary_term(&pool, "priority-source", "word", "british_core").await;
+    seed_dictionary_term(&pool, "priority-ambiguous", "word", "british_american").await;
+    seed_dictionary_term(&pool, "priority-us", "word", "american_core").await;
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES (
+            $1, 'priority-source', 'priority-source', 'british_core', ARRAY['british_core'],
+            ARRAY['GB'], ARRAY['spelling'], ARRAY['noun'],
+            ARRAY['priority-ambiguous', 'priority-us'], true
+        )
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "priority-source"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "候选优先级检测失败：{response}");
+    assert_eq!(
+        response["builtin_dictionary"]["headwords"],
+        json!({
+            "mode": "distinguish",
+            "uk": "priority-source",
+            "us": "priority-us",
+            "source_dialect": "uk"
+        }),
+        "明确反方言候选必须优先于排列在前的混合候选"
+    );
+}
+
+#[sqlx::test]
+async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    seed_dictionary_term(&pool, "manual-common", "word", "common_unmarked").await;
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "manual-common"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "统一词形检测失败：{detection}");
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {
+                "mode": "distinguish",
+                "uk": "  manual-edited-uk  ",
+                "us": " manual-common ",
+                "source_dialect": "us"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "统一改区分应成功：{created}");
+    assert_eq!(created["word"]["headwords"]["mode"], "distinguish");
+    assert_eq!(created["word"]["headwords"]["uk"], "manual-edited-uk");
+    assert_eq!(created["word"]["headwords"]["us"], "manual-common");
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["dialect_rules"],
+        json!({"spelling_mode": "distinguish", "phonetic_mode": "distinguish"}),
+        "统一改区分后 Step 2 的方言规则必须同步"
+    );
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["base_form"]["variants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "统一改区分后必须生成英美两侧基础词形"
+    );
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["base_form"]["variants"][0]["origin"], "manual",
+        "用户修改的英式词形必须标记为手工来源"
+    );
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["base_form"]["variants"][1]["origin"], "dictionary",
+        "保持检测基准的美式词形必须保留词典来源"
+    );
+    let created_id = Uuid::parse_str(created["word"]["id"].as_str().unwrap()).unwrap();
+    let persisted_origins: Vec<(String, String)> = sqlx::query_as(
+        "SELECT dialect, origin FROM lexicon.entry_headwords WHERE entry_id = $1 ORDER BY dialect",
+    )
+    .bind(created_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted_origins,
+        vec![
+            ("uk".to_owned(), "manual".to_owned()),
+            ("us".to_owned(), "dictionary".to_owned()),
+        ],
+        "持久化词头必须逐侧保留真实来源"
+    );
+
+    seed_dictionary_term(&pool, "manual-uk", "word", "british_core").await;
+    seed_dictionary_term(&pool, "manual-us", "word", "american_core").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES
+            ($1, 'manual-uk', 'manual-uk', 'british_core', ARRAY['british_core'],
+             ARRAY['GB'], ARRAY['spelling'], ARRAY['noun'], ARRAY['manual-us'], true),
+            ($1, 'manual-us', 'manual-us', 'american_core', ARRAY['american_core'],
+             ARRAY['US'], ARRAY['spelling'], ARRAY['noun'], ARRAY['manual-uk'], true)
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "manual-us"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "区分词形检测失败：{detection}");
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {"mode": "unified", "common": "manual-us"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "区分改统一应成功：{created}");
+    assert_eq!(created["word"]["headwords"]["mode"], "unified");
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["dialect_rules"],
+        json!({"spelling_mode": "unified", "phonetic_mode": "unified"}),
+        "区分改统一后 Step 2 的方言规则必须同步"
+    );
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["base_form"]["variants"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "区分改统一后必须只保留共同基础词形"
+    );
+
+    seed_dictionary_term(&pool, "tamper-common", "word", "common_unmarked").await;
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "tamper-common"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "篡改测试检测失败：{detection}");
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {
+                "mode": "distinguish",
+                "uk": "manual-edited-uk",
+                "us": "tampered-source",
+                "source_dialect": "us"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "命中侧被篡改时必须拒绝：{rejected}"
+    );
+    assert_eq!(rejected["code"], "detection_mismatch");
+
+    seed_dictionary_term(&pool, "single-uk", "word", "british_core").await;
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "single-uk"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "单侧英式检测失败：{detection}");
+    assert_eq!(
+        detection["builtin_dictionary"]["headwords"]["mode"],
+        "unified"
+    );
+    assert_eq!(detection["matched_dialect"], "uk");
+
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {
+                "mode": "distinguish",
+                "uk": "single-uk-edited",
+                "us": "single-uk",
+                "source_dialect": "us"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "单侧英式命中不得伪装为美式来源：{rejected}"
+    );
+    assert_eq!(rejected["code"], "detection_mismatch");
+
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {
+                "mode": "distinguish",
+                "uk": "single-uk",
+                "us": "single-us-edited",
+                "source_dialect": "uk"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "保持英式命中侧应允许创建：{created}"
+    );
+}
+
+#[sqlx::test]
+async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let draft = create_ready_draft(&state, &pool, &bearer, "deletable-draft").await;
+    let draft_id = draft["word"]["id"].as_str().unwrap();
+    let draft_revision = draft["word"]["revision"].as_i64().unwrap();
+    let draft_lifecycle_revision = draft["word"]["lifecycle_revision"].as_i64().unwrap();
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{draft_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 0,
+            "base_lifecycle_revision": draft_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "非法 revision 必须返回 422：{response}"
+    );
+    assert_eq!(response["meta"]["code"], "base_revision");
+
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{draft_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": draft_revision,
+            "base_lifecycle_revision": 0
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "非法 lifecycle revision 必须返回 422：{response}"
+    );
+    assert_eq!(response["meta"]["code"], "base_lifecycle_revision");
+
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{draft_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": draft_revision - 1,
+            "base_lifecycle_revision": draft_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "过期 revision 不得删除较新的草稿：{response}"
+    );
+    assert_eq!(response["code"], "revision_conflict");
+    assert_eq!(response["meta"]["current_revision"], draft_revision);
+
+    let archive_race = create_ready_draft(&state, &pool, &bearer, "archive-delete-race").await;
+    let archive_race_id = archive_race["word"]["id"].as_str().unwrap();
+    let archive_race_revision = archive_race["word"]["revision"].as_i64().unwrap();
+    let archive_race_lifecycle_revision =
+        archive_race["word"]["lifecycle_revision"].as_i64().unwrap();
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{archive_race_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": archive_race_revision,
+            "base_lifecycle_revision": archive_race_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "并发测试归档失败：{archived}");
+    let archived_lifecycle_revision = archived["word"]["lifecycle_revision"].as_i64().unwrap();
+
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{archive_race_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": archive_race_revision,
+            "base_lifecycle_revision": archive_race_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "旧页面不得删除刚被归档的草稿：{response}"
+    );
+    assert_eq!(response["code"], "revision_conflict");
+    assert_eq!(
+        response["meta"]["current_lifecycle_revision"],
+        archived_lifecycle_revision
+    );
+
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{archive_race_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": archive_race_revision,
+            "base_lifecycle_revision": archived_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "归档状态不是可永久删除的草稿：{response}"
+    );
+    assert_eq!(response["code"], "entry_not_deletable");
+
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{draft_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": draft_revision,
+            "base_lifecycle_revision": draft_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "删除草稿失败：{response}");
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM lexicon.entries WHERE id = $1)")
+            .bind(Uuid::parse_str(draft_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!exists, "删除必须级联清理草稿聚合并释放词头");
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit.admin_actions WHERE action = 'lexicon.entry.delete_draft' AND resource_id = $1",
+    )
+    .bind(Uuid::parse_str(draft_id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_count, 1, "永久删除草稿必须留下管理员审计记录");
+
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{draft_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": draft_revision,
+            "base_lifecycle_revision": draft_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "重复删除应返回 404：{response}"
+    );
+
+    let referenced = create_ready_draft(&state, &pool, &bearer, "referenced-draft").await;
+    let referring = create_ready_draft(&state, &pool, &bearer, "referring-draft").await;
+    let referenced_id = Uuid::parse_str(referenced["word"]["id"].as_str().unwrap()).unwrap();
+    let referenced_revision = referenced["word"]["revision"].as_i64().unwrap();
+    let referenced_lifecycle_revision = referenced["word"]["lifecycle_revision"].as_i64().unwrap();
+    let referenced_sense_id = Uuid::parse_str(
+        referenced["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let referring_id = Uuid::parse_str(referring["word"]["id"].as_str().unwrap()).unwrap();
+    let referring_sense_id = Uuid::parse_str(
+        referring["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let relation_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.nodes (
+            id, entry_id, node_type, parent_node_id, node_role, stable_slot
+        ) VALUES ($1, $2, 'relation', $3, 'meanings.relation', false)
+        "#,
+    )
+    .bind(relation_id)
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.relations (
+            id, entry_id, source_sense_id, relation_type,
+            target_entry_id, target_sense_id, score,
+            target_headword_snapshot, target_gloss_snapshot, sort_order
+        ) VALUES ($1, $2, $3, 'synonym', $4, $5, 100, 'referenced-draft', '', 0)
+        "#,
+    )
+    .bind(relation_id)
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .bind(referenced_id)
+    .bind(referenced_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{referenced_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": referenced_revision,
+            "base_lifecycle_revision": referenced_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "被其他草稿引用的词条不得删除：{response}"
+    );
+    assert_eq!(response["code"], "entry_not_deletable");
+
+    let published = create_ready_draft(&state, &pool, &bearer, "protected-published").await;
+    let (status, published) = publish_ready(&state, &bearer, &published).await;
+    assert_eq!(status, StatusCode::CREATED, "发布准备失败：{published}");
+    let published_id = published["word"]["id"].as_str().unwrap();
+    let published_revision = published["word"]["revision"].as_i64().unwrap();
+    let published_lifecycle_revision = published["word"]["lifecycle_revision"].as_i64().unwrap();
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{published_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": published_revision,
+            "base_lifecycle_revision": published_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "已发布词条不得删除：{response}"
+    );
+    assert_eq!(response["code"], "entry_not_deletable");
+}
+
+#[sqlx::test]
 async fn forms_impact_is_complete_stable_and_detects_pos_code_replacement(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

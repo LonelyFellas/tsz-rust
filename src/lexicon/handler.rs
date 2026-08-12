@@ -13,7 +13,7 @@ use crate::{
         detection_store::DetectionStore,
         dto::{
             AdminWordListQuery, AdminWordListResponse, AdminWordStats, AdminWordV2Envelope,
-            CreateAdminWordV2Input, DetectWordInputV2, DetectWordResponseV2,
+            CreateAdminWordV2Input, DeleteDraftInput, DetectWordInputV2, DetectWordResponseV2,
             DraftValidationResponse, EntryLifecycleBatchInput, EntryLifecycleBatchResponse,
             EntryLifecycleInput, EntryPath, FormsImpactResponseV2, PreviewFormsImpactInputV2,
             PublishAdminWordV2Input, RelatedSearchQuery, RelatedSearchResponse, SaveFormsStepInput,
@@ -36,7 +36,7 @@ pub use commands::{
     create, detect, preview_forms_impact, publish, save_forms, save_meanings,
     suggest_dialect_variants, validate,
 };
-pub use lifecycle::{archive, archive_batch, restore, restore_batch};
+pub use lifecycle::{archive, archive_batch, delete_draft, restore, restore_batch};
 pub use query::{get, list, related_search, stats};
 
 fn service(state: &AppState) -> LexiconService {
@@ -132,6 +132,11 @@ fn map_error(error: LexiconServiceError) -> AppError {
             ErrorCode::EntryArchived,
             None,
             "entry is archived and must be restored before editing",
+        ),
+        LexiconServiceError::EntryNotDeletable => AppError::conflict(
+            ErrorCode::EntryNotDeletable,
+            None,
+            "only never-published entries without inbound draft references can be deleted",
         ),
         LexiconServiceError::EntryHasInboundPublicationRefs(references) => AppError::conflict(
             ErrorCode::EntryHasInboundPublicationRefs,

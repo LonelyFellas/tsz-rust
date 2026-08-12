@@ -399,6 +399,67 @@ impl LexiconRepository {
         .await
         .map_err(LexiconRepositoryError::Database)
     }
+
+    pub(crate) async fn delete_never_published_entry(
+        tx: &mut Transaction<'_, Postgres>,
+        actor_id: Uuid,
+        request_id: Uuid,
+        id: Uuid,
+        revision: i64,
+    ) -> Result<bool, LexiconRepositoryError> {
+        let has_inbound_draft_references = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM lexicon.relations relation
+                JOIN lexicon.nodes target ON target.id = relation.target_sense_id
+                WHERE target.entry_id = $1 AND relation.entry_id <> $1
+                UNION ALL
+                SELECT 1
+                FROM lexicon.sentence_links link
+                JOIN lexicon.nodes target ON target.id = link.target_sense_id
+                WHERE target.entry_id = $1 AND link.entry_id <> $1
+            )
+            "#,
+        )
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        if has_inbound_draft_references {
+            return Ok(false);
+        }
+        delete_current_content(tx, id).await?;
+        let deleted = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            DELETE FROM lexicon.entries entry
+            WHERE entry.id = $1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM lexicon.entry_publications publication
+                  WHERE publication.entry_id = entry.id
+              )
+            RETURNING entry.id
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        if deleted.is_some() {
+            insert_audit_action(
+                tx,
+                actor_id,
+                "lexicon.entry.delete_draft",
+                id,
+                revision,
+                request_id,
+                serde_json::json!({"never_published": true}),
+            )
+            .await?;
+        }
+        Ok(deleted.is_some())
+    }
 }
 
 // --- persistence ---

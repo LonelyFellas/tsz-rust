@@ -6,11 +6,6 @@ pub(super) async fn insert_headwords(
     tx: &mut Transaction<'_, Postgres>,
     word: &AdminWordV2,
 ) -> Result<(), LexiconRepositoryError> {
-    let origin = if word.detection_snapshot.builtin_dictionary_status == "matched" {
-        "dictionary"
-    } else {
-        "manual"
-    };
     let values: Vec<(Dialect, &str)> = match &word.headwords {
         WordHeadwordsV2::Unified { common } => vec![(Dialect::Common, common)],
         WordHeadwordsV2::Distinguish { uk, us, .. } => {
@@ -19,6 +14,17 @@ pub(super) async fn insert_headwords(
     };
 
     for (dialect, value) in &values {
+        let origin = if word.detection_snapshot.builtin_dictionary_status == "matched" {
+            headword_origin(
+                &word.detection_snapshot.headwords,
+                word.detection_snapshot.matched_dialect,
+                &word.headwords,
+                *dialect,
+                value,
+            )
+        } else {
+            TextOrigin::Manual
+        };
         let normalized = normalize_headword(value)
             .map_err(|_| LexiconRepositoryError::Invariant("headword was not normalized"))?;
         sqlx::query(
@@ -35,7 +41,7 @@ pub(super) async fn insert_headwords(
         .bind(&normalized.display)
         .bind(&normalized.key)
         .bind(HEADWORD_NORMALIZATION_VERSION)
-        .bind(origin)
+        .bind(origin_string(origin))
         .execute(&mut **tx)
         .await
         .map_err(map_entry_write_error)?;

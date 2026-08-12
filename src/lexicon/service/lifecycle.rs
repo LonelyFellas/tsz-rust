@@ -21,6 +21,63 @@ impl TargetState {
 }
 
 impl LexiconService {
+    pub async fn delete_draft(
+        &self,
+        actor_id: Uuid,
+        request_id: Uuid,
+        entry_id: Uuid,
+        input: DeleteDraftInput,
+    ) -> Result<(), LexiconServiceError> {
+        if input.base_revision < 1 {
+            return Err(LexiconServiceError::UnprocessableField {
+                field: "base_revision",
+                message: "base_revision must be at least 1",
+            });
+        }
+        if input.base_lifecycle_revision < 1 {
+            return Err(LexiconServiceError::UnprocessableField {
+                field: "base_lifecycle_revision",
+                message: "base_lifecycle_revision must be at least 1",
+            });
+        }
+        let mut transaction = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        let current = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(LexiconServiceError::WordNotFound)?;
+        if current.revision != input.base_revision {
+            return Err(LexiconServiceError::RevisionConflict {
+                current_revision: current.revision,
+            });
+        }
+        if current.lifecycle_revision != input.base_lifecycle_revision {
+            return Err(LexiconServiceError::LifecycleRevisionConflict {
+                current_lifecycle_revision: current.lifecycle_revision,
+            });
+        }
+        if current.archived_at.is_some()
+            || current.current_publication_id.is_some()
+            || !LexiconRepository::delete_never_published_entry(
+                &mut transaction,
+                actor_id,
+                request_id,
+                entry_id,
+                current.revision,
+            )
+            .await
+            .map_err(repository_error)?
+        {
+            return Err(LexiconServiceError::EntryNotDeletable);
+        }
+        transaction.commit().await.map_err(database_error)?;
+        Ok(())
+    }
+
     pub async fn archive(
         &self,
         actor_id: Uuid,
