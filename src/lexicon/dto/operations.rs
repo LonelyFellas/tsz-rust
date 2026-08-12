@@ -231,6 +231,15 @@ pub struct PublishAdminWordV2Input {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct DeleteDraftInput {
+    #[schema(minimum = 1)]
+    pub base_revision: i64,
+    #[schema(minimum = 1)]
+    pub base_lifecycle_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EntryLifecycleInput {
     #[schema(minimum = 1)]
     pub base_revision: i64,

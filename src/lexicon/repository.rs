@@ -22,6 +22,7 @@ use crate::{
             form_slot_role, form_variant_role, text_variant_role,
         },
         normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword, sha256_json},
+        provenance::headword_origin,
     },
     platform::is_unique_violation,
 };

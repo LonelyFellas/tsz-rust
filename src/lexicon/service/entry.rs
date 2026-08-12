@@ -83,10 +83,17 @@ pub(super) fn build_suggested_forms(
             .map(|part| {
                 let variants = match headwords {
                     WordHeadwordsV2::Unified { common } => {
-                        vec![base_variant(Dialect::Common, common)]
+                        vec![base_variant(
+                            Dialect::Common,
+                            common,
+                            TextOrigin::Dictionary,
+                        )]
                     }
                     WordHeadwordsV2::Distinguish { uk, us, .. } => {
-                        vec![base_variant(Dialect::Uk, uk), base_variant(Dialect::Us, us)]
+                        vec![
+                            base_variant(Dialect::Uk, uk, TextOrigin::Dictionary),
+                            base_variant(Dialect::Us, us, TextOrigin::Dictionary),
+                        ]
                     }
                 };
                 WordPosFormsV2 {
@@ -122,12 +129,16 @@ pub(super) fn build_suggested_forms(
     }
 }
 
-pub(super) fn base_variant(dialect: Dialect, spelling: &str) -> WordFormVariantV2 {
+pub(super) fn base_variant(
+    dialect: Dialect,
+    spelling: &str,
+    origin: TextOrigin,
+) -> WordFormVariantV2 {
     WordFormVariantV2 {
         id: Uuid::now_v7(),
         dialect,
         spelling: spelling.to_owned(),
-        origin: TextOrigin::Dictionary,
+        origin,
         pronunciations: vec![WordPronunciationV2 {
             id: Uuid::now_v7(),
             dict_phonetic: String::new(),
@@ -256,12 +267,45 @@ pub(super) fn empty_english_text(headwords: &WordHeadwordsV2) -> EnglishTextV2 {
     }
 }
 
-pub(super) fn align_base_forms(forms: &mut DraftFormsStepContent, headwords: &WordHeadwordsV2) {
+pub(super) fn align_base_forms(
+    forms: &mut DraftFormsStepContent,
+    detected: &WordHeadwordsV2,
+    matched_dialect: Dialect,
+    submitted: &WordHeadwordsV2,
+) {
+    let mode = if matches!(submitted, WordHeadwordsV2::Distinguish { .. }) {
+        "distinguish"
+    } else {
+        "unified"
+    };
     for pos in &mut forms.pos {
-        pos.base_form.variants = match headwords {
-            WordHeadwordsV2::Unified { common } => vec![base_variant(Dialect::Common, common)],
+        pos.dialect_rules.spelling_mode = mode.to_owned();
+        pos.dialect_rules.phonetic_mode = mode.to_owned();
+        pos.base_form.variants = match submitted {
+            WordHeadwordsV2::Unified { common } => vec![base_variant(
+                Dialect::Common,
+                common,
+                headword_origin(
+                    detected,
+                    matched_dialect,
+                    submitted,
+                    Dialect::Common,
+                    common,
+                ),
+            )],
             WordHeadwordsV2::Distinguish { uk, us, .. } => {
-                vec![base_variant(Dialect::Uk, uk), base_variant(Dialect::Us, us)]
+                vec![
+                    base_variant(
+                        Dialect::Uk,
+                        uk,
+                        headword_origin(detected, matched_dialect, submitted, Dialect::Uk, uk),
+                    ),
+                    base_variant(
+                        Dialect::Us,
+                        us,
+                        headword_origin(detected, matched_dialect, submitted, Dialect::Us, us),
+                    ),
+                ]
             }
         };
     }
@@ -385,7 +429,7 @@ impl LexiconService {
         actor_id: Uuid,
         request_id: Uuid,
         idempotency_key: Uuid,
-        input: CreateAdminWordV2Input,
+        mut input: CreateAdminWordV2Input,
     ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
         if input.schema_version != 2 {
             return Err(LexiconServiceError::InvalidField {
@@ -393,7 +437,7 @@ impl LexiconService {
                 message: "schema_version must be 2",
             });
         }
-        validate_headwords(&input.headwords)?;
+        normalize_submitted_headwords(&mut input.headwords)?;
         let request_hash = sha256_json(&input).map_err(|error| {
             LexiconServiceError::Repository(LexiconRepositoryError::Serialization(error))
         })?;
@@ -488,11 +532,15 @@ impl LexiconService {
             }
             _ => return Err(LexiconServiceError::DetectionMismatch),
         };
-        if !compatible_headwords(&detected_headwords, &input.headwords)? {
+        if !compatible_headwords(&detected_headwords, matched_dialect, &input.headwords)? {
             return Err(LexiconServiceError::DetectionMismatch);
         }
-
-        align_base_forms(&mut forms, &input.headwords);
+        align_base_forms(
+            &mut forms,
+            &detected_headwords,
+            matched_dialect,
+            &input.headwords,
+        );
         let pos_codes = forms
             .pos
             .iter()
@@ -578,39 +626,73 @@ impl LexiconService {
         term_family: &str,
         surface: Option<RegionSurfaceRecord>,
     ) -> Result<(WordHeadwordsV2, Dialect), LexiconServiceError> {
-        let effective_family = surface
-            .as_ref()
-            .map_or(term_family, |surface| surface.region_family.as_str());
-        let source = family_dialect(effective_family);
-        let Some(source_dialect) = source else {
-            return Ok((
-                WordHeadwordsV2::Unified {
-                    common: term.to_owned(),
-                },
-                Dialect::Common,
-            ));
-        };
         let Some(surface) = surface else {
             return Ok((
                 WordHeadwordsV2::Unified {
                     common: term.to_owned(),
                 },
-                source_dialect,
+                family_dialect(term_family).unwrap_or(Dialect::Common),
             ));
         };
+        let effective_family = surface.region_family.as_str();
         let target_keys = surface
             .targets
             .iter()
             .filter_map(|target| normalize_headword(target).ok().map(|value| value.key))
             .collect::<Vec<_>>();
-        let candidates = self
+        let mut candidates = self
             .repository
             .dictionary_candidates(&target_keys)
             .await
             .map_err(repository_error)?;
-        let counterpart = candidates.into_iter().find(|candidate| {
-            family_dialect(&candidate.region_family).is_some_and(|value| value != source_dialect)
+        let source_dialect = family_dialect(effective_family).or_else(|| {
+            let mut target_dialects = candidates
+                .iter()
+                .filter_map(|candidate| family_dialect(&candidate.region_family));
+            let first = target_dialects.next()?;
+            target_dialects
+                .all(|dialect| dialect == first)
+                .then_some(match first {
+                    Dialect::Uk => Dialect::Us,
+                    Dialect::Us => Dialect::Uk,
+                    Dialect::Common => unreachable!("family dialect is never common"),
+                })
         });
+        let Some(source_dialect) = source_dialect else {
+            return Ok((
+                WordHeadwordsV2::Unified {
+                    common: surface.term,
+                },
+                Dialect::Common,
+            ));
+        };
+        let priority = |candidate: &DictionaryCandidateRecord| match family_dialect(
+            &candidate.region_family,
+        ) {
+            Some(dialect) if dialect != source_dialect => 0_u8,
+            None => 1,
+            Some(_) => 2,
+        };
+        candidates.sort_by(|left, right| {
+            priority(left)
+                .cmp(&priority(right))
+                .then_with(|| {
+                    target_keys
+                        .iter()
+                        .position(|key| key == &left.normalized_term)
+                        .unwrap_or(usize::MAX)
+                        .cmp(
+                            &target_keys
+                                .iter()
+                                .position(|key| key == &right.normalized_term)
+                                .unwrap_or(usize::MAX),
+                        )
+                })
+                .then_with(|| left.normalized_term.cmp(&right.normalized_term))
+        });
+        let counterpart = candidates
+            .into_iter()
+            .find(|candidate| priority(candidate) < 2);
         let Some(counterpart) = counterpart else {
             return Ok((
                 WordHeadwordsV2::Unified {

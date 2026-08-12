@@ -2,69 +2,57 @@ use super::*;
 
 pub(super) fn compatible_headwords(
     detected: &WordHeadwordsV2,
+    matched_dialect: Dialect,
     submitted: &WordHeadwordsV2,
 ) -> Result<bool, LexiconServiceError> {
-    Ok(match (detected, submitted) {
-        (
-            WordHeadwordsV2::Unified { common: expected },
-            WordHeadwordsV2::Unified { common: actual },
-        ) => {
-            normalize_headword(expected)
-                .map_err(map_headword_error)?
-                .key
-                == normalize_headword(actual).map_err(map_headword_error)?.key
-        }
-        (
-            WordHeadwordsV2::Distinguish {
-                uk: expected_uk,
-                us: expected_us,
-                source_dialect,
-            },
-            WordHeadwordsV2::Distinguish {
-                uk,
-                us,
-                source_dialect: submitted_source,
-            },
-        ) => {
-            if source_dialect != submitted_source {
-                false
-            } else {
-                let expected = if *source_dialect == SourceDialect::Uk {
-                    expected_uk
-                } else {
-                    expected_us
-                };
-                let actual = if *source_dialect == SourceDialect::Uk {
-                    uk
-                } else {
-                    us
-                };
-                normalize_headword(expected)
-                    .map_err(map_headword_error)?
-                    .key
-                    == normalize_headword(actual).map_err(map_headword_error)?.key
-                    && !normalize_headword(uk)
-                        .map_err(map_headword_error)?
-                        .key
-                        .is_empty()
-                    && !normalize_headword(us)
-                        .map_err(map_headword_error)?
-                        .key
-                        .is_empty()
-            }
-        }
-        _ => false,
-    })
+    let detected_source = match detected {
+        WordHeadwordsV2::Distinguish { source_dialect, .. } => Some(*source_dialect),
+        WordHeadwordsV2::Unified { .. } => match matched_dialect {
+            Dialect::Uk => Some(SourceDialect::Uk),
+            Dialect::Us => Some(SourceDialect::Us),
+            Dialect::Common => None,
+        },
+    };
+    if let (Some(detected_source), WordHeadwordsV2::Distinguish { source_dialect, .. }) =
+        (detected_source, submitted)
+        && detected_source != *source_dialect
+    {
+        return Ok(false);
+    }
+    Ok(normalize_headword(source_headword(detected))
+        .map_err(map_headword_error)?
+        .key
+        == normalize_headword(source_headword(submitted))
+            .map_err(map_headword_error)?
+            .key)
 }
 
-pub(super) fn validate_headwords(headwords: &WordHeadwordsV2) -> Result<(), LexiconServiceError> {
+fn source_headword(headwords: &WordHeadwordsV2) -> &str {
+    match headwords {
+        WordHeadwordsV2::Unified { common } => common,
+        WordHeadwordsV2::Distinguish {
+            uk,
+            us,
+            source_dialect,
+        } => match source_dialect {
+            SourceDialect::Uk => uk,
+            SourceDialect::Us => us,
+        },
+    }
+}
+
+pub(super) fn normalize_submitted_headwords(
+    headwords: &mut WordHeadwordsV2,
+) -> Result<(), LexiconServiceError> {
     match headwords {
         WordHeadwordsV2::Unified { common } => {
-            normalize_headword(common).map_err(map_headword_error)?;
+            *common = normalize_headword(common)
+                .map_err(map_headword_error)?
+                .display;
         }
         WordHeadwordsV2::Distinguish { uk, us, .. } => {
-            normalize_headword(uk).map_err(map_headword_error)?;
-            normalize_headword(us).map_err(map_headword_error)?;
+            *uk = normalize_headword(uk).map_err(map_headword_error)?.display;
+            *us = normalize_headword(us).map_err(map_headword_error)?.display;
         }
     }
     Ok(())

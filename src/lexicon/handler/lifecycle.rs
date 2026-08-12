@@ -1,6 +1,38 @@
 use super::*;
 
 #[utoipa::path(
+    delete,
+    path = "/api/v1/admin/lexicon/entries/{id}",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(EntryPath),
+    request_body = DeleteDraftInput,
+    responses(
+        (status = 204, description = "从未发布的草稿已永久删除并释放词头"),
+        (status = 400, description = "路径非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 404, description = "词条不存在"),
+        (status = 409, description = "revision 冲突，或词条已有发布历史/被其他草稿引用"),
+        (status = 422, description = "base_revision 取值非法")
+    )
+)]
+pub async fn delete_draft(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Extension(request_id): Extension<RequestId>,
+    ApiPath(path): ApiPath<EntryPath>,
+    ApiJson(input): ApiJson<DeleteDraftInput>,
+) -> Result<StatusCode, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    service(&state)
+        .delete_draft(admin.id, request_id.as_uuid(), path.id, input)
+        .await
+        .map_err(map_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/admin/lexicon/entries/{id}/archive",
     tag = "admin-lexicon",

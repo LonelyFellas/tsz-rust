@@ -57,6 +57,7 @@ pub enum ErrorCode {
     ValidationFailed,
     DownstreamConfirmationRequired,
     EntryArchived,
+    EntryNotDeletable,
     EntryHasInboundPublicationRefs,
     EntryHasUnavailablePublicationRefs,
     WordNotFound,
@@ -74,7 +75,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 53] = [
+    pub const ALL: [Self; 54] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -121,6 +122,7 @@ impl ErrorCode {
         Self::ValidationFailed,
         Self::DownstreamConfirmationRequired,
         Self::EntryArchived,
+        Self::EntryNotDeletable,
         Self::EntryHasInboundPublicationRefs,
         Self::EntryHasUnavailablePublicationRefs,
         Self::WordNotFound,
@@ -318,6 +320,11 @@ impl ErrorCode {
                 StatusCode::CONFLICT,
             ),
             Self::EntryArchived => ("entry_archived", "Entry archived", StatusCode::CONFLICT),
+            Self::EntryNotDeletable => (
+                "entry_not_deletable",
+                "Entry cannot be deleted",
+                StatusCode::CONFLICT,
+            ),
             Self::EntryHasInboundPublicationRefs => (
                 "entry_has_inbound_publication_refs",
                 "Entry has inbound publication references",
