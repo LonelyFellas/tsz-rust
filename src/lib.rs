@@ -171,6 +171,9 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     // 免得第一个打到不存在账号的登录请求在 async worker 上现算、拖慢当时的在途请求。
     let _ = platform::dummy_hash();
 
+    // 构建仅做本地配置装配，不发远端请求；未配置时得到空 registry。
+    let object_storage = config.object_storage.build_registry()?;
+
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on {addr}");
@@ -204,6 +207,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         redis,
         otp_service,
         cookie_secure: config.cookie_secure,
+        object_storage,
     };
 
     // 接优雅停机：systemctl stop / 容器停止发 SIGTERM，Ctrl+C 发 SIGINT。
