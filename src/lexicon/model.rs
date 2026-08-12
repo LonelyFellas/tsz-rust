@@ -58,6 +58,9 @@ pub(crate) struct NodeIdentityRecord {
     pub id: Uuid,
     pub entry_id: Uuid,
     pub node_type: String,
+    pub parent_node_id: Option<Uuid>,
+    pub node_role: String,
+    pub stable_slot: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

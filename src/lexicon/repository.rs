@@ -16,6 +16,11 @@ use crate::{
             NodeIdentityRecord, RegionSurfaceRecord, RelatedSearchRecord,
             ResolvedSenseTargetRecord, SenseTargetKey, StatsRecord,
         },
+        node_identity::{
+            BASE_FORM_ROLE, FORM_GROUP_ROLE, GRAMMAR_STRUCTURE_ROLE, POS_ROLE, PRONUNCIATION_ROLE,
+            RELATION_ROLE, SENSE_GROUP_ROLE, SENSE_ROLE, SENTENCE_ROLE, definition_role,
+            form_slot_role, form_variant_role, text_variant_role,
+        },
         normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword, sha256_json},
     },
     platform::is_unique_violation,

@@ -239,6 +239,73 @@ async fn node_registry_rejects_unknown_node_types(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn node_parent_and_stable_slot_bindings_are_database_enforced(pool: PgPool) {
+    let admin_id = insert_admin(&pool).await;
+    let first = insert_entry(&pool, admin_id).await;
+    let second = insert_entry(&pool, admin_id).await;
+    let parent_id = insert_node(&pool, first, "sentence").await;
+    let child_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.nodes (
+            id, entry_id, node_type, parent_node_id, node_role, stable_slot
+        ) VALUES ($1, $2, 'text_variant', $3, 'meanings.zh_text:zh:common', TRUE)
+        "#,
+    )
+    .bind(child_id)
+    .bind(first)
+    .bind(parent_id)
+    .execute(&pool)
+    .await
+    .expect("同词条父子槽位应可登记");
+
+    let replaced_slot = sqlx::query(
+        r#"
+        INSERT INTO lexicon.nodes (
+            id, entry_id, node_type, parent_node_id, node_role, stable_slot
+        ) VALUES ($1, $2, 'text_variant', $3, 'meanings.zh_text:zh:common', TRUE)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(first)
+    .bind(parent_id)
+    .execute(&pool)
+    .await;
+    assert_db_error(
+        replaced_slot,
+        UNIQUE_VIOLATION,
+        "lexicon_nodes_stable_slot_key",
+    );
+
+    let crossed = sqlx::query(
+        r#"
+        INSERT INTO lexicon.nodes (
+            id, entry_id, node_type, parent_node_id, node_role
+        ) VALUES ($1, $2, 'definition', $3, 'meanings.definition:zh:definition')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(second)
+    .bind(parent_id)
+    .execute(&pool)
+    .await;
+    assert_db_error(crossed, FOREIGN_KEY_VIOLATION, "lexicon_nodes_parent_fkey");
+
+    sqlx::query("DELETE FROM lexicon.entries WHERE id = $1")
+        .bind(first)
+        .execute(&pool)
+        .await
+        .expect("删除词条应级联删除 registry 节点树");
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.nodes WHERE id = ANY($1)")
+            .bind([parent_id, child_id])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[sqlx::test]
 async fn publication_references_preserve_catalog_and_entry_integrity(pool: PgPool) {
     let admin_id = insert_admin(&pool).await;
     let entry_id = insert_entry(&pool, admin_id).await;

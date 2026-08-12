@@ -262,14 +262,17 @@ impl LexiconRepository {
 impl LexiconRepository {
     pub(crate) async fn node_identities(
         tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
         ids: &[Uuid],
     ) -> Result<Vec<NodeIdentityRecord>, LexiconRepositoryError> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
         sqlx::query_as::<_, NodeIdentityRecord>(
-            "SELECT id, entry_id, node_type FROM lexicon.nodes WHERE id = ANY($1)",
+            r#"
+            SELECT id, entry_id, node_type, parent_node_id, node_role, stable_slot
+            FROM lexicon.nodes
+            WHERE entry_id = $1 OR id = ANY($2)
+            "#,
         )
+        .bind(entry_id)
         .bind(ids)
         .fetch_all(&mut **tx)
         .await

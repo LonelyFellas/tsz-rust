@@ -102,7 +102,7 @@ pub async fn suggest_dialect_variants(
     params(EntryPath),
     request_body = PreviewFormsImpactInputV2,
     responses(
-        (status = 200, description = "删除词性前的下游影响与确认 token", body = FormsImpactResponseV2),
+        (status = 200, description = "删除或替换词性前的下游影响与确认 token", body = FormsImpactResponseV2),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条不存在"),

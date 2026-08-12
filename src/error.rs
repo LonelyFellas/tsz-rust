@@ -383,7 +383,7 @@ pub struct ProblemDetails {
     /// 多字段/多节点校验问题；智能词库等复杂表单按稳定 node_id 定位。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
-    pub field_issues: Option<Vec<serde_json::Value>>,
+    pub field_issues: Option<Vec<crate::lexicon::dto::DraftValidationIssue>>,
     /// 领域错误的结构化上下文；客户端不得解析 detail 文案。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -533,13 +533,11 @@ impl AppError {
         self
     }
 
-    pub fn with_field_issues<T: Serialize>(mut self, issues: &[T]) -> Self {
-        self.response.field_issues = Some(
-            issues
-                .iter()
-                .filter_map(|issue| serde_json::to_value(issue).ok())
-                .collect(),
-        );
+    pub fn with_field_issues(
+        mut self,
+        issues: &[crate::lexicon::dto::DraftValidationIssue],
+    ) -> Self {
+        self.response.field_issues = Some(issues.to_vec());
         self
     }
 
