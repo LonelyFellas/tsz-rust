@@ -97,7 +97,7 @@ pub(super) async fn insert_forms(
                 .ok_or(LexiconRepositoryError::Invariant(
                     "part of speech disappeared",
                 ))?;
-        insert_node(tx, pos.pos_id, word.id, "pos").await?;
+        insert_node(tx, pos.pos_id, word.id, "pos", None, POS_ROLE, false).await?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.entry_pos (
@@ -115,7 +115,16 @@ pub(super) async fn insert_forms(
         .await
         .map_err(map_entry_write_error)?;
 
-        insert_node(tx, pos.base_form.id, word.id, "form_slot").await?;
+        insert_node(
+            tx,
+            pos.base_form.id,
+            word.id,
+            "form_slot",
+            Some(pos.pos_id),
+            BASE_FORM_ROLE,
+            true,
+        )
+        .await?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.form_slots (
@@ -132,7 +141,16 @@ pub(super) async fn insert_forms(
         insert_form_variants(tx, word.id, pos.base_form.id, &pos.base_form.variants).await?;
 
         for (group_index, group) in pos.form_groups.iter().enumerate() {
-            insert_node(tx, group.id, word.id, "form_group").await?;
+            insert_node(
+                tx,
+                group.id,
+                word.id,
+                "form_group",
+                Some(pos.pos_id),
+                FORM_GROUP_ROLE,
+                false,
+            )
+            .await?;
             sqlx::query(
                 r#"
                 INSERT INTO lexicon.form_groups (
@@ -150,7 +168,17 @@ pub(super) async fn insert_forms(
             .map_err(map_entry_write_error)?;
 
             for (slot_index, slot) in group.slots.iter().enumerate() {
-                insert_node(tx, slot.id, word.id, "form_slot").await?;
+                let node_role = form_slot_role(&slot.form_type);
+                insert_node(
+                    tx,
+                    slot.id,
+                    word.id,
+                    "form_slot",
+                    Some(group.id),
+                    &node_role,
+                    true,
+                )
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO lexicon.form_slots (
@@ -181,7 +209,17 @@ pub(super) async fn insert_form_variants(
     variants: &[crate::lexicon::dto::WordFormVariantV2],
 ) -> Result<(), LexiconRepositoryError> {
     for (variant_index, variant) in variants.iter().enumerate() {
-        insert_node(tx, variant.id, entry_id, "form_variant").await?;
+        let node_role = form_variant_role(variant.dialect);
+        insert_node(
+            tx,
+            variant.id,
+            entry_id,
+            "form_variant",
+            Some(slot_id),
+            &node_role,
+            true,
+        )
+        .await?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.form_variants (
@@ -201,7 +239,16 @@ pub(super) async fn insert_form_variants(
         .map_err(map_entry_write_error)?;
 
         for (pronunciation_index, pronunciation) in variant.pronunciations.iter().enumerate() {
-            insert_node(tx, pronunciation.id, entry_id, "pronunciation").await?;
+            insert_node(
+                tx,
+                pronunciation.id,
+                entry_id,
+                "pronunciation",
+                Some(variant.id),
+                PRONUNCIATION_ROLE,
+                false,
+            )
+            .await?;
             sqlx::query(
                 r#"
                 INSERT INTO lexicon.pronunciations (
@@ -236,7 +283,16 @@ pub(super) async fn insert_meanings(
     sub_parts: &HashMap<String, Uuid>,
 ) -> Result<(), LexiconRepositoryError> {
     for (index, group) in word.meanings.sense_groups.iter().enumerate() {
-        insert_node(tx, group.id, word.id, "sense_group").await?;
+        insert_node(
+            tx,
+            group.id,
+            word.id,
+            "sense_group",
+            None,
+            SENSE_GROUP_ROLE,
+            false,
+        )
+        .await?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.sense_groups (id, entry_id, name_zh, name_en, sort_order)
@@ -255,7 +311,16 @@ pub(super) async fn insert_meanings(
 
     for meanings in &word.meanings.pos {
         for (grammar_index, grammar) in meanings.grammar_structures.iter().enumerate() {
-            insert_node(tx, grammar.id, word.id, "grammar_structure").await?;
+            insert_node(
+                tx,
+                grammar.id,
+                word.id,
+                "grammar_structure",
+                Some(meanings.pos_id),
+                GRAMMAR_STRUCTURE_ROLE,
+                false,
+            )
+            .await?;
             sqlx::query(
                 r#"
                 INSERT INTO lexicon.grammar_structures (id, entry_id, entry_pos_id, sort_order)
@@ -294,7 +359,16 @@ pub(super) async fn insert_meanings(
                     LexiconRepositoryError::Invariant("sub part of speech disappeared"),
                 )?)
             };
-            insert_node(tx, sense.id, word.id, "sense").await?;
+            insert_node(
+                tx,
+                sense.id,
+                word.id,
+                "sense",
+                Some(meanings.pos_id),
+                SENSE_ROLE,
+                false,
+            )
+            .await?;
             sqlx::query(
                 r#"
                 INSERT INTO lexicon.senses (
@@ -321,7 +395,16 @@ pub(super) async fn insert_meanings(
                     .await?;
             }
             for (sentence_index, sentence) in sense.sentences.iter().enumerate() {
-                insert_node(tx, sentence.id, word.id, "sentence").await?;
+                insert_node(
+                    tx,
+                    sentence.id,
+                    word.id,
+                    "sentence",
+                    Some(sense.id),
+                    SENTENCE_ROLE,
+                    false,
+                )
+                .await?;
                 sqlx::query(
                     "INSERT INTO lexicon.sentences (id, entry_id, sense_id, level, sort_order) VALUES ($1, $2, $3, $4, $5)",
                 )
@@ -367,7 +450,16 @@ pub(super) async fn insert_meanings(
                 }
             }
             for (relation_index, relation) in sense.relations.iter().enumerate() {
-                insert_node(tx, relation.id, word.id, "relation").await?;
+                insert_node(
+                    tx,
+                    relation.id,
+                    word.id,
+                    "relation",
+                    Some(sense.id),
+                    RELATION_ROLE,
+                    false,
+                )
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO lexicon.relations (
@@ -429,7 +521,16 @@ pub(super) async fn insert_definition(
             ..
         } => (*id, level, *grammar_structure_id, "sentence", "en"),
     };
-    insert_node(tx, id, entry_id, "definition").await?;
+    insert_node(
+        tx,
+        id,
+        entry_id,
+        "definition",
+        Some(sense_id),
+        definition_role(definition),
+        false,
+    )
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO lexicon.definitions (
@@ -545,7 +646,17 @@ pub(super) async fn insert_text_variant(
     origin: TextOrigin,
     sort_order: i32,
 ) -> Result<(), LexiconRepositoryError> {
-    insert_node(tx, id, entry_id, "text_variant").await?;
+    let node_role = text_variant_role(field_role, language, dialect);
+    insert_node(
+        tx,
+        id,
+        entry_id,
+        "text_variant",
+        Some(owner_id),
+        &node_role,
+        true,
+    )
+    .await?;
     let content_json = serde_json::to_value(content)?;
     let content_hash = sha256_json(content)?;
     sqlx::query(

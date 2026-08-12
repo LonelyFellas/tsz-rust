@@ -41,7 +41,19 @@ impl LexiconService {
         if !blocking.is_empty() {
             return Err(LexiconServiceError::ValidationFailed(blocking));
         }
-        let affected = forms_impact(&current, &input.content);
+        let next_meanings = reconcile_meanings_after_forms(
+            current.meanings.clone(),
+            &current.headwords,
+            &current.forms,
+            &input.content,
+            entry_id,
+        );
+        let proposed = proposed_nodes(&input.content, &next_meanings);
+        let limit_issues = validate_node_limit(entry_id, PersistedWordStep::Forms, &proposed);
+        if !limit_issues.is_empty() {
+            return Err(LexiconServiceError::ValidationFailed(limit_issues));
+        }
+        let affected = forms_impact(&current, &input.content, &next_meanings);
         if affected.is_empty() {
             return Ok(FormsImpactResponseV2 {
                 base_revision: current.revision,
@@ -129,6 +141,7 @@ impl LexiconService {
         let mut meanings = reconcile_meanings_after_forms(
             current.meanings.clone(),
             &current.headwords,
+            &current.forms,
             &input.content,
             entry_id,
         );
@@ -155,19 +168,24 @@ impl LexiconService {
             ));
         }
         let proposed = proposed_nodes(&input.content, &meanings);
+        let limit_issues = validate_node_limit(entry_id, PersistedWordStep::Forms, &proposed);
+        if !limit_issues.is_empty() {
+            return Err(LexiconServiceError::ValidationFailed(limit_issues));
+        }
         let proposed_ids = proposed.iter().map(|node| node.id).collect::<Vec<_>>();
         LexiconRepository::lock_node_ids(&mut transaction, &proposed_ids)
             .await
             .map_err(repository_error)?;
-        let existing = LexiconRepository::node_identities(&mut transaction, &proposed_ids)
-            .await
-            .map_err(repository_error)?;
+        let existing =
+            LexiconRepository::node_identities(&mut transaction, entry_id, &proposed_ids)
+                .await
+                .map_err(repository_error)?;
         let node_issues = validate_node_identities(entry_id, &proposed, &existing);
         if !node_issues.is_empty() {
             return Err(LexiconServiceError::ValidationFailed(node_issues));
         }
 
-        let affected = forms_impact(&current, &input.content);
+        let affected = forms_impact(&current, &input.content, &meanings);
         if !affected.is_empty() {
             let token = input
                 .confirmed_impact_token
@@ -299,13 +317,18 @@ impl LexiconService {
             &catalog.sub_part_parents,
         );
         let proposed = proposed_nodes(&current.forms, &content);
+        let limit_issues = validate_node_limit(entry_id, PersistedWordStep::Meanings, &proposed);
+        if !limit_issues.is_empty() {
+            return Err(LexiconServiceError::ValidationFailed(limit_issues));
+        }
         let proposed_ids = proposed.iter().map(|node| node.id).collect::<Vec<_>>();
         LexiconRepository::lock_node_ids(&mut transaction, &proposed_ids)
             .await
             .map_err(repository_error)?;
-        let existing = LexiconRepository::node_identities(&mut transaction, &proposed_ids)
-            .await
-            .map_err(repository_error)?;
+        let existing =
+            LexiconRepository::node_identities(&mut transaction, entry_id, &proposed_ids)
+                .await
+                .map_err(repository_error)?;
         let node_issues = validate_node_identities(entry_id, &proposed, &existing);
         if !node_issues.is_empty() {
             return Err(LexiconServiceError::ValidationFailed(node_issues));
@@ -412,50 +435,48 @@ pub(super) fn form_issue_blocks_save(issue: &DraftValidationIssue) -> bool {
 pub(super) fn forms_impact(
     word: &AdminWordV2,
     next_forms: &DraftFormsStepContent,
+    next_meanings: &DraftMeaningsStepContent,
 ) -> Vec<FormsImpactItemV2> {
-    let remaining = next_forms
+    let next_pos_codes = next_forms
         .pos
         .iter()
+        .map(|pos| (pos.pos_id, pos.pos.as_str()))
+        .collect::<HashMap<_, _>>();
+    let changed_pos_ids = word
+        .forms
+        .pos
+        .iter()
+        .filter(|pos| next_pos_codes.get(&pos.pos_id).copied() != Some(pos.pos.as_str()))
         .map(|pos| pos.pos_id)
         .collect::<std::collections::HashSet<_>>();
+    let current_nodes = proposed_nodes(&word.forms, &word.meanings);
+    let next_nodes = proposed_nodes(next_forms, next_meanings);
+    let next_by_id = next_nodes
+        .iter()
+        .map(|node| (node.id, node))
+        .collect::<HashMap<_, _>>();
     let mut affected = Vec::new();
-    for pos in &word.meanings.pos {
-        if remaining.contains(&pos.pos_id) {
+    let mut seen = std::collections::HashSet::new();
+    for node in current_nodes {
+        if node.node_type != "pos" && node.step != PersistedWordStep::Meanings {
+            continue;
+        }
+        let binding_is_unchanged = next_by_id.get(&node.id).is_some_and(|next| *next == &node);
+        if binding_is_unchanged && !changed_pos_ids.contains(&node.id) {
+            continue;
+        }
+        if !seen.insert(node.id) {
             continue;
         }
         affected.push(FormsImpactItemV2 {
-            node_id: pos.pos_id,
-            node_type: "pos".to_owned(),
-            reason: "删除词性会同时删除其词义与例句".to_owned(),
+            node_id: node.id,
+            node_type: node.node_type.to_owned(),
+            reason: if node.node_type == "pos" && changed_pos_ids.contains(&node.id) {
+                "词性被删除或代码被替换，其下游词义内容将重建".to_owned()
+            } else {
+                "节点将因词形结构变更从草稿中移除或重新绑定".to_owned()
+            },
         });
-        for grammar in &pos.grammar_structures {
-            affected.push(FormsImpactItemV2 {
-                node_id: grammar.id,
-                node_type: "grammar_structure".to_owned(),
-                reason: "所属词性已删除".to_owned(),
-            });
-        }
-        for sense in &pos.senses {
-            affected.push(FormsImpactItemV2 {
-                node_id: sense.id,
-                node_type: "sense".to_owned(),
-                reason: "所属词性已删除".to_owned(),
-            });
-            for definition in &sense.definitions {
-                affected.push(FormsImpactItemV2 {
-                    node_id: definition_id(definition),
-                    node_type: "definition".to_owned(),
-                    reason: "所属词义已删除".to_owned(),
-                });
-            }
-            for sentence in &sense.sentences {
-                affected.push(FormsImpactItemV2 {
-                    node_id: sentence.id,
-                    node_type: "sentence".to_owned(),
-                    reason: "所属词义已删除".to_owned(),
-                });
-            }
-        }
     }
     affected
 }
@@ -469,6 +490,7 @@ pub(super) fn downstream_required(affected: &[FormsImpactItemV2]) -> LexiconServ
 pub(super) fn reconcile_meanings_after_forms(
     mut meanings: DraftMeaningsStepContent,
     headwords: &WordHeadwordsV2,
+    previous_forms: &DraftFormsStepContent,
     forms: &DraftFormsStepContent,
     entry_id: Uuid,
 ) -> DraftMeaningsStepContent {
@@ -480,12 +502,18 @@ pub(super) fn reconcile_meanings_after_forms(
         });
     }
     let default_group_id = meanings.sense_groups[0].id;
-    let remaining = forms
+    let previous_codes = previous_forms
         .pos
         .iter()
+        .map(|pos| (pos.pos_id, pos.pos.as_str()))
+        .collect::<HashMap<_, _>>();
+    let unchanged = forms
+        .pos
+        .iter()
+        .filter(|pos| previous_codes.get(&pos.pos_id).copied() == Some(pos.pos.as_str()))
         .map(|pos| pos.pos_id)
         .collect::<std::collections::HashSet<_>>();
-    meanings.pos.retain(|pos| remaining.contains(&pos.pos_id));
+    meanings.pos.retain(|pos| unchanged.contains(&pos.pos_id));
     for forms_pos in &forms.pos {
         if !meanings
             .pos

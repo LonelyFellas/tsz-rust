@@ -642,6 +642,30 @@ mod tests {
     }
 
     #[test]
+    fn problem_details_field_issues_use_the_stable_draft_issue_schema() {
+        let json = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        assert_eq!(
+            json["components"]["schemas"]["ProblemDetails"]["properties"]["field_issues"]["items"]
+                ["$ref"],
+            "#/components/schemas/DraftValidationIssue"
+        );
+        let issue = &json["components"]["schemas"]["DraftValidationIssue"];
+        for field in [
+            "step",
+            "node_id",
+            "field",
+            "code",
+            "message",
+            "reference_location",
+        ] {
+            assert!(
+                issue["properties"][field].is_object(),
+                "DraftValidationIssue 应稳定暴露 {field}"
+            );
+        }
+    }
+
+    #[test]
     fn catalog_contract_is_documented() {
         let json = serde_json::to_value(ApiDoc::openapi()).unwrap();
 

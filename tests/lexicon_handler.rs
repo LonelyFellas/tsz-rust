@@ -168,6 +168,12 @@ fn rich_text(text: &str) -> Value {
     json!({"version": 1, "text": text, "spans": [], "liaisons": []})
 }
 
+fn has_issue(body: &Value, expected_code: &str) -> bool {
+    body["field_issues"]
+        .as_array()
+        .is_some_and(|issues| issues.iter().any(|issue| issue["code"] == expected_code))
+}
+
 async fn seed_related_search_entry(
     pool: &PgPool,
     admin_id: Uuid,
@@ -2032,4 +2038,567 @@ async fn dialect_suggestions_use_dictionary_region_evidence_and_preserve_rich_te
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(invalid["code"], "validation_failed");
     assert_eq!(invalid["meta"]["code"], "target_dialect");
+}
+
+#[sqlx::test]
+async fn forms_impact_is_complete_stable_and_detects_pos_code_replacement(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target = create_ready_draft(&state, &pool, &bearer, "impact-target").await;
+    let (status, target) = publish_ready(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "目标词发布失败：{target}");
+    let target_entry_id = target["word"]["id"].clone();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+
+    let source = create_ready_draft(&state, &pool, &bearer, "impact-source").await;
+    let entry_id = source["word"]["id"].as_str().unwrap().to_owned();
+    let mut meanings = source["word"]["meanings"].clone();
+    let relation_id = Uuid::now_v7();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "synonym",
+        "target_word_id": target_entry_id,
+        "target_sense_id": target_sense_id,
+        "score": "75"
+    }]);
+    let (status, source) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "relation 保存失败：{source}");
+    let revision = source["word"]["revision"].as_i64().unwrap();
+    let forms = source["word"]["forms"].clone();
+
+    let (status, unchanged) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        &bearer,
+        None,
+        Some(json!({"base_revision": revision, "content": forms})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "无变化 impact 失败：{unchanged}");
+    assert_eq!(unchanged["requires_confirmation"], false);
+    assert_eq!(unchanged["affected"], json!([]));
+    assert!(unchanged["confirmation_token"].is_null());
+
+    let pos = &source["word"]["meanings"]["pos"][0];
+    let sense = &pos["senses"][0];
+    let definition = &sense["definitions"][0];
+    let sentence = &sense["sentences"][0];
+    let expected_ids = vec![
+        source["word"]["forms"]["pos"][0]["pos_id"].clone(),
+        pos["grammar_structures"][0]["id"].clone(),
+        pos["grammar_structures"][0]["variants"][0]["id"].clone(),
+        sense["id"].clone(),
+        definition["id"].clone(),
+        definition["content_id"].clone(),
+        sentence["id"].clone(),
+        sentence["en_text"]["common"]["id"].clone(),
+        sentence["zh_text_id"].clone(),
+        json!(relation_id),
+    ];
+    let expected_types = vec![
+        "pos",
+        "grammar_structure",
+        "text_variant",
+        "sense",
+        "definition",
+        "text_variant",
+        "sentence",
+        "text_variant",
+        "text_variant",
+        "relation",
+    ];
+
+    let mut deleted_forms = forms.clone();
+    deleted_forms["pos"] = json!([]);
+    let impact_uri = format!("{ROOT}/entries/{entry_id}/steps/forms/impact");
+    let preview_deleted = || {
+        let content = deleted_forms.clone();
+        call(
+            &state,
+            Method::POST,
+            &impact_uri,
+            &bearer,
+            None,
+            Some(json!({
+                "base_revision": revision,
+                "content": content,
+            })),
+        )
+    };
+    let (status, deleted) = preview_deleted().await;
+    assert_eq!(status, StatusCode::OK, "删除 POS impact 失败：{deleted}");
+    assert_eq!(deleted["requires_confirmation"], true);
+    let deleted_items = deleted["affected"].as_array().unwrap();
+    assert_eq!(
+        deleted_items
+            .iter()
+            .map(|item| item["node_id"].clone())
+            .collect::<Vec<_>>(),
+        expected_ids
+    );
+    assert_eq!(
+        deleted_items
+            .iter()
+            .map(|item| item["node_type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        expected_types
+    );
+
+    let (status, deleted_again) = preview_deleted().await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        deleted_again["affected"], deleted["affected"],
+        "同 revision、同请求的 impact diff 必须稳定"
+    );
+
+    let mut replaced_forms = forms;
+    replaced_forms["pos"][0]["pos"] = json!("adjective");
+    let (status, replaced) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "content": replaced_forms,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "替换 POS code impact 失败：{replaced}"
+    );
+    assert_eq!(replaced["requires_confirmation"], true);
+    assert_eq!(
+        replaced["affected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["node_id"].clone())
+            .collect::<Vec<_>>(),
+        expected_ids
+    );
+
+    let (status, confirmation_required) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": replaced_forms,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "未确认应拒绝：{confirmation_required}"
+    );
+    assert_eq!(
+        confirmation_required["code"],
+        "downstream_confirmation_required"
+    );
+    assert_eq!(
+        confirmation_required["meta"]["affected_node_ids"],
+        json!(expected_ids)
+    );
+
+    let old_sense_id = sense["id"].clone();
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "confirmed_impact_token": replaced["confirmation_token"],
+            "content": replaced_forms,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "确认后保存失败：{saved}");
+    assert_eq!(saved["word"]["forms"]["pos"][0]["pos"], "adjective");
+    assert_eq!(
+        saved["word"]["meanings"]["pos"][0]["pos_id"],
+        saved["word"]["forms"]["pos"][0]["pos_id"]
+    );
+    assert_ne!(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["id"],
+        old_sense_id
+    );
+    assert_eq!(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"],
+        json!([])
+    );
+}
+
+#[sqlx::test]
+async fn stable_node_slots_and_parent_bindings_are_enforced(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let ready = create_ready_draft(&state, &pool, &bearer, "stable-bindings").await;
+    let entry_id = ready["word"]["id"].as_str().unwrap();
+    let revision = ready["word"]["revision"].as_i64().unwrap();
+
+    let mut replaced_base_slot = ready["word"]["forms"].clone();
+    replaced_base_slot["pos"][0]["base_form"]["id"] = json!(Uuid::now_v7());
+    let (status, rejected) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": replaced_base_slot,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "固定 forms 槽位换 ID 应拒绝：{rejected}"
+    );
+    assert!(has_issue(&rejected, "stable_node_id_changed"));
+
+    let mut rebound_form_variant = ready["word"]["forms"].clone();
+    let base_variant_id = rebound_form_variant["pos"][0]["base_form"]["variants"][0]["id"].clone();
+    let derived_variant_id =
+        rebound_form_variant["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["id"].clone();
+    rebound_form_variant["pos"][0]["base_form"]["variants"][0]["id"] = derived_variant_id;
+    rebound_form_variant["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["id"] =
+        base_variant_id;
+    let (status, rejected) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": rebound_form_variant,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "同类型 forms ID 换父节点应拒绝：{rejected}"
+    );
+    assert!(has_issue(&rejected, "node_binding_changed"));
+
+    let original_meanings = ready["word"]["meanings"].clone();
+    let mut replaced_definition_content = original_meanings.clone();
+    replaced_definition_content["pos"][0]["senses"][0]["definitions"][0]["content_id"] =
+        json!(Uuid::now_v7());
+    let mut replaced_sentence_english = original_meanings.clone();
+    replaced_sentence_english["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["id"] =
+        json!(Uuid::now_v7());
+    let mut replaced_sentence_chinese = original_meanings.clone();
+    replaced_sentence_chinese["pos"][0]["senses"][0]["sentences"][0]["zh_text_id"] =
+        json!(Uuid::now_v7());
+    for (label, content) in [
+        ("中文 content_id", replaced_definition_content),
+        ("TextVariantV2.id", replaced_sentence_english),
+        ("sentence zh_text_id", replaced_sentence_chinese),
+    ] {
+        let (status, rejected) = call(
+            &state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+            &bearer,
+            None,
+            Some(json!({
+                "base_revision": revision,
+                "intent": "save",
+                "content": content,
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "已有 {label} 换 ID 应拒绝：{rejected}"
+        );
+        assert!(has_issue(&rejected, "stable_node_id_changed"));
+    }
+
+    let mut rebound_text_nodes = original_meanings.clone();
+    let definition_content_id =
+        rebound_text_nodes["pos"][0]["senses"][0]["definitions"][0]["content_id"].clone();
+    let sentence_zh_id =
+        rebound_text_nodes["pos"][0]["senses"][0]["sentences"][0]["zh_text_id"].clone();
+    rebound_text_nodes["pos"][0]["senses"][0]["definitions"][0]["content_id"] = sentence_zh_id;
+    rebound_text_nodes["pos"][0]["senses"][0]["sentences"][0]["zh_text_id"] = definition_content_id;
+    let (status, rejected) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": rebound_text_nodes,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "同类型文本 ID 换父节点应拒绝：{rejected}"
+    );
+    assert!(has_issue(&rejected, "node_binding_changed"));
+
+    let legacy_text_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.nodes (
+            id, entry_id, node_type, node_role, removed_from_draft_at
+        ) VALUES ($1, $2, 'text_variant', 'legacy', now())
+        "#,
+    )
+    .bind(legacy_text_id)
+    .bind(Uuid::parse_str(entry_id).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut reused_legacy_text = original_meanings.clone();
+    reused_legacy_text["pos"][0]["senses"][0]["sentences"][0]["zh_text_id"] = json!(legacy_text_id);
+    let (status, rejected) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": reused_legacy_text,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "无法回填绑定的历史 ID 不能静默重新认领：{rejected}"
+    );
+    assert!(has_issue(&rejected, "node_binding_unknown"));
+
+    let definition_id = Uuid::now_v7();
+    let mut with_missing_slots = original_meanings;
+    with_missing_slots["pos"][0]["senses"][0]["definitions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "definition_mode": "en_definition",
+            "id": definition_id,
+            "level": "A1",
+            "content": {
+                "mode": "distinguish",
+                "source_dialect": "uk",
+                "uk": {"state": "missing"},
+                "us": {"state": "missing"}
+            }
+        }));
+    let (status, with_missing_slots) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": with_missing_slots,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "missing 槽位草稿应可保存：{with_missing_slots}"
+    );
+
+    let mut create_ready_slot = with_missing_slots["word"]["meanings"].clone();
+    let added_definition = create_ready_slot["pos"][0]["senses"][0]["definitions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|definition| definition["id"] == json!(definition_id))
+        .expect("应找到新增的英文释义");
+    let new_text_id = Uuid::now_v7();
+    added_definition["content"]["uk"] = json!({
+        "state": "ready",
+        "variant": {
+            "id": new_text_id,
+            "value": rich_text("newly created from missing"),
+            "origin": "manual"
+        }
+    });
+    let (status, created_slot) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": with_missing_slots["word"]["revision"],
+            "intent": "save",
+            "content": create_ready_slot,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "missing -> ready 应允许新 UUID：{created_slot}"
+    );
+    assert!(created_slot.to_string().contains(&new_text_id.to_string()));
+
+    let stored_revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(entry_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored_revision,
+        revision + 2,
+        "只有两次合法保存可推进 revision"
+    );
+}
+
+#[sqlx::test]
+async fn forms_and_meanings_reject_aggregate_node_limit_before_writes(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let ready = create_ready_draft(&state, &pool, &bearer, "node-limit").await;
+    let entry_id = ready["word"]["id"].as_str().unwrap();
+    let entry_uuid = Uuid::parse_str(entry_id).unwrap();
+    let revision = ready["word"]["revision"].as_i64().unwrap();
+    let node_count_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.nodes WHERE entry_id = $1")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let oversized_groups = (0..2_001)
+        .map(|_| {
+            json!({
+                "id": Uuid::now_v7(),
+                "is_regular": false,
+                "slots": []
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut oversized_forms = ready["word"]["forms"].clone();
+    oversized_forms["pos"][0]["form_groups"] = json!(oversized_groups);
+    let (status, rejected_forms) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": oversized_forms,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "forms 超限应返回结构化 422：{rejected_forms}"
+    );
+    assert_eq!(rejected_forms["code"], "validation_failed");
+    assert!(has_issue(&rejected_forms, "aggregate_node_limit_exceeded"));
+
+    let mut oversized_meanings = ready["word"]["meanings"].clone();
+    oversized_meanings["sense_groups"]
+        .as_array_mut()
+        .unwrap()
+        .extend((0..2_001).map(|index| {
+            json!({
+                "id": Uuid::now_v7(),
+                "name_zh": format!("超限{index}"),
+                "name_en": format!("Overflow {index}")
+            })
+        }));
+    let (status, rejected_meanings) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "save",
+            "content": oversized_meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "meanings 超限应返回结构化 422：{rejected_meanings}"
+    );
+    assert_eq!(rejected_meanings["code"], "validation_failed");
+    assert!(has_issue(
+        &rejected_meanings,
+        "aggregate_node_limit_exceeded"
+    ));
+
+    let (stored_revision, node_count_after): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT entry.revision, count(node.id)::bigint
+        FROM lexicon.entries entry
+        LEFT JOIN lexicon.nodes node ON node.entry_id = entry.id
+        WHERE entry.id = $1
+        GROUP BY entry.revision
+        "#,
+    )
+    .bind(entry_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored_revision, revision);
+    assert_eq!(node_count_after, node_count_before);
 }

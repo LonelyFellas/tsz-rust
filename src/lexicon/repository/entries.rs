@@ -408,26 +408,38 @@ pub(super) async fn insert_node(
     id: Uuid,
     entry_id: Uuid,
     node_type: &str,
+    parent_node_id: Option<Uuid>,
+    node_role: &str,
+    stable_slot: bool,
 ) -> Result<(), LexiconRepositoryError> {
     let result = sqlx::query(
         r#"
-        INSERT INTO lexicon.nodes (id, entry_id, node_type)
-        VALUES ($1, $2, $3)
+        INSERT INTO lexicon.nodes (
+            id, entry_id, node_type, parent_node_id, node_role, stable_slot
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (id) DO UPDATE
         SET removed_from_draft_at = NULL
         WHERE lexicon.nodes.entry_id = EXCLUDED.entry_id
           AND lexicon.nodes.node_type = EXCLUDED.node_type
+          AND lexicon.nodes.node_role <> 'legacy'
+          AND lexicon.nodes.parent_node_id IS NOT DISTINCT FROM EXCLUDED.parent_node_id
+          AND lexicon.nodes.node_role = EXCLUDED.node_role
+          AND lexicon.nodes.stable_slot = EXCLUDED.stable_slot
         "#,
     )
     .bind(id)
     .bind(entry_id)
     .bind(node_type)
+    .bind(parent_node_id)
+    .bind(node_role)
+    .bind(stable_slot)
     .execute(&mut **tx)
     .await
     .map_err(map_entry_write_error)?;
     if result.rows_affected() != 1 {
         return Err(LexiconRepositoryError::Invariant(
-            "node id belongs to another entry or node type",
+            "node id belongs to another entry, type, parent, or slot",
         ));
     }
     Ok(())

@@ -4,6 +4,7 @@ pub mod dto;
 pub mod handler;
 pub mod impact_store;
 pub mod model;
+pub(crate) mod node_identity;
 pub mod normalization;
 pub mod repository;
 pub mod rich_text;
