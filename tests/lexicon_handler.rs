@@ -478,6 +478,25 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replayed, created, "创建响应丢失后应可原样重放");
 
+    let (status, draft_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": headword})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "草稿词条检测失败：{draft_detection}"
+    );
+    assert_eq!(
+        draft_detection["smart_dictionary"]["duplicates"][0]["status"],
+        "draft"
+    );
+
     let mut forms = created["word"]["forms"].clone();
     forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["dict_phonetic"] =
         json!("/kəʊdɛks/");
@@ -677,6 +696,25 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     assert_eq!(status, StatusCode::CREATED, "发布失败：{published}");
     assert_eq!(published["word"]["status"], "published");
     assert!(published["word"]["published_at"].is_string());
+
+    let (status, published_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": headword})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "已发布词条检测失败：{published_detection}"
+    );
+    assert_eq!(
+        published_detection["smart_dictionary"]["duplicates"][0]["status"],
+        "published"
+    );
 
     let (status, publish_replay) = call(
         &state,
@@ -1736,6 +1774,47 @@ async fn lifecycle_commands_preserve_publications_and_are_idempotent_under_doubl
     assert_eq!(archived["word"]["published_revision"], revision);
     assert!(archived["word"]["archived_at"].is_string());
     assert_eq!(archived["word"]["archived_by"], admin_id.to_string());
+
+    let (status, default_list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?q=archive-safe"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "默认列表查询失败：{default_list}");
+    assert_eq!(default_list["words"], json!([]));
+
+    let (status, archived_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "archive-safe"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "归档词条检测失败：{archived_detection}"
+    );
+    assert_eq!(
+        archived_detection["smart_dictionary"]["status"],
+        "duplicate"
+    );
+    assert_eq!(
+        archived_detection["smart_dictionary"]["duplicates"],
+        json!([{
+            "word_id": entry_id,
+            "headword": "archive-safe",
+            "dialect": "common",
+            "status": "archived"
+        }]),
+        "归档词条必须继续阻止同名创建，并明确返回可恢复状态"
+    );
 
     let (status, replayed) = call(
         &state,

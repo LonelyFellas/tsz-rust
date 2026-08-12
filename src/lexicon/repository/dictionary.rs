@@ -167,7 +167,9 @@ impl LexiconRepository {
             r#"
             SELECT DISTINCT keys.entry_id,
                    headword.headword,
-                   headword.dialect
+                   headword.dialect,
+                   entry.archived_at IS NOT NULL AS is_archived,
+                   entry.current_publication_id IS NOT NULL AS is_published
             FROM lexicon.entry_headword_keys keys
             JOIN lexicon.entries entry ON entry.id = keys.entry_id
             JOIN LATERAL (

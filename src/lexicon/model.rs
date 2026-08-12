@@ -43,6 +43,8 @@ pub(crate) struct DuplicateRecord {
     pub entry_id: Uuid,
     pub headword: String,
     pub dialect: String,
+    pub is_archived: bool,
+    pub is_published: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
