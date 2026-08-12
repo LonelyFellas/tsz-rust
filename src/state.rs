@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::{
     auth::{Realm, TokenManager},
     otp::{sender::OtpSender, service::OtpService, store::OtpStore},
+    platform::storage::StorageRegistry,
 };
 use axum::extract::FromRef;
 
@@ -20,6 +21,7 @@ pub struct AppState {
     pub redis: deadpool_redis::Pool,
     pub otp_service: Arc<OtpService>,
     pub cookie_secure: bool,
+    pub object_storage: StorageRegistry,
 }
 
 impl AppState {
@@ -62,6 +64,7 @@ impl AppState {
             redis,
             otp_service,
             cookie_secure: false,
+            object_storage: StorageRegistry::empty(),
         }
     }
 
@@ -101,6 +104,7 @@ impl AppState {
             admin_refresh_ttl: Duration::days(7),
             redis,
             otp_service,
+            object_storage: StorageRegistry::empty(),
         };
         (state, store)
     }
@@ -116,5 +120,11 @@ impl FromRef<AppState> for PgPool {
 impl FromRef<AppState> for deadpool_redis::Pool {
     fn from_ref(state: &AppState) -> Self {
         state.redis.clone()
+    }
+}
+
+impl FromRef<AppState> for StorageRegistry {
+    fn from_ref(state: &AppState) -> Self {
+        state.object_storage.clone()
     }
 }

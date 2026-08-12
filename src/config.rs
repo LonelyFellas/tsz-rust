@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::num::{NonZeroU8, NonZeroU16};
 
+use crate::platform::storage::ObjectStorageConfig;
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_port")]
@@ -29,6 +31,8 @@ pub struct Config {
     pub admin_access_ttl_minutes: u64,
     #[serde(default = "default_admin_refresh_ttl_days")]
     pub admin_refresh_ttl_days: u64,
+    #[serde(skip)]
+    pub object_storage: ObjectStorageConfig,
 }
 
 fn default_refresh_ttl_days() -> u64 {
@@ -72,7 +76,11 @@ impl Config {
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        let cfg: Self = envy::from_iter(pairs)?;
+        let pairs = pairs.into_iter().collect::<Vec<_>>();
+        let object_storage = ObjectStorageConfig::from_pairs(pairs.iter().cloned())
+            .map_err(|error| envy::Error::Custom(error.to_string()))?;
+        let mut cfg: Self = envy::from_iter(pairs)?;
+        cfg.object_storage = object_storage;
         // 两把密钥相同 = per-realm 隔离塌一半,启动即失败(admin-design.md §13)
         if cfg.admin_jwt_secret == cfg.jwt_secret {
             return Err(envy::Error::Custom(
@@ -257,6 +265,55 @@ mod tests {
 
         assert_eq!(cfg.admin_access_ttl_minutes, 30, "显式值应覆盖默认");
         assert_eq!(cfg.admin_refresh_ttl_days, 14, "显式值应覆盖默认");
+    }
+
+    #[test]
+    fn object_storage_is_disabled_when_no_space_is_declared() {
+        let cfg = parse(&valid_baseline()).expect("核心必填项齐全应能解析");
+
+        assert!(cfg.object_storage.is_empty(), "默认不得启用远端对象存储");
+    }
+
+    #[test]
+    fn explicit_object_storage_space_requires_a_complete_configuration() {
+        let mut input = valid_baseline();
+        input.push(("OBJECT_STORAGE_SPACES", "avatars"));
+
+        let error = parse(&input).expect_err("声明空间但缺少连接与策略字段应启动失败");
+
+        assert!(
+            error.to_string().contains("BACKEND"),
+            "错误应指出缺失字段且不回显配置值"
+        );
+    }
+
+    #[test]
+    fn complete_object_storage_space_is_attached_to_application_config() {
+        let mut input = valid_baseline();
+        input.extend([
+            ("OBJECT_STORAGE_SPACES", "avatars"),
+            ("OBJECT_STORAGE_AVATARS_BACKEND", "oss"),
+            (
+                "OBJECT_STORAGE_AVATARS_OSS_ENDPOINT",
+                "https://oss-cn-hangzhou.aliyuncs.com",
+            ),
+            ("OBJECT_STORAGE_AVATARS_OSS_REGION", "cn-hangzhou"),
+            ("OBJECT_STORAGE_AVATARS_OSS_BUCKET", "tsz-avatars"),
+            ("OBJECT_STORAGE_AVATARS_OSS_ROOT", "/avatars"),
+            ("OBJECT_STORAGE_AVATARS_OSS_ACCESS_KEY_ID", "test-key-id"),
+            (
+                "OBJECT_STORAGE_AVATARS_OSS_ACCESS_KEY_SECRET",
+                "test-key-secret",
+            ),
+            ("OBJECT_STORAGE_AVATARS_PRIVACY", "private"),
+            ("OBJECT_STORAGE_AVATARS_MAX_OBJECT_SIZE_BYTES", "1048576"),
+            ("OBJECT_STORAGE_AVATARS_PRESIGN_TTL_SECONDS", "300"),
+            ("OBJECT_STORAGE_AVATARS_CACHE_CONTROL", "none"),
+        ]);
+
+        let cfg = parse(&input).expect("完整对象存储配置应接入应用配置");
+
+        assert_eq!(cfg.object_storage.len(), 1);
     }
 
     #[test]

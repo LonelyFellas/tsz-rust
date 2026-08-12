@@ -1,6 +1,7 @@
 mod db;
 mod model;
 mod redis;
+pub mod storage;
 mod utils;
 
 pub use db::{connect as connect_db, is_foreign_key_violation, is_unique_violation};
