@@ -138,6 +138,36 @@ impl UserRepository {
         Ok(user)
     }
 
+    /// 在同一事务内锁定用户、吊销其全部 refresh session，再删除用户。
+    /// DELETE 的 FK cascade 会清理角色、profile 与 refresh token 行；显式 revoke
+    /// 仍保留“先吊销、后删除”的安全顺序，避免未来 FK 策略变化破坏会话语义。
+    pub async fn delete_account_in(
+        connection: &mut PgConnection,
+        user_id: Uuid,
+    ) -> Result<bool, UserError> {
+        let exists = sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *connection)
+            .await?;
+        if exists.is_none() {
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "UPDATE refresh_tokens SET revoked_at = NOW() \
+             WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(&mut *connection)
+        .await?;
+
+        let deleted = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&mut *connection)
+            .await?;
+        Ok(deleted.rows_affected() == 1)
+    }
+
     // 查询用户用户的角色列表
     pub async fn get_roles_by_user_id(&self, user_id: &Uuid) -> Result<Vec<UserRole>, UserError> {
         let roles = sqlx::query_scalar!(

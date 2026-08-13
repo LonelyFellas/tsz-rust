@@ -230,6 +230,25 @@ async fn public_send_cannot_request_admin_login_purpose(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn public_send_cannot_request_account_deletion_purpose(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool);
+    let (status, _) = post_send(
+        &state,
+        json!({"phone": "13800138000", "purpose": "account_deletion"}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        !store
+            .code_exists("13800138000", Purpose::AccountDeletion)
+            .await
+            .unwrap(),
+        "account_deletion 只能由认证专用端点在服务端选择"
+    );
+}
+
+#[sqlx::test]
 async fn public_send_still_mints_public_purpose_code(pool: PgPool) {
     // 正向对照：同一个 store、同一套断言机制下，公开用途 login 必须真落码。
     // 否则上一条的 code_exists==false 可能只是「这机制恒为假」的假绿。

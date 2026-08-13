@@ -1,15 +1,18 @@
-use crate::otp::model::Channel;
+use crate::otp::model::{Channel, Purpose};
 
 /// 内部联调使用的统一验证码。只对 [`OtpSender::Mock`] 生效；真实短信通道不得复用。
 const MOCK_CODE: &str = "000000";
 
 pub enum OtpSender {
+    /// 当前开发/测试环境 sender；所有用途暂时统一使用固定验证码 000000。
     Mock,
     // Aliyun(AliyunSender),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum OtpSenderError {
+    #[error("OTP delivery provider is unavailable")]
+    Unavailable,
     #[error(transparent)]
     Unknown(#[from] anyhow::Error),
     // Aliyun(#[from] aliyun_sdk::Error),
@@ -24,10 +27,16 @@ impl OtpSender {
         }
     }
 
-    pub fn send(&self, channel: Channel, target: &str, code: &str) -> Result<(), OtpSenderError> {
+    pub(crate) fn ensure_available_for(&self, _purpose: Purpose) -> Result<(), OtpSenderError> {
+        match self {
+            OtpSender::Mock => Ok(()),
+        }
+    }
+
+    pub fn send(&self, channel: Channel, _target: &str, _code: &str) -> Result<(), OtpSenderError> {
         match self {
             OtpSender::Mock => {
-                tracing::info!(mock = true, ?channel, target, code, "otp_code_sent");
+                tracing::info!(mock = true, ?channel, "otp_code_sent");
                 Ok(())
             }
         }

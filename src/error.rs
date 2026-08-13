@@ -40,6 +40,8 @@ pub enum ErrorCode {
     Forbidden,
     OtpRateLimited,
     OtpUnavailable,
+    AccountDeletionChannelUnavailable,
+    InvalidAccountDeletionCode,
     PasswordHashUnavailable,
     UserAlreadyExists,
     PhoneAlreadyRegistered,
@@ -81,7 +83,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 62] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -111,6 +113,8 @@ impl ErrorCode {
         Self::Forbidden,
         Self::OtpRateLimited,
         Self::OtpUnavailable,
+        Self::AccountDeletionChannelUnavailable,
+        Self::InvalidAccountDeletionCode,
         Self::PasswordHashUnavailable,
         Self::UserAlreadyExists,
         Self::PhoneAlreadyRegistered,
@@ -254,6 +258,16 @@ impl ErrorCode {
                 "otp_unavailable",
                 "Verification service unavailable",
                 StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::AccountDeletionChannelUnavailable => (
+                "account_deletion_channel_unavailable",
+                "Account deletion channel unavailable",
+                StatusCode::CONFLICT,
+            ),
+            Self::InvalidAccountDeletionCode => (
+                "invalid_account_deletion_code",
+                "Invalid account deletion code",
+                StatusCode::UNAUTHORIZED,
             ),
             Self::PasswordHashUnavailable => (
                 "password_hash_unavailable",

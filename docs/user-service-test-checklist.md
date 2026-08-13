@@ -648,6 +648,9 @@ No handler-layer assertions belong here — extracting the token from the Author
 
 ### account-deletion
 
+> Rust 当前实现与权威契约见 `docs/account-deletion-design.md`；下列延后用例已按当前 Redis OTP、
+> PostgreSQL 事务、RFC 9457 和 cookie 架构落地，不沿用旧 Go 路径/错误名。
+
 - [ ] **given an authenticated user and a valid deletion code sent to their own contact on the chosen channel; when DeleteAccount(userID, channel, code) runs; then it FIRST revokes all sessions THEN deletes the user (cascading to roles/profiles/tokens); afterwards GetByID -> ErrNotFound and the pre-delete refresh token no longer rotates.** `[服务+mock仓储·延后]` — Whole DeleteAccount concern (5 go tests) omitted. Revoke-before-delete is deliberate so 'delete signs you out everywhere' holds even if the FK cascade action changes.  
   <sub>TestService_DeleteAccount_Success (service_test.go:552-578); service.go DeleteAccount:345-365; reference doc section 8 defers account_deletion</sub>
 - [ ] **given the deletion code is sent to the account's OWN contact on file (never a value supplied in the request); when RequestAccountDeletion(userID, channel) runs; then the code target is u.Phone or u.Email resolved from the loaded user, so possession of the code proves ownership.** `[服务+mock仓储·延后]` — SECURITY: the code goes to the contact already on the account, not a caller-supplied target — that is what makes it proof of ownership. Missed; distinct from bind (which targets a new value).  

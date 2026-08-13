@@ -34,6 +34,8 @@ use utoipa::{
         crate::auth::handler::logout,
         crate::auth::handler::me,
         crate::auth::handler::register,
+        crate::auth::handler::request_account_deletion_code,
+        crate::auth::handler::confirm_account_deletion,
         // otp 域
         crate::otp::handler::send_otp,
         // admin 域
@@ -92,8 +94,11 @@ use utoipa::{
             crate::auth::handler::RegisterRequest,
             crate::auth::handler::Token,
             crate::auth::handler::RefreshResponse,
+            crate::auth::handler::AccountDeletionCodeRequest,
+            crate::auth::handler::ConfirmAccountDeletionRequest,
             // user
             crate::user::model::UserRole,
+            crate::user::model::AccountDeletionChannel,
             // otp
             crate::otp::handler::SendOtpRequest,
             crate::otp::model::Purpose,
@@ -913,6 +918,37 @@ mod tests {
                 "admin login-code 反枚举契约：不得声明可探测状态码 {leaky}"
             );
         }
+    }
+
+    #[test]
+    fn account_deletion_contract_is_documented() {
+        let value = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI 应可序列化");
+        let request = &value["paths"]["/api/v1/auth/account/deletion-code"]["post"];
+        let confirm = &value["paths"]["/api/v1/auth/account"]["delete"];
+
+        assert_eq!(
+            request["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AccountDeletionCodeRequest"
+        );
+        assert_eq!(
+            confirm["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ConfirmAccountDeletionRequest"
+        );
+        assert!(confirm["responses"]["401"]["content"]["application/problem+json"].is_object());
+        for status in ["400", "401", "409", "422", "500", "503"] {
+            assert!(
+                confirm["responses"][status]["content"]["application/problem+json"].is_object(),
+                "确认注销应声明 {status} Problem Details"
+            );
+        }
+        for status in ["400", "401", "409", "422", "429", "500", "503"] {
+            assert!(
+                request["responses"][status]["content"]["application/problem+json"].is_object(),
+                "申请注销码应声明 {status} Problem Details"
+            );
+        }
+        assert!(confirm["responses"]["204"]["headers"]["Set-Cookie"].is_object());
+        assert!(request["security"].is_array() && confirm["security"].is_array());
     }
 
     #[test]

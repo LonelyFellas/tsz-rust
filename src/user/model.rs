@@ -22,6 +22,13 @@ pub enum UserRole {
     Teacher,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountDeletionChannel {
+    Phone,
+    Email,
+}
+
 impl UserRole {
     pub fn as_str(&self) -> &'static str {
         match self {

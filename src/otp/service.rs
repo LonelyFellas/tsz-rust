@@ -49,6 +49,9 @@ impl OtpService {
     }
 
     pub async fn request(&self, target: &str, purpose: Purpose) -> Result<(), OtpServiceError> {
+        // 先 fail-close，避免未配置真实 provider 时写入无人可收取的验证码或消耗限额。
+        self.sender.ensure_available_for(purpose)?;
+
         // 1) 冷却（0=）--最便宜，先查，挡掉多数连接点
         if !self.cooldown.is_zero()
             && !self
