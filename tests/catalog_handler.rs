@@ -262,7 +262,7 @@ async fn catalog_read_allows_active_admin_but_management_requires_super_admin(po
     )
     .await;
     assert_eq!(status, StatusCode::OK, "普通管理员应能读 catalog：{body}");
-    assert_eq!(body["catalog_version"], 1);
+    assert_eq!(body["catalog_version"], 2);
     let noun = body["items"]
         .as_array()
         .unwrap()
@@ -579,7 +579,7 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(catalog["catalog_version"], 7);
+    assert_eq!(catalog["catalog_version"], 8);
     assert!(
         catalog["items"]
             .as_array()

@@ -181,8 +181,8 @@ async fn catalog_schema_and_metadata_seed_are_present(pool: PgPool) {
     .expect("查询 catalog.metadata 应成功");
     assert_eq!(
         rows,
-        vec![(true, 1, true)],
-        "metadata 应初始化为唯一一行 version=1"
+        vec![(true, 2, true)],
+        "能力契约迁移后 metadata 应为唯一一行 version=2"
     );
 }
 

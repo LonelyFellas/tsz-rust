@@ -18,10 +18,19 @@ pub(crate) fn allowed_form_types(part_of_speech: &str) -> &'static [&'static str
     }
 }
 
-pub(crate) fn owned_allowed_form_types(part_of_speech: &str) -> Vec<String> {
+pub(crate) fn catalog_form_types(part_of_speech: &str) -> Vec<WordFormTypeWithoutBase> {
     allowed_form_types(part_of_speech)
         .iter()
-        .map(|value| (*value).to_owned())
+        .filter_map(|value| match *value {
+            "third_person_singular" => Some(WordFormTypeWithoutBase::ThirdPersonSingular),
+            "present_participle" => Some(WordFormTypeWithoutBase::PresentParticiple),
+            "past_tense" => Some(WordFormTypeWithoutBase::PastTense),
+            "past_participle" => Some(WordFormTypeWithoutBase::PastParticiple),
+            "plural" => Some(WordFormTypeWithoutBase::Plural),
+            "comparative" => Some(WordFormTypeWithoutBase::Comparative),
+            "superlative" => Some(WordFormTypeWithoutBase::Superlative),
+            _ => None,
+        })
         .collect()
 }
 
@@ -49,4 +58,18 @@ mod tests {
         assert!(allowed_form_types("preposition").is_empty());
         assert!(allowed_form_types("custom_part").is_empty());
     }
+}
+use serde::Serialize;
+use utoipa::ToSchema;
+
+#[derive(Debug, Clone, Copy, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WordFormTypeWithoutBase {
+    ThirdPersonSingular,
+    PresentParticiple,
+    PastTense,
+    PastParticiple,
+    Plural,
+    Comparative,
+    Superlative,
 }

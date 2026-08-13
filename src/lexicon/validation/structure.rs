@@ -676,7 +676,11 @@ mod tests {
 
     #[test]
     fn aggregates_every_pos_form_type_mismatch_at_the_slot() {
-        let content = forms(&[("adjective", &["past_tense"]), ("verb", &["comparative"])]);
+        let content = forms(&[
+            ("adjective", &["past_tense"]),
+            ("verb", &["comparative"]),
+            ("noun", &["superlative"]),
+        ]);
         let configured = content.pos.iter().map(|pos| pos.pos.clone()).collect();
         let issues = validate_forms(
             Uuid::now_v7(),
@@ -690,7 +694,7 @@ mod tests {
             .iter()
             .filter(|issue| issue.code == "invalid_form_type_for_part_of_speech")
             .collect::<Vec<_>>();
-        assert_eq!(mismatches.len(), 2);
+        assert_eq!(mismatches.len(), 3);
         assert_eq!(mismatches[0].step, PersistedWordStep::Forms);
         assert_eq!(mismatches[0].field, "form_type");
         assert_eq!(
@@ -700,6 +704,10 @@ mod tests {
         assert_eq!(
             mismatches[1].node_id,
             content.pos[1].form_groups[0].slots[0].id
+        );
+        assert_eq!(
+            mismatches[2].node_id,
+            content.pos[2].form_groups[0].slots[0].id
         );
     }
 }

@@ -23,8 +23,7 @@ impl CatalogService {
             };
             if items.last().is_none_or(|item| item.id != part_id) {
                 let code = required(record.part_code, "part code is null")?;
-                let allowed_form_types =
-                    crate::lexicon::form_types::owned_allowed_form_types(&code);
+                let allowed_form_types = crate::lexicon::form_types::catalog_form_types(&code);
                 items.push(CatalogPart {
                     id: part_id,
                     code,

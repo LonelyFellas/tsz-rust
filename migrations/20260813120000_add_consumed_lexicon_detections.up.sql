@@ -7,3 +7,7 @@ CREATE TABLE lexicon.consumed_detections (
     FOREIGN KEY (entry_id) REFERENCES lexicon.entries(id) ON DELETE SET NULL
         DEFERRABLE INITIALLY DEFERRED
 );
+
+UPDATE catalog.metadata
+SET version = version + 1, updated_at = now()
+WHERE id = TRUE;
