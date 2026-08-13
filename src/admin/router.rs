@@ -2,7 +2,7 @@ use axum::{Router, routing::get};
 
 use crate::{
     admin::{self},
-    catalog, lexicon,
+    catalog, lexicon, speech,
     state::AppState,
 };
 
@@ -14,4 +14,5 @@ pub fn router() -> Router<AppState> {
         .nest("/admins", admin::accounts::router())
         .nest("/settings/parts-of-speech", catalog::router::router())
         .nest("/lexicon", lexicon::router::router())
+        .nest("/speech", speech::preview::router::router())
 }

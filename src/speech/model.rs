@@ -75,6 +75,10 @@ impl Voice {
     pub fn supports_style(&self, style: &str) -> bool {
         self.styles.contains(style)
     }
+
+    pub fn styles(&self) -> impl Iterator<Item = &str> {
+        self.styles.iter().map(String::as_str)
+    }
 }
 
 fn validate_token(

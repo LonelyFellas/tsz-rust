@@ -63,6 +63,12 @@ pub enum ErrorCode {
     WordNotFound,
     PartOfSpeechInUse,
     SubPartOfSpeechInUse,
+    InvalidSpeechPreview,
+    SpeechVoiceNotFound,
+    SpeechPreviewInProgress,
+    SpeechProviderUnavailable,
+    SpeechRateLimited,
+    SpeechStorageUnavailable,
     ServiceUnavailable,
     InternalError,
 }
@@ -75,7 +81,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 60] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -128,6 +134,12 @@ impl ErrorCode {
         Self::WordNotFound,
         Self::PartOfSpeechInUse,
         Self::SubPartOfSpeechInUse,
+        Self::InvalidSpeechPreview,
+        Self::SpeechVoiceNotFound,
+        Self::SpeechPreviewInProgress,
+        Self::SpeechProviderUnavailable,
+        Self::SpeechRateLimited,
+        Self::SpeechStorageUnavailable,
         Self::ServiceUnavailable,
         Self::InternalError,
     ];
@@ -345,6 +357,36 @@ impl ErrorCode {
                 "sub_part_of_speech_in_use",
                 "Sub part of speech in use",
                 StatusCode::CONFLICT,
+            ),
+            Self::InvalidSpeechPreview => (
+                "invalid_speech_preview",
+                "Invalid speech preview",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::SpeechVoiceNotFound => (
+                "speech_voice_not_found",
+                "Speech voice not found",
+                StatusCode::NOT_FOUND,
+            ),
+            Self::SpeechPreviewInProgress => (
+                "speech_preview_in_progress",
+                "Speech preview is being generated",
+                StatusCode::CONFLICT,
+            ),
+            Self::SpeechProviderUnavailable => (
+                "speech_provider_unavailable",
+                "Speech provider unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::SpeechRateLimited => (
+                "speech_rate_limited",
+                "Speech provider rate limited",
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+            Self::SpeechStorageUnavailable => (
+                "speech_storage_unavailable",
+                "Speech storage unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
             ),
             Self::ServiceUnavailable => (
                 "service_unavailable",

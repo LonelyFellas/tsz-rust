@@ -75,6 +75,8 @@ use utoipa::{
         crate::lexicon::handler::commands::save_meanings,
         crate::lexicon::handler::commands::validate,
         crate::lexicon::handler::commands::publish,
+        crate::speech::preview::handler::list_voices,
+        crate::speech::preview::handler::create_preview,
     ),
     components(
         schemas(
@@ -206,6 +208,12 @@ use utoipa::{
             crate::lexicon::dto::SuggestDialectVariantsInputV2,
             crate::lexicon::dto::DialectSuggestionProviderV2,
             crate::lexicon::dto::SuggestDialectVariantsResponseV2,
+            crate::speech::preview::dto::CreatePreviewRequest,
+            crate::speech::preview::dto::VoiceCapabilities,
+            crate::speech::preview::dto::VoiceResponse,
+            crate::speech::preview::dto::VoiceListResponse,
+            crate::speech::preview::dto::PreviewCacheStatus,
+            crate::speech::preview::dto::PreviewResponse,
         )
     ),
     tags(
@@ -217,6 +225,7 @@ use utoipa::{
         (name = "admin-users", description = "管理后台 C 端用户管理"),
         (name = "admin-catalog", description = "管理后台词性目录配置"),
         (name = "admin-lexicon", description = "管理后台智能词库创编与发布"),
+        (name = "admin-speech", description = "管理后台语音目录与试听"),
     )
 )]
 pub struct ApiDoc;
@@ -950,5 +959,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn speech_preview_contract_is_documented_without_server_owned_fields() {
+        let json = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        assert!(json["paths"]["/api/v1/admin/speech/voices"]["get"].is_object());
+        assert!(json["paths"]["/api/v1/admin/speech/previews"]["post"].is_object());
+
+        let request = &json["components"]["schemas"]["CreatePreviewRequest"]["properties"];
+        for field in [
+            "content",
+            "voice_alias",
+            "style",
+            "rate_percent",
+            "pitch_semitones",
+        ] {
+            assert!(request[field].is_object(), "试听请求缺少 {field}");
+        }
+        for forbidden in [
+            "ssml",
+            "provider_voice_id",
+            "request_hash",
+            "object_key",
+            "audio",
+            "audio_url",
+        ] {
+            assert!(request[forbidden].is_null(), "试听请求不得暴露 {forbidden}");
+        }
+
+        let voice = &json["components"]["schemas"]["VoiceResponse"]["properties"];
+        assert!(voice["alias"].is_object());
+        assert!(voice["provider"].is_null());
+        assert!(voice["provider_voice_id"].is_null());
     }
 }

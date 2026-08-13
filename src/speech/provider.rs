@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::time::Duration;
 use thiserror::Error;
 
 use super::{SynthesisRequest, SynthesizedAudio};
@@ -22,7 +23,9 @@ pub struct SpeechError {
 }
 
 impl SpeechError {
-    pub(crate) const fn new(kind: SpeechErrorKind, status: Option<u16>) -> Self {
+    /// Constructor for provider adapters and deterministic fakes. `status` must contain only the
+    /// upstream HTTP status, never a response body or credential-bearing detail.
+    pub const fn new(kind: SpeechErrorKind, status: Option<u16>) -> Self {
         Self { kind, status }
     }
 
@@ -37,6 +40,12 @@ impl SpeechError {
 #[async_trait]
 pub trait SpeechProvider: Send + Sync {
     fn provider_name(&self) -> &'static str;
+
+    /// Redis single-flight lease sizing hint. Implementations should return their complete
+    /// synthesis request timeout; the orchestration layer adds storage/database tail room.
+    fn synthesis_timeout(&self) -> Duration {
+        Duration::from_secs(15)
+    }
 
     async fn synthesize(&self, request: &SynthesisRequest)
     -> Result<SynthesizedAudio, SpeechError>;
