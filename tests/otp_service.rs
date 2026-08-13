@@ -97,6 +97,19 @@ async fn request_with_mock_sender_saves_fixed_verifiable_code() {
         .expect("正确码应校验通过");
 }
 
+#[tokio::test]
+async fn mock_account_deletion_uses_fixed_code_in_its_own_keyspace() {
+    let (svc, pool, prefix) = service_with(Duration::from_secs(60), 10).await;
+    svc.request(T, Purpose::AccountDeletion)
+        .await
+        .expect("当前约定允许 Mock 发放固定注销码");
+    let code = saved_code(&pool, &prefix, T, Purpose::AccountDeletion).await;
+    assert_eq!(code, "000000");
+    svc.verify(T, Purpose::AccountDeletion, "000000")
+        .await
+        .expect("固定注销码应仅在 account_deletion purpose 下可验证");
+}
+
 // ============================ verify 映射 ============================
 
 #[tokio::test]

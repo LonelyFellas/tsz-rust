@@ -10,7 +10,7 @@ use crate::{
     },
     state::AppState,
     user::{
-        model::{SubjectError, User, UserRole, UserStatus},
+        model::{AccountDeletionChannel, SubjectError, User, UserRole, UserStatus},
         repository::{UserError, UserRepository},
         service::{LoginError, RegisterError, UserService, normalize_identifier},
     },
@@ -452,6 +452,109 @@ pub async fn logout(
     Ok((jar, StatusCode::NO_CONTENT))
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct AccountDeletionCodeRequest {
+    /// 必须是当前账号已经持有且可用的联系方式渠道。
+    pub channel: AccountDeletionChannel,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ConfirmAccountDeletionRequest {
+    pub channel: AccountDeletionChannel,
+    /// 仅接受以 account_deletion purpose 签发到本人所选联系方式的验证码。
+    #[schema(example = "123456")]
+    pub code: String,
+}
+
+/// POST /api/v1/auth/account/deletion-code
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/account/deletion-code",
+    tag = "auth",
+    security(("bearer_auth" = [])),
+    request_body = AccountDeletionCodeRequest,
+    responses(
+        (status = 202, description = "注销验证码发送请求已受理"),
+        (status = 400, description = "JSON 语法错误"),
+        (status = 401, description = "access token 无效、过期或账号已不存在"),
+        (status = 409, description = "当前账号没有所选渠道的联系方式"),
+        (status = 422, description = "请求体或渠道值不合法"),
+        (status = 429, description = "请求过于频繁"),
+        (status = 500, description = "数据库内部错误"),
+        (status = 503, description = "验证码基础设施不可用"),
+    )
+)]
+pub async fn request_account_deletion_code(
+    State(state): State<AppState>,
+    user: AuthUser,
+    ApiJson(payload): ApiJson<AccountDeletionCodeRequest>,
+) -> Result<StatusCode, AppError> {
+    let service = UserService::new(UserRepository::new(state.pool.clone()));
+    let target = service
+        .account_deletion_target(user.subject, payload.channel)
+        .await
+        .map_err(map_account_deletion_target_error)?;
+    state
+        .otp_service
+        .request(&target, Purpose::AccountDeletion)
+        .await
+        .map_err(map_account_deletion_otp_error)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// DELETE /api/v1/auth/account
+#[utoipa::path(
+    delete,
+    path = "/api/v1/auth/account",
+    tag = "auth",
+    security(("bearer_auth" = [])),
+    request_body = ConfirmAccountDeletionRequest,
+    responses(
+        (status = 204, description = "账号已注销，全部 refresh session 已吊销，并清除 refresh cookie",
+            headers(("Set-Cookie" = String, description = "清除 refresh_token cookie（Max-Age=0）"))),
+        (status = 400, description = "JSON 语法错误"),
+        (status = 401, description = "验证码错误、过期、已消费，或 access token 对应账号已不存在（不可区分验证码状态）"),
+        (status = 409, description = "当前账号没有所选渠道的联系方式"),
+        (status = 422, description = "请求体或渠道值不合法"),
+        (status = 500, description = "数据库内部错误"),
+        (status = 503, description = "验证码基础设施不可用"),
+    )
+)]
+pub async fn confirm_account_deletion(
+    State(state): State<AppState>,
+    user: AuthUser,
+    jar: CookieJar,
+    ApiJson(payload): ApiJson<ConfirmAccountDeletionRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let service = UserService::new(UserRepository::new(state.pool.clone()));
+    let target = service
+        .account_deletion_target(user.subject, payload.channel)
+        .await
+        .map_err(map_account_deletion_target_error)?;
+
+    // Redis Lua 原子校验并删除 key：错误/过期/已用/并发输家统一为同一错误。
+    state
+        .otp_service
+        .verify(&target, Purpose::AccountDeletion, &payload.code)
+        .await
+        .map_err(map_account_deletion_otp_error)?;
+
+    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let deleted = service
+        .delete_account_in(&mut tx, user.subject)
+        .await
+        .map_err(AppError::internal)?;
+    if !deleted {
+        return Err(invalid_access_token());
+    }
+    tx.commit().await.map_err(AppError::internal)?;
+
+    Ok((
+        jar.remove(clean_refresh_token_cookie()),
+        StatusCode::NO_CONTENT,
+    ))
+}
+
 /// `jar.remove` 按「名字 + Path」生成删除 cookie（Max-Age=0 由它自己设），
 /// 只需这两项与下发时一致；Path 不匹配则浏览器视为另一枚 cookie，清不掉。
 fn clean_refresh_token_cookie() -> Cookie<'static> {
@@ -514,6 +617,33 @@ fn map_login_otp_error(err: OtpServiceError) -> AppError {
         OtpServiceError::InvalidCode => {
             AppError::unauthorized(ErrorCode::InvalidOtpCode, "invalid code")
         }
+        OtpServiceError::RateLimited => {
+            AppError::rate_limited(ErrorCode::OtpRateLimited, "too many requests")
+        }
+        error @ (OtpServiceError::Store(_) | OtpServiceError::Send(_)) => {
+            AppError::unavailable_with_source(ErrorCode::OtpUnavailable, "OTP unavailable", error)
+        }
+    }
+}
+
+fn map_account_deletion_target_error(err: UserError) -> AppError {
+    match err {
+        UserError::MissingSubject => AppError::conflict(
+            ErrorCode::AccountDeletionChannelUnavailable,
+            Some("channel"),
+            "selected channel is unavailable",
+        ),
+        UserError::NotFound => invalid_access_token(),
+        other => AppError::internal(other),
+    }
+}
+
+fn map_account_deletion_otp_error(err: OtpServiceError) -> AppError {
+    match err {
+        OtpServiceError::InvalidCode => AppError::unauthorized(
+            ErrorCode::InvalidAccountDeletionCode,
+            "invalid account deletion code",
+        ),
         OtpServiceError::RateLimited => {
             AppError::rate_limited(ErrorCode::OtpRateLimited, "too many requests")
         }
@@ -614,4 +744,8 @@ fn map_password_error(error: PasswordError) -> AppError {
 
 fn invalid_refresh_token() -> AppError {
     AppError::unauthorized(ErrorCode::InvalidRefreshToken, "invalid refresh token")
+}
+
+fn invalid_access_token() -> AppError {
+    AppError::unauthorized(ErrorCode::InvalidToken, "invalid token")
 }

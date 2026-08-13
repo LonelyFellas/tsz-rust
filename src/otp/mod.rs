@@ -16,7 +16,6 @@ pub enum PublicOtpPurpose {
     Login,
     Register,
     PasswordReset,
-    AccountDeletion,
     ContactBind,
 }
 
@@ -26,7 +25,6 @@ impl From<PublicOtpPurpose> for Purpose {
             PublicOtpPurpose::Login => Purpose::Login,
             PublicOtpPurpose::Register => Purpose::Register,
             PublicOtpPurpose::PasswordReset => Purpose::PasswordReset,
-            PublicOtpPurpose::AccountDeletion => Purpose::AccountDeletion,
             PublicOtpPurpose::ContactBind => Purpose::ContactBind,
         }
     }

@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 use crate::platform::{Email, EmailError, Password, PasswordError, Phone, PhoneError, dummy_hash};
 use crate::user::display_name::generate_display_name;
-use crate::user::model::UserStatus;
+use crate::user::model::{AccountDeletionChannel, UserStatus};
 use crate::user::{
     model::{SubjectError, User, UserRole},
     repository::{NewUser, UserError, UserRepository},
@@ -168,6 +168,27 @@ impl UserService {
             Err(UserError::NotFound) => Err(LoginError::InvalidCredentials),
             Err(e) => Err(LoginError::Repository(e)),
         }
+    }
+
+    pub async fn account_deletion_target(
+        &self,
+        user_id: Uuid,
+        channel: AccountDeletionChannel,
+    ) -> Result<String, UserError> {
+        let user = self.repository.get_by_id(&user_id).await?;
+        match channel {
+            AccountDeletionChannel::Phone => user.phone,
+            AccountDeletionChannel::Email => user.email,
+        }
+        .ok_or(UserError::MissingSubject)
+    }
+
+    pub async fn delete_account_in(
+        &self,
+        connection: &mut sqlx::PgConnection,
+        user_id: Uuid,
+    ) -> Result<bool, UserError> {
+        UserRepository::delete_account_in(connection, user_id).await
     }
 }
 

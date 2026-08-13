@@ -61,6 +61,14 @@ pub fn router(state: AppState) -> Router {
                 .route("/login", post(auth::handler::login))
                 .route("/refresh", post(auth::handler::refresh_token))
                 .route("/logout", post(auth::handler::logout))
+                .route(
+                    "/account/deletion-code",
+                    post(auth::handler::request_account_deletion_code),
+                )
+                .route(
+                    "/account",
+                    axum::routing::delete(auth::handler::confirm_account_deletion),
+                )
                 .route("/register", post(auth::handler::register))
                 .route("/login-otp", post(auth::handler::login_otp))
                 .route("/me", get(auth::handler::me)),
@@ -199,6 +207,8 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
 
     let otp_service = Arc::new(OtpService::new(
         OtpStore::new(redis.clone()),
+        // 当前约定：所有 OTP（包括 account_deletion）暂用固定码 000000；
+        // sender 日志不得包含验证码或联系方式，真实 provider 后续替换此装配点。
         OtpSender::Mock,
         StdDuration::from_secs(config.otp_cooldown_seconds), // cooldown
         config.otp_daily_limit,                              // daily_limit
