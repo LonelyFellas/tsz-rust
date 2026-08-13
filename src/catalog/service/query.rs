@@ -22,13 +22,17 @@ impl CatalogService {
                 continue;
             };
             if items.last().is_none_or(|item| item.id != part_id) {
+                let code = required(record.part_code, "part code is null")?;
+                let allowed_form_types = crate::lexicon::form_types::catalog_form_types(&code);
                 items.push(CatalogPart {
                     id: part_id,
-                    code: required(record.part_code, "part code is null")?,
+                    code,
                     name_zh: required(record.part_name_zh, "part name_zh is null")?,
                     name_en: required(record.part_name_en, "part name_en is null")?,
                     abbreviation: required(record.part_abbreviation, "part abbreviation is null")?,
                     sort_order: required(record.part_sort_order, "part sort_order is null")?,
+                    default_form_types: allowed_form_types.clone(),
+                    allowed_form_types,
                     sub_parts: Vec::new(),
                 });
             }

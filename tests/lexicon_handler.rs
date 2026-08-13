@@ -433,6 +433,32 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     .await;
     assert_eq!(status, StatusCode::OK, "检测失败：{detection}");
     assert_eq!(detection["builtin_dictionary"]["status"], "matched");
+    assert_eq!(
+        detection["builtin_dictionary"]["provider"],
+        json!({"name": "test", "version": "v1"})
+    );
+    assert_eq!(
+        detection["builtin_dictionary"]["coverage"],
+        json!({
+            "forms": "partial",
+            "pronunciations": "missing",
+            "meanings": "missing",
+            "examples": "missing",
+            "frequency": "missing"
+        })
+    );
+    assert_eq!(
+        detection["builtin_dictionary"]["provenance"]["forms"],
+        json!({"name": "test", "version": "v1"})
+    );
+    assert!(detection["builtin_dictionary"]["provenance"]["pronunciations"].is_null());
+    assert!(
+        detection["builtin_dictionary"]["suggested_meanings"]["pos"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(detection["builtin_dictionary"]["suggested_frequency"].is_null());
     assert_eq!(detection["smart_dictionary"]["status"], "clear");
 
     let create_body = json!({
@@ -864,6 +890,38 @@ async fn lexicon_expiry_pagination_and_form_storage_boundaries_are_safe(pool: Pg
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replayed, first_created);
+
+    deadpool_redis::redis::cmd("SET")
+        .arg(&detection_key)
+        .arg(serde_json::to_string(&detection).unwrap())
+        .arg("EX")
+        .arg(60 * 60)
+        .query_async::<()>(&mut redis_connection)
+        .await
+        .expect("应能模拟创建提交后 Redis 删除失败");
+    let (status, reused_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection_id,
+            "headwords": detection["builtin_dictionary"]["headwords"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reused_detection["code"], "detection_mismatch");
+    let duplicate_entries: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.entries WHERE detection_snapshot->>'detection_id' = $1",
+    )
+    .bind(detection_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(duplicate_entries, 1, "同一 detection 只能创建一个词条");
 
     sqlx::query(
         r#"
@@ -2613,6 +2671,24 @@ async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(p
             .await
             .unwrap();
     assert!(!exists, "删除必须级联清理草稿聚合并释放词头");
+    let consumed_detection_id = Uuid::parse_str(
+        draft["word"]["detection_snapshot"]["detection_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let consumed_entry_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT entry_id FROM lexicon.consumed_detections WHERE actor_id = $1 AND detection_id = $2",
+    )
+    .bind(admin_id)
+    .bind(consumed_detection_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        consumed_entry_id, None,
+        "删除草稿后必须保留独立的 detection 消费墓碑"
+    );
     let audit_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit.admin_actions WHERE action = 'lexicon.entry.delete_draft' AND resource_id = $1",
     )
@@ -2865,6 +2941,33 @@ async fn forms_impact_is_complete_stable_and_detects_pos_code_replacement(pool: 
 
     let mut replaced_forms = forms;
     replaced_forms["pos"][0]["pos"] = json!("adjective");
+    let (status, invalid_replacement) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "content": replaced_forms,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        invalid_replacement["field_issues"][0]["code"],
+        "invalid_form_type_for_part_of_speech"
+    );
+    assert_eq!(
+        invalid_replacement["field_issues"][0]["node_id"],
+        replaced_forms["pos"][0]["form_groups"][0]["slots"][0]["id"]
+    );
+    replaced_forms["pos"][0]["form_groups"][0]["slots"][0]["form_type"] = json!("comparative");
+    replaced_forms["pos"][0]["form_groups"][0]["slots"][0]["id"] = json!(Uuid::now_v7());
+    replaced_forms["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["id"] =
+        json!(Uuid::now_v7());
+    replaced_forms["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["pronunciations"][0]["id"] =
+        json!(Uuid::now_v7());
     let (status, replaced) = call(
         &state,
         Method::POST,

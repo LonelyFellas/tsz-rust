@@ -13,6 +13,12 @@ pub struct WordDetectionSnapshotV2 {
     pub smart_dictionary_status: String,
     pub headwords: WordHeadwordsV2,
     pub suggested_pos: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary_provider: Option<DictionaryProviderV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary_coverage: Option<DictionaryCoverageV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary_provenance: Option<DictionaryProvenanceV2>,
     pub detected_at: DateTime<Utc>,
 }
 

@@ -262,7 +262,37 @@ async fn catalog_read_allows_active_admin_but_management_requires_super_admin(po
     )
     .await;
     assert_eq!(status, StatusCode::OK, "普通管理员应能读 catalog：{body}");
-    assert_eq!(body["catalog_version"], 1);
+    assert_eq!(body["catalog_version"], 2);
+    let noun = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == "noun")
+        .unwrap();
+    assert_eq!(noun["allowed_form_types"], json!(["plural"]));
+    assert_eq!(noun["default_form_types"], json!(["plural"]));
+    let verb = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == "verb")
+        .unwrap();
+    assert_eq!(
+        verb["allowed_form_types"],
+        json!([
+            "third_person_singular",
+            "present_participle",
+            "past_tense",
+            "past_participle"
+        ])
+    );
+    let preposition = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == "preposition")
+        .unwrap();
+    assert_eq!(preposition["allowed_form_types"], json!([]));
     assert_eq!(body["items"].as_array().map(Vec::len), Some(11));
     assert_eq!(body["items"][0]["code"], "noun");
     assert_eq!(
@@ -549,7 +579,7 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(catalog["catalog_version"], 7);
+    assert_eq!(catalog["catalog_version"], 8);
     assert!(
         catalog["items"]
             .as_array()

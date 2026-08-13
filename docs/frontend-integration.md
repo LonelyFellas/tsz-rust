@@ -597,6 +597,27 @@ DELETE 的正常引用检查返回 `meta.usage_count`。如果删除语句在极
 7. 配置删除与词条保存并发时，数据库约束/事务需保证不会留下悬空 code；
 8. 生产初始化需先 seed 当前 11/19 编码，再导入或开放词条写入。
 
+基本词性 catalog item 与基本词性管理 item 均额外返回有序的
+`allowed_form_types` / `default_form_types`。两者当前相同，后者供新建表单初始化，前者是服务端
+保存和发布的权威白名单：`noun=[plural]`，`verb=[third_person_singular,
+present_participle,past_tense,past_participle]`，`adjective` 与
+`adverb=[comparative,superlative]`。其他（包括以后新增的自定义）基本词性返回空数组并
+fail closed。forms 保存（`save` 和 `complete`）、validate、publish 对每个不匹配 slot 聚合返回
+`DraftValidationIssue`，稳定字段为 `step=forms`、`node_id=slot.id`、`field=form_type`、
+`code=invalid_form_type_for_part_of_speech`。
+
+`builtin_dictionary.status=matched` 保留既有 `headwords` / `suggested_forms`，并增加
+`provider`、`suggested_meanings`、`suggested_frequency`、`coverage` 和 `provenance`。coverage 的
+五个固定分类是 `forms/pronunciations/meanings/examples/frequency`，状态仅为
+`complete|partial|missing`。create 仍只接受 `detection_id/headwords`，并在后端事务中消费检测
+快照里的全部建议；客户端不得回传或重建建议。
+
+当前激活 Kaikki 导入只持久化词头、基本词性和地区证据，因此 matched 的 forms 仅含词头/POS
+骨架，准确标为 `partial`；音标、实际发音、释义、例句和词频均为空并标为 `missing`，相应
+provenance 为 null。不得由客户端或服务端按拼写规则猜测这些值。要升级为 complete，必须先
+扩展离线清洗产物、dictionary schema 与导入器，保存 Kaikki 原始 forms/sounds/senses/examples，
+并另接有授权且可追踪版本的词频数据源。
+
 active draft 的 `entry_pos` / `senses` FK 不能保护已从新草稿移除的发布内容；发布事务还必须写
 `entry_publication_part_of_speech_refs` / `entry_publication_sub_part_of_speech_refs` 结构化引用，
 并以 `ON DELETE RESTRICT` 指向 catalog。publication 仍保留时引用行也必须保留，不能只扫描

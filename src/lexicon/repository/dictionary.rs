@@ -7,9 +7,12 @@ impl LexiconRepository {
     ) -> Result<Option<DictionaryTermRecord>, LexiconRepositoryError> {
         sqlx::query_as::<_, DictionaryTermRecord>(
             r#"
-            SELECT term, kind, pos, region_family
-            FROM dictionary.active_terms
-            WHERE normalized_term = $1
+            SELECT terms.term, terms.kind, terms.pos, terms.region_family,
+                   datasets.source_name AS provider_name,
+                   datasets.source_version AS provider_version
+            FROM dictionary.active_terms terms
+            JOIN dictionary.datasets datasets ON datasets.id = terms.dataset_id
+            WHERE terms.normalized_term = $1
             "#,
         )
         .bind(normalized)

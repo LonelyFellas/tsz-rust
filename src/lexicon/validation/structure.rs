@@ -149,6 +149,18 @@ pub fn validate_forms(
                         "派生词形类型无效",
                     );
                 }
+                if !crate::lexicon::form_types::allowed_form_types(&pos.pos)
+                    .contains(&slot.form_type.as_str())
+                {
+                    issue(
+                        &mut issues,
+                        PersistedWordStep::Forms,
+                        slot.id,
+                        "form_type",
+                        "invalid_form_type_for_part_of_speech",
+                        "词形类型不适用于当前基本词性",
+                    );
+                }
                 if !form_types.insert(slot.form_type.as_str()) {
                     issue(
                         &mut issues,
@@ -580,5 +592,122 @@ fn json_value_contains_nul(value: &serde_json::Value) -> bool {
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn forms(pos_and_types: &[(&str, &[&str])]) -> DraftFormsStepContent {
+        let pos = pos_and_types
+            .iter()
+            .map(|(pos, form_types)| {
+                let pos_id = Uuid::now_v7();
+                serde_json::from_value(json!({
+                    "pos_id": pos_id,
+                    "pos": pos,
+                    "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
+                    "base_form": {
+                        "id": Uuid::now_v7(), "form_type": "base",
+                        "variants": [{
+                            "id": Uuid::now_v7(), "dialect": "common", "spelling": "high",
+                            "origin": "dictionary", "pronunciations": [{
+                                "id": Uuid::now_v7(), "dict_phonetic": "", "actual_pron": "", "style": "normal"
+                            }]
+                        }]
+                    },
+                    "form_groups": [{
+                        "id": Uuid::now_v7(), "is_regular": true,
+                        "slots": form_types.iter().map(|form_type| json!({
+                            "id": Uuid::now_v7(), "form_type": form_type,
+                            "variants": [{
+                                "id": Uuid::now_v7(), "dialect": "common", "spelling": "value",
+                                "origin": "manual", "pronunciations": [{
+                                    "id": Uuid::now_v7(), "dict_phonetic": "", "actual_pron": "", "style": "normal"
+                                }]
+                            }]
+                        })).collect::<Vec<_>>()
+                    }]
+                }))
+                .unwrap()
+            })
+            .collect();
+        DraftFormsStepContent { pos }
+    }
+
+    #[test]
+    fn accepts_high_and_access_baseline_form_sets() {
+        for content in [
+            forms(&[
+                ("noun", &["plural"]),
+                ("adjective", &["comparative", "superlative"]),
+            ]),
+            forms(&[
+                ("noun", &["plural"]),
+                (
+                    "verb",
+                    &[
+                        "third_person_singular",
+                        "present_participle",
+                        "past_tense",
+                        "past_participle",
+                    ],
+                ),
+            ]),
+        ] {
+            let configured = content.pos.iter().map(|pos| pos.pos.clone()).collect();
+            let issues = validate_forms(
+                Uuid::now_v7(),
+                &content,
+                &WordHeadwordsV2::Unified {
+                    common: "high".to_owned(),
+                },
+                &configured,
+            );
+            assert!(
+                issues
+                    .iter()
+                    .all(|issue| issue.code != "invalid_form_type_for_part_of_speech")
+            );
+        }
+    }
+
+    #[test]
+    fn aggregates_every_pos_form_type_mismatch_at_the_slot() {
+        let content = forms(&[
+            ("adjective", &["past_tense"]),
+            ("verb", &["comparative"]),
+            ("noun", &["superlative"]),
+        ]);
+        let configured = content.pos.iter().map(|pos| pos.pos.clone()).collect();
+        let issues = validate_forms(
+            Uuid::now_v7(),
+            &content,
+            &WordHeadwordsV2::Unified {
+                common: "high".to_owned(),
+            },
+            &configured,
+        );
+        let mismatches = issues
+            .iter()
+            .filter(|issue| issue.code == "invalid_form_type_for_part_of_speech")
+            .collect::<Vec<_>>();
+        assert_eq!(mismatches.len(), 3);
+        assert_eq!(mismatches[0].step, PersistedWordStep::Forms);
+        assert_eq!(mismatches[0].field, "form_type");
+        assert_eq!(
+            mismatches[0].node_id,
+            content.pos[0].form_groups[0].slots[0].id
+        );
+        assert_eq!(
+            mismatches[1].node_id,
+            content.pos[1].form_groups[0].slots[0].id
+        );
+        assert_eq!(
+            mismatches[2].node_id,
+            content.pos[2].form_groups[0].slots[0].id
+        );
     }
 }

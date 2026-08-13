@@ -422,6 +422,7 @@ pub(super) fn form_issue_blocks_save(issue: &DraftValidationIssue) -> bool {
             | "base_form_type_invalid"
             | "dialect_variants_invalid"
             | "form_type_invalid"
+            | "invalid_form_type_for_part_of_speech"
             | "duplicate_form_type"
             | "base_spelling_mismatch"
             | "spelling_not_trimmed"

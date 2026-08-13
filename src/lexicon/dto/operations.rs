@@ -38,11 +38,49 @@ pub enum SmartDictionaryResultV2 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DictionaryProviderV2 {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DictionaryCoverageStateV2 {
+    Complete,
+    Partial,
+    Missing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DictionaryCoverageV2 {
+    pub forms: DictionaryCoverageStateV2,
+    pub pronunciations: DictionaryCoverageStateV2,
+    pub meanings: DictionaryCoverageStateV2,
+    pub examples: DictionaryCoverageStateV2,
+    pub frequency: DictionaryCoverageStateV2,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DictionaryProvenanceV2 {
+    pub forms: Option<DictionaryProviderV2>,
+    pub pronunciations: Option<DictionaryProviderV2>,
+    pub meanings: Option<DictionaryProviderV2>,
+    pub examples: Option<DictionaryProviderV2>,
+    pub frequency: Option<DictionaryProviderV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // wire shape stays flat and backward-compatible
 pub enum BuiltinDictionaryResultV2 {
     Matched {
+        provider: DictionaryProviderV2,
         headwords: WordHeadwordsV2,
-        suggested_forms: DraftFormsStepContent,
+        suggested_forms: Box<DraftFormsStepContent>,
+        suggested_meanings: Box<DraftMeaningsStepContent>,
+        suggested_frequency: Option<String>,
+        coverage: DictionaryCoverageV2,
+        provenance: DictionaryProvenanceV2,
     },
     NotFound,
     Unavailable {
