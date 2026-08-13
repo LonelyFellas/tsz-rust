@@ -29,6 +29,7 @@ pub struct AzureSpeechProvider {
     client: Client,
     endpoint: String,
     key: SecretKey,
+    request_timeout: Duration,
     max_response_bytes: usize,
 }
 
@@ -38,6 +39,7 @@ impl fmt::Debug for AzureSpeechProvider {
             .debug_struct("AzureSpeechProvider")
             .field("endpoint", &self.endpoint)
             .field("key", &self.key)
+            .field("request_timeout", &self.request_timeout)
             .field("max_response_bytes", &self.max_response_bytes)
             .finish_non_exhaustive()
     }
@@ -81,6 +83,7 @@ impl AzureSpeechProvider {
             client,
             endpoint,
             key: SecretKey(key),
+            request_timeout,
             max_response_bytes,
         })
     }
@@ -106,6 +109,10 @@ impl AzureSpeechProvider {
 impl SpeechProvider for AzureSpeechProvider {
     fn provider_name(&self) -> &'static str {
         PROVIDER_NAME
+    }
+
+    fn synthesis_timeout(&self) -> Duration {
+        self.request_timeout
     }
 
     async fn synthesize(
