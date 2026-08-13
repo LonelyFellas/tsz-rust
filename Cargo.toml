@@ -27,7 +27,9 @@ jsonwebtoken = { version = "10.4.0", default-features = false, features = [
 ] }
 opendal = { version = "0.58.1", default-features = false, features = [
     "executors-tokio",
-    "http-transport-reqwest-rustls",
+    # OpenDAL 0.58's `install_default()` is gated on this facade feature. Enabling only the
+    # rustls subfeature compiles the transport crate but leaves the process default uninstalled.
+    "http-transport-reqwest",
     "services-oss",
 ] }
 rand = "0.10.2"

@@ -223,6 +223,10 @@ impl OssAdapter {
         policy: StoragePolicy,
         config: OssAdapterConfig,
     ) -> Result<Arc<dyn ObjectStore>, StorageError> {
+        // OpenDAL 0.58 no longer installs an HTTP transport through service construction.
+        // Installation is process-global, idempotent (first-installed wins), and lazy, so do it
+        // at the OSS boundary before any operator can issue a request.
+        opendal::install_default();
         let presign_write_endpoint = format!(
             "https://{}.{}",
             config.bucket,

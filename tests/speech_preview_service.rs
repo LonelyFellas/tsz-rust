@@ -50,11 +50,11 @@ fn redis_pool() -> deadpool_redis::Pool {
         .unwrap()
 }
 
-fn request() -> CreatePreviewRequest {
+fn request(text: &str) -> CreatePreviewRequest {
     CreatePreviewRequest {
         content: RichTextV2 {
             version: 2,
-            text: "hello".to_owned(),
+            text: text.to_owned(),
             annotations: vec![],
         },
         voice_alias: "en-us-jenny".to_owned(),
@@ -89,13 +89,19 @@ async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
         Some(store),
     );
 
-    let generated = service.create_preview(request()).await.unwrap();
+    let generated = service
+        .create_preview(request("cache-hit-test"))
+        .await
+        .unwrap();
     assert!(matches!(
         generated.cache_status,
         PreviewCacheStatus::Generated
     ));
     assert_eq!(generated.url_expires_in_seconds, 60);
-    let hit = service.create_preview(request()).await.unwrap();
+    let hit = service
+        .create_preview(request("cache-hit-test"))
+        .await
+        .unwrap();
     assert!(matches!(hit.cache_status, PreviewCacheStatus::Hit));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
@@ -138,8 +144,8 @@ async fn concurrent_same_fingerprint_has_one_provider_owner(pool: PgPool) {
     let first = service.clone();
     let second = service;
     let (left, right) = tokio::join!(
-        async move { first.create_preview(request()).await },
-        async move { second.create_preview(request()).await },
+        async move { first.create_preview(request("concurrent-test")).await },
+        async move { second.create_preview(request("concurrent-test")).await },
     );
     assert!(left.is_ok(), "first request should finish");
     assert!(right.is_ok(), "second request should hit winner");
