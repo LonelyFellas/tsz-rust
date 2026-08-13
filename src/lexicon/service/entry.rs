@@ -358,12 +358,33 @@ impl LexiconService {
                     .await
                     .map_err(repository_error)?;
                 let suggested_forms = build_suggested_forms(&headwords, &catalog_parts);
+                let provider = DictionaryProviderV2 {
+                    name: term.provider_name,
+                    version: term.provider_version,
+                };
                 (
                     entry_kind,
                     Some(matched_dialect),
                     BuiltinDictionaryResultV2::Matched {
+                        provider: provider.clone(),
                         headwords,
-                        suggested_forms,
+                        suggested_forms: Box::new(suggested_forms),
+                        suggested_meanings: Box::new(DraftMeaningsStepContent::default()),
+                        suggested_frequency: None,
+                        coverage: DictionaryCoverageV2 {
+                            forms: DictionaryCoverageStateV2::Partial,
+                            pronunciations: DictionaryCoverageStateV2::Missing,
+                            meanings: DictionaryCoverageStateV2::Missing,
+                            examples: DictionaryCoverageStateV2::Missing,
+                            frequency: DictionaryCoverageStateV2::Missing,
+                        },
+                        provenance: DictionaryProvenanceV2 {
+                            forms: Some(provider),
+                            pronunciations: None,
+                            meanings: None,
+                            examples: None,
+                            frequency: None,
+                        },
                     },
                     normalized_keys,
                 )
@@ -486,7 +507,17 @@ impl LexiconService {
         if detection.expires_at <= Utc::now() {
             return Err(LexiconServiceError::DetectionExpired);
         }
-        let (detected_headwords, mut forms, matched_dialect, builtin_status) = match (
+        let (
+            detected_headwords,
+            mut forms,
+            suggested_meanings,
+            suggested_frequency,
+            dictionary_provider,
+            dictionary_coverage,
+            dictionary_provenance,
+            matched_dialect,
+            builtin_status,
+        ) = match (
             &detection.builtin_dictionary,
             &detection.smart_dictionary,
             detection.entry_kind,
@@ -496,13 +527,23 @@ impl LexiconService {
                 BuiltinDictionaryResultV2::Matched {
                     headwords,
                     suggested_forms,
+                    suggested_meanings,
+                    suggested_frequency,
+                    provider,
+                    coverage,
+                    provenance,
                 },
                 SmartDictionaryResultV2::Clear { .. },
                 EntryKind::Word | EntryKind::Phrase,
                 Some(matched_dialect),
             ) => (
                 headwords.clone(),
-                suggested_forms.clone(),
+                (**suggested_forms).clone(),
+                (**suggested_meanings).clone(),
+                suggested_frequency.clone(),
+                Some(provider.clone()),
+                Some(coverage.clone()),
+                Some(provenance.clone()),
                 matched_dialect,
                 "matched",
             ),
@@ -523,6 +564,11 @@ impl LexiconService {
                 (
                     input.headwords.clone(),
                     DraftFormsStepContent::default(),
+                    DraftMeaningsStepContent::default(),
+                    None,
+                    None,
+                    None,
+                    None,
                     Dialect::Common,
                     "not_found",
                 )
@@ -559,7 +605,11 @@ impl LexiconService {
 
         let word_id = Uuid::now_v7();
         let now = Utc::now();
-        let meanings = build_initial_meanings(word_id, &input.headwords, &forms);
+        let meanings = if suggested_meanings.pos.is_empty() {
+            build_initial_meanings(word_id, &input.headwords, &forms)
+        } else {
+            suggested_meanings
+        };
         let suggested_pos = forms.pos.iter().map(|part| part.pos.clone()).collect();
         let detection_snapshot = crate::lexicon::dto::WordDetectionSnapshotV2 {
             detection_id: detection.detection_id,
@@ -571,6 +621,9 @@ impl LexiconService {
             smart_dictionary_status: "clear".to_owned(),
             headwords: detected_headwords,
             suggested_pos,
+            dictionary_provider,
+            dictionary_coverage,
+            dictionary_provenance,
             detected_at: now,
         };
         let word = AdminWordV2 {
@@ -584,7 +637,7 @@ impl LexiconService {
             published_revision: None,
             has_unpublished_changes: false,
             headwords: input.headwords,
-            frequency: None,
+            frequency: suggested_frequency,
             detection_snapshot,
             forms,
             meanings,
@@ -597,6 +650,17 @@ impl LexiconService {
             archived_by: None,
             published_at: None,
         };
+        if !LexiconRepository::consume_detection(
+            &mut transaction,
+            actor_id,
+            input.detection_id,
+            word_id,
+        )
+        .await
+        .map_err(repository_error)?
+        {
+            return Err(LexiconServiceError::DetectionMismatch);
+        }
         LexiconRepository::insert_entry(
             &mut transaction,
             &word,

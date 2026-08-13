@@ -150,6 +150,8 @@ pub struct PartOfSpeechConfig {
     pub sort_order: i32,
     pub usage_count: i64,
     pub sub_part_count: i64,
+    pub allowed_form_types: Vec<String>,
+    pub default_form_types: Vec<String>,
     pub revision: i64,
     pub created_by: Actor,
     pub created_at: DateTime<Utc>,
@@ -191,6 +193,8 @@ pub struct CatalogPart {
     pub name_en: String,
     pub abbreviation: String,
     pub sort_order: i32,
+    pub allowed_form_types: Vec<String>,
+    pub default_form_types: Vec<String>,
     pub sub_parts: Vec<CatalogSubPart>,
 }
 
@@ -231,6 +235,7 @@ pub(crate) struct PartRecord {
 
 impl From<PartRecord> for PartOfSpeechConfig {
     fn from(value: PartRecord) -> Self {
+        let allowed_form_types = crate::lexicon::form_types::owned_allowed_form_types(&value.code);
         Self {
             id: value.id,
             code: value.code,
@@ -240,6 +245,8 @@ impl From<PartRecord> for PartOfSpeechConfig {
             sort_order: value.sort_order,
             usage_count: value.usage_count,
             sub_part_count: value.sub_part_count,
+            default_form_types: allowed_form_types.clone(),
+            allowed_form_types,
             revision: value.revision,
             created_by: actor(value.created_by_admin_id, value.created_by_display_name)
                 .unwrap_or_else(Actor::system),

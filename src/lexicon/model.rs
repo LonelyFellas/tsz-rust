@@ -8,6 +8,8 @@ pub(crate) struct DictionaryTermRecord {
     pub kind: String,
     pub pos: Vec<String>,
     pub region_family: String,
+    pub provider_name: String,
+    pub provider_version: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]

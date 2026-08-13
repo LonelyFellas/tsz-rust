@@ -59,6 +59,29 @@ pub(super) fn origin_string(origin: TextOrigin) -> &'static str {
 // --- entry commands ---
 
 impl LexiconRepository {
+    pub(crate) async fn consume_detection(
+        tx: &mut Transaction<'_, Postgres>,
+        actor_id: Uuid,
+        detection_id: Uuid,
+        entry_id: Uuid,
+    ) -> Result<bool, LexiconRepositoryError> {
+        let inserted = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO lexicon.consumed_detections (actor_id, detection_id, entry_id)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (actor_id, detection_id) DO NOTHING
+            RETURNING entry_id
+            "#,
+        )
+        .bind(actor_id)
+        .bind(detection_id)
+        .bind(entry_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        Ok(inserted.is_some())
+    }
+
     pub(crate) async fn insert_entry(
         tx: &mut Transaction<'_, Postgres>,
         word: &AdminWordV2,
