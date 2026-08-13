@@ -11,6 +11,7 @@ pub mod otp;
 pub mod platform;
 pub mod request_id;
 pub mod session;
+pub mod speech;
 pub mod state;
 pub mod user;
 
@@ -173,6 +174,12 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
 
     // 构建仅做本地配置装配，不发远端请求；未配置时得到空 registry。
     let object_storage = config.object_storage.build_registry()?;
+    let speech_provider = config
+        .azure_speech
+        .as_ref()
+        .map(|speech| speech.build_provider())
+        .transpose()?
+        .map(|provider| Arc::new(provider) as Arc<dyn speech::SpeechProvider>);
 
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -208,6 +215,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         otp_service,
         cookie_secure: config.cookie_secure,
         object_storage,
+        speech_provider,
     };
 
     // 接优雅停机：systemctl stop / 容器停止发 SIGTERM，Ctrl+C 发 SIGINT。

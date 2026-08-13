@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::num::{NonZeroU8, NonZeroU16};
 
 use crate::platform::storage::ObjectStorageConfig;
+use crate::speech::AzureSpeechConfig;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -33,6 +34,8 @@ pub struct Config {
     pub admin_refresh_ttl_days: u64,
     #[serde(skip)]
     pub object_storage: ObjectStorageConfig,
+    #[serde(skip)]
+    pub azure_speech: Option<AzureSpeechConfig>,
 }
 
 fn default_refresh_ttl_days() -> u64 {
@@ -79,8 +82,11 @@ impl Config {
         let pairs = pairs.into_iter().collect::<Vec<_>>();
         let object_storage = ObjectStorageConfig::from_pairs(pairs.iter().cloned())
             .map_err(|error| envy::Error::Custom(error.to_string()))?;
+        let azure_speech = AzureSpeechConfig::from_pairs(pairs.iter().cloned())
+            .map_err(|error| envy::Error::Custom(error.to_string()))?;
         let mut cfg: Self = envy::from_iter(pairs)?;
         cfg.object_storage = object_storage;
+        cfg.azure_speech = azure_speech;
         // 两把密钥相同 = per-realm 隔离塌一半,启动即失败(admin-design.md §13)
         if cfg.admin_jwt_secret == cfg.jwt_secret {
             return Err(envy::Error::Custom(
