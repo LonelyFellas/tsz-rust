@@ -5,5 +5,5 @@ mod repository;
 pub mod router;
 mod service;
 
-pub use repository::PreviewRepository;
+pub use repository::{CacheRecord, PreviewRepository, PreviewRepositoryPort, VoiceRecord};
 pub use service::{PreviewService, PreviewServiceError};

@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -29,6 +30,22 @@ pub struct CacheRecord {
 #[derive(Clone)]
 pub struct PreviewRepository {
     pool: PgPool,
+}
+
+#[async_trait]
+pub trait PreviewRepositoryPort: Send + Sync {
+    async fn list_voices(&self) -> Result<VoiceListResponse, sqlx::Error>;
+    async fn voice_by_alias(&self, alias: &str) -> Result<Option<VoiceRecord>, sqlx::Error>;
+    async fn active_cache(&self, hash: &[u8]) -> Result<Option<CacheRecord>, sqlx::Error>;
+    async fn cache_by_hash(&self, hash: &[u8]) -> Result<Option<CacheRecord>, sqlx::Error>;
+    async fn save_cache(
+        &self,
+        request_hash: &[u8],
+        content_hash: &[u8],
+        voice_id: Uuid,
+        object_key: &str,
+        size_bytes: i64,
+    ) -> Result<Option<String>, sqlx::Error>;
 }
 
 impl PreviewRepository {
@@ -156,6 +173,44 @@ impl PreviewRepository {
         .fetch_optional(&self.pool)
         .await?;
         Ok(previous)
+    }
+}
+
+#[async_trait]
+impl PreviewRepositoryPort for PreviewRepository {
+    async fn list_voices(&self) -> Result<VoiceListResponse, sqlx::Error> {
+        PreviewRepository::list_voices(self).await
+    }
+
+    async fn voice_by_alias(&self, alias: &str) -> Result<Option<VoiceRecord>, sqlx::Error> {
+        PreviewRepository::voice_by_alias(self, alias).await
+    }
+
+    async fn active_cache(&self, hash: &[u8]) -> Result<Option<CacheRecord>, sqlx::Error> {
+        PreviewRepository::active_cache(self, hash).await
+    }
+
+    async fn cache_by_hash(&self, hash: &[u8]) -> Result<Option<CacheRecord>, sqlx::Error> {
+        PreviewRepository::cache_by_hash(self, hash).await
+    }
+
+    async fn save_cache(
+        &self,
+        request_hash: &[u8],
+        content_hash: &[u8],
+        voice_id: Uuid,
+        object_key: &str,
+        size_bytes: i64,
+    ) -> Result<Option<String>, sqlx::Error> {
+        PreviewRepository::save_cache(
+            self,
+            request_hash,
+            content_hash,
+            voice_id,
+            object_key,
+            size_bytes,
+        )
+        .await
     }
 }
 

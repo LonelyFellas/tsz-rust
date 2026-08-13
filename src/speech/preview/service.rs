@@ -13,7 +13,7 @@ use crate::{
 use super::{
     dto::{CreatePreviewRequest, PreviewCacheStatus, PreviewResponse, VoiceListResponse},
     lock::{PreviewLock, wait_interval},
-    repository::{CacheRecord, PreviewRepository},
+    repository::{CacheRecord, PreviewRepositoryPort},
 };
 
 #[derive(Debug, Error)]
@@ -40,21 +40,24 @@ pub enum PreviewServiceError {
 
 #[derive(Clone)]
 pub struct PreviewService {
-    repository: PreviewRepository,
+    repository: Arc<dyn PreviewRepositoryPort>,
     redis: RedisPool,
     provider: Option<Arc<dyn SpeechProvider>>,
     storage: Option<Arc<dyn ObjectStore>>,
 }
 
 impl PreviewService {
-    pub fn new(
-        repository: PreviewRepository,
+    pub fn new<R>(
+        repository: R,
         redis: RedisPool,
         provider: Option<Arc<dyn SpeechProvider>>,
         storage: Option<Arc<dyn ObjectStore>>,
-    ) -> Self {
+    ) -> Self
+    where
+        R: PreviewRepositoryPort + 'static,
+    {
         Self {
-            repository,
+            repository: Arc::new(repository),
             redis,
             provider,
             storage,
