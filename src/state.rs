@@ -8,6 +8,7 @@ use crate::{
     auth::{Realm, TokenManager},
     otp::{sender::OtpSender, service::OtpService, store::OtpStore},
     platform::storage::StorageRegistry,
+    speech::SpeechProvider,
 };
 use axum::extract::FromRef;
 
@@ -22,6 +23,7 @@ pub struct AppState {
     pub otp_service: Arc<OtpService>,
     pub cookie_secure: bool,
     pub object_storage: StorageRegistry,
+    pub speech_provider: Option<Arc<dyn SpeechProvider>>,
 }
 
 impl AppState {
@@ -65,6 +67,7 @@ impl AppState {
             otp_service,
             cookie_secure: false,
             object_storage: StorageRegistry::empty(),
+            speech_provider: None,
         }
     }
 
@@ -105,6 +108,7 @@ impl AppState {
             redis,
             otp_service,
             object_storage: StorageRegistry::empty(),
+            speech_provider: None,
         };
         (state, store)
     }
