@@ -208,10 +208,37 @@ pub struct PreviewFormsImpactInputV2 {
     pub content: DraftFormsStepContent,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FormsImpactNodeType {
+    Pos,
+    GrammarStructure,
+    TextVariant,
+    Sense,
+    Definition,
+    Sentence,
+    Relation,
+}
+
+impl FormsImpactNodeType {
+    pub(crate) fn from_internal(value: &str) -> Self {
+        match value {
+            "pos" => Self::Pos,
+            "grammar_structure" => Self::GrammarStructure,
+            "text_variant" => Self::TextVariant,
+            "sense" => Self::Sense,
+            "definition" => Self::Definition,
+            "sentence" => Self::Sentence,
+            "relation" => Self::Relation,
+            _ => unreachable!("forms impact emitted unsupported node type: {value}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct FormsImpactItemV2 {
     pub node_id: Uuid,
-    pub node_type: String,
+    pub node_type: FormsImpactNodeType,
     pub reason: String,
 }
 
@@ -223,6 +250,29 @@ pub struct FormsImpactResponseV2 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub confirmation_token: Option<Uuid>,
+}
+
+#[cfg(test)]
+mod forms_impact_node_type_tests {
+    use super::FormsImpactNodeType;
+
+    #[test]
+    fn internal_types_serialize_to_the_documented_wire_values() {
+        for value in [
+            "pos",
+            "grammar_structure",
+            "text_variant",
+            "sense",
+            "definition",
+            "sentence",
+            "relation",
+        ] {
+            assert_eq!(
+                serde_json::to_value(FormsImpactNodeType::from_internal(value)).unwrap(),
+                value
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
