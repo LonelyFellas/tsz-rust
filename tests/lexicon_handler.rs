@@ -2931,6 +2931,15 @@ async fn forms_impact_is_complete_stable_and_detects_pos_code_replacement(pool: 
             .collect::<Vec<_>>(),
         expected_types
     );
+    assert_eq!(
+        deleted_items
+            .iter()
+            .map(|item| item["node_id"].clone())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        deleted_items.len(),
+        "affected 中 node_id 不得重复"
+    );
 
     let (status, deleted_again) = preview_deleted().await;
     assert_eq!(status, StatusCode::OK);
@@ -3052,6 +3061,180 @@ async fn forms_impact_is_complete_stable_and_detects_pos_code_replacement(pool: 
         saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"],
         json!([])
     );
+}
+
+#[sqlx::test]
+async fn forms_impact_ignores_reconciled_default_meaning_placeholders(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_word(&pool, "tomato").await;
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "tomato"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "检测失败：{detection}");
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": detection["builtin_dictionary"]["headwords"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建失败：{created}");
+    let entry_id = created["word"]["id"].as_str().unwrap();
+    let revision = created["word"]["revision"].as_i64().unwrap();
+
+    let mut content_only = created["word"]["forms"].clone();
+    content_only["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["dict_phonetic"] =
+        json!("/təˈmɑːtoʊ/");
+    content_only["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["actual_pron"] =
+        json!("təˈmɑːtoʊ");
+    let (status, content_impact) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        &bearer,
+        None,
+        Some(json!({"base_revision": revision, "content": content_only})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "内容补全 impact 失败：{content_impact}"
+    );
+    assert_eq!(content_impact["requires_confirmation"], false);
+
+    let mut replaced = created["word"]["forms"].clone();
+    replaced["pos"][0]["pos"] = json!("adjective");
+    replaced["pos"][0]["form_groups"] = json!([{
+        "id": Uuid::now_v7(),
+        "is_regular": true,
+        "slots": [{
+            "id": Uuid::now_v7(),
+            "form_type": "comparative",
+            "variants": [{
+                "id": Uuid::now_v7(),
+                "dialect": "common",
+                "spelling": "more tomato",
+                "origin": "manual",
+                "pronunciations": [{
+                    "id": Uuid::now_v7(),
+                    "dict_phonetic": "/mɔːr təˈmɑːtoʊ/",
+                    "actual_pron": "mɔːr təˈmɑːtoʊ",
+                    "style": "normal"
+                }]
+            }]
+        }]
+    }]);
+    let (status, placeholder_impact) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        &bearer,
+        None,
+        Some(json!({"base_revision": revision, "content": replaced})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "默认占位 reconcile impact 失败：{placeholder_impact}"
+    );
+    assert_eq!(placeholder_impact["requires_confirmation"], false);
+    assert_eq!(placeholder_impact["affected"], json!([]));
+
+    let mut completed_forms = content_only;
+    completed_forms["pos"][0]["form_groups"] = json!([{
+        "id": Uuid::now_v7(),
+        "is_regular": true,
+        "slots": [{
+            "id": Uuid::now_v7(),
+            "form_type": "plural",
+            "variants": [{
+                "id": Uuid::now_v7(),
+                "dialect": "common",
+                "spelling": "tomatoes",
+                "origin": "manual",
+                "pronunciations": [{
+                    "id": Uuid::now_v7(),
+                    "dict_phonetic": "/təˈmɑːtoʊz/",
+                    "actual_pron": "təˈmɑːtoʊz",
+                    "style": "normal"
+                }]
+            }]
+        }]
+    }]);
+    let (status, completed) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": revision,
+            "intent": "complete",
+            "content": completed_forms,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "完成 forms 失败：{completed}");
+
+    let mut named_group_meanings = completed["word"]["meanings"].clone();
+    named_group_meanings["sense_groups"][0]["name_zh"] = json!("共享但不会被删除的分组");
+    let (status, with_named_group) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": completed["word"]["revision"],
+            "intent": "save",
+            "content": named_group_meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "命名分组保存失败：{with_named_group}"
+    );
+    let (status, named_group_impact) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": with_named_group["word"]["revision"],
+            "content": replaced,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "保留命名分组的 impact 失败：{named_group_impact}"
+    );
+    assert_eq!(named_group_impact["requires_confirmation"], false);
+    assert_eq!(named_group_impact["affected"], json!([]));
 }
 
 #[sqlx::test]
