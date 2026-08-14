@@ -451,6 +451,20 @@ pub(super) fn forms_impact(
         .map(|pos| pos.pos_id)
         .collect::<std::collections::HashSet<_>>();
     let current_nodes = proposed_nodes(&word.forms, &word.meanings);
+    let impactful_pos_ids = word
+        .meanings
+        .pos
+        .iter()
+        .filter(|pos| {
+            changed_pos_ids.contains(&pos.pos_id)
+                && pos_meanings_have_content(word.id, pos, &word.meanings)
+        })
+        .map(|pos| pos.pos_id)
+        .collect::<std::collections::HashSet<_>>();
+    let current_by_id = current_nodes
+        .iter()
+        .map(|node| (node.id, node))
+        .collect::<HashMap<_, _>>();
     let next_nodes = proposed_nodes(next_forms, next_meanings);
     let next_by_id = next_nodes
         .iter()
@@ -458,11 +472,21 @@ pub(super) fn forms_impact(
         .collect::<HashMap<_, _>>();
     let mut affected = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for node in current_nodes {
+    for node in &current_nodes {
         if node.node_type != "pos" && node.step != PersistedWordStep::Meanings {
             continue;
         }
-        let binding_is_unchanged = next_by_id.get(&node.id).is_some_and(|next| *next == &node);
+        let owning_pos_id = if node.node_type == "pos" {
+            Some(node.id)
+        } else {
+            owning_pos_id(node, &current_by_id)
+        };
+        if owning_pos_id.is_some_and(|pos_id| {
+            changed_pos_ids.contains(&pos_id) && !impactful_pos_ids.contains(&pos_id)
+        }) {
+            continue;
+        }
+        let binding_is_unchanged = next_by_id.get(&node.id).is_some_and(|next| *next == node);
         if binding_is_unchanged && !changed_pos_ids.contains(&node.id) {
             continue;
         }
@@ -480,6 +504,80 @@ pub(super) fn forms_impact(
         });
     }
     affected
+}
+
+fn owning_pos_id(node: &ProposedNode, nodes: &HashMap<Uuid, &ProposedNode>) -> Option<Uuid> {
+    let mut parent_id = node.parent_node_id;
+    while let Some(id) = parent_id {
+        let parent = nodes.get(&id)?;
+        if parent.node_type == "pos" {
+            return Some(parent.id);
+        }
+        parent_id = parent.parent_node_id;
+    }
+    None
+}
+
+fn pos_meanings_have_content(
+    entry_id: Uuid,
+    pos: &WordPosMeaningsV2,
+    meanings: &DraftMeaningsStepContent,
+) -> bool {
+    if pos.grammar_structures.len() != 1
+        || pos.grammar_structures.iter().any(|grammar| {
+            grammar
+                .variants
+                .iter()
+                .any(|variant| !variant.content.text().trim().is_empty())
+        })
+        || pos.senses.len() != 1
+    {
+        return true;
+    }
+    let sense = &pos.senses[0];
+    if !sense.sub_pos.is_empty()
+        || sense.level != "A1"
+        || sense.frequency.is_some()
+        || sense.depends_on_context
+        || !sense.relations.is_empty()
+        || sense.definitions.len() != 1
+        || sense.sentences.len() != 1
+    {
+        return true;
+    }
+    let default_group_id = meanings.sense_groups.first().map(|group| group.id);
+    if sense.sense_group_id != default_group_id {
+        return true;
+    }
+    let default_definition = matches!(
+        &sense.definitions[0],
+        WordDefinitionV2::ZhDefinition {
+            level,
+            grammar_structure_id: None,
+            content,
+            ..
+        } if level == "A1" && content.text().trim().is_empty()
+    );
+    if !default_definition {
+        return true;
+    }
+    let sentence = &sense.sentences[0];
+    sentence.level != "A1"
+        || english_text_has_content(&sentence.en_text)
+        || !sentence.zh_text.text().trim().is_empty()
+        || sentence.links.len() != 1
+        || sentence.links[0].word_id != entry_id
+        || sentence.links[0].sense_id != sense.id
+        || sentence.links[0].role != "focus"
+}
+
+fn english_text_has_content(content: &EnglishTextV2) -> bool {
+    match content {
+        EnglishTextV2::Unified { common } => !common.value.text().trim().is_empty(),
+        EnglishTextV2::Distinguish { uk, us, .. } => [uk, us].iter().any(|slot| {
+            matches!(slot, DialectVariantSlotV2::Ready { variant } if !variant.value.text().trim().is_empty())
+        }),
+    }
 }
 
 pub(super) fn downstream_required(affected: &[FormsImpactItemV2]) -> LexiconServiceError {

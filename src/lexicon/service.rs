@@ -38,7 +38,7 @@ use crate::lexicon::{
     repository::{LexiconRepository, LexiconRepositoryError},
     rich_text::canonicalize_meanings,
     validation::{
-        proposed_nodes, validate_forms, validate_meanings, validate_node_identities,
+        ProposedNode, proposed_nodes, validate_forms, validate_meanings, validate_node_identities,
         validate_node_limit, validate_persisted_text,
     },
 };
