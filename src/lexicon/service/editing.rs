@@ -495,7 +495,7 @@ pub(super) fn forms_impact(
         }
         affected.push(FormsImpactItemV2 {
             node_id: node.id,
-            node_type: node.node_type.to_owned(),
+            node_type: FormsImpactNodeType::from_internal(node.node_type),
             reason: if node.node_type == "pos" && changed_pos_ids.contains(&node.id) {
                 "词性被删除或代码被替换，其下游词义内容将重建".to_owned()
             } else {
