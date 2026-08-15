@@ -118,11 +118,17 @@ pub(super) fn build_suggested_forms(
                         form_type: "base".to_owned(),
                         variants,
                     },
-                    form_groups: vec![WordFormGroupV2 {
-                        id: Uuid::now_v7(),
-                        is_regular: true,
-                        slots: Vec::new(),
-                    }],
+                    form_groups: if crate::lexicon::form_types::allowed_form_types(&part.code)
+                        .is_empty()
+                    {
+                        Vec::new()
+                    } else {
+                        vec![WordFormGroupV2 {
+                            id: Uuid::now_v7(),
+                            is_regular: true,
+                            slots: Vec::new(),
+                        }]
+                    },
                 }
             })
             .collect(),
@@ -841,5 +847,33 @@ impl LexiconService {
                 .map(|part| (part.code, part.part_code))
                 .collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggested_forms_only_create_groups_for_parts_with_derived_forms() {
+        let parts = [
+            CatalogPartRecord {
+                id: Uuid::now_v7(),
+                code: "noun".to_owned(),
+            },
+            CatalogPartRecord {
+                id: Uuid::now_v7(),
+                code: "pronoun".to_owned(),
+            },
+        ];
+        let forms = build_suggested_forms(
+            &WordHeadwordsV2::Unified {
+                common: "book".to_owned(),
+            },
+            &parts,
+        );
+
+        assert_eq!(forms.pos[0].form_groups.len(), 1);
+        assert!(forms.pos[1].form_groups.is_empty());
     }
 }

@@ -75,7 +75,8 @@ pub fn validate_forms(
                 "词形与音标方言规则无效",
             );
         }
-        if pos.form_groups.is_empty() {
+        let allowed_form_types = crate::lexicon::form_types::allowed_form_types(&pos.pos);
+        if pos.form_groups.is_empty() && !allowed_form_types.is_empty() {
             issue(
                 &mut issues,
                 PersistedWordStep::Forms,
@@ -83,6 +84,16 @@ pub fn validate_forms(
                 "form_groups",
                 "form_group_required",
                 "每个词性至少需要一组词形变化",
+            );
+        }
+        if allowed_form_types.is_empty() && pos.form_groups.len() > 1 {
+            issue(
+                &mut issues,
+                PersistedWordStep::Forms,
+                pos.pos_id,
+                "form_groups",
+                "form_groups_not_supported",
+                "当前基本词性不支持多组词形变化",
             );
         }
 
@@ -120,7 +131,7 @@ pub fn validate_forms(
                 group.id,
                 "form_group",
             );
-            if group.slots.is_empty() {
+            if group.slots.is_empty() && !allowed_form_types.is_empty() {
                 issue(
                     &mut issues,
                     PersistedWordStep::Forms,
@@ -149,9 +160,7 @@ pub fn validate_forms(
                         "派生词形类型无效",
                     );
                 }
-                if !crate::lexicon::form_types::allowed_form_types(&pos.pos)
-                    .contains(&slot.form_type.as_str())
-                {
+                if !allowed_form_types.contains(&slot.form_type.as_str()) {
                     issue(
                         &mut issues,
                         PersistedWordStep::Forms,
@@ -672,6 +681,73 @@ mod tests {
                     .all(|issue| issue.code != "invalid_form_type_for_part_of_speech")
             );
         }
+    }
+
+    #[test]
+    fn accepts_zero_or_one_legacy_empty_group_only_for_parts_without_derived_forms() {
+        let mut pronoun = forms(&[("pronoun", &[])]);
+        let pronoun_parts = HashSet::from(["pronoun".to_owned()]);
+        let legacy_issues = validate_forms(
+            Uuid::now_v7(),
+            &pronoun,
+            &WordHeadwordsV2::Unified {
+                common: "it".to_owned(),
+            },
+            &pronoun_parts,
+        );
+        assert!(
+            legacy_issues
+                .iter()
+                .all(|issue| issue.code != "form_slot_required")
+        );
+
+        pronoun.pos[0].form_groups.clear();
+        let pronoun_issues = validate_forms(
+            Uuid::now_v7(),
+            &pronoun,
+            &WordHeadwordsV2::Unified {
+                common: "it".to_owned(),
+            },
+            &pronoun_parts,
+        );
+        assert!(pronoun_issues.iter().all(|issue| {
+            issue.code != "form_group_required" && issue.code != "form_slot_required"
+        }));
+
+        let mut duplicate_legacy = forms(&[("pronoun", &[])]);
+        let mut extra_empty_group = duplicate_legacy.pos[0].form_groups[0].clone();
+        extra_empty_group.id = Uuid::now_v7();
+        duplicate_legacy.pos[0].form_groups.push(extra_empty_group);
+        let duplicate_issues = validate_forms(
+            Uuid::now_v7(),
+            &duplicate_legacy,
+            &WordHeadwordsV2::Unified {
+                common: "it".to_owned(),
+            },
+            &pronoun_parts,
+        );
+        assert!(
+            duplicate_issues
+                .iter()
+                .any(|issue| issue.code == "form_groups_not_supported")
+        );
+
+        let mut noun = forms(&[("noun", &["plural"])]);
+        noun.pos[0].form_groups.clear();
+        let noun_parts = HashSet::from(["noun".to_owned()]);
+        let noun_issues = validate_forms(
+            Uuid::now_v7(),
+            &noun,
+            &WordHeadwordsV2::Unified {
+                common: "book".to_owned(),
+            },
+            &noun_parts,
+        );
+        assert!(
+            noun_issues
+                .iter()
+                .any(|issue| issue.code == "form_group_required")
+        );
     }
 
     #[test]
