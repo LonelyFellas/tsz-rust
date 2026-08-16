@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{Realm, TokenManager},
+    lexicon::surface_policy::SurfacePolicyStore,
     otp::{sender::OtpSender, service::OtpService, store::OtpStore},
     platform::storage::StorageRegistry,
     speech::SpeechProvider,
@@ -20,6 +21,7 @@ pub struct AppState {
     pub refresh_ttl: Duration,
     pub admin_refresh_ttl: Duration,
     pub redis: deadpool_redis::Pool,
+    pub(crate) surface_policy_prefix: String,
     pub otp_service: Arc<OtpService>,
     pub cookie_secure: bool,
     pub object_storage: StorageRegistry,
@@ -27,6 +29,11 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[doc(hidden)]
+    pub fn surface_policy_store_for_test(&self) -> SurfacePolicyStore {
+        SurfacePolicyStore::with_prefix(self.redis.clone(), self.surface_policy_prefix.clone())
+    }
+
     /// 集成测试用（**不关心 Redis** 的测试走这个）：塞 dummy TokenManager + 默认 TTL，
     /// 内部用默认串建一个**惰性** redis pool。deadpool 惰性建连——只要测试不真正触达
     /// Redis 就不会发起连接，故这类测试无需本地跑 Redis，也不必在调用处构造 pool。
@@ -40,9 +47,10 @@ impl AppState {
     /// 需要**注入特定 redis pool** 的测试用——如 readyz 的「Redis 宕机」场景要塞一个
     /// 指向死地址的 pool 来验证探活会失败。
     pub fn for_test_with_redis(pool: PgPool, redis: deadpool_redis::Pool) -> Self {
+        let test_id = Uuid::now_v7();
         // 唯一前缀隔离——每个 for_test 的 OtpService 独享 keyspace，可并行、不串号。
         let otp_service = Arc::new(OtpService::new(
-            OtpStore::with_prefix(redis.clone(), format!("test:{}:", Uuid::now_v7())),
+            OtpStore::with_prefix(redis.clone(), format!("test:{test_id}:")),
             OtpSender::Mock,
             StdDuration::from_secs(60),  // cooldown（>0，好测 429）
             10,                          // daily_limit
@@ -64,6 +72,7 @@ impl AppState {
             refresh_ttl: Duration::days(30),
             admin_refresh_ttl: Duration::days(7),
             redis,
+            surface_policy_prefix: format!("test:{test_id}:lexicon:surface-policy:"),
             otp_service,
             cookie_secure: false,
             object_storage: StorageRegistry::empty(),
@@ -106,6 +115,7 @@ impl AppState {
             refresh_ttl: Duration::days(30),
             admin_refresh_ttl: Duration::days(7),
             redis,
+            surface_policy_prefix: format!("test:{}:lexicon:surface-policy:", Uuid::now_v7()),
             otp_service,
             object_storage: StorageRegistry::empty(),
             speech_provider: None,

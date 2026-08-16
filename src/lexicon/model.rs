@@ -28,6 +28,15 @@ pub(crate) struct DictionaryCandidateRecord {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct DuplicateRecord {
+    pub entry_id: Uuid,
+    pub headword: String,
+    pub dialect: String,
+    pub is_archived: bool,
+    pub is_published: bool,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct CatalogPartRecord {
     pub id: Uuid,
     pub code: String,
@@ -40,19 +49,57 @@ pub(crate) struct CatalogSubPartRecord {
     pub part_code: String,
 }
 
-#[derive(Debug, sqlx::FromRow)]
-pub(crate) struct DuplicateRecord {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceLookupKey {
+    pub dialect_scope: String,
+    pub normalized_surface: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SurfaceSourceRecord {
+    pub matched_dialect_scope: String,
     pub entry_id: Uuid,
-    pub headword: String,
+    pub entry_headword: String,
+    pub entry_headword_dialect: String,
+    pub entry_kind: String,
+    pub lifecycle_status: String,
+    pub source_id: String,
+    pub source_kind: String,
+    pub source_node_id: Option<Uuid>,
+    pub content_scope: String,
+    pub publication_id: Option<Uuid>,
+    pub surface: String,
+    pub normalized_surface: String,
     pub dialect: String,
-    pub is_archived: bool,
-    pub is_published: bool,
+    pub normalization_version: i16,
+    pub source_revision: i64,
+    pub event_offset: i64,
+    pub pos_id: Option<Uuid>,
+    pub pos: Option<String>,
+    pub form_type: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct SurfaceEntryContextRecord {
+    pub entry_id: Uuid,
+    pub forms: Value,
+    pub meanings: Value,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct SurfaceInboundRelationRecord {
+    pub target_entry_id: Uuid,
+    pub source_entry_id: Uuid,
+    pub source_node_id: Uuid,
+    pub source_snapshot: Value,
 }
 
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct IdempotencyRecord {
     pub request_hash: Vec<u8>,
     pub resource_id: Option<Uuid>,
+    pub response_status: i16,
     pub response_body: Value,
     pub expired: bool,
 }

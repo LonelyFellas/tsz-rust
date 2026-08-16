@@ -46,10 +46,11 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
-        let current = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
+        let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        let current = entry_from_record(record)?;
         if current.revision != input.base_revision {
             return Err(LexiconServiceError::RevisionConflict {
                 current_revision: current.revision,
@@ -60,17 +61,36 @@ impl LexiconService {
                 current_lifecycle_revision: current.lifecycle_revision,
             });
         }
-        if current.archived_at.is_some()
-            || current.current_publication_id.is_some()
-            || !LexiconRepository::delete_never_published_entry(
-                &mut transaction,
-                actor_id,
-                request_id,
-                entry_id,
-                current.revision,
-            )
+        let surface_sources = crate::lexicon::repository::surface_projection_sources(&current)
+            .map_err(surface_projection_error)?;
+        let surface_keys =
+            crate::lexicon::repository::surface_lock_keys([surface_sources.as_slice()]);
+        LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
             .await
-            .map_err(repository_error)?
+            .map_err(repository_error)?;
+        if current.archived_at.is_some() || current.published_revision.is_some() {
+            return Err(LexiconServiceError::EntryNotDeletable);
+        }
+        LexiconRepository::replace_surface_projection(
+            &mut transaction,
+            entry_id,
+            current.revision + 1,
+            crate::lexicon::repository::SurfaceContentScope::Draft,
+            None,
+            &surface_sources,
+            &[],
+        )
+        .await
+        .map_err(repository_error)?;
+        if !LexiconRepository::delete_never_published_entry(
+            &mut transaction,
+            actor_id,
+            request_id,
+            entry_id,
+            current.revision,
+        )
+        .await
+        .map_err(repository_error)?
         {
             return Err(LexiconServiceError::EntryNotDeletable);
         }
@@ -207,8 +227,7 @@ impl LexiconService {
         };
         let mut sorted = targets.clone();
         sorted.sort_by_key(|target| target.id);
-        let mut words_by_id = HashMap::new();
-        let mut affected = 0;
+        let mut pending = Vec::with_capacity(sorted.len());
         for target in sorted {
             let record = LexiconRepository::entry_by_id_for_update(&mut transaction, target.id)
                 .await
@@ -220,11 +239,44 @@ impl LexiconService {
                 TargetState::Archived => current.archived_at.is_some(),
                 TargetState::Active => current.archived_at.is_none(),
             };
+            if !already_target {
+                ensure_lifecycle_revision(&current, target.base_lifecycle_revision)?;
+            }
+            pending.push((target, current, already_target));
+        }
+
+        let surface_sets = pending
+            .iter()
+            .map(|(_, word, _)| {
+                crate::lexicon::repository::surface_projection_sources(word)
+                    .map_err(surface_projection_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let entry_ids = pending
+            .iter()
+            .map(|(_, word, _)| word.id)
+            .collect::<Vec<_>>();
+        let publication_sources =
+            LexiconRepository::current_publication_surface_sources(&mut transaction, &entry_ids)
+                .await
+                .map_err(repository_error)?;
+        let surface_keys = crate::lexicon::repository::surface_lock_keys(
+            surface_sets
+                .iter()
+                .map(Vec::as_slice)
+                .chain(std::iter::once(publication_sources.as_slice())),
+        );
+        LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
+            .await
+            .map_err(repository_error)?;
+
+        let mut words_by_id = HashMap::new();
+        let mut affected = 0;
+        for (_target, current, already_target) in pending {
             if already_target {
                 words_by_id.insert(current.id, current);
                 continue;
             }
-            ensure_lifecycle_revision(&current, target.base_lifecycle_revision)?;
             if target_state == TargetState::Archived {
                 let references = LexiconRepository::active_inbound_sense_refs(
                     &mut transaction,

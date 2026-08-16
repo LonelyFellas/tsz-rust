@@ -18,11 +18,14 @@ use crate::{
             EntryLifecycleInput, EntryPath, FormsImpactResponseV2, PreviewFormsImpactInputV2,
             PublishAdminWordV2Input, RelatedSearchQuery, RelatedSearchResponse, SaveFormsStepInput,
             SaveMeaningsStepInput, SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2,
+            SurfaceMatchPageV2, SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2,
             ValidateAdminWordV2Input,
         },
         impact_store::ImpactStore,
         repository::LexiconRepository,
         service::{LexiconService, LexiconServiceError},
+        surface_policy::SurfacePolicyStore,
+        surface_snapshot::SurfaceSnapshotStore,
     },
     request_id::RequestId,
     state::AppState,
@@ -37,13 +40,18 @@ pub use commands::{
     suggest_dialect_variants, validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_draft, restore, restore_batch};
-pub use query::{get, list, related_search, stats};
+pub use query::{get, list, related_search, stats, surface_match_snapshot_page};
 
 fn service(state: &AppState) -> LexiconService {
     LexiconService::new(
         LexiconRepository::new(state.pool.clone()),
         DetectionStore::new(state.redis.clone()),
         ImpactStore::new(state.redis.clone()),
+        SurfaceSnapshotStore::with_policy_prefix(
+            state.redis.clone(),
+            state.surface_policy_prefix.clone(),
+        ),
+        SurfacePolicyStore::with_prefix(state.redis.clone(), state.surface_policy_prefix.clone()),
     )
 }
 
@@ -90,6 +98,47 @@ fn map_error(error: LexiconServiceError) -> AppError {
         LexiconServiceError::DetectionExpired => {
             AppError::gone(ErrorCode::DetectionExpired, "detection expired")
         }
+        LexiconServiceError::SurfaceMatchAcknowledgementRequired(page) => AppError::conflict(
+            ErrorCode::SurfaceMatchAcknowledgementRequired,
+            None,
+            "surface match acknowledgement is required",
+        )
+        .with_meta(ProblemMeta {
+            surface_match_page: Some(*page),
+            ..ProblemMeta::default()
+        }),
+        LexiconServiceError::SurfaceMatchesChanged(page) => AppError::conflict(
+            ErrorCode::SurfaceMatchesChanged,
+            None,
+            "surface matches changed since confirmation",
+        )
+        .with_meta(ProblemMeta {
+            surface_match_page: Some(*page),
+            ..ProblemMeta::default()
+        }),
+        LexiconServiceError::SurfaceMatchSnapshotExpired => AppError::gone(
+            ErrorCode::SurfaceMatchSnapshotExpired,
+            "surface confirmation snapshot expired",
+        ),
+        LexiconServiceError::SurfacePolicyChanged(policy) => AppError::conflict(
+            ErrorCode::SurfacePolicyChanged,
+            None,
+            "surface policy changed since confirmation",
+        )
+        .with_meta(ProblemMeta {
+            current_policy_name: Some(policy.name),
+            current_policy_epoch: Some(policy.epoch),
+            ..ProblemMeta::default()
+        }),
+        LexiconServiceError::ExactHeadwordCreationTemporarilyDisabled(page) => AppError::conflict(
+            ErrorCode::ExactHeadwordCreationTemporarilyDisabled,
+            None,
+            "exact headword creation is temporarily disabled",
+        )
+        .with_meta(ProblemMeta {
+            surface_match_page: Some(*page),
+            ..ProblemMeta::default()
+        }),
         LexiconServiceError::DuplicateWord => AppError::conflict(
             ErrorCode::DuplicateWord,
             Some("headword"),
@@ -211,6 +260,16 @@ fn map_error(error: LexiconServiceError) -> AppError {
         LexiconServiceError::ImpactStore(error) => AppError::unavailable_with_source(
             ErrorCode::ServiceUnavailable,
             "impact confirmation service unavailable",
+            error,
+        ),
+        LexiconServiceError::SurfaceSnapshot(error) => AppError::unavailable_with_source(
+            ErrorCode::ServiceUnavailable,
+            "surface snapshot service unavailable",
+            error,
+        ),
+        LexiconServiceError::SurfacePolicy(error) => AppError::unavailable_with_source(
+            ErrorCode::ServiceUnavailable,
+            "surface policy service unavailable",
             error,
         ),
         LexiconServiceError::Repository(error) => AppError::internal(error),

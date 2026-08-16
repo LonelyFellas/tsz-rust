@@ -2,7 +2,7 @@ use super::*;
 
 // --- aggregate ---
 
-pub(super) fn entry_from_record(record: EntryRecord) -> Result<AdminWordV2, LexiconServiceError> {
+pub(crate) fn entry_from_record(record: EntryRecord) -> Result<AdminWordV2, LexiconServiceError> {
     let headwords = match record.headword_mode.as_str() {
         "unified" => WordHeadwordsV2::Unified {
             common: record.common_headword.ok_or_else(invariant_record)?,
@@ -339,7 +339,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?;
 
-        let (entry_kind, matched_dialect, builtin_dictionary, duplicate_keys) =
+        let (entry_kind, matched_dialect, builtin_dictionary, candidate_headwords) =
             if let Some(term) = term {
                 let entry_kind = parse_kind(&term.kind).unwrap_or_else(|| {
                     if normalized.display.contains(' ') {
@@ -356,7 +356,6 @@ impl LexiconService {
                 let (headwords, matched_dialect) = self
                     .detected_headwords(&term.term, &term.region_family, surface)
                     .await?;
-                let normalized_keys = normalized_headword_keys(&headwords)?;
                 let mapped_codes = map_dictionary_pos(&term.pos);
                 let catalog_parts = self
                     .repository
@@ -373,7 +372,7 @@ impl LexiconService {
                     Some(matched_dialect),
                     BuiltinDictionaryResultV2::Matched {
                         provider: provider.clone(),
-                        headwords,
+                        headwords: headwords.clone(),
                         suggested_forms: Box::new(suggested_forms),
                         suggested_meanings: Box::new(DraftMeaningsStepContent::default()),
                         suggested_frequency: None,
@@ -392,7 +391,7 @@ impl LexiconService {
                             frequency: None,
                         },
                     },
-                    normalized_keys,
+                    headwords,
                 )
             } else {
                 let entry_kind = if normalized.display.contains(' ') {
@@ -404,39 +403,79 @@ impl LexiconService {
                     entry_kind,
                     None,
                     BuiltinDictionaryResultV2::NotFound,
-                    vec![normalized.key.clone()],
+                    WordHeadwordsV2::Unified {
+                        common: normalized.display.clone(),
+                    },
                 )
             };
 
-        let duplicates = self
+        let detection_id = Uuid::now_v7();
+        let expires_at =
+            Utc::now() + Duration::from_std(DETECTION_TTL).expect("five minutes is valid");
+        let evidence = CreateDetectionEvidence {
+            detection_id,
+            expires_at,
+            request: request.clone(),
+            normalized_headword: normalized.key.clone(),
+            entry_kind,
+            matched_dialect,
+            builtin_dictionary: builtin_dictionary.clone(),
+            candidate_headwords: candidate_headwords.clone(),
+        };
+        let (matches, contexts) = self
+            .headword_surface_matches(&candidate_headwords, entry_kind, None)
+            .await?;
+        let legacy_keys = match &candidate_headwords {
+            WordHeadwordsV2::Unified { common } => {
+                vec![normalize_headword(common).map_err(map_headword_error)?.key]
+            }
+            WordHeadwordsV2::Distinguish { uk, us, .. } => vec![
+                normalize_headword(uk).map_err(map_headword_error)?.key,
+                normalize_headword(us).map_err(map_headword_error)?.key,
+            ],
+        };
+        let legacy = self
             .repository
-            .duplicates(entry_kind, &duplicate_keys)
+            .legacy_exact_duplicates(entry_kind, &legacy_keys)
             .await
-            .map_err(repository_error)?
-            .into_iter()
-            .map(|record| DuplicateWordMatchV2 {
-                word_id: record.entry_id,
-                headword: record.headword,
-                dialect: parse_dialect(&record.dialect).unwrap_or(Dialect::Common),
-                status: if record.is_archived {
-                    AdminWordStatus::Archived
-                } else if record.is_published {
-                    AdminWordStatus::Published
-                } else {
-                    AdminWordStatus::Draft
-                },
-            })
-            .collect::<Vec<_>>();
-        let smart_dictionary = if duplicates.is_empty() {
-            SmartDictionaryResultV2::Clear { duplicates }
+            .map_err(repository_error)?;
+        let has_unprojected_legacy_exact = has_unprojected_legacy_exact(&legacy, &matches);
+        let smart_dictionary = if has_unprojected_legacy_exact {
+            SmartDictionaryResultV2::Duplicate {
+                duplicates: legacy
+                    .into_iter()
+                    .map(|record| DuplicateWordMatchV2 {
+                        word_id: record.entry_id,
+                        headword: record.headword,
+                        dialect: parse_dialect(&record.dialect).unwrap_or(Dialect::Common),
+                        status: if record.is_archived {
+                            AdminWordStatus::Archived
+                        } else if record.is_published {
+                            AdminWordStatus::Published
+                        } else {
+                            AdminWordStatus::Draft
+                        },
+                    })
+                    .collect(),
+            }
+        } else if matches.is_empty() {
+            SmartDictionaryResultV2::Clear {
+                duplicates: Vec::new(),
+            }
         } else {
-            SmartDictionaryResultV2::Duplicate { duplicates }
+            let (_, snapshot) = self
+                .create_detection_surface_snapshot(actor_id, &evidence, matches, contexts, None)
+                .await?;
+            SmartDictionaryResultV2::Warning {
+                duplicates: Vec::new(),
+                surface_match_page: Box::new(snapshot.page),
+                matched_entry_contexts: Vec::new(),
+            }
         };
 
         let detection = DetectWordResponseV2 {
-            detection_id: Uuid::now_v7(),
-            expires_at: Utc::now()
-                + Duration::from_std(DETECTION_TTL).expect("five minutes is valid"),
+            detection_id,
+            expires_at,
             request,
             normalized_headword: normalized.key,
             entry_kind,
@@ -493,6 +532,12 @@ impl LexiconService {
             if existing.request_hash != request_hash {
                 return Err(LexiconServiceError::IdempotencyConflict);
             }
+            if existing.response_status >= 400 {
+                let failure: CreateIdempotentFailure =
+                    serde_json::from_value(existing.response_body).map_err(serialization_error)?;
+                transaction.commit().await.map_err(database_error)?;
+                return Err(failure.into_service_error());
+            }
             existing.resource_id.ok_or_else(|| {
                 LexiconServiceError::Repository(LexiconRepositoryError::Invariant(
                     "create idempotency record has no resource",
@@ -504,14 +549,123 @@ impl LexiconService {
             });
         }
 
-        let detection = self
-            .detections
-            .load(actor_id, input.detection_id)
+        // The durable consumption row is authoritative once a create command has
+        // committed. Same-key retries have already replayed above; every other
+        // reuse of the detection has stable gone/consumed semantics.
+        if LexiconRepository::consumed_detection(&mut transaction, actor_id, input.detection_id)
             .await
-            .map_err(LexiconServiceError::DetectionStore)?
-            .ok_or(LexiconServiceError::DetectionMismatch)?;
-        if detection.expires_at <= Utc::now() {
-            return Err(LexiconServiceError::DetectionExpired);
+            .map_err(repository_error)?
+            .is_some()
+        {
+            return persist_create_failure(
+                transaction,
+                actor_id,
+                idempotency_key,
+                &request_hash,
+                CreateIdempotentFailure::DetectionExpired,
+            )
+            .await;
+        }
+
+        let (mut evidence, recovered_confirmation) =
+            if let Some(token) = input.confirmed_surface_match_token.as_deref() {
+                // A terminal snapshot owner bundle deliberately outlives the short
+                // detection-store payload. Recover it only after the token, actor,
+                // command, owner context, TTL and policy epoch have been verified.
+                let confirmation = match self
+                    .surface_snapshots
+                    .verify_owner(
+                        token,
+                        &ExpectedSurfaceOwner {
+                            actor_id,
+                            command: SurfaceConsumptionCommand::CreateEntry,
+                            owner_context: input.detection_id.to_string(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(confirmation) => confirmation,
+                    Err(SurfaceSnapshotError::Expired) => {
+                        return persist_create_failure(
+                            transaction,
+                            actor_id,
+                            idempotency_key,
+                            &request_hash,
+                            CreateIdempotentFailure::SurfaceMatchSnapshotExpired,
+                        )
+                        .await;
+                    }
+                    Err(SurfaceSnapshotError::PolicyChanged(policy_name)) => {
+                        let policy = self
+                            .surface_policies
+                            .policy(policy_name)
+                            .await
+                            .map_err(LexiconServiceError::SurfacePolicy)?;
+                        return persist_create_failure(
+                            transaction,
+                            actor_id,
+                            idempotency_key,
+                            &request_hash,
+                            CreateIdempotentFailure::SurfacePolicyChanged { policy },
+                        )
+                        .await;
+                    }
+                    Err(SurfaceSnapshotError::BindingMismatch) => {
+                        return Err(LexiconServiceError::DetectionMismatch);
+                    }
+                    Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
+                };
+                let evidence: CreateDetectionEvidence =
+                    serde_json::from_value(confirmation.owner_bundle.clone())
+                        .map_err(serialization_error)?;
+                if evidence.detection_id != input.detection_id {
+                    return Err(LexiconServiceError::DetectionMismatch);
+                }
+                (evidence, Some(confirmation))
+            } else {
+                let detection = self
+                    .detections
+                    .load(actor_id, input.detection_id)
+                    .await
+                    .map_err(LexiconServiceError::DetectionStore)?
+                    .ok_or(LexiconServiceError::DetectionMismatch)?;
+                if detection.expires_at <= Utc::now() {
+                    return persist_create_failure(
+                        transaction,
+                        actor_id,
+                        idempotency_key,
+                        &request_hash,
+                        CreateIdempotentFailure::DetectionExpired,
+                    )
+                    .await;
+                }
+                if matches!(
+                    detection.smart_dictionary,
+                    SmartDictionaryResultV2::Duplicate { .. }
+                ) {
+                    return persist_create_failure(
+                        transaction,
+                        actor_id,
+                        idempotency_key,
+                        &request_hash,
+                        CreateIdempotentFailure::DuplicateWord,
+                    )
+                    .await;
+                }
+                (CreateDetectionEvidence::from_detection(&detection), None)
+            };
+        evidence.candidate_headwords = input.headwords.clone();
+        if let Some(confirmation) = &recovered_confirmation {
+            let owner_bundle = serde_json::to_value(&evidence).map_err(serialization_error)?;
+            if confirmation.binding.canonical_content_digest
+                != canonical_headwords_digest(&input.headwords)?
+                || confirmation.binding.owner_evidence_digest
+                    != surface_owner_bundle_digest(&owner_bundle).map_err(serialization_error)?
+                || confirmation.binding.normalization_version
+                    != crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION
+            {
+                return Err(LexiconServiceError::DetectionMismatch);
+            }
         }
         let (
             detected_headwords,
@@ -524,10 +678,9 @@ impl LexiconService {
             matched_dialect,
             builtin_status,
         ) = match (
-            &detection.builtin_dictionary,
-            &detection.smart_dictionary,
-            detection.entry_kind,
-            detection.matched_dialect,
+            &evidence.builtin_dictionary,
+            evidence.entry_kind,
+            evidence.matched_dialect,
         ) {
             (
                 BuiltinDictionaryResultV2::Matched {
@@ -539,7 +692,6 @@ impl LexiconService {
                     coverage,
                     provenance,
                 },
-                SmartDictionaryResultV2::Clear { .. },
                 EntryKind::Word | EntryKind::Phrase,
                 Some(matched_dialect),
             ) => (
@@ -553,17 +705,12 @@ impl LexiconService {
                 matched_dialect,
                 "matched",
             ),
-            (
-                BuiltinDictionaryResultV2::NotFound,
-                SmartDictionaryResultV2::Clear { .. },
-                EntryKind::Phrase,
-                None,
-            ) => {
+            (BuiltinDictionaryResultV2::NotFound, EntryKind::Phrase, None) => {
                 let WordHeadwordsV2::Unified { common } = &input.headwords else {
                     return Err(LexiconServiceError::DetectionMismatch);
                 };
                 if normalize_headword(common).map_err(map_headword_error)?.key
-                    != detection.normalized_headword
+                    != evidence.normalized_headword
                 {
                     return Err(LexiconServiceError::DetectionMismatch);
                 }
@@ -578,9 +725,6 @@ impl LexiconService {
                     Dialect::Common,
                     "not_found",
                 )
-            }
-            (_, SmartDictionaryResultV2::Duplicate { .. }, _, _) => {
-                return Err(LexiconServiceError::DuplicateWord);
             }
             _ => return Err(LexiconServiceError::DetectionMismatch),
         };
@@ -618,13 +762,15 @@ impl LexiconService {
         };
         let suggested_pos = forms.pos.iter().map(|part| part.pos.clone()).collect();
         let detection_snapshot = crate::lexicon::dto::WordDetectionSnapshotV2 {
-            detection_id: detection.detection_id,
-            request: detection.request.clone(),
-            normalized_headword: detection.normalized_headword.clone(),
-            entry_kind: detection.entry_kind,
+            detection_id: evidence.detection_id,
+            request: evidence.request.clone(),
+            normalized_headword: evidence.normalized_headword.clone(),
+            entry_kind: evidence.entry_kind,
             matched_dialect,
             builtin_dictionary_status: builtin_status.to_owned(),
-            smart_dictionary_status: "clear".to_owned(),
+            smart_dictionary: WordDetectionSnapshotSmartDictionaryV2::Clear {
+                surface_warning: None,
+            },
             headwords: detected_headwords,
             suggested_pos,
             dictionary_provider,
@@ -632,17 +778,17 @@ impl LexiconService {
             dictionary_provenance,
             detected_at: now,
         };
-        let word = AdminWordV2 {
+        let mut word = AdminWordV2 {
             schema_version: 2,
             id: word_id,
             language: "en".to_owned(),
-            kind: detection.entry_kind,
+            kind: evidence.entry_kind,
             status: AdminWordStatus::Draft,
             revision: 1,
             lifecycle_revision: 1,
             published_revision: None,
             has_unpublished_changes: false,
-            headwords: input.headwords,
+            headwords: input.headwords.clone(),
             frequency: suggested_frequency,
             detection_snapshot,
             forms,
@@ -656,6 +802,230 @@ impl LexiconService {
             archived_by: None,
             published_at: None,
         };
+        let surface_sources = crate::lexicon::repository::surface_projection_sources(&word)
+            .map_err(surface_projection_error)?;
+        let surface_keys =
+            crate::lexicon::repository::surface_lock_keys([surface_sources.as_slice()]);
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
+        LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
+            .await
+            .map_err(repository_error)?;
+        let (current_matches, current_contexts) = self
+            .headword_surface_matches_in_transaction(
+                &mut transaction,
+                &input.headwords,
+                word.kind,
+                None,
+            )
+            .await?;
+        let mut verified_surface = None;
+        if !current_matches.is_empty() {
+            let policy_name = surface_policy_name(&current_matches);
+            let policy = self
+                .surface_policies
+                .policy(policy_name)
+                .await
+                .map_err(LexiconServiceError::SurfacePolicy)?;
+            let owner_bundle = serde_json::to_value(&evidence).map_err(serialization_error)?;
+            let expected = ExpectedSurfaceConfirmation {
+                binding: SurfaceConfirmationBinding {
+                    actor_id,
+                    command: SurfaceConsumptionCommand::CreateEntry,
+                    owner_context: input.detection_id.to_string(),
+                    base_revision: None,
+                    canonical_content_digest: canonical_headwords_digest(&input.headwords)?,
+                    owner_evidence_digest: surface_owner_bundle_digest(&owner_bundle)
+                        .map_err(serialization_error)?,
+                    normalization_version:
+                        crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION,
+                    policy_name: policy.name,
+                    policy_epoch: policy.epoch,
+                },
+                current_policy: policy,
+            };
+
+            let Some(token) = input.confirmed_surface_match_token.as_deref() else {
+                let snapshot = match self
+                    .create_detection_surface_snapshot(
+                        actor_id,
+                        &evidence,
+                        current_matches,
+                        current_contexts,
+                        Some(policy),
+                    )
+                    .await
+                {
+                    Ok((_, snapshot)) => snapshot,
+                    Err(LexiconServiceError::SurfaceSnapshot(
+                        SurfaceSnapshotError::PolicyChanged(name),
+                    )) => {
+                        let current = self
+                            .surface_policies
+                            .policy(name)
+                            .await
+                            .map_err(LexiconServiceError::SurfacePolicy)?;
+                        return persist_create_failure(
+                            transaction,
+                            actor_id,
+                            idempotency_key,
+                            &request_hash,
+                            CreateIdempotentFailure::SurfacePolicyChanged { policy: current },
+                        )
+                        .await;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let failure = if policy.enabled {
+                    CreateIdempotentFailure::SurfaceMatchAcknowledgementRequired {
+                        page: Box::new(snapshot.page),
+                    }
+                } else {
+                    CreateIdempotentFailure::ExactHeadwordCreationTemporarilyDisabled {
+                        page: Box::new(snapshot.page),
+                    }
+                };
+                return persist_create_failure(
+                    transaction,
+                    actor_id,
+                    idempotency_key,
+                    &request_hash,
+                    failure,
+                )
+                .await;
+            };
+            let confirmation = match self.surface_snapshots.verify(token, &expected).await {
+                Ok(confirmation) => confirmation,
+                Err(SurfaceSnapshotError::Expired) => {
+                    return persist_create_failure(
+                        transaction,
+                        actor_id,
+                        idempotency_key,
+                        &request_hash,
+                        CreateIdempotentFailure::SurfaceMatchSnapshotExpired,
+                    )
+                    .await;
+                }
+                Err(SurfaceSnapshotError::PolicyChanged(name)) => {
+                    let current = self
+                        .surface_policies
+                        .policy(name)
+                        .await
+                        .map_err(LexiconServiceError::SurfacePolicy)?;
+                    return persist_create_failure(
+                        transaction,
+                        actor_id,
+                        idempotency_key,
+                        &request_hash,
+                        CreateIdempotentFailure::SurfacePolicyChanged { policy: current },
+                    )
+                    .await;
+                }
+                Err(SurfaceSnapshotError::BindingMismatch) => {
+                    let snapshot = match self
+                        .create_detection_surface_snapshot(
+                            actor_id,
+                            &evidence,
+                            current_matches,
+                            current_contexts,
+                            Some(policy),
+                        )
+                        .await
+                    {
+                        Ok((_, snapshot)) => snapshot,
+                        Err(LexiconServiceError::SurfaceSnapshot(
+                            SurfaceSnapshotError::PolicyChanged(name),
+                        )) => {
+                            let current = self
+                                .surface_policies
+                                .policy(name)
+                                .await
+                                .map_err(LexiconServiceError::SurfacePolicy)?;
+                            return persist_create_failure(
+                                transaction,
+                                actor_id,
+                                idempotency_key,
+                                &request_hash,
+                                CreateIdempotentFailure::SurfacePolicyChanged { policy: current },
+                            )
+                            .await;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    return persist_create_failure(
+                        transaction,
+                        actor_id,
+                        idempotency_key,
+                        &request_hash,
+                        CreateIdempotentFailure::SurfaceMatchesChanged {
+                            page: Box::new(snapshot.page),
+                        },
+                    )
+                    .await;
+                }
+                Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
+            };
+            let confirmed_ids = confirmation
+                .match_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>();
+            if current_matches
+                .iter()
+                .any(|item| !confirmed_ids.contains(item.match_id.as_str()))
+            {
+                let snapshot = match self
+                    .create_detection_surface_snapshot(
+                        actor_id,
+                        &evidence,
+                        current_matches,
+                        current_contexts,
+                        Some(policy),
+                    )
+                    .await
+                {
+                    Ok((_, snapshot)) => snapshot,
+                    Err(LexiconServiceError::SurfaceSnapshot(
+                        SurfaceSnapshotError::PolicyChanged(name),
+                    )) => {
+                        let current = self
+                            .surface_policies
+                            .policy(name)
+                            .await
+                            .map_err(LexiconServiceError::SurfacePolicy)?;
+                        return persist_create_failure(
+                            transaction,
+                            actor_id,
+                            idempotency_key,
+                            &request_hash,
+                            CreateIdempotentFailure::SurfacePolicyChanged { policy: current },
+                        )
+                        .await;
+                    }
+                    Err(error) => return Err(error),
+                };
+                return persist_create_failure(
+                    transaction,
+                    actor_id,
+                    idempotency_key,
+                    &request_hash,
+                    CreateIdempotentFailure::SurfaceMatchesChanged {
+                        page: Box::new(snapshot.page),
+                    },
+                )
+                .await;
+            }
+            word.detection_snapshot.smart_dictionary =
+                WordDetectionSnapshotSmartDictionaryV2::Warning {
+                    surface_warning: surface_warning_audit(
+                        &confirmation,
+                        &current_matches,
+                        actor_id,
+                    ),
+                };
+            verified_surface = Some(confirmation);
+        }
         if !LexiconRepository::consume_detection(
             &mut transaction,
             actor_id,
@@ -665,9 +1035,16 @@ impl LexiconService {
         .await
         .map_err(repository_error)?
         {
-            return Err(LexiconServiceError::DetectionMismatch);
+            return persist_create_failure(
+                transaction,
+                actor_id,
+                idempotency_key,
+                &request_hash,
+                CreateIdempotentFailure::DetectionExpired,
+            )
+            .await;
         }
-        LexiconRepository::insert_entry(
+        if let Err(error) = LexiconRepository::insert_entry(
             &mut transaction,
             &word,
             actor_id,
@@ -677,8 +1054,53 @@ impl LexiconService {
             &request_hash,
         )
         .await
+        {
+            if matches!(error, LexiconRepositoryError::DuplicateHeadword) {
+                transaction.rollback().await.map_err(database_error)?;
+                return persist_create_failure_after_rollback(
+                    self.repository.pool(),
+                    actor_id,
+                    idempotency_key,
+                    &request_hash,
+                    CreateIdempotentFailure::DuplicateWord,
+                )
+                .await;
+            }
+            return Err(repository_error(error));
+        }
+        if let (
+            Some(confirmation),
+            WordDetectionSnapshotSmartDictionaryV2::Warning { surface_warning },
+        ) = (&verified_surface, &word.detection_snapshot.smart_dictionary)
+        {
+            LexiconRepository::insert_surface_acknowledgement(
+                &mut transaction,
+                &word,
+                surface_warning,
+                &canonical_headwords_digest(&word.headwords)?,
+                &confirmation.match_ids,
+            )
+            .await
+            .map_err(repository_error)?;
+        }
+        LexiconRepository::replace_surface_projection(
+            &mut transaction,
+            word.id,
+            word.revision,
+            crate::lexicon::repository::SurfaceContentScope::Draft,
+            None,
+            &[],
+            &surface_sources,
+        )
+        .await
         .map_err(repository_error)?;
         transaction.commit().await.map_err(database_error)?;
+
+        if let Some(confirmation) = &verified_surface
+            && let Err(error) = self.surface_snapshots.remove_verified(confirmation).await
+        {
+            tracing::warn!(%error, snapshot_id = %confirmation.snapshot_id, "created lexicon entry but failed to remove surface confirmation");
+        }
 
         if let Err(error) = self.detections.remove(actor_id, input.detection_id).await {
             tracing::warn!(%error, detection_id = %input.detection_id, "created lexicon entry but failed to remove detection context");
@@ -688,6 +1110,676 @@ impl LexiconService {
 }
 
 // --- support ---
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CreateDetectionEvidence {
+    detection_id: Uuid,
+    expires_at: chrono::DateTime<Utc>,
+    request: DetectionRequestEcho,
+    normalized_headword: String,
+    entry_kind: EntryKind,
+    matched_dialect: Option<Dialect>,
+    builtin_dictionary: BuiltinDictionaryResultV2,
+    candidate_headwords: WordHeadwordsV2,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "failure", rename_all = "snake_case")]
+enum CreateIdempotentFailure {
+    DetectionExpired,
+    DuplicateWord,
+    SurfaceMatchAcknowledgementRequired { page: Box<SurfaceMatchPageV2> },
+    SurfaceMatchesChanged { page: Box<SurfaceMatchPageV2> },
+    SurfaceMatchSnapshotExpired,
+    SurfacePolicyChanged { policy: SurfaceCreationPolicy },
+    ExactHeadwordCreationTemporarilyDisabled { page: Box<SurfaceMatchPageV2> },
+}
+
+impl CreateIdempotentFailure {
+    const fn status(&self) -> i16 {
+        match self {
+            Self::DetectionExpired | Self::SurfaceMatchSnapshotExpired => 410,
+            Self::DuplicateWord
+            | Self::SurfaceMatchAcknowledgementRequired { .. }
+            | Self::SurfaceMatchesChanged { .. }
+            | Self::SurfacePolicyChanged { .. }
+            | Self::ExactHeadwordCreationTemporarilyDisabled { .. } => 409,
+        }
+    }
+
+    fn into_service_error(self) -> LexiconServiceError {
+        match self {
+            Self::DetectionExpired => LexiconServiceError::DetectionExpired,
+            Self::DuplicateWord => LexiconServiceError::DuplicateWord,
+            Self::SurfaceMatchAcknowledgementRequired { page } => {
+                LexiconServiceError::SurfaceMatchAcknowledgementRequired(page)
+            }
+            Self::SurfaceMatchesChanged { page } => {
+                LexiconServiceError::SurfaceMatchesChanged(page)
+            }
+            Self::SurfaceMatchSnapshotExpired => LexiconServiceError::SurfaceMatchSnapshotExpired,
+            Self::SurfacePolicyChanged { policy } => {
+                LexiconServiceError::SurfacePolicyChanged(policy)
+            }
+            Self::ExactHeadwordCreationTemporarilyDisabled { page } => {
+                LexiconServiceError::ExactHeadwordCreationTemporarilyDisabled(page)
+            }
+        }
+    }
+}
+
+async fn persist_create_failure(
+    mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+    actor_id: Uuid,
+    idempotency_key: Uuid,
+    request_hash: &[u8],
+    failure: CreateIdempotentFailure,
+) -> Result<AdminWordV2Envelope, LexiconServiceError> {
+    LexiconRepository::insert_create_idempotency_failure(
+        &mut transaction,
+        actor_id,
+        idempotency_key,
+        request_hash,
+        failure.status(),
+        serde_json::to_value(&failure).map_err(serialization_error)?,
+    )
+    .await
+    .map_err(repository_error)?;
+    transaction.commit().await.map_err(database_error)?;
+    Err(failure.into_service_error())
+}
+
+async fn persist_create_failure_after_rollback(
+    pool: &sqlx::PgPool,
+    actor_id: Uuid,
+    idempotency_key: Uuid,
+    request_hash: &[u8],
+    failure: CreateIdempotentFailure,
+) -> Result<AdminWordV2Envelope, LexiconServiceError> {
+    let mut transaction = pool.begin().await.map_err(database_error)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("{CREATE_SCOPE}:{actor_id}:{idempotency_key}"))
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_error)?;
+    if let Some(existing) =
+        LexiconRepository::idempotency(&mut transaction, CREATE_SCOPE, actor_id, idempotency_key)
+            .await
+            .map_err(repository_error)?
+    {
+        if existing.request_hash != request_hash {
+            return Err(LexiconServiceError::IdempotencyConflict);
+        }
+        if existing.response_status >= 400 {
+            let replay: CreateIdempotentFailure =
+                serde_json::from_value(existing.response_body).map_err(serialization_error)?;
+            transaction.commit().await.map_err(database_error)?;
+            return Err(replay.into_service_error());
+        }
+        transaction.commit().await.map_err(database_error)?;
+        return serde_json::from_value(existing.response_body).map_err(serialization_error);
+    }
+    persist_create_failure(
+        transaction,
+        actor_id,
+        idempotency_key,
+        request_hash,
+        failure,
+    )
+    .await
+}
+
+impl CreateDetectionEvidence {
+    fn from_detection(detection: &DetectWordResponseV2) -> Self {
+        let candidate_headwords = match &detection.builtin_dictionary {
+            BuiltinDictionaryResultV2::Matched { headwords, .. } => headwords.clone(),
+            BuiltinDictionaryResultV2::NotFound | BuiltinDictionaryResultV2::Unavailable { .. } => {
+                WordHeadwordsV2::Unified {
+                    common: detection.request.headword.clone(),
+                }
+            }
+        };
+        Self {
+            detection_id: detection.detection_id,
+            expires_at: detection.expires_at,
+            request: detection.request.clone(),
+            normalized_headword: detection.normalized_headword.clone(),
+            entry_kind: detection.entry_kind,
+            matched_dialect: detection.matched_dialect,
+            builtin_dictionary: detection.builtin_dictionary.clone(),
+            candidate_headwords,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HeadwordSurfaceCandidate {
+    candidate_ref: String,
+    surface: String,
+    normalized_surface: String,
+    dialect: Dialect,
+    entry_kind: EntryKind,
+    lookup_keys: Vec<crate::lexicon::model::SurfaceLookupKey>,
+}
+
+impl LexiconService {
+    async fn headword_surface_matches(
+        &self,
+        headwords: &WordHeadwordsV2,
+        entry_kind: EntryKind,
+        excluding_entry_id: Option<Uuid>,
+    ) -> Result<(Vec<LexiconSurfaceMatchV2>, Vec<MatchedEntryContextV2>), LexiconServiceError> {
+        let candidates = headword_surface_candidates(headwords, entry_kind)?;
+        let requested = candidates
+            .iter()
+            .flat_map(|candidate| candidate.lookup_keys.iter().cloned())
+            .collect::<Vec<_>>();
+        let sources = self
+            .repository
+            .surface_sources("en", &requested, excluding_entry_id)
+            .await
+            .map_err(repository_error)?;
+        let mut matches = BTreeMap::new();
+        for candidate in &candidates {
+            for source in sources.iter().filter(|source| {
+                source.normalized_surface == candidate.normalized_surface
+                    && candidate.lookup_keys.iter().any(|key| {
+                        key.dialect_scope == source.matched_dialect_scope
+                            && key.normalized_surface == source.normalized_surface
+                    })
+            }) {
+                let item = surface_match(candidate, source)?;
+                matches.entry(item.match_id.clone()).or_insert(item);
+            }
+        }
+        let matches = matches.into_values().collect::<Vec<_>>();
+        let contexts = self.surface_match_contexts(&matches).await?;
+        Ok((matches, contexts))
+    }
+
+    async fn surface_match_contexts(
+        &self,
+        matches: &[LexiconSurfaceMatchV2],
+    ) -> Result<Vec<MatchedEntryContextV2>, LexiconServiceError> {
+        let mut entry_ids = matches
+            .iter()
+            .map(|item| item.existing.word_id)
+            .collect::<Vec<_>>();
+        entry_ids.sort_unstable();
+        entry_ids.dedup();
+        let records = self
+            .repository
+            .surface_entry_contexts(&entry_ids)
+            .await
+            .map_err(repository_error)?;
+        let inbound = self
+            .repository
+            .surface_inbound_relations(&entry_ids)
+            .await
+            .map_err(repository_error)?;
+
+        let mut relation_summaries = HashMap::<Uuid, RelationSummaryBuilder>::new();
+        for reference in inbound {
+            let source: AdminWordV2 =
+                serde_json::from_value(reference.source_snapshot).map_err(serialization_error)?;
+            let Some(relation) = relation_type_for_node(&source, reference.source_node_id) else {
+                continue;
+            };
+            relation_summaries
+                .entry(reference.target_entry_id)
+                .or_default()
+                .push(RelationReferencePreviewV2 {
+                    source_word_id: reference.source_entry_id,
+                    source_headword: published_word_headword(&source),
+                    relation,
+                });
+        }
+
+        records
+            .into_iter()
+            .map(|record| {
+                let forms: DraftFormsStepContent =
+                    serde_json::from_value(record.forms).map_err(serialization_error)?;
+                let meanings: DraftMeaningsStepContent =
+                    serde_json::from_value(record.meanings).map_err(serialization_error)?;
+                let mut pos_labels = forms
+                    .pos
+                    .iter()
+                    .map(|pos| pos.pos.clone())
+                    .collect::<Vec<_>>();
+                pos_labels.sort();
+                pos_labels.dedup();
+                pos_labels.truncate(5);
+                let mut gloss_previews = meanings
+                    .pos
+                    .iter()
+                    .flat_map(|pos| pos.senses.iter())
+                    .map(published_sense_gloss)
+                    .filter(|gloss| !gloss.is_empty())
+                    .take(5)
+                    .collect::<Vec<_>>();
+                gloss_previews.dedup();
+                Ok(MatchedEntryContextV2 {
+                    word_id: record.entry_id,
+                    pos_labels,
+                    gloss_previews,
+                    updated_at: record.updated_at,
+                    inbound_relations: relation_summaries
+                        .remove(&record.entry_id)
+                        .unwrap_or_default()
+                        .finish(),
+                })
+            })
+            .collect()
+    }
+
+    async fn headword_surface_matches_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        headwords: &WordHeadwordsV2,
+        entry_kind: EntryKind,
+        excluding_entry_id: Option<Uuid>,
+    ) -> Result<(Vec<LexiconSurfaceMatchV2>, Vec<MatchedEntryContextV2>), LexiconServiceError> {
+        let candidates = headword_surface_candidates(headwords, entry_kind)?;
+        let requested = candidates
+            .iter()
+            .flat_map(|candidate| candidate.lookup_keys.iter().cloned())
+            .collect::<Vec<_>>();
+        let sources = LexiconRepository::surface_sources_in_transaction(
+            tx,
+            "en",
+            &requested,
+            excluding_entry_id,
+        )
+        .await
+        .map_err(repository_error)?;
+        let mut matches = BTreeMap::new();
+        for candidate in &candidates {
+            for source in sources.iter().filter(|source| {
+                source.normalized_surface == candidate.normalized_surface
+                    && candidate.lookup_keys.iter().any(|key| {
+                        key.dialect_scope == source.matched_dialect_scope
+                            && key.normalized_surface == source.normalized_surface
+                    })
+            }) {
+                let item = surface_match(candidate, source)?;
+                matches.entry(item.match_id.clone()).or_insert(item);
+            }
+        }
+        let matches = matches.into_values().collect::<Vec<_>>();
+        let mut entry_ids = matches
+            .iter()
+            .map(|item| item.existing.word_id)
+            .collect::<Vec<_>>();
+        entry_ids.sort_unstable();
+        entry_ids.dedup();
+        let records = LexiconRepository::surface_entry_contexts_in_transaction(tx, &entry_ids)
+            .await
+            .map_err(repository_error)?;
+        let inbound = LexiconRepository::surface_inbound_relations_in_transaction(tx, &entry_ids)
+            .await
+            .map_err(repository_error)?;
+        let contexts = surface_contexts_from_records(records, inbound)?;
+        Ok((matches, contexts))
+    }
+
+    async fn create_detection_surface_snapshot(
+        &self,
+        actor_id: Uuid,
+        evidence: &CreateDetectionEvidence,
+        items: Vec<LexiconSurfaceMatchV2>,
+        contexts: Vec<MatchedEntryContextV2>,
+        locked_policy: Option<SurfaceCreationPolicy>,
+    ) -> Result<(SurfaceCreationPolicy, CreatedSurfaceSnapshot), LexiconServiceError> {
+        let policy_name = surface_policy_name(&items);
+        let policy = match locked_policy {
+            Some(policy) if policy.name == policy_name => policy,
+            Some(_) => return Err(invariant_record()),
+            None => self
+                .surface_policies
+                .policy(policy_name)
+                .await
+                .map_err(LexiconServiceError::SurfacePolicy)?,
+        };
+        if !policy.enabled && policy.name != SurfacePolicyNameV2::AllowNewExactHeadwordEntries {
+            return Err(LexiconServiceError::Repository(
+                LexiconRepositoryError::Invariant("ordinary surface warning policy is disabled"),
+            ));
+        }
+        let owner_bundle = serde_json::to_value(evidence).map_err(serialization_error)?;
+        let binding = SurfaceConfirmationBinding {
+            actor_id,
+            command: SurfaceConsumptionCommand::CreateEntry,
+            owner_context: evidence.detection_id.to_string(),
+            base_revision: None,
+            canonical_content_digest: canonical_headwords_digest(&evidence.candidate_headwords)?,
+            owner_evidence_digest: surface_owner_bundle_digest(&owner_bundle)
+                .map_err(serialization_error)?,
+            normalization_version: crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION,
+            policy_name: policy.name,
+            policy_epoch: policy.epoch,
+        };
+        let snapshot = self
+            .surface_snapshots
+            .create(CreateSurfaceSnapshot {
+                binding,
+                policy_enabled: policy.enabled,
+                policy_block_code: (!policy.enabled)
+                    .then_some(SurfacePolicyBlockCodeV2::ExactHeadwordCreationTemporarilyDisabled),
+                items,
+                matched_entry_contexts: contexts,
+                confirmation_reasons: vec![
+                    SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches,
+                ],
+                owner_bundle,
+                page_size: DEFAULT_SURFACE_PAGE_SIZE,
+            })
+            .await
+            .map_err(LexiconServiceError::SurfaceSnapshot)?;
+        Ok((policy, snapshot))
+    }
+}
+
+fn surface_contexts_from_records(
+    records: Vec<crate::lexicon::model::SurfaceEntryContextRecord>,
+    inbound: Vec<crate::lexicon::model::SurfaceInboundRelationRecord>,
+) -> Result<Vec<MatchedEntryContextV2>, LexiconServiceError> {
+    let mut relation_summaries = HashMap::<Uuid, RelationSummaryBuilder>::new();
+    for reference in inbound {
+        let source: AdminWordV2 =
+            serde_json::from_value(reference.source_snapshot).map_err(serialization_error)?;
+        let Some(relation) = relation_type_for_node(&source, reference.source_node_id) else {
+            continue;
+        };
+        relation_summaries
+            .entry(reference.target_entry_id)
+            .or_default()
+            .push(RelationReferencePreviewV2 {
+                source_word_id: reference.source_entry_id,
+                source_headword: published_word_headword(&source),
+                relation,
+            });
+    }
+    records
+        .into_iter()
+        .map(|record| {
+            let forms: DraftFormsStepContent =
+                serde_json::from_value(record.forms).map_err(serialization_error)?;
+            let meanings: DraftMeaningsStepContent =
+                serde_json::from_value(record.meanings).map_err(serialization_error)?;
+            let mut pos_labels = forms
+                .pos
+                .iter()
+                .map(|pos| pos.pos.clone())
+                .collect::<Vec<_>>();
+            pos_labels.sort();
+            pos_labels.dedup();
+            pos_labels.truncate(5);
+            let mut gloss_previews = meanings
+                .pos
+                .iter()
+                .flat_map(|pos| pos.senses.iter())
+                .map(published_sense_gloss)
+                .filter(|gloss| !gloss.is_empty())
+                .take(5)
+                .collect::<Vec<_>>();
+            gloss_previews.dedup();
+            Ok(MatchedEntryContextV2 {
+                word_id: record.entry_id,
+                pos_labels,
+                gloss_previews,
+                updated_at: record.updated_at,
+                inbound_relations: relation_summaries
+                    .remove(&record.entry_id)
+                    .unwrap_or_default()
+                    .finish(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct RelationSummaryBuilder {
+    synonym: u32,
+    antonym: u32,
+    derivative: u32,
+    total: u32,
+    previews: Vec<RelationReferencePreviewV2>,
+}
+
+impl RelationSummaryBuilder {
+    fn push(&mut self, preview: RelationReferencePreviewV2) {
+        self.total = self.total.saturating_add(1);
+        match preview.relation {
+            RelationTypeV2::Synonym => self.synonym = self.synonym.saturating_add(1),
+            RelationTypeV2::Antonym => self.antonym = self.antonym.saturating_add(1),
+            RelationTypeV2::Derivative => self.derivative = self.derivative.saturating_add(1),
+        }
+        if self.previews.len() < 5 {
+            self.previews.push(preview);
+        }
+    }
+
+    fn finish(self) -> RelationReferenceSummaryV2 {
+        RelationReferenceSummaryV2 {
+            total: self.total,
+            by_type: RelationReferenceCountsV2 {
+                synonym: self.synonym,
+                antonym: self.antonym,
+                derivative: self.derivative,
+            },
+            truncated: self.total as usize > self.previews.len(),
+            previews: self.previews,
+        }
+    }
+}
+
+fn headword_surface_candidates(
+    headwords: &WordHeadwordsV2,
+    entry_kind: EntryKind,
+) -> Result<Vec<HeadwordSurfaceCandidate>, LexiconServiceError> {
+    let values = match headwords {
+        WordHeadwordsV2::Unified { common } => vec![("headword:common", common, Dialect::Common)],
+        WordHeadwordsV2::Distinguish { uk, us, .. } => vec![
+            ("headword:uk", uk, Dialect::Uk),
+            ("headword:us", us, Dialect::Us),
+        ],
+    };
+    values
+        .into_iter()
+        .map(|(candidate_ref, surface, dialect)| {
+            let scopes = crate::lexicon::surface::normalize_surface_scopes(surface, dialect)
+                .map_err(surface_projection_error)?;
+            let normalized_surface = scopes
+                .first()
+                .ok_or_else(invariant_record)?
+                .normalized_surface
+                .clone();
+            Ok(HeadwordSurfaceCandidate {
+                candidate_ref: candidate_ref.to_owned(),
+                surface: scopes[0].surface.clone(),
+                normalized_surface,
+                dialect,
+                entry_kind,
+                lookup_keys: scopes
+                    .into_iter()
+                    .map(|scope| crate::lexicon::model::SurfaceLookupKey {
+                        dialect_scope: scope.dialect_scope.to_owned(),
+                        normalized_surface: scope.normalized_surface,
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn surface_match(
+    candidate: &HeadwordSurfaceCandidate,
+    source: &crate::lexicon::model::SurfaceSourceRecord,
+) -> Result<LexiconSurfaceMatchV2, LexiconServiceError> {
+    let existing_kind = parse_kind(&source.entry_kind).ok_or_else(invariant_record)?;
+    let existing_status = parse_surface_status(&source.lifecycle_status)?;
+    let existing_dialect = parse_dialect(&source.dialect).ok_or_else(invariant_record)?;
+    let content_scope = match source.content_scope.as_str() {
+        "draft" => SurfaceContentScopeV2::Draft,
+        "current_publication" => SurfaceContentScopeV2::CurrentPublication,
+        _ => return Err(invariant_record()),
+    };
+    let existing_source = match source.source_kind.as_str() {
+        "headword" => ExistingSurfaceSourceV2::Headword {
+            source_id: source.source_id.clone(),
+            content_scope,
+            surface: source.surface.clone(),
+            dialect: existing_dialect,
+        },
+        "form" => ExistingSurfaceSourceV2::Form {
+            source_id: source.source_id.clone(),
+            source_node_id: source.source_node_id.ok_or_else(invariant_record)?,
+            content_scope,
+            surface: source.surface.clone(),
+            dialect: existing_dialect,
+            pos_id: source.pos_id.ok_or_else(invariant_record)?,
+            pos: source.pos.clone().ok_or_else(invariant_record)?,
+            form_type: WordFormTypeV2::try_from(
+                source.form_type.as_deref().ok_or_else(invariant_record)?,
+            )
+            .map_err(|()| invariant_record())?,
+        },
+        _ => return Err(invariant_record()),
+    };
+    let category = if source.source_kind == "form" {
+        SurfaceMatchCategoryV2::HeadwordForm
+    } else if existing_kind == candidate.entry_kind {
+        SurfaceMatchCategoryV2::ExactHeadword
+    } else {
+        SurfaceMatchCategoryV2::CrossKindHeadword
+    };
+    let candidate_wire = SurfaceMatchCandidateV2::Headword {
+        candidate_ref: candidate.candidate_ref.clone(),
+        candidate_word_id: None,
+        surface: candidate.surface.clone(),
+        normalized_surface: candidate.normalized_surface.clone(),
+        dialect: candidate.dialect,
+        entry_kind: candidate.entry_kind,
+    };
+    let existing = ExistingSurfaceMatchV2 {
+        word_id: source.entry_id,
+        headword: source.entry_headword.clone(),
+        kind: existing_kind,
+        status: existing_status,
+        source: existing_source,
+    };
+    let match_id = crate::platform::hash_token(
+        &serde_json::to_string(&serde_json::json!({
+            "candidate_ref": candidate.candidate_ref,
+            "candidate_surface": candidate.normalized_surface,
+            "candidate_dialect": candidate.dialect,
+            "existing": existing,
+            "normalization_version": source.normalization_version,
+        }))
+        .map_err(serialization_error)?,
+    );
+    Ok(LexiconSurfaceMatchV2 {
+        match_id,
+        match_category: category,
+        severity: SurfaceMatchSeverityV2::Warning,
+        attention_level: if category == SurfaceMatchCategoryV2::ExactHeadword {
+            SurfaceAttentionLevelV2::High
+        } else {
+            SurfaceAttentionLevelV2::Normal
+        },
+        can_continue: SurfaceCanContinueTrue,
+        confirmation_reasons: vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches],
+        candidate: candidate_wire,
+        existing,
+    })
+}
+
+fn parse_surface_status(value: &str) -> Result<AdminWordStatus, LexiconServiceError> {
+    match value {
+        "draft" => Ok(AdminWordStatus::Draft),
+        "published" => Ok(AdminWordStatus::Published),
+        "archived" => Ok(AdminWordStatus::Archived),
+        _ => Err(invariant_record()),
+    }
+}
+
+fn surface_policy_name(items: &[LexiconSurfaceMatchV2]) -> SurfacePolicyNameV2 {
+    if items
+        .iter()
+        .any(|item| item.match_category == SurfaceMatchCategoryV2::ExactHeadword)
+    {
+        SurfacePolicyNameV2::AllowNewExactHeadwordEntries
+    } else {
+        SurfacePolicyNameV2::SurfaceWarningAcknowledgement
+    }
+}
+
+fn has_unprojected_legacy_exact(
+    legacy: &[crate::lexicon::model::DuplicateRecord],
+    matches: &[LexiconSurfaceMatchV2],
+) -> bool {
+    let projected_entry_ids = matches
+        .iter()
+        .filter(|item| item.match_category == SurfaceMatchCategoryV2::ExactHeadword)
+        .map(|item| item.existing.word_id)
+        .collect::<std::collections::HashSet<_>>();
+    legacy
+        .iter()
+        .any(|record| !projected_entry_ids.contains(&record.entry_id))
+}
+
+fn canonical_headwords_digest(headwords: &WordHeadwordsV2) -> Result<String, LexiconServiceError> {
+    Ok(crate::platform::hash_token(
+        &serde_json::to_string(headwords).map_err(serialization_error)?,
+    ))
+}
+
+fn relation_type_for_node(word: &AdminWordV2, node_id: Uuid) -> Option<RelationTypeV2> {
+    let relation = word
+        .meanings
+        .pos
+        .iter()
+        .flat_map(|pos| pos.senses.iter())
+        .flat_map(|sense| sense.relations.iter())
+        .find(|relation| relation.id == node_id)?;
+    match relation.relation.as_str() {
+        "synonym" => Some(RelationTypeV2::Synonym),
+        "antonym" => Some(RelationTypeV2::Antonym),
+        "derivative" => Some(RelationTypeV2::Derivative),
+        _ => None,
+    }
+}
+
+fn surface_warning_audit(
+    confirmation: &VerifiedSurfaceConfirmation,
+    current_matches: &[LexiconSurfaceMatchV2],
+    actor_id: Uuid,
+) -> DetectionSurfaceWarningAuditV2 {
+    let mut preview = current_matches
+        .iter()
+        .take(5)
+        .map(|item| DetectionSurfaceMatchPreviewV2 {
+            match_id: item.match_id.clone(),
+            match_category: item.match_category,
+            existing_word_id: item.existing.word_id,
+            existing_headword: item.existing.headword.clone(),
+            existing_status: item.existing.status,
+        })
+        .collect::<Vec<_>>();
+    preview.sort_by(|left, right| left.match_id.cmp(&right.match_id));
+    DetectionSurfaceWarningAuditV2 {
+        total: confirmation.match_ids.len() as u64,
+        match_digest: confirmation.match_digest.clone(),
+        acknowledged: AcknowledgedTrue,
+        acknowledged_at: Utc::now(),
+        acknowledged_by: actor_id,
+        policy_name: confirmation.binding.policy_name,
+        policy_epoch: confirmation.binding.policy_epoch,
+        truncated: confirmation.match_ids.len() > preview.len(),
+        preview,
+    }
+}
 
 impl LexiconService {
     pub(super) async fn detected_headwords(
@@ -854,6 +1946,37 @@ impl LexiconService {
 mod tests {
     use super::*;
 
+    fn source(source_kind: &str, entry_kind: &str) -> crate::lexicon::model::SurfaceSourceRecord {
+        let is_form = source_kind == "form";
+        crate::lexicon::model::SurfaceSourceRecord {
+            matched_dialect_scope: "uk".to_owned(),
+            entry_id: Uuid::now_v7(),
+            entry_headword: "workspace".to_owned(),
+            entry_headword_dialect: "common".to_owned(),
+            entry_kind: entry_kind.to_owned(),
+            lifecycle_status: "draft".to_owned(),
+            source_id: if is_form {
+                "form:plural"
+            } else {
+                "headword:common"
+            }
+            .to_owned(),
+            source_kind: source_kind.to_owned(),
+            source_node_id: is_form.then(Uuid::now_v7),
+            content_scope: "draft".to_owned(),
+            publication_id: None,
+            surface: if is_form { "workspaces" } else { "workspace" }.to_owned(),
+            normalized_surface: if is_form { "workspaces" } else { "workspace" }.to_owned(),
+            dialect: "common".to_owned(),
+            normalization_version: 1,
+            source_revision: 1,
+            event_offset: 1,
+            pos_id: is_form.then(Uuid::now_v7),
+            pos: is_form.then(|| "noun".to_owned()),
+            form_type: is_form.then(|| "plural".to_owned()),
+        }
+    }
+
     #[test]
     fn suggested_forms_only_create_groups_for_parts_with_derived_forms() {
         let parts = [
@@ -875,5 +1998,102 @@ mod tests {
 
         assert_eq!(forms.pos[0].form_groups.len(), 1);
         assert!(forms.pos[1].form_groups.is_empty());
+    }
+
+    #[test]
+    fn detection_classifies_exact_cross_kind_and_explicit_form_surfaces_as_warnings() {
+        let exact_candidate = headword_surface_candidates(
+            &WordHeadwordsV2::Unified {
+                common: "workspace".to_owned(),
+            },
+            EntryKind::Word,
+        )
+        .unwrap()
+        .remove(0);
+        let exact = surface_match(&exact_candidate, &source("headword", "word")).unwrap();
+        assert_eq!(exact.match_category, SurfaceMatchCategoryV2::ExactHeadword);
+        assert_eq!(exact.attention_level, SurfaceAttentionLevelV2::High);
+        assert_eq!(exact.can_continue, SurfaceCanContinueTrue);
+
+        let cross_kind = surface_match(&exact_candidate, &source("headword", "phrase")).unwrap();
+        assert_eq!(
+            cross_kind.match_category,
+            SurfaceMatchCategoryV2::CrossKindHeadword
+        );
+
+        let form_candidate = headword_surface_candidates(
+            &WordHeadwordsV2::Unified {
+                common: "workspaces".to_owned(),
+            },
+            EntryKind::Word,
+        )
+        .unwrap()
+        .remove(0);
+        let form = surface_match(&form_candidate, &source("form", "word")).unwrap();
+        assert_eq!(form.match_category, SurfaceMatchCategoryV2::HeadwordForm);
+        assert_eq!(form.attention_level, SurfaceAttentionLevelV2::Normal);
+        assert_eq!(form.can_continue, SurfaceCanContinueTrue);
+        assert!(matches!(
+            form.existing.source,
+            ExistingSurfaceSourceV2::Form { .. }
+        ));
+
+        let mut base_source = source("form", "word");
+        base_source.form_type = Some("base".to_owned());
+        let base = surface_match(&exact_candidate, &base_source).unwrap();
+        let ExistingSurfaceSourceV2::Form { form_type, .. } = base.existing.source else {
+            panic!("base slot must remain a form source");
+        };
+        assert_eq!(form_type, WordFormTypeV2::Base);
+        assert_eq!(serde_json::to_value(form_type).unwrap(), "base");
+    }
+
+    #[test]
+    fn mixed_parity_falls_back_when_any_legacy_exact_entry_is_not_projected() {
+        let candidate = headword_surface_candidates(
+            &WordHeadwordsV2::Unified {
+                common: "workspace".to_owned(),
+            },
+            EntryKind::Word,
+        )
+        .unwrap()
+        .remove(0);
+        let projected_source = source("headword", "word");
+        let projected_id = projected_source.entry_id;
+        let projected = surface_match(&candidate, &projected_source).unwrap();
+        let legacy = vec![
+            crate::lexicon::model::DuplicateRecord {
+                entry_id: projected_id,
+                headword: "workspace".to_owned(),
+                dialect: "common".to_owned(),
+                is_archived: false,
+                is_published: false,
+            },
+            crate::lexicon::model::DuplicateRecord {
+                entry_id: Uuid::now_v7(),
+                headword: "workspace".to_owned(),
+                dialect: "common".to_owned(),
+                is_archived: false,
+                is_published: true,
+            },
+        ];
+
+        assert!(has_unprojected_legacy_exact(&legacy, &[projected]));
+        let fully_projected = vec![legacy[0].clone()];
+        let projected_again = surface_match(&candidate, &projected_source).unwrap();
+        assert!(!has_unprojected_legacy_exact(
+            &fully_projected,
+            &[projected_again]
+        ));
+
+        let mut form_only_source = source("form", "word");
+        form_only_source.entry_id = projected_id;
+        let form_only = surface_match(&candidate, &form_only_source).unwrap();
+        assert_eq!(form_only.existing.word_id, projected_id);
+        assert_eq!(
+            form_only.match_category,
+            SurfaceMatchCategoryV2::HeadwordForm
+        );
+        assert!(has_unprojected_legacy_exact(&fully_projected, &[form_only]));
     }
 }
