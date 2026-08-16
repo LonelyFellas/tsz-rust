@@ -9,7 +9,7 @@
 
 | 依赖 | 说明 |
 |------|------|
-| Postgres 16 | 生产库。可本机装、Docker，或用托管（RDS/云数据库）。**不要用** compose 里的 `postgres/postgres` dev 凭据。 |
+| PostgreSQL | 生产库。可本机装、Docker，或用托管（RDS/云数据库）；服务端大版本以实际部署为准。**不要用** compose 里的 `postgres/postgres` dev 凭据。 |
 | Redis 7 | OTP / 限流。数据到期即弃、无需持久化。 |
 | （构建期）Rust | 若在服务器上构建则需 rustup；也可本地/CI 交叉编译后只传二进制。 |
 
@@ -125,6 +125,8 @@ curl localhost:8383/readyz         # {"status":"ready"} 就绪（探 DB+Redis）
 ```
 
 **升级流程**：`systemctl stop` → 覆盖二进制 → `systemctl start`。新迁移会在启动时自动应用（多实例同时启动有 advisory lock 兜底，只一个真正执行）。
+
+涉及数据库写入前，先按 [PostgreSQL 备份与恢复验证](postgresql-backup-restore.md) 创建并验证当前恢复点。客户端主版本不得低于数据库服务端主版本。
 
 ## 5. TLS / 反向代理（必须）
 
