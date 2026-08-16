@@ -160,7 +160,7 @@ pub async fn related_search(
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
     let response = service(&state)
-        .related_search(query)
+        .related_search(auth.subject, query)
         .await
         .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))

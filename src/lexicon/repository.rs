@@ -14,8 +14,8 @@ use crate::{
             DictionaryTermRecord, DuplicateRecord, EntryRecord, FormsSurfaceAcknowledgementRecord,
             IdempotencyRecord, InboundSenseReferenceRecord, ListEntryRecord, ListFilter,
             NewPublicationSenseReference, NodeIdentityRecord, RegionSurfaceRecord,
-            RelatedSearchRecord, ResolvedSenseTargetRecord, SenseTargetKey, StatsRecord,
-            SurfaceEntryContextRecord, SurfaceInboundRelationRecord, SurfaceLookupKey,
+            RelatedSearchFilter, RelatedSearchRecord, ResolvedSenseTargetRecord, SenseTargetKey,
+            StatsRecord, SurfaceEntryContextRecord, SurfaceInboundRelationRecord, SurfaceLookupKey,
             SurfaceSourceRecord,
         },
         node_identity::{

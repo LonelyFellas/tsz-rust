@@ -219,6 +219,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         pool,
         token_manager,
         admin_token_manager,
+        related_search_cursor_key: Arc::from(config.admin_jwt_secret.as_bytes()),
         refresh_ttl: Duration::days(config.refresh_ttl_days as i64),
         admin_refresh_ttl: Duration::days(config.admin_refresh_ttl_days as i64),
         redis,

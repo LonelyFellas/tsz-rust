@@ -24,7 +24,8 @@ use crate::lexicon::{
         ExistingSurfaceMatchV2, ExistingSurfaceSourceV2, FormsImpactItemV2, FormsImpactNodeType,
         FormsImpactResponseV2, GrammarStructureV2, GrammarVariantV2, LexiconSurfaceMatchV2,
         MatchedEntryContextV2, PersistedWordStep, PreviewFormsImpactInputV2, PronunciationStyle,
-        PublishAdminWordV2Input, RelatedSearchQuery, RelatedSearchResponse, RelatedWordResult,
+        PublishAdminWordV2Input, RelatedSearchLegacyResponse, RelatedSearchMatchMode,
+        RelatedSearchQuery, RelatedSearchResponse, RelatedSearchV2Response, RelatedWordResult,
         RelatedWordSense, RelationReferenceCountsV2, RelationReferencePreviewV2,
         RelationReferenceSummaryV2, RelationTypeV2, RichText, SaveFormsStepInput,
         SaveMeaningsStepInput, SenseGroupV2, SmartDictionaryResultV2, SourceDialect,
@@ -41,8 +42,8 @@ use crate::lexicon::{
     model::{
         CatalogPartRecord, DictionaryCandidateRecord, EntryRecord,
         FormsSurfaceAcknowledgementRecord, ListFilter, NewPublicationSenseReference,
-        PublicationSenseReferenceKind, RegionSurfaceRecord, ResolvedSenseTargetRecord,
-        SenseTargetKey,
+        PublicationSenseReferenceKind, RegionSurfaceRecord, RelatedSearchFilter,
+        ResolvedSenseTargetRecord, SenseTargetKey,
     },
     normalization::{HeadwordNormalizationError, normalize_headword, sha256_json},
     provenance::headword_origin,
@@ -156,6 +157,7 @@ pub struct LexiconService {
     impacts: ImpactStore,
     surface_snapshots: SurfaceSnapshotStore,
     surface_policies: SurfacePolicyStore,
+    related_search_cursor_key: std::sync::Arc<[u8]>,
 }
 
 impl LexiconService {
@@ -165,6 +167,7 @@ impl LexiconService {
         impacts: ImpactStore,
         surface_snapshots: SurfaceSnapshotStore,
         surface_policies: SurfacePolicyStore,
+        related_search_cursor_key: std::sync::Arc<[u8]>,
     ) -> Self {
         Self {
             repository,
@@ -172,6 +175,7 @@ impl LexiconService {
             impacts,
             surface_snapshots,
             surface_policies,
+            related_search_cursor_key,
         }
     }
 }

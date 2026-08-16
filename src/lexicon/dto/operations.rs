@@ -725,8 +725,20 @@ pub struct AdminWordListQuery {
 pub struct RelatedSearchQuery {
     pub q: Option<String>,
     pub kind: Option<EntryKind>,
+    pub match_mode: Option<RelatedSearchMatchMode>,
+    pub exclude_exact: Option<bool>,
+    #[param(minimum = 1, maximum = 100)]
+    pub page_size: Option<u32>,
     #[param(default = 20, minimum = 1, maximum = 100)]
     pub limit: Option<u32>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelatedSearchMatchMode {
+    Exact,
+    Contains,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
@@ -740,12 +752,31 @@ pub struct RelatedWordResult {
     pub word_id: Uuid,
     pub headword: String,
     pub kind: EntryKind,
+    pub dialects: Vec<Dialect>,
+    pub pos_labels: Vec<String>,
     pub senses: Vec<RelatedWordSense>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
-pub struct RelatedSearchResponse {
+#[serde(deny_unknown_fields)]
+pub struct RelatedSearchLegacyResponse {
     pub results: Vec<RelatedWordResult>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RelatedSearchV2Response {
+    pub results: Vec<RelatedWordResult>,
+    pub total: u64,
+    #[schema(required = true, nullable = true)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RelatedSearchResponse {
+    Legacy(RelatedSearchLegacyResponse),
+    V2(RelatedSearchV2Response),
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

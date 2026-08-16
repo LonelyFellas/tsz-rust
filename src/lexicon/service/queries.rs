@@ -1,4 +1,71 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, KeyInit, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RelatedSearchCursor {
+    actor_id: Uuid,
+    q: String,
+    kind: Option<EntryKind>,
+    match_mode: RelatedSearchMatchMode,
+    exclude_exact: bool,
+    page_size: u32,
+    total: u64,
+    consumed: u64,
+    last_kind: Option<EntryKind>,
+    last_headword: Option<String>,
+    last_word_id: Option<Uuid>,
+    dataset_version: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RelatedSearchCursorEnvelope {
+    payload: String,
+    signature: String,
+}
+
+fn encode_related_search_cursor(cursor: &RelatedSearchCursor, key: &[u8]) -> String {
+    let payload = serde_json::to_vec(cursor).expect("cursor serialization cannot fail");
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts every key length");
+    mac.update(&payload);
+    let envelope = RelatedSearchCursorEnvelope {
+        payload: URL_SAFE_NO_PAD.encode(&payload),
+        signature: URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()),
+    };
+    URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&envelope).expect("cursor envelope serialization cannot fail"))
+}
+
+fn decode_related_search_cursor(encoded: &str, key: &[u8]) -> Result<RelatedSearchCursor, ()> {
+    let envelope_bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| ())?;
+    let envelope: RelatedSearchCursorEnvelope =
+        serde_json::from_slice(&envelope_bytes).map_err(|_| ())?;
+    let payload = URL_SAFE_NO_PAD.decode(envelope.payload).map_err(|_| ())?;
+    let signature = URL_SAFE_NO_PAD.decode(envelope.signature).map_err(|_| ())?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| ())?;
+    mac.update(&payload);
+    mac.verify_slice(&signature).map_err(|_| ())?;
+    serde_json::from_slice(&payload).map_err(|_| ())
+}
+
+fn related_search_response(
+    v2: bool,
+    results: Vec<RelatedWordResult>,
+    total: u64,
+    next_cursor: Option<String>,
+) -> RelatedSearchResponse {
+    if v2 {
+        RelatedSearchResponse::V2(RelatedSearchV2Response {
+            results,
+            total,
+            next_cursor,
+        })
+    } else {
+        RelatedSearchResponse::Legacy(RelatedSearchLegacyResponse { results })
+    }
+}
 
 // --- query ---
 
@@ -17,15 +84,31 @@ impl LexiconService {
 
     pub async fn related_search(
         &self,
+        actor_id: Uuid,
         query: RelatedSearchQuery,
     ) -> Result<RelatedSearchResponse, LexiconServiceError> {
-        let limit = query.limit.unwrap_or(20);
-        if !(1..=100).contains(&limit) {
+        if query.page_size.is_some() && query.limit.is_some() {
             return Err(LexiconServiceError::InvalidField {
-                field: "limit",
-                message: "limit must be between 1 and 100",
+                field: "page_size",
+                message: "page_size and deprecated limit must not be sent together",
             });
         }
+        let page_size = query.page_size.or(query.limit).unwrap_or(20);
+        let size_field = if query.page_size.is_some() {
+            "page_size"
+        } else {
+            "limit"
+        };
+        if !(1..=100).contains(&page_size) {
+            return Err(LexiconServiceError::InvalidField {
+                field: size_field,
+                message: "page size must be between 1 and 100",
+            });
+        }
+        let v2 = query.match_mode.is_some()
+            || query.exclude_exact.is_some()
+            || query.page_size.is_some()
+            || query.cursor.is_some();
         let q = query.q.unwrap_or_default();
         if q.contains('\0') {
             return Err(LexiconServiceError::InvalidField {
@@ -35,20 +118,121 @@ impl LexiconService {
         }
         let q = q.trim();
         if q.is_empty() {
-            return Ok(RelatedSearchResponse {
-                results: Vec::new(),
-            });
+            return Ok(related_search_response(v2, Vec::new(), 0, None));
         }
-        let records = self
-            .repository
-            .related_search(q, query.kind, i64::from(limit))
-            .await
-            .map_err(repository_error)?;
+        let normalized_q = normalize_headword(q)
+            .map_err(|_| LexiconServiceError::InvalidField {
+                field: "q",
+                message: "q is not a valid headword search",
+            })?
+            .key;
+        let match_mode = query.match_mode.unwrap_or(RelatedSearchMatchMode::Contains);
+        let exclude_exact = query.exclude_exact.unwrap_or(false);
+        let requested_cursor = query.cursor.is_some();
+        let mut cursor = if let Some(encoded) = query.cursor.as_deref() {
+            let cursor = decode_related_search_cursor(encoded, &self.related_search_cursor_key)
+                .map_err(|_| LexiconServiceError::InvalidField {
+                    field: "cursor",
+                    message: "cursor is invalid",
+                })?;
+            if cursor.actor_id != actor_id
+                || cursor.q != normalized_q
+                || cursor.kind != query.kind
+                || cursor.match_mode != match_mode
+                || cursor.exclude_exact != exclude_exact
+                || cursor.page_size != page_size
+            {
+                return Err(LexiconServiceError::InvalidField {
+                    field: "cursor",
+                    message: "cursor does not match this search",
+                });
+            }
+            cursor
+        } else {
+            RelatedSearchCursor {
+                actor_id,
+                q: normalized_q.clone(),
+                kind: query.kind,
+                match_mode,
+                exclude_exact,
+                page_size,
+                total: 0,
+                consumed: 0,
+                last_kind: None,
+                last_headword: None,
+                last_word_id: None,
+                dataset_version: 0,
+            }
+        };
+        let mut attempts = 0;
+        let records = loop {
+            let dataset_version = self
+                .repository
+                .related_search_dataset_version()
+                .await
+                .map_err(repository_error)?;
+            if requested_cursor && cursor.dataset_version != dataset_version {
+                return Err(LexiconServiceError::InvalidField {
+                    field: "cursor",
+                    message: "related search targets changed; restart the search",
+                });
+            }
+            if !requested_cursor {
+                cursor.dataset_version = dataset_version;
+            }
+            let records = self
+                .repository
+                .related_search(&RelatedSearchFilter {
+                    q: &normalized_q,
+                    kind: query.kind,
+                    exact: match_mode == RelatedSearchMatchMode::Exact,
+                    exclude_exact,
+                    limit: i64::from(page_size),
+                    last_kind: cursor.last_kind,
+                    last_headword: cursor.last_headword.as_deref(),
+                    last_word_id: cursor.last_word_id,
+                })
+                .await
+                .map_err(repository_error)?;
+            let current_version = self
+                .repository
+                .related_search_dataset_version()
+                .await
+                .map_err(repository_error)?;
+            if current_version == dataset_version {
+                break records;
+            }
+            if requested_cursor {
+                return Err(LexiconServiceError::InvalidField {
+                    field: "cursor",
+                    message: "related search targets changed; restart the search",
+                });
+            }
+            attempts += 1;
+            if attempts == 3 {
+                return Err(repository_error(LexiconRepositoryError::Invariant(
+                    "related search targets kept changing while opening a cursor",
+                )));
+            }
+        };
+        let page_total = records
+            .first()
+            .map_or(0, |record| record.total.max(0) as u64);
+        let total = if cursor.consumed == 0 {
+            page_total
+        } else {
+            cursor.total
+        };
+        let last_page_key = records.last().map(|record| record.sort_headword.clone());
         let results = records
             .into_iter()
             .map(|record| {
                 let word: AdminWordV2 =
                     serde_json::from_value(record.snapshot).map_err(serialization_error)?;
+                let dialects = match &word.headwords {
+                    WordHeadwordsV2::Unified { .. } => vec![Dialect::Common],
+                    WordHeadwordsV2::Distinguish { .. } => vec![Dialect::Uk, Dialect::Us],
+                };
                 let senses = word
                     .meanings
                     .pos
@@ -63,11 +247,26 @@ impl LexiconService {
                     word_id: word.id,
                     headword: published_word_headword(&word),
                     kind: word.kind,
+                    dialects,
+                    pos_labels: record.pos_labels,
                     senses,
                 })
             })
             .collect::<Result<Vec<_>, LexiconServiceError>>()?;
-        Ok(RelatedSearchResponse { results })
+        let consumed = cursor.consumed + results.len() as u64;
+        let next_cursor = (v2 && !results.is_empty() && consumed < total).then(|| {
+            let last = results.last().expect("non-empty page has a last result");
+            let next = RelatedSearchCursor {
+                total,
+                consumed,
+                last_kind: Some(last.kind),
+                last_headword: last_page_key,
+                last_word_id: Some(last.word_id),
+                ..cursor
+            };
+            encode_related_search_cursor(&next, &self.related_search_cursor_key)
+        });
+        Ok(related_search_response(v2, results, total, next_cursor))
     }
 
     pub async fn list(
@@ -340,4 +539,41 @@ fn family_matches_source_dialect(family: &str, dialect: SourceDialect) -> bool {
         (family_dialect(family), dialect),
         (Some(Dialect::Uk), SourceDialect::Uk) | (Some(Dialect::Us), SourceDialect::Us)
     )
+}
+
+#[cfg(test)]
+mod related_search_cursor_tests {
+    use super::*;
+
+    fn cursor() -> RelatedSearchCursor {
+        RelatedSearchCursor {
+            actor_id: Uuid::nil(),
+            q: "workspace".to_owned(),
+            kind: Some(EntryKind::Word),
+            match_mode: RelatedSearchMatchMode::Exact,
+            exclude_exact: false,
+            page_size: 20,
+            total: 40,
+            consumed: 20,
+            last_kind: Some(EntryKind::Word),
+            last_headword: Some("workspace".to_owned()),
+            last_word_id: Some(Uuid::nil()),
+            dataset_version: 7,
+        }
+    }
+
+    #[test]
+    fn cursor_round_trip_is_keyed_and_tamper_evident() {
+        let encoded = encode_related_search_cursor(&cursor(), b"correct-key");
+        let decoded = decode_related_search_cursor(&encoded, b"correct-key").unwrap();
+        assert_eq!(decoded.actor_id, Uuid::nil());
+        assert_eq!(decoded.consumed, 20);
+        assert_eq!(decoded.dataset_version, 7);
+        assert!(decode_related_search_cursor(&encoded, b"wrong-key").is_err());
+
+        let mut bytes = URL_SAFE_NO_PAD.decode(&encoded).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        let tampered = URL_SAFE_NO_PAD.encode(bytes);
+        assert!(decode_related_search_cursor(&tampered, b"correct-key").is_err());
+    }
 }

@@ -222,6 +222,9 @@ use utoipa::{
             crate::lexicon::dto::AdminWordListResponse,
             crate::lexicon::dto::RelatedWordSense,
             crate::lexicon::dto::RelatedWordResult,
+            crate::lexicon::dto::RelatedSearchMatchMode,
+            crate::lexicon::dto::RelatedSearchLegacyResponse,
+            crate::lexicon::dto::RelatedSearchV2Response,
             crate::lexicon::dto::RelatedSearchResponse,
             crate::lexicon::dto::AdminWordStats,
             crate::lexicon::dto::StepSaveIntent,
@@ -1401,6 +1404,37 @@ mod tests {
         }
         assert!(confirm["responses"]["204"]["headers"]["Set-Cookie"].is_object());
         assert!(request["security"].is_array() && confirm["security"].is_array());
+    }
+
+    #[test]
+    fn related_search_v2_contract_has_registered_and_required_pagination_schemas() {
+        let json = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI 应可序列化");
+        let schemas = &json["components"]["schemas"];
+        assert!(schemas["RelatedSearchMatchMode"].is_object());
+        assert!(schemas["RelatedSearchLegacyResponse"].is_object());
+        assert!(schemas["RelatedSearchV2Response"].is_object());
+        assert_eq!(
+            schemas["RelatedSearchLegacyResponse"]["additionalProperties"],
+            false
+        );
+        assert_eq!(
+            schemas["RelatedSearchV2Response"]["additionalProperties"],
+            false
+        );
+
+        let required = schemas["RelatedSearchV2Response"]["required"]
+            .as_array()
+            .expect("V2 response 应声明 required");
+        for field in ["results", "total", "next_cursor"] {
+            assert!(
+                required.iter().any(|value| value == field),
+                "V2 response 缺少 required 字段 {field}"
+            );
+        }
+        assert_eq!(
+            schemas["RelatedSearchV2Response"]["properties"]["next_cursor"]["type"],
+            serde_json::json!(["string", "null"])
+        );
     }
 
     #[test]
