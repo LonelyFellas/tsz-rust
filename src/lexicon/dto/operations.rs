@@ -16,6 +16,7 @@ pub struct DetectionRequestEcho {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(deprecated)]
 pub struct DuplicateWordMatchV2 {
     pub word_id: Uuid,
     pub headword: String,
@@ -24,17 +25,351 @@ pub struct DuplicateWordMatchV2 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SmartDictionaryResultV2 {
     Clear {
+        #[schema(max_items = 0)]
         duplicates: Vec<DuplicateWordMatchV2>,
     },
+    #[schema(deprecated)]
     Duplicate {
+        #[schema(min_items = 1)]
         duplicates: Vec<DuplicateWordMatchV2>,
+    },
+    Warning {
+        #[schema(max_items = 0)]
+        duplicates: Vec<DuplicateWordMatchV2>,
+        surface_match_page: Box<SurfaceMatchPageV2>,
+        #[schema(max_items = 0)]
+        matched_entry_contexts: Vec<MatchedEntryContextV2>,
     },
     Unavailable {
+        #[schema(max_items = 0)]
         duplicates: Vec<DuplicateWordMatchV2>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "candidate_type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SurfaceMatchCandidateV2 {
+    Headword {
+        candidate_ref: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        candidate_word_id: Option<Uuid>,
+        surface: String,
+        normalized_surface: String,
+        dialect: Dialect,
+        entry_kind: EntryKind,
+    },
+    Form {
+        candidate_ref: String,
+        candidate_word_id: Uuid,
+        candidate_node_id: Uuid,
+        surface: String,
+        normalized_surface: String,
+        dialect: Dialect,
+        pos_id: Uuid,
+        pos: String,
+        form_type: WordFormTypeV2,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "source_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExistingSurfaceSourceV2 {
+    Headword {
+        source_id: String,
+        content_scope: SurfaceContentScopeV2,
+        surface: String,
+        dialect: Dialect,
+    },
+    Form {
+        source_id: String,
+        source_node_id: Uuid,
+        content_scope: SurfaceContentScopeV2,
+        surface: String,
+        dialect: Dialect,
+        pos_id: Uuid,
+        pos: String,
+        form_type: WordFormTypeV2,
+    },
+}
+
+/// Closed wire enum for every explicitly persisted form surface. Unlike the
+/// catalog's derived-form capability enum this includes the base slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WordFormTypeV2 {
+    Base,
+    ThirdPersonSingular,
+    PresentParticiple,
+    PastTense,
+    PastParticiple,
+    Plural,
+    Comparative,
+    Superlative,
+}
+
+impl TryFrom<&str> for WordFormTypeV2 {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "base" => Ok(Self::Base),
+            "third_person_singular" => Ok(Self::ThirdPersonSingular),
+            "present_participle" => Ok(Self::PresentParticiple),
+            "past_tense" => Ok(Self::PastTense),
+            "past_participle" => Ok(Self::PastParticiple),
+            "plural" => Ok(Self::Plural),
+            "comparative" => Ok(Self::Comparative),
+            "superlative" => Ok(Self::Superlative),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceContentScopeV2 {
+    Draft,
+    CurrentPublication,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceConfirmationReasonV2 {
+    UnacknowledgedSurfaceMatches,
+    VisibilityActivation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceMatchCategoryV2 {
+    ExactHeadword,
+    CrossKindHeadword,
+    HeadwordForm,
+    FormHeadword,
+    FormForm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceAttentionLevelV2 {
+    High,
+    Normal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExistingSurfaceMatchV2 {
+    pub word_id: Uuid,
+    pub headword: String,
+    pub kind: EntryKind,
+    pub status: AdminWordStatus,
+    pub source: ExistingSurfaceSourceV2,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LexiconSurfaceMatchV2 {
+    pub match_id: String,
+    pub match_category: SurfaceMatchCategoryV2,
+    pub severity: SurfaceMatchSeverityV2,
+    pub attention_level: SurfaceAttentionLevelV2,
+    #[schema(schema_with = literal_true_schema)]
+    pub can_continue: SurfaceCanContinueTrue,
+    #[schema(min_items = 1, max_items = 2)]
+    pub confirmation_reasons: Vec<SurfaceConfirmationReasonV2>,
+    pub candidate: SurfaceMatchCandidateV2,
+    pub existing: ExistingSurfaceMatchV2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceCanContinueTrue;
+
+impl Serialize for SurfaceCanContinueTrue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bool(true)
+    }
+}
+
+impl<'de> Deserialize<'de> for SurfaceCanContinueTrue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if bool::deserialize(deserializer)? {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom("can_continue must be true"))
+        }
+    }
+}
+
+fn literal_true_schema() -> utoipa::openapi::schema::Object {
+    utoipa::openapi::schema::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::Type::Boolean)
+        .enum_values(Some([true]))
+        .build()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceMatchSeverityV2 {
+    Warning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationTypeV2 {
+    Synonym,
+    Antonym,
+    Derivative,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelationReferenceCountsV2 {
+    pub synonym: u32,
+    pub antonym: u32,
+    pub derivative: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelationReferencePreviewV2 {
+    pub source_word_id: Uuid,
+    pub source_headword: String,
+    pub relation: RelationTypeV2,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelationReferenceSummaryV2 {
+    pub total: u32,
+    pub by_type: RelationReferenceCountsV2,
+    #[schema(max_items = 5)]
+    pub previews: Vec<RelationReferencePreviewV2>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MatchedEntryContextV2 {
+    pub word_id: Uuid,
+    #[schema(max_items = 5)]
+    pub pos_labels: Vec<String>,
+    #[schema(max_items = 5)]
+    pub gloss_previews: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+    pub inbound_relations: RelationReferenceSummaryV2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfacePolicyNameV2 {
+    SurfaceWarningAcknowledgement,
+    AllowNewExactHeadwordEntries,
+    AllowMultipleActiveExactHeadwordPublications,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfacePolicyBlockCodeV2 {
+    ExactHeadwordCreationTemporarilyDisabled,
+    MultipleActiveExactHeadwordPublicationsNotEnabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceContinuationEnabledV2 {
+    Enabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceContinuationDisabledV2 {
+    TemporarilyDisabled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceMatchPageBaseV2 {
+    pub snapshot_id: Uuid,
+    #[schema(min_items = 1, max_items = 50)]
+    pub items: Vec<LexiconSurfaceMatchV2>,
+    pub total: u64,
+    #[schema(min_items = 1, max_items = 50)]
+    pub matched_entry_contexts: Vec<MatchedEntryContextV2>,
+    #[schema(min_items = 1, max_items = 2)]
+    pub confirmation_reasons: Vec<SurfaceConfirmationReasonV2>,
+    pub policy_name: SurfacePolicyNameV2,
+    pub policy_epoch: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceMatchEnabledNextPageV2 {
+    #[serde(flatten)]
+    pub page: SurfaceMatchPageBaseV2,
+    pub continuation_policy: SurfaceContinuationEnabledV2,
+    pub next_cursor: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceMatchEnabledTerminalPageV2 {
+    #[serde(flatten)]
+    pub page: SurfaceMatchPageBaseV2,
+    pub continuation_policy: SurfaceContinuationEnabledV2,
+    #[schema(schema_with = literal_null_schema)]
+    pub next_cursor: (),
+    pub surface_confirmation_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub impact_confirmation_token: Option<String>,
+}
+
+fn literal_null_schema() -> utoipa::openapi::schema::Object {
+    utoipa::openapi::schema::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::Type::Null)
+        .build()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceMatchTemporarilyDisabledPageV2 {
+    #[serde(flatten)]
+    pub page: SurfaceMatchPageBaseV2,
+    pub continuation_policy: SurfaceContinuationDisabledV2,
+    #[schema(required = true, nullable = true)]
+    pub next_cursor: Option<String>,
+    pub policy_block_code: SurfacePolicyBlockCodeV2,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum SurfaceMatchPageV2 {
+    EnabledNext(SurfaceMatchEnabledNextPageV2),
+    EnabledTerminal(SurfaceMatchEnabledTerminalPageV2),
+    TemporarilyDisabled(SurfaceMatchTemporarilyDisabledPageV2),
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Path)]
+pub struct SurfaceMatchSnapshotPathV2 {
+    pub snapshot_id: Uuid,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceMatchSnapshotQueryV2 {
+    pub cursor: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -109,6 +444,9 @@ pub struct CreateAdminWordV2Input {
     pub schema_version: u8,
     pub detection_id: Uuid,
     pub headwords: WordHeadwordsV2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
 }
 
 // --- dialect suggestion ---

@@ -6,6 +6,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/detections", axum::routing::post(handler::detect))
         .route(
+            "/surface-match-snapshots/{snapshot_id}",
+            get(handler::surface_match_snapshot_page),
+        )
+        .route(
             "/dialect-variant-suggestions",
             axum::routing::post(handler::suggest_dialect_variants),
         )

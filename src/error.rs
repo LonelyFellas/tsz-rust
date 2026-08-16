@@ -54,6 +54,12 @@ pub enum ErrorCode {
     DetectionMismatch,
     DetectionExpired,
     DuplicateWord,
+    SurfaceMatchAcknowledgementRequired,
+    SurfaceMatchesChanged,
+    SurfaceMatchSnapshotExpired,
+    SurfacePolicyChanged,
+    ExactHeadwordCreationTemporarilyDisabled,
+    MultipleActiveExactHeadwordPublicationsNotEnabled,
     IdempotencyConflict,
     StepNotReachable,
     ValidationFailed,
@@ -83,7 +89,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 68] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -127,6 +133,12 @@ impl ErrorCode {
         Self::DetectionMismatch,
         Self::DetectionExpired,
         Self::DuplicateWord,
+        Self::SurfaceMatchAcknowledgementRequired,
+        Self::SurfaceMatchesChanged,
+        Self::SurfaceMatchSnapshotExpired,
+        Self::SurfacePolicyChanged,
+        Self::ExactHeadwordCreationTemporarilyDisabled,
+        Self::MultipleActiveExactHeadwordPublicationsNotEnabled,
         Self::IdempotencyConflict,
         Self::StepNotReachable,
         Self::ValidationFailed,
@@ -325,6 +337,36 @@ impl ErrorCode {
                 "Word already exists",
                 StatusCode::CONFLICT,
             ),
+            Self::SurfaceMatchAcknowledgementRequired => (
+                "surface_match_acknowledgement_required",
+                "Surface match acknowledgement required",
+                StatusCode::CONFLICT,
+            ),
+            Self::SurfaceMatchesChanged => (
+                "surface_matches_changed",
+                "Surface matches changed",
+                StatusCode::CONFLICT,
+            ),
+            Self::SurfaceMatchSnapshotExpired => (
+                "surface_match_snapshot_expired",
+                "Surface match snapshot expired",
+                StatusCode::GONE,
+            ),
+            Self::SurfacePolicyChanged => (
+                "surface_policy_changed",
+                "Surface policy changed",
+                StatusCode::CONFLICT,
+            ),
+            Self::ExactHeadwordCreationTemporarilyDisabled => (
+                "exact_headword_creation_temporarily_disabled",
+                "Exact headword creation temporarily disabled",
+                StatusCode::CONFLICT,
+            ),
+            Self::MultipleActiveExactHeadwordPublicationsNotEnabled => (
+                "multiple_active_exact_headword_publications_not_enabled",
+                "Multiple active exact headword publications not enabled",
+                StatusCode::CONFLICT,
+            ),
             Self::IdempotencyConflict => (
                 "idempotency_conflict",
                 "Idempotency key conflict",
@@ -482,6 +524,15 @@ pub struct ProblemMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub reference_locations: Option<Vec<ProblemReferenceLocation>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub surface_match_page: Option<crate::lexicon::dto::SurfaceMatchPageV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub current_policy_name: Option<crate::lexicon::dto::SurfacePolicyNameV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub current_policy_epoch: Option<u64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

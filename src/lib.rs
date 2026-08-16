@@ -222,6 +222,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         refresh_ttl: Duration::days(config.refresh_ttl_days as i64),
         admin_refresh_ttl: Duration::days(config.admin_refresh_ttl_days as i64),
         redis,
+        surface_policy_prefix: crate::lexicon::surface_policy::SURFACE_POLICY_PREFIX.to_owned(),
         otp_service,
         cookie_secure: config.cookie_secure,
         object_storage,

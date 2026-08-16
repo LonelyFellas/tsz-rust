@@ -103,6 +103,19 @@ impl LexiconService {
         let mut word = entry_from_record(record)?;
         ensure_active(&word)?;
         ensure_revision(&word, input.base_revision)?;
+        let surface_sources = crate::lexicon::repository::surface_projection_sources(&word)
+            .map_err(surface_projection_error)?;
+        let previous_publication_sources =
+            LexiconRepository::current_publication_surface_sources(&mut transaction, &[entry_id])
+                .await
+                .map_err(repository_error)?;
+        let surface_keys = crate::lexicon::repository::surface_lock_keys([
+            previous_publication_sources.as_slice(),
+            surface_sources.as_slice(),
+        ]);
+        LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
+            .await
+            .map_err(repository_error)?;
         let catalog = self
             .catalog_context_for_reference(&mut transaction, &word.forms)
             .await?;
@@ -190,7 +203,7 @@ impl LexiconService {
         word.published_revision = Some(word.revision);
         word.has_unpublished_changes = false;
         word.published_at = Some(Utc::now());
-        LexiconRepository::insert_publication(
+        let publication_id = LexiconRepository::insert_publication(
             &mut transaction,
             &word,
             actor_id,
@@ -198,6 +211,17 @@ impl LexiconService {
             idempotency_key,
             &request_hash,
             &reference_resolution.publication_references,
+        )
+        .await
+        .map_err(repository_error)?;
+        LexiconRepository::replace_surface_projection(
+            &mut transaction,
+            word.id,
+            word.revision,
+            crate::lexicon::repository::SurfaceContentScope::CurrentPublication(publication_id),
+            current_publication_id,
+            &previous_publication_sources,
+            &surface_sources,
         )
         .await
         .map_err(repository_error)?;

@@ -14,14 +14,18 @@ use crate::{
             DictionaryTermRecord, DuplicateRecord, EntryRecord, IdempotencyRecord,
             InboundSenseReferenceRecord, ListEntryRecord, ListFilter, NewPublicationSenseReference,
             NodeIdentityRecord, RegionSurfaceRecord, RelatedSearchRecord,
-            ResolvedSenseTargetRecord, SenseTargetKey, StatsRecord,
+            ResolvedSenseTargetRecord, SenseTargetKey, StatsRecord, SurfaceEntryContextRecord,
+            SurfaceInboundRelationRecord, SurfaceLookupKey, SurfaceSourceRecord,
         },
         node_identity::{
             BASE_FORM_ROLE, FORM_GROUP_ROLE, GRAMMAR_STRUCTURE_ROLE, POS_ROLE, PRONUNCIATION_ROLE,
             RELATION_ROLE, SENSE_GROUP_ROLE, SENSE_ROLE, SENTENCE_ROLE, definition_role,
             form_slot_role, form_variant_role, text_variant_role,
         },
-        normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword, sha256_json},
+        normalization::{
+            HEADWORD_NORMALIZATION_VERSION, HeadwordNormalizationError, normalize_headword,
+            sha256_json,
+        },
         provenance::headword_origin,
     },
     platform::is_unique_violation,
@@ -33,9 +37,14 @@ mod lifecycle;
 mod projections;
 mod publications;
 mod query;
+mod surface_writes;
+mod surfaces;
 
 use entries::*;
 use projections::*;
+pub(crate) use surface_writes::{
+    SurfaceContentScope, SurfaceProjectionSource, surface_lock_keys, surface_projection_sources,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LexiconRepositoryError {
@@ -72,7 +81,7 @@ impl LexiconRepository {
     ) -> Result<Option<IdempotencyRecord>, LexiconRepositoryError> {
         let record = sqlx::query_as::<_, IdempotencyRecord>(
             r#"
-            SELECT request_hash, resource_id, response_body,
+            SELECT request_hash, resource_id, response_status, response_body,
                    expires_at <= now() AS expired
             FROM platform.idempotency_records
             WHERE scope = $1 AND actor_id = $2 AND idempotency_key = $3

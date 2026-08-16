@@ -59,6 +59,25 @@ pub(super) fn origin_string(origin: TextOrigin) -> &'static str {
 // --- entry commands ---
 
 impl LexiconRepository {
+    pub(crate) async fn consumed_detection(
+        tx: &mut Transaction<'_, Postgres>,
+        actor_id: Uuid,
+        detection_id: Uuid,
+    ) -> Result<Option<Uuid>, LexiconRepositoryError> {
+        sqlx::query_scalar(
+            r#"
+            SELECT entry_id
+            FROM lexicon.consumed_detections
+            WHERE actor_id = $1 AND detection_id = $2
+            "#,
+        )
+        .bind(actor_id)
+        .bind(detection_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     pub(crate) async fn consume_detection(
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
@@ -69,7 +88,7 @@ impl LexiconRepository {
             r#"
             INSERT INTO lexicon.consumed_detections (actor_id, detection_id, entry_id)
             VALUES ($1, $2, $3)
-            ON CONFLICT (actor_id, detection_id) DO NOTHING
+            ON CONFLICT DO NOTHING
             RETURNING entry_id
             "#,
         )
@@ -191,6 +210,74 @@ impl LexiconRepository {
         )
         .await?;
         Ok(())
+    }
+
+    pub(crate) async fn insert_surface_acknowledgement(
+        tx: &mut Transaction<'_, Postgres>,
+        word: &AdminWordV2,
+        audit: &crate::lexicon::dto::DetectionSurfaceWarningAuditV2,
+        headwords_content_digest: &str,
+        match_ids: &[String],
+    ) -> Result<(), LexiconRepositoryError> {
+        let policy_name = match audit.policy_name {
+            crate::lexicon::dto::SurfacePolicyNameV2::SurfaceWarningAcknowledgement => {
+                "surface_warning_acknowledgement"
+            }
+            crate::lexicon::dto::SurfacePolicyNameV2::AllowNewExactHeadwordEntries => {
+                "allow_new_exact_headword_entries"
+            }
+            crate::lexicon::dto::SurfacePolicyNameV2::AllowMultipleActiveExactHeadwordPublications => {
+                return Err(LexiconRepositoryError::Invariant(
+                    "publication policy cannot authorize entry creation",
+                ));
+            }
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entry_surface_acknowledgements (
+                entry_id, detection_id, headwords_content_digest, match_ids,
+                match_digest, acknowledged_by_admin_id, acknowledged_at,
+                policy_name, policy_epoch, normalization_version
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(word.id)
+        .bind(word.detection_snapshot.detection_id)
+        .bind(headwords_content_digest)
+        .bind(match_ids)
+        .bind(&audit.match_digest)
+        .bind(audit.acknowledged_by)
+        .bind(audit.acknowledged_at)
+        .bind(policy_name)
+        .bind(i64::try_from(audit.policy_epoch).map_err(|_| {
+            LexiconRepositoryError::Invariant("surface policy epoch does not fit BIGINT")
+        })?)
+        .bind(crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION)
+        .execute(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        Ok(())
+    }
+
+    pub(crate) async fn insert_create_idempotency_failure(
+        tx: &mut Transaction<'_, Postgres>,
+        actor_id: Uuid,
+        idempotency_key: Uuid,
+        request_hash: &[u8],
+        response_status: i16,
+        response_body: serde_json::Value,
+    ) -> Result<(), LexiconRepositoryError> {
+        insert_idempotency_value(
+            tx,
+            "lexicon.entry.create",
+            actor_id,
+            idempotency_key,
+            request_hash,
+            None,
+            response_body,
+            response_status,
+        )
+        .await
     }
 
     pub(crate) async fn replace_entry_content(

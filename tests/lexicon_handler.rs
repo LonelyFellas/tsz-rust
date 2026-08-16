@@ -13,6 +13,10 @@ use uuid::Uuid;
 
 use tsz_rust::{
     admin::{AdminRepository, AdminRole, NewAdmin},
+    lexicon::surface_backfill::{
+        SURFACE_WRITER_VERSION, execute_surface_cutover, run_surface_backfill,
+        run_surface_cutover_preflight, run_surface_parity, surface_cutover_artifact_sha256,
+    },
     platform,
     state::AppState,
 };
@@ -412,6 +416,296 @@ async fn publish_ready(state: &AppState, bearer: &str, word: &Value) -> (StatusC
 }
 
 #[sqlx::test]
+async fn b4_backfill_is_repeatable_and_cutover_requires_clean_parity(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let policies = state.surface_policy_store_for_test();
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let draft = create_ready_draft(&state, &pool, &bearer, "workspace").await;
+    let entry_id = Uuid::parse_str(draft["word"]["id"].as_str().unwrap()).unwrap();
+
+    sqlx::query(
+        "DELETE FROM platform.outbox_events WHERE aggregate_id = $1 AND aggregate_type = 'lexicon.surface_projection'",
+    )
+    .bind(entry_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let missing_outbox = run_surface_parity(&pool).await.unwrap();
+    assert_eq!(missing_outbox.outbox_lag, 1);
+    assert!(
+        !missing_outbox.ready,
+        "投影存在但 outbox 缺失时必须 fail closed"
+    );
+
+    sqlx::query("DELETE FROM lexicon.surface_sources WHERE entry_id = $1")
+        .bind(entry_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = run_surface_parity(&pool).await.unwrap();
+    assert!(!before.ready);
+    assert!(!before.missing_rows.is_empty());
+    let blocked = run_surface_cutover_preflight(&pool, &policies, SURFACE_WRITER_VERSION)
+        .await
+        .unwrap();
+    assert!(!blocked.ready);
+
+    let first = run_surface_backfill(&pool).await.unwrap();
+    assert_eq!(first.scanned_entries, 1);
+    assert_eq!(first.changed_entries, 1);
+    assert!(first.parity.ready, "backfill 后必须零差异: {first:?}");
+    assert!(first.parity.counts.iter().any(|count| {
+        count.lifecycle == "draft"
+            && count.content_scope == "draft"
+            && count.expected == count.actual
+            && count.actual >= 4
+    }));
+
+    let plural_scopes: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT dialect_scope
+        FROM lexicon.surface_sources
+        WHERE entry_id = $1 AND content_scope = 'draft'
+          AND source_kind = 'form' AND form_type = 'plural'
+          AND normalized_surface = 'workspaces' AND is_deleted = FALSE
+        ORDER BY dialect_scope
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(plural_scopes, ["uk", "us"]);
+
+    let second = run_surface_backfill(&pool).await.unwrap();
+    assert_eq!(second.changed_entries, 0, "重复 backfill 必须是 no-op");
+    assert_eq!(
+        second.parity.expected_checksum,
+        first.parity.expected_checksum
+    );
+    assert_eq!(second.parity.actual_checksum, first.parity.actual_checksum);
+
+    let preflight = run_surface_cutover_preflight(&pool, &policies, SURFACE_WRITER_VERSION)
+        .await
+        .unwrap();
+    assert!(
+        preflight.ready,
+        "clean parity 应允许 cutover: {preflight:?}"
+    );
+    assert!(preflight.legacy_unique_present_before);
+    assert!(preflight.non_unique_lookup_present);
+
+    policies
+        .transition_exact_headword_creation(&pool, true)
+        .await
+        .unwrap();
+    let (status, warning) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "workspace"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "同名检测失败：{warning}");
+    assert_eq!(warning["smart_dictionary"]["status"], "warning");
+    let confirmation_token =
+        warning["smart_dictionary"]["surface_match_page"]["surface_confirmation_token"]
+            .as_str()
+            .expect("终页 warning 必须包含确认 token");
+    let duplicate_key = Uuid::now_v7();
+    let duplicate_body = json!({
+        "schema_version": 2,
+        "detection_id": warning["detection_id"],
+        "headwords": warning["builtin_dictionary"]["headwords"],
+        "confirmed_surface_match_token": confirmation_token,
+    });
+    let (status, unique_conflict) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(duplicate_key),
+        Some(duplicate_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(unique_conflict["code"], "duplicate_word");
+    let (status, unique_conflict_replay) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(duplicate_key),
+        Some(duplicate_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        unique_conflict_replay, unique_conflict,
+        "UNIQUE 冲突回滚后的业务 409 必须按同一 Idempotency-Key 原样重放"
+    );
+    let workspace_entries: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT entry_id) FROM lexicon.entry_headword_keys WHERE normalized_headword = 'workspace'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(workspace_entries, 1, "失败事务不得留下第二个词条");
+
+    let enabled_preflight = run_surface_cutover_preflight(&pool, &policies, SURFACE_WRITER_VERSION)
+        .await
+        .unwrap();
+    assert!(!enabled_preflight.ready);
+    assert!(enabled_preflight.creation_policy.enabled);
+    assert!(!enabled_preflight.publication_policy.enabled);
+    assert!(
+        enabled_preflight
+            .blocking_reasons
+            .contains(&"exact_headword_creation_policy_enabled".to_owned())
+    );
+    let enabled_cutover = execute_surface_cutover(
+        &pool,
+        &policies,
+        SURFACE_WRITER_VERSION,
+        &surface_cutover_artifact_sha256(),
+    )
+    .await
+    .unwrap_err();
+    assert!(enabled_cutover.to_string().contains("policy_enabled"));
+    policies
+        .transition_exact_headword_creation(&pool, false)
+        .await
+        .unwrap();
+
+    let wrong_writer = run_surface_cutover_preflight(&pool, &policies, "surface-writer-v0")
+        .await
+        .unwrap();
+    assert!(!wrong_writer.ready);
+    assert!(
+        wrong_writer
+            .blocking_reasons
+            .contains(&"writer_version_mismatch".to_owned())
+    );
+    let wrong_hash =
+        execute_surface_cutover(&pool, &policies, SURFACE_WRITER_VERSION, "not-reviewed")
+            .await
+            .unwrap_err();
+    assert!(wrong_hash.to_string().contains("artifact hash mismatch"));
+
+    let cutover = execute_surface_cutover(
+        &pool,
+        &policies,
+        SURFACE_WRITER_VERSION,
+        &surface_cutover_artifact_sha256(),
+    )
+    .await
+    .unwrap();
+    assert!(cutover.executed);
+    assert!(!cutover.legacy_unique_present_after);
+    let entry_local_unique: bool = sqlx::query_scalar(
+        "SELECT to_regclass('lexicon.lexicon_entry_headwords_entry_dialect_key') IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(entry_local_unique, "entry 内 headword/dialect 约束必须保留");
+}
+
+#[sqlx::test]
+async fn b4_backfill_keeps_archived_current_publication_and_never_revives_newer_tombstone(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let ready = create_ready_draft(&state, &pool, &bearer, "archivework").await;
+    let (status, published) = publish_ready(&state, &bearer, &ready).await;
+    assert_eq!(status, StatusCode::CREATED, "发布失败：{published}");
+    let entry_id = Uuid::parse_str(published["word"]["id"].as_str().unwrap()).unwrap();
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": published["word"]["revision"],
+            "base_lifecycle_revision": published["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "归档失败：{archived}");
+
+    sqlx::query("DELETE FROM lexicon.surface_sources WHERE entry_id = $1")
+        .bind(entry_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let backfill = run_surface_backfill(&pool).await.unwrap();
+    assert!(
+        backfill.parity.ready,
+        "archived backfill 应零差异: {backfill:?}"
+    );
+    assert!(backfill.parity.counts.iter().any(|count| {
+        count.lifecycle == "archived"
+            && count.content_scope == "draft"
+            && count.expected == count.actual
+            && count.actual > 0
+    }));
+    assert!(backfill.parity.counts.iter().any(|count| {
+        count.lifecycle == "archived"
+            && count.content_scope == "current_publication"
+            && count.expected == count.actual
+            && count.actual > 0
+    }));
+
+    let tombstoned_source: String = sqlx::query_scalar(
+        r#"
+        UPDATE lexicon.surface_sources
+        SET is_deleted = TRUE, source_revision = 999999,
+            event_offset = nextval('lexicon.surface_projection_event_offset_seq')
+        WHERE entry_id = $1 AND content_scope = 'draft'
+          AND source_kind = 'form' AND form_type = 'plural'
+        RETURNING source_id
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let stale = run_surface_backfill(&pool).await.unwrap();
+    assert!(
+        !stale.parity.ready,
+        "较新 tombstone 必须阻止旧 backfill 宣称 ready"
+    );
+    assert!(
+        stale
+            .parity
+            .missing_rows
+            .iter()
+            .any(|row| row.source_id == tombstoned_source)
+    );
+    let still_deleted: bool = sqlx::query_scalar(
+        "SELECT bool_and(is_deleted) FROM lexicon.surface_sources WHERE source_id = $1 AND content_scope = 'draft'",
+    )
+    .bind(tombstoned_source)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(still_deleted, "迟到 backfill 不得复活较新 tombstone");
+}
+
+#[sqlx::test]
 async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
@@ -492,17 +786,61 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     assert_eq!(created["word"]["revision"], 1);
     let entry_id = Uuid::parse_str(created["word"]["id"].as_str().unwrap()).unwrap();
 
+    let created_headword_surfaces: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*) FROM lexicon.surface_sources
+        WHERE entry_id = $1 AND content_scope = 'draft'
+          AND source_kind = 'headword' AND is_deleted = FALSE
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        created_headword_surfaces, 2,
+        "common headword 必须原子展开为 UK/US 两个 scope"
+    );
+
     let (status, replayed) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries"),
         &bearer,
         Some(create_key),
-        Some(create_body),
+        Some(create_body.clone()),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replayed, created, "创建响应丢失后应可原样重放");
+
+    let consumed_key = Uuid::now_v7();
+    let consumed_body = create_body;
+    let (status, consumed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(consumed_key),
+        Some(consumed_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(consumed["code"], "detection_expired");
+    let (status, consumed_replay) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(consumed_key),
+        Some(consumed_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(
+        consumed_replay, consumed,
+        "丢失的 consumed 410 必须原样重放"
+    );
 
     let (status, draft_detection) = call(
         &state,
@@ -518,10 +856,50 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
         StatusCode::OK,
         "草稿词条检测失败：{draft_detection}"
     );
-    assert_eq!(
-        draft_detection["smart_dictionary"]["duplicates"][0]["status"],
-        "draft"
+    assert_eq!(draft_detection["smart_dictionary"]["status"], "warning");
+    assert!(
+        draft_detection["smart_dictionary"]["duplicates"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
     );
+    assert!(
+        draft_detection["smart_dictionary"]["surface_match_page"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| {
+                item["match_category"] == "exact_headword" && item["existing"]["status"] == "draft"
+            }))
+    );
+    let exact_gate_key = Uuid::now_v7();
+    let exact_gate_body = json!({
+        "schema_version": 2,
+        "detection_id": draft_detection["detection_id"],
+        "headwords": draft_detection["builtin_dictionary"]["headwords"],
+    });
+    let (status, exact_gate_off) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(exact_gate_key),
+        Some(exact_gate_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        exact_gate_off["code"],
+        "exact_headword_creation_temporarily_disabled"
+    );
+    let (status, exact_gate_replay) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(exact_gate_key),
+        Some(exact_gate_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(exact_gate_replay, exact_gate_off, "丢失的 409 必须原样重放");
 
     let mut forms = created["word"]["forms"].clone();
     forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["dict_phonetic"] =
@@ -560,6 +938,124 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     assert_eq!(status, StatusCode::OK, "完成 forms 失败：{forms_saved}");
     assert_eq!(forms_saved["word"]["revision"], 2);
     assert_eq!(forms_saved["word"]["max_reachable_step"], "meanings");
+
+    let plural_surfaces: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT dialect_scope FROM lexicon.surface_sources
+        WHERE entry_id = $1 AND content_scope = 'draft'
+          AND source_kind = 'form' AND form_type = 'plural'
+          AND normalized_surface = $2 AND is_deleted = FALSE
+        ORDER BY dialect_scope
+        "#,
+    )
+    .bind(entry_id)
+    .bind(format!("{headword}s"))
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(plural_surfaces, ["uk", "us"]);
+
+    let plural_headword = format!("{headword}s");
+    seed_dictionary_word(&pool, &plural_headword).await;
+    let (status, plural_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": plural_headword})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "复数词形检测失败：{plural_detection}"
+    );
+    assert_eq!(plural_detection["smart_dictionary"]["status"], "warning");
+    assert!(
+        plural_detection["smart_dictionary"]["surface_match_page"]["items"]
+            .as_array()
+            .is_some_and(|items| items
+                .iter()
+                .any(|item| item["match_category"] == "headword_form"))
+    );
+    assert!(
+        plural_detection["smart_dictionary"]["surface_match_page"]["surface_confirmation_token"]
+            .is_string()
+    );
+    let plural_create = json!({
+        "schema_version": 2,
+        "detection_id": plural_detection["detection_id"],
+        "headwords": plural_detection["builtin_dictionary"]["headwords"],
+    });
+    let acknowledgement_key = Uuid::now_v7();
+    let (status, acknowledgement_required) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(acknowledgement_key),
+        Some(plural_create.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        acknowledgement_required["code"],
+        "surface_match_acknowledgement_required"
+    );
+    let (status, acknowledgement_replay) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(acknowledgement_key),
+        Some(plural_create.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        acknowledgement_replay, acknowledgement_required,
+        "丢失的 acknowledgement 409 必须保留同一 snapshot/token 原样重放"
+    );
+    let surface_token =
+        acknowledgement_required["meta"]["surface_match_page"]["surface_confirmation_token"]
+            .as_str()
+            .expect("409 warning 的终页必须签发新 token")
+            .to_owned();
+
+    let mut confirmed_plural_create = plural_create;
+    confirmed_plural_create["confirmed_surface_match_token"] = json!(surface_token);
+    let (status, plural_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(confirmed_plural_create),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "确认复数 warning 后应允许创建：{plural_created}"
+    );
+    assert_ne!(plural_created["word"]["id"], entry_id.to_string());
+    assert_eq!(
+        plural_created["word"]["detection_snapshot"]["smart_dictionary_status"],
+        "warning"
+    );
+    assert_eq!(
+        plural_created["word"]["detection_snapshot"]["surface_warning"]["acknowledged"],
+        true
+    );
+    let acknowledgement_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.entry_surface_acknowledgements WHERE entry_id = $1",
+    )
+    .bind(Uuid::parse_str(plural_created["word"]["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(acknowledgement_count, 1);
 
     let (status, conflict) = call(
         &state,
@@ -723,6 +1219,26 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     assert_eq!(published["word"]["status"], "published");
     assert!(published["word"]["published_at"].is_string());
 
+    let current_publication_surfaces: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM lexicon.surface_sources source
+        JOIN lexicon.entries entry ON entry.id = source.entry_id
+        WHERE source.entry_id = $1
+          AND source.content_scope = 'current_publication'
+          AND source.publication_id = entry.current_publication_id
+          AND source.is_deleted = FALSE
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        current_publication_surfaces >= 4,
+        "发布必须在同一事务写 current publication surface"
+    );
+
     let (status, published_detection) = call(
         &state,
         Method::POST,
@@ -737,9 +1253,13 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
         StatusCode::OK,
         "已发布词条检测失败：{published_detection}"
     );
-    assert_eq!(
-        published_detection["smart_dictionary"]["duplicates"][0]["status"],
-        "published"
+    assert_eq!(published_detection["smart_dictionary"]["status"], "warning");
+    assert!(
+        published_detection["smart_dictionary"]["surface_match_page"]["items"]
+            .as_array()
+            .is_some_and(|items| items
+                .iter()
+                .any(|item| item["existing"]["status"] == "published"))
     );
 
     let (status, publish_replay) = call(
@@ -912,8 +1432,8 @@ async fn lexicon_expiry_pagination_and_form_storage_boundaries_are_safe(pool: Pg
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(reused_detection["code"], "detection_mismatch");
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(reused_detection["code"], "detection_expired");
     let duplicate_entries: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM lexicon.entries WHERE detection_snapshot->>'detection_id' = $1",
     )
@@ -1859,19 +2379,21 @@ async fn lifecycle_commands_preserve_publications_and_are_idempotent_under_doubl
         StatusCode::OK,
         "归档词条检测失败：{archived_detection}"
     );
-    assert_eq!(
-        archived_detection["smart_dictionary"]["status"],
-        "duplicate"
+    assert_eq!(archived_detection["smart_dictionary"]["status"], "warning");
+    assert!(
+        archived_detection["smart_dictionary"]["duplicates"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
     );
-    assert_eq!(
-        archived_detection["smart_dictionary"]["duplicates"],
-        json!([{
-            "word_id": entry_id,
-            "headword": "archive-safe",
-            "dialect": "common",
-            "status": "archived"
-        }]),
-        "归档词条必须继续阻止同名创建，并明确返回可恢复状态"
+    assert!(
+        archived_detection["smart_dictionary"]["surface_match_page"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| {
+                item["existing"]["word_id"] == json!(entry_id)
+                    && item["existing"]["status"] == "archived"
+                    && item["can_continue"] == true
+            })),
+        "归档词条必须作为可确认 warning 返回并明确显示 archived 状态"
     );
 
     let (status, replayed) = call(
@@ -2671,6 +3193,23 @@ async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(p
             .await
             .unwrap();
     assert!(!exists, "删除必须级联清理草稿聚合并释放词头");
+
+    let draft_tombstones: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*) FROM lexicon.surface_sources
+        WHERE entry_id = $1 AND content_scope = 'draft'
+          AND is_deleted = TRUE AND source_revision = $2
+        "#,
+    )
+    .bind(Uuid::parse_str(draft_id).unwrap())
+    .bind(draft_revision + 1)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        draft_tombstones > 0,
+        "删除必须保留更高 source revision 的 projection tombstone"
+    );
     let consumed_detection_id = Uuid::parse_str(
         draft["word"]["detection_snapshot"]["detection_id"]
             .as_str()

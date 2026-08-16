@@ -12,4 +12,8 @@ pub mod repository;
 pub mod rich_text;
 pub mod router;
 pub mod service;
+pub mod surface;
+pub mod surface_backfill;
+pub mod surface_policy;
+pub mod surface_snapshot;
 pub mod validation;

@@ -10,7 +10,8 @@ pub struct WordDetectionSnapshotV2 {
     pub entry_kind: EntryKind,
     pub matched_dialect: Dialect,
     pub builtin_dictionary_status: String,
-    pub smart_dictionary_status: String,
+    #[serde(flatten)]
+    pub smart_dictionary: WordDetectionSnapshotSmartDictionaryV2,
     pub headwords: WordHeadwordsV2,
     pub suggested_pos: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -20,6 +21,87 @@ pub struct WordDetectionSnapshotV2 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dictionary_provenance: Option<DictionaryProvenanceV2>,
     pub detected_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(
+    tag = "smart_dictionary_status",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum WordDetectionSnapshotSmartDictionaryV2 {
+    Clear {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(schema_with = null_surface_warning_schema)]
+        surface_warning: Option<()>,
+    },
+    Warning {
+        surface_warning: DetectionSurfaceWarningAuditV2,
+    },
+}
+
+fn null_surface_warning_schema() -> utoipa::openapi::schema::Object {
+    utoipa::openapi::schema::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::Type::Null)
+        .build()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcknowledgedTrue;
+
+impl Serialize for AcknowledgedTrue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bool(true)
+    }
+}
+
+impl<'de> Deserialize<'de> for AcknowledgedTrue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if bool::deserialize(deserializer)? {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom("acknowledged must be true"))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DetectionSurfaceMatchPreviewV2 {
+    pub match_id: String,
+    pub match_category: SurfaceMatchCategoryV2,
+    pub existing_word_id: Uuid,
+    pub existing_headword: String,
+    pub existing_status: AdminWordStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DetectionSurfaceWarningAuditV2 {
+    pub total: u64,
+    pub match_digest: String,
+    #[schema(schema_with = acknowledged_true_schema)]
+    pub acknowledged: AcknowledgedTrue,
+    pub acknowledged_at: DateTime<Utc>,
+    pub acknowledged_by: Uuid,
+    pub policy_name: SurfacePolicyNameV2,
+    pub policy_epoch: u64,
+    #[schema(max_items = 5)]
+    pub preview: Vec<DetectionSurfaceMatchPreviewV2>,
+    pub truncated: bool,
+}
+
+fn acknowledged_true_schema() -> utoipa::openapi::schema::Object {
+    utoipa::openapi::schema::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::Type::Boolean)
+        .enum_values(Some([true]))
+        .build()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -304,4 +386,124 @@ pub struct WordPosMeaningsV2 {
 pub struct DraftMeaningsStepContent {
     pub sense_groups: Vec<SenseGroupV2>,
     pub pos: Vec<WordPosMeaningsV2>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn warning_acknowledgement(acknowledged: bool) -> serde_json::Value {
+        json!({
+            "smart_dictionary_status": "warning",
+            "surface_warning": {
+                "total": 1,
+                "match_digest": "digest",
+                "acknowledged": acknowledged,
+                "acknowledged_at": "2026-08-15T00:00:00Z",
+                "acknowledged_by": Uuid::nil(),
+                "policy_name": "surface_warning_acknowledgement",
+                "policy_epoch": 1,
+                "preview": [],
+                "truncated": true
+            }
+        })
+    }
+
+    fn snapshot_with(smart_dictionary: serde_json::Value) -> serde_json::Value {
+        let mut snapshot = json!({
+            "detection_id": Uuid::now_v7(),
+            "request": {"language": "en", "headword": "workspace"},
+            "normalized_headword": "workspace",
+            "entry_kind": "word",
+            "matched_dialect": "common",
+            "builtin_dictionary_status": "matched",
+            "headwords": {"mode": "unified", "common": "workspace"},
+            "suggested_pos": [],
+            "detected_at": "2026-08-15T00:00:00Z"
+        });
+        snapshot
+            .as_object_mut()
+            .unwrap()
+            .extend(smart_dictionary.as_object().unwrap().clone());
+        snapshot
+    }
+
+    #[test]
+    fn smart_dictionary_snapshot_is_a_strict_clear_or_acknowledged_warning_union() {
+        let clear = serde_json::from_value::<WordDetectionSnapshotSmartDictionaryV2>(json!({
+            "smart_dictionary_status": "clear"
+        }));
+        assert!(matches!(
+            clear,
+            Ok(WordDetectionSnapshotSmartDictionaryV2::Clear {
+                surface_warning: None
+            })
+        ));
+
+        let explicit_null =
+            serde_json::from_value::<WordDetectionSnapshotSmartDictionaryV2>(json!({
+                "smart_dictionary_status": "clear",
+                "surface_warning": null
+            }));
+        assert!(matches!(
+            explicit_null,
+            Ok(WordDetectionSnapshotSmartDictionaryV2::Clear {
+                surface_warning: None
+            })
+        ));
+
+        assert!(
+            serde_json::from_value::<WordDetectionSnapshotSmartDictionaryV2>(json!({
+                "smart_dictionary_status": "clear",
+                "surface_warning": warning_acknowledgement(true)["surface_warning"].clone()
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<WordDetectionSnapshotSmartDictionaryV2>(json!({
+                "smart_dictionary_status": "warning"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<WordDetectionSnapshotSmartDictionaryV2>(
+                warning_acknowledgement(false)
+            )
+            .is_err()
+        );
+        let mut warning_with_extra = warning_acknowledgement(true);
+        warning_with_extra["unexpected"] = json!(true);
+        assert!(
+            serde_json::from_value::<WordDetectionSnapshotSmartDictionaryV2>(warning_with_extra)
+                .is_err()
+        );
+        let mut audit_with_extra = warning_acknowledgement(true);
+        audit_with_extra["surface_warning"]["unexpected"] = json!(true);
+        assert!(
+            serde_json::from_value::<WordDetectionSnapshotSmartDictionaryV2>(audit_with_extra)
+                .is_err()
+        );
+
+        let warning = serde_json::from_value::<WordDetectionSnapshotSmartDictionaryV2>(
+            warning_acknowledgement(true),
+        )
+        .unwrap();
+        let serialized = serde_json::to_value(warning).unwrap();
+        assert_eq!(serialized["surface_warning"]["acknowledged"], true);
+
+        assert!(
+            serde_json::from_value::<WordDetectionSnapshotV2>(snapshot_with(json!({
+                "smart_dictionary_status": "clear",
+                "surface_warning": null
+            })))
+            .is_ok()
+        );
+        let mut snapshot_with_extra = snapshot_with(json!({
+            "smart_dictionary_status": "clear"
+        }));
+        snapshot_with_extra["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<WordDetectionSnapshotV2>(snapshot_with_extra).is_err());
+    }
 }

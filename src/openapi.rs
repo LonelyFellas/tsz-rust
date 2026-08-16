@@ -13,6 +13,7 @@ use utoipa::{
     openapi::{
         Content, Ref, RefOr,
         path::Operation,
+        schema::Schema,
         security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
     },
 };
@@ -25,7 +26,11 @@ use utoipa::{
         version = "0.1.0",
         description = "tsz 核心服务（Rust 版）接口文档"
     ),
-    modifiers(&SecurityAddon, &ProblemDetailsAddon),
+    modifiers(
+        &SecurityAddon,
+        &ProblemDetailsAddon,
+        &DetectionSnapshotSchemaAddon
+    ),
     paths(
         // auth 域
         crate::auth::handler::login,
@@ -64,6 +69,7 @@ use utoipa::{
         crate::lexicon::handler::query::related_search,
         crate::lexicon::handler::query::stats,
         crate::lexicon::handler::commands::detect,
+        crate::lexicon::handler::query::surface_match_snapshot_page,
         crate::lexicon::handler::commands::suggest_dialect_variants,
         crate::lexicon::handler::commands::create,
         crate::lexicon::handler::lifecycle::archive_batch,
@@ -144,6 +150,29 @@ use utoipa::{
             crate::lexicon::dto::DetectWordInputV2,
             crate::lexicon::dto::DetectionRequestEcho,
             crate::lexicon::dto::DuplicateWordMatchV2,
+            crate::lexicon::dto::SurfaceMatchCandidateV2,
+            crate::lexicon::dto::ExistingSurfaceSourceV2,
+            crate::lexicon::dto::SurfaceContentScopeV2,
+            crate::lexicon::dto::SurfaceConfirmationReasonV2,
+            crate::lexicon::dto::SurfaceMatchCategoryV2,
+            crate::lexicon::dto::SurfaceAttentionLevelV2,
+            crate::lexicon::dto::SurfaceMatchSeverityV2,
+            crate::lexicon::dto::ExistingSurfaceMatchV2,
+            crate::lexicon::dto::LexiconSurfaceMatchV2,
+            crate::lexicon::dto::RelationTypeV2,
+            crate::lexicon::dto::RelationReferenceCountsV2,
+            crate::lexicon::dto::RelationReferencePreviewV2,
+            crate::lexicon::dto::RelationReferenceSummaryV2,
+            crate::lexicon::dto::MatchedEntryContextV2,
+            crate::lexicon::dto::SurfacePolicyNameV2,
+            crate::lexicon::dto::SurfacePolicyBlockCodeV2,
+            crate::lexicon::dto::SurfaceContinuationEnabledV2,
+            crate::lexicon::dto::SurfaceContinuationDisabledV2,
+            crate::lexicon::dto::SurfaceMatchPageBaseV2,
+            crate::lexicon::dto::SurfaceMatchEnabledNextPageV2,
+            crate::lexicon::dto::SurfaceMatchEnabledTerminalPageV2,
+            crate::lexicon::dto::SurfaceMatchTemporarilyDisabledPageV2,
+            crate::lexicon::dto::SurfaceMatchPageV2,
             crate::lexicon::dto::SmartDictionaryResultV2,
             crate::lexicon::dto::BuiltinDictionaryResultV2,
             crate::lexicon::dto::DetectWordResponseV2,
@@ -180,6 +209,9 @@ use utoipa::{
             crate::lexicon::dto::WordPosMeaningsV2,
             crate::lexicon::dto::DraftMeaningsStepContent,
             crate::lexicon::dto::WordDetectionSnapshotV2,
+            crate::lexicon::dto::WordDetectionSnapshotSmartDictionaryV2,
+            crate::lexicon::dto::DetectionSurfaceWarningAuditV2,
+            crate::lexicon::dto::DetectionSurfaceMatchPreviewV2,
             crate::lexicon::dto::PersistedWordStep,
             crate::lexicon::dto::WordCreationStep,
             crate::lexicon::dto::AdminWordStatus,
@@ -234,6 +266,181 @@ use utoipa::{
     )
 )]
 pub struct ApiDoc;
+
+/// `utoipa` represents a flattened Rust enum as `allOf(base, oneOf(...))`.
+/// That shape cannot make both the base and variant objects closed without
+/// accidentally rejecting one another's fields. Replace only this aggregate
+/// with two complete, closed branches so OpenAPI mirrors serde's strict union.
+struct DetectionSnapshotSchemaAddon;
+
+impl Modify for DetectionSnapshotSchemaAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi
+            .components
+            .as_mut()
+            .expect("derived OpenAPI must contain components");
+
+        let smart_dictionary = components
+            .schemas
+            .get("WordDetectionSnapshotSmartDictionaryV2")
+            .cloned()
+            .expect("smart dictionary snapshot union must be registered");
+        let mut smart_dictionary_json =
+            serde_json::to_value(smart_dictionary).expect("snapshot union schema must serialize");
+        for branch in smart_dictionary_json["oneOf"]
+            .as_array_mut()
+            .expect("snapshot union must have oneOf branches")
+        {
+            branch["additionalProperties"] = serde_json::json!(false);
+        }
+        components.schemas.insert(
+            "WordDetectionSnapshotSmartDictionaryV2".to_owned(),
+            serde_json::from_value(smart_dictionary_json)
+                .expect("closed snapshot union schema must deserialize"),
+        );
+
+        for name in [
+            "SmartDictionaryResultV2",
+            "SurfaceMatchCandidateV2",
+            "ExistingSurfaceSourceV2",
+        ] {
+            let mut tagged_union = component_schema_json(components, name);
+            for branch in tagged_union["oneOf"]
+                .as_array_mut()
+                .unwrap_or_else(|| panic!("schema {name} must contain oneOf branches"))
+            {
+                branch["additionalProperties"] = serde_json::json!(false);
+            }
+            components.schemas.insert(
+                name.to_owned(),
+                serde_json::from_value(tagged_union)
+                    .unwrap_or_else(|_| panic!("closed schema {name} must deserialize")),
+            );
+        }
+
+        let aggregate = components
+            .schemas
+            .get("WordDetectionSnapshotV2")
+            .cloned()
+            .expect("word detection snapshot must be registered");
+        let aggregate_json =
+            serde_json::to_value(aggregate).expect("word detection snapshot schema must serialize");
+        let base = aggregate_json["allOf"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item["properties"]["detection_id"].is_object())
+            })
+            .cloned()
+            .expect("flattened snapshot schema must contain its base object");
+
+        let mut clear = base.clone();
+        close_detection_snapshot_branch(&mut clear, "clear", false);
+        let mut warning = base;
+        close_detection_snapshot_branch(&mut warning, "warning", true);
+        let strict = serde_json::json!({
+            "oneOf": [clear, warning],
+            "discriminator": {"propertyName": "smart_dictionary_status"}
+        });
+        components.schemas.insert(
+            "WordDetectionSnapshotV2".to_owned(),
+            serde_json::from_value::<RefOr<Schema>>(strict)
+                .expect("strict word detection snapshot schema must deserialize"),
+        );
+
+        let page_base = component_schema_json(components, "SurfaceMatchPageBaseV2");
+        let mut complete_pages = Vec::new();
+        for name in [
+            "SurfaceMatchEnabledNextPageV2",
+            "SurfaceMatchEnabledTerminalPageV2",
+            "SurfaceMatchTemporarilyDisabledPageV2",
+        ] {
+            let flattened = component_schema_json(components, name);
+            let extension = flattened["allOf"]
+                .as_array()
+                .and_then(|items| items.iter().find(|item| item["properties"].is_object()))
+                .cloned()
+                .expect("flattened surface page must contain variant fields");
+            let complete = complete_surface_page_branch(&page_base, &extension);
+            components.schemas.insert(
+                name.to_owned(),
+                serde_json::from_value(complete.clone())
+                    .expect("closed surface page branch must deserialize"),
+            );
+            complete_pages.push(complete);
+        }
+        components.schemas.insert(
+            "SurfaceMatchPageV2".to_owned(),
+            serde_json::from_value::<RefOr<Schema>>(serde_json::json!({
+                "oneOf": complete_pages
+            }))
+            .expect("complete surface page union must deserialize"),
+        );
+    }
+}
+
+fn component_schema_json(
+    components: &utoipa::openapi::schema::Components,
+    name: &str,
+) -> serde_json::Value {
+    serde_json::to_value(
+        components
+            .schemas
+            .get(name)
+            .unwrap_or_else(|| panic!("schema {name} must be registered")),
+    )
+    .expect("component schema must serialize")
+}
+
+fn complete_surface_page_branch(
+    base: &serde_json::Value,
+    extension: &serde_json::Value,
+) -> serde_json::Value {
+    let mut complete = base.clone();
+    complete["additionalProperties"] = serde_json::json!(false);
+    complete["properties"]
+        .as_object_mut()
+        .expect("surface page base properties must be an object")
+        .extend(
+            extension["properties"]
+                .as_object()
+                .expect("surface page extension properties must be an object")
+                .clone(),
+        );
+    let required = complete["required"]
+        .as_array_mut()
+        .expect("surface page base required fields must be an array");
+    for field in extension["required"]
+        .as_array()
+        .expect("surface page extension required fields must be an array")
+    {
+        if !required.contains(field) {
+            required.push(field.clone());
+        }
+    }
+    complete
+}
+
+fn close_detection_snapshot_branch(branch: &mut serde_json::Value, status: &str, warning: bool) {
+    branch["additionalProperties"] = serde_json::json!(false);
+    branch["properties"]["smart_dictionary_status"] = serde_json::json!({
+        "type": "string",
+        "enum": [status]
+    });
+    branch["properties"]["surface_warning"] = if warning {
+        serde_json::json!({"$ref": "#/components/schemas/DetectionSurfaceWarningAuditV2"})
+    } else {
+        serde_json::json!({"type": "null"})
+    };
+    let required = branch["required"]
+        .as_array_mut()
+        .expect("snapshot base required fields must be an array");
+    required.push(serde_json::json!("smart_dictionary_status"));
+    if warning {
+        required.push(serde_json::json!("surface_warning"));
+    }
+}
 
 /// 注入 Bearer JWT 安全方案，让 Swagger UI 出现 "Authorize" 按钮。
 /// 接口上用 `security(("bearer_auth" = []))` 引用这个名字。
@@ -351,6 +558,10 @@ mod tests {
             ("get", "/api/v1/admin/lexicon/entries/stats"),
             ("get", "/api/v1/admin/lexicon/entries/related-search"),
             ("post", "/api/v1/admin/lexicon/detections"),
+            (
+                "get",
+                "/api/v1/admin/lexicon/surface-match-snapshots/{snapshot_id}",
+            ),
             ("post", "/api/v1/admin/lexicon/entries"),
             ("get", "/api/v1/admin/lexicon/entries/{id}"),
             (
@@ -655,6 +866,215 @@ mod tests {
             json["paths"]["/api/v1/admin/admins/users"].is_null(),
             "用户列表不得继续暴露在错误的 /api/v1/admin/admins/users 路径"
         );
+    }
+
+    #[test]
+    fn surface_match_expand_contract_is_documented_without_enabling_creation() {
+        let json = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let schemas = &json["components"]["schemas"];
+        let path =
+            &json["paths"]["/api/v1/admin/lexicon/surface-match-snapshots/{snapshot_id}"]["get"];
+
+        assert_eq!(
+            path["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/SurfaceMatchPageV2"
+        );
+        for status in ["400", "401", "403", "410", "503"] {
+            assert_eq!(
+                path["responses"][status]["content"]["application/problem+json"]["schema"]["$ref"],
+                "#/components/schemas/ProblemDetails"
+            );
+        }
+        assert!(path["parameters"].as_array().is_some_and(|parameters| {
+            parameters.iter().any(|parameter| {
+                parameter["name"] == "cursor"
+                    && parameter["in"] == "query"
+                    && parameter["required"] == true
+            })
+        }));
+
+        let statuses = schemas["SmartDictionaryResultV2"]["oneOf"]
+            .as_array()
+            .unwrap();
+        for status in ["clear", "duplicate", "warning", "unavailable"] {
+            assert!(statuses.iter().any(|branch| {
+                branch["properties"]["status"]["enum"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == status))
+            }));
+        }
+        let warning = statuses
+            .iter()
+            .find(|branch| branch["properties"]["status"]["enum"][0] == "warning")
+            .unwrap();
+        for field in [
+            "duplicates",
+            "surface_match_page",
+            "matched_entry_contexts",
+            "status",
+        ] {
+            assert!(
+                warning["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|required| required == field)
+            );
+        }
+        assert_eq!(warning["properties"]["duplicates"]["maxItems"], 0);
+        assert_eq!(schemas["DuplicateWordMatchV2"]["deprecated"], true);
+
+        let snapshot_union = schemas["WordDetectionSnapshotSmartDictionaryV2"]["oneOf"]
+            .as_array()
+            .expect("persisted smart dictionary status must be a union");
+        assert_eq!(snapshot_union.len(), 2);
+        let clear = snapshot_union
+            .iter()
+            .find(|branch| branch["properties"]["smart_dictionary_status"]["enum"][0] == "clear")
+            .unwrap();
+        assert_eq!(clear["properties"]["surface_warning"]["type"], "null");
+        assert_eq!(clear["additionalProperties"], false);
+        let persisted_warning = snapshot_union
+            .iter()
+            .find(|branch| branch["properties"]["smart_dictionary_status"]["enum"][0] == "warning")
+            .unwrap();
+        assert!(
+            persisted_warning["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "surface_warning")
+        );
+        assert_eq!(persisted_warning["additionalProperties"], false);
+
+        let aggregate_snapshot = schemas["WordDetectionSnapshotV2"]["oneOf"]
+            .as_array()
+            .expect("persisted detection snapshot must expose complete strict branches");
+        assert_eq!(aggregate_snapshot.len(), 2);
+        for branch in aggregate_snapshot {
+            assert_eq!(branch["additionalProperties"], false);
+            assert!(branch["properties"]["detection_id"].is_object());
+            assert!(branch["properties"]["smart_dictionary_status"].is_object());
+        }
+        let aggregate_clear = aggregate_snapshot
+            .iter()
+            .find(|branch| branch["properties"]["smart_dictionary_status"]["enum"][0] == "clear")
+            .unwrap();
+        assert_eq!(
+            aggregate_clear["properties"]["surface_warning"]["type"],
+            "null"
+        );
+        assert!(
+            !aggregate_clear["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "surface_warning")
+        );
+        assert_eq!(
+            schemas["DetectionSurfaceWarningAuditV2"]["properties"]["acknowledged"]["enum"],
+            serde_json::json!([true])
+        );
+        assert_eq!(
+            schemas["DetectionSurfaceWarningAuditV2"]["additionalProperties"],
+            false
+        );
+
+        let page_variants = schemas["SurfaceMatchPageV2"]["oneOf"].as_array().unwrap();
+        assert_eq!(page_variants.len(), 3);
+        for branch in page_variants {
+            assert_eq!(branch["additionalProperties"], false);
+            assert!(branch["properties"]["snapshot_id"].is_object());
+            assert!(branch["properties"]["continuation_policy"].is_object());
+            assert!(branch["allOf"].is_null());
+        }
+        let terminal_page = page_variants
+            .iter()
+            .find(|branch| branch["properties"]["surface_confirmation_token"].is_object())
+            .expect("enabled terminal page must be present");
+        assert_eq!(terminal_page["properties"]["next_cursor"]["type"], "null");
+        assert_eq!(
+            schemas["LexiconSurfaceMatchV2"]["properties"]["can_continue"]["enum"],
+            serde_json::json!([true])
+        );
+        assert_eq!(
+            schemas["WordFormTypeV2"]["enum"],
+            serde_json::json!([
+                "base",
+                "third_person_singular",
+                "present_participle",
+                "past_tense",
+                "past_participle",
+                "plural",
+                "comparative",
+                "superlative"
+            ])
+        );
+        assert_eq!(
+            schemas["SurfaceMatchPageBaseV2"]["properties"]["items"]["minItems"],
+            1
+        );
+        assert_eq!(
+            schemas["SurfaceMatchPageBaseV2"]["properties"]["items"]["maxItems"],
+            50
+        );
+        for schema_name in [
+            "SurfaceMatchPageBaseV2",
+            "LexiconSurfaceMatchV2",
+            "ExistingSurfaceMatchV2",
+            "MatchedEntryContextV2",
+            "RelationReferenceSummaryV2",
+        ] {
+            assert_eq!(
+                schemas[schema_name]["additionalProperties"], false,
+                "{schema_name} 必须拒绝未知字段"
+            );
+        }
+        for schema_name in [
+            "SurfaceMatchEnabledNextPageV2",
+            "SurfaceMatchEnabledTerminalPageV2",
+            "SurfaceMatchTemporarilyDisabledPageV2",
+        ] {
+            assert_eq!(schemas[schema_name]["additionalProperties"], false);
+            assert!(schemas[schema_name]["allOf"].is_null());
+        }
+        for schema_name in [
+            "SmartDictionaryResultV2",
+            "SurfaceMatchCandidateV2",
+            "ExistingSurfaceSourceV2",
+        ] {
+            for branch in schemas[schema_name]["oneOf"].as_array().unwrap() {
+                assert_eq!(
+                    branch["additionalProperties"], false,
+                    "{schema_name} 的每个 tagged-union 分支必须拒绝未知字段"
+                );
+            }
+        }
+
+        assert!(
+            schemas["CreateAdminWordV2Input"]["properties"]["confirmed_surface_match_token"]
+                .is_object()
+        );
+        let problem_meta = &schemas["ProblemMeta"]["properties"];
+        for field in [
+            "surface_match_page",
+            "current_policy_name",
+            "current_policy_epoch",
+        ] {
+            assert!(problem_meta[field].is_object(), "ProblemMeta 缺少 {field}");
+        }
+
+        let error_codes = schemas["ErrorCode"]["enum"].as_array().unwrap();
+        for code in [
+            "surface_match_acknowledgement_required",
+            "surface_matches_changed",
+            "surface_match_snapshot_expired",
+            "surface_policy_changed",
+            "exact_headword_creation_temporarily_disabled",
+            "multiple_active_exact_headword_publications_not_enabled",
+        ] {
+            assert!(error_codes.iter().any(|value| value == code));
+        }
     }
 
     #[test]

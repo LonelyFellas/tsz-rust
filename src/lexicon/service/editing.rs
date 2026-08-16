@@ -222,6 +222,7 @@ impl LexiconService {
                 .contains(&PersistedWordStep::Meanings);
         let completed_steps = completed_steps(forms_complete, meanings_complete);
         let now = Utc::now();
+        let previous_forms = current.forms.clone();
         let word = AdminWordV2 {
             revision: current.revision + 1,
             has_unpublished_changes: current.published_revision.is_some(),
@@ -238,6 +239,19 @@ impl LexiconService {
             updated_at: now,
             ..current
         };
+        let previous_surface_sources = crate::lexicon::repository::surface_projection_sources(
+            &word_with_previous_forms(&word, &previous_forms),
+        )
+        .map_err(surface_projection_error)?;
+        let surface_sources = crate::lexicon::repository::surface_projection_sources(&word)
+            .map_err(surface_projection_error)?;
+        let surface_keys = crate::lexicon::repository::surface_lock_keys([
+            previous_surface_sources.as_slice(),
+            surface_sources.as_slice(),
+        ]);
+        LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
+            .await
+            .map_err(repository_error)?;
         LexiconRepository::replace_entry_content(
             &mut transaction,
             &word,
@@ -246,6 +260,17 @@ impl LexiconService {
             "forms",
             &catalog.part_ids,
             &catalog.sub_part_ids,
+        )
+        .await
+        .map_err(repository_error)?;
+        LexiconRepository::replace_surface_projection(
+            &mut transaction,
+            word.id,
+            word.revision,
+            crate::lexicon::repository::SurfaceContentScope::Draft,
+            None,
+            &previous_surface_sources,
+            &surface_sources,
         )
         .await
         .map_err(repository_error)?;
@@ -378,6 +403,16 @@ impl LexiconService {
         .map_err(repository_error)?;
         transaction.commit().await.map_err(database_error)?;
         Ok(AdminWordV2Envelope { word })
+    }
+}
+
+fn word_with_previous_forms(
+    word: &AdminWordV2,
+    previous_forms: &DraftFormsStepContent,
+) -> AdminWordV2 {
+    AdminWordV2 {
+        forms: previous_forms.clone(),
+        ..word.clone()
     }
 }
 

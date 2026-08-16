@@ -125,6 +125,54 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
+    /// Expand/catch-up parity fallback. New detection uses the non-unique
+    /// surface projection first; until B4 backfill reaches parity, the legacy
+    /// exact-headword index remains authoritative for a missing exact row.
+    pub(crate) async fn legacy_exact_duplicates(
+        &self,
+        kind: EntryKind,
+        normalized: &[String],
+    ) -> Result<Vec<DuplicateRecord>, LexiconRepositoryError> {
+        if normalized.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_as::<_, DuplicateRecord>(
+            r#"
+            SELECT DISTINCT keys.entry_id,
+                   headword.headword,
+                   headword.dialect,
+                   entry.archived_at IS NOT NULL AS is_archived,
+                   entry.current_publication_id IS NOT NULL AS is_published
+            FROM lexicon.entry_headword_keys keys
+            JOIN lexicon.entries entry ON entry.id = keys.entry_id
+            JOIN LATERAL (
+                SELECT value.headword, value.dialect
+                FROM lexicon.entry_headwords value
+                WHERE value.entry_id = keys.entry_id
+                  AND (
+                      value.normalized_headword = keys.normalized_headword
+                      OR value.dialect = 'common'
+                  )
+                ORDER BY CASE value.dialect
+                             WHEN 'common' THEN 0
+                             WHEN keys.dialect_scope THEN 1
+                             ELSE 2
+                         END
+                LIMIT 1
+            ) headword ON TRUE
+            WHERE keys.language = 'en'
+              AND keys.kind = $1
+              AND keys.normalized_headword = ANY($2)
+            ORDER BY keys.entry_id, headword.dialect
+            "#,
+        )
+        .bind(kind_string(kind))
+        .bind(normalized)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     pub(crate) async fn catalog_sub_parts(
         &self,
     ) -> Result<Vec<CatalogSubPartRecord>, LexiconRepositoryError> {
@@ -154,47 +202,6 @@ impl LexiconRepository {
             "#,
         )
         .fetch_all(&mut **tx)
-        .await
-        .map_err(LexiconRepositoryError::Database)
-    }
-
-    pub(crate) async fn duplicates(
-        &self,
-        kind: EntryKind,
-        normalized: &[String],
-    ) -> Result<Vec<DuplicateRecord>, LexiconRepositoryError> {
-        if normalized.is_empty() {
-            return Ok(Vec::new());
-        }
-        sqlx::query_as::<_, DuplicateRecord>(
-            r#"
-            SELECT DISTINCT keys.entry_id,
-                   headword.headword,
-                   headword.dialect,
-                   entry.archived_at IS NOT NULL AS is_archived,
-                   entry.current_publication_id IS NOT NULL AS is_published
-            FROM lexicon.entry_headword_keys keys
-            JOIN lexicon.entries entry ON entry.id = keys.entry_id
-            JOIN LATERAL (
-                SELECT value.headword, value.dialect
-                FROM lexicon.entry_headwords value
-                WHERE value.entry_id = keys.entry_id
-                  AND (
-                      value.normalized_headword = keys.normalized_headword
-                      OR value.dialect = 'common'
-                  )
-                ORDER BY CASE value.dialect WHEN 'common' THEN 0 WHEN keys.dialect_scope THEN 1 ELSE 2 END
-                LIMIT 1
-            ) headword ON TRUE
-            WHERE keys.language = 'en'
-              AND keys.kind = $1
-              AND keys.normalized_headword = ANY($2)
-            ORDER BY keys.entry_id, headword.dialect
-            "#,
-        )
-        .bind(kind_string(kind))
-        .bind(normalized)
-        .fetch_all(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)
     }

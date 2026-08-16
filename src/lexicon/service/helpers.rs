@@ -58,20 +58,6 @@ pub(super) fn normalize_submitted_headwords(
     Ok(())
 }
 
-pub(super) fn normalized_headword_keys(
-    headwords: &WordHeadwordsV2,
-) -> Result<Vec<String>, LexiconServiceError> {
-    match headwords {
-        WordHeadwordsV2::Unified { common } => Ok(vec![
-            normalize_headword(common).map_err(map_headword_error)?.key,
-        ]),
-        WordHeadwordsV2::Distinguish { uk, us, .. } => Ok(vec![
-            normalize_headword(uk).map_err(map_headword_error)?.key,
-            normalize_headword(us).map_err(map_headword_error)?.key,
-        ]),
-    }
-}
-
 pub(super) fn map_dictionary_pos(values: &[String]) -> Vec<String> {
     let mut output = Vec::new();
     for value in values {
@@ -171,6 +157,12 @@ pub(super) fn map_headword_error(error: HeadwordNormalizationError) -> LexiconSe
             HeadwordNormalizationError::ControlCharacter => "headword contains control characters",
         },
     }
+}
+
+pub(super) fn surface_projection_error(_error: HeadwordNormalizationError) -> LexiconServiceError {
+    LexiconServiceError::Repository(LexiconRepositoryError::Invariant(
+        "persisted surface normalization failed",
+    ))
 }
 
 pub(super) fn repository_error(error: LexiconRepositoryError) -> LexiconServiceError {
