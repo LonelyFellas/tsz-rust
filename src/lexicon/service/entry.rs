@@ -966,15 +966,10 @@ impl LexiconService {
                 }
                 Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
             };
-            let confirmed_ids = confirmation
-                .match_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<std::collections::HashSet<_>>();
-            if current_matches
-                .iter()
-                .any(|item| !confirmed_ids.contains(item.match_id.as_str()))
-            {
+            if surface_match_ids_changed(
+                current_matches.iter().map(|item| item.match_id.as_str()),
+                confirmation.match_ids.iter().map(String::as_str),
+            ) {
                 let snapshot = match self
                     .create_detection_surface_snapshot(
                         actor_id,
@@ -1964,6 +1959,20 @@ impl LexiconService {
     }
 }
 
+fn surface_match_ids_changed<'a, I, J>(current_match_ids: I, confirmed_match_ids: J) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+    J: IntoIterator<Item = &'a str>,
+{
+    let current_ids = current_match_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let confirmed_ids = confirmed_match_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    current_ids != confirmed_ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2117,5 +2126,12 @@ mod tests {
             SurfaceMatchCategoryV2::HeadwordForm
         );
         assert!(has_unprojected_legacy_exact(&fully_projected, &[form_only]));
+    }
+
+    #[test]
+    fn surface_match_ids_changed_rejects_shrunk_and_expanded_sets() {
+        assert!(!surface_match_ids_changed(["a", "b"], ["b", "a"]));
+        assert!(surface_match_ids_changed(["a", "b"], ["a"]));
+        assert!(surface_match_ids_changed(["a"], ["a", "b"]));
     }
 }
