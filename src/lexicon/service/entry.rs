@@ -1369,7 +1369,7 @@ impl LexiconService {
             .collect()
     }
 
-    async fn headword_surface_matches_in_transaction(
+    pub(super) async fn headword_surface_matches_in_transaction(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         headwords: &WordHeadwordsV2,
@@ -1732,7 +1732,9 @@ fn has_unprojected_legacy_exact(
         .any(|record| !projected_entry_ids.contains(&record.entry_id))
 }
 
-fn canonical_headwords_digest(headwords: &WordHeadwordsV2) -> Result<String, LexiconServiceError> {
+pub(super) fn canonical_headwords_digest(
+    headwords: &WordHeadwordsV2,
+) -> Result<String, LexiconServiceError> {
     Ok(crate::platform::hash_token(
         &serde_json::to_string(headwords).map_err(serialization_error)?,
     ))

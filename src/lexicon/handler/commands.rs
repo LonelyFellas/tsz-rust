@@ -260,3 +260,49 @@ pub async fn publish(
         .map_err(map_error)?;
     Ok((StatusCode::CREATED, Json(response)))
 }
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/activate",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(
+        PublicationPath,
+        ("Idempotency-Key" = Uuid, Header, description = "历史 publication activation 命令幂等键（UUID）")
+    ),
+    request_body = ActivatePublicationInput,
+    responses(
+        (status = 200, description = "指定历史 publication 已切换为当前公开版本", body = AdminWordV2Envelope),
+        (status = 400, description = "路径、header 或 JSON 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用、必须先改密或词条已归档"),
+        (status = 404, description = "词条或 publication 不存在"),
+        (status = 409, description = "revision、surface、policy、visibility 或幂等键冲突"),
+        (status = 410, description = "surface 确认 snapshot 已过期"),
+        (status = 422, description = "revision 取值非法"),
+        (status = 503, description = "surface 确认服务不可用")
+    )
+)]
+pub async fn activate_publication(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    ApiPath(path): ApiPath<PublicationPath>,
+    ApiJson(input): ApiJson<ActivatePublicationInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    let idempotency_key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
+    let response = service(&state)
+        .activate_publication(
+            admin.id,
+            request_id.as_uuid(),
+            path.id,
+            path.publication_id,
+            idempotency_key,
+            input,
+        )
+        .await
+        .map_err(map_error)?;
+    Ok((StatusCode::OK, Json(response)))
+}

@@ -17,3 +17,4 @@ pub mod surface_backfill;
 pub mod surface_policy;
 pub mod surface_snapshot;
 pub mod validation;
+mod visibility;

@@ -255,6 +255,113 @@ impl LexiconRepository {
         )
         .await
     }
+
+    pub(crate) async fn historical_publication_for_update(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+        publication_id: Uuid,
+    ) -> Result<Option<HistoricalPublicationRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, HistoricalPublicationRecord>(
+            r#"
+            SELECT id, entry_id, publication_number, source_revision, snapshot, published_at
+            FROM lexicon.entry_publications
+            WHERE id = $1 AND entry_id = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(publication_id)
+        .bind(entry_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn activate_historical_publication(
+        tx: &mut Transaction<'_, Postgres>,
+        actor_id: Uuid,
+        request_id: Uuid,
+        idempotency_key: Uuid,
+        request_hash: &[u8],
+        publication: &HistoricalPublicationRecord,
+        previous_publication_id: Option<Uuid>,
+        word: &AdminWordV2,
+    ) -> Result<(), LexiconRepositoryError> {
+        let updated = sqlx::query(
+            r#"
+            UPDATE lexicon.entries
+            SET current_publication_id = $2,
+                updated_by_admin_id = $3,
+                updated_at = $4
+            WHERE id = $1 AND revision = $5 AND lifecycle_revision = $6
+            "#,
+        )
+        .bind(word.id)
+        .bind(publication.id)
+        .bind(actor_id)
+        .bind(word.updated_at)
+        .bind(word.revision)
+        .bind(word.lifecycle_revision)
+        .execute(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        if updated.rows_affected() != 1 {
+            return Err(LexiconRepositoryError::Invariant(
+                "locked entry revision changed during publication activation",
+            ));
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO platform.outbox_events (
+                id, aggregate_type, aggregate_id, aggregate_revision,
+                event_type, payload, occurred_at, available_at
+            ) VALUES (
+                $1, 'lexicon.entry', $2, $3,
+                'lexicon.publication_activated', $4, $5, $5
+            )
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(word.id)
+        .bind(word.revision)
+        .bind(serde_json::json!({
+            "entry_id": word.id,
+            "publication_id": publication.id,
+            "publication_number": publication.publication_number,
+            "previous_publication_id": previous_publication_id,
+        }))
+        .bind(word.updated_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+
+        insert_audit_action(
+            tx,
+            actor_id,
+            "lexicon.publication.activate",
+            word.id,
+            word.revision,
+            request_id,
+            serde_json::json!({
+                "publication_id": publication.id,
+                "publication_number": publication.publication_number,
+                "previous_publication_id": previous_publication_id,
+            }),
+        )
+        .await?;
+        insert_idempotency_response(
+            tx,
+            "lexicon.publication.activate",
+            actor_id,
+            idempotency_key,
+            request_hash,
+            Some(publication.id),
+            word,
+            200,
+        )
+        .await
+    }
 }
 
 // --- references ---
@@ -508,6 +615,42 @@ impl LexiconRepository {
         )
         .bind(source_entry_id)
         .bind(restoring_entry_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn unavailable_outbound_sense_refs_for_publication(
+        tx: &mut Transaction<'_, Postgres>,
+        publication_id: Uuid,
+    ) -> Result<Vec<InboundSenseReferenceRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, InboundSenseReferenceRecord>(
+            r#"
+            SELECT sense_ref.target_sense_id,
+                   sense_ref.entry_id AS source_entry_id,
+                   sense_ref.publication_id AS source_publication_id,
+                   sense_ref.source_node_id,
+                   sense_ref.reference_kind
+            FROM lexicon.entry_publication_sense_refs sense_ref
+            JOIN lexicon.entries target_entry
+              ON target_entry.id = sense_ref.target_entry_id
+            LEFT JOIN lexicon.entry_publication_nodes target_node
+              ON target_node.publication_id = target_entry.current_publication_id
+             AND target_node.entry_id = target_entry.id
+             AND target_node.node_id = sense_ref.target_sense_id
+             AND target_node.node_type = 'sense'
+            WHERE sense_ref.publication_id = $1
+              AND (
+                   target_entry.archived_at IS NOT NULL
+                   OR target_entry.current_publication_id IS NULL
+                   OR target_node.node_id IS NULL
+              )
+            ORDER BY sense_ref.target_sense_id,
+                     sense_ref.entry_id,
+                     sense_ref.source_node_id
+            "#,
+        )
+        .bind(publication_id)
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)

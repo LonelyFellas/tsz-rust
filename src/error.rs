@@ -69,6 +69,7 @@ pub enum ErrorCode {
     EntryHasInboundPublicationRefs,
     EntryHasUnavailablePublicationRefs,
     WordNotFound,
+    PublicationNotFound,
     PartOfSpeechInUse,
     SubPartOfSpeechInUse,
     InvalidSpeechPreview,
@@ -89,7 +90,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 68] = [
+    pub const ALL: [Self; 69] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -148,6 +149,7 @@ impl ErrorCode {
         Self::EntryHasInboundPublicationRefs,
         Self::EntryHasUnavailablePublicationRefs,
         Self::WordNotFound,
+        Self::PublicationNotFound,
         Self::PartOfSpeechInUse,
         Self::SubPartOfSpeechInUse,
         Self::InvalidSpeechPreview,
@@ -404,6 +406,11 @@ impl ErrorCode {
                 StatusCode::CONFLICT,
             ),
             Self::WordNotFound => ("word_not_found", "Word not found", StatusCode::NOT_FOUND),
+            Self::PublicationNotFound => (
+                "publication_not_found",
+                "Publication not found",
+                StatusCode::NOT_FOUND,
+            ),
             Self::PartOfSpeechInUse => (
                 "part_of_speech_in_use",
                 "Part of speech in use",

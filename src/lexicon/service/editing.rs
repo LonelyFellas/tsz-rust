@@ -736,7 +736,7 @@ impl LexiconService {
         Ok((matches, contexts))
     }
 
-    async fn form_surface_matches_in_transaction(
+    pub(super) async fn form_surface_matches_in_transaction(
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         word: &AdminWordV2,
@@ -947,7 +947,9 @@ fn form_surface_match(
     })
 }
 
-fn canonical_forms_digest(content: &DraftFormsStepContent) -> Result<String, LexiconServiceError> {
+pub(super) fn canonical_forms_digest(
+    content: &DraftFormsStepContent,
+) -> Result<String, LexiconServiceError> {
     Ok(crate::platform::hash_token(
         &serde_json::to_string(content).map_err(serialization_error)?,
     ))
