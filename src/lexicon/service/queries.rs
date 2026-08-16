@@ -348,6 +348,11 @@ impl LexiconService {
                 id: record.id,
                 headword: record.headword,
                 kind: parse_kind(&record.kind).unwrap_or(EntryKind::Word),
+                dialects: record
+                    .dialects
+                    .iter()
+                    .filter_map(|dialect| parse_dialect(dialect))
+                    .collect(),
                 revision: record.revision,
                 lifecycle_revision: record.lifecycle_revision,
                 gloss: record.gloss,

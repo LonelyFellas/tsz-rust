@@ -966,15 +966,10 @@ impl LexiconService {
                 }
                 Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
             };
-            let confirmed_ids = confirmation
-                .match_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<std::collections::HashSet<_>>();
-            if current_matches
-                .iter()
-                .any(|item| !confirmed_ids.contains(item.match_id.as_str()))
-            {
+            if surface_match_ids_changed(
+                current_matches.iter().map(|item| item.match_id.as_str()),
+                confirmation.match_ids.iter().map(String::as_str),
+            ) {
                 let snapshot = match self
                     .create_detection_surface_snapshot(
                         actor_id,
@@ -1021,6 +1016,7 @@ impl LexiconService {
                     surface_warning: surface_warning_audit(
                         &confirmation,
                         &current_matches,
+                        &current_contexts,
                         actor_id,
                     ),
                 };
@@ -1761,17 +1757,31 @@ fn relation_type_for_node(word: &AdminWordV2, node_id: Uuid) -> Option<RelationT
 fn surface_warning_audit(
     confirmation: &VerifiedSurfaceConfirmation,
     current_matches: &[LexiconSurfaceMatchV2],
+    current_contexts: &[MatchedEntryContextV2],
     actor_id: Uuid,
 ) -> DetectionSurfaceWarningAuditV2 {
     let mut preview = current_matches
         .iter()
         .take(5)
-        .map(|item| DetectionSurfaceMatchPreviewV2 {
-            match_id: item.match_id.clone(),
-            match_category: item.match_category,
-            existing_word_id: item.existing.word_id,
-            existing_headword: item.existing.headword.clone(),
-            existing_status: item.existing.status,
+        .map(|item| {
+            let context = current_contexts
+                .iter()
+                .find(|context| context.word_id == item.existing.word_id);
+            let existing_dialect = match &item.existing.source {
+                ExistingSurfaceSourceV2::Headword { dialect, .. }
+                | ExistingSurfaceSourceV2::Form { dialect, .. } => *dialect,
+            };
+            DetectionSurfaceMatchPreviewV2 {
+                match_id: item.match_id.clone(),
+                match_category: item.match_category,
+                existing_word_id: item.existing.word_id,
+                existing_headword: item.existing.headword.clone(),
+                existing_kind: item.existing.kind,
+                existing_status: item.existing.status,
+                existing_dialect,
+                pos_labels: context.map_or_else(Vec::new, |item| item.pos_labels.clone()),
+                gloss_previews: context.map_or_else(Vec::new, |item| item.gloss_previews.clone()),
+            }
         })
         .collect::<Vec<_>>();
     preview.sort_by(|left, right| left.match_id.cmp(&right.match_id));
@@ -1949,6 +1959,20 @@ impl LexiconService {
     }
 }
 
+fn surface_match_ids_changed<'a, I, J>(current_match_ids: I, confirmed_match_ids: J) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+    J: IntoIterator<Item = &'a str>,
+{
+    let current_ids = current_match_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let confirmed_ids = confirmed_match_ids
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    current_ids != confirmed_ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2102,5 +2126,12 @@ mod tests {
             SurfaceMatchCategoryV2::HeadwordForm
         );
         assert!(has_unprojected_legacy_exact(&fully_projected, &[form_only]));
+    }
+
+    #[test]
+    fn surface_match_ids_changed_rejects_shrunk_and_expanded_sets() {
+        assert!(!surface_match_ids_changed(["a", "b"], ["b", "a"]));
+        assert!(surface_match_ids_changed(["a", "b"], ["a"]));
+        assert!(surface_match_ids_changed(["a"], ["a", "b"]));
     }
 }

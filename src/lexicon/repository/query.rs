@@ -129,6 +129,12 @@ impl LexiconRepository {
             r#"
             SELECT entry.id,
                    entry.kind,
+                   COALESCE((
+                       SELECT array_agg(headword.dialect ORDER BY CASE headword.dialect
+                           WHEN 'common' THEN 0 WHEN 'uk' THEN 1 ELSE 2 END)
+                       FROM lexicon.entry_headwords headword
+                       WHERE headword.entry_id = entry.id
+                   ), ARRAY[]::text[]) AS dialects,
                    entry.revision,
                    entry.lifecycle_revision,
                    COALESCE((

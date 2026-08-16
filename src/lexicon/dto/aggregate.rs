@@ -78,7 +78,13 @@ pub struct DetectionSurfaceMatchPreviewV2 {
     pub match_category: SurfaceMatchCategoryV2,
     pub existing_word_id: Uuid,
     pub existing_headword: String,
+    pub existing_kind: EntryKind,
     pub existing_status: AdminWordStatus,
+    pub existing_dialect: Dialect,
+    #[schema(max_items = 5)]
+    pub pos_labels: Vec<String>,
+    #[schema(max_items = 5)]
+    pub gloss_previews: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
