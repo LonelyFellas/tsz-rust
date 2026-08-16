@@ -52,6 +52,7 @@ fn service(state: &AppState) -> LexiconService {
             state.surface_policy_prefix.clone(),
         ),
         SurfacePolicyStore::with_prefix(state.redis.clone(), state.surface_policy_prefix.clone()),
+        state.related_search_cursor_key.clone(),
     )
 }
 
@@ -74,7 +75,15 @@ fn map_error(error: LexiconServiceError) -> AppError {
                 ErrorCode::InvalidHeadword
             } else if matches!(
                 field,
-                "page" | "page_size" | "limit" | "q" | "gloss" | "pos" | "level" | "created_to"
+                "page"
+                    | "page_size"
+                    | "limit"
+                    | "cursor"
+                    | "q"
+                    | "gloss"
+                    | "pos"
+                    | "level"
+                    | "created_to"
             ) {
                 ErrorCode::InvalidQuery
             } else {

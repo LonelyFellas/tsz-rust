@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use tsz_rust::{
     admin::{AdminRepository, AdminRole, NewAdmin},
+    lexicon::normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword},
     lexicon::surface_backfill::{
         SURFACE_WRITER_VERSION, execute_surface_cutover, run_surface_backfill,
         run_surface_cutover_preflight, run_surface_parity, surface_cutover_artifact_sha256,
@@ -283,6 +284,34 @@ async fn seed_related_search_entry(
         .execute(pool)
         .await
         .unwrap();
+        let normalized = normalize_headword(headword).unwrap();
+        for dialect_scope in ["uk", "us"] {
+            sqlx::query(
+                r#"
+                INSERT INTO lexicon.surface_sources (
+                    entry_id, source_id, source_kind, language, entry_kind,
+                    dialect, dialect_scope, surface, normalized_surface,
+                    normalization_version, source_revision, is_deleted,
+                    content_scope, publication_id
+                ) VALUES (
+                    $1, $2, 'headword', 'en', $3,
+                    'common', $4, $5, $6,
+                    $7, 1, FALSE, 'current_publication', $8
+                )
+                "#,
+            )
+            .bind(entry_id)
+            .bind(format!("headword:{entry_id}:common"))
+            .bind(kind)
+            .bind(dialect_scope)
+            .bind(&normalized.display)
+            .bind(&normalized.key)
+            .bind(HEADWORD_NORMALIZATION_VERSION)
+            .bind(publication_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
     }
     if archived {
         sqlx::query("UPDATE lexicon.entries SET archived_at = now() WHERE id = $1")
@@ -2046,6 +2075,8 @@ async fn related_search_reads_only_current_published_snapshots(pool: PgPool) {
     let bearer = token(&state, admin_id);
     let (word_id, sense_id) =
         seed_related_search_entry(&pool, admin_id, "colour", "word", "颜色", true, false).await;
+    let (second_word_id, second_sense_id) =
+        seed_related_search_entry(&pool, admin_id, "colour", "word", "色彩", true, false).await;
     seed_related_search_entry(
         &pool,
         admin_id,
@@ -2076,6 +2107,8 @@ async fn related_search_reads_only_current_published_snapshots(pool: PgPool) {
         false,
     )
     .await;
+    let (unicode_id, _) =
+        seed_related_search_entry(&pool, admin_id, "İ", "word", "带点大写 I", true, false).await;
 
     let (status, empty) = call(
         &state,
@@ -2088,6 +2121,21 @@ async fn related_search_reads_only_current_published_snapshots(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(empty, json!({"results": []}));
+
+    let (status, empty_v2) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=%20%20%20&page_size=20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        empty_v2,
+        json!({"results": [], "total": 0, "next_cursor": null})
+    );
 
     let (status, words) = call(
         &state,
@@ -2106,7 +2154,16 @@ async fn related_search_reads_only_current_published_snapshots(pool: PgPool) {
                 "word_id": word_id,
                 "headword": "colour",
                 "kind": "word",
+                "dialects": ["common"],
+                "pos_labels": [],
                 "senses": [{"sense_id": sense_id, "gloss": "颜色"}]
+            }, {
+                "word_id": second_word_id,
+                "headword": "colour",
+                "kind": "word",
+                "dialects": ["common"],
+                "pos_labels": [],
+                "senses": [{"sense_id": second_sense_id, "gloss": "色彩"}]
             }]
         })
     );
@@ -2128,10 +2185,297 @@ async fn related_search_reads_only_current_published_snapshots(pool: PgPool) {
                 "word_id": phrase_id,
                 "headword": "colour centre",
                 "kind": "phrase",
+                "dialects": ["common"],
+                "pos_labels": [],
                 "senses": [{"sense_id": phrase_sense_id, "gloss": "色彩中心"}]
             }]
         })
     );
+
+    let (status, exact_first) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "exact 首页失败：{exact_first}");
+    assert_eq!(exact_first["total"], 2);
+    assert_eq!(exact_first["results"].as_array().unwrap().len(), 1);
+    assert!(exact_first.get("next_cursor").is_some());
+    let cursor = exact_first["next_cursor"]
+        .as_str()
+        .expect("应有第二页 cursor");
+    let mut tampered_cursor = cursor.as_bytes().to_vec();
+    let last = tampered_cursor.last_mut().unwrap();
+    *last = if *last == b'A' { b'B' } else { b'A' };
+    let tampered_cursor = String::from_utf8(tampered_cursor).unwrap();
+    let (status, invalid_cursor) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1&cursor={tampered_cursor}"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid_cursor["field"], "cursor");
+
+    let second_admin_id = seed_admin(&pool).await;
+    let second_bearer = token(&state, second_admin_id);
+    for (uri, request_bearer) in [
+        (
+            format!(
+                "{ROOT}/entries/related-search?q=colours&kind=word&match_mode=exact&page_size=1&cursor={cursor}"
+            ),
+            bearer.as_str(),
+        ),
+        (
+            format!(
+                "{ROOT}/entries/related-search?q=colour&kind=phrase&match_mode=exact&page_size=1&cursor={cursor}"
+            ),
+            bearer.as_str(),
+        ),
+        (
+            format!(
+                "{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1&cursor={cursor}"
+            ),
+            second_bearer.as_str(),
+        ),
+    ] {
+        let (status, mismatched_cursor) =
+            call(&state, Method::GET, &uri, request_bearer, None, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(mismatched_cursor["field"], "cursor");
+    }
+
+    let first_page_id =
+        Uuid::parse_str(exact_first["results"][0]["word_id"].as_str().unwrap()).unwrap();
+    let unread_id = if first_page_id == word_id {
+        second_word_id
+    } else {
+        word_id
+    };
+    sqlx::query("UPDATE lexicon.entries SET updated_at = now() WHERE id = $1")
+        .bind(unread_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, exact_second) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1&cursor={cursor}"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "exact 第二页失败：{exact_second}");
+    assert_eq!(exact_second["total"], 2);
+    assert!(exact_second.get("next_cursor").is_some());
+    assert!(exact_second["next_cursor"].is_null());
+    let first_id = exact_first["results"][0]["word_id"].as_str().unwrap();
+    let second_id = exact_second["results"][0]["word_id"].as_str().unwrap();
+    assert_ne!(first_id, second_id, "同名词条不得合并或重复");
+
+    let (status, exact_second_replay) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1&cursor={cursor}"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        exact_second_replay, exact_second,
+        "同一 cursor 必须稳定重放"
+    );
+
+    let (status, normalized_exact) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=%EF%BC%A3%EF%BC%AF%EF%BC%AC%EF%BC%AF%EF%BC%B5%EF%BC%B2&kind=word&match_mode=exact&page_size=20"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "NFKC exact 搜索失败：{normalized_exact}"
+    );
+    assert_eq!(normalized_exact["total"], 2);
+    assert_eq!(normalized_exact["results"].as_array().unwrap().len(), 2);
+    assert!(normalized_exact.get("next_cursor").is_some());
+    assert!(normalized_exact["next_cursor"].is_null());
+
+    let (status, unicode_exact) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=%C4%B0&kind=word&match_mode=exact&page_size=20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Unicode exact 搜索失败：{unicode_exact}"
+    );
+    assert_eq!(unicode_exact["total"], 1);
+    assert_eq!(
+        unicode_exact["results"][0]["word_id"],
+        unicode_id.to_string()
+    );
+
+    let (status, contains) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=colour&match_mode=contains&exclude_exact=true&page_size=20"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "contains 搜索失败：{contains}");
+    assert_eq!(contains["total"], 1);
+    assert_eq!(contains["results"][0]["word_id"], phrase_id.to_string());
+
+    let changing = create_ready_draft(&state, &pool, &bearer, "pagination-change").await;
+    let (status, published_change) = publish_ready(&state, &bearer, &changing).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "发布并发目标失败：{published_change}"
+    );
+    let (status, changed_dataset_cursor) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1&cursor={cursor}"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(changed_dataset_cursor["field"], "cursor");
+
+    let (status, before_archive) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let before_archive_cursor = before_archive["next_cursor"].as_str().unwrap();
+    let changing_id = published_change["word"]["id"].as_str().unwrap();
+    let (status, archived_change) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{changing_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": published_change["word"]["revision"],
+            "base_lifecycle_revision": published_change["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "归档并发目标失败：{archived_change}"
+    );
+    let (status, archived_dataset_cursor) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1&cursor={before_archive_cursor}"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(archived_dataset_cursor["field"], "cursor");
+
+    let (status, before_restore) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let before_restore_cursor = before_restore["next_cursor"].as_str().unwrap();
+    let (status, restored_change) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{changing_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": archived_change["word"]["revision"],
+            "base_lifecycle_revision": archived_change["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "恢复并发目标失败：{restored_change}"
+    );
+    let (status, restored_dataset_cursor) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=colour&kind=word&match_mode=exact&page_size=1&cursor={before_restore_cursor}"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(restored_dataset_cursor["field"], "cursor");
+
+    let (status, invalid) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=colour&page_size=1&limit=1"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid["field"], "page_size");
 
     for limit in [0, 101] {
         let (status, invalid) = call(

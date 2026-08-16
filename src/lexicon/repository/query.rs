@@ -1,18 +1,34 @@
 use super::*;
 
 impl LexiconRepository {
+    pub(crate) async fn related_search_dataset_version(
+        &self,
+    ) -> Result<i64, LexiconRepositoryError> {
+        // aggregate_type 是 outbox 唯一索引的首列；这里只扫描词库发布/生命周期索引区间，
+        // 草稿保存与其他业务事件不会让已签名游标无故失效。
+        sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM platform.outbox_events
+            WHERE aggregate_type IN ('lexicon.entry', 'lexicon.entry.lifecycle')
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     pub(crate) async fn related_search(
         &self,
-        q: &str,
-        kind: Option<EntryKind>,
-        limit: i64,
+        filter: &RelatedSearchFilter<'_>,
     ) -> Result<Vec<RelatedSearchRecord>, LexiconRepositoryError> {
-        let pattern = format!("%{}%", escape_like_literal(q));
+        let pattern = format!("%{}%", escape_like_literal(filter.q));
         sqlx::query_as::<_, RelatedSearchRecord>(
             r#"
             WITH published_entry AS (
                 SELECT entry.id,
                        entry.kind,
+                       publication.id AS publication_id,
                        publication.snapshot,
                        CASE publication.snapshot #>> '{headwords,mode}'
                            WHEN 'unified' THEN
@@ -29,18 +45,77 @@ impl LexiconRepository {
                   ON publication.id = entry.current_publication_id
                  AND publication.entry_id = entry.id
                 WHERE entry.archived_at IS NULL
+            ), searchable_entry AS (
+                SELECT *, headword AS sort_headword
+                FROM published_entry
             )
-            SELECT snapshot
-            FROM published_entry
+            SELECT snapshot,
+                   COALESCE((
+                       SELECT array_agg(DISTINCT part.code ORDER BY part.code)
+                       FROM lexicon.entry_publication_part_of_speech_refs pos_ref
+                       JOIN catalog.parts_of_speech part
+                         ON part.id = pos_ref.part_of_speech_id
+                       WHERE pos_ref.publication_id = searchable_entry.publication_id
+                         AND pos_ref.entry_id = searchable_entry.id
+                   ), ARRAY[]::text[]) AS pos_labels,
+                   sort_headword,
+                   count(*) OVER() AS total
+            FROM searchable_entry
             WHERE ($2::text IS NULL OR kind = $2)
-              AND headword ILIKE $1 ESCAPE '\'
-            ORDER BY lower(headword), id
-            LIMIT $3
+              AND CASE WHEN $3 THEN
+                    EXISTS (
+                        SELECT 1
+                        FROM lexicon.surface_sources surface
+                        WHERE surface.entry_id = searchable_entry.id
+                          AND surface.publication_id = searchable_entry.publication_id
+                          AND surface.content_scope = 'current_publication'
+                          AND surface.source_kind = 'headword'
+                          AND surface.is_deleted = FALSE
+                          AND surface.normalized_surface = $5
+                    )
+                  ELSE
+                    EXISTS (
+                        SELECT 1
+                        FROM lexicon.surface_sources surface
+                        WHERE surface.entry_id = searchable_entry.id
+                          AND surface.publication_id = searchable_entry.publication_id
+                          AND surface.content_scope = 'current_publication'
+                          AND surface.source_kind = 'headword'
+                          AND surface.is_deleted = FALSE
+                          AND surface.normalized_surface LIKE $1 ESCAPE '\'
+                    )
+                  END
+              AND (NOT $4 OR NOT (
+                    EXISTS (
+                        SELECT 1
+                        FROM lexicon.surface_sources surface
+                        WHERE surface.entry_id = searchable_entry.id
+                          AND surface.publication_id = searchable_entry.publication_id
+                          AND surface.content_scope = 'current_publication'
+                          AND surface.source_kind = 'headword'
+                          AND surface.is_deleted = FALSE
+                          AND surface.normalized_surface = $5
+                    )
+                  ))
+              AND ($6::text IS NULL OR (
+                    kind,
+                    sort_headword COLLATE "C",
+                    id
+                  ) > ($6, $7 COLLATE "C", $8)
+              )
+            ORDER BY kind ASC, sort_headword COLLATE "C" ASC, id ASC
+            LIMIT $9
             "#,
         )
         .bind(pattern)
-        .bind(kind.map(kind_string))
-        .bind(limit)
+        .bind(filter.kind.map(kind_string))
+        .bind(filter.exact)
+        .bind(filter.exclude_exact)
+        .bind(filter.q)
+        .bind(filter.last_kind.map(kind_string))
+        .bind(filter.last_headword)
+        .bind(filter.last_word_id)
+        .bind(filter.limit)
         .fetch_all(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)

@@ -206,6 +206,20 @@ pub(crate) struct EntryRecord {
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct RelatedSearchRecord {
     pub snapshot: Value,
+    pub pos_labels: Vec<String>,
+    pub sort_headword: String,
+    pub total: i64,
+}
+
+pub(crate) struct RelatedSearchFilter<'a> {
+    pub q: &'a str,
+    pub kind: Option<crate::lexicon::dto::EntryKind>,
+    pub exact: bool,
+    pub exclude_exact: bool,
+    pub limit: i64,
+    pub last_kind: Option<crate::lexicon::dto::EntryKind>,
+    pub last_headword: Option<&'a str>,
+    pub last_word_id: Option<Uuid>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
