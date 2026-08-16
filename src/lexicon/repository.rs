@@ -11,11 +11,12 @@ use crate::{
         },
         model::{
             CatalogPartRecord, CatalogSubPartRecord, DictionaryCandidateRecord,
-            DictionaryTermRecord, DuplicateRecord, EntryRecord, IdempotencyRecord,
-            InboundSenseReferenceRecord, ListEntryRecord, ListFilter, NewPublicationSenseReference,
-            NodeIdentityRecord, RegionSurfaceRecord, RelatedSearchRecord,
-            ResolvedSenseTargetRecord, SenseTargetKey, StatsRecord, SurfaceEntryContextRecord,
-            SurfaceInboundRelationRecord, SurfaceLookupKey, SurfaceSourceRecord,
+            DictionaryTermRecord, DuplicateRecord, EntryRecord, FormsSurfaceAcknowledgementRecord,
+            IdempotencyRecord, InboundSenseReferenceRecord, ListEntryRecord, ListFilter,
+            NewPublicationSenseReference, NodeIdentityRecord, RegionSurfaceRecord,
+            RelatedSearchRecord, ResolvedSenseTargetRecord, SenseTargetKey, StatsRecord,
+            SurfaceEntryContextRecord, SurfaceInboundRelationRecord, SurfaceLookupKey,
+            SurfaceSourceRecord,
         },
         node_identity::{
             BASE_FORM_ROLE, FORM_GROUP_ROLE, GRAMMAR_STRUCTURE_ROLE, POS_ROLE, PRONUNCIATION_ROLE,

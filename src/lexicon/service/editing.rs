@@ -54,12 +54,66 @@ impl LexiconService {
             return Err(LexiconServiceError::ValidationFailed(limit_issues));
         }
         let affected = forms_impact(&current, &input.content, &next_meanings);
+        let proposed_word = AdminWordV2 {
+            forms: input.content.clone(),
+            meanings: next_meanings,
+            ..current.clone()
+        };
+        let (matches, contexts) = self.form_surface_matches(&proposed_word).await?;
+        let forms_content_digest = canonical_forms_digest(&input.content)?;
+        let policy = if matches.is_empty() {
+            None
+        } else {
+            Some(
+                self.surface_policies
+                    .policy(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
+                    .await
+                    .map_err(LexiconServiceError::SurfacePolicy)?,
+            )
+        };
+        let existing_evidence = if matches.is_empty() {
+            None
+        } else {
+            self.repository
+                .forms_surface_acknowledgement_by_entry(entry_id)
+                .await
+                .map_err(repository_error)?
+        };
+        let unacknowledged = unacknowledged_forms_matches(
+            &matches,
+            existing_evidence.as_ref(),
+            entry_id,
+            &forms_content_digest,
+            policy.as_ref(),
+        );
+        if !unacknowledged.is_empty() {
+            let snapshot = self
+                .create_forms_surface_snapshot(
+                    actor_id,
+                    entry_id,
+                    current.revision,
+                    &input.content,
+                    &affected,
+                    unacknowledged,
+                    contexts,
+                    policy.expect("non-empty forms matches have a policy"),
+                )
+                .await?;
+            return Ok(FormsImpactResponseV2 {
+                base_revision: current.revision,
+                requires_confirmation: !affected.is_empty(),
+                affected,
+                confirmation_token: None,
+                surface_match_page: Some(snapshot.page),
+            });
+        }
         if affected.is_empty() {
             return Ok(FormsImpactResponseV2 {
                 base_revision: current.revision,
                 requires_confirmation: false,
                 affected,
                 confirmation_token: None,
+                surface_match_page: None,
             });
         }
         let token = Uuid::now_v7();
@@ -81,6 +135,7 @@ impl LexiconService {
             requires_confirmation: true,
             affected,
             confirmation_token: Some(token),
+            surface_match_page: None,
         })
     }
 
@@ -186,24 +241,9 @@ impl LexiconService {
         }
 
         let affected = forms_impact(&current, &input.content, &meanings);
-        if !affected.is_empty() {
-            let token = input
-                .confirmed_impact_token
-                .ok_or_else(|| downstream_required(&affected))?;
-            let confirmation = self
-                .impacts
-                .load(actor_id, token)
-                .await
-                .map_err(LexiconServiceError::ImpactStore)?
-                .ok_or_else(|| downstream_required(&affected))?;
-            let expected_hash = sha256_json(&input.content).map_err(serialization_error)?;
-            if confirmation.entry_id != entry_id
-                || confirmation.base_revision != current.revision
-                || confirmation.content_hash != expected_hash
-            {
-                return Err(downstream_required(&affected));
-            }
-        }
+        let forms_content_digest = canonical_forms_digest(&input.content)?;
+        let confirmed_impact_token = input.confirmed_impact_token;
+        let confirmed_surface_match_token = input.confirmed_surface_match_token.clone();
 
         let meaning_issues = validate_meanings(
             entry_id,
@@ -249,9 +289,244 @@ impl LexiconService {
             previous_surface_sources.as_slice(),
             surface_sources.as_slice(),
         ]);
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
         LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
             .await
             .map_err(repository_error)?;
+
+        // Re-read the authoritative projection only after the same ordered locks
+        // used by every surface writer are held. Preview responses are advisory;
+        // this lock-held set decides whether acknowledgement is still sufficient.
+        let (current_matches, current_contexts) = self
+            .form_surface_matches_in_transaction(&mut transaction, &word)
+            .await?;
+        let current_policy =
+            if current_matches.is_empty() && confirmed_surface_match_token.is_none() {
+                None
+            } else {
+                Some(
+                    self.surface_policies
+                        .policy(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
+                        .await
+                        .map_err(LexiconServiceError::SurfacePolicy)?,
+                )
+            };
+        let previous_evidence =
+            LexiconRepository::forms_surface_acknowledgement(&mut transaction, entry_id)
+                .await
+                .map_err(repository_error)?;
+        let unacknowledged = unacknowledged_forms_matches(
+            &current_matches,
+            previous_evidence.as_ref(),
+            entry_id,
+            &forms_content_digest,
+            current_policy.as_ref(),
+        );
+        let mut verified_surface = None;
+        if !unacknowledged.is_empty() {
+            let policy = current_policy.expect("non-empty forms matches have a policy");
+            let Some(token) = confirmed_surface_match_token.as_deref() else {
+                let snapshot = self
+                    .create_forms_surface_snapshot(
+                        actor_id,
+                        entry_id,
+                        current.revision,
+                        &word.forms,
+                        &affected,
+                        unacknowledged,
+                        current_contexts,
+                        policy,
+                    )
+                    .await?;
+                return Err(LexiconServiceError::SurfaceMatchAcknowledgementRequired(
+                    Box::new(snapshot.page),
+                ));
+            };
+            let (binding, _) = forms_surface_binding(
+                actor_id,
+                entry_id,
+                current.revision,
+                &word.forms,
+                &affected,
+                policy,
+            )?;
+            let confirmation = match self
+                .surface_snapshots
+                .verify(
+                    token,
+                    &ExpectedSurfaceConfirmation {
+                        binding,
+                        current_policy: policy,
+                    },
+                )
+                .await
+            {
+                Ok(confirmation) => confirmation,
+                Err(SurfaceSnapshotError::Expired) => {
+                    return Err(LexiconServiceError::SurfaceMatchSnapshotExpired);
+                }
+                Err(SurfaceSnapshotError::PolicyChanged(name)) => {
+                    let policy = self
+                        .surface_policies
+                        .policy(name)
+                        .await
+                        .map_err(LexiconServiceError::SurfacePolicy)?;
+                    return Err(LexiconServiceError::SurfacePolicyChanged(policy));
+                }
+                Err(SurfaceSnapshotError::BindingMismatch) => {
+                    let snapshot = self
+                        .create_forms_surface_snapshot(
+                            actor_id,
+                            entry_id,
+                            current.revision,
+                            &word.forms,
+                            &affected,
+                            unacknowledged,
+                            current_contexts,
+                            policy,
+                        )
+                        .await?;
+                    return Err(LexiconServiceError::SurfaceMatchesChanged(Box::new(
+                        snapshot.page,
+                    )));
+                }
+                Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
+            };
+            let confirmed_ids = confirmation
+                .match_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>();
+            if unacknowledged
+                .iter()
+                .any(|item| !confirmed_ids.contains(item.match_id.as_str()))
+            {
+                let snapshot = self
+                    .create_forms_surface_snapshot(
+                        actor_id,
+                        entry_id,
+                        current.revision,
+                        &word.forms,
+                        &affected,
+                        unacknowledged,
+                        current_contexts,
+                        policy,
+                    )
+                    .await?;
+                return Err(LexiconServiceError::SurfaceMatchesChanged(Box::new(
+                    snapshot.page,
+                )));
+            }
+            verified_surface = Some(confirmation);
+        }
+
+        let mut verified_impact_snapshot = None;
+        if !affected.is_empty() {
+            let token = confirmed_impact_token.ok_or_else(|| downstream_required(&affected))?;
+            if confirmed_surface_match_token.is_some() {
+                let policy = current_policy
+                    .expect("a submitted forms surface token always loads the current policy");
+                let (expected_binding, _) = forms_surface_binding(
+                    actor_id,
+                    entry_id,
+                    current.revision,
+                    &word.forms,
+                    &affected,
+                    policy,
+                )?;
+                let impact_confirmation = match self
+                    .surface_snapshots
+                    .verify_impact(
+                        token,
+                        &ExpectedSurfaceOwner {
+                            actor_id,
+                            command: SurfaceConsumptionCommand::SaveForms,
+                            owner_context: entry_id.to_string(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(confirmation) => confirmation,
+                    Err(SurfaceSnapshotError::Expired) => {
+                        return Err(LexiconServiceError::SurfaceMatchSnapshotExpired);
+                    }
+                    Err(SurfaceSnapshotError::PolicyChanged(name)) => {
+                        let policy = self
+                            .surface_policies
+                            .policy(name)
+                            .await
+                            .map_err(LexiconServiceError::SurfacePolicy)?;
+                        return Err(LexiconServiceError::SurfacePolicyChanged(policy));
+                    }
+                    Err(SurfaceSnapshotError::BindingMismatch) => {
+                        return Err(downstream_required(&affected));
+                    }
+                    Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
+                };
+                if impact_confirmation.binding != expected_binding
+                    || verified_surface
+                        .as_ref()
+                        .is_some_and(|surface_confirmation| {
+                            impact_confirmation.snapshot_id != surface_confirmation.snapshot_id
+                        })
+                {
+                    return Err(downstream_required(&affected));
+                }
+                verified_impact_snapshot = Some(impact_confirmation);
+            } else {
+                let confirmation = self
+                    .impacts
+                    .load(actor_id, token)
+                    .await
+                    .map_err(LexiconServiceError::ImpactStore)?
+                    .ok_or_else(|| downstream_required(&affected))?;
+                let expected_hash = sha256_json(&word.forms).map_err(serialization_error)?;
+                if confirmation.entry_id != entry_id
+                    || confirmation.base_revision != current.revision
+                    || confirmation.content_hash != expected_hash
+                {
+                    return Err(downstream_required(&affected));
+                }
+            }
+        }
+
+        let forms_surface_evidence = if current_matches.is_empty() {
+            None
+        } else {
+            let policy = current_policy.expect("non-empty forms matches have a policy");
+            let (acknowledged_by_admin_id, acknowledged_at) = match &verified_surface {
+                Some(_) => (actor_id, Utc::now()),
+                None => {
+                    let evidence = previous_evidence.as_ref().ok_or_else(invariant_record)?;
+                    (evidence.acknowledged_by_admin_id, evidence.acknowledged_at)
+                }
+            };
+            let mut match_ids = current_matches
+                .iter()
+                .map(|item| item.match_id.clone())
+                .collect::<Vec<_>>();
+            match_ids.sort();
+            Some(FormsSurfaceAcknowledgementRecord {
+                entry_id,
+                forms_revision: word.revision,
+                forms_content_digest: forms_content_digest.clone(),
+                match_ids,
+                match_digest: crate::lexicon::surface_snapshot::surface_match_digest(
+                    &current_matches,
+                    &[SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches],
+                )
+                .map_err(LexiconServiceError::SurfaceSnapshot)?,
+                acknowledged_by_admin_id,
+                acknowledged_at,
+                policy_name: "surface_warning_acknowledgement".to_owned(),
+                policy_epoch: i64::try_from(policy.epoch).map_err(|_| invariant_record())?,
+                normalization_version: i32::from(
+                    crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION,
+                ),
+            })
+        };
         LexiconRepository::replace_entry_content(
             &mut transaction,
             &word,
@@ -274,7 +549,23 @@ impl LexiconService {
         )
         .await
         .map_err(repository_error)?;
+        if let Some(evidence) = &forms_surface_evidence {
+            LexiconRepository::upsert_forms_surface_acknowledgement(&mut transaction, evidence)
+                .await
+                .map_err(repository_error)?;
+        } else {
+            LexiconRepository::delete_forms_surface_acknowledgement(&mut transaction, entry_id)
+                .await
+                .map_err(repository_error)?;
+        }
         transaction.commit().await.map_err(database_error)?;
+        if let Some(confirmation) = verified_surface
+            .as_ref()
+            .or(verified_impact_snapshot.as_ref())
+            && let Err(error) = self.surface_snapshots.remove_verified(confirmation).await
+        {
+            tracing::warn!(%error, snapshot_id = %confirmation.snapshot_id, "saved forms but failed to remove surface confirmation");
+        }
         Ok(AdminWordV2Envelope { word })
     }
 
@@ -404,6 +695,329 @@ impl LexiconService {
         transaction.commit().await.map_err(database_error)?;
         Ok(AdminWordV2Envelope { word })
     }
+}
+
+#[derive(Debug, Clone)]
+struct FormSurfaceCandidate {
+    candidate_ref: String,
+    candidate_word_id: Uuid,
+    candidate_node_id: Uuid,
+    surface: String,
+    normalized_surface: String,
+    dialect: Dialect,
+    pos_id: Uuid,
+    pos: String,
+    form_type: WordFormTypeV2,
+    lookup_keys: Vec<crate::lexicon::model::SurfaceLookupKey>,
+}
+
+#[derive(serde::Serialize)]
+struct FormsSurfaceOwnerBundle<'a> {
+    entry_id: Uuid,
+    base_revision: i64,
+    content: &'a DraftFormsStepContent,
+    affected: &'a [FormsImpactItemV2],
+}
+
+impl LexiconService {
+    async fn form_surface_matches(
+        &self,
+        word: &AdminWordV2,
+    ) -> Result<(Vec<LexiconSurfaceMatchV2>, Vec<MatchedEntryContextV2>), LexiconServiceError> {
+        let candidates = form_surface_candidates(word)?;
+        let requested = form_surface_lookup_keys(&candidates);
+        let sources = self
+            .repository
+            .surface_sources("en", &requested, Some(word.id))
+            .await
+            .map_err(repository_error)?;
+        let matches = form_surface_matches_from_sources(&candidates, &sources)?;
+        let contexts = self.surface_match_contexts(&matches).await?;
+        Ok((matches, contexts))
+    }
+
+    async fn form_surface_matches_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        word: &AdminWordV2,
+    ) -> Result<(Vec<LexiconSurfaceMatchV2>, Vec<MatchedEntryContextV2>), LexiconServiceError> {
+        let candidates = form_surface_candidates(word)?;
+        let requested = form_surface_lookup_keys(&candidates);
+        let sources = LexiconRepository::surface_sources_in_transaction(
+            transaction,
+            "en",
+            &requested,
+            Some(word.id),
+        )
+        .await
+        .map_err(repository_error)?;
+        let matches = form_surface_matches_from_sources(&candidates, &sources)?;
+        let mut entry_ids = matches
+            .iter()
+            .map(|item| item.existing.word_id)
+            .collect::<Vec<_>>();
+        entry_ids.sort_unstable();
+        entry_ids.dedup();
+        let records =
+            LexiconRepository::surface_entry_contexts_in_transaction(transaction, &entry_ids)
+                .await
+                .map_err(repository_error)?;
+        let inbound =
+            LexiconRepository::surface_inbound_relations_in_transaction(transaction, &entry_ids)
+                .await
+                .map_err(repository_error)?;
+        Ok((matches, surface_contexts_from_records(records, inbound)?))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forms snapshot must bind the complete save owner, impact, match, context, and policy evidence"
+    )]
+    async fn create_forms_surface_snapshot(
+        &self,
+        actor_id: Uuid,
+        entry_id: Uuid,
+        base_revision: i64,
+        content: &DraftFormsStepContent,
+        affected: &[FormsImpactItemV2],
+        items: Vec<LexiconSurfaceMatchV2>,
+        contexts: Vec<MatchedEntryContextV2>,
+        policy: SurfaceCreationPolicy,
+    ) -> Result<CreatedSurfaceSnapshot, LexiconServiceError> {
+        if policy.name != SurfacePolicyNameV2::SurfaceWarningAcknowledgement || !policy.enabled {
+            return Err(invariant_record());
+        }
+        let (binding, owner_bundle) =
+            forms_surface_binding(actor_id, entry_id, base_revision, content, affected, policy)?;
+        let input = CreateSurfaceSnapshot {
+            binding,
+            policy_enabled: policy.enabled,
+            policy_block_code: None,
+            items,
+            matched_entry_contexts: contexts,
+            confirmation_reasons: vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches],
+            owner_bundle,
+            page_size: DEFAULT_SURFACE_PAGE_SIZE,
+        };
+        let snapshot = if affected.is_empty() {
+            self.surface_snapshots.create(input).await
+        } else {
+            self.surface_snapshots
+                .create_with_impact_confirmation(input)
+                .await
+        };
+        let snapshot = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(SurfaceSnapshotError::PolicyChanged(name)) => {
+                let policy = self
+                    .surface_policies
+                    .policy(name)
+                    .await
+                    .map_err(LexiconServiceError::SurfacePolicy)?;
+                return Err(LexiconServiceError::SurfacePolicyChanged(policy));
+            }
+            Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
+        };
+        Ok(snapshot)
+    }
+}
+
+fn form_surface_candidates(
+    word: &AdminWordV2,
+) -> Result<Vec<FormSurfaceCandidate>, LexiconServiceError> {
+    let sources = crate::lexicon::repository::surface_projection_sources(word)
+        .map_err(surface_projection_error)?;
+    let mut candidates = BTreeMap::<String, FormSurfaceCandidate>::new();
+    for source in sources
+        .into_iter()
+        .filter(|source| source.source_kind == "form")
+    {
+        let candidate_node_id = source.source_node_id.ok_or_else(invariant_record)?;
+        let dialect = parse_dialect(source.dialect).ok_or_else(invariant_record)?;
+        let pos_id = source.pos_id.ok_or_else(invariant_record)?;
+        let pos = source.pos.clone().ok_or_else(invariant_record)?;
+        let form_type =
+            WordFormTypeV2::try_from(source.form_type.as_deref().ok_or_else(invariant_record)?)
+                .map_err(|()| invariant_record())?;
+        let key = crate::lexicon::model::SurfaceLookupKey {
+            dialect_scope: source.dialect_scope.to_owned(),
+            normalized_surface: source.normalized_surface.clone(),
+        };
+        let candidate = candidates
+            .entry(source.source_id.clone())
+            .or_insert_with(|| FormSurfaceCandidate {
+                candidate_ref: source.source_id.clone(),
+                candidate_word_id: word.id,
+                candidate_node_id,
+                surface: source.surface.clone(),
+                normalized_surface: source.normalized_surface.clone(),
+                dialect,
+                pos_id,
+                pos,
+                form_type,
+                lookup_keys: Vec::new(),
+            });
+        if !candidate.lookup_keys.contains(&key) {
+            candidate.lookup_keys.push(key);
+        }
+    }
+    Ok(candidates.into_values().collect())
+}
+
+fn form_surface_matches_from_sources(
+    candidates: &[FormSurfaceCandidate],
+    sources: &[crate::lexicon::model::SurfaceSourceRecord],
+) -> Result<Vec<LexiconSurfaceMatchV2>, LexiconServiceError> {
+    let mut sources_by_key =
+        BTreeMap::<(&str, &str), Vec<&crate::lexicon::model::SurfaceSourceRecord>>::new();
+    for source in sources {
+        sources_by_key
+            .entry((
+                source.matched_dialect_scope.as_str(),
+                source.normalized_surface.as_str(),
+            ))
+            .or_default()
+            .push(source);
+    }
+    let mut matches = BTreeMap::new();
+    for candidate in candidates {
+        for key in &candidate.lookup_keys {
+            if let Some(matched_sources) =
+                sources_by_key.get(&(key.dialect_scope.as_str(), key.normalized_surface.as_str()))
+            {
+                for source in matched_sources {
+                    let item = form_surface_match(candidate, source)?;
+                    matches.entry(item.match_id.clone()).or_insert(item);
+                }
+            }
+        }
+    }
+    Ok(matches.into_values().collect())
+}
+
+fn form_surface_lookup_keys(
+    candidates: &[FormSurfaceCandidate],
+) -> Vec<crate::lexicon::model::SurfaceLookupKey> {
+    candidates
+        .iter()
+        .flat_map(|candidate| candidate.lookup_keys.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn form_surface_match(
+    candidate: &FormSurfaceCandidate,
+    source: &crate::lexicon::model::SurfaceSourceRecord,
+) -> Result<LexiconSurfaceMatchV2, LexiconServiceError> {
+    let (_, existing) = existing_surface_match(source)?;
+    let category = match source.source_kind.as_str() {
+        "headword" => SurfaceMatchCategoryV2::FormHeadword,
+        "form" => SurfaceMatchCategoryV2::FormForm,
+        _ => return Err(invariant_record()),
+    };
+    let candidate_wire = SurfaceMatchCandidateV2::Form {
+        candidate_ref: candidate.candidate_ref.clone(),
+        candidate_word_id: candidate.candidate_word_id,
+        candidate_node_id: candidate.candidate_node_id,
+        surface: candidate.surface.clone(),
+        normalized_surface: candidate.normalized_surface.clone(),
+        dialect: candidate.dialect,
+        pos_id: candidate.pos_id,
+        pos: candidate.pos.clone(),
+        form_type: candidate.form_type,
+    };
+    let match_id = crate::platform::hash_token(
+        &serde_json::to_string(&serde_json::json!({
+            "candidate": &candidate_wire,
+            "existing": &existing,
+            "normalization_version": source.normalization_version,
+        }))
+        .map_err(serialization_error)?,
+    );
+    Ok(LexiconSurfaceMatchV2 {
+        match_id,
+        match_category: category,
+        severity: SurfaceMatchSeverityV2::Warning,
+        attention_level: SurfaceAttentionLevelV2::Normal,
+        can_continue: SurfaceCanContinueTrue,
+        confirmation_reasons: vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches],
+        candidate: candidate_wire,
+        existing,
+    })
+}
+
+fn canonical_forms_digest(content: &DraftFormsStepContent) -> Result<String, LexiconServiceError> {
+    Ok(crate::platform::hash_token(
+        &serde_json::to_string(content).map_err(serialization_error)?,
+    ))
+}
+
+fn forms_surface_binding(
+    actor_id: Uuid,
+    entry_id: Uuid,
+    base_revision: i64,
+    content: &DraftFormsStepContent,
+    affected: &[FormsImpactItemV2],
+    policy: SurfaceCreationPolicy,
+) -> Result<(SurfaceConfirmationBinding, serde_json::Value), LexiconServiceError> {
+    let owner_bundle = serde_json::to_value(FormsSurfaceOwnerBundle {
+        entry_id,
+        base_revision,
+        content,
+        affected,
+    })
+    .map_err(serialization_error)?;
+    Ok((
+        SurfaceConfirmationBinding {
+            actor_id,
+            command: SurfaceConsumptionCommand::SaveForms,
+            owner_context: entry_id.to_string(),
+            base_revision: Some(base_revision),
+            canonical_content_digest: canonical_forms_digest(content)?,
+            owner_evidence_digest: surface_owner_bundle_digest(&owner_bundle)
+                .map_err(serialization_error)?,
+            normalization_version: crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION,
+            policy_name: policy.name,
+            policy_epoch: policy.epoch,
+        },
+        owner_bundle,
+    ))
+}
+
+fn unacknowledged_forms_matches(
+    current: &[LexiconSurfaceMatchV2],
+    evidence: Option<&FormsSurfaceAcknowledgementRecord>,
+    entry_id: Uuid,
+    content_digest: &str,
+    policy: Option<&SurfaceCreationPolicy>,
+) -> Vec<LexiconSurfaceMatchV2> {
+    let Some(policy) = policy else {
+        return Vec::new();
+    };
+    let acknowledged = evidence
+        .filter(|evidence| {
+            evidence.entry_id == entry_id
+                && evidence.forms_revision > 0
+                && evidence.forms_content_digest == content_digest
+                && evidence.policy_name == "surface_warning_acknowledgement"
+                && evidence.policy_epoch == i64::try_from(policy.epoch).unwrap_or_default()
+                && evidence.normalization_version
+                    == i32::from(crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION)
+        })
+        .map(|evidence| {
+            evidence
+                .match_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+    current
+        .iter()
+        .filter(|item| !acknowledged.contains(item.match_id.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn word_with_previous_forms(
@@ -837,4 +1451,157 @@ pub(super) fn valid_fixed_percent(value: &str) -> bool {
     value
         .parse::<f64>()
         .is_ok_and(|number| (0.0..=100.0).contains(&number))
+}
+
+#[cfg(test)]
+mod forms_surface_tests {
+    use super::*;
+
+    fn candidate(entry_id: Uuid, node_id: Uuid) -> FormSurfaceCandidate {
+        FormSurfaceCandidate {
+            candidate_ref: format!("entry:{entry_id}:form:{node_id}"),
+            candidate_word_id: entry_id,
+            candidate_node_id: node_id,
+            surface: "workspaces".to_owned(),
+            normalized_surface: "workspaces".to_owned(),
+            dialect: Dialect::Common,
+            pos_id: Uuid::now_v7(),
+            pos: "noun".to_owned(),
+            form_type: WordFormTypeV2::Plural,
+            lookup_keys: vec![],
+        }
+    }
+
+    fn existing_source(source_kind: &str) -> crate::lexicon::model::SurfaceSourceRecord {
+        crate::lexicon::model::SurfaceSourceRecord {
+            matched_dialect_scope: "uk".to_owned(),
+            entry_id: Uuid::now_v7(),
+            entry_headword: "workspaces".to_owned(),
+            entry_headword_dialect: "common".to_owned(),
+            entry_kind: "word".to_owned(),
+            lifecycle_status: "draft".to_owned(),
+            source_id: format!("existing:{source_kind}"),
+            source_kind: source_kind.to_owned(),
+            source_node_id: (source_kind == "form").then(Uuid::now_v7),
+            content_scope: "draft".to_owned(),
+            publication_id: None,
+            surface: "workspaces".to_owned(),
+            normalized_surface: "workspaces".to_owned(),
+            dialect: "common".to_owned(),
+            normalization_version: crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION,
+            source_revision: 1,
+            event_offset: 1,
+            pos_id: (source_kind == "form").then(Uuid::now_v7),
+            pos: (source_kind == "form").then(|| "noun".to_owned()),
+            form_type: (source_kind == "form").then(|| "plural".to_owned()),
+        }
+    }
+
+    #[test]
+    fn form_matches_classify_both_directions_and_preserve_slot_identity() {
+        let entry_id = Uuid::now_v7();
+        let node_id = Uuid::now_v7();
+        let candidate = candidate(entry_id, node_id);
+        let headword = form_surface_match(&candidate, &existing_source("headword")).unwrap();
+        let form = form_surface_match(&candidate, &existing_source("form")).unwrap();
+
+        assert_eq!(
+            headword.match_category,
+            SurfaceMatchCategoryV2::FormHeadword
+        );
+        assert_eq!(form.match_category, SurfaceMatchCategoryV2::FormForm);
+        for item in [headword, form] {
+            assert_eq!(item.severity, SurfaceMatchSeverityV2::Warning);
+            assert_eq!(item.attention_level, SurfaceAttentionLevelV2::Normal);
+            assert!(matches!(
+                item.candidate,
+                SurfaceMatchCandidateV2::Form {
+                    candidate_word_id,
+                    candidate_node_id,
+                    form_type: WordFormTypeV2::Plural,
+                    ..
+                } if candidate_word_id == entry_id && candidate_node_id == node_id
+            ));
+        }
+    }
+
+    #[test]
+    fn form_lookup_keys_are_deduplicated_across_legal_same_surface_slots() {
+        let lookup_key = crate::lexicon::model::SurfaceLookupKey {
+            dialect_scope: "uk".to_owned(),
+            normalized_surface: "workspaces".to_owned(),
+        };
+        let mut first = candidate(Uuid::now_v7(), Uuid::now_v7());
+        first.lookup_keys = vec![lookup_key.clone()];
+        let mut second = candidate(Uuid::now_v7(), Uuid::now_v7());
+        second.lookup_keys = vec![lookup_key.clone()];
+
+        assert_eq!(form_surface_lookup_keys(&[first, second]), vec![lookup_key]);
+    }
+
+    #[test]
+    fn forms_evidence_only_suppresses_same_content_policy_and_match_membership() {
+        let entry_id = Uuid::now_v7();
+        let item = form_surface_match(
+            &candidate(entry_id, Uuid::now_v7()),
+            &existing_source("headword"),
+        )
+        .unwrap();
+        let evidence = FormsSurfaceAcknowledgementRecord {
+            entry_id,
+            forms_revision: 2,
+            forms_content_digest: "same-content".to_owned(),
+            match_ids: vec![item.match_id.clone()],
+            match_digest: "digest".to_owned(),
+            acknowledged_by_admin_id: Uuid::now_v7(),
+            acknowledged_at: Utc::now(),
+            policy_name: "surface_warning_acknowledgement".to_owned(),
+            policy_epoch: 1,
+            normalization_version: i32::from(
+                crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION,
+            ),
+        };
+        let policy = SurfaceCreationPolicy {
+            enabled: true,
+            name: SurfacePolicyNameV2::SurfaceWarningAcknowledgement,
+            epoch: 1,
+        };
+
+        assert!(
+            unacknowledged_forms_matches(
+                std::slice::from_ref(&item),
+                Some(&evidence),
+                entry_id,
+                "same-content",
+                Some(&policy),
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            unacknowledged_forms_matches(
+                std::slice::from_ref(&item),
+                Some(&evidence),
+                entry_id,
+                "changed-content",
+                Some(&policy),
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            unacknowledged_forms_matches(
+                &[form_surface_match(
+                    &candidate(entry_id, Uuid::now_v7()),
+                    &existing_source("headword"),
+                )
+                .unwrap()],
+                Some(&evidence),
+                entry_id,
+                "same-content",
+                Some(&policy),
+            )
+            .len(),
+            1
+        );
+    }
 }

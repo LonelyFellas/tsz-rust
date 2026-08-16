@@ -259,6 +259,96 @@ impl LexiconRepository {
         Ok(())
     }
 
+    pub(crate) async fn forms_surface_acknowledgement(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+    ) -> Result<Option<FormsSurfaceAcknowledgementRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, FormsSurfaceAcknowledgementRecord>(
+            r#"
+            SELECT entry_id, forms_revision, forms_content_digest, match_ids,
+                   match_digest, acknowledged_by_admin_id, acknowledged_at,
+                   policy_name, policy_epoch, normalization_version
+            FROM lexicon.entry_forms_surface_acknowledgements
+            WHERE entry_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(entry_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn forms_surface_acknowledgement_by_entry(
+        &self,
+        entry_id: Uuid,
+    ) -> Result<Option<FormsSurfaceAcknowledgementRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, FormsSurfaceAcknowledgementRecord>(
+            r#"
+            SELECT entry_id, forms_revision, forms_content_digest, match_ids,
+                   match_digest, acknowledged_by_admin_id, acknowledged_at,
+                   policy_name, policy_epoch, normalization_version
+            FROM lexicon.entry_forms_surface_acknowledgements
+            WHERE entry_id = $1
+            "#,
+        )
+        .bind(entry_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn upsert_forms_surface_acknowledgement(
+        tx: &mut Transaction<'_, Postgres>,
+        evidence: &FormsSurfaceAcknowledgementRecord,
+    ) -> Result<(), LexiconRepositoryError> {
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entry_forms_surface_acknowledgements (
+                entry_id, forms_revision, forms_content_digest, match_ids,
+                match_digest, acknowledged_by_admin_id, acknowledged_at,
+                policy_name, policy_epoch, normalization_version
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (entry_id) DO UPDATE SET
+                forms_revision = EXCLUDED.forms_revision,
+                forms_content_digest = EXCLUDED.forms_content_digest,
+                match_ids = EXCLUDED.match_ids,
+                match_digest = EXCLUDED.match_digest,
+                acknowledged_by_admin_id = EXCLUDED.acknowledged_by_admin_id,
+                acknowledged_at = EXCLUDED.acknowledged_at,
+                policy_name = EXCLUDED.policy_name,
+                policy_epoch = EXCLUDED.policy_epoch,
+                normalization_version = EXCLUDED.normalization_version
+            "#,
+        )
+        .bind(evidence.entry_id)
+        .bind(evidence.forms_revision)
+        .bind(&evidence.forms_content_digest)
+        .bind(&evidence.match_ids)
+        .bind(&evidence.match_digest)
+        .bind(evidence.acknowledged_by_admin_id)
+        .bind(evidence.acknowledged_at)
+        .bind(&evidence.policy_name)
+        .bind(evidence.policy_epoch)
+        .bind(evidence.normalization_version)
+        .execute(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_forms_surface_acknowledgement(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+    ) -> Result<(), LexiconRepositoryError> {
+        sqlx::query("DELETE FROM lexicon.entry_forms_surface_acknowledgements WHERE entry_id = $1")
+            .bind(entry_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(LexiconRepositoryError::Database)?;
+        Ok(())
+    }
+
     pub(crate) async fn insert_create_idempotency_failure(
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,

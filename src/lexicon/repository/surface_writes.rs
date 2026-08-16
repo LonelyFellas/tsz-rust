@@ -143,6 +143,11 @@ fn push_form_variant(
     form_type: &str,
     variant: &WordFormVariantV2,
 ) -> Result<(), HeadwordNormalizationError> {
+    // Incomplete derived forms are a valid draft state. They have no canonical
+    // surface yet, so they must not participate in projection or warning lookup.
+    if variant.spelling.is_empty() {
+        return Ok(());
+    }
     push_source_scopes(
         sources,
         word,
@@ -658,5 +663,27 @@ mod tests {
             .map(|source| source.source_id.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(plural_source_ids.len(), 2);
+    }
+
+    #[test]
+    fn incomplete_form_spelling_is_not_projected() {
+        let mut word = word(EntryKind::Word);
+        let incomplete_id = word.forms.pos[0].form_groups[0].slots[0].variants[0].id;
+        word.forms.pos[0].form_groups[0].slots[0].variants[0]
+            .spelling
+            .clear();
+
+        let sources = surface_projection_sources(&word).unwrap();
+
+        assert_eq!(
+            sources.len(),
+            4,
+            "headword and base still expand to UK and US"
+        );
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.source_node_id != Some(incomplete_id))
+        );
     }
 }

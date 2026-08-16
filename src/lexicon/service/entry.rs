@@ -1297,7 +1297,7 @@ impl LexiconService {
         Ok((matches, contexts))
     }
 
-    async fn surface_match_contexts(
+    pub(super) async fn surface_match_contexts(
         &self,
         matches: &[LexiconSurfaceMatchV2],
     ) -> Result<Vec<MatchedEntryContextV2>, LexiconServiceError> {
@@ -1480,7 +1480,7 @@ impl LexiconService {
     }
 }
 
-fn surface_contexts_from_records(
+pub(super) fn surface_contexts_from_records(
     records: Vec<crate::lexicon::model::SurfaceEntryContextRecord>,
     inbound: Vec<crate::lexicon::model::SurfaceInboundRelationRecord>,
 ) -> Result<Vec<MatchedEntryContextV2>, LexiconServiceError> {
@@ -1617,6 +1617,51 @@ fn surface_match(
     candidate: &HeadwordSurfaceCandidate,
     source: &crate::lexicon::model::SurfaceSourceRecord,
 ) -> Result<LexiconSurfaceMatchV2, LexiconServiceError> {
+    let (existing_kind, existing) = existing_surface_match(source)?;
+    let category = if source.source_kind == "form" {
+        SurfaceMatchCategoryV2::HeadwordForm
+    } else if existing_kind == candidate.entry_kind {
+        SurfaceMatchCategoryV2::ExactHeadword
+    } else {
+        SurfaceMatchCategoryV2::CrossKindHeadword
+    };
+    let candidate_wire = SurfaceMatchCandidateV2::Headword {
+        candidate_ref: candidate.candidate_ref.clone(),
+        candidate_word_id: None,
+        surface: candidate.surface.clone(),
+        normalized_surface: candidate.normalized_surface.clone(),
+        dialect: candidate.dialect,
+        entry_kind: candidate.entry_kind,
+    };
+    let match_id = crate::platform::hash_token(
+        &serde_json::to_string(&serde_json::json!({
+            "candidate_ref": candidate.candidate_ref,
+            "candidate_surface": candidate.normalized_surface,
+            "candidate_dialect": candidate.dialect,
+            "existing": existing,
+            "normalization_version": source.normalization_version,
+        }))
+        .map_err(serialization_error)?,
+    );
+    Ok(LexiconSurfaceMatchV2 {
+        match_id,
+        match_category: category,
+        severity: SurfaceMatchSeverityV2::Warning,
+        attention_level: if category == SurfaceMatchCategoryV2::ExactHeadword {
+            SurfaceAttentionLevelV2::High
+        } else {
+            SurfaceAttentionLevelV2::Normal
+        },
+        can_continue: SurfaceCanContinueTrue,
+        confirmation_reasons: vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches],
+        candidate: candidate_wire,
+        existing,
+    })
+}
+
+pub(super) fn existing_surface_match(
+    source: &crate::lexicon::model::SurfaceSourceRecord,
+) -> Result<(EntryKind, ExistingSurfaceMatchV2), LexiconServiceError> {
     let existing_kind = parse_kind(&source.entry_kind).ok_or_else(invariant_record)?;
     let existing_status = parse_surface_status(&source.lifecycle_status)?;
     let existing_dialect = parse_dialect(&source.dialect).ok_or_else(invariant_record)?;
@@ -1647,21 +1692,6 @@ fn surface_match(
         },
         _ => return Err(invariant_record()),
     };
-    let category = if source.source_kind == "form" {
-        SurfaceMatchCategoryV2::HeadwordForm
-    } else if existing_kind == candidate.entry_kind {
-        SurfaceMatchCategoryV2::ExactHeadword
-    } else {
-        SurfaceMatchCategoryV2::CrossKindHeadword
-    };
-    let candidate_wire = SurfaceMatchCandidateV2::Headword {
-        candidate_ref: candidate.candidate_ref.clone(),
-        candidate_word_id: None,
-        surface: candidate.surface.clone(),
-        normalized_surface: candidate.normalized_surface.clone(),
-        dialect: candidate.dialect,
-        entry_kind: candidate.entry_kind,
-    };
     let existing = ExistingSurfaceMatchV2 {
         word_id: source.entry_id,
         headword: source.entry_headword.clone(),
@@ -1669,33 +1699,10 @@ fn surface_match(
         status: existing_status,
         source: existing_source,
     };
-    let match_id = crate::platform::hash_token(
-        &serde_json::to_string(&serde_json::json!({
-            "candidate_ref": candidate.candidate_ref,
-            "candidate_surface": candidate.normalized_surface,
-            "candidate_dialect": candidate.dialect,
-            "existing": existing,
-            "normalization_version": source.normalization_version,
-        }))
-        .map_err(serialization_error)?,
-    );
-    Ok(LexiconSurfaceMatchV2 {
-        match_id,
-        match_category: category,
-        severity: SurfaceMatchSeverityV2::Warning,
-        attention_level: if category == SurfaceMatchCategoryV2::ExactHeadword {
-            SurfaceAttentionLevelV2::High
-        } else {
-            SurfaceAttentionLevelV2::Normal
-        },
-        can_continue: SurfaceCanContinueTrue,
-        confirmation_reasons: vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches],
-        candidate: candidate_wire,
-        existing,
-    })
+    Ok((existing_kind, existing))
 }
 
-fn parse_surface_status(value: &str) -> Result<AdminWordStatus, LexiconServiceError> {
+pub(super) fn parse_surface_status(value: &str) -> Result<AdminWordStatus, LexiconServiceError> {
     match value {
         "draft" => Ok(AdminWordStatus::Draft),
         "published" => Ok(AdminWordStatus::Published),

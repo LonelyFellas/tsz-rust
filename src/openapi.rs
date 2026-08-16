@@ -1055,6 +1055,38 @@ mod tests {
             schemas["CreateAdminWordV2Input"]["properties"]["confirmed_surface_match_token"]
                 .is_object()
         );
+        let save_forms = &schemas["SaveFormsStepInput"];
+        assert_eq!(save_forms["additionalProperties"], false);
+        assert!(save_forms["properties"]["confirmed_surface_match_token"].is_object());
+        assert_eq!(
+            save_forms["properties"]["confirmed_impact_token"]["format"],
+            "uuid"
+        );
+        assert!(
+            schemas["SaveMeaningsStepInput"]["properties"]["confirmed_surface_match_token"]
+                .is_null(),
+            "surface token 只能属于 Forms save"
+        );
+        assert!(
+            schemas["SaveMeaningsStepInput"]["properties"]["confirmed_impact_token"].is_null(),
+            "impact token 只能属于 Forms save"
+        );
+        assert!(schemas["FormsImpactResponseV2"]["properties"]["surface_match_page"].is_object());
+        assert_eq!(
+            terminal_page["properties"]["impact_confirmation_token"]["format"],
+            "uuid"
+        );
+        assert!(
+            json["paths"]["/api/v1/admin/lexicon/entries/{id}/steps/forms"]["put"]
+                ["responses"]["410"]
+                .is_object()
+        );
+        assert!(
+            json["paths"]["/api/v1/admin/lexicon/entries/{id}/steps/forms/impact"]["post"]
+                ["responses"]["410"]
+                .is_null(),
+            "impact preview 不消费 snapshot token，不应声明不可达的 410"
+        );
         let problem_meta = &schemas["ProblemMeta"]["properties"];
         for field in [
             "surface_match_page",

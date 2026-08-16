@@ -331,7 +331,7 @@ pub struct SurfaceMatchEnabledTerminalPageV2 {
     pub surface_confirmation_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
-    pub impact_confirmation_token: Option<String>,
+    pub impact_confirmation_token: Option<Uuid>,
 }
 
 fn literal_null_schema() -> utoipa::openapi::schema::Object {
@@ -526,6 +526,9 @@ pub struct SaveFormsStepInput {
     #[serde(default)]
     #[schema(nullable = false)]
     pub confirmed_impact_token: Option<Uuid>,
+    #[serde(default)]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
     pub content: DraftFormsStepContent,
 }
 
@@ -588,6 +591,9 @@ pub struct FormsImpactResponseV2 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub confirmation_token: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub surface_match_page: Option<SurfaceMatchPageV2>,
 }
 
 #[cfg(test)]

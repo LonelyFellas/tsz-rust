@@ -3603,6 +3603,473 @@ async fn forms_impact_is_complete_stable_and_detects_pos_code_replacement(pool: 
 }
 
 #[sqlx::test]
+async fn forms_surface_warning_allows_reverse_workspaces_after_acknowledgement(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    seed_dictionary_word(&pool, "workspace").await;
+    let (status, workspace_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "workspace"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "workspace 检测失败：{workspace_detection}"
+    );
+    let (status, workspace) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": workspace_detection["detection_id"],
+            "headwords": workspace_detection["builtin_dictionary"]["headwords"],
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "workspace 创建失败：{workspace}"
+    );
+    let workspace_id = workspace["word"]["id"].as_str().unwrap().to_owned();
+
+    // 先建立另一个明确保存了 headword/base form=workspaces 的 entry，再反向保存
+    // workspace.plural=workspaces；没有任何英语复数推导参与这个 fixture。
+    let existing = create_ready_draft(&state, &pool, &bearer, "workspaces").await;
+    let existing_id = existing["word"]["id"].as_str().unwrap().to_owned();
+    let concurrent = create_ready_draft(&state, &pool, &bearer, "concurrent-owner").await;
+    let concurrent_id = concurrent["word"]["id"].as_str().unwrap().to_owned();
+
+    let mut forms = workspace["word"]["forms"].clone();
+    forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["dict_phonetic"] =
+        json!("/workspace/");
+    forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["actual_pron"] =
+        json!("workspace");
+    let plural_variant_id = Uuid::now_v7();
+    forms["pos"][0]["form_groups"][0]["slots"] = json!([{
+        "id": Uuid::now_v7(),
+        "form_type": "plural",
+        "variants": [{
+            "id": plural_variant_id,
+            "dialect": "common",
+            "spelling": "workspaces",
+            "origin": "manual",
+            "pronunciations": [{
+                "id": Uuid::now_v7(),
+                "dict_phonetic": "/workspaces/",
+                "actual_pron": "workspaces",
+                "style": "normal"
+            }]
+        }]
+    }]);
+
+    let impact_uri = format!("{ROOT}/entries/{workspace_id}/steps/forms/impact");
+    let (status, preview) = call(
+        &state,
+        Method::POST,
+        &impact_uri,
+        &bearer,
+        None,
+        Some(json!({"base_revision": 1, "content": forms.clone()})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "反向 Forms 预检失败：{preview}");
+    assert_eq!(preview["requires_confirmation"], false);
+    assert!(preview["confirmation_token"].is_null());
+    let preview_items = preview["surface_match_page"]["items"]
+        .as_array()
+        .expect("必须返回 surface warning 首页");
+    assert!(preview_items.iter().any(|item| {
+        item["match_category"] == "form_headword"
+            && item["candidate"]["candidate_node_id"] == plural_variant_id.to_string()
+            && item["existing"]["word_id"] == existing_id
+    }));
+    assert!(preview_items.iter().any(|item| {
+        item["match_category"] == "form_form"
+            && item["candidate"]["candidate_node_id"] == plural_variant_id.to_string()
+            && item["existing"]["word_id"] == existing_id
+    }));
+    assert!(
+        preview_items
+            .iter()
+            .all(|item| { item["existing"]["word_id"] != workspace_id }),
+        "同一 entry 的 headword/slot 同形必须被整体排除"
+    );
+
+    let save_uri = format!("{ROOT}/entries/{workspace_id}/steps/forms");
+    let (status, required) = call(
+        &state,
+        Method::PUT,
+        &save_uri,
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 1,
+            "intent": "complete",
+            "content": forms.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "缺少确认必须拒绝：{required}");
+    assert_eq!(required["code"], "surface_match_acknowledgement_required");
+    let revision_after_cancel: i64 =
+        sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(&workspace_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(revision_after_cancel, 1, "取消/缺 token 不得推进 revision");
+
+    let surface_token = required["meta"]["surface_match_page"]["surface_confirmation_token"]
+        .as_str()
+        .expect("单页 warning 必须提供终页 token");
+
+    // 模拟另一个 surface writer 在 preview 后提交了新的跨 entry form source；
+    // Forms save 必须在统一锁内重查完整集合，而不能消费旧 snapshot 静默放行。
+    sqlx::query(
+        r#"
+        UPDATE lexicon.surface_sources
+        SET surface = 'workspaces', normalized_surface = 'workspaces',
+            source_revision = source_revision + 1,
+            event_offset = nextval('lexicon.surface_projection_event_offset_seq')
+        WHERE entry_id = $1 AND source_kind = 'form' AND is_deleted = FALSE
+        "#,
+    )
+    .bind(Uuid::parse_str(&concurrent_id).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, changed) = call(
+        &state,
+        Method::PUT,
+        &save_uri,
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 1,
+            "intent": "complete",
+            "confirmed_surface_match_token": surface_token,
+            "content": forms.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "锁后新增 match 必须重确认：{changed}"
+    );
+    assert_eq!(changed["code"], "surface_matches_changed");
+    assert!(
+        changed["meta"]["surface_match_page"]["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| {
+                item["match_category"] == "form_form"
+                    && item["existing"]["word_id"] == concurrent_id
+            })),
+        "409 新首页必须包含锁后新增的 form source"
+    );
+    let revision_after_change: i64 =
+        sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(&workspace_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(revision_after_change, 1, "重确认前不得推进 revision");
+    let replacement_surface_token =
+        changed["meta"]["surface_match_page"]["surface_confirmation_token"]
+            .as_str()
+            .expect("409 新终页必须提供 replacement token");
+
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &save_uri,
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 1,
+            "intent": "complete",
+            "confirmed_surface_match_token": replacement_surface_token,
+            "content": forms,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "明确确认后应允许保存：{saved}");
+    assert_eq!(saved["word"]["revision"], 2);
+    assert_eq!(
+        saved["word"]["forms"]["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["spelling"],
+        "workspaces"
+    );
+
+    let evidence: (i64, String, Vec<String>) = sqlx::query_as(
+        r#"
+        SELECT forms_revision, forms_content_digest, match_ids
+        FROM lexicon.entry_forms_surface_acknowledgements
+        WHERE entry_id = $1
+        "#,
+    )
+    .bind(Uuid::parse_str(&workspace_id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(evidence.0, 2);
+    assert!(!evidence.1.is_empty());
+    assert!(
+        evidence.2.len() >= 2,
+        "headword 与 form source 证据都应保留"
+    );
+
+    let saved_forms = saved["word"]["forms"].clone();
+    let (status, reused) = call(
+        &state,
+        Method::POST,
+        &impact_uri,
+        &bearer,
+        None,
+        Some(json!({"base_revision": 2, "content": saved_forms})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "证据复用预检失败：{reused}");
+    assert!(reused.get("surface_match_page").is_none());
+
+    let (status, saved_again) = call(
+        &state,
+        Method::PUT,
+        &save_uri,
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 2,
+            "intent": "save",
+            "content": saved["word"]["forms"],
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "相同 canonical forms 证据应可复用：{saved_again}"
+    );
+    assert_eq!(saved_again["word"]["revision"], 3);
+}
+
+#[sqlx::test]
+async fn forms_surface_and_downstream_impact_require_both_terminal_tokens(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis.clone());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let source = create_ready_draft(&state, &pool, &bearer, "combined-source").await;
+    let existing = create_ready_draft(&state, &pool, &bearer, "combined-collision").await;
+    let entry_id = source["word"]["id"].as_str().unwrap();
+    let base_revision = source["word"]["revision"].as_i64().unwrap();
+    let mut forms = source["word"]["forms"].clone();
+    forms["pos"][0]["pos"] = json!("adjective");
+    forms["pos"][0]["form_groups"][0]["slots"][0]["form_type"] = json!("comparative");
+    forms["pos"][0]["form_groups"][0]["slots"][0]["id"] = json!(Uuid::now_v7());
+    let candidate_node_id = Uuid::now_v7();
+    forms["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["id"] = json!(candidate_node_id);
+    forms["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["spelling"] =
+        json!("combined-collision");
+    forms["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["pronunciations"][0]["id"] =
+        json!(Uuid::now_v7());
+
+    let impact_uri = format!("{ROOT}/entries/{entry_id}/steps/forms/impact");
+    let (status, preview) = call(
+        &state,
+        Method::POST,
+        &impact_uri,
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": base_revision,
+            "content": forms.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "双确认预检失败：{preview}");
+    assert_eq!(preview["requires_confirmation"], true);
+    assert!(!preview["affected"].as_array().unwrap().is_empty());
+    assert!(
+        preview.get("confirmation_token").is_none() || preview["confirmation_token"].is_null(),
+        "surface 存在时不得提前签发旧 impact token"
+    );
+    let page = &preview["surface_match_page"];
+    assert!(
+        page["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| {
+                item["match_category"] == "form_headword"
+                    && item["candidate"]["candidate_node_id"] == candidate_node_id.to_string()
+                    && item["existing"]["word_id"] == existing["word"]["id"]
+            }))
+    );
+    let surface_token = page["surface_confirmation_token"]
+        .as_str()
+        .expect("surface 终页 token 缺失");
+    let impact_token = page["impact_confirmation_token"]
+        .as_str()
+        .expect("impact 终页 token 缺失");
+    Uuid::parse_str(impact_token).expect("impact token 必须为 UUID wire");
+
+    let save_uri = format!("{ROOT}/entries/{entry_id}/steps/forms");
+    let (status, missing_impact) = call(
+        &state,
+        Method::PUT,
+        &save_uri,
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": base_revision,
+            "intent": "save",
+            "confirmed_surface_match_token": surface_token,
+            "content": forms.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "只交 surface token 必须失败");
+    assert_eq!(missing_impact["code"], "downstream_confirmation_required");
+    let unchanged_revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(entry_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(unchanged_revision, base_revision);
+
+    let snapshot_id = page["snapshot_id"].as_str().expect("snapshot id 缺失");
+    let mut redis_connection = redis.get().await.expect("应能取得测试 Redis 连接");
+    deadpool_redis::redis::cmd("DEL")
+        .arg(format!("lexicon:surface-snapshot:{snapshot_id}"))
+        .query_async::<i64>(&mut redis_connection)
+        .await
+        .expect("应能使 Forms snapshot 过期");
+    let (status, expired) = call(
+        &state,
+        Method::PUT,
+        &save_uri,
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": base_revision,
+            "intent": "save",
+            "confirmed_surface_match_token": surface_token,
+            "confirmed_impact_token": impact_token,
+            "content": forms.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::GONE,
+        "过期双 token 必须返回 410：{expired}"
+    );
+    assert_eq!(expired["code"], "surface_match_snapshot_expired");
+    let revision_after_expiry: i64 =
+        sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(entry_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(revision_after_expiry, base_revision);
+
+    let (status, refreshed) = call(
+        &state,
+        Method::POST,
+        &impact_uri,
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": base_revision,
+            "content": forms.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "过期后重新 impact 失败：{refreshed}"
+    );
+    let refreshed_snapshot_id = refreshed["surface_match_page"]["snapshot_id"]
+        .as_str()
+        .expect("重新 impact 后缺 snapshot id")
+        .to_owned();
+    let refreshed_surface_token = refreshed["surface_match_page"]["surface_confirmation_token"]
+        .as_str()
+        .expect("重新 impact 后缺 surface token")
+        .to_owned();
+    let refreshed_impact_token = refreshed["surface_match_page"]["impact_confirmation_token"]
+        .as_str()
+        .expect("重新 impact 后缺 impact token")
+        .to_owned();
+
+    // preview 后若唯一外部 match 被另一个合法 writer 删除，ordinary warning 已消失；
+    // dual impact token 仍须按完整 owner/content/affected binding 验证并允许保存。
+    let existing_id = existing["word"]["id"].as_str().unwrap();
+    let (status, deleted) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{existing_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": existing["word"]["revision"],
+            "base_lifecycle_revision": existing["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "并发删除外部 match 失败：{deleted}"
+    );
+
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &save_uri,
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": base_revision,
+            "intent": "save",
+            "confirmed_surface_match_token": refreshed_surface_token,
+            "confirmed_impact_token": refreshed_impact_token,
+            "content": forms,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "双 token 一次保存应成功：{saved}");
+    assert_eq!(saved["word"]["revision"], base_revision + 1);
+    assert_eq!(saved["word"]["forms"]["pos"][0]["pos"], "adjective");
+    let refreshed_snapshot_exists: i64 = deadpool_redis::redis::cmd("EXISTS")
+        .arg(format!("lexicon:surface-snapshot:{refreshed_snapshot_id}"))
+        .query_async(&mut redis_connection)
+        .await
+        .expect("应能检查成功消费后的 snapshot");
+    assert_eq!(
+        refreshed_snapshot_exists, 0,
+        "即使 warning 锁后全部消失，成功保存后也应清理双 token snapshot"
+    );
+}
+
+#[sqlx::test]
 async fn forms_impact_ignores_reconciled_default_meaning_placeholders(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

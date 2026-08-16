@@ -49,7 +49,7 @@ pub(crate) struct CatalogSubPartRecord {
     pub part_code: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SurfaceLookupKey {
     pub dialect_scope: String,
     pub normalized_surface: String,
@@ -93,6 +93,20 @@ pub(crate) struct SurfaceInboundRelationRecord {
     pub source_entry_id: Uuid,
     pub source_node_id: Uuid,
     pub source_snapshot: Value,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct FormsSurfaceAcknowledgementRecord {
+    pub entry_id: Uuid,
+    pub forms_revision: i64,
+    pub forms_content_digest: String,
+    pub match_ids: Vec<String>,
+    pub match_digest: String,
+    pub acknowledged_by_admin_id: Uuid,
+    pub acknowledged_at: DateTime<Utc>,
+    pub policy_name: String,
+    pub policy_epoch: i64,
+    pub normalization_version: i32,
 }
 
 #[derive(Debug, sqlx::FromRow)]
