@@ -16,4 +16,3 @@ ALTER TABLE lexicon.surface_sources
     FOREIGN KEY (publication_id, entry_id)
     REFERENCES lexicon.entry_publications(id, entry_id)
     ON DELETE CASCADE;
-

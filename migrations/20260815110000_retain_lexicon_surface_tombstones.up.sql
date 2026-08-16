@@ -8,4 +8,3 @@ ALTER TABLE lexicon.surface_sources
 
 ALTER TABLE lexicon.surface_sources
     DROP CONSTRAINT lexicon_surface_sources_publication_fkey;
-
