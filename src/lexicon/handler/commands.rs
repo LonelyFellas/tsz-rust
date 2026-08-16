@@ -234,8 +234,10 @@ pub async fn validate(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条不存在"),
-        (status = 409, description = "revision 或幂等键冲突"),
-        (status = 422, description = "发布完整性校验失败")
+        (status = 409, description = "revision、surface、policy、visibility 或幂等键冲突"),
+        (status = 410, description = "surface 确认 snapshot 已过期"),
+        (status = 422, description = "发布完整性校验失败"),
+        (status = 503, description = "surface 确认服务不可用")
     )
 )]
 pub async fn publish(

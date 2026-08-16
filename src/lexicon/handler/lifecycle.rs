@@ -79,8 +79,10 @@ pub async fn archive(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条不存在"),
-        (status = 409, description = "revision 或幂等键冲突"),
-        (status = 422, description = "revision 取值非法")
+        (status = 409, description = "revision、surface、policy、visibility 或幂等键冲突"),
+        (status = 410, description = "surface 确认 snapshot 已过期"),
+        (status = 422, description = "revision 取值非法"),
+        (status = 503, description = "surface 确认服务不可用")
     )
 )]
 pub async fn restore(
@@ -146,8 +148,10 @@ pub async fn archive_batch(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "任一词条不存在"),
-        (status = 409, description = "任一 revision 或幂等键冲突"),
-        (status = 422, description = "批量为空、重复、超限或 revision 非法")
+        (status = 409, description = "任一 revision、surface、policy、visibility 或幂等键冲突"),
+        (status = 410, description = "surface 确认 snapshot 已过期"),
+        (status = 422, description = "批量为空、重复、超限或 revision 非法"),
+        (status = 503, description = "surface 确认服务不可用")
     )
 )]
 pub async fn restore_batch(

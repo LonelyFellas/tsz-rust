@@ -93,6 +93,9 @@ impl LexiconService {
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
 
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -113,9 +116,6 @@ impl LexiconService {
             previous_publication_sources.as_slice(),
             surface_sources.as_slice(),
         ]);
-        LexiconRepository::lock_surface_policy_writer(&mut transaction)
-            .await
-            .map_err(repository_error)?;
         LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
             .await
             .map_err(repository_error)?;
@@ -345,6 +345,9 @@ impl LexiconService {
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
 
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -401,9 +404,6 @@ impl LexiconService {
             previous_sources.as_slice(),
             proposed_sources.as_slice(),
         ]);
-        LexiconRepository::lock_surface_policy_writer(&mut transaction)
-            .await
-            .map_err(repository_error)?;
         LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
             .await
             .map_err(repository_error)?;
@@ -426,6 +426,12 @@ impl LexiconService {
                 command_owner,
             )
             .await?;
+        LexiconRepository::lock_outbound_sense_ref_targets_for_publication(
+            &mut transaction,
+            publication_id,
+        )
+        .await
+        .map_err(repository_error)?;
         let unavailable = LexiconRepository::unavailable_outbound_sense_refs_for_publication(
             &mut transaction,
             publication_id,
@@ -437,11 +443,45 @@ impl LexiconService {
                 unavailable,
             ));
         }
+        let retained_sense_ids = publication_word
+            .meanings
+            .pos
+            .iter()
+            .flat_map(|pos| pos.senses.iter().map(|sense| sense.id))
+            .collect::<Vec<_>>();
+        let inbound_references = LexiconRepository::current_inbound_sense_refs(
+            &mut transaction,
+            entry_id,
+            &retained_sense_ids,
+        )
+        .await
+        .map_err(repository_error)?;
+        if !inbound_references.is_empty() {
+            return Err(LexiconServiceError::ValidationFailed(
+                inbound_references
+                    .into_iter()
+                    .map(|reference| DraftValidationIssue {
+                        step: PersistedWordStep::Meanings,
+                        node_id: reference.target_sense_id,
+                        field: "senses".to_owned(),
+                        code: "sense_has_inbound_publication_refs".to_owned(),
+                        message: "该词义仍被其他词条的当前发布版本引用".to_owned(),
+                        reference_location: Some(DraftReferenceLocation {
+                            source_entry_id: reference.source_entry_id,
+                            source_publication_id: reference.source_publication_id,
+                            source_node_id: reference.source_node_id,
+                            reference_kind: reference.reference_kind,
+                        }),
+                    })
+                    .collect(),
+            ));
+        }
 
         word.status = AdminWordStatus::Published;
         word.published_revision = Some(publication.source_revision);
         word.has_unpublished_changes = word.revision != publication.source_revision;
         word.published_at = Some(publication.published_at);
+        word.lifecycle_revision += 1;
         word.updated_at = Utc::now();
         LexiconRepository::replace_surface_projection(
             &mut transaction,
@@ -681,24 +721,19 @@ impl LexiconService {
             owner_bundle: owner_bundle.clone(),
             page_size: DEFAULT_SURFACE_PAGE_SIZE,
         };
-        if !policy.enabled && visibility_required {
-            let snapshot = self
-                .surface_snapshots
-                .create(create_snapshot())
-                .await
-                .map_err(LexiconServiceError::SurfaceSnapshot)?;
-            return Err(
-                LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(Box::new(
-                    snapshot.page,
-                )),
-            );
-        }
         let Some(token) = token else {
             let snapshot = self
                 .surface_snapshots
                 .create(create_snapshot())
                 .await
                 .map_err(LexiconServiceError::SurfaceSnapshot)?;
+            if !policy.enabled && visibility_required {
+                return Err(
+                    LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(
+                        Box::new(snapshot.page),
+                    ),
+                );
+            }
             return Err(LexiconServiceError::SurfaceMatchAcknowledgementRequired(
                 Box::new(snapshot.page),
             ));
@@ -732,6 +767,18 @@ impl LexiconService {
             }
             Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
         };
+        if !policy.enabled && visibility_required {
+            let snapshot = self
+                .surface_snapshots
+                .create(create_snapshot())
+                .await
+                .map_err(LexiconServiceError::SurfaceSnapshot)?;
+            return Err(
+                LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(Box::new(
+                    snapshot.page,
+                )),
+            );
+        }
         let current_ids = items
             .iter()
             .map(|item| item.match_id.as_str())

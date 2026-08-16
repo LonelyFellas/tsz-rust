@@ -224,6 +224,9 @@ impl LexiconService {
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
 
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
         let excluded_sources = if target_state == TargetState::Archived {
             targets.iter().map(|target| target.id).collect::<Vec<_>>()
         } else {
@@ -278,9 +281,6 @@ impl LexiconService {
                 .map(Vec::as_slice)
                 .chain(std::iter::once(publication_sources.as_slice())),
         );
-        LexiconRepository::lock_surface_policy_writer(&mut transaction)
-            .await
-            .map_err(repository_error)?;
         LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
             .await
             .map_err(repository_error)?;
@@ -590,24 +590,19 @@ impl LexiconService {
             owner_bundle: owner_bundle.clone(),
             page_size: DEFAULT_SURFACE_PAGE_SIZE,
         };
-        if !policy.enabled && visibility_required {
-            let snapshot = self
-                .surface_snapshots
-                .create(create_snapshot())
-                .await
-                .map_err(LexiconServiceError::SurfaceSnapshot)?;
-            return Err(
-                LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(Box::new(
-                    snapshot.page,
-                )),
-            );
-        }
         let Some(token) = token else {
             let snapshot = self
                 .surface_snapshots
                 .create(create_snapshot())
                 .await
                 .map_err(LexiconServiceError::SurfaceSnapshot)?;
+            if !policy.enabled && visibility_required {
+                return Err(
+                    LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(
+                        Box::new(snapshot.page),
+                    ),
+                );
+            }
             return Err(LexiconServiceError::SurfaceMatchAcknowledgementRequired(
                 Box::new(snapshot.page),
             ));
@@ -641,6 +636,18 @@ impl LexiconService {
             }
             Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
         };
+        if !policy.enabled && visibility_required {
+            let snapshot = self
+                .surface_snapshots
+                .create(create_snapshot())
+                .await
+                .map_err(LexiconServiceError::SurfaceSnapshot)?;
+            return Err(
+                LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(Box::new(
+                    snapshot.page,
+                )),
+            );
+        }
         let current_ids = items
             .iter()
             .map(|item| item.match_id.as_str())

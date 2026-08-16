@@ -292,8 +292,9 @@ impl LexiconRepository {
             UPDATE lexicon.entries
             SET current_publication_id = $2,
                 updated_by_admin_id = $3,
-                updated_at = $4
-            WHERE id = $1 AND revision = $5 AND lifecycle_revision = $6
+                updated_at = $4,
+                lifecycle_revision = $6
+            WHERE id = $1 AND revision = $5 AND lifecycle_revision = $7
             "#,
         )
         .bind(word.id)
@@ -302,6 +303,7 @@ impl LexiconRepository {
         .bind(word.updated_at)
         .bind(word.revision)
         .bind(word.lifecycle_revision)
+        .bind(word.lifecycle_revision - 1)
         .execute(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)?;
@@ -324,12 +326,13 @@ impl LexiconRepository {
         )
         .bind(Uuid::now_v7())
         .bind(word.id)
-        .bind(word.revision)
+        .bind(word.lifecycle_revision)
         .bind(serde_json::json!({
             "entry_id": word.id,
             "publication_id": publication.id,
             "publication_number": publication.publication_number,
             "previous_publication_id": previous_publication_id,
+            "lifecycle_revision": word.lifecycle_revision,
         }))
         .bind(word.updated_at)
         .execute(&mut **tx)
@@ -536,13 +539,14 @@ impl LexiconRepository {
             ORDER BY sense_ref.target_sense_id,
                      sense_ref.entry_id,
                      sense_ref.source_node_id
+            FOR SHARE OF source_entry NOWAIT
             "#,
         )
         .bind(target_entry_id)
         .bind(retained_sense_ids)
         .fetch_all(&mut **tx)
         .await
-        .map_err(LexiconRepositoryError::Database)
+        .map_err(map_target_publication_lock_error)
     }
 
     pub(crate) async fn active_inbound_sense_refs(
@@ -567,13 +571,14 @@ impl LexiconRepository {
             ORDER BY sense_ref.target_sense_id,
                      sense_ref.entry_id,
                      sense_ref.source_node_id
+            FOR SHARE OF source_entry NOWAIT
             "#,
         )
         .bind(target_entry_id)
         .bind(excluding_source_entry_ids)
         .fetch_all(&mut **tx)
         .await
-        .map_err(LexiconRepositoryError::Database)
+        .map_err(map_target_publication_lock_error)
     }
 
     pub(crate) async fn unavailable_outbound_sense_refs_for_restore(
@@ -654,5 +659,27 @@ impl LexiconRepository {
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn lock_outbound_sense_ref_targets_for_publication(
+        tx: &mut Transaction<'_, Postgres>,
+        publication_id: Uuid,
+    ) -> Result<(), LexiconRepositoryError> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT target_entry.id
+            FROM lexicon.entry_publication_sense_refs sense_ref
+            JOIN lexicon.entries target_entry
+              ON target_entry.id = sense_ref.target_entry_id
+            WHERE sense_ref.publication_id = $1
+            ORDER BY target_entry.id
+            FOR SHARE OF target_entry NOWAIT
+            "#,
+        )
+        .bind(publication_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map(|_| ())
+        .map_err(map_target_publication_lock_error)
     }
 }

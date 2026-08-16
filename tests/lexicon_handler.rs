@@ -870,6 +870,23 @@ async fn gate_on_publish_uses_one_composite_token_and_reconfirms_match_and_epoch
         )
         .await
         .unwrap();
+    let (status, disabled_policy_changed) = call(
+        &state,
+        Method::POST,
+        &publish_uri,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second["word"]["revision"],
+            "confirmed_surface_match_token": changed_token.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        disabled_policy_changed["code"], "surface_policy_changed",
+        "gate 关闭后旧 epoch token 必须先按策略变化拒绝，不能降级成 capability block"
+    );
     policies
         .transition(
             &pool,
@@ -1130,6 +1147,200 @@ async fn historical_publication_activation_obeys_visibility_gate_and_command_con
         .transition_exact_headword_creation(&pool, false)
         .await
         .unwrap();
+}
+
+#[sqlx::test]
+async fn historical_publication_activation_increments_lifecycle_revision_across_a_b_a(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let draft = create_ready_draft(&state, &pool, &bearer, "activation-cycle").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &draft).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let entry_id = Uuid::parse_str(first_published["word"]["id"].as_str().unwrap()).unwrap();
+
+    let (status, edited) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": first_published["word"]["revision"],
+            "intent": "complete",
+            "content": first_published["word"]["meanings"],
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "创建第二个 publication 草稿失败：{edited}"
+    );
+    let (status, second_published) = publish_ready(&state, &bearer, &edited).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "第二个 publication 发布失败：{second_published}"
+    );
+
+    let publications: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM lexicon.entry_publications WHERE entry_id = $1 ORDER BY publication_number",
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(publications.len(), 2);
+    let mut lifecycle_revision = second_published["word"]["lifecycle_revision"]
+        .as_i64()
+        .unwrap();
+    for publication_id in [publications[0], publications[1], publications[0]] {
+        let (status, activated) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/{entry_id}/publications/{publication_id}/activate"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(json!({
+                "base_revision": second_published["word"]["revision"],
+                "base_lifecycle_revision": lifecycle_revision,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "A→B→A activation 失败：{activated}");
+        lifecycle_revision += 1;
+        assert_eq!(
+            activated["word"]["lifecycle_revision"], lifecycle_revision,
+            "每次切换 current publication 都必须推进 lifecycle revision"
+        );
+    }
+    let activation_events: Vec<i64> = sqlx::query_scalar(
+        r#"
+        SELECT aggregate_revision
+        FROM platform.outbox_events
+        WHERE aggregate_id = $1 AND event_type = 'lexicon.publication_activated'
+        ORDER BY aggregate_revision
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(activation_events, vec![2, 3, 4]);
+}
+
+#[sqlx::test]
+async fn historical_publication_activation_rejects_missing_current_inbound_sense(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_ready = create_ready_draft(&state, &pool, &bearer, "activation-target").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &target_ready).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let target_id = Uuid::parse_str(first_published["word"]["id"].as_str().unwrap()).unwrap();
+    let first_publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(target_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let mut meanings = first_published["word"]["meanings"].clone();
+    let mut added_sense = meanings["pos"][0]["senses"][0].clone();
+    let added_sense_id = Uuid::now_v7();
+    added_sense["id"] = json!(added_sense_id);
+    added_sense["definitions"][0]["id"] = json!(Uuid::now_v7());
+    added_sense["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    added_sense["definitions"][0]["content"] = rich_text("仅第二版存在的词义");
+    added_sense["sentences"][0]["id"] = json!(Uuid::now_v7());
+    added_sense["sentences"][0]["en_text"]["common"]["id"] = json!(Uuid::now_v7());
+    added_sense["sentences"][0]["zh_text_id"] = json!(Uuid::now_v7());
+    added_sense["sentences"][0]["links"][0]["sense_id"] = json!(added_sense_id);
+    meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(added_sense);
+    let (status, target_edited) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": first_published["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "添加第二版词义失败：{target_edited}"
+    );
+    let (status, second_published) = publish_ready(&state, &bearer, &target_edited).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let source_ready = create_ready_draft(&state, &pool, &bearer, "activation-source").await;
+    let source_id = source_ready["word"]["id"].as_str().unwrap();
+    let mut source_meanings = source_ready["word"]["meanings"].clone();
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "target_word_id": target_id,
+        "target_sense_id": added_sense_id,
+        "score": "80.00"
+    }]);
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source_ready["word"]["revision"],
+            "intent": "complete",
+            "content": source_meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "保存当前入站引用失败：{source_saved}"
+    );
+    let (status, source_published) = publish_ready(&state, &bearer, &source_saved).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "发布当前入站引用失败：{source_published}"
+    );
+
+    let (status, blocked) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_id}/publications/{first_publication_id}/activate"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second_published["word"]["revision"],
+            "base_lifecycle_revision": second_published["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(blocked["field_issues"].as_array().is_some_and(|issues| {
+        issues.iter().any(|issue| {
+            issue["code"] == "sense_has_inbound_publication_refs"
+                && issue["node_id"] == added_sense_id.to_string()
+        })
+    }));
 }
 
 #[sqlx::test]
