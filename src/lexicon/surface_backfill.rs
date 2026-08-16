@@ -13,6 +13,7 @@ use crate::lexicon::{
         LexiconRepository, SurfaceContentScope, SurfaceProjectionSource, surface_projection_sources,
     },
     service::entry_from_record,
+    surface_policy::{SurfaceCreationPolicy, SurfacePolicyStore},
 };
 
 pub const SURFACE_WRITER_VERSION: &str = "surface-writer-v1";
@@ -66,6 +67,8 @@ pub struct SurfaceCutoverReport {
     pub legacy_unique_present_before: bool,
     pub legacy_unique_present_after: bool,
     pub non_unique_lookup_present: bool,
+    pub creation_policy: SurfaceCreationPolicy,
+    pub publication_policy: SurfaceCreationPolicy,
     pub executed: bool,
     pub ready: bool,
     pub blocking_reasons: Vec<String>,
@@ -247,13 +250,15 @@ pub async fn run_surface_parity(pool: &PgPool) -> anyhow::Result<SurfaceParityRe
 
 pub async fn run_surface_cutover_preflight(
     pool: &PgPool,
+    policies: &SurfacePolicyStore,
     expected_writer_version: &str,
 ) -> anyhow::Result<SurfaceCutoverReport> {
-    run_surface_cutover(pool, expected_writer_version, None).await
+    run_surface_cutover(pool, policies, expected_writer_version, None).await
 }
 
 pub async fn execute_surface_cutover(
     pool: &PgPool,
+    policies: &SurfacePolicyStore,
     expected_writer_version: &str,
     confirmed_artifact_sha256: &str,
 ) -> anyhow::Result<SurfaceCutoverReport> {
@@ -266,11 +271,12 @@ pub async fn execute_surface_cutover(
         artifact_sha256 == confirmed_artifact_sha256,
         "cutover artifact hash mismatch: expected {confirmed_artifact_sha256}, actual {artifact_sha256}"
     );
-    run_surface_cutover(pool, expected_writer_version, Some(artifact)).await
+    run_surface_cutover(pool, policies, expected_writer_version, Some(artifact)).await
 }
 
 async fn run_surface_cutover(
     pool: &PgPool,
+    policies: &SurfacePolicyStore,
     expected_writer_version: &str,
     artifact: Option<&'static str>,
 ) -> anyhow::Result<SurfaceCutoverReport> {
@@ -285,6 +291,10 @@ async fn run_surface_cutover(
     )
     .execute(&mut *transaction)
     .await?;
+    let creation_policy = policies.exact_headword_creation().await?;
+    let publication_policy = policies
+        .multiple_active_exact_headword_publications()
+        .await?;
     let parity = surface_parity_in_transaction(&mut transaction).await?;
     let legacy_unique_present_before = index_exists(
         &mut transaction,
@@ -305,6 +315,13 @@ async fn run_surface_cutover(
     }
     if !legacy_unique_present_before {
         blocking_reasons.push("legacy_unique_index_missing".to_owned());
+    }
+    if creation_policy.enabled {
+        blocking_reasons.push("exact_headword_creation_policy_enabled".to_owned());
+    }
+    if publication_policy.enabled {
+        blocking_reasons
+            .push("multiple_active_exact_headword_publications_policy_enabled".to_owned());
     }
 
     let ready = blocking_reasons.is_empty();
@@ -339,6 +356,8 @@ async fn run_surface_cutover(
         legacy_unique_present_before,
         legacy_unique_present_after,
         non_unique_lookup_present,
+        creation_policy,
+        publication_policy,
         executed,
         ready,
         blocking_reasons,

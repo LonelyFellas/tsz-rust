@@ -43,18 +43,21 @@ async fn main() -> anyhow::Result<()> {
         })?,
         "preflight" => {
             let expected = expected_writer_version()?;
-            serde_json::to_value(run_surface_cutover_preflight(&pool, &expected).await?)?
+            let policies = policy_store().await?;
+            serde_json::to_value(run_surface_cutover_preflight(&pool, &policies, &expected).await?)?
         }
         "cutover" => {
             let expected = expected_writer_version()?;
+            let policies = policy_store().await?;
             let confirmed_hash = std::env::var("CONFIRMED_CUTOVER_ARTIFACT_SHA256")
                 .context("CONFIRMED_CUTOVER_ARTIFACT_SHA256 is required")?;
-            serde_json::to_value(execute_surface_cutover(&pool, &expected, &confirmed_hash).await?)?
+            serde_json::to_value(
+                execute_surface_cutover(&pool, &policies, &expected, &confirmed_hash).await?,
+            )?
         }
         "policy-enable" | "policy-disable" => {
-            let redis_url = std::env::var("REDIS_URL").context("REDIS_URL is required")?;
-            let redis = tsz_rust::platform::connect_redis(&redis_url).await?;
-            let policy = SurfacePolicyStore::new(redis)
+            let policy = policy_store()
+                .await?
                 .transition_exact_headword_creation(&pool, command == "policy-enable")
                 .await?;
             serde_json::to_value(policy)?
@@ -64,6 +67,12 @@ async fn main() -> anyhow::Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+async fn policy_store() -> anyhow::Result<SurfacePolicyStore> {
+    let redis_url = std::env::var("REDIS_URL").context("REDIS_URL is required")?;
+    let redis = tsz_rust::platform::connect_redis(&redis_url).await?;
+    Ok(SurfacePolicyStore::new(redis))
 }
 
 fn expected_writer_version() -> anyhow::Result<String> {

@@ -1,6 +1,6 @@
 use deadpool_redis::Pool;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::lexicon::dto::SurfacePolicyNameV2;
 
@@ -71,6 +71,13 @@ impl SurfacePolicyStore {
             .await
     }
 
+    pub async fn multiple_active_exact_headword_publications(
+        &self,
+    ) -> Result<SurfaceCreationPolicy, SurfacePolicyStoreError> {
+        self.policy(SurfacePolicyNameV2::AllowMultipleActiveExactHeadwordPublications)
+            .await
+    }
+
     pub async fn policy(
         &self,
         name: SurfacePolicyNameV2,
@@ -115,14 +122,20 @@ impl SurfacePolicyStore {
         name: SurfacePolicyNameV2,
         enabled: bool,
     ) -> Result<SurfaceCreationPolicy, SurfacePolicyStoreError> {
-        loop {
+        // Enabling must serialize with the cutover's exclusive barrier before
+        // Redis can publish a new epoch. Otherwise a concurrent cutover could
+        // observe disabled, drop the legacy UNIQUE, and only then let the
+        // already-started enable become visible.
+        let enable_barrier = if enabled {
+            Some(lock_policy_enable(database).await?)
+        } else {
+            None
+        };
+        let persisted = loop {
             let current = self.policy(name).await?;
             let next = transition_policy(current, enabled)?;
             if next == current {
-                if !enabled {
-                    wait_for_surface_writers(database).await?;
-                }
-                return Ok(current);
+                break current;
             }
 
             let mut connection = self.redis.get().await?;
@@ -145,17 +158,39 @@ impl SurfacePolicyStore {
             .await?;
 
             if let Some(payload) = payload {
-                let persisted = serde_json::from_str(&payload)?;
-                if !enabled {
-                    // Redis changes first: no new token can be signed. The
-                    // exclusive PostgreSQL advisory lock then waits for every
-                    // writer that may have observed the previous epoch.
-                    wait_for_surface_writers(database).await?;
-                }
-                return Ok(persisted);
+                break serde_json::from_str(&payload)?;
             }
+        };
+
+        if let Some(transaction) = enable_barrier {
+            transaction
+                .commit()
+                .await
+                .map_err(SurfacePolicyStoreError::Database)?;
+        } else {
+            // Redis changes first: no new token can be signed. The exclusive
+            // PostgreSQL advisory lock then waits for every writer that may
+            // have observed the previous epoch.
+            wait_for_surface_writers(database).await?;
         }
+        Ok(persisted)
     }
+}
+
+async fn lock_policy_enable(
+    database: &PgPool,
+) -> Result<Transaction<'static, Postgres>, SurfacePolicyStoreError> {
+    let mut transaction = database
+        .begin()
+        .await
+        .map_err(SurfacePolicyStoreError::Database)?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended('lexicon.surface-policy-writer', 0))",
+    )
+    .execute(&mut *transaction)
+    .await
+    .map_err(SurfacePolicyStoreError::Database)?;
+    Ok(transaction)
 }
 
 async fn wait_for_surface_writers(database: &PgPool) -> Result<(), SurfacePolicyStoreError> {

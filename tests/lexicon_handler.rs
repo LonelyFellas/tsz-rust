@@ -421,6 +421,7 @@ async fn b4_backfill_is_repeatable_and_cutover_requires_clean_parity(pool: PgPoo
         .await
         .expect("测试 Redis 连接池应能创建");
     let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let policies = state.surface_policy_store_for_test();
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
     let draft = create_ready_draft(&state, &pool, &bearer, "workspace").await;
@@ -448,7 +449,7 @@ async fn b4_backfill_is_repeatable_and_cutover_requires_clean_parity(pool: PgPoo
     let before = run_surface_parity(&pool).await.unwrap();
     assert!(!before.ready);
     assert!(!before.missing_rows.is_empty());
-    let blocked = run_surface_cutover_preflight(&pool, SURFACE_WRITER_VERSION)
+    let blocked = run_surface_cutover_preflight(&pool, &policies, SURFACE_WRITER_VERSION)
         .await
         .unwrap();
     assert!(!blocked.ready);
@@ -488,7 +489,7 @@ async fn b4_backfill_is_repeatable_and_cutover_requires_clean_parity(pool: PgPoo
     );
     assert_eq!(second.parity.actual_checksum, first.parity.actual_checksum);
 
-    let preflight = run_surface_cutover_preflight(&pool, SURFACE_WRITER_VERSION)
+    let preflight = run_surface_cutover_preflight(&pool, &policies, SURFACE_WRITER_VERSION)
         .await
         .unwrap();
     assert!(
@@ -498,8 +499,7 @@ async fn b4_backfill_is_repeatable_and_cutover_requires_clean_parity(pool: PgPoo
     assert!(preflight.legacy_unique_present_before);
     assert!(preflight.non_unique_lookup_present);
 
-    state
-        .surface_policy_store_for_test()
+    policies
         .transition_exact_headword_creation(&pool, true)
         .await
         .unwrap();
@@ -558,7 +558,32 @@ async fn b4_backfill_is_repeatable_and_cutover_requires_clean_parity(pool: PgPoo
     .unwrap();
     assert_eq!(workspace_entries, 1, "失败事务不得留下第二个词条");
 
-    let wrong_writer = run_surface_cutover_preflight(&pool, "surface-writer-v0")
+    let enabled_preflight = run_surface_cutover_preflight(&pool, &policies, SURFACE_WRITER_VERSION)
+        .await
+        .unwrap();
+    assert!(!enabled_preflight.ready);
+    assert!(enabled_preflight.creation_policy.enabled);
+    assert!(!enabled_preflight.publication_policy.enabled);
+    assert!(
+        enabled_preflight
+            .blocking_reasons
+            .contains(&"exact_headword_creation_policy_enabled".to_owned())
+    );
+    let enabled_cutover = execute_surface_cutover(
+        &pool,
+        &policies,
+        SURFACE_WRITER_VERSION,
+        &surface_cutover_artifact_sha256(),
+    )
+    .await
+    .unwrap_err();
+    assert!(enabled_cutover.to_string().contains("policy_enabled"));
+    policies
+        .transition_exact_headword_creation(&pool, false)
+        .await
+        .unwrap();
+
+    let wrong_writer = run_surface_cutover_preflight(&pool, &policies, "surface-writer-v0")
         .await
         .unwrap();
     assert!(!wrong_writer.ready);
@@ -567,13 +592,15 @@ async fn b4_backfill_is_repeatable_and_cutover_requires_clean_parity(pool: PgPoo
             .blocking_reasons
             .contains(&"writer_version_mismatch".to_owned())
     );
-    let wrong_hash = execute_surface_cutover(&pool, SURFACE_WRITER_VERSION, "not-reviewed")
-        .await
-        .unwrap_err();
+    let wrong_hash =
+        execute_surface_cutover(&pool, &policies, SURFACE_WRITER_VERSION, "not-reviewed")
+            .await
+            .unwrap_err();
     assert!(wrong_hash.to_string().contains("artifact hash mismatch"));
 
     let cutover = execute_surface_cutover(
         &pool,
+        &policies,
         SURFACE_WRITER_VERSION,
         &surface_cutover_artifact_sha256(),
     )

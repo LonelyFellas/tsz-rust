@@ -26,8 +26,10 @@ After acceptance, always restore the creation policy:
 cargo run --bin lexicon_surface_migration -- policy-disable
 ```
 
-Every command prints a JSON report. Preserve the backfill, preflight, cutover,
-policy epoch, exact application commit, OpenAPI hash, database image and Redis
+Every command prints a JSON report. `preflight` and `cutover` fail closed unless
+both creation and publication policies are disabled, and include each policy's
+name, epoch and state in the report. Preserve the backfill, preflight, cutover,
+policy epochs, exact application commit, OpenAPI hash, database image and Redis
 image as the rehearsal evidence bundle.
 
 ## Production R3 gate
