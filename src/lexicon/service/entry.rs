@@ -567,7 +567,7 @@ impl LexiconService {
             .await;
         }
 
-        let (mut evidence, recovered_confirmation) =
+        let (mut evidence, recovered_confirmation, has_surface_warning) =
             if let Some(token) = input.confirmed_surface_match_token.as_deref() {
                 // A terminal snapshot owner bundle deliberately outlives the short
                 // detection-store payload. Recover it only after the token, actor,
@@ -621,7 +621,7 @@ impl LexiconService {
                 if evidence.detection_id != input.detection_id {
                     return Err(LexiconServiceError::DetectionMismatch);
                 }
-                (evidence, Some(confirmation))
+                (evidence, Some(confirmation), true)
             } else {
                 let detection = self
                     .detections
@@ -652,7 +652,15 @@ impl LexiconService {
                     )
                     .await;
                 }
-                (CreateDetectionEvidence::from_detection(&detection), None)
+                let has_surface_warning = matches!(
+                    &detection.smart_dictionary,
+                    SmartDictionaryResultV2::Warning { .. }
+                );
+                (
+                    CreateDetectionEvidence::from_detection(&detection),
+                    None,
+                    has_surface_warning,
+                )
             };
         evidence.candidate_headwords = input.headwords.clone();
         if let Some(confirmation) = &recovered_confirmation {
@@ -705,7 +713,10 @@ impl LexiconService {
                 matched_dialect,
                 "matched",
             ),
-            (BuiltinDictionaryResultV2::NotFound, EntryKind::Phrase, None) => {
+            (BuiltinDictionaryResultV2::NotFound, entry_kind, None)
+                if entry_kind == EntryKind::Phrase
+                    || (entry_kind == EntryKind::Word && has_surface_warning) =>
+            {
                 let WordHeadwordsV2::Unified { common } = &input.headwords else {
                     return Err(LexiconServiceError::DetectionMismatch);
                 };

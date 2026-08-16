@@ -1884,7 +1884,6 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     assert_eq!(plural_surfaces, ["uk", "us"]);
 
     let plural_headword = format!("{headword}s");
-    seed_dictionary_word(&pool, &plural_headword).await;
     let (status, plural_detection) = call(
         &state,
         Method::POST,
@@ -1898,6 +1897,10 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
         status,
         StatusCode::OK,
         "复数词形检测失败：{plural_detection}"
+    );
+    assert_eq!(
+        plural_detection["builtin_dictionary"]["status"],
+        "not_found"
     );
     assert_eq!(plural_detection["smart_dictionary"]["status"], "warning");
     assert!(
@@ -1914,7 +1917,7 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     let plural_create = json!({
         "schema_version": 2,
         "detection_id": plural_detection["detection_id"],
-        "headwords": plural_detection["builtin_dictionary"]["headwords"],
+        "headwords": {"mode": "unified", "common": plural_headword},
     });
     let acknowledgement_key = Uuid::now_v7();
     let (status, acknowledgement_required) = call(
@@ -1984,6 +1987,38 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     .await
     .unwrap();
     assert_eq!(acknowledgement_count, 1);
+
+    let unmatched_word = format!("unlisted{}", Uuid::now_v7().simple());
+    let (status, unmatched_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": unmatched_word})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        unmatched_detection["builtin_dictionary"]["status"],
+        "not_found"
+    );
+    assert_eq!(unmatched_detection["smart_dictionary"]["status"], "clear");
+    let (status, unmatched_create) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": unmatched_detection["detection_id"],
+            "headwords": {"mode": "unified", "common": unmatched_word},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(unmatched_create["code"], "detection_mismatch");
 
     let (status, conflict) = call(
         &state,
