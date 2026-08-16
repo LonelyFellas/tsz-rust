@@ -12,14 +12,14 @@ use crate::{
     lexicon::{
         detection_store::DetectionStore,
         dto::{
-            AdminWordListQuery, AdminWordListResponse, AdminWordStats, AdminWordV2Envelope,
-            CreateAdminWordV2Input, DeleteDraftInput, DetectWordInputV2, DetectWordResponseV2,
-            DraftValidationResponse, EntryLifecycleBatchInput, EntryLifecycleBatchResponse,
-            EntryLifecycleInput, EntryPath, FormsImpactResponseV2, PreviewFormsImpactInputV2,
-            PublishAdminWordV2Input, RelatedSearchQuery, RelatedSearchResponse, SaveFormsStepInput,
-            SaveMeaningsStepInput, SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2,
-            SurfaceMatchPageV2, SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2,
-            ValidateAdminWordV2Input,
+            ActivatePublicationInput, AdminWordListQuery, AdminWordListResponse, AdminWordStats,
+            AdminWordV2Envelope, CreateAdminWordV2Input, DeleteDraftInput, DetectWordInputV2,
+            DetectWordResponseV2, DraftValidationResponse, EntryLifecycleBatchInput,
+            EntryLifecycleBatchResponse, EntryLifecycleInput, EntryPath, FormsImpactResponseV2,
+            PreviewFormsImpactInputV2, PublicationPath, PublishAdminWordV2Input,
+            RelatedSearchQuery, RelatedSearchResponse, SaveFormsStepInput, SaveMeaningsStepInput,
+            SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2, SurfaceMatchPageV2,
+            SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2, ValidateAdminWordV2Input,
         },
         impact_store::ImpactStore,
         repository::LexiconRepository,
@@ -36,7 +36,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod query;
 
 pub use commands::{
-    create, detect, preview_forms_impact, publish, save_forms, save_meanings,
+    activate_publication, create, detect, preview_forms_impact, publish, save_forms, save_meanings,
     suggest_dialect_variants, validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_draft, restore, restore_batch};
@@ -148,6 +148,17 @@ fn map_error(error: LexiconServiceError) -> AppError {
             surface_match_page: Some(*page),
             ..ProblemMeta::default()
         }),
+        LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(page) => {
+            AppError::conflict(
+                ErrorCode::MultipleActiveExactHeadwordPublicationsNotEnabled,
+                None,
+                "multiple active exact headword publications are not enabled",
+            )
+            .with_meta(ProblemMeta {
+                surface_match_page: Some(*page),
+                ..ProblemMeta::default()
+            })
+        }
         LexiconServiceError::DuplicateWord => AppError::conflict(
             ErrorCode::DuplicateWord,
             Some("headword"),
@@ -160,6 +171,9 @@ fn map_error(error: LexiconServiceError) -> AppError {
         ),
         LexiconServiceError::WordNotFound => {
             AppError::not_found_with_code(ErrorCode::WordNotFound, "word not found")
+        }
+        LexiconServiceError::PublicationNotFound => {
+            AppError::not_found_with_code(ErrorCode::PublicationNotFound, "publication not found")
         }
         LexiconServiceError::CatalogMismatch => AppError::conflict(
             ErrorCode::InvalidPartOfSpeech,

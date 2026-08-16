@@ -1,4 +1,5 @@
 use super::*;
+use crate::lexicon::model::HeadwordSurfaceAcknowledgementRecord;
 
 // --- helpers ---
 
@@ -269,6 +270,25 @@ impl LexiconRepository {
                    match_digest, acknowledged_by_admin_id, acknowledged_at,
                    policy_name, policy_epoch, normalization_version
             FROM lexicon.entry_forms_surface_acknowledgements
+            WHERE entry_id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(entry_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn headword_surface_acknowledgement(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+    ) -> Result<Option<HeadwordSurfaceAcknowledgementRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, HeadwordSurfaceAcknowledgementRecord>(
+            r#"
+            SELECT entry_id, headwords_content_digest, match_ids,
+                   policy_name, policy_epoch, normalization_version
+            FROM lexicon.entry_surface_acknowledgements
             WHERE entry_id = $1
             FOR UPDATE
             "#,
@@ -762,6 +782,56 @@ pub(super) async fn insert_audit_action(
     .await
     .map(|_| ())
     .map_err(LexiconRepositoryError::Database)
+}
+
+impl LexiconRepository {
+    pub(crate) async fn insert_command_surface_confirmation_audits(
+        tx: &mut Transaction<'_, Postgres>,
+        actor_id: Uuid,
+        request_id: Uuid,
+        resource_id: Uuid,
+        resource_revision: i64,
+        confirmation: &crate::lexicon::surface_snapshot::VerifiedSurfaceConfirmation,
+    ) -> Result<(), LexiconRepositoryError> {
+        let reasons = confirmation.owner_bundle["confirmation_reasons"]
+            .as_array()
+            .ok_or(LexiconRepositoryError::Invariant(
+                "surface confirmation owner bundle has no reasons",
+            ))?;
+        for reason in reasons {
+            let action = match reason.as_str() {
+                Some("unacknowledged_surface_matches") => {
+                    "lexicon.surface_warning.acknowledge_command"
+                }
+                Some("visibility_activation") => "lexicon.visibility_activation.acknowledge",
+                _ => {
+                    return Err(LexiconRepositoryError::Invariant(
+                        "surface confirmation owner bundle has an unknown reason",
+                    ));
+                }
+            };
+            insert_audit_action(
+                tx,
+                actor_id,
+                action,
+                resource_id,
+                resource_revision,
+                request_id,
+                serde_json::json!({
+                    "snapshot_id": confirmation.snapshot_id,
+                    "command": confirmation.binding.command,
+                    "policy_name": confirmation.binding.policy_name,
+                    "policy_epoch": confirmation.binding.policy_epoch,
+                    "match_digest": confirmation.match_digest,
+                    "match_ids": confirmation.match_ids,
+                    "owner_bundle": confirmation.owner_bundle,
+                    "confirmation_reason": reason,
+                }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -510,6 +510,13 @@ pub struct EntryPath {
     pub id: Uuid,
 }
 
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Path)]
+pub struct PublicationPath {
+    pub id: Uuid,
+    pub publication_id: Uuid,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StepSaveIntent {
@@ -657,6 +664,21 @@ pub struct ValidateAdminWordV2Input {
 pub struct PublishAdminWordV2Input {
     #[schema(minimum = 1)]
     pub base_revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActivatePublicationInput {
+    #[schema(minimum = 1)]
+    pub base_revision: i64,
+    #[schema(minimum = 1)]
+    pub base_lifecycle_revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
 }
 
 // --- lifecycle ---
@@ -677,6 +699,9 @@ pub struct EntryLifecycleInput {
     pub base_revision: i64,
     #[schema(minimum = 1)]
     pub base_lifecycle_revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -693,6 +718,9 @@ pub struct EntryLifecycleTarget {
 #[serde(deny_unknown_fields)]
 pub struct EntryLifecycleBatchInput {
     pub entries: Vec<EntryLifecycleTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

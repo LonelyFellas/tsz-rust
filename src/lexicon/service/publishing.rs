@@ -93,6 +93,9 @@ impl LexiconService {
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
 
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -116,6 +119,23 @@ impl LexiconService {
         LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
             .await
             .map_err(repository_error)?;
+        let command_owner = serde_json::json!({
+            "entry_id": word.id,
+            "base_revision": word.revision,
+        });
+        let verified_visibility = self
+            .confirm_visibility_command(
+                &mut transaction,
+                actor_id,
+                &word,
+                &previous_publication_sources,
+                &surface_sources,
+                input.confirmed_surface_match_token.as_deref(),
+                SurfaceConsumptionCommand::PublishEntry,
+                "publish_entry",
+                command_owner,
+            )
+            .await?;
         let catalog = self
             .catalog_context_for_reference(&mut transaction, &word.forms)
             .await?;
@@ -137,6 +157,18 @@ impl LexiconService {
             word.published_revision = current_publication_source_revision;
             word.has_unpublished_changes = false;
             word.published_at = current_published_at;
+            if let Some(confirmation) = verified_visibility.as_ref() {
+                LexiconRepository::insert_command_surface_confirmation_audits(
+                    &mut transaction,
+                    actor_id,
+                    request_id,
+                    word.id,
+                    word.revision,
+                    confirmation,
+                )
+                .await
+                .map_err(repository_error)?;
+            }
             LexiconRepository::insert_idempotent_word_response(
                 &mut transaction,
                 PUBLISH_SCOPE,
@@ -150,6 +182,14 @@ impl LexiconService {
             .await
             .map_err(repository_error)?;
             transaction.commit().await.map_err(database_error)?;
+            if let Some(confirmation) = verified_visibility
+                && let Err(error) = self.surface_snapshots.remove_verified(&confirmation).await
+            {
+                tracing::warn!(
+                    ?error,
+                    "failed to remove consumed publish visibility snapshot"
+                );
+            }
             return Ok(AdminWordV2Envelope { word });
         }
 
@@ -225,8 +265,609 @@ impl LexiconService {
         )
         .await
         .map_err(repository_error)?;
+        if let Some(confirmation) = verified_visibility.as_ref() {
+            LexiconRepository::insert_command_surface_confirmation_audits(
+                &mut transaction,
+                actor_id,
+                request_id,
+                word.id,
+                word.revision,
+                confirmation,
+            )
+            .await
+            .map_err(repository_error)?;
+        }
         transaction.commit().await.map_err(database_error)?;
+        if let Some(confirmation) = verified_visibility
+            && let Err(error) = self.surface_snapshots.remove_verified(&confirmation).await
+        {
+            tracing::warn!(
+                ?error,
+                "failed to remove consumed publish visibility snapshot"
+            );
+        }
         Ok(AdminWordV2Envelope { word })
+    }
+
+    pub async fn activate_publication(
+        &self,
+        actor_id: Uuid,
+        request_id: Uuid,
+        entry_id: Uuid,
+        publication_id: Uuid,
+        idempotency_key: Uuid,
+        input: ActivatePublicationInput,
+    ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
+        if input.base_revision < 1 {
+            return Err(LexiconServiceError::InvalidField {
+                field: "base_revision",
+                message: "base_revision must be at least 1",
+            });
+        }
+        if input.base_lifecycle_revision < 1 {
+            return Err(LexiconServiceError::InvalidField {
+                field: "base_lifecycle_revision",
+                message: "base_lifecycle_revision must be at least 1",
+            });
+        }
+        let request_hash = sha256_json(&serde_json::json!({
+            "entry_id": entry_id,
+            "publication_id": publication_id,
+            "input": input,
+        }))
+        .map_err(serialization_error)?;
+        let mut transaction = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "{ACTIVATE_PUBLICATION_SCOPE}:{actor_id}:{idempotency_key}"
+            ))
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+        if let Some(existing) = LexiconRepository::idempotency(
+            &mut transaction,
+            ACTIVATE_PUBLICATION_SCOPE,
+            actor_id,
+            idempotency_key,
+        )
+        .await
+        .map_err(repository_error)?
+        {
+            if existing.request_hash != request_hash {
+                return Err(LexiconServiceError::IdempotencyConflict);
+            }
+            transaction.commit().await.map_err(database_error)?;
+            return serde_json::from_value(existing.response_body).map_err(serialization_error);
+        }
+
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
+        let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(LexiconServiceError::WordNotFound)?;
+        let previous_publication_id = record.current_publication_id;
+        let mut word = entry_from_record(record)?;
+        ensure_active(&word)?;
+        ensure_revision(&word, input.base_revision)?;
+        super::lifecycle::ensure_lifecycle_revision(&word, input.base_lifecycle_revision)?;
+        let publication = LexiconRepository::historical_publication_for_update(
+            &mut transaction,
+            entry_id,
+            publication_id,
+        )
+        .await
+        .map_err(repository_error)?
+        .ok_or(LexiconServiceError::PublicationNotFound)?;
+
+        if previous_publication_id == Some(publication_id) {
+            LexiconRepository::insert_idempotent_word_response(
+                &mut transaction,
+                ACTIVATE_PUBLICATION_SCOPE,
+                actor_id,
+                idempotency_key,
+                &request_hash,
+                Some(publication_id),
+                &word,
+                200,
+            )
+            .await
+            .map_err(repository_error)?;
+            transaction.commit().await.map_err(database_error)?;
+            return Ok(AdminWordV2Envelope { word });
+        }
+
+        let mut publication_word: AdminWordV2 =
+            serde_json::from_value(publication.snapshot.clone()).map_err(serialization_error)?;
+        if publication.entry_id != entry_id || publication_word.id != entry_id {
+            return Err(invariant_record());
+        }
+        publication_word.status = AdminWordStatus::Published;
+        publication_word.archived_at = None;
+        publication_word.archived_by = None;
+        publication_word.published_revision = Some(publication.source_revision);
+        publication_word.published_at = Some(publication.published_at);
+        let previous_sources =
+            LexiconRepository::current_publication_surface_sources(&mut transaction, &[entry_id])
+                .await
+                .map_err(repository_error)?;
+        let proposed_sources =
+            crate::lexicon::repository::surface_projection_sources(&publication_word)
+                .map_err(surface_projection_error)?;
+        let surface_keys = crate::lexicon::repository::surface_lock_keys([
+            previous_sources.as_slice(),
+            proposed_sources.as_slice(),
+        ]);
+        LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
+            .await
+            .map_err(repository_error)?;
+        let command_owner = serde_json::json!({
+            "entry_id": entry_id,
+            "publication_id": publication_id,
+            "base_revision": input.base_revision,
+            "base_lifecycle_revision": input.base_lifecycle_revision,
+        });
+        let verified_visibility = self
+            .confirm_visibility_command(
+                &mut transaction,
+                actor_id,
+                &publication_word,
+                &previous_sources,
+                &proposed_sources,
+                input.confirmed_surface_match_token.as_deref(),
+                SurfaceConsumptionCommand::ActivatePublication,
+                "activate_publication",
+                command_owner,
+            )
+            .await?;
+        LexiconRepository::lock_outbound_sense_ref_targets_for_publication(
+            &mut transaction,
+            publication_id,
+        )
+        .await
+        .map_err(repository_error)?;
+        let unavailable = LexiconRepository::unavailable_outbound_sense_refs_for_publication(
+            &mut transaction,
+            publication_id,
+        )
+        .await
+        .map_err(repository_error)?;
+        if !unavailable.is_empty() {
+            return Err(LexiconServiceError::EntryHasUnavailablePublicationRefs(
+                unavailable,
+            ));
+        }
+        let retained_sense_ids = publication_word
+            .meanings
+            .pos
+            .iter()
+            .flat_map(|pos| pos.senses.iter().map(|sense| sense.id))
+            .collect::<Vec<_>>();
+        let inbound_references = LexiconRepository::current_inbound_sense_refs(
+            &mut transaction,
+            entry_id,
+            &retained_sense_ids,
+        )
+        .await
+        .map_err(repository_error)?;
+        if !inbound_references.is_empty() {
+            return Err(LexiconServiceError::ValidationFailed(
+                inbound_references
+                    .into_iter()
+                    .map(|reference| DraftValidationIssue {
+                        step: PersistedWordStep::Meanings,
+                        node_id: reference.target_sense_id,
+                        field: "senses".to_owned(),
+                        code: "sense_has_inbound_publication_refs".to_owned(),
+                        message: "该词义仍被其他词条的当前发布版本引用".to_owned(),
+                        reference_location: Some(DraftReferenceLocation {
+                            source_entry_id: reference.source_entry_id,
+                            source_publication_id: reference.source_publication_id,
+                            source_node_id: reference.source_node_id,
+                            reference_kind: reference.reference_kind,
+                        }),
+                    })
+                    .collect(),
+            ));
+        }
+
+        word.status = AdminWordStatus::Published;
+        word.published_revision = Some(publication.source_revision);
+        word.has_unpublished_changes = word.revision != publication.source_revision;
+        word.published_at = Some(publication.published_at);
+        word.lifecycle_revision += 1;
+        word.updated_at = Utc::now();
+        LexiconRepository::replace_surface_projection(
+            &mut transaction,
+            entry_id,
+            word.revision,
+            crate::lexicon::repository::SurfaceContentScope::CurrentPublication(publication_id),
+            previous_publication_id,
+            &previous_sources,
+            &proposed_sources,
+        )
+        .await
+        .map_err(repository_error)?;
+        LexiconRepository::activate_historical_publication(
+            &mut transaction,
+            actor_id,
+            request_id,
+            idempotency_key,
+            &request_hash,
+            &publication,
+            previous_publication_id,
+            &word,
+        )
+        .await
+        .map_err(repository_error)?;
+        if let Some(confirmation) = verified_visibility.as_ref() {
+            LexiconRepository::insert_command_surface_confirmation_audits(
+                &mut transaction,
+                actor_id,
+                request_id,
+                word.id,
+                word.revision,
+                confirmation,
+            )
+            .await
+            .map_err(repository_error)?;
+        }
+        transaction.commit().await.map_err(database_error)?;
+        if let Some(confirmation) = verified_visibility
+            && let Err(error) = self.surface_snapshots.remove_verified(&confirmation).await
+        {
+            tracing::warn!(?error, "failed to remove consumed activation snapshot");
+        }
+        Ok(AdminWordV2Envelope { word })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn confirm_visibility_command(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        actor_id: Uuid,
+        word: &AdminWordV2,
+        previous_sources: &[crate::lexicon::repository::SurfaceProjectionSource],
+        proposed_sources: &[crate::lexicon::repository::SurfaceProjectionSource],
+        token: Option<&str>,
+        command: SurfaceConsumptionCommand,
+        command_name: &'static str,
+        command_owner: serde_json::Value,
+    ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
+        let removals = crate::lexicon::visibility::headword_memberships(previous_sources);
+        let additions = crate::lexicon::visibility::headword_memberships(proposed_sources);
+        let mut requested = removals
+            .iter()
+            .chain(additions.iter())
+            .map(|(scope, _)| scope.clone())
+            .collect::<Vec<_>>();
+        requested.sort();
+        requested.dedup();
+        let before =
+            LexiconRepository::active_headword_memberships_in_transaction(transaction, &requested)
+                .await
+                .map_err(repository_error)?;
+        let transitions = crate::lexicon::visibility::transitions(before, removals, additions);
+        let visibility_required =
+            crate::lexicon::visibility::requires_multiple_active_confirmation(&transitions);
+
+        let active_ids = transitions
+            .iter()
+            .flat_map(|item| item.after_active_ids.iter().copied())
+            .filter(|id| *id != word.id)
+            .collect::<std::collections::HashSet<_>>();
+        let (mut headword_matches, headword_contexts) = self
+            .headword_surface_matches_in_transaction(
+                transaction,
+                &word.headwords,
+                word.kind,
+                Some(word.id),
+            )
+            .await?;
+        for item in &mut headword_matches {
+            if let SurfaceMatchCandidateV2::Headword {
+                candidate_word_id, ..
+            } = &mut item.candidate
+            {
+                *candidate_word_id = Some(word.id);
+            }
+        }
+        let (form_matches, form_contexts) = self
+            .form_surface_matches_in_transaction(transaction, word)
+            .await?;
+
+        let headword_evidence =
+            LexiconRepository::headword_surface_acknowledgement(transaction, word.id)
+                .await
+                .map_err(repository_error)?;
+        let forms_evidence = LexiconRepository::forms_surface_acknowledgement(transaction, word.id)
+            .await
+            .map_err(repository_error)?;
+        let acknowledged_headword_ids = self
+            .valid_headword_acknowledgement_ids(word, headword_evidence.as_ref())
+            .await?;
+        let acknowledged_form_ids = self
+            .valid_forms_acknowledgement_ids(word, forms_evidence.as_ref())
+            .await?;
+        let ordinary_items = headword_matches
+            .iter()
+            .chain(form_matches.iter())
+            .filter(|item| {
+                let acknowledged = match item.candidate {
+                    SurfaceMatchCandidateV2::Headword { .. } => &acknowledged_headword_ids,
+                    SurfaceMatchCandidateV2::Form { .. } => &acknowledged_form_ids,
+                };
+                !acknowledged.contains(item.match_id.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut visibility_items = headword_matches.clone();
+        visibility_items.retain(|item| {
+            active_ids.contains(&item.existing.word_id)
+                && matches!(
+                    item.existing.source,
+                    ExistingSurfaceSourceV2::Headword {
+                        content_scope: SurfaceContentScopeV2::CurrentPublication,
+                        ..
+                    }
+                )
+        });
+        for item in &mut visibility_items {
+            item.confirmation_reasons = vec![SurfaceConfirmationReasonV2::VisibilityActivation];
+        }
+        let mut items_by_id = std::collections::BTreeMap::new();
+        for mut item in ordinary_items {
+            item.confirmation_reasons =
+                vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches];
+            items_by_id.insert(item.match_id.clone(), item);
+        }
+        if visibility_required {
+            for item in visibility_items {
+                match items_by_id.entry(item.match_id.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(item);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        entry.get_mut().confirmation_reasons = vec![
+                            SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches,
+                            SurfaceConfirmationReasonV2::VisibilityActivation,
+                        ];
+                    }
+                }
+            }
+        }
+        let items = items_by_id.into_values().collect::<Vec<_>>();
+        if items.is_empty() {
+            return Ok(None);
+        }
+        let item_entry_ids = items
+            .iter()
+            .map(|item| item.existing.word_id)
+            .collect::<std::collections::HashSet<_>>();
+        let contexts = headword_contexts
+            .into_iter()
+            .chain(form_contexts)
+            .filter(|context| item_entry_ids.contains(&context.word_id))
+            .fold(
+                std::collections::BTreeMap::new(),
+                |mut contexts, context| {
+                    contexts.entry(context.word_id).or_insert(context);
+                    contexts
+                },
+            )
+            .into_values()
+            .collect::<Vec<_>>();
+
+        let policy = if visibility_required {
+            self.surface_policies
+                .multiple_active_exact_headword_publications()
+                .await
+        } else {
+            self.surface_policies
+                .policy(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
+                .await
+        }
+        .map_err(LexiconServiceError::SurfacePolicy)?;
+        let confirmation_reasons = if visibility_required {
+            if items.iter().any(|item| {
+                item.confirmation_reasons
+                    .contains(&SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches)
+            }) {
+                vec![
+                    SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches,
+                    SurfaceConfirmationReasonV2::VisibilityActivation,
+                ]
+            } else {
+                vec![SurfaceConfirmationReasonV2::VisibilityActivation]
+            }
+        } else {
+            vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches]
+        };
+        let owner_bundle = serde_json::json!({
+            "command": command_name,
+            "owner": command_owner,
+            "transitions": transitions,
+            "match_ids": items.iter().map(|item| &item.match_id).collect::<Vec<_>>(),
+            "confirmation_reasons": confirmation_reasons,
+        });
+        let binding = SurfaceConfirmationBinding {
+            actor_id,
+            command,
+            owner_context: serde_json::to_string(&command_owner).map_err(serialization_error)?,
+            base_revision: Some(word.revision),
+            canonical_content_digest: canonical_headwords_digest(&word.headwords)?,
+            owner_evidence_digest: surface_owner_bundle_digest(&owner_bundle)
+                .map_err(serialization_error)?,
+            normalization_version: crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION,
+            policy_name: policy.name,
+            policy_epoch: policy.epoch,
+        };
+        let create_snapshot = || CreateSurfaceSnapshot {
+            binding: binding.clone(),
+            policy_enabled: policy.enabled,
+            policy_block_code: (!policy.enabled && visibility_required).then_some(
+                SurfacePolicyBlockCodeV2::MultipleActiveExactHeadwordPublicationsNotEnabled,
+            ),
+            items: items.clone(),
+            matched_entry_contexts: contexts.clone(),
+            confirmation_reasons: confirmation_reasons.clone(),
+            owner_bundle: owner_bundle.clone(),
+            page_size: DEFAULT_SURFACE_PAGE_SIZE,
+        };
+        let Some(token) = token else {
+            let snapshot = self
+                .surface_snapshots
+                .create(create_snapshot())
+                .await
+                .map_err(LexiconServiceError::SurfaceSnapshot)?;
+            if !policy.enabled && visibility_required {
+                return Err(
+                    LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(
+                        Box::new(snapshot.page),
+                    ),
+                );
+            }
+            return Err(LexiconServiceError::SurfaceMatchAcknowledgementRequired(
+                Box::new(snapshot.page),
+            ));
+        };
+        let expected = ExpectedSurfaceConfirmation {
+            binding: binding.clone(),
+            current_policy: policy,
+        };
+        let verified = match self.surface_snapshots.verify(token, &expected).await {
+            Ok(verified) => verified,
+            Err(SurfaceSnapshotError::Expired) => {
+                return Err(LexiconServiceError::SurfaceMatchSnapshotExpired);
+            }
+            Err(SurfaceSnapshotError::PolicyChanged(name)) => {
+                let current = self
+                    .surface_policies
+                    .policy(name)
+                    .await
+                    .map_err(LexiconServiceError::SurfacePolicy)?;
+                return Err(LexiconServiceError::SurfacePolicyChanged(current));
+            }
+            Err(SurfaceSnapshotError::BindingMismatch) => {
+                let snapshot = self
+                    .surface_snapshots
+                    .create(create_snapshot())
+                    .await
+                    .map_err(LexiconServiceError::SurfaceSnapshot)?;
+                return Err(LexiconServiceError::SurfaceMatchesChanged(Box::new(
+                    snapshot.page,
+                )));
+            }
+            Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
+        };
+        if !policy.enabled && visibility_required {
+            let snapshot = self
+                .surface_snapshots
+                .create(create_snapshot())
+                .await
+                .map_err(LexiconServiceError::SurfaceSnapshot)?;
+            return Err(
+                LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(Box::new(
+                    snapshot.page,
+                )),
+            );
+        }
+        let current_ids = items
+            .iter()
+            .map(|item| item.match_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let verified_ids = verified
+            .match_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let current_digest =
+            crate::lexicon::surface_snapshot::surface_match_digest(&items, &confirmation_reasons)
+                .map_err(LexiconServiceError::SurfaceSnapshot)?;
+        if current_ids != verified_ids || current_digest != verified.match_digest {
+            let snapshot = self
+                .surface_snapshots
+                .create(create_snapshot())
+                .await
+                .map_err(LexiconServiceError::SurfaceSnapshot)?;
+            return Err(LexiconServiceError::SurfaceMatchesChanged(Box::new(
+                snapshot.page,
+            )));
+        }
+        Ok(Some(verified))
+    }
+
+    pub(super) async fn valid_headword_acknowledgement_ids(
+        &self,
+        word: &AdminWordV2,
+        evidence: Option<&HeadwordSurfaceAcknowledgementRecord>,
+    ) -> Result<std::collections::HashSet<String>, LexiconServiceError> {
+        let Some(evidence) = evidence else {
+            return Ok(Default::default());
+        };
+        let Some(policy_name) = stored_surface_policy_name(&evidence.policy_name) else {
+            return Ok(Default::default());
+        };
+        let policy = self
+            .surface_policies
+            .policy(policy_name)
+            .await
+            .map_err(LexiconServiceError::SurfacePolicy)?;
+        if evidence.entry_id != word.id
+            || evidence.headwords_content_digest != canonical_headwords_digest(&word.headwords)?
+            || evidence.policy_epoch != i64::try_from(policy.epoch).unwrap_or_default()
+            || evidence.normalization_version
+                != i32::from(crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION)
+        {
+            return Ok(Default::default());
+        }
+        Ok(evidence.match_ids.iter().cloned().collect())
+    }
+
+    pub(super) async fn valid_forms_acknowledgement_ids(
+        &self,
+        word: &AdminWordV2,
+        evidence: Option<&FormsSurfaceAcknowledgementRecord>,
+    ) -> Result<std::collections::HashSet<String>, LexiconServiceError> {
+        let Some(evidence) = evidence else {
+            return Ok(Default::default());
+        };
+        let Some(policy_name) = stored_surface_policy_name(&evidence.policy_name) else {
+            return Ok(Default::default());
+        };
+        let policy = self
+            .surface_policies
+            .policy(policy_name)
+            .await
+            .map_err(LexiconServiceError::SurfacePolicy)?;
+        if evidence.entry_id != word.id
+            || evidence.forms_content_digest != canonical_forms_digest(&word.forms)?
+            || evidence.policy_epoch != i64::try_from(policy.epoch).unwrap_or_default()
+            || evidence.normalization_version
+                != i32::from(crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION)
+        {
+            return Ok(Default::default());
+        }
+        Ok(evidence.match_ids.iter().cloned().collect())
+    }
+}
+
+fn stored_surface_policy_name(value: &str) -> Option<SurfacePolicyNameV2> {
+    match value {
+        "surface_warning_acknowledgement" => {
+            Some(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
+        }
+        "allow_new_exact_headword_entries" => {
+            Some(SurfacePolicyNameV2::AllowNewExactHeadwordEntries)
+        }
+        _ => None,
     }
 }
 

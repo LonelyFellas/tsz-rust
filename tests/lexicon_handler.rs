@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use tsz_rust::{
     admin::{AdminRepository, AdminRole, NewAdmin},
+    lexicon::dto::SurfacePolicyNameV2,
     lexicon::normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword},
     lexicon::surface_backfill::{
         SURFACE_WRITER_VERSION, execute_surface_cutover, run_surface_backfill,
@@ -349,17 +350,23 @@ async fn create_ready_draft(
     )
     .await;
     assert_eq!(status, StatusCode::OK, "检测失败：{detection}");
+    let mut create_input = json!({
+        "schema_version": 2,
+        "detection_id": detection["detection_id"],
+        "headwords": detection["builtin_dictionary"]["headwords"],
+    });
+    if let Some(surface_token) =
+        detection["smart_dictionary"]["surface_match_page"]["surface_confirmation_token"].as_str()
+    {
+        create_input["confirmed_surface_match_token"] = json!(surface_token);
+    }
     let (status, created) = call(
         state,
         Method::POST,
         &format!("{ROOT}/entries"),
         bearer,
         Some(Uuid::now_v7()),
-        Some(json!({
-            "schema_version": 2,
-            "detection_id": detection["detection_id"],
-            "headwords": detection["builtin_dictionary"]["headwords"],
-        })),
+        Some(create_input),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "创建失败：{created}");
@@ -385,19 +392,38 @@ async fn create_ready_draft(
             }]
         }]
     }]);
-    let (status, forms_saved) = call(
+    let forms_input = json!({
+        "base_revision": 1,
+        "intent": "complete",
+        "content": forms,
+    });
+    let (mut status, mut forms_saved) = call(
         state,
         Method::PUT,
         &format!("{ROOT}/entries/{entry_id}/steps/forms"),
         bearer,
         None,
-        Some(json!({
-            "base_revision": 1,
-            "intent": "complete",
-            "content": forms,
-        })),
+        Some(forms_input.clone()),
     )
     .await;
+    if status == StatusCode::CONFLICT
+        && forms_saved["code"] == "surface_match_acknowledgement_required"
+    {
+        let surface_token = forms_saved["meta"]["surface_match_page"]["surface_confirmation_token"]
+            .as_str()
+            .expect("单页 forms warning 应签发确认 token");
+        let mut confirmed = forms_input;
+        confirmed["confirmed_surface_match_token"] = json!(surface_token);
+        (status, forms_saved) = call(
+            state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+            bearer,
+            None,
+            Some(confirmed),
+        )
+        .await;
+    }
     assert_eq!(status, StatusCode::OK, "forms 失败：{forms_saved}");
 
     let mut meanings = forms_saved["word"]["meanings"].clone();
@@ -442,6 +468,879 @@ async fn publish_ready(state: &AppState, bearer: &str, word: &Value) -> (StatusC
         Some(json!({"base_revision": word["word"]["revision"]})),
     )
     .await
+}
+
+async fn publish_ready_confirming(
+    state: &AppState,
+    bearer: &str,
+    word: &Value,
+) -> (StatusCode, Value) {
+    let (status, response) = publish_ready(state, bearer, word).await;
+    if status != StatusCode::CONFLICT
+        || response["code"] != "surface_match_acknowledgement_required"
+    {
+        return (status, response);
+    }
+    let surface_token = response["meta"]["surface_match_page"]["surface_confirmation_token"]
+        .as_str()
+        .expect("单页 publish warning 应签发确认 token");
+    call(
+        state,
+        Method::POST,
+        &format!(
+            "{ROOT}/entries/{}/publications",
+            word["word"]["id"].as_str().unwrap()
+        ),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": word["word"]["revision"],
+            "confirmed_surface_match_token": surface_token,
+        })),
+    )
+    .await
+}
+
+async fn prepare_duplicate_headword_test(
+    pool: &PgPool,
+    policies: &tsz_rust::lexicon::surface_policy::SurfacePolicyStore,
+) {
+    run_surface_backfill(pool).await.unwrap();
+    execute_surface_cutover(
+        pool,
+        policies,
+        SURFACE_WRITER_VERSION,
+        &surface_cutover_artifact_sha256(),
+    )
+    .await
+    .unwrap();
+    policies
+        .transition_exact_headword_creation(pool, true)
+        .await
+        .unwrap();
+}
+
+async fn restore_confirming(state: &AppState, bearer: &str, word: &Value) -> (StatusCode, Value) {
+    let uri = format!("{ROOT}/entries/{}/restore", word["id"].as_str().unwrap());
+    let body = json!({
+        "base_revision": word["revision"],
+        "base_lifecycle_revision": word["lifecycle_revision"],
+    });
+    let (status, response) = call(
+        state,
+        Method::POST,
+        &uri,
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(body.clone()),
+    )
+    .await;
+    if status != StatusCode::CONFLICT
+        || response["code"] != "surface_match_acknowledgement_required"
+    {
+        return (status, response);
+    }
+    let token = response["meta"]["surface_match_page"]["surface_confirmation_token"]
+        .as_str()
+        .expect("单页 restore warning 应签发确认 token");
+    let mut confirmed = body;
+    confirmed["confirmed_surface_match_token"] = json!(token);
+    call(
+        state,
+        Method::POST,
+        &uri,
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(confirmed),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn visibility_gate_off_allows_zero_to_one_and_same_entry_revision_but_blocks_one_to_two(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let policies = state.surface_policy_store_for_test();
+    prepare_duplicate_headword_test(&pool, &policies).await;
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let first = create_ready_draft(&state, &pool, &bearer, "visibility-workspace").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &first).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "0→1 发布失败：{first_published}"
+    );
+    let second = create_ready_draft(&state, &pool, &bearer, "visibility-workspace").await;
+
+    let first_id = first_published["word"]["id"].as_str().unwrap();
+    let (status, edited) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{first_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": first_published["word"]["revision"],
+            "intent": "save",
+            "content": first_published["word"]["meanings"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "发布后草稿更新失败：{edited}");
+    let (status, republished) = publish_ready_confirming(&state, &bearer, &edited).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "同一 active entry 新 revision 不得被 visibility gate 误拦：{republished}"
+    );
+
+    let (status, blocked) = publish_ready(&state, &bearer, &second).await;
+    assert_eq!(status, StatusCode::CONFLICT, "1→2 必须被 gate-off 阻断");
+    assert_eq!(
+        blocked["code"],
+        "multiple_active_exact_headword_publications_not_enabled"
+    );
+    let page = &blocked["meta"]["surface_match_page"];
+    assert_eq!(page["continuation_policy"], "temporarily_disabled");
+    assert!(page.get("surface_confirmation_token").is_none());
+    assert!(
+        page["confirmation_reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons
+                .iter()
+                .any(|reason| reason == "visibility_activation"))
+    );
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.entries WHERE archived_at IS NULL AND current_publication_id IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active_count, 1, "失败发布不得留下第二条 active publication");
+    assert!(
+        !policies
+            .multiple_active_exact_headword_publications()
+            .await
+            .unwrap()
+            .enabled
+    );
+    policies
+        .transition_exact_headword_creation(&pool, false)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn visibility_gate_off_blocks_zero_to_two_batch_atomically_and_single_restore_one_to_two(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let policies = state.surface_policy_store_for_test();
+    prepare_duplicate_headword_test(&pool, &policies).await;
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let first = create_ready_draft(&state, &pool, &bearer, "restore-workspace").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &first).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "首条发布失败：{first_published}"
+    );
+    let first_id = first_published["word"]["id"].as_str().unwrap();
+    let (status, first_archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{first_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": first_published["word"]["revision"],
+            "base_lifecycle_revision": first_published["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "首条归档失败：{first_archived}");
+
+    let second = create_ready_draft(&state, &pool, &bearer, "restore-workspace").await;
+    let (status, second_published) = publish_ready_confirming(&state, &bearer, &second).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "active set 0→1 应成功：{second_published}"
+    );
+    let second_id = second_published["word"]["id"].as_str().unwrap();
+    let (status, second_archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{second_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second_published["word"]["revision"],
+            "base_lifecycle_revision": second_published["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "第二条归档失败：{second_archived}");
+
+    let batch = json!({
+        "entries": [
+            {
+                "id": first_id,
+                "base_revision": first_archived["word"]["revision"],
+                "base_lifecycle_revision": first_archived["word"]["lifecycle_revision"],
+            },
+            {
+                "id": second_id,
+                "base_revision": second_archived["word"]["revision"],
+                "base_lifecycle_revision": second_archived["word"]["lifecycle_revision"],
+            }
+        ]
+    });
+    let (status, blocked_batch) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/restore-batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(batch),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "0→2 batch 必须原子失败");
+    assert_eq!(
+        blocked_batch["code"],
+        "multiple_active_exact_headword_publications_not_enabled"
+    );
+    let archived_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.entries WHERE id = ANY($1) AND archived_at IS NOT NULL",
+    )
+    .bind(vec![
+        Uuid::parse_str(first_id).unwrap(),
+        Uuid::parse_str(second_id).unwrap(),
+    ])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(archived_count, 2, "batch 失败不得部分恢复");
+
+    let (status, first_restored) =
+        restore_confirming(&state, &bearer, &first_archived["word"]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "单条 0→1 restore 应成功：{first_restored}"
+    );
+    let (status, blocked_second) =
+        restore_confirming(&state, &bearer, &second_archived["word"]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "单条 1→2 restore 必须失败");
+    assert_eq!(
+        blocked_second["code"],
+        "multiple_active_exact_headword_publications_not_enabled"
+    );
+    policies
+        .transition_exact_headword_creation(&pool, false)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn gate_on_publish_uses_one_composite_token_and_reconfirms_match_and_epoch_changes(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let policies = state.surface_policy_store_for_test();
+    prepare_duplicate_headword_test(&pool, &policies).await;
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let first = create_ready_draft(&state, &pool, &bearer, "composite-workspace").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &first).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "首条发布失败：{first_published}"
+    );
+    let second = create_ready_draft(&state, &pool, &bearer, "composite-workspace").await;
+    let ordinary = create_ready_draft(&state, &pool, &bearer, "composite-workspaces").await;
+    let first_id = first_published["word"]["id"].as_str().unwrap();
+    let ordinary_id = ordinary["word"]["id"].as_str().unwrap();
+
+    policies
+        .transition_exact_headword_creation(&pool, false)
+        .await
+        .unwrap();
+    policies
+        .transition(
+            &pool,
+            SurfacePolicyNameV2::AllowMultipleActiveExactHeadwordPublications,
+            true,
+        )
+        .await
+        .unwrap();
+
+    let (status, composite) = publish_ready(&state, &bearer, &second).await;
+    assert_eq!(status, StatusCode::CONFLICT, "gate-on 首次发布必须确认");
+    assert_eq!(composite["code"], "surface_match_acknowledgement_required");
+    let page = &composite["meta"]["surface_match_page"];
+    assert_eq!(
+        page["policy_name"],
+        "allow_multiple_active_exact_headword_publications"
+    );
+    assert_eq!(page["continuation_policy"], "enabled");
+    let reasons = page["confirmation_reasons"].as_array().unwrap();
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason == "visibility_activation")
+    );
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason == "unacknowledged_surface_matches")
+    );
+    let items = page["items"].as_array().unwrap();
+    assert!(items.iter().any(|item| {
+        item["existing"]["word_id"] == first_id
+            && item["existing"]["source"]["content_scope"] == "current_publication"
+            && item["confirmation_reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons.len() == 2)
+    }));
+    assert!(items.iter().any(|item| {
+        item["existing"]["word_id"] == ordinary_id
+            && item["confirmation_reasons"]
+                .as_array()
+                .is_some_and(|reasons| {
+                    reasons.len() == 1 && reasons[0] == "unacknowledged_surface_matches"
+                })
+    }));
+    let original_token = page["surface_confirmation_token"]
+        .as_str()
+        .expect("composite 终页只能签发一个 surface token")
+        .to_owned();
+
+    policies
+        .transition_exact_headword_creation(&pool, true)
+        .await
+        .unwrap();
+    let concurrent = create_ready_draft(&state, &pool, &bearer, "composite-workspace").await;
+    let concurrent_id = concurrent["word"]["id"].as_str().unwrap();
+    let publish_uri = format!(
+        "{ROOT}/entries/{}/publications",
+        second["word"]["id"].as_str().unwrap()
+    );
+    let (status, changed) = call(
+        &state,
+        Method::POST,
+        &publish_uri,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second["word"]["revision"],
+            "confirmed_surface_match_token": original_token,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "并发 match 变化必须重确认");
+    assert_eq!(changed["code"], "surface_matches_changed");
+    assert!(
+        changed["meta"]["surface_match_page"]["items"]
+            .as_array()
+            .is_some_and(|items| items
+                .iter()
+                .any(|item| { item["existing"]["word_id"] == concurrent_id }))
+    );
+    let changed_token = changed["meta"]["surface_match_page"]["surface_confirmation_token"]
+        .as_str()
+        .expect("变化后的 composite 首页应签发新 token")
+        .to_owned();
+
+    policies
+        .transition(
+            &pool,
+            SurfacePolicyNameV2::AllowMultipleActiveExactHeadwordPublications,
+            false,
+        )
+        .await
+        .unwrap();
+    let (status, disabled_policy_changed) = call(
+        &state,
+        Method::POST,
+        &publish_uri,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second["word"]["revision"],
+            "confirmed_surface_match_token": changed_token.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        disabled_policy_changed["code"], "surface_policy_changed",
+        "gate 关闭后旧 epoch token 必须先按策略变化拒绝，不能降级成 capability block"
+    );
+    policies
+        .transition(
+            &pool,
+            SurfacePolicyNameV2::AllowMultipleActiveExactHeadwordPublications,
+            true,
+        )
+        .await
+        .unwrap();
+    let (status, policy_changed) = call(
+        &state,
+        Method::POST,
+        &publish_uri,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second["word"]["revision"],
+            "confirmed_surface_match_token": changed_token,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "visibility epoch 变化必须拒绝旧 token"
+    );
+    assert_eq!(policy_changed["code"], "surface_policy_changed");
+
+    let (status, refreshed) = publish_ready(&state, &bearer, &second).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(refreshed["code"], "surface_match_acknowledgement_required");
+    let refreshed_token = refreshed["meta"]["surface_match_page"]["surface_confirmation_token"]
+        .as_str()
+        .unwrap();
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &publish_uri,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second["word"]["revision"],
+            "confirmed_surface_match_token": refreshed_token,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "新 epoch composite token 应一次发布：{published}"
+    );
+    let second_id = Uuid::parse_str(second["word"]["id"].as_str().unwrap()).unwrap();
+    let confirmation_actions: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT action
+        FROM audit.admin_actions
+        WHERE resource_id = $1
+          AND action IN (
+              'lexicon.surface_warning.acknowledge_command',
+              'lexicon.visibility_activation.acknowledge'
+          )
+        ORDER BY action
+        "#,
+    )
+    .bind(second_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        confirmation_actions,
+        [
+            "lexicon.surface_warning.acknowledge_command",
+            "lexicon.visibility_activation.acknowledge",
+        ],
+        "composite 命令应在同一事务内分别留下两个 reason 的审计证据"
+    );
+
+    policies
+        .transition(
+            &pool,
+            SurfacePolicyNameV2::AllowMultipleActiveExactHeadwordPublications,
+            false,
+        )
+        .await
+        .unwrap();
+    policies
+        .transition_exact_headword_creation(&pool, false)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn historical_publication_activation_obeys_visibility_gate_and_command_confirmation(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let policies = state.surface_policy_store_for_test();
+    prepare_duplicate_headword_test(&pool, &policies).await;
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let first = create_ready_draft(&state, &pool, &bearer, "activation-workspace").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &first).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let first_id = first_published["word"]["id"].as_str().unwrap();
+    let (status, first_archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{first_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": first_published["word"]["revision"],
+            "base_lifecycle_revision": first_published["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "首条归档失败：{first_archived}");
+
+    let second = create_ready_draft(&state, &pool, &bearer, "activation-workspace").await;
+    let (status, second_published) = publish_ready_confirming(&state, &bearer, &second).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "第二条 0→1 发布失败：{second_published}"
+    );
+    let second_id = Uuid::parse_str(second_published["word"]["id"].as_str().unwrap()).unwrap();
+    let second_publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(second_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id = NULL WHERE id = $1")
+        .bind(second_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, first_restored) =
+        restore_confirming(&state, &bearer, &first_archived["word"]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "首条 0→1 restore 失败：{first_restored}"
+    );
+    let activation_uri =
+        format!("{ROOT}/entries/{second_id}/publications/{second_publication_id}/activate");
+    let activation_body = json!({
+        "base_revision": second_published["word"]["revision"],
+        "base_lifecycle_revision": second_published["word"]["lifecycle_revision"],
+    });
+    let (status, disabled) = call(
+        &state,
+        Method::POST,
+        &activation_uri,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(activation_body.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "activation 1→2 必须被 gate-off 阻断"
+    );
+    assert_eq!(
+        disabled["code"],
+        "multiple_active_exact_headword_publications_not_enabled"
+    );
+    let still_inactive: Option<Uuid> =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(second_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        still_inactive.is_none(),
+        "失败 activation 不得切换 current publication"
+    );
+
+    policies
+        .transition(
+            &pool,
+            SurfacePolicyNameV2::AllowMultipleActiveExactHeadwordPublications,
+            true,
+        )
+        .await
+        .unwrap();
+    let (status, required) = call(
+        &state,
+        Method::POST,
+        &activation_uri,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(activation_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(required["code"], "surface_match_acknowledgement_required");
+    let activation_token = required["meta"]["surface_match_page"]["surface_confirmation_token"]
+        .as_str()
+        .expect("activation visibility snapshot 应签发命令 token");
+    let mut confirmed = activation_body;
+    confirmed["confirmed_surface_match_token"] = json!(activation_token);
+    let success_key = Uuid::now_v7();
+    let (status, activated) = call(
+        &state,
+        Method::POST,
+        &activation_uri,
+        &bearer,
+        Some(success_key),
+        Some(confirmed.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "activation 确认后失败：{activated}");
+    assert_eq!(
+        activated["word"]["published_revision"],
+        second_published["word"]["revision"]
+    );
+    let (status, replayed) = call(
+        &state,
+        Method::POST,
+        &activation_uri,
+        &bearer,
+        Some(success_key),
+        Some(confirmed),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replayed, activated, "activation 成功响应必须幂等重放");
+    let visibility_audit_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM audit.admin_actions
+        WHERE resource_id = $1
+          AND action = 'lexicon.visibility_activation.acknowledge'
+        "#,
+    )
+    .bind(second_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        visibility_audit_count, 1,
+        "activation 幂等重放不得重复写 visibility 确认审计"
+    );
+
+    policies
+        .transition(
+            &pool,
+            SurfacePolicyNameV2::AllowMultipleActiveExactHeadwordPublications,
+            false,
+        )
+        .await
+        .unwrap();
+    policies
+        .transition_exact_headword_creation(&pool, false)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn historical_publication_activation_increments_lifecycle_revision_across_a_b_a(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let draft = create_ready_draft(&state, &pool, &bearer, "activation-cycle").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &draft).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let entry_id = Uuid::parse_str(first_published["word"]["id"].as_str().unwrap()).unwrap();
+
+    let (status, edited) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": first_published["word"]["revision"],
+            "intent": "complete",
+            "content": first_published["word"]["meanings"],
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "创建第二个 publication 草稿失败：{edited}"
+    );
+    let (status, second_published) = publish_ready(&state, &bearer, &edited).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "第二个 publication 发布失败：{second_published}"
+    );
+
+    let publications: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM lexicon.entry_publications WHERE entry_id = $1 ORDER BY publication_number",
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(publications.len(), 2);
+    let mut lifecycle_revision = second_published["word"]["lifecycle_revision"]
+        .as_i64()
+        .unwrap();
+    for publication_id in [publications[0], publications[1], publications[0]] {
+        let (status, activated) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/{entry_id}/publications/{publication_id}/activate"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(json!({
+                "base_revision": second_published["word"]["revision"],
+                "base_lifecycle_revision": lifecycle_revision,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "A→B→A activation 失败：{activated}");
+        lifecycle_revision += 1;
+        assert_eq!(
+            activated["word"]["lifecycle_revision"], lifecycle_revision,
+            "每次切换 current publication 都必须推进 lifecycle revision"
+        );
+    }
+    let activation_events: Vec<i64> = sqlx::query_scalar(
+        r#"
+        SELECT aggregate_revision
+        FROM platform.outbox_events
+        WHERE aggregate_id = $1 AND event_type = 'lexicon.publication_activated'
+        ORDER BY aggregate_revision
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(activation_events, vec![2, 3, 4]);
+}
+
+#[sqlx::test]
+async fn historical_publication_activation_rejects_missing_current_inbound_sense(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_ready = create_ready_draft(&state, &pool, &bearer, "activation-target").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &target_ready).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let target_id = Uuid::parse_str(first_published["word"]["id"].as_str().unwrap()).unwrap();
+    let first_publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(target_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let mut meanings = first_published["word"]["meanings"].clone();
+    let mut added_sense = meanings["pos"][0]["senses"][0].clone();
+    let added_sense_id = Uuid::now_v7();
+    added_sense["id"] = json!(added_sense_id);
+    added_sense["definitions"][0]["id"] = json!(Uuid::now_v7());
+    added_sense["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    added_sense["definitions"][0]["content"] = rich_text("仅第二版存在的词义");
+    added_sense["sentences"][0]["id"] = json!(Uuid::now_v7());
+    added_sense["sentences"][0]["en_text"]["common"]["id"] = json!(Uuid::now_v7());
+    added_sense["sentences"][0]["zh_text_id"] = json!(Uuid::now_v7());
+    added_sense["sentences"][0]["links"][0]["sense_id"] = json!(added_sense_id);
+    meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(added_sense);
+    let (status, target_edited) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": first_published["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "添加第二版词义失败：{target_edited}"
+    );
+    let (status, second_published) = publish_ready(&state, &bearer, &target_edited).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let source_ready = create_ready_draft(&state, &pool, &bearer, "activation-source").await;
+    let source_id = source_ready["word"]["id"].as_str().unwrap();
+    let mut source_meanings = source_ready["word"]["meanings"].clone();
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "target_word_id": target_id,
+        "target_sense_id": added_sense_id,
+        "score": "80.00"
+    }]);
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source_ready["word"]["revision"],
+            "intent": "complete",
+            "content": source_meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "保存当前入站引用失败：{source_saved}"
+    );
+    let (status, source_published) = publish_ready(&state, &bearer, &source_saved).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "发布当前入站引用失败：{source_published}"
+    );
+
+    let (status, blocked) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_id}/publications/{first_publication_id}/activate"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second_published["word"]["revision"],
+            "base_lifecycle_revision": second_published["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(blocked["field_issues"].as_array().is_some_and(|issues| {
+        issues.iter().any(|issue| {
+            issue["code"] == "sense_has_inbound_publication_refs"
+                && issue["node_id"] == added_sense_id.to_string()
+        })
+    }));
 }
 
 #[sqlx::test]
@@ -1234,14 +2133,37 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
     assert_eq!(status, StatusCode::OK, "校验失败：{validation}");
     assert_eq!(validation["valid"], true);
 
+    let (status, publish_warning) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"base_revision": 3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        publish_warning["code"],
+        "surface_match_acknowledgement_required"
+    );
+    let publish_surface_token =
+        publish_warning["meta"]["surface_match_page"]["surface_confirmation_token"]
+            .as_str()
+            .expect("发布普通词形 warning 应签发 token")
+            .to_owned();
     let publish_key = Uuid::now_v7();
+    let publish_input = json!({
+        "base_revision": 3,
+        "confirmed_surface_match_token": publish_surface_token,
+    });
     let (status, published) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries/{entry_id}/publications"),
         &bearer,
         Some(publish_key),
-        Some(json!({"base_revision": 3})),
+        Some(publish_input.clone()),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "发布失败：{published}");
@@ -1297,7 +2219,7 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
         &format!("{ROOT}/entries/{entry_id}/publications"),
         &bearer,
         Some(publish_key),
-        Some(json!({"base_revision": 3})),
+        Some(publish_input),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -1332,6 +2254,7 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
             "lexicon.entry.save",
             "lexicon.entry.save",
             "lexicon.entry.publish",
+            "lexicon.surface_warning.acknowledge_command",
         ]
     );
     let missing_pronunciation_hashes: i64 = sqlx::query_scalar(

@@ -111,6 +111,83 @@ const SURFACE_INBOUND_RELATIONS_QUERY: &str = r#"
 "#;
 
 impl LexiconRepository {
+    pub(crate) async fn active_headword_memberships_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        requested: &[crate::lexicon::visibility::VisibilityScope],
+    ) -> Result<Vec<(crate::lexicon::visibility::VisibilityScope, Uuid)>, LexiconRepositoryError>
+    {
+        if requested.is_empty() {
+            return Ok(Vec::new());
+        }
+        let languages = requested
+            .iter()
+            .map(|key| key.language.as_str())
+            .collect::<Vec<_>>();
+        let entry_kinds = requested
+            .iter()
+            .map(|key| key.entry_kind.as_str())
+            .collect::<Vec<_>>();
+        let dialect_scopes = requested
+            .iter()
+            .map(|key| key.dialect_scope.as_str())
+            .collect::<Vec<_>>();
+        let normalized = requested
+            .iter()
+            .map(|key| key.normalized_headword.as_str())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query_as::<_, (String, String, String, String, Uuid)>(
+            r#"
+            WITH requested AS (
+                SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[])
+                    AS value(language, entry_kind, dialect_scope, normalized_headword)
+            )
+            SELECT DISTINCT source.language,
+                            source.entry_kind,
+                            source.dialect_scope,
+                            source.normalized_surface,
+                            source.entry_id
+            FROM requested
+            JOIN lexicon.surface_sources source
+              ON source.language = requested.language
+             AND source.entry_kind = requested.entry_kind
+             AND source.dialect_scope = requested.dialect_scope
+             AND source.normalized_surface = requested.normalized_headword
+             AND source.source_kind = 'headword'
+             AND source.content_scope = 'current_publication'
+             AND source.is_deleted = FALSE
+            JOIN lexicon.entries entry
+              ON entry.id = source.entry_id
+             AND entry.archived_at IS NULL
+             AND entry.current_publication_id = source.publication_id
+            ORDER BY source.language, source.entry_kind, source.dialect_scope,
+                     source.normalized_surface, source.entry_id
+            "#,
+        )
+        .bind(languages)
+        .bind(entry_kinds)
+        .bind(dialect_scopes)
+        .bind(normalized)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(language, entry_kind, dialect_scope, normalized_headword, id)| {
+                    (
+                        crate::lexicon::visibility::VisibilityScope {
+                            language,
+                            entry_kind,
+                            dialect_scope,
+                            normalized_headword,
+                        },
+                        id,
+                    )
+                },
+            )
+            .collect())
+    }
+
     /// Return the authoritative, kind-independent surface sources for the
     /// requested normalized dialect scopes.
     ///

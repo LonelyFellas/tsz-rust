@@ -10,23 +10,23 @@ use crate::lexicon::{
     detection_store::{DetectionStore, DetectionStoreError},
     dialect_provider::{DialectSuggestionProvider, DictionaryRegionRulesProvider, evidence_keys},
     dto::{
-        AcknowledgedTrue, AdminWordListItem, AdminWordListPage, AdminWordListQuery,
-        AdminWordListResponse, AdminWordStats, AdminWordStatus, AdminWordV2, AdminWordV2Envelope,
-        BuiltinDictionaryResultV2, CreateAdminWordV2Input, DeleteDraftInput, DetectWordInputV2,
-        DetectWordResponseV2, DetectionRequestEcho, DetectionSurfaceMatchPreviewV2,
-        DetectionSurfaceWarningAuditV2, Dialect, DialectRulesV2, DialectSuggestionFieldKind,
-        DialectSuggestionProviderV2, DialectVariantSlotV2, DialectVariantSuggestionItemV2,
-        DictionaryCoverageStateV2, DictionaryCoverageV2, DictionaryProvenanceV2,
-        DictionaryProviderV2, DraftFormsStepContent, DraftMeaningsStepContent,
-        DraftReferenceLocation, DraftValidationIssue, DraftValidationResponse,
-        DuplicateWordMatchV2, EnglishTextV2, EntryKind, EntryLifecycleBatchInput,
-        EntryLifecycleBatchResponse, EntryLifecycleInput, EntryLifecycleTarget,
-        ExistingSurfaceMatchV2, ExistingSurfaceSourceV2, FormsImpactItemV2, FormsImpactNodeType,
-        FormsImpactResponseV2, GrammarStructureV2, GrammarVariantV2, LexiconSurfaceMatchV2,
-        MatchedEntryContextV2, PersistedWordStep, PreviewFormsImpactInputV2, PronunciationStyle,
-        PublishAdminWordV2Input, RelatedSearchLegacyResponse, RelatedSearchMatchMode,
-        RelatedSearchQuery, RelatedSearchResponse, RelatedSearchV2Response, RelatedWordResult,
-        RelatedWordSense, RelationReferenceCountsV2, RelationReferencePreviewV2,
+        AcknowledgedTrue, ActivatePublicationInput, AdminWordListItem, AdminWordListPage,
+        AdminWordListQuery, AdminWordListResponse, AdminWordStats, AdminWordStatus, AdminWordV2,
+        AdminWordV2Envelope, BuiltinDictionaryResultV2, CreateAdminWordV2Input, DeleteDraftInput,
+        DetectWordInputV2, DetectWordResponseV2, DetectionRequestEcho,
+        DetectionSurfaceMatchPreviewV2, DetectionSurfaceWarningAuditV2, Dialect, DialectRulesV2,
+        DialectSuggestionFieldKind, DialectSuggestionProviderV2, DialectVariantSlotV2,
+        DialectVariantSuggestionItemV2, DictionaryCoverageStateV2, DictionaryCoverageV2,
+        DictionaryProvenanceV2, DictionaryProviderV2, DraftFormsStepContent,
+        DraftMeaningsStepContent, DraftReferenceLocation, DraftValidationIssue,
+        DraftValidationResponse, DuplicateWordMatchV2, EnglishTextV2, EntryKind,
+        EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput,
+        EntryLifecycleTarget, ExistingSurfaceMatchV2, ExistingSurfaceSourceV2, FormsImpactItemV2,
+        FormsImpactNodeType, FormsImpactResponseV2, GrammarStructureV2, GrammarVariantV2,
+        LexiconSurfaceMatchV2, MatchedEntryContextV2, PersistedWordStep, PreviewFormsImpactInputV2,
+        PronunciationStyle, PublishAdminWordV2Input, RelatedSearchLegacyResponse,
+        RelatedSearchMatchMode, RelatedSearchQuery, RelatedSearchResponse, RelatedSearchV2Response,
+        RelatedWordResult, RelatedWordSense, RelationReferenceCountsV2, RelationReferencePreviewV2,
         RelationReferenceSummaryV2, RelationTypeV2, RichText, SaveFormsStepInput,
         SaveMeaningsStepInput, SenseGroupV2, SmartDictionaryResultV2, SourceDialect,
         StepSaveIntent, SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2,
@@ -41,9 +41,9 @@ use crate::lexicon::{
     impact_store::{ImpactConfirmation, ImpactStore, ImpactStoreError},
     model::{
         CatalogPartRecord, DictionaryCandidateRecord, EntryRecord,
-        FormsSurfaceAcknowledgementRecord, ListFilter, NewPublicationSenseReference,
-        PublicationSenseReferenceKind, RegionSurfaceRecord, RelatedSearchFilter,
-        ResolvedSenseTargetRecord, SenseTargetKey,
+        FormsSurfaceAcknowledgementRecord, HeadwordSurfaceAcknowledgementRecord, ListFilter,
+        NewPublicationSenseReference, PublicationSenseReferenceKind, RegionSurfaceRecord,
+        RelatedSearchFilter, ResolvedSenseTargetRecord, SenseTargetKey,
     },
     normalization::{HeadwordNormalizationError, normalize_headword, sha256_json},
     provenance::headword_origin,
@@ -81,6 +81,7 @@ const DETECTION_TTL: StdDuration = StdDuration::from_secs(5 * 60);
 const DETECTION_RETENTION_TTL: StdDuration = StdDuration::from_secs(65 * 60);
 const CREATE_SCOPE: &str = "lexicon.entry.create";
 const PUBLISH_SCOPE: &str = "lexicon.entry.publish";
+const ACTIVATE_PUBLICATION_SCOPE: &str = "lexicon.publication.activate";
 const IMPACT_TTL: StdDuration = StdDuration::from_secs(10 * 60);
 
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +108,8 @@ pub enum LexiconServiceError {
     IdempotencyConflict,
     #[error("word not found")]
     WordNotFound,
+    #[error("publication not found")]
+    PublicationNotFound,
     #[error("configured part of speech disappeared")]
     CatalogMismatch,
     #[error("entry revision conflict")]
@@ -139,6 +142,8 @@ pub enum LexiconServiceError {
     SurfacePolicyChanged(SurfaceCreationPolicy),
     #[error("exact headword creation is temporarily disabled")]
     ExactHeadwordCreationTemporarilyDisabled(Box<SurfaceMatchPageV2>),
+    #[error("multiple active exact headword publications are not enabled")]
+    MultipleActiveExactHeadwordPublicationsNotEnabled(Box<SurfaceMatchPageV2>),
     #[error("surface snapshot store failed")]
     SurfaceSnapshot(#[source] SurfaceSnapshotError),
     #[error("surface policy store failed")]

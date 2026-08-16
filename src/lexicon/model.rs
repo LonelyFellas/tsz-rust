@@ -109,6 +109,26 @@ pub(crate) struct FormsSurfaceAcknowledgementRecord {
     pub normalization_version: i32,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct HeadwordSurfaceAcknowledgementRecord {
+    pub entry_id: Uuid,
+    pub headwords_content_digest: String,
+    pub match_ids: Vec<String>,
+    pub policy_name: String,
+    pub policy_epoch: i64,
+    pub normalization_version: i32,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct HistoricalPublicationRecord {
+    pub id: Uuid,
+    pub entry_id: Uuid,
+    pub publication_number: i32,
+    pub source_revision: i64,
+    pub snapshot: Value,
+    pub published_at: DateTime<Utc>,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct IdempotencyRecord {
     pub request_hash: Vec<u8>,
