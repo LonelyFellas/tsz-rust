@@ -1021,6 +1021,7 @@ impl LexiconService {
                     surface_warning: surface_warning_audit(
                         &confirmation,
                         &current_matches,
+                        &current_contexts,
                         actor_id,
                     ),
                 };
@@ -1761,17 +1762,31 @@ fn relation_type_for_node(word: &AdminWordV2, node_id: Uuid) -> Option<RelationT
 fn surface_warning_audit(
     confirmation: &VerifiedSurfaceConfirmation,
     current_matches: &[LexiconSurfaceMatchV2],
+    current_contexts: &[MatchedEntryContextV2],
     actor_id: Uuid,
 ) -> DetectionSurfaceWarningAuditV2 {
     let mut preview = current_matches
         .iter()
         .take(5)
-        .map(|item| DetectionSurfaceMatchPreviewV2 {
-            match_id: item.match_id.clone(),
-            match_category: item.match_category,
-            existing_word_id: item.existing.word_id,
-            existing_headword: item.existing.headword.clone(),
-            existing_status: item.existing.status,
+        .map(|item| {
+            let context = current_contexts
+                .iter()
+                .find(|context| context.word_id == item.existing.word_id);
+            let existing_dialect = match &item.existing.source {
+                ExistingSurfaceSourceV2::Headword { dialect, .. }
+                | ExistingSurfaceSourceV2::Form { dialect, .. } => *dialect,
+            };
+            DetectionSurfaceMatchPreviewV2 {
+                match_id: item.match_id.clone(),
+                match_category: item.match_category,
+                existing_word_id: item.existing.word_id,
+                existing_headword: item.existing.headword.clone(),
+                existing_kind: item.existing.kind,
+                existing_status: item.existing.status,
+                existing_dialect,
+                pos_labels: context.map_or_else(Vec::new, |item| item.pos_labels.clone()),
+                gloss_previews: context.map_or_else(Vec::new, |item| item.gloss_previews.clone()),
+            }
         })
         .collect::<Vec<_>>();
     preview.sort_by(|left, right| left.match_id.cmp(&right.match_id));

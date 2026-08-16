@@ -226,6 +226,7 @@ pub(crate) struct RelatedSearchFilter<'a> {
 pub(crate) struct ListEntryRecord {
     pub id: Uuid,
     pub kind: String,
+    pub dialects: Vec<String>,
     pub revision: i64,
     pub lifecycle_revision: i64,
     pub headword: String,

@@ -978,6 +978,26 @@ mod tests {
             schemas["DetectionSurfaceWarningAuditV2"]["properties"]["acknowledged"]["enum"],
             serde_json::json!([true])
         );
+        let preview_required = schemas["DetectionSurfaceMatchPreviewV2"]["required"]
+            .as_array()
+            .expect("warning preview context fields must be required");
+        for field in [
+            "existing_word_id",
+            "existing_kind",
+            "existing_status",
+            "existing_dialect",
+            "pos_labels",
+            "gloss_previews",
+        ] {
+            assert!(preview_required.iter().any(|required| required == field));
+        }
+        assert!(
+            schemas["AdminWordListItem"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "dialects")
+        );
         assert_eq!(
             schemas["DetectionSurfaceWarningAuditV2"]["additionalProperties"],
             false

@@ -785,6 +785,7 @@ pub struct AdminWordListItem {
     pub id: Uuid,
     pub headword: String,
     pub kind: EntryKind,
+    pub dialects: Vec<Dialect>,
     pub revision: i64,
     pub lifecycle_revision: i64,
     pub gloss: String,
