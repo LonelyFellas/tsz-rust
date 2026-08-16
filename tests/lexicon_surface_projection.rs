@@ -546,6 +546,74 @@ async fn policy_enable_waits_for_cutover_barrier_before_redis_cas(pool: PgPool) 
 }
 
 #[sqlx::test]
+async fn policy_disable_reasserts_false_after_an_inflight_enable(pool: PgPool) {
+    let redis_url = std::env::var("TEST_REDIS_URL")
+        .or_else(|_| std::env::var("REDIS_URL"))
+        .unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned());
+    let redis = tsz_rust::platform::connect_redis(&redis_url)
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let prefix = format!("test:surface-policy:{}:", Uuid::now_v7());
+    let policy = SurfacePolicyStore::with_prefix_for_test(redis.clone(), prefix.clone());
+    assert!(!policy.exact_headword_creation().await.unwrap().enabled);
+
+    let mut outer_cutover = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('lexicon.surface-policy-writer', 0))",
+    )
+    .execute(&mut *outer_cutover)
+    .await
+    .unwrap();
+
+    let enable_pool = pool.clone();
+    let enable_policy = policy.clone();
+    let mut enable = Box::pin(async move {
+        enable_policy
+            .transition_exact_headword_creation(&enable_pool, true)
+            .await
+            .unwrap()
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut enable)
+            .await
+            .is_err()
+    );
+
+    let disable_pool = pool.clone();
+    let disable_policy = policy.clone();
+    let mut disable = Box::pin(async move {
+        disable_policy
+            .transition_exact_headword_creation(&disable_pool, false)
+            .await
+            .unwrap()
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut disable)
+            .await
+            .is_err()
+    );
+
+    outer_cutover.commit().await.unwrap();
+    let enabled = tokio::time::timeout(Duration::from_secs(2), enable)
+        .await
+        .expect("queued enable should finish after the outer cutover");
+    assert!(enabled.enabled);
+    let disabled = tokio::time::timeout(Duration::from_secs(2), disable)
+        .await
+        .expect("disable should obtain exclusive barrier after enable");
+    assert!(!disabled.enabled);
+    assert!(disabled.epoch > enabled.epoch);
+    assert!(!policy.exact_headword_creation().await.unwrap().enabled);
+
+    let mut connection = redis.get().await.unwrap();
+    deadpool_redis::redis::cmd("DEL")
+        .arg(format!("{prefix}allow_new_exact_headword_entries"))
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
 async fn lock_held_surface_requery_uses_the_same_connection(pool: PgPool) {
     let connect_options = pool.connect_options().as_ref().clone();
     let single_connection_pool = PgPoolOptions::new()

@@ -122,20 +122,44 @@ impl SurfacePolicyStore {
         name: SurfacePolicyNameV2,
         enabled: bool,
     ) -> Result<SurfaceCreationPolicy, SurfacePolicyStoreError> {
-        // Enabling must serialize with the cutover's exclusive barrier before
-        // Redis can publish a new epoch. Otherwise a concurrent cutover could
-        // observe disabled, drop the legacy UNIQUE, and only then let the
-        // already-started enable become visible.
-        let enable_barrier = if enabled {
-            Some(lock_policy_enable(database).await?)
+        if enabled {
+            // Enabling must serialize with the cutover's exclusive barrier
+            // before Redis can publish a new epoch. Otherwise a concurrent
+            // cutover could observe disabled, drop the legacy UNIQUE, and only
+            // then let the already-started enable become visible.
+            let barrier = lock_policy_enable(database).await?;
+            let persisted = self.transition_redis(name, true).await?;
+            barrier
+                .commit()
+                .await
+                .map_err(SurfacePolicyStoreError::Database)?;
+            Ok(persisted)
         } else {
-            None
-        };
-        let persisted = loop {
+            // Stop token issuance first. An enable that already owns the
+            // shared barrier may still publish a newer enabled epoch, so wait
+            // for the exclusive barrier and reassert disabled while holding
+            // it before reporting success.
+            self.transition_redis(name, false).await?;
+            let barrier = lock_policy_disable(database).await?;
+            let persisted = self.transition_redis(name, false).await?;
+            barrier
+                .commit()
+                .await
+                .map_err(SurfacePolicyStoreError::Database)?;
+            Ok(persisted)
+        }
+    }
+
+    async fn transition_redis(
+        &self,
+        name: SurfacePolicyNameV2,
+        enabled: bool,
+    ) -> Result<SurfaceCreationPolicy, SurfacePolicyStoreError> {
+        loop {
             let current = self.policy(name).await?;
             let next = transition_policy(current, enabled)?;
             if next == current {
-                break current;
+                return Ok(current);
             }
 
             let mut connection = self.redis.get().await?;
@@ -158,22 +182,9 @@ impl SurfacePolicyStore {
             .await?;
 
             if let Some(payload) = payload {
-                break serde_json::from_str(&payload)?;
+                return Ok(serde_json::from_str(&payload)?);
             }
-        };
-
-        if let Some(transaction) = enable_barrier {
-            transaction
-                .commit()
-                .await
-                .map_err(SurfacePolicyStoreError::Database)?;
-        } else {
-            // Redis changes first: no new token can be signed. The exclusive
-            // PostgreSQL advisory lock then waits for every writer that may
-            // have observed the previous epoch.
-            wait_for_surface_writers(database).await?;
         }
-        Ok(persisted)
     }
 }
 
@@ -193,7 +204,9 @@ async fn lock_policy_enable(
     Ok(transaction)
 }
 
-async fn wait_for_surface_writers(database: &PgPool) -> Result<(), SurfacePolicyStoreError> {
+async fn lock_policy_disable(
+    database: &PgPool,
+) -> Result<Transaction<'static, Postgres>, SurfacePolicyStoreError> {
     let mut transaction = database
         .begin()
         .await
@@ -204,10 +217,7 @@ async fn wait_for_surface_writers(database: &PgPool) -> Result<(), SurfacePolicy
     .execute(&mut *transaction)
     .await
     .map_err(SurfacePolicyStoreError::Database)?;
-    transaction
-        .commit()
-        .await
-        .map_err(SurfacePolicyStoreError::Database)
+    Ok(transaction)
 }
 
 fn policy_key(prefix: &str, name: SurfacePolicyNameV2) -> String {
