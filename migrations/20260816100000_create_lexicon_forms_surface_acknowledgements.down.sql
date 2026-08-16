@@ -1,0 +1,1 @@
+DROP TABLE lexicon.entry_forms_surface_acknowledgements;

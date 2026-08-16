@@ -23,6 +23,7 @@ use crate::{
 const SNAPSHOT_PREFIX: &str = "lexicon:surface-snapshot:";
 const ACTIVE_PREFIX: &str = "lexicon:surface-snapshot-active:";
 const TOKEN_PREFIX: &str = "lexicon:surface-confirmation-token:";
+const IMPACT_TOKEN_PREFIX: &str = "lexicon:surface-impact-confirmation-token:";
 pub const DEFAULT_SURFACE_PAGE_SIZE: usize = 20;
 pub const MAX_SURFACE_PAGE_SIZE: usize = 50;
 pub const DEFAULT_SURFACE_IDLE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -126,6 +127,10 @@ struct SurfaceSnapshotBundle {
     next_offset: usize,
     next_cursor_digest: Option<String>,
     terminal_token_digest: Option<String>,
+    #[serde(default)]
+    issue_impact_confirmation_token: bool,
+    #[serde(default)]
+    terminal_impact_token_digest: Option<String>,
     terminal_token_expires_at_ms: Option<i64>,
     lease_expires_at_ms: i64,
     match_digest: String,
@@ -137,6 +142,7 @@ struct InitializedSnapshot {
     bundle: SurfaceSnapshotBundle,
     page: SurfaceMatchPageV2,
     terminal_token_digest: Option<String>,
+    terminal_impact_token_digest: Option<String>,
 }
 
 #[derive(Clone)]
@@ -178,6 +184,25 @@ impl SurfaceSnapshotStore {
         &self,
         input: CreateSurfaceSnapshot,
     ) -> Result<CreatedSurfaceSnapshot, SurfaceSnapshotError> {
+        self.create_internal(input, false).await
+    }
+
+    /// Create a Forms-owned snapshot whose enabled terminal page signs both
+    /// the surface acknowledgement and the downstream-impact acknowledgement.
+    /// The impact token is a UUID so it can be passed directly through
+    /// `SaveFormsStepInput.confirmed_impact_token`.
+    pub async fn create_with_impact_confirmation(
+        &self,
+        input: CreateSurfaceSnapshot,
+    ) -> Result<CreatedSurfaceSnapshot, SurfaceSnapshotError> {
+        self.create_internal(input, true).await
+    }
+
+    async fn create_internal(
+        &self,
+        input: CreateSurfaceSnapshot,
+        issue_impact_confirmation_token: bool,
+    ) -> Result<CreatedSurfaceSnapshot, SurfaceSnapshotError> {
         let now_ms = Utc::now().timestamp_millis();
         let initialized = initialize_snapshot(
             input,
@@ -186,6 +211,7 @@ impl SurfaceSnapshotStore {
             self.token_ttl,
             generate_token_plaintext(),
             generate_token_plaintext(),
+            issue_impact_confirmation_token.then(Uuid::now_v7),
         )?;
         let snapshot_id = initialized.bundle.snapshot_id;
         let snapshot_key = snapshot_key(snapshot_id);
@@ -195,6 +221,11 @@ impl SurfaceSnapshotStore {
             .as_deref()
             .map(token_key)
             .unwrap_or_else(|| format!("{TOKEN_PREFIX}unused:{snapshot_id}"));
+        let terminal_impact_token_key = initialized
+            .terminal_impact_token_digest
+            .as_deref()
+            .map(impact_token_key)
+            .unwrap_or_else(|| format!("{IMPACT_TOKEN_PREFIX}unused:{snapshot_id}"));
         let ttl_ms = remaining_bundle_ttl_ms(&initialized.bundle, now_ms)?;
         let token_ttl_ms = initialized
             .bundle
@@ -207,7 +238,7 @@ impl SurfaceSnapshotStore {
         let result: Vec<String> = deadpool_redis::redis::Script::new(
             r#"
             local bundle = cjson.decode(ARGV[1])
-            local policy_payload = redis.call('GET', ARGV[8] .. bundle.binding.policy_name)
+            local policy_payload = redis.call('GET', ARGV[10] .. bundle.binding.policy_name)
             if not policy_payload then return {'policy', bundle.binding.policy_name} end
             local policy = cjson.decode(policy_payload)
             if policy.name ~= bundle.binding.policy_name
@@ -217,13 +248,17 @@ impl SurfaceSnapshotStore {
             end
             local old_snapshot_id = redis.call('GET', KEYS[2])
             if old_snapshot_id then
-                local old_key = ARGV[5] .. old_snapshot_id
+                local old_key = ARGV[6] .. old_snapshot_id
                 local old_payload = redis.call('GET', old_key)
                 if old_payload then
                     local old = cjson.decode(old_payload)
                     if old.terminal_token_digest
                        and old.terminal_token_digest ~= cjson.null then
-                        redis.call('DEL', ARGV[6] .. old.terminal_token_digest)
+                        redis.call('DEL', ARGV[7] .. old.terminal_token_digest)
+                    end
+                    if old.terminal_impact_token_digest
+                       and old.terminal_impact_token_digest ~= cjson.null then
+                        redis.call('DEL', ARGV[8] .. old.terminal_impact_token_digest)
                     end
                 end
                 redis.call('DEL', old_key)
@@ -231,7 +266,10 @@ impl SurfaceSnapshotStore {
             redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
             redis.call('SET', KEYS[2], ARGV[3], 'PX', ARGV[2])
             if ARGV[4] == '1' then
-                redis.call('SET', KEYS[3], ARGV[3], 'PX', ARGV[7])
+                redis.call('SET', KEYS[3], ARGV[3], 'PX', ARGV[9])
+            end
+            if ARGV[5] == '1' then
+                redis.call('SET', KEYS[4], ARGV[3], 'PX', ARGV[9])
             end
             return {'ok'}
             "#,
@@ -239,6 +277,7 @@ impl SurfaceSnapshotStore {
         .key(snapshot_key)
         .key(active_key)
         .key(terminal_token_key)
+        .key(terminal_impact_token_key)
         .arg(payload)
         .arg(ttl_ms)
         .arg(snapshot_id.to_string())
@@ -247,8 +286,14 @@ impl SurfaceSnapshotStore {
         } else {
             "0"
         })
+        .arg(if initialized.terminal_impact_token_digest.is_some() {
+            "1"
+        } else {
+            "0"
+        })
         .arg(SNAPSHOT_PREFIX)
         .arg(TOKEN_PREFIX)
+        .arg(IMPACT_TOKEN_PREFIX)
         .arg(token_ttl_ms)
         .arg(&self.policy_prefix)
         .invoke_async(&mut connection)
@@ -282,11 +327,14 @@ impl SurfaceSnapshotStore {
     ) -> Result<SurfaceMatchPageV2, SurfaceSnapshotError> {
         let next_cursor = generate_token_plaintext();
         let terminal_token = generate_token_plaintext();
+        let terminal_impact_token = Uuid::now_v7();
         let supplied_cursor_digest = hash_token(cursor);
         let next_cursor_digest = hash_token(&next_cursor);
         let terminal_token_digest = hash_token(&terminal_token);
+        let terminal_impact_token_digest = hash_token(&terminal_impact_token.to_string());
         let snapshot_key = snapshot_key(snapshot_id);
         let terminal_key = token_key(&terminal_token_digest);
+        let terminal_impact_key = impact_token_key(&terminal_impact_token_digest);
         let idle_ttl_ms = duration_ms(self.idle_ttl)?;
         let token_ttl_ms = duration_ms(self.token_ttl)?;
 
@@ -296,7 +344,7 @@ impl SurfaceSnapshotStore {
             local payload = redis.call('GET', KEYS[1])
             if not payload then return {'expired'} end
             local bundle = cjson.decode(payload)
-            local policy_payload = redis.call('GET', ARGV[9] .. bundle.binding.policy_name)
+            local policy_payload = redis.call('GET', ARGV[10] .. bundle.binding.policy_name)
             if not policy_payload then return {'policy', bundle.binding.policy_name} end
             local policy = cjson.decode(policy_payload)
             if policy.name ~= bundle.binding.policy_name
@@ -321,31 +369,39 @@ impl SurfaceSnapshotStore {
             if is_terminal and bundle.policy_enabled then
                 bundle.next_cursor_digest = nil
                 bundle.terminal_token_digest = ARGV[4]
-                bundle.terminal_token_expires_at_ms = now_ms + tonumber(ARGV[6])
+                if bundle.issue_impact_confirmation_token then
+                    bundle.terminal_impact_token_digest = ARGV[5]
+                end
+                bundle.terminal_token_expires_at_ms = now_ms + tonumber(ARGV[7])
                 bundle.lease_expires_at_ms = bundle.terminal_token_expires_at_ms
-                ttl_ms = tonumber(ARGV[6])
-                redis.call('SET', KEYS[2], ARGV[7], 'PX', ttl_ms)
+                ttl_ms = tonumber(ARGV[7])
+                redis.call('SET', KEYS[2], ARGV[8], 'PX', ttl_ms)
+                if bundle.issue_impact_confirmation_token then
+                    redis.call('SET', KEYS[3], ARGV[8], 'PX', ttl_ms)
+                end
             elseif is_terminal then
                 bundle.next_cursor_digest = nil
-                bundle.lease_expires_at_ms = now_ms + tonumber(ARGV[5])
-                ttl_ms = tonumber(ARGV[5])
+                bundle.lease_expires_at_ms = now_ms + tonumber(ARGV[6])
+                ttl_ms = tonumber(ARGV[6])
             else
                 bundle.next_cursor_digest = ARGV[3]
-                bundle.lease_expires_at_ms = now_ms + tonumber(ARGV[5])
-                ttl_ms = tonumber(ARGV[5])
+                bundle.lease_expires_at_ms = now_ms + tonumber(ARGV[6])
+                ttl_ms = tonumber(ARGV[6])
             end
             local updated = cjson.encode(bundle)
             redis.call('SET', KEYS[1], updated, 'PX', ttl_ms)
-            redis.call('PEXPIRE', ARGV[8] .. bundle.active_context_digest, ttl_ms)
+            redis.call('PEXPIRE', ARGV[9] .. bundle.active_context_digest, ttl_ms)
             return {'ok', updated, tostring(start_offset), tostring(end_offset), is_terminal and '1' or '0'}
             "#,
         )
         .key(snapshot_key)
         .key(terminal_key)
+        .key(terminal_impact_key)
         .arg(actor_id.to_string())
         .arg(supplied_cursor_digest)
         .arg(next_cursor_digest)
         .arg(terminal_token_digest)
+        .arg(terminal_impact_token_digest)
         .arg(idle_ttl_ms)
         .arg(token_ttl_ms)
         .arg(snapshot_id.to_string())
@@ -375,6 +431,8 @@ impl SurfaceSnapshotStore {
                     end,
                     (!terminal).then_some(next_cursor),
                     (terminal && bundle.policy_enabled).then_some(terminal_token),
+                    (terminal && bundle.policy_enabled && bundle.issue_impact_confirmation_token)
+                        .then_some(terminal_impact_token),
                 ))
             }
             _ => Err(SurfaceSnapshotError::InvalidInput(
@@ -438,6 +496,71 @@ impl SurfaceSnapshotStore {
             }
             _ => Err(SurfaceSnapshotError::InvalidInput(
                 "invalid Redis token response",
+            )),
+        }
+    }
+
+    /// Verify the UUID companion token issued on a Forms terminal page. The
+    /// impact and surface tokens have distinct Redis namespaces and bundle
+    /// digests, so neither can be substituted for the other.
+    pub async fn verify_impact(
+        &self,
+        token: Uuid,
+        expected: &ExpectedSurfaceOwner,
+    ) -> Result<VerifiedSurfaceConfirmation, SurfaceSnapshotError> {
+        let token_digest = hash_token(&token.to_string());
+        let mut connection = self.redis.get().await?;
+        let result: Vec<String> = deadpool_redis::redis::Script::new(
+            r#"
+            local snapshot_id = redis.call('GET', KEYS[1])
+            if not snapshot_id then return {'expired'} end
+            local payload = redis.call('GET', ARGV[3] .. snapshot_id)
+            if not payload then return {'expired'} end
+            local bundle = cjson.decode(payload)
+            local policy_payload = redis.call('GET', ARGV[4] .. bundle.binding.policy_name)
+            if not policy_payload then return {'policy', bundle.binding.policy_name} end
+            local policy = cjson.decode(policy_payload)
+            if policy.name ~= bundle.binding.policy_name
+               or tonumber(policy.epoch) ~= tonumber(bundle.binding.policy_epoch)
+               or not policy.enabled then
+                return {'policy', bundle.binding.policy_name}
+            end
+            local clock = redis.call('TIME')
+            local now_ms = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+            if bundle.binding.actor_id ~= ARGV[1] then return {'expired'} end
+            if not bundle.issue_impact_confirmation_token
+               or bundle.terminal_impact_token_digest ~= ARGV[2] then
+                return {'expired'}
+            end
+            if not bundle.terminal_token_expires_at_ms
+               or tonumber(bundle.terminal_token_expires_at_ms) <= now_ms then
+                return {'expired'}
+            end
+            return {'ok', payload, tostring(now_ms)}
+            "#,
+        )
+        .key(impact_token_key(&token_digest))
+        .arg(expected.actor_id.to_string())
+        .arg(&token_digest)
+        .arg(SNAPSHOT_PREFIX)
+        .arg(&self.policy_prefix)
+        .invoke_async(&mut connection)
+        .await?;
+
+        match result.first().map(String::as_str) {
+            Some("expired") => Err(SurfaceSnapshotError::Expired),
+            Some("policy") if result.len() == 2 => Err(SurfaceSnapshotError::PolicyChanged(
+                parse_policy_name(&result[1])?,
+            )),
+            Some("ok") if result.len() == 3 => {
+                let bundle: SurfaceSnapshotBundle = serde_json::from_str(&result[1])?;
+                let now_ms = result[2]
+                    .parse::<i64>()
+                    .map_err(|_| SurfaceSnapshotError::InvalidInput("invalid Redis clock"))?;
+                verify_impact_owner_bundle(&bundle, &token_digest, expected, now_ms)
+            }
+            _ => Err(SurfaceSnapshotError::InvalidInput(
+                "invalid Redis impact token response",
             )),
         }
     }
@@ -529,6 +652,10 @@ impl SurfaceSnapshotStore {
                and bundle.terminal_token_digest ~= cjson.null then
                 redis.call('DEL', ARGV[5] .. bundle.terminal_token_digest)
             end
+            if bundle.terminal_impact_token_digest
+               and bundle.terminal_impact_token_digest ~= cjson.null then
+                redis.call('DEL', ARGV[6] .. bundle.terminal_impact_token_digest)
+            end
             redis.call('DEL', KEYS[1])
             return 1
             "#,
@@ -539,6 +666,7 @@ impl SurfaceSnapshotStore {
         .arg(ACTIVE_PREFIX)
         .arg(confirmation.snapshot_id.to_string())
         .arg(TOKEN_PREFIX)
+        .arg(IMPACT_TOKEN_PREFIX)
         .invoke_async::<i64>(&mut connection)
         .await?;
         Ok(())
@@ -588,7 +716,15 @@ fn initialize_snapshot(
     token_ttl: Duration,
     next_cursor: String,
     terminal_token: String,
+    terminal_impact_token: Option<Uuid>,
 ) -> Result<InitializedSnapshot, SurfaceSnapshotError> {
+    if terminal_impact_token.is_some()
+        && input.binding.command != SurfaceConsumptionCommand::SaveForms
+    {
+        return Err(SurfaceSnapshotError::InvalidInput(
+            "impact confirmation token is only valid for save_forms snapshots",
+        ));
+    }
     validate_input(&input)?;
     for item in &mut input.items {
         item.confirmation_reasons.sort_by_key(reason_order);
@@ -609,12 +745,17 @@ fn initialize_snapshot(
     let next_cursor_digest = (!terminal).then(|| hash_token(&next_cursor));
     let terminal_token_digest =
         (terminal && input.policy_enabled).then(|| hash_token(&terminal_token));
+    let issue_impact_confirmation_token = terminal_impact_token.is_some();
+    let terminal_impact_token_digest = terminal_impact_token
+        .as_ref()
+        .filter(|_| terminal && input.policy_enabled)
+        .map(|token| hash_token(&token.to_string()));
     let token_expires_at = terminal_token_digest
         .as_ref()
         .map(|_| add_duration(now_ms, token_ttl))
         .transpose()?;
     let lease_expires_at_ms = token_expires_at.unwrap_or(add_duration(now_ms, idle_ttl)?);
-    let match_digest = compute_match_digest(&input.items, &input.confirmation_reasons)?;
+    let match_digest = surface_match_digest(&input.items, &input.confirmation_reasons)?;
     let active_context_digest = active_context_digest(&input.binding);
     let bundle = SurfaceSnapshotBundle {
         snapshot_id,
@@ -629,6 +770,8 @@ fn initialize_snapshot(
         next_offset: page_size,
         next_cursor_digest,
         terminal_token_digest: terminal_token_digest.clone(),
+        issue_impact_confirmation_token,
+        terminal_impact_token_digest: terminal_impact_token_digest.clone(),
         terminal_token_expires_at_ms: token_expires_at,
         lease_expires_at_ms,
         match_digest,
@@ -640,11 +783,13 @@ fn initialize_snapshot(
         page_size,
         (!terminal).then_some(next_cursor),
         (terminal && bundle.policy_enabled).then_some(terminal_token),
+        terminal_impact_token.filter(|_| terminal && bundle.policy_enabled),
     );
     Ok(InitializedSnapshot {
         bundle,
         page,
         terminal_token_digest,
+        terminal_impact_token_digest,
     })
 }
 
@@ -662,6 +807,7 @@ fn advance_bundle(
     token_ttl: Duration,
     next_cursor: String,
     terminal_token: String,
+    terminal_impact_token: Uuid,
 ) -> Result<SurfaceMatchPageV2, SurfaceSnapshotError> {
     if bundle.binding.actor_id != actor_id || bundle.lease_expires_at_ms <= now_ms {
         return Err(SurfaceSnapshotError::Expired);
@@ -674,23 +820,36 @@ fn advance_bundle(
     let end = (start + bundle.page_size).min(bundle.items.len());
     let terminal = end == bundle.items.len();
     bundle.next_offset = end;
-    let (next_cursor, terminal_token) = if terminal && bundle.policy_enabled {
+    let (next_cursor, terminal_token, terminal_impact_token) = if terminal && bundle.policy_enabled
+    {
         bundle.next_cursor_digest = None;
         bundle.terminal_token_digest = Some(hash_token(&terminal_token));
+        let terminal_impact_token = bundle.issue_impact_confirmation_token.then(|| {
+            bundle.terminal_impact_token_digest =
+                Some(hash_token(&terminal_impact_token.to_string()));
+            terminal_impact_token
+        });
         let expires = add_duration(now_ms, token_ttl)?;
         bundle.terminal_token_expires_at_ms = Some(expires);
         bundle.lease_expires_at_ms = expires;
-        (None, Some(terminal_token))
+        (None, Some(terminal_token), terminal_impact_token)
     } else if terminal {
         bundle.next_cursor_digest = None;
         bundle.lease_expires_at_ms = add_duration(now_ms, idle_ttl)?;
-        (None, None)
+        (None, None, None)
     } else {
         bundle.next_cursor_digest = Some(hash_token(&next_cursor));
         bundle.lease_expires_at_ms = add_duration(now_ms, idle_ttl)?;
-        (Some(next_cursor), None)
+        (Some(next_cursor), None, None)
     };
-    Ok(render_page(bundle, start, end, next_cursor, terminal_token))
+    Ok(render_page(
+        bundle,
+        start,
+        end,
+        next_cursor,
+        terminal_token,
+        terminal_impact_token,
+    ))
 }
 
 fn verify_bundle(
@@ -715,6 +874,29 @@ fn verify_bundle(
         ));
     }
     if bundle.binding != expected.binding {
+        return Err(SurfaceSnapshotError::BindingMismatch);
+    }
+    Ok(verified_confirmation(bundle))
+}
+
+fn verify_impact_owner_bundle(
+    bundle: &SurfaceSnapshotBundle,
+    token_digest: &str,
+    expected: &ExpectedSurfaceOwner,
+    now_ms: i64,
+) -> Result<VerifiedSurfaceConfirmation, SurfaceSnapshotError> {
+    if !bundle.issue_impact_confirmation_token
+        || bundle.terminal_impact_token_digest.as_deref() != Some(token_digest)
+        || bundle
+            .terminal_token_expires_at_ms
+            .is_none_or(|expires| expires <= now_ms)
+    {
+        return Err(SurfaceSnapshotError::Expired);
+    }
+    if bundle.binding.actor_id != expected.actor_id
+        || bundle.binding.command != expected.command
+        || bundle.binding.owner_context != expected.owner_context
+    {
         return Err(SurfaceSnapshotError::BindingMismatch);
     }
     Ok(verified_confirmation(bundle))
@@ -814,6 +996,7 @@ fn render_page(
     end: usize,
     next_cursor: Option<String>,
     terminal_token: Option<String>,
+    terminal_impact_token: Option<Uuid>,
 ) -> SurfaceMatchPageV2 {
     let items = bundle.items[start..end].to_vec();
     let contexts_by_id = bundle
@@ -860,7 +1043,7 @@ fn render_page(
                     continuation_policy: SurfaceContinuationEnabledV2::Enabled,
                     next_cursor: (),
                     surface_confirmation_token,
-                    impact_confirmation_token: None,
+                    impact_confirmation_token: terminal_impact_token,
                 })
             }
             _ => unreachable!("validated enabled snapshot page shape"),
@@ -877,7 +1060,7 @@ fn render_page(
     }
 }
 
-fn compute_match_digest(
+pub(crate) fn surface_match_digest(
     items: &[LexiconSurfaceMatchV2],
     reasons: &[SurfaceConfirmationReasonV2],
 ) -> Result<String, SurfaceSnapshotError> {
@@ -959,6 +1142,10 @@ fn snapshot_key(snapshot_id: Uuid) -> String {
 
 fn token_key(token_digest: &str) -> String {
     format!("{TOKEN_PREFIX}{token_digest}")
+}
+
+fn impact_token_key(token_digest: &str) -> String {
+    format!("{IMPACT_TOKEN_PREFIX}{token_digest}")
 }
 
 fn active_context_digest(binding: &SurfaceConfirmationBinding) -> String {
@@ -1074,6 +1261,18 @@ mod tests {
         }
     }
 
+    fn forms_input(
+        actor_id: Uuid,
+        item_count: usize,
+        page_size: usize,
+        enabled: bool,
+    ) -> CreateSurfaceSnapshot {
+        let mut input = input(actor_id, item_count, page_size, enabled);
+        input.binding.command = SurfaceConsumptionCommand::SaveForms;
+        input.binding.base_revision = Some(7);
+        input
+    }
+
     fn next_cursor(page: &SurfaceMatchPageV2) -> &str {
         match page {
             SurfaceMatchPageV2::EnabledNext(page) => &page.next_cursor,
@@ -1089,6 +1288,17 @@ mod tests {
             SurfaceMatchPageV2::EnabledTerminal(page) => &page.surface_confirmation_token,
             _ => panic!("expected enabled terminal page"),
         }
+    }
+
+    fn terminal_impact_token(page: &SurfaceMatchPageV2) -> Option<Uuid> {
+        match page {
+            SurfaceMatchPageV2::EnabledTerminal(page) => page.impact_confirmation_token,
+            _ => panic!("expected enabled terminal page"),
+        }
+    }
+
+    fn unused_impact_token() -> Uuid {
+        Uuid::from_u128(0x1a2b3c4d)
     }
 
     fn page_match_ids(page: &SurfaceMatchPageV2) -> Vec<&str> {
@@ -1110,6 +1320,7 @@ mod tests {
             TOKEN_TTL,
             "cursor-1".to_owned(),
             "unused-token".to_owned(),
+            None,
         )
         .unwrap();
         assert_eq!(page_match_ids(&initialized.page), vec!["match-00"]);
@@ -1129,6 +1340,7 @@ mod tests {
                 TOKEN_TTL,
                 "cursor-x".to_owned(),
                 "token-x".to_owned(),
+                unused_impact_token(),
             ),
             Err(SurfaceSnapshotError::Expired)
         ));
@@ -1142,6 +1354,7 @@ mod tests {
             TOKEN_TTL,
             "cursor-2".to_owned(),
             "unused-token".to_owned(),
+            unused_impact_token(),
         )
         .unwrap();
         assert_eq!(page_match_ids(&second), vec!["match-01"]);
@@ -1156,10 +1369,157 @@ mod tests {
             TOKEN_TTL,
             "unused-cursor".to_owned(),
             "terminal-token".to_owned(),
+            unused_impact_token(),
         )
         .unwrap();
         assert_eq!(page_match_ids(&terminal), vec!["match-02"]);
         assert_eq!(terminal_token(&terminal), "terminal-token");
+        assert_eq!(terminal_impact_token(&terminal), None);
+        assert!(!bundle.issue_impact_confirmation_token);
+        assert!(bundle.terminal_impact_token_digest.is_none());
+    }
+
+    #[test]
+    fn forms_surface_and_impact_tokens_are_signed_together_only_on_terminal_page() {
+        let actor = Uuid::now_v7();
+        let impact_token = Uuid::from_u128(0x1234_5678_9abc_def0);
+        let impact_token_wire = impact_token.to_string();
+        let initialized = initialize_snapshot(
+            forms_input(actor, 3, 1, true),
+            0,
+            IDLE_TTL,
+            TOKEN_TTL,
+            "cursor-1".to_owned(),
+            "unused-surface-token".to_owned(),
+            Some(impact_token),
+        )
+        .unwrap();
+        assert!(matches!(
+            initialized.page,
+            SurfaceMatchPageV2::EnabledNext(_)
+        ));
+        assert!(initialized.terminal_token_digest.is_none());
+        assert!(initialized.terminal_impact_token_digest.is_none());
+        assert!(initialized.bundle.issue_impact_confirmation_token);
+        let serialized = serde_json::to_string(&initialized.bundle).unwrap();
+        assert!(!serialized.contains("unused-surface-token"));
+        assert!(!serialized.contains(&impact_token_wire));
+
+        let mut bundle = initialized.bundle;
+        let second = advance_bundle(
+            &mut bundle,
+            actor,
+            "cursor-1",
+            10,
+            IDLE_TTL,
+            TOKEN_TTL,
+            "cursor-2".to_owned(),
+            "still-unused-surface-token".to_owned(),
+            unused_impact_token(),
+        )
+        .unwrap();
+        assert!(matches!(second, SurfaceMatchPageV2::EnabledNext(_)));
+        assert!(bundle.terminal_token_digest.is_none());
+        assert!(bundle.terminal_impact_token_digest.is_none());
+
+        let terminal = advance_bundle(
+            &mut bundle,
+            actor,
+            "cursor-2",
+            20,
+            IDLE_TTL,
+            TOKEN_TTL,
+            "unused-cursor".to_owned(),
+            "surface-terminal-token".to_owned(),
+            impact_token,
+        )
+        .unwrap();
+        assert_eq!(terminal_token(&terminal), "surface-terminal-token");
+        assert_eq!(terminal_impact_token(&terminal), Some(impact_token));
+        assert_eq!(bundle.terminal_token_expires_at_ms, Some(5_020));
+        assert_eq!(bundle.lease_expires_at_ms, 5_020);
+
+        let expected = ExpectedSurfaceConfirmation {
+            binding: bundle.binding.clone(),
+            current_policy: SurfaceCreationPolicy {
+                enabled: true,
+                name: bundle.binding.policy_name,
+                epoch: bundle.binding.policy_epoch,
+            },
+        };
+        let expected_owner = ExpectedSurfaceOwner {
+            actor_id: actor,
+            command: SurfaceConsumptionCommand::SaveForms,
+            owner_context: bundle.binding.owner_context.clone(),
+        };
+        let surface_digest = hash_token("surface-terminal-token");
+        let impact_digest = hash_token(&impact_token_wire);
+        assert_ne!(surface_digest, impact_digest);
+        verify_bundle(&bundle, &surface_digest, &expected, 5_019).unwrap();
+        verify_impact_owner_bundle(&bundle, &impact_digest, &expected_owner, 5_019).unwrap();
+        assert!(matches!(
+            verify_bundle(&bundle, &impact_digest, &expected, 5_019),
+            Err(SurfaceSnapshotError::Expired)
+        ));
+        assert!(matches!(
+            verify_impact_owner_bundle(&bundle, &surface_digest, &expected_owner, 5_019),
+            Err(SurfaceSnapshotError::Expired)
+        ));
+        assert!(matches!(
+            verify_bundle(&bundle, &surface_digest, &expected, 5_020),
+            Err(SurfaceSnapshotError::Expired)
+        ));
+        assert!(matches!(
+            verify_impact_owner_bundle(&bundle, &impact_digest, &expected_owner, 5_020),
+            Err(SurfaceSnapshotError::Expired)
+        ));
+
+        let surface_digest_before_replay = bundle.terminal_token_digest.clone();
+        let impact_digest_before_replay = bundle.terminal_impact_token_digest.clone();
+        assert!(matches!(
+            advance_bundle(
+                &mut bundle,
+                actor,
+                "cursor-2",
+                21,
+                IDLE_TTL,
+                TOKEN_TTL,
+                "attacker-cursor".to_owned(),
+                "attacker-surface-token".to_owned(),
+                Uuid::now_v7(),
+            ),
+            Err(SurfaceSnapshotError::InvalidCursor)
+        ));
+        assert_eq!(bundle.terminal_token_digest, surface_digest_before_replay);
+        assert_eq!(
+            bundle.terminal_impact_token_digest,
+            impact_digest_before_replay
+        );
+        assert_eq!(bundle.lease_expires_at_ms, 5_020);
+    }
+
+    #[test]
+    fn forms_single_page_terminal_immediately_returns_uuid_impact_token() {
+        let actor = Uuid::now_v7();
+        let impact_token = Uuid::from_u128(0xf012_3456_789a_bcde);
+        let initialized = initialize_snapshot(
+            forms_input(actor, 1, 1, true),
+            100,
+            IDLE_TTL,
+            TOKEN_TTL,
+            "unused-cursor".to_owned(),
+            "surface-terminal-token".to_owned(),
+            Some(impact_token),
+        )
+        .unwrap();
+        assert_eq!(terminal_token(&initialized.page), "surface-terminal-token");
+        assert_eq!(terminal_impact_token(&initialized.page), Some(impact_token));
+        assert_eq!(initialized.bundle.terminal_token_expires_at_ms, Some(5_100));
+        assert_eq!(initialized.bundle.lease_expires_at_ms, 5_100);
+        assert_eq!(
+            initialized.terminal_impact_token_digest,
+            Some(hash_token(&impact_token.to_string()))
+        );
     }
 
     #[test]
@@ -1172,6 +1532,7 @@ mod tests {
             TOKEN_TTL,
             "cursor-1".to_owned(),
             "unused".to_owned(),
+            None,
         )
         .unwrap();
         let mut bundle = initialized.bundle;
@@ -1186,6 +1547,7 @@ mod tests {
             TOKEN_TTL,
             "cursor-2".to_owned(),
             "unused".to_owned(),
+            unused_impact_token(),
         )
         .unwrap();
         assert_eq!(bundle.lease_expires_at_ms, 1_999);
@@ -1201,6 +1563,7 @@ mod tests {
                 TOKEN_TTL,
                 "attacker-cursor".to_owned(),
                 "attacker-token".to_owned(),
+                unused_impact_token(),
             ),
             Err(SurfaceSnapshotError::InvalidCursor)
         ));
@@ -1215,21 +1578,23 @@ mod tests {
                 TOKEN_TTL,
                 "unused".to_owned(),
                 "unused".to_owned(),
+                unused_impact_token(),
             ),
             Err(SurfaceSnapshotError::Expired)
         ));
     }
 
     #[test]
-    fn disabled_policy_pages_full_snapshot_without_ever_signing_a_token() {
+    fn disabled_policy_pages_full_snapshot_without_signing_either_forms_token() {
         let actor = Uuid::now_v7();
         let initialized = initialize_snapshot(
-            input(actor, 2, 1, false),
+            forms_input(actor, 2, 1, false),
             0,
             IDLE_TTL,
             TOKEN_TTL,
             "cursor-1".to_owned(),
             "must-not-appear".to_owned(),
+            Some(unused_impact_token()),
         )
         .unwrap();
         assert!(matches!(
@@ -1246,6 +1611,7 @@ mod tests {
             TOKEN_TTL,
             "unused".to_owned(),
             "must-not-appear".to_owned(),
+            unused_impact_token(),
         )
         .unwrap();
         match terminal {
@@ -1259,6 +1625,52 @@ mod tests {
             _ => panic!("disabled policy must never sign a token"),
         }
         assert!(bundle.terminal_token_digest.is_none());
+        assert!(bundle.terminal_impact_token_digest.is_none());
+    }
+
+    #[test]
+    fn impact_confirmation_switch_rejects_non_forms_snapshot_owner() {
+        let actor = Uuid::now_v7();
+        assert!(matches!(
+            initialize_snapshot(
+                input(actor, 1, 1, true),
+                0,
+                IDLE_TTL,
+                TOKEN_TTL,
+                "unused".to_owned(),
+                "surface-token".to_owned(),
+                Some(unused_impact_token()),
+            ),
+            Err(SurfaceSnapshotError::InvalidInput(
+                "impact confirmation token is only valid for save_forms snapshots"
+            ))
+        ));
+    }
+
+    #[test]
+    fn legacy_snapshot_bundle_without_impact_fields_defaults_to_surface_only() {
+        let initialized = initialize_snapshot(
+            input(Uuid::now_v7(), 1, 1, true),
+            0,
+            IDLE_TTL,
+            TOKEN_TTL,
+            "unused".to_owned(),
+            "surface-token".to_owned(),
+            None,
+        )
+        .unwrap();
+        let mut legacy = serde_json::to_value(initialized.bundle).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("issue_impact_confirmation_token");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("terminal_impact_token_digest");
+        let restored: SurfaceSnapshotBundle = serde_json::from_value(legacy).unwrap();
+        assert!(!restored.issue_impact_confirmation_token);
+        assert!(restored.terminal_impact_token_digest.is_none());
     }
 
     #[test]
@@ -1271,6 +1683,7 @@ mod tests {
             TOKEN_TTL,
             "unused".to_owned(),
             "terminal-token".to_owned(),
+            None,
         )
         .unwrap();
 
@@ -1295,10 +1708,12 @@ mod tests {
             TOKEN_TTL,
             "unused".to_owned(),
             "terminal-token".to_owned(),
+            None,
         )
         .unwrap();
         let bundle = initialized.bundle;
         assert_eq!(terminal_token(&initialized.page), "terminal-token");
+        assert_eq!(terminal_impact_token(&initialized.page), None);
         assert!(
             !serde_json::to_string(&bundle)
                 .unwrap()
@@ -1361,6 +1776,7 @@ mod tests {
             TOKEN_TTL,
             "unused".to_owned(),
             "terminal-token".to_owned(),
+            None,
         )
         .unwrap();
         let expected = ExpectedSurfaceConfirmation {
@@ -1394,6 +1810,7 @@ mod tests {
             TOKEN_TTL,
             "unused".to_owned(),
             "terminal-token".to_owned(),
+            None,
         )
         .unwrap();
         let token_digest = hash_token("terminal-token");
@@ -1447,6 +1864,7 @@ mod tests {
             TOKEN_TTL,
             "unused".to_owned(),
             "token".to_owned(),
+            None,
         )
         .unwrap()
         .bundle;
@@ -1457,6 +1875,7 @@ mod tests {
             TOKEN_TTL,
             "unused".to_owned(),
             "token".to_owned(),
+            None,
         )
         .unwrap()
         .bundle;
@@ -1470,6 +1889,7 @@ mod tests {
             TOKEN_TTL,
             "unused".to_owned(),
             "token".to_owned(),
+            None,
         )
         .unwrap()
         .bundle;
@@ -1489,6 +1909,7 @@ mod tests {
                 TOKEN_TTL,
                 "cursor".to_owned(),
                 "token".to_owned(),
+                None,
             ),
             Err(SurfaceSnapshotError::InvalidInput(
                 "owner bundle digest does not match binding"
@@ -1505,6 +1926,7 @@ mod tests {
                 TOKEN_TTL,
                 "cursor".to_owned(),
                 "token".to_owned(),
+                None,
             ),
             Err(SurfaceSnapshotError::InvalidInput(
                 "snapshot match IDs must be unique"

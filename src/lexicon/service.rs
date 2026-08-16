@@ -39,9 +39,10 @@ use crate::lexicon::{
     },
     impact_store::{ImpactConfirmation, ImpactStore, ImpactStoreError},
     model::{
-        CatalogPartRecord, DictionaryCandidateRecord, EntryRecord, ListFilter,
-        NewPublicationSenseReference, PublicationSenseReferenceKind, RegionSurfaceRecord,
-        ResolvedSenseTargetRecord, SenseTargetKey,
+        CatalogPartRecord, DictionaryCandidateRecord, EntryRecord,
+        FormsSurfaceAcknowledgementRecord, ListFilter, NewPublicationSenseReference,
+        PublicationSenseReferenceKind, RegionSurfaceRecord, ResolvedSenseTargetRecord,
+        SenseTargetKey,
     },
     normalization::{HeadwordNormalizationError, normalize_headword, sha256_json},
     provenance::headword_origin,

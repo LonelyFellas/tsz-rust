@@ -102,11 +102,11 @@ pub async fn suggest_dialect_variants(
     params(EntryPath),
     request_body = PreviewFormsImpactInputV2,
     responses(
-        (status = 200, description = "删除或替换词性前的下游影响与确认 token", body = FormsImpactResponseV2),
+        (status = 200, description = "词形 surface warning、下游影响与独立确认 token", body = FormsImpactResponseV2),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条不存在"),
-        (status = 409, description = "revision 冲突"),
+        (status = 409, description = "revision、surface warning 或策略冲突"),
         (status = 422, description = "词形结构非法"),
         (status = 503, description = "确认 token 存储不可用")
     )
@@ -137,7 +137,8 @@ pub async fn preview_forms_impact(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条不存在"),
-        (status = 409, description = "revision 或下游确认冲突"),
+        (status = 409, description = "revision、surface warning、策略或下游确认冲突"),
+        (status = 410, description = "surface 确认 snapshot 已过期"),
         (status = 422, description = "词形校验失败"),
         (status = 503, description = "确认 token 存储不可用")
     )
