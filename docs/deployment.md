@@ -128,6 +128,31 @@ curl localhost:8383/readyz         # {"status":"ready"} 就绪（探 DB+Redis）
 
 涉及数据库写入前，先按 [PostgreSQL 备份与恢复验证](postgresql-backup-restore.md) 创建并验证当前恢复点。客户端主版本不得低于数据库服务端主版本。
 
+### 部署来源 manifest
+
+服务器目录不是 Git checkout。每次部署只有在精确 `origin/main` 的 CI success、二进制编译/重启和 health/ready/auth smoke 全部通过后，才使用仓库工具发布正式 manifest：
+
+```bash
+python3 ops/deployment_manifest.py create \
+  --component api \
+  --repository LonelyFellas/tsz-rust \
+  --git-sha <40位精确main SHA> \
+  --git-tree <40位tree SHA> \
+  --ci-run-id <精确CI run ID> \
+  --ci-run-url https://github.com/LonelyFellas/tsz-rust/actions/runs/<run ID> \
+  --artifact /opt/tsz-rust/target/release/tsz-rust \
+  --artifact-path /opt/tsz-rust/target/release/tsz-rust \
+  --output /opt/tsz-deploy-manifests/api.json
+
+python3 ops/deployment_manifest.py verify \
+  --manifest /opt/tsz-deploy-manifests/api.json \
+  --artifact /opt/tsz-rust/target/release/tsz-rust
+```
+
+manifest schema version 1 记录 repository、Git commit/tree、远端 main ref、CI workflow/run、实际二进制 SHA-256和 UTC 验收时间；API 的 `excluded_paths` 固定为空。工具严格拒绝额外/缺失字段、JSON 布尔值冒充整数、非 success CI、错仓库/URL/路径和摘要不一致；写入使用同目录临时文件与原子 rename。manifest 不含环境变量、凭据或自由文本，也不通过 HTTP 暴露。
+
+`api.json` 与实际二进制是一组部署制品。升级前必须成组备份，并在改变当前部署前用只读 `validate-backup` 验证备份二进制与 manifest 摘要一致（或明确是 `manifest.absent`）；验证失败时当前部署保持不动。验证通过后，在编译可能改变当前二进制前撤下正式 manifest；编译、重启、health/ready/auth smoke、create 或 verify 任一步失败，都必须使用 `restore` 子命令从精确备份目录恢复。restore 再次验证备份组，通过同目录临时文件和 `os.replace` 原子替换运行二进制，最后恢复配套 manifest，避免 `Text file busy` 与错配。旧版本没有 manifest 时应报告来源 UNKNOWN/BLOCKED，不能手工补写。该机制用于发现误部署或陈旧部署，不抵抗已取得服务器 root/GitHub 管理权限的恶意篡改。
+
 ## 5. TLS / 反向代理（必须）
 
 应用只监听明文 HTTP `0.0.0.0:PORT`。**不要直接对公网暴露**，前面挡一层做 HTTPS：
