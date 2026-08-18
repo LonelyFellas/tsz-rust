@@ -56,7 +56,7 @@ fn service(state: &AppState) -> LexiconService {
     )
 }
 
-fn required_idempotency_key(headers: &HeaderMap) -> Result<uuid::Uuid, &'static str> {
+pub(crate) fn required_idempotency_key(headers: &HeaderMap) -> Result<uuid::Uuid, &'static str> {
     let value = headers
         .get("Idempotency-Key")
         .and_then(|value| value.to_str().ok())
@@ -64,7 +64,7 @@ fn required_idempotency_key(headers: &HeaderMap) -> Result<uuid::Uuid, &'static 
     uuid::Uuid::parse_str(value).map_err(|_| "Idempotency-Key header must be a UUID")
 }
 
-fn idempotency_key_error(message: &'static str) -> AppError {
+pub(crate) fn idempotency_key_error(message: &'static str) -> AppError {
     AppError::validation(ErrorCode::InvalidRequestBody, "idempotency_key", message)
 }
 

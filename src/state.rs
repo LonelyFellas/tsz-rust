@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{Realm, TokenManager},
+    lexicon::content_completion::LexiconContentGenerator,
     lexicon::surface_policy::SurfacePolicyStore,
     otp::{sender::OtpSender, service::OtpService, store::OtpStore},
     platform::storage::StorageRegistry,
@@ -27,6 +28,7 @@ pub struct AppState {
     pub cookie_secure: bool,
     pub object_storage: StorageRegistry,
     pub speech_provider: Option<Arc<dyn SpeechProvider>>,
+    pub lexicon_content_generator: Option<Arc<dyn LexiconContentGenerator>>,
 }
 
 impl AppState {
@@ -79,6 +81,7 @@ impl AppState {
             cookie_secure: false,
             object_storage: StorageRegistry::empty(),
             speech_provider: None,
+            lexicon_content_generator: None,
         }
     }
 
@@ -122,6 +125,7 @@ impl AppState {
             otp_service,
             object_storage: StorageRegistry::empty(),
             speech_provider: None,
+            lexicon_content_generator: None,
         };
         (state, store)
     }

@@ -57,6 +57,22 @@ pub fn router() -> Router<AppState> {
             axum::routing::put(handler::save_meanings),
         )
         .route(
+            "/entries/{id}/content-completion-jobs",
+            axum::routing::post(
+                crate::lexicon::content_completion::handler::create_content_completion_job,
+            ),
+        )
+        .route(
+            "/entries/{id}/content-completion-jobs/{job_id}",
+            get(crate::lexicon::content_completion::handler::get_content_completion_job),
+        )
+        .route(
+            "/entries/{id}/content-completion-jobs/{job_id}/retries",
+            axum::routing::post(
+                crate::lexicon::content_completion::handler::retry_content_completion_job,
+            ),
+        )
+        .route(
             "/entries/{id}/validate",
             axum::routing::post(handler::validate),
         )

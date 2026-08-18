@@ -3,6 +3,10 @@
 内置词典位于 PostgreSQL 的 `dictionary` schema，只供运行时查询，不与后续可编辑的
 `words` 业务表混用。迁移只负责建表；数据由 `import_dictionary` 一次性命令导入。
 
+该轻量数据不含释义正文或例句。自动生成使用的完整 Kaikki JSONL 由
+[`dictionary-content-import.md`](dictionary-content-import.md) 说明的独立命令导入，
+不得把 `sense_count` 当作正文来源。
+
 ## 永久对象
 
 - `dictionary.datasets`：数据版本、校验和、激活状态和行数。
