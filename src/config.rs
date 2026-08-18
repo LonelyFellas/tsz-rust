@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::num::{NonZeroU8, NonZeroU16};
 
+use crate::lexicon::content_completion::LexiconGeneratorConfig;
 use crate::platform::storage::ObjectStorageConfig;
 use crate::speech::AzureSpeechConfig;
 
@@ -36,6 +37,8 @@ pub struct Config {
     pub object_storage: ObjectStorageConfig,
     #[serde(skip)]
     pub azure_speech: Option<AzureSpeechConfig>,
+    #[serde(skip)]
+    pub lexicon_generator: Option<LexiconGeneratorConfig>,
 }
 
 fn default_refresh_ttl_days() -> u64 {
@@ -84,9 +87,12 @@ impl Config {
             .map_err(|error| envy::Error::Custom(error.to_string()))?;
         let azure_speech = AzureSpeechConfig::from_pairs(pairs.iter().cloned())
             .map_err(|error| envy::Error::Custom(error.to_string()))?;
+        let lexicon_generator = LexiconGeneratorConfig::from_pairs(pairs.iter().cloned())
+            .map_err(envy::Error::Custom)?;
         let mut cfg: Self = envy::from_iter(pairs)?;
         cfg.object_storage = object_storage;
         cfg.azure_speech = azure_speech;
+        cfg.lexicon_generator = lexicon_generator;
         // 两把密钥相同 = per-realm 隔离塌一半,启动即失败(admin-design.md §13)
         if cfg.admin_jwt_secret == cfg.jwt_secret {
             return Err(envy::Error::Custom(
@@ -161,6 +167,33 @@ mod tests {
         assert_eq!(cfg.jwt_secret, "s3cret");
         assert_eq!(cfg.redis_url, "redis://localhost:6379/0");
         assert_eq!(cfg.admin_jwt_secret, "adm1n-s3cret");
+    }
+
+    #[test]
+    fn qwen_lexicon_generator_is_attached_only_with_explicit_complete_configuration() {
+        let mut input = valid_baseline();
+        input.extend([
+            ("LEXICON_GENERATOR_PROVIDER", "qwen"),
+            ("QWEN_LEXICON_API_KEY", "secret"),
+            ("QWEN_LEXICON_MODEL", "qwen3.8-max"),
+        ]);
+
+        let cfg = parse(&input).expect("完整千问配置应接入应用配置");
+
+        assert!(matches!(
+            cfg.lexicon_generator,
+            Some(LexiconGeneratorConfig::Qwen(_))
+        ));
+    }
+
+    #[test]
+    fn qwen_lexicon_generator_rejects_missing_selected_configuration() {
+        let mut input = valid_baseline();
+        input.push(("LEXICON_GENERATOR_PROVIDER", "qwen"));
+
+        let error = parse(&input).expect_err("选择千问但没有凭据和模型应启动失败");
+
+        assert!(error.to_string().contains("qwen lexicon generator"));
     }
 
     #[test]
