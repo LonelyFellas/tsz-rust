@@ -1071,13 +1071,12 @@ pub(super) fn form_issue_blocks_save(issue: &DraftValidationIssue) -> bool {
             | "unknown_part_of_speech"
             | "dialect_rules_invalid"
             | "base_form_type_invalid"
-            | "dialect_variants_invalid"
             | "form_type_invalid"
-            | "invalid_form_type_for_part_of_speech"
             | "duplicate_form_type"
-            | "base_spelling_mismatch"
+            | "duplicate_dialect_variant"
             | "spelling_not_trimmed"
             | "spelling_too_long"
+            | "spelling_not_normalizable"
             | "dict_phonetic_too_long"
             | "actual_pron_too_long"
             | "node_id_reused"
@@ -1458,6 +1457,41 @@ pub(super) fn valid_fixed_percent(value: &str) -> bool {
 #[cfg(test)]
 mod forms_surface_tests {
     use super::*;
+
+    fn validation_issue(code: &str) -> DraftValidationIssue {
+        DraftValidationIssue {
+            step: PersistedWordStep::Forms,
+            node_id: Uuid::now_v7(),
+            field: "field".to_owned(),
+            code: code.to_owned(),
+            message: "message".to_owned(),
+            reference_location: None,
+        }
+    }
+
+    #[test]
+    fn draft_save_only_blocks_storage_safety_issues() {
+        for code in [
+            "dialect_variants_invalid",
+            "invalid_form_type_for_part_of_speech",
+            "base_spelling_mismatch",
+        ] {
+            assert!(!form_issue_blocks_save(&validation_issue(code)), "{code}");
+        }
+        for code in [
+            "duplicate_part_of_speech",
+            "unknown_part_of_speech",
+            "dialect_rules_invalid",
+            "base_form_type_invalid",
+            "form_type_invalid",
+            "duplicate_form_type",
+            "duplicate_dialect_variant",
+            "spelling_not_normalizable",
+            "node_id_reused",
+        ] {
+            assert!(form_issue_blocks_save(&validation_issue(code)), "{code}");
+        }
+    }
 
     fn candidate(entry_id: Uuid, node_id: Uuid) -> FormSurfaceCandidate {
         FormSurfaceCandidate {

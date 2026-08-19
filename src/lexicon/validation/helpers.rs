@@ -6,9 +6,10 @@ pub(super) fn validate_slot_variants(
     slot_id: Uuid,
     variants: &[crate::lexicon::dto::WordFormVariantV2],
     spelling_mode: &str,
+    phonetic_mode: &str,
     headwords: Option<&WordHeadwordsV2>,
 ) {
-    let expected = if spelling_mode == "distinguish" {
+    let expected = if spelling_mode == "distinguish" || phonetic_mode == "distinguish" {
         vec![Dialect::Uk, Dialect::Us]
     } else {
         vec![Dialect::Common]
@@ -17,10 +18,17 @@ pub(super) fn validate_slot_variants(
         .iter()
         .map(|variant| variant.dialect)
         .collect::<HashSet<_>>();
-    if variants.len() != expected.len()
-        || actual.len() != expected.len()
-        || expected.iter().any(|value| !actual.contains(value))
-    {
+    if actual.len() != variants.len() {
+        issue(
+            issues,
+            PersistedWordStep::Forms,
+            slot_id,
+            "variants",
+            "duplicate_dialect_variant",
+            "同一词形不能重复添加相同方言行",
+        );
+    }
+    if actual.len() != expected.len() || expected.iter().any(|value| !actual.contains(value)) {
         issue(
             issues,
             PersistedWordStep::Forms,
@@ -68,9 +76,21 @@ pub(super) fn validate_slot_variants(
                 "拼写不能超过 200 个字符",
             );
         }
+        if !variant.spelling.is_empty()
+            && crate::lexicon::normalization::normalize_headword(&variant.spelling).is_err()
+        {
+            issue(
+                issues,
+                PersistedWordStep::Forms,
+                variant.id,
+                "spelling",
+                "spelling_not_normalizable",
+                "拼写包含不支持的字符或归一化后过长",
+            );
+        }
         if let Some(headwords) = headwords {
             let expected_spelling = match (headwords, variant.dialect) {
-                (WordHeadwordsV2::Unified { common }, Dialect::Common) => Some(common.as_str()),
+                (WordHeadwordsV2::Unified { common }, _) => Some(common.as_str()),
                 (WordHeadwordsV2::Distinguish { uk, .. }, Dialect::Uk) => Some(uk.as_str()),
                 (WordHeadwordsV2::Distinguish { us, .. }, Dialect::Us) => Some(us.as_str()),
                 _ => None,
