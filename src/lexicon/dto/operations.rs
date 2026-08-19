@@ -811,9 +811,14 @@ pub enum RelatedSearchResponse {
 pub struct AdminWordListItem {
     pub schema_version: u8,
     pub id: Uuid,
+    /// 并列拼写按检测基准侧在前拼接，与 `dialects` 同序。
     pub headword: String,
     pub kind: EntryKind,
     pub dialects: Vec<Dialect>,
+    /// 检测基准侧；`mode = unified` 的词条没有基准侧，字段整体省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub source_dialect: Option<SourceDialect>,
     pub revision: i64,
     pub lifecycle_revision: i64,
     pub gloss: String,
