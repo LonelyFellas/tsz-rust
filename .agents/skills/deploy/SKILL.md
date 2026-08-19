@@ -116,8 +116,11 @@ ssh tshb-test 'rm -f /opt/tsz-deploy-manifests/api.json'
 
 # 3) 推代码。排除项一个都不能少：
 #    .env 是生产密钥(600 权限,含 JWT_SECRET/COOKIE_SECURE)——rsync 覆盖或 --delete 掉它=事故;
-#    target 巨大且服务器要自己编译; 绝不使用 --delete。
+#    target 巨大且服务器要自己编译; 绝不使用 --delete;
+#    .claude/worktrees 是本机 worktree 的整份源码副本(数百个文件),服务器只编译仓库根,
+#    推上去纯属浪费并会在服务器留下另一个分支的代码,容易误读。
 rsync -az --exclude .git --exclude target --exclude .env --exclude .vscode \
+  --exclude .claude/worktrees \
   /Users/darwish/Dev/tsz-core/tsz-rust/ tshb-test:/opt/tsz-rust/
 
 # 4) 服务器编译(后台跑,增量 1-2 分钟,全量约 7 分钟)。
@@ -136,8 +139,11 @@ ssh tshb-test 'systemctl restart tsz-rust && sleep 2 && systemctl is-active tsz-
 
 1. `healthz` → `{"status":"ok"}`；
 2. `readyz` → **200 `{"status":"ready"}`**，同时证明 DB 与 Redis 可用；
-3. `POST $B/auth/refresh`（无 cookie）→ **401 `{"error":"invalid refresh token"}`**
-   （若返回 422 说明旧二进制没换掉）；
+3. `POST $B/auth/refresh`（无 cookie）→ **401 RFC 9457 Problem，稳定判据是
+   `code == "invalid_refresh_token"`**（响应体早已迁到 Problem Details，不再是
+   `{"error":...}`；判断形状而不是逐字比对 `detail`）。若拿到 422 或旧的
+   `{"error":...}` 形状，说明跑的不是本次构建；注意 422 现在的语义是
+   `invalid_request_body`，见 `docs/api-errors.md`；
 4. 全链路（使用常驻冒烟账号；先执行
    `set -a; source ~/.config/tsz-rust/deploy-smoke.env; set +a`，再从环境变量
    `TSZ_SMOKE_IDENTIFIER` / `TSZ_SMOKE_PASSWORD` 读取凭据；禁止写入仓库、命令参数或日志）：
