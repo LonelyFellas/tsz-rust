@@ -76,16 +76,6 @@ pub fn validate_forms(
             );
         }
         let allowed_form_types = crate::lexicon::form_types::allowed_form_types(&pos.pos);
-        if pos.form_groups.is_empty() && !allowed_form_types.is_empty() {
-            issue(
-                &mut issues,
-                PersistedWordStep::Forms,
-                pos.pos_id,
-                "form_groups",
-                "form_group_required",
-                "每个词性至少需要一组词形变化",
-            );
-        }
         if allowed_form_types.is_empty() && pos.form_groups.len() > 1 {
             issue(
                 &mut issues,
@@ -120,6 +110,7 @@ pub fn validate_forms(
             pos.base_form.id,
             &pos.base_form.variants,
             &pos.dialect_rules.spelling_mode,
+            &pos.dialect_rules.phonetic_mode,
             Some(headwords),
         );
 
@@ -131,16 +122,6 @@ pub fn validate_forms(
                 group.id,
                 "form_group",
             );
-            if group.slots.is_empty() && !allowed_form_types.is_empty() {
-                issue(
-                    &mut issues,
-                    PersistedWordStep::Forms,
-                    group.id,
-                    "slots",
-                    "form_slot_required",
-                    "每组词形变化至少需要一个词形",
-                );
-            }
             let mut form_types = HashSet::new();
             for slot in &group.slots {
                 unique_node(
@@ -186,6 +167,7 @@ pub fn validate_forms(
                     slot.id,
                     &slot.variants,
                     &pos.dialect_rules.spelling_mode,
+                    &pos.dialect_rules.phonetic_mode,
                     None,
                 );
             }
@@ -607,6 +589,7 @@ fn json_value_contains_nul(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lexicon::dto::WordFormVariantV2;
     use serde_json::json;
 
     fn forms(pos_and_types: &[(&str, &[&str])]) -> DraftFormsStepContent {
@@ -684,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_zero_or_one_legacy_empty_group_only_for_parts_without_derived_forms() {
+    fn accepts_empty_form_groups_for_words_without_derived_forms() {
         let mut pronoun = forms(&[("pronoun", &[])]);
         let pronoun_parts = HashSet::from(["pronoun".to_owned()]);
         let legacy_issues = validate_forms(
@@ -746,8 +729,105 @@ mod tests {
         assert!(
             noun_issues
                 .iter()
-                .any(|issue| issue.code == "form_group_required")
+                .all(|issue| issue.code != "form_group_required"
+                    && issue.code != "form_slot_required")
         );
+    }
+
+    #[test]
+    fn accepts_unified_spelling_with_distinguished_pronunciations() {
+        fn distinguish(variants: &mut Vec<WordFormVariantV2>) {
+            let common = variants[0].clone();
+            let mut uk = common.clone();
+            uk.id = Uuid::now_v7();
+            uk.dialect = Dialect::Uk;
+            for pronunciation in &mut uk.pronunciations {
+                pronunciation.id = Uuid::now_v7();
+            }
+            let mut us = common;
+            us.id = Uuid::now_v7();
+            us.dialect = Dialect::Us;
+            for pronunciation in &mut us.pronunciations {
+                pronunciation.id = Uuid::now_v7();
+            }
+            *variants = vec![uk, us];
+        }
+
+        let mut content = forms(&[("adjective", &["comparative"])]);
+        let pos = &mut content.pos[0];
+        pos.dialect_rules.spelling_mode = "unified".to_owned();
+        pos.dialect_rules.phonetic_mode = "distinguish".to_owned();
+        distinguish(&mut pos.base_form.variants);
+        for slot in pos
+            .form_groups
+            .iter_mut()
+            .flat_map(|group| group.slots.iter_mut())
+        {
+            distinguish(&mut slot.variants);
+        }
+        let configured = HashSet::from(["adjective".to_owned()]);
+        let issues = validate_forms(
+            Uuid::now_v7(),
+            &content,
+            &WordHeadwordsV2::Unified {
+                common: "high".to_owned(),
+            },
+            &configured,
+        );
+
+        assert!(issues.iter().all(|issue| {
+            issue.code != "dialect_variants_invalid" && issue.code != "base_spelling_mismatch"
+        }));
+    }
+
+    #[test]
+    fn rejects_duplicate_dialect_rows_as_storage_unsafe() {
+        let mut content = forms(&[("noun", &["plural"])]);
+        let variants = &mut content.pos[0].form_groups[0].slots[0].variants;
+        let mut duplicate = variants[0].clone();
+        duplicate.id = Uuid::now_v7();
+        for pronunciation in &mut duplicate.pronunciations {
+            pronunciation.id = Uuid::now_v7();
+        }
+        variants.push(duplicate);
+        let configured = HashSet::from(["noun".to_owned()]);
+        let issues = validate_forms(
+            Uuid::now_v7(),
+            &content,
+            &WordHeadwordsV2::Unified {
+                common: "high".to_owned(),
+            },
+            &configured,
+        );
+
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == "duplicate_dialect_variant")
+        );
+    }
+
+    #[test]
+    fn rejects_form_spellings_that_cannot_be_surface_normalized() {
+        for spelling in ["\u{0001}".to_owned(), "\u{fb03}".repeat(100)] {
+            let mut content = forms(&[("noun", &["plural"])]);
+            content.pos[0].base_form.variants[0].spelling = spelling;
+            let configured = HashSet::from(["noun".to_owned()]);
+            let issues = validate_forms(
+                Uuid::now_v7(),
+                &content,
+                &WordHeadwordsV2::Unified {
+                    common: "high".to_owned(),
+                },
+                &configured,
+            );
+
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.code == "spelling_not_normalizable")
+            );
+        }
     }
 
     #[test]

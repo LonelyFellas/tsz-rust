@@ -4791,7 +4791,7 @@ async fn forms_impact_is_complete_stable_and_detects_pos_code_replacement(pool: 
 
     let mut replaced_forms = forms;
     replaced_forms["pos"][0]["pos"] = json!("adjective");
-    let (status, invalid_replacement) = call(
+    let (status, draft_replacement) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
@@ -4803,15 +4803,12 @@ async fn forms_impact_is_complete_stable_and_detects_pos_code_replacement(pool: 
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
-        invalid_replacement["field_issues"][0]["code"],
-        "invalid_form_type_for_part_of_speech"
+        status,
+        StatusCode::OK,
+        "草稿 impact 不应被词性与词形类型不匹配阻断：{draft_replacement}"
     );
-    assert_eq!(
-        invalid_replacement["field_issues"][0]["node_id"],
-        replaced_forms["pos"][0]["form_groups"][0]["slots"][0]["id"]
-    );
+    assert_eq!(draft_replacement["requires_confirmation"], true);
     replaced_forms["pos"][0]["form_groups"][0]["slots"][0]["form_type"] = json!("comparative");
     replaced_forms["pos"][0]["form_groups"][0]["slots"][0]["id"] = json!(Uuid::now_v7());
     replaced_forms["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["id"] =
