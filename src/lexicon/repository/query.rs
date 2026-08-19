@@ -129,17 +129,26 @@ impl LexiconRepository {
             r#"
             SELECT entry.id,
                    entry.kind,
+                   entry.source_dialect,
+                   -- 并列拼写一律「检测基准侧在前」，与词条详情、建稿第 4 步保持一致；
+                   -- source_dialect 为 NULL（unified）时回落到 common → uk → us。
                    COALESCE((
-                       SELECT array_agg(headword.dialect ORDER BY CASE headword.dialect
-                           WHEN 'common' THEN 0 WHEN 'uk' THEN 1 ELSE 2 END)
+                       SELECT array_agg(headword.dialect ORDER BY CASE
+                           WHEN headword.dialect = 'common' THEN 0
+                           WHEN headword.dialect = entry.source_dialect THEN 1
+                           WHEN headword.dialect = 'uk' THEN 2
+                           ELSE 3 END)
                        FROM lexicon.entry_headwords headword
                        WHERE headword.entry_id = entry.id
                    ), ARRAY[]::text[]) AS dialects,
                    entry.revision,
                    entry.lifecycle_revision,
                    COALESCE((
-                       SELECT string_agg(headword.headword, ' / ' ORDER BY CASE headword.dialect
-                           WHEN 'common' THEN 0 WHEN 'uk' THEN 1 ELSE 2 END)
+                       SELECT string_agg(headword.headword, ' / ' ORDER BY CASE
+                           WHEN headword.dialect = 'common' THEN 0
+                           WHEN headword.dialect = entry.source_dialect THEN 1
+                           WHEN headword.dialect = 'uk' THEN 2
+                           ELSE 3 END)
                        FROM lexicon.entry_headwords headword
                        WHERE headword.entry_id = entry.id
                    ), '') AS headword,

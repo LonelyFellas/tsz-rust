@@ -4343,6 +4343,111 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn list_rows_order_headword_spellings_by_source_dialect(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 三个词条覆盖列表可能出现的全部基准侧形态：us 基准、uk 基准、无基准（unified）。
+    for term in ["listorderus", "listorderuk", "listordercommon"] {
+        seed_dictionary_word(&pool, term).await;
+    }
+    let cases = [
+        (
+            "listorderus",
+            json!({
+                "mode": "distinguish",
+                "uk": "listorderusbre",
+                "us": "listorderus",
+                "source_dialect": "us",
+            }),
+        ),
+        (
+            "listorderuk",
+            json!({
+                "mode": "distinguish",
+                "uk": "listorderuk",
+                "us": "listorderukame",
+                "source_dialect": "uk",
+            }),
+        ),
+        (
+            "listordercommon",
+            json!({"mode": "unified", "common": "listordercommon"}),
+        ),
+    ];
+    for (term, headwords) in &cases {
+        let (status, detection) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({"language": "en", "headword": term})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{term} 检测失败：{detection}");
+        let (status, created) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(json!({
+                "schema_version": 2,
+                "detection_id": detection["detection_id"],
+                "headwords": headwords,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{term} 建稿失败：{created}");
+    }
+
+    let row = |list: &Value| list["words"][0].clone();
+    let fetch = async |query: &str| {
+        let (status, list) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries?q={query}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{query} 列表查询失败：{list}");
+        assert_eq!(list["words"].as_array().map(Vec::len), Some(1));
+        list
+    };
+
+    let us_based = row(&fetch("listorderus").await);
+    assert_eq!(
+        us_based["headword"], "listorderus / listorderusbre",
+        "美式基准词条的列表词汇列必须把基准侧排在前"
+    );
+    assert_eq!(us_based["dialects"], json!(["us", "uk"]));
+    assert_eq!(us_based["source_dialect"], "us");
+
+    let uk_based = row(&fetch("listorderuk").await);
+    assert_eq!(
+        uk_based["headword"], "listorderuk / listorderukame",
+        "英式基准词条的列表词汇列必须把基准侧排在前"
+    );
+    assert_eq!(uk_based["dialects"], json!(["uk", "us"]));
+    assert_eq!(uk_based["source_dialect"], "uk");
+
+    let unified = row(&fetch("listordercommon").await);
+    assert_eq!(unified["headword"], "listordercommon");
+    assert_eq!(unified["dialects"], json!(["common"]));
+    assert!(
+        !unified.as_object().unwrap().contains_key("source_dialect"),
+        "unified 词条没有基准侧，字段应整体省略：{unified}"
+    );
+}
+
+#[sqlx::test]
 async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

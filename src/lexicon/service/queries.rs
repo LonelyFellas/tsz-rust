@@ -348,6 +348,10 @@ impl LexiconService {
                 id: record.id,
                 headword: record.headword,
                 kind: parse_kind(&record.kind).unwrap_or(EntryKind::Word),
+                source_dialect: record
+                    .source_dialect
+                    .as_deref()
+                    .and_then(parse_source_dialect),
                 dialects: record
                     .dialects
                     .iter()

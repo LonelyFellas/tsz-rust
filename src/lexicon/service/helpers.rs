@@ -101,6 +101,14 @@ pub(super) fn parse_kind(value: &str) -> Option<EntryKind> {
     }
 }
 
+pub(super) fn parse_source_dialect(value: &str) -> Option<SourceDialect> {
+    match value {
+        "uk" => Some(SourceDialect::Uk),
+        "us" => Some(SourceDialect::Us),
+        _ => None,
+    }
+}
+
 pub(super) fn parse_dialect(value: &str) -> Option<Dialect> {
     match value {
         "common" => Some(Dialect::Common),
