@@ -62,10 +62,12 @@ pub fn validate_meanings(
     }
 
     let mut seen_pos = HashSet::new();
-    let expected_dialects = if matches!(headwords, WordHeadwordsV2::Unified { .. }) {
-        vec![Dialect::Common]
+    // 语法结构的方言形状：unified 词条只接受单条 common；distinguish 词条既接受历史的
+    // uk + us 双条，也接受收敛后的单条 common（英美方言偏好化 A1 · 后端提案 P1）。
+    let allowed_dialects: &[&[Dialect]] = if matches!(headwords, WordHeadwordsV2::Unified { .. }) {
+        &[&[Dialect::Common]]
     } else {
-        vec![Dialect::Uk, Dialect::Us]
+        &[&[Dialect::Common], &[Dialect::Uk, Dialect::Us]]
     };
     for pos in &content.pos {
         let Some(pos_code) = form_pos.get(&pos.pos_id).copied() else {
@@ -117,11 +119,13 @@ pub fn validate_meanings(
                 .iter()
                 .map(|variant| variant.dialect)
                 .collect::<HashSet<_>>();
-            if grammar.variants.len() != expected_dialects.len()
-                || dialects.len() != expected_dialects.len()
-                || expected_dialects
-                    .iter()
-                    .any(|dialect| !dialects.contains(dialect))
+            // 变体去重后必须恰好等于某一种被允许的方言集合，重复方言因此也被挡住。
+            let shape_allowed = dialects.len() == grammar.variants.len()
+                && allowed_dialects.iter().any(|allowed| {
+                    allowed.len() == dialects.len()
+                        && allowed.iter().all(|dialect| dialects.contains(dialect))
+                });
+            if !shape_allowed
                 || grammar.variants.iter().any(|variant| {
                     !valid_rich_text(&variant.content) || variant.content.text().trim().is_empty()
                 })

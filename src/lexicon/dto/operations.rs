@@ -775,12 +775,22 @@ pub struct RelatedWordSense {
     pub gloss: String,
 }
 
+/// 一侧词头的结构化形式。`headword` 是把这些拼写按同一顺序拼成的展示串，
+/// 想按管理员方言偏好重排就读这个数组——**不要切分 `" / "`**，短语词条的拼写里可能有斜杠。
+#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
+pub struct HeadwordVariant {
+    pub dialect: Dialect,
+    pub headword: String,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
 pub struct RelatedWordResult {
     pub word_id: Uuid,
     pub headword: String,
     pub kind: EntryKind,
     pub dialects: Vec<Dialect>,
+    /// 每侧拼写，与 `dialects` 同序；`headword` 即本数组按序拼接。
+    pub headword_variants: Vec<HeadwordVariant>,
     pub pos_labels: Vec<String>,
     pub senses: Vec<RelatedWordSense>,
 }
@@ -815,6 +825,8 @@ pub struct AdminWordListItem {
     pub headword: String,
     pub kind: EntryKind,
     pub dialects: Vec<Dialect>,
+    /// 每侧拼写，与 `dialects` 同序；`headword` 即本数组按序拼接。
+    pub headword_variants: Vec<HeadwordVariant>,
     /// 检测基准侧；`mode = unified` 的词条没有基准侧，字段整体省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]

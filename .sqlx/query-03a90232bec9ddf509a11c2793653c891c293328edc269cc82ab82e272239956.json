@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            RETURNING id, phone, display_name, password_hash,\n                      role as \"role: AdminRole\",\n                      status as \"status: AdminStatus\",\n                      must_change_password, failed_login_count, locked_until,\n                      created_by_admin_id,\n                      created_at, updated_at\n            ",
+  "query": "\n            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            RETURNING id, phone, display_name, password_hash,\n                      role as \"role: AdminRole\",\n                      status as \"status: AdminStatus\",\n                      must_change_password, failed_login_count, locked_until,\n                      created_by_admin_id,\n                      dialect_preference as \"dialect_preference: AdminDialectPreference\",\n                      created_at, updated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -115,6 +115,17 @@
       },
       {
         "ordinal": 10,
+        "name": "dialect_preference: AdminDialectPreference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "dialect_preference"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -159,8 +170,9 @@
       true,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "6a2ed146ada8503db0c6d67766d62394108a01b72c338f9a146b4a8fe6b0ac31"
+  "hash": "03a90232bec9ddf509a11c2793653c891c293328edc269cc82ab82e272239956"
 }

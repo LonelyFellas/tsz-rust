@@ -12,7 +12,7 @@
 //! ③ disabled                           ⇒ 403（对齐 admin refresh 的拍板）
 //! ④ must_change_password = true        ⇒ 403 + code（前端跳改密页的硬契约；
 //!    守卫内联在 handler——唯一守卫组端点，middleware 等多端点批次再抽）
-//! ⑤ 成功 ⇒ 200 {id, phone, display_name, role, permissions}
+//! ⑤ 成功 ⇒ 200 {id, phone, display_name, role, permissions, preferences}
 //!    permissions 恒返全量 12 个菜单 key 死数据（Q4/Q10），顺序即侧栏顺序；
 //!    **只在 profile 下发、login 不带**（2026-07-26 拍板：F5 会话恢复走
 //!    refresh→profile，login 一次性下发撑不住该链路；login 侧有防回潮钉子）
@@ -129,6 +129,14 @@ async fn valid_token_returns_full_profile(pool: PgPool) {
         perms, EXPECTED_MENU_KEYS,
         "permissions 应为全量 12 个菜单 key 且顺序逐位一致"
     );
+
+    // preferences：字段恒在，从未设置过的管理员拿到后端默认值（英式）。
+    // 默认值只有后端一处，前端不再持有第二份（英美方言偏好化 A1 · 后端提案 P2）。
+    assert_eq!(
+        json["preferences"]["dialect"].as_str(),
+        Some("uk"),
+        "未设置过偏好的管理员应拿到默认英式：{body}"
+    );
 }
 
 #[sqlx::test]
@@ -152,7 +160,7 @@ async fn plain_admin_gets_same_full_permissions(pool: PgPool) {
 
 #[sqlx::test]
 async fn response_leaks_no_sensitive_or_extra_fields(pool: PgPool) {
-    // 防「序列化整个 Admin 本体」：响应必须是手挑的 5 个字段，一个不多。
+    // 防「序列化整个 Admin 本体」：响应必须是手挑的 6 个字段，一个不多。
     let state = AppState::for_test(pool.clone());
     let id = seed_admin(&pool, AdminRole::Admin, false).await;
     let token = admin_token(&state, id, AdminRole::Admin);
@@ -169,13 +177,15 @@ async fn response_leaks_no_sensitive_or_extra_fields(pool: PgPool) {
         "locked_until",
         "created_at",
         "updated_at",
+        "dialect_preference",
     ] {
         assert!(
             !obj.contains_key(forbidden),
             "响应不得含 {forbidden} 字段：{body}"
         );
     }
-    assert_eq!(obj.len(), 5, "响应应恰为 5 个字段：{body}");
+    // 方言偏好只以 preferences.dialect 出现，不把库里的列名直接抖出去。
+    assert_eq!(obj.len(), 6, "响应应恰为 6 个字段：{body}");
 }
 
 #[sqlx::test]

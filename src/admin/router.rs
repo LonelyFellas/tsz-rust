@@ -1,4 +1,7 @@
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    routing::{get, patch},
+};
 
 use crate::{
     admin::{self},
@@ -9,6 +12,10 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/profile", get(admin::profile::handler::admin_profile))
+        .route(
+            "/profile/preferences",
+            patch(admin::profile::handler::update_admin_preferences),
+        )
         .route("/users", get(admin::accounts::handler::list_users))
         .nest("/auth", admin::auth::router())
         .nest("/admins", admin::accounts::router())

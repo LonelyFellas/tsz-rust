@@ -2,7 +2,7 @@ use sqlx::PgPool;
 
 use crate::{
     admin::{
-        Admin, AdminRole, AdminStatus, NewAdmin,
+        Admin, AdminDialectPreference, AdminRole, AdminStatus, NewAdmin,
         accounts::model::{AdminAccountAdminListFilter, AdminAccountRecord},
     },
     platform::is_unique_violation,
@@ -37,6 +37,7 @@ impl AdminAccountsRepository {
                       status as "status: AdminStatus",
                       must_change_password, failed_login_count, locked_until,
                       created_by_admin_id,
+                      dialect_preference as "dialect_preference: AdminDialectPreference",
                       created_at, updated_at
             "#,
             admin.id,

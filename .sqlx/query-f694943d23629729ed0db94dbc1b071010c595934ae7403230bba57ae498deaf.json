@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE admins\n            SET dialect_preference = $2, updated_at = NOW()\n            WHERE id = $1\n            RETURNING dialect_preference as \"dialect_preference: AdminDialectPreference\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "dialect_preference: AdminDialectPreference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "dialect_preference"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f694943d23629729ed0db94dbc1b071010c595934ae7403230bba57ae498deaf"
+}

@@ -250,7 +250,7 @@ pub(crate) struct ListEntryRecord {
     pub dialects: Vec<String>,
     pub revision: i64,
     pub lifecycle_revision: i64,
-    pub headword: String,
+    pub headword_spellings: Vec<String>,
     pub gloss: String,
     pub pos_list: Vec<String>,
     pub levels: Vec<String>,

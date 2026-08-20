@@ -100,6 +100,33 @@ async fn admin_defaults_are_correct(pool: PgPool) {
     );
 }
 
+/// 方言偏好列（英美方言偏好化 A1 · 后端提案 P2）：默认英式，取值由 CHECK 兜住。
+/// 默认值写在数据库上——存量账号与新账号都不需要应用层再补一次默认。
+#[sqlx::test]
+async fn admin_dialect_preference_defaults_to_uk_and_rejects_other_values(pool: PgPool) {
+    let id = insert_admin(&pool, "13800000002").await;
+
+    let preference: String =
+        sqlx::query_scalar("SELECT dialect_preference FROM admins WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("查询应成功");
+    assert_eq!(preference, "uk", "dialect_preference 默认应为英式");
+
+    let updated = sqlx::query("UPDATE admins SET dialect_preference = 'us' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await;
+    assert!(updated.is_ok(), "美式应是合法取值");
+
+    let invalid = sqlx::query("UPDATE admins SET dialect_preference = 'au' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await;
+    assert_db_error_code(invalid, "23514", "枚举外的方言应被 CHECK 拒绝");
+}
+
 // ===== admins:唯一约束 =====
 
 #[sqlx::test]
