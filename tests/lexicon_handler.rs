@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use tsz_rust::{
     admin::{AdminRepository, AdminRole, NewAdmin},
-    lexicon::dto::SurfacePolicyNameV2,
+    lexicon::detection_store::DetectionStore,
+    lexicon::dto::{DetectWordResponseV2, SurfacePolicyNameV2},
     lexicon::normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword},
     lexicon::surface_backfill::{
         SURFACE_WRITER_VERSION, execute_surface_cutover, run_surface_backfill,
@@ -2017,8 +2018,17 @@ async fn lexicon_editor_flow_is_revision_safe_idempotent_and_publishable(pool: P
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(unmatched_create["code"], "detection_mismatch");
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "未收录单词建稿失败：{unmatched_create}"
+    );
+    assert_eq!(unmatched_create["word"]["kind"], "word");
+    assert_eq!(unmatched_create["word"]["forms"], json!({"pos": []}));
+    assert_eq!(
+        unmatched_create["word"]["detection_snapshot"]["builtin_dictionary_status"],
+        "not_found"
+    );
 
     let (status, conflict) = call(
         &state,
@@ -3596,6 +3606,284 @@ async fn phrase_detection_creation_editing_and_publication_use_the_v2_aggregate(
     assert_eq!(status, StatusCode::CREATED, "未收录短语建稿失败：{created}");
     assert_eq!(created["word"]["kind"], "phrase");
     assert_eq!(created["word"]["forms"], json!({"pos": []}));
+}
+
+/// 内置词典是 Kaikki 静态快照，未命中不代表词不存在（品牌名、新造词、缩写都在外面），
+/// 单词必须和短语一样能人工建稿，只是没有任何词典建议可继承。
+#[sqlx::test]
+async fn unmatched_word_creates_a_manual_draft_without_dictionary_suggestions(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let headword = format!("brandnew{}", Uuid::now_v7().simple());
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "未收录单词检测失败：{detection}");
+    assert_eq!(detection["entry_kind"], "word");
+    assert_eq!(detection["builtin_dictionary"]["status"], "not_found");
+    assert_eq!(detection["smart_dictionary"]["status"], "clear");
+
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {"mode": "unified", "common": headword},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "未收录单词建稿失败：{created}");
+    assert_eq!(created["word"]["kind"], "word");
+    assert_eq!(created["word"]["status"], "draft");
+    assert_eq!(
+        created["word"]["headwords"],
+        json!({"mode": "unified", "common": headword})
+    );
+    assert_eq!(created["word"]["forms"], json!({"pos": []}));
+    assert_eq!(created["word"]["meanings"]["pos"], json!([]));
+    assert_eq!(created["word"]["max_reachable_step"], "forms");
+    assert_eq!(
+        created["word"]["detection_snapshot"]["builtin_dictionary_status"],
+        "not_found"
+    );
+    assert_eq!(
+        created["word"]["detection_snapshot"]["smart_dictionary_status"],
+        "clear"
+    );
+    assert_eq!(created["word"]["detection_snapshot"]["entry_kind"], "word");
+    assert_eq!(
+        created["word"]["detection_snapshot"]["matched_dialect"],
+        "common"
+    );
+    assert_eq!(
+        created["word"]["detection_snapshot"]["suggested_pos"],
+        json!([])
+    );
+
+    // 未命中时词头没有词典来源，必须记成人工来源，并照常进入表层投影。
+    let entry_id = Uuid::parse_str(created["word"]["id"].as_str().unwrap()).unwrap();
+    let origins: Vec<String> =
+        sqlx::query_scalar("SELECT origin FROM lexicon.entry_headwords WHERE entry_id = $1")
+            .bind(entry_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(origins, ["manual"]);
+    let projected: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT dialect_scope FROM lexicon.surface_sources
+        WHERE entry_id = $1 AND content_scope = 'draft'
+          AND source_kind = 'headword' AND is_deleted = FALSE
+        ORDER BY dialect_scope
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(projected, ["uk", "us"]);
+}
+
+/// 未命中放开的只是「词典没收录」这一条闸：重复、词典临时不可用、词头对不上仍要拒。
+#[sqlx::test]
+async fn unmatched_word_creation_still_rejects_duplicates_unavailable_and_mismatched_headwords(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis.clone());
+    let detections = DetectionStore::new(redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let duplicated = format!("brandnew{}", Uuid::now_v7().simple());
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": duplicated})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "未收录单词检测失败：{detection}");
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {"mode": "unified", "common": duplicated},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "未收录单词建稿失败：{created}");
+
+    // 把已建词条的词头投影打成 tombstone：legacy exact 索引仍在但投影已缺，
+    // 这正是 smart_dictionary = duplicate 的成因。
+    sqlx::query(
+        r#"
+        UPDATE lexicon.surface_sources
+        SET is_deleted = TRUE, source_revision = 999999,
+            event_offset = nextval('lexicon.surface_projection_event_offset_seq')
+        WHERE entry_id = $1 AND source_kind = 'headword'
+        "#,
+    )
+    .bind(Uuid::parse_str(created["word"]["id"].as_str().unwrap()).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, duplicate_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": duplicated})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        duplicate_detection["builtin_dictionary"]["status"],
+        "not_found"
+    );
+    assert_eq!(
+        duplicate_detection["smart_dictionary"]["status"],
+        "duplicate"
+    );
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": duplicate_detection["detection_id"],
+            "headwords": {"mode": "unified", "common": duplicated},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "重复词必须拒绝：{rejected}");
+    assert_eq!(rejected["code"], "duplicate_word");
+
+    // 词典临时不可用是故障，应当重试而不是当成「未收录」绕过。detect 目前不会产出
+    // unavailable，所以直接改写检测上下文，把这条契约钉在创建侧。
+    let unavailable_headword = format!("brandnew{}", Uuid::now_v7().simple());
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": unavailable_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "未收录单词检测失败：{detection}");
+    let mut unavailable = detection.clone();
+    unavailable["builtin_dictionary"] = json!({"status": "unavailable"});
+    let unavailable: DetectWordResponseV2 =
+        serde_json::from_value(unavailable).expect("改写后的检测上下文应能反序列化");
+    detections
+        .save(admin_id, &unavailable, std::time::Duration::from_secs(300))
+        .await
+        .expect("覆盖检测上下文应成功");
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {"mode": "unified", "common": unavailable_headword},
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "词典不可用不得当成未收录放行：{rejected}"
+    );
+    assert_eq!(rejected["code"], "detection_mismatch");
+
+    // 未命中只签发统一词头，提交区分词形或换掉词头都属于凭据不符。
+    let tampered = format!("brandnew{}", Uuid::now_v7().simple());
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": tampered})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "未收录单词检测失败：{detection}");
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {
+                "mode": "distinguish",
+                "uk": format!("{tampered}-uk"),
+                "us": format!("{tampered}-us"),
+                "source_dialect": "uk"
+            },
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "未命中不得提交区分词形：{rejected}"
+    );
+    assert_eq!(rejected["code"], "detection_mismatch");
+
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {"mode": "unified", "common": format!("{tampered}x")},
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "词头被换掉必须拒绝：{rejected}"
+    );
+    assert_eq!(rejected["code"], "detection_mismatch");
 }
 
 #[sqlx::test]
