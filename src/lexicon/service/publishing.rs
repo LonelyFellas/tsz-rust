@@ -1110,10 +1110,11 @@ pub(super) fn published_sense_snapshot(
 }
 
 pub(super) fn published_word_headword(word: &AdminWordV2) -> String {
-    match &word.headwords {
-        WordHeadwordsV2::Unified { common } => common.clone(),
-        WordHeadwordsV2::Distinguish { uk, us, .. } => format!("{uk} / {us}"),
-    }
+    ordered_headword_sides(&word.headwords)
+        .into_iter()
+        .map(|(_, spelling)| spelling)
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 pub(super) fn published_sense_gloss(sense: &WordSenseV2) -> String {

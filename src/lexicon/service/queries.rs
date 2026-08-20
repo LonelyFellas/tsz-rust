@@ -229,10 +229,10 @@ impl LexiconService {
             .map(|record| {
                 let word: AdminWordV2 =
                     serde_json::from_value(record.snapshot).map_err(serialization_error)?;
-                let dialects = match &word.headwords {
-                    WordHeadwordsV2::Unified { .. } => vec![Dialect::Common],
-                    WordHeadwordsV2::Distinguish { .. } => vec![Dialect::Uk, Dialect::Us],
-                };
+                let dialects = ordered_headword_sides(&word.headwords)
+                    .into_iter()
+                    .map(|(dialect, _)| dialect)
+                    .collect();
                 let senses = word
                     .meanings
                     .pos

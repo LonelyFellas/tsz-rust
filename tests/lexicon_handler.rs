@@ -331,6 +331,17 @@ async fn create_ready_draft(
     bearer: &str,
     headword: &str,
 ) -> Value {
+    create_ready_draft_with_headwords(state, pool, bearer, headword, None).await
+}
+
+/// 与 `create_ready_draft` 相同的建稿链路，但可以覆盖词头以构造 distinguish 词条。
+async fn create_ready_draft_with_headwords(
+    state: &AppState,
+    pool: &PgPool,
+    bearer: &str,
+    headword: &str,
+    headwords: Option<Value>,
+) -> Value {
     let dictionary_term_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM dictionary.active_terms WHERE normalized_term = $1)",
     )
@@ -354,7 +365,8 @@ async fn create_ready_draft(
     let mut create_input = json!({
         "schema_version": 2,
         "detection_id": detection["detection_id"],
-        "headwords": detection["builtin_dictionary"]["headwords"],
+        "headwords": headwords
+            .unwrap_or_else(|| detection["builtin_dictionary"]["headwords"].clone()),
     });
     if let Some(surface_token) =
         detection["smart_dictionary"]["surface_match_page"]["surface_confirmation_token"].as_str()
@@ -374,24 +386,35 @@ async fn create_ready_draft(
     let entry_id = created["word"]["id"].as_str().unwrap();
 
     let mut forms = created["word"]["forms"].clone();
-    forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["dict_phonetic"] =
-        json!("/test/");
-    forms["pos"][0]["base_form"]["variants"][0]["pronunciations"][0]["actual_pron"] = json!("test");
+    // distinguish 词条的骨架自带 uk/us 两行，unified 只有 common 一行；统一按骨架逐行补齐。
+    let base_variants = forms["pos"][0]["base_form"]["variants"]
+        .as_array()
+        .expect("基本形应带方言行")
+        .clone();
+    for index in 0..base_variants.len() {
+        let pronunciation =
+            &mut forms["pos"][0]["base_form"]["variants"][index]["pronunciations"][0];
+        pronunciation["dict_phonetic"] = json!("/test/");
+        pronunciation["actual_pron"] = json!("test");
+    }
     forms["pos"][0]["form_groups"][0]["slots"] = json!([{
         "id": Uuid::now_v7(),
         "form_type": "plural",
-        "variants": [{
-            "id": Uuid::now_v7(),
-            "dialect": "common",
-            "spelling": format!("{headword}s"),
-            "origin": "manual",
-            "pronunciations": [{
+        "variants": base_variants
+            .iter()
+            .map(|variant| json!({
                 "id": Uuid::now_v7(),
-                "dict_phonetic": "/tests/",
-                "actual_pron": "tests",
-                "style": "normal"
-            }]
-        }]
+                "dialect": variant["dialect"],
+                "spelling": format!("{}s", variant["spelling"].as_str().unwrap()),
+                "origin": "manual",
+                "pronunciations": [{
+                    "id": Uuid::now_v7(),
+                    "dict_phonetic": "/tests/",
+                    "actual_pron": "tests",
+                    "style": "normal"
+                }]
+            }))
+            .collect::<Vec<_>>()
     }]);
     let forms_input = json!({
         "base_revision": 1,
@@ -430,14 +453,39 @@ async fn create_ready_draft(
     let mut meanings = forms_saved["word"]["meanings"].clone();
     meanings["sense_groups"][0]["name_zh"] = json!("测试含义");
     meanings["sense_groups"][0]["name_en"] = json!("Test meaning");
-    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"] =
-        rich_text("used as a noun");
+    let grammar_variants = meanings["pos"][0]["grammar_structures"][0]["variants"]
+        .as_array()
+        .expect("语法结构应带方言行")
+        .len();
+    for index in 0..grammar_variants {
+        meanings["pos"][0]["grammar_structures"][0]["variants"][index]["content"] =
+            rich_text("used as a noun");
+    }
     meanings["pos"][0]["senses"][0]["sub_pos"] = json!("N-COUNT");
     meanings["pos"][0]["senses"][0]["frequency"] = json!("50");
     meanings["pos"][0]["senses"][0]["definitions"][0]["content"] =
         rich_text(&format!("{headword} 的释义"));
-    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["value"] =
-        rich_text(&format!("A {headword} example."));
+    let example = rich_text(&format!("A {headword} example."));
+    let en_text = &mut meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"];
+    if en_text["mode"] == "distinguish" {
+        // 骨架只把基准侧填成 ready，另一侧是 missing，两侧都要有内容才算完成。
+        for side in ["uk", "us"] {
+            if en_text[side]["state"] == "ready" {
+                en_text[side]["variant"]["value"] = example.clone();
+            } else {
+                en_text[side] = json!({
+                    "state": "ready",
+                    "variant": {
+                        "id": Uuid::now_v7(),
+                        "value": example.clone(),
+                        "origin": "manual"
+                    }
+                });
+            }
+        }
+    } else {
+        en_text["common"]["value"] = example;
+    }
     meanings["pos"][0]["senses"][0]["sentences"][0]["zh_text"] = rich_text("测试例句。");
     let (status, meanings_saved) = call(
         state,
@@ -4732,6 +4780,252 @@ async fn list_rows_order_headword_spellings_by_source_dialect(pool: PgPool) {
     assert!(
         !unified.as_object().unwrap().contains_key("source_dialect"),
         "unified 词条没有基准侧，字段应整体省略：{unified}"
+    );
+}
+
+#[sqlx::test]
+async fn relation_target_headwords_follow_the_source_dialect(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 三个关联目标覆盖全部词头形态：us 基准、uk 基准、无基准（unified）。
+    let targets = [
+        (
+            "reltargetus",
+            Some(json!({
+                "mode": "distinguish",
+                "uk": "reltargetusbre",
+                "us": "reltargetus",
+                "source_dialect": "us",
+            })),
+            "reltargetus / reltargetusbre",
+        ),
+        (
+            "reltargetuk",
+            Some(json!({
+                "mode": "distinguish",
+                "uk": "reltargetuk",
+                "us": "reltargetukame",
+                "source_dialect": "uk",
+            })),
+            "reltargetuk / reltargetukame",
+        ),
+        ("reltargetcommon", None, "reltargetcommon"),
+    ];
+
+    let mut relations = Vec::new();
+    let mut expected = Vec::new();
+    for (term, headwords, expected_headword) in &targets {
+        let ready =
+            create_ready_draft_with_headwords(&state, &pool, &bearer, term, headwords.clone())
+                .await;
+        let (status, published) = publish_ready(&state, &bearer, &ready).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{term} 目标词发布失败：{published}"
+        );
+        relations.push(json!({
+            "id": Uuid::now_v7(),
+            "relation": "synonym",
+            "target_word_id": ready["word"]["id"],
+            "target_sense_id": ready["word"]["meanings"]["pos"][0]["senses"][0]["id"],
+            "target_headword": "客户端伪造词头",
+            "target_gloss": "客户端伪造释义",
+            "score": "88.50"
+        }));
+        expected.push((*expected_headword, format!("{term} 的释义")));
+    }
+
+    let source_ready = create_ready_draft(&state, &pool, &bearer, "relsource").await;
+    let source_entry_id =
+        Uuid::parse_str(source_ready["word"]["id"].as_str().unwrap()).expect("来源词 id 应是 uuid");
+    let mut source_meanings = source_ready["word"]["meanings"].clone();
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!(relations);
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": 3,
+            "intent": "complete",
+            "content": source_meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "关联保存失败：{source_saved}");
+
+    // Canonicalize：服务端覆盖写入的词头必须是「检测基准侧优先」。
+    let saved_relations = source_saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"]
+        .as_array()
+        .expect("关联应原样返回");
+    assert_eq!(saved_relations.len(), expected.len());
+    for (saved, (expected_headword, expected_gloss)) in saved_relations.iter().zip(&expected) {
+        assert_eq!(
+            saved["target_headword"], *expected_headword,
+            "关联目标词头必须把基准侧排在前：{saved}"
+        );
+        assert_eq!(saved["target_gloss"], *expected_gloss);
+    }
+
+    // Verify：同一份草稿必须能直接发布，否则「保存能过、发布必失败」。
+    let (status, source_published) = publish_ready(&state, &bearer, &source_saved).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "保存与发布必须用同一套词头顺序，不能被 relation_target_stale 拦下：{source_published}"
+    );
+
+    let snapshots: Vec<String> = sqlx::query_scalar(
+        "SELECT target_headword_snapshot FROM lexicon.relations WHERE entry_id = $1 ORDER BY sort_order",
+    )
+    .bind(source_entry_id)
+    .fetch_all(&pool)
+    .await
+    .expect("应能读取关联快照");
+    assert_eq!(
+        snapshots,
+        expected
+            .iter()
+            .map(|(headword, _)| (*headword).to_owned())
+            .collect::<Vec<_>>(),
+        "落库的词头快照必须与保存/发布时一致"
+    );
+}
+
+#[sqlx::test]
+async fn related_search_orders_headword_spellings_like_the_list(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let cases = [
+        (
+            "relorderus",
+            Some(json!({
+                "mode": "distinguish",
+                "uk": "relorderusbre",
+                "us": "relorderus",
+                "source_dialect": "us",
+            })),
+            "relorderus / relorderusbre",
+            json!(["us", "uk"]),
+        ),
+        (
+            "relorderuk",
+            Some(json!({
+                "mode": "distinguish",
+                "uk": "relorderuk",
+                "us": "relorderukame",
+                "source_dialect": "uk",
+            })),
+            "relorderuk / relorderukame",
+            json!(["uk", "us"]),
+        ),
+        ("relordercommon", None, "relordercommon", json!(["common"])),
+    ];
+
+    for (term, headwords, expected_headword, expected_dialects) in &cases {
+        let ready =
+            create_ready_draft_with_headwords(&state, &pool, &bearer, term, headwords.clone())
+                .await;
+        let (status, published) = publish_ready(&state, &bearer, &ready).await;
+        assert_eq!(status, StatusCode::CREATED, "{term} 发布失败：{published}");
+
+        let (status, search) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/related-search?q={term}&kind=word&page_size=20"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{term} 关联词搜索失败：{search}");
+        assert_eq!(
+            search["results"].as_array().map(Vec::len),
+            Some(1),
+            "{term} 应只命中自己：{search}"
+        );
+        let result = &search["results"][0];
+        assert_eq!(
+            result["headword"], *expected_headword,
+            "关联词搜索必须把基准侧排在前：{result}"
+        );
+        assert_eq!(
+            result["dialects"], *expected_dialects,
+            "dialects 必须与 headword 同序：{result}"
+        );
+
+        let (status, list) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries?q={term}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{term} 列表查询失败：{list}");
+        assert_eq!(list["words"].as_array().map(Vec::len), Some(1));
+        let row = &list["words"][0];
+        assert_eq!(
+            row["headword"], result["headword"],
+            "列表与关联词搜索的并列拼写必须一致：{row} / {result}"
+        );
+        assert_eq!(
+            row["dialects"], result["dialects"],
+            "列表与关联词搜索的方言顺序必须一致：{row} / {result}"
+        );
+    }
+
+    // 排序键与展示串必须是同一个字符串。relsortcolos 正好落在两种拼法之间：
+    // 按展示串 "relsortcolor / ..." 排它在后，按 uk-first 的 "relsortcolour / ..." 排它在前。
+    for (term, headwords) in [
+        (
+            "relsortcolor",
+            Some(json!({
+                "mode": "distinguish",
+                "uk": "relsortcolour",
+                "us": "relsortcolor",
+                "source_dialect": "us",
+            })),
+        ),
+        ("relsortcolos", None),
+    ] {
+        let ready =
+            create_ready_draft_with_headwords(&state, &pool, &bearer, term, headwords).await;
+        let (status, published) = publish_ready(&state, &bearer, &ready).await;
+        assert_eq!(status, StatusCode::CREATED, "{term} 发布失败：{published}");
+    }
+    let (status, sorted) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=relsortcolo&kind=word&page_size=20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "排序查询失败：{sorted}");
+    assert_eq!(
+        sorted["results"]
+            .as_array()
+            .expect("结果应是数组")
+            .iter()
+            .map(|result| result["headword"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("relsortcolor / relsortcolour"), json!("relsortcolos")],
+        "关联词搜索必须按展示出来的词头排序：{sorted}"
     );
 }
 
