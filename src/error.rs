@@ -16,6 +16,7 @@ pub enum ErrorCode {
     InvalidRequestBody,
     InvalidQuery,
     InvalidPathParameter,
+    PayloadTooLarge,
     InvalidPartOfSpeech,
     InvalidHeadword,
     UnsupportedLanguage,
@@ -90,12 +91,13 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 69] = [
+    pub const ALL: [Self; 70] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
         Self::InvalidQuery,
         Self::InvalidPathParameter,
+        Self::PayloadTooLarge,
         Self::InvalidPartOfSpeech,
         Self::InvalidHeadword,
         Self::UnsupportedLanguage,
@@ -176,6 +178,11 @@ impl ErrorCode {
                 "invalid_path_parameter",
                 "Invalid path parameter",
                 StatusCode::BAD_REQUEST,
+            ),
+            Self::PayloadTooLarge => (
+                "payload_too_large",
+                "Payload too large",
+                StatusCode::PAYLOAD_TOO_LARGE,
             ),
             Self::InvalidPartOfSpeech => (
                 "invalid_part_of_speech",

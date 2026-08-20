@@ -16,7 +16,7 @@ mod structure;
 use helpers::*;
 
 pub use meanings::validate_meanings;
-pub use structure::validate_forms;
+pub use structure::{MAX_STEP_CONTENT_BODY_BYTES, validate_forms};
 pub(crate) use structure::{
     ProposedNode, proposed_nodes, validate_node_identities, validate_node_limit,
     validate_persisted_text,

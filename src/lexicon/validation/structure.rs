@@ -7,6 +7,14 @@ use crate::lexicon::node_identity::{
 
 pub(crate) const MAX_ENTRY_NODES: usize = 2_000;
 
+/// 承载整步草稿内容的请求体上限，由节点上限按每节点 4 KiB 预算推导（当前 8,192,000 字节）。
+/// 注意这不是 8 MiB —— 是 2000 × 4 KiB，比 8 MiB 少 196,608 字节；对外文档必须给这个精确值，
+/// 否则前端按 8 MiB 预检会放过一批服务端仍要 413 的请求。
+/// 现网草稿实测约 132 字节/节点（正文近乎为空），4 KiB 给正文、标注和 JSON 结构留余量，
+/// 同时仍是硬内存边界。axum 默认只有 2 MiB，塞满的词条会在校验之前先被 413 掉。
+/// 对外公开是为了让集成测试和文档只有这一个数字来源。
+pub const MAX_STEP_CONTENT_BODY_BYTES: usize = MAX_ENTRY_NODES * 4 * 1024;
+
 // --- forms ---
 
 pub fn validate_forms(

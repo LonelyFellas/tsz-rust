@@ -25,8 +25,12 @@ where
             .await
             .map_err(|rejection| {
                 let status = rejection.status();
+                // 超出 body limit 的 413 必须自成一档：请求体结构合法、只是太大，
+                // 混进 invalid_request_body 会让前端把「录太多」误报成「格式错」。
                 let (code, message) = if status == StatusCode::BAD_REQUEST {
                     (ErrorCode::InvalidJson, "invalid JSON")
+                } else if status == StatusCode::PAYLOAD_TOO_LARGE {
+                    (ErrorCode::PayloadTooLarge, "request body is too large")
                 } else {
                     (ErrorCode::InvalidRequestBody, "invalid request body")
                 };
@@ -121,17 +125,26 @@ mod tests {
         payload.value
     }
 
-    async fn error_for(
-        body: &'static str,
+    async fn error_for(body: &str, content_type: Option<&'static str>) -> (StatusCode, Value) {
+        error_for_body(Body::from(body.to_owned()), content_type, None).await
+    }
+
+    async fn error_for_body(
+        body: Body,
         content_type: Option<&'static str>,
+        body_limit: Option<usize>,
     ) -> (StatusCode, Value) {
         let mut request = axum::http::Request::builder().method("POST").uri("/");
         if let Some(content_type) = content_type {
             request = request.header(axum::http::header::CONTENT_TYPE, content_type);
         }
+        let mut route = post(json_handler);
+        if let Some(limit) = body_limit {
+            route = route.layer(axum::extract::DefaultBodyLimit::max(limit));
+        }
         let response = Router::new()
-            .route("/", post(json_handler))
-            .oneshot(request.body(Body::from(body)).unwrap())
+            .route("/", route)
+            .oneshot(request.body(body).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -161,5 +174,17 @@ mod tests {
             assert_eq!(body["status"], 422);
             assert!(body.get("error").is_none());
         }
+    }
+
+    // 超出 body limit 的请求体本身是合法 JSON，只能报 413，不能退化成 422 invalid_request_body。
+    #[tokio::test]
+    async fn oversized_body_is_413_payload_too_large_problem() {
+        let payload = format!(r#"{{"value":"{}"}}"#, "a".repeat(256));
+        let (status, body) =
+            error_for_body(Body::from(payload), Some("application/json"), Some(64)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body["code"], "payload_too_large");
+        assert_eq!(body["status"], 413);
+        assert_eq!(body["type"], "urn:tsz:problem:payload_too_large");
     }
 }

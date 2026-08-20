@@ -1,6 +1,9 @@
-use axum::{Router, routing::get};
+use axum::{Router, extract::DefaultBodyLimit, routing::get};
 
-use crate::{lexicon::handler, state::AppState};
+use crate::{
+    lexicon::{handler, validation::MAX_STEP_CONTENT_BODY_BYTES},
+    state::AppState,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -44,17 +47,23 @@ pub fn router() -> Router<AppState> {
             "/entries/{id}/publications/{publication_id}/activate",
             axum::routing::post(handler::activate_publication),
         )
+        // 只有这三条路由承载整步草稿内容，需要高于 axum 默认 2 MiB 的请求体上限。
+        // 其余接口的请求体都被自身契约框住（批量最多 100 条、其余是定长字段），
+        // 继续吃默认值即可，不跟着放宽。
         .route(
             "/entries/{id}/steps/forms/impact",
-            axum::routing::post(handler::preview_forms_impact),
+            axum::routing::post(handler::preview_forms_impact)
+                .layer(DefaultBodyLimit::max(MAX_STEP_CONTENT_BODY_BYTES)),
         )
         .route(
             "/entries/{id}/steps/forms",
-            axum::routing::put(handler::save_forms),
+            axum::routing::put(handler::save_forms)
+                .layer(DefaultBodyLimit::max(MAX_STEP_CONTENT_BODY_BYTES)),
         )
         .route(
             "/entries/{id}/steps/meanings",
-            axum::routing::put(handler::save_meanings),
+            axum::routing::put(handler::save_meanings)
+                .layer(DefaultBodyLimit::max(MAX_STEP_CONTENT_BODY_BYTES)),
         )
         .route(
             "/entries/{id}/content-completion-jobs",
