@@ -20,6 +20,7 @@ use tsz_rust::{
         SURFACE_WRITER_VERSION, execute_surface_cutover, run_surface_backfill,
         run_surface_cutover_preflight, run_surface_parity, surface_cutover_artifact_sha256,
     },
+    lexicon::validation::MAX_STEP_CONTENT_BODY_BYTES,
     platform,
     state::AppState,
 };
@@ -6756,4 +6757,118 @@ async fn grammar_structures_accept_a_single_common_variant_on_distinguish_entrie
         has_issue(&rejected, "grammar_variants_invalid"),
         "unified 词条写 uk + us 双条仍应被拒：{rejected}"
     );
+}
+
+/// 整步草稿内容的请求体上限：axum 默认 2 MiB 装不下塞满的词条（2000 节点），
+/// 所以这三条路由单独放宽到 MAX_STEP_CONTENT_BODY_BYTES；其余接口维持默认值。
+/// 超限只能报 413 payload_too_large——退化成 422 会让前端把「录太多」当成「格式错」。
+///
+/// 边界逐字节钉死：上限本身必须被接受、上限 +1 必须被拒。对外文档给的是同一个数字，
+/// 一旦实现与文档漂移（例如把 2000 × 4 KiB 当成 8 MiB），这里立刻红。
+#[sqlx::test]
+async fn step_content_body_limit_is_raised_bounded_and_scoped_per_route(pool: PgPool) {
+    // 镜像 axum-core 私有的 DEFAULT_LIMIT（ext_traits/request.rs），没有公开 API 可引用。
+    // axum 升级后若这个默认值变了，下面「批量接口仍吃默认值」那段会失败——那是依赖漂移，
+    // 不是本改动回归。
+    const AXUM_DEFAULT_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+    // 编译期就钉死，不用等测试跑起来：
+    // 上限必须真的高于框架默认值，且必须等于文档 §13.2 对外承诺的精确值。
+    const {
+        assert!(
+            MAX_STEP_CONTENT_BODY_BYTES > AXUM_DEFAULT_BODY_LIMIT,
+            "放宽必须真的高于框架默认值，否则这条改动没有意义"
+        );
+        // 这个数字对外散在三处，改了要一起改，否则前端拿到的是旧值：
+        //   1. docs/frontend-integration.md §13.2（表格、警告框、TS 常量）
+        //   2. src/lexicon/handler/commands.rs 三条路由的 utoipa 413 description
+        //   3. 本断言自身
+        assert!(
+            MAX_STEP_CONTENT_BODY_BYTES == 8_192_000,
+            "整步内容上限变了：请同步 frontend-integration.md §13.2、三条路由的 utoipa 413 description，以及本断言"
+        );
+    }
+
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let entry_id = Uuid::now_v7();
+
+    // 形状不合 DTO 但结构完整的 JSON：能读完就是 422，读不完才是 413。
+    // 用它把「请求体被完整读入」与「词条是否存在」解耦。
+    let envelope = r#"{"not_a_field":""}"#.len();
+    let body_of_exactly = |total: usize| {
+        assert!(
+            total >= envelope,
+            "目标字节数至少要装得下 JSON 外壳（{envelope} 字节）"
+        );
+        let padding = "a".repeat(total - envelope);
+        let body = format!(r#"{{"not_a_field":"{padding}"}}"#).into_bytes();
+        assert_eq!(body.len(), total, "构造的请求体应恰好是目标字节数");
+        body
+    };
+
+    // 三条路由都放宽了，三条都要验——只测两条的话，漏挂 layer 的第三条不会红。
+    let step_content_routes = [
+        (
+            Method::PUT,
+            format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        ),
+        (
+            Method::PUT,
+            format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        ),
+        (
+            Method::POST,
+            format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        ),
+    ];
+
+    // 恰好等于上限：必须被完整读入（走到 DTO 反序列化才失败），不能是 413。
+    let at_limit = body_of_exactly(MAX_STEP_CONTENT_BODY_BYTES);
+    for (method, uri) in &step_content_routes {
+        let (status, problem) =
+            call_raw(&state, method.clone(), uri, &bearer, None, &at_limit).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "恰好等于上限的请求体应被接受并读完：{uri} → {problem}"
+        );
+        assert_eq!(problem["code"], "invalid_request_body");
+    }
+
+    // 上限 +1：必须 413，且是 payload_too_large 而不是 invalid_request_body。
+    let over_limit = body_of_exactly(MAX_STEP_CONTENT_BODY_BYTES + 1);
+    for (method, uri) in &step_content_routes {
+        let (status, problem) =
+            call_raw(&state, method.clone(), uri, &bearer, None, &over_limit).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "上限 +1 应被拒：{uri} → {problem}"
+        );
+        assert_eq!(problem["code"], "payload_too_large");
+        assert_eq!(problem["type"], "urn:tsz:problem:payload_too_large");
+    }
+
+    let over_axum_default = body_of_exactly(AXUM_DEFAULT_BODY_LIMIT + 4_096);
+
+    // 放宽是逐路由的：不承载整步内容的接口仍然吃 axum 默认值。
+    let idempotency_key = Uuid::now_v7().to_string();
+    let (status, problem) = call_raw(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/restore-batch"),
+        &bearer,
+        Some(&idempotency_key),
+        &over_axum_default,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "批量接口不应跟着放宽：{problem}"
+    );
+    assert_eq!(problem["code"], "payload_too_large");
 }

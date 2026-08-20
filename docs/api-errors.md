@@ -36,6 +36,7 @@ Content-Type: application/problem+json
 | 403 | Authenticated but forbidden | `forbidden`, `account_disabled`, `must_change_password` |
 | 404 | Resource not found | `not_found` |
 | 409 | Unique-resource conflict | `user_already_exists`, `phone_already_registered` |
+| 413 | Request body exceeds the route's byte limit | `payload_too_large` |
 | 422 | JSON body cannot be deserialized | `invalid_request_body` |
 | 423 | Account temporarily locked | `account_locked` |
 | 429 | OTP rate limit | `otp_rate_limited` |
@@ -44,6 +45,11 @@ Content-Type: application/problem+json
 
 `invalid_request_body` 只表示请求 JSON 无法反序列化为 DTO，并固定为 422。非法 JSON 语法使用
 `400 invalid_json`；领域层的手机号/邮箱二选一等错误使用更准确的 400 错误码。
+
+`payload_too_large` 只表示请求体超过了该路由的字节上限——JSON 本身可能完全合法，服务端根本
+没读完就拒绝了，因此不带 `field` 也不带 `field_issues`。各路由的具体上限见
+[`frontend-integration.md` §13](frontend-integration.md#13-词条录入的体积与长度上限后端已实现)。内容本身超出词条节点数或正文长度
+上限是另一回事，走 `422 validation_failed` 并在 `field_issues` 里给出具体 code。
 
 ## Indistinguishable security groups
 

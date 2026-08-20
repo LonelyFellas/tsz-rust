@@ -853,6 +853,80 @@ JSONB snapshot 做删除判断。
 既有消费者不改一行也照常工作。`required` 数组各多一项，
 `endpoints.contract.test.ts` 里基于 `arrayContaining` 的断言不受影响。
 
+## 13. 词条录入的体积与长度上限（后端已实现）
+
+> **状态（2026-08-20）**：常量本就在代码里，只是从未写进对接文档；本次同时修掉了两个
+> 会让前端拿不到正确信号的缺陷。上游诉求：前端「requirements 待确认第 12 条」——
+> 管理员可能录到一半被拒，前端无法提前拦。
+
+### 13.1 内容上限（超限 → `422 validation_failed`）
+
+| 上限 | 值 | 作用范围 |
+| --- | --- | --- |
+| 单个词条内容节点数 | **2000** | `forms` 与 `meanings` **各自**独立计数，不是两步之和 |
+| 单段富文本正文长度 | **5000** 个 Unicode 码点 | 每一段 RichText 单独计，注意是码点不是 UTF-16 length |
+| 单段富文本标注数 | **500** | V2 是 `annotations`；V1 的 `spans` 与 `liaisons` 各自独立计 500 |
+| 单个 IPA 音素长度 | **200** 个码点 | `phoneme` 标注，且不能为空 |
+| 单个停顿时长 | **1–5000** ms | `pause` 标注，必须是整数 |
+
+节点数超限时 `field_issues` 里给的是 **`aggregate_node_limit_exceeded`**（`field: "content"`），
+可以直接照着提示做。
+
+**但正文长度 / 标注数 / IPA / 停顿超限拿不到专门的 code**：这些失败会并入所在字段的既有
+错误码——语法结构给 `grammar_variants_invalid`、释义正文给 `definition_invalid`、
+例句给 `sentence_incomplete`——前端只知道「这个字段不合法」，不知道「因为太长」。
+这是后端刻意保持的现状（RichText 子码不外泄），所以**长度类限制请在前端本地先拦**，
+按上表的数字实现即可，别指望从错误码反推。
+
+### 13.2 请求体上限（超限 → `413 payload_too_large`）
+
+| 路由 | 上限 |
+| --- | --- |
+| `PUT /entries/{id}/steps/forms`<br>`PUT /entries/{id}/steps/meanings`<br>`POST /entries/{id}/steps/forms/impact` | **8,192,000 字节**（约 7.81 MiB） |
+| 其余所有接口 | **2 MiB**（2,097,152 字节，框架默认） |
+
+三条承载整步草稿内容的路由单独放宽，上限由 `节点数上限 × 每节点 4 KiB` 推导
+（2000 × 4096 = **8,192,000**）。现网草稿实测约 132 字节/节点（正文近乎为空），
+4 KiB/节点是给正文、标注和 JSON 结构留的余量。
+
+> ⚠️ **不是 8 MiB。** 8 MiB 是 8,388,608，比真实上限多 196,608 字节。写成 `8 * 1024 * 1024`
+> 会让前端放过一批服务端仍要 413 的请求，等于白做预检。请照抄 `8_192_000` 这个数。
+> 后端侧唯一来源是 `MAX_STEP_CONTENT_BODY_BYTES`（`src/lexicon/validation/structure.rs`），
+> 节点上限调整时它会跟着变，届时本节数字同步更新。
+
+前端要拦的话，量的是**序列化后的字节数**，不是字符数；上限是闭区间，恰好等于上限会被接受：
+
+```ts
+const STEP_CONTENT_BODY_LIMIT = 8_192_000; // 2000 节点 × 4 KiB，不是 8 MiB
+const bytes = new TextEncoder().encode(JSON.stringify(payload)).byteLength;
+if (bytes > STEP_CONTENT_BODY_LIMIT) { /* 提示拆分，别发出去 */ }
+```
+
+### 13.3 本次修了什么
+
+1. **整步保存的请求体上限从 2 MiB 提到 8,192,000 字节。** 之前吃框架默认值 2 MiB，而校验层允许
+   2000 节点——一条塞满的词条在校验之前就会被传输层 413 掉，且后端日志里看不出原因。
+2. **413 不再伪装成 422。** 之前 `ApiJson` 把所有非 400 的 rejection 统一映射成
+   `422 invalid_request_body`，超大请求体因此报「请求体不合法」。现在超限固定返回
+   `413 payload_too_large`（`type: "urn:tsz:problem:payload_too_large"`），
+   与「JSON 格式错」「DTO 形状错」三者互不混淆。
+
+### 13.4 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | `pnpm --filter @tsz/api-client sync:openapi` 同步 `openapi.snapshot.json`（`ErrorCode` 多了 `payload_too_large`） |
+| 2 | 错误处理补 `413 / payload_too_large` 分支，文案是「内容过大，请拆分」而不是「格式错误」 |
+| 3 | 编辑器按 §13.1 的数字做本地校验，尤其是 5000 码点和 500 标注——这两个后端不会给专门的 code |
+| 4 | 保存前按 §13.2 量一次字节数，超了就地提示，别发出去等 413 |
+
+### 13.5 兼容性
+
+`payload_too_large` 是**新增**错误码，旧前端撞不到它的前提是请求体本来就没超过 2 MiB；
+而现在两步保存的实际上限是放宽的，只会让原本失败的请求成功，不会让原本成功的请求失败。
+`ErrorCode` 枚举多一个值，`endpoints.contract.test.ts` 里基于 `arrayContaining` 的断言不受影响。
+内容上限的**数值一个都没改**，只是补了文档。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_

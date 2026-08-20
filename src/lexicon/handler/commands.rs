@@ -107,6 +107,7 @@ pub async fn suggest_dialect_variants(
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision、surface warning 或策略冲突"),
+        (status = 413, description = "请求体超过 8,192,000 字节"),
         (status = 422, description = "词形结构非法"),
         (status = 503, description = "确认 token 存储不可用")
     )
@@ -139,6 +140,7 @@ pub async fn preview_forms_impact(
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision、surface warning、策略或下游确认冲突"),
         (status = 410, description = "surface 确认 snapshot 已过期"),
+        (status = 413, description = "请求体超过 8,192,000 字节"),
         (status = 422, description = "词形校验失败"),
         (status = 503, description = "确认 token 存储不可用")
     )
@@ -171,6 +173,7 @@ pub async fn save_forms(
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision 或步骤可达性冲突"),
+        (status = 413, description = "请求体超过 8,192,000 字节"),
         (status = 422, description = "词义校验失败")
     )
 )]
