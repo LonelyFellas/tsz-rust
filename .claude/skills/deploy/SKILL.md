@@ -114,6 +114,27 @@ EOF
      47.121.142.19 加 DIRECT 规则；
    - 家用动态 IP 变了，Aliyun 安全组白名单失效 → 让用户去控制台给新 IP 加 /32。
 
+   这一项必须排在下面的 manifest 核对**之前**：ssh 连不上时 `cat` 会失败并被兜底成
+   空 JSON，看起来就像「服务器没有 manifest」，从而放行一次本该被拦下的空跑。
+3. **现有部署来源核对（动服务器状态之前必做）**：读服务器上的正式 manifest，
+   由脚本判定是否与本次目标相同——不要人眼比对两个 40 字符 SHA：
+   ```bash
+   set -a; . ~/.config/tsz-rust/deploy-state.env; set +a
+   deployed_sha=$(ssh tshb-test 'cat /opt/tsz-deploy-manifests/api.json 2>/dev/null || echo "{}"' \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source",{}).get("git_sha",""))')
+   echo "服务器当前: ${deployed_sha:-<无 manifest>}"
+   echo "本次目标:   $deploy_sha"
+   if [ "$deployed_sha" = "$deploy_sha" ]; then
+     echo "!! 该提交已经部署过 —— 停下来向用户报告并确认是否仍要重跑"
+   else
+     echo "OK 与服务器当前来源不同，可继续"
+   fi
+   ```
+   打印 `!!` 那行就**停下来**向用户确认，不要默认继续。多个 session 并行时，你对生产
+   当前版本的记忆会过期——别用记忆代替这一步。空跑一轮的代价不只是白费时间：第 4 节
+   撤下旧 manifest 后，服务器会陷入「有二进制、无来源记录」的半状态，必须重启服务走完
+   全流程才能恢复（2026-08-20 实际发生过）。
+
 ## 4. 部署步骤
 
 ```bash
