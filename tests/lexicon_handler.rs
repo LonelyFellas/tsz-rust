@@ -3171,6 +3171,7 @@ async fn related_search_reads_only_current_published_snapshots(pool: PgPool) {
                 "headword": "colour",
                 "kind": "word",
                 "dialects": ["common"],
+                "headword_variants": [{"dialect": "common", "headword": "colour"}],
                 "pos_labels": [],
                 "senses": [{"sense_id": sense_id, "gloss": "颜色"}]
             }, {
@@ -3178,6 +3179,7 @@ async fn related_search_reads_only_current_published_snapshots(pool: PgPool) {
                 "headword": "colour",
                 "kind": "word",
                 "dialects": ["common"],
+                "headword_variants": [{"dialect": "common", "headword": "colour"}],
                 "pos_labels": [],
                 "senses": [{"sense_id": second_sense_id, "gloss": "色彩"}]
             }]
@@ -3202,6 +3204,7 @@ async fn related_search_reads_only_current_published_snapshots(pool: PgPool) {
                 "headword": "colour centre",
                 "kind": "phrase",
                 "dialects": ["common"],
+                "headword_variants": [{"dialect": "common", "headword": "colour centre"}],
                 "pos_labels": [],
                 "senses": [{"sense_id": phrase_sense_id, "gloss": "色彩中心"}]
             }]
@@ -4765,6 +4768,14 @@ async fn list_rows_order_headword_spellings_by_source_dialect(pool: PgPool) {
     );
     assert_eq!(us_based["dialects"], json!(["us", "uk"]));
     assert_eq!(us_based["source_dialect"], "us");
+    // 结构化词头与 dialects 同序，让前端能按管理员方言偏好重排而不用切分 " / "。
+    assert_eq!(
+        us_based["headword_variants"],
+        json!([
+            {"dialect": "us", "headword": "listorderus"},
+            {"dialect": "uk", "headword": "listorderusbre"},
+        ])
+    );
 
     let uk_based = row(&fetch("listorderuk").await);
     assert_eq!(
@@ -4773,10 +4784,22 @@ async fn list_rows_order_headword_spellings_by_source_dialect(pool: PgPool) {
     );
     assert_eq!(uk_based["dialects"], json!(["uk", "us"]));
     assert_eq!(uk_based["source_dialect"], "uk");
+    assert_eq!(
+        uk_based["headword_variants"],
+        json!([
+            {"dialect": "uk", "headword": "listorderuk"},
+            {"dialect": "us", "headword": "listorderukame"},
+        ])
+    );
 
     let unified = row(&fetch("listordercommon").await);
     assert_eq!(unified["headword"], "listordercommon");
     assert_eq!(unified["dialects"], json!(["common"]));
+    assert_eq!(
+        unified["headword_variants"],
+        json!([{"dialect": "common", "headword": "listordercommon"}]),
+        "unified 词条也给结构化词头，只是单元素"
+    );
     assert!(
         !unified.as_object().unwrap().contains_key("source_dialect"),
         "unified 词条没有基准侧，字段应整体省略：{unified}"
@@ -4965,6 +4988,28 @@ async fn related_search_orders_headword_spellings_like_the_list(pool: PgPool) {
             result["dialects"], *expected_dialects,
             "dialects 必须与 headword 同序：{result}"
         );
+        // 结构化词头是同一份数据的另一种形状：方言顺序与 dialects 逐位相同，
+        // 拼写按序拼起来必须逐字符等于 headword，前端因此不必切分 " / "。
+        let variants = result["headword_variants"]
+            .as_array()
+            .expect("关联词搜索结果应带结构化词头");
+        assert_eq!(
+            variants
+                .iter()
+                .map(|variant| variant["dialect"].clone())
+                .collect::<Vec<_>>(),
+            *expected_dialects.as_array().expect("期望方言应为数组"),
+            "headword_variants 必须与 dialects 同序：{result}"
+        );
+        assert_eq!(
+            variants
+                .iter()
+                .map(|variant| variant["headword"].as_str().expect("拼写应为字符串"))
+                .collect::<Vec<_>>()
+                .join(" / "),
+            *expected_headword,
+            "headword_variants 按序拼接必须等于 headword：{result}"
+        );
 
         let (status, list) = call(
             &state,
@@ -4985,6 +5030,10 @@ async fn related_search_orders_headword_spellings_like_the_list(pool: PgPool) {
         assert_eq!(
             row["dialects"], result["dialects"],
             "列表与关联词搜索的方言顺序必须一致：{row} / {result}"
+        );
+        assert_eq!(
+            row["headword_variants"], result["headword_variants"],
+            "列表与关联词搜索的结构化词头必须一致：{row} / {result}"
         );
     }
 
@@ -6573,4 +6622,138 @@ async fn forms_and_meanings_reject_aggregate_node_limit_before_writes(pool: PgPo
     .unwrap();
     assert_eq!(stored_revision, revision);
     assert_eq!(node_count_after, node_count_before);
+}
+
+/// 语法结构的方言形状（后端提案 P1 · 英美方言偏好化 A1）：distinguish 词条既接受
+/// 历史的 uk + us 双条，也接受收敛后的单条 common；unified 词条仍然只接受 common，
+/// 缺一侧、多一侧或方言重复都照旧拒绝。
+#[sqlx::test]
+async fn grammar_structures_accept_a_single_common_variant_on_distinguish_entries(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let ready = create_ready_draft_with_headwords(
+        &state,
+        &pool,
+        &bearer,
+        "grammarcolour",
+        Some(json!({
+            "mode": "distinguish",
+            "uk": "grammarcolour",
+            "us": "grammarcolor",
+            "source_dialect": "uk",
+        })),
+    )
+    .await;
+    let entry_id = ready["word"]["id"].as_str().unwrap().to_owned();
+    let meanings = ready["word"]["meanings"].clone();
+    let template = meanings["pos"][0]["grammar_structures"][0]["variants"][0].clone();
+    assert_eq!(
+        meanings["pos"][0]["grammar_structures"][0]["variants"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "distinguish 骨架仍应产出 uk + us 双条，本用例的起点即历史形状"
+    );
+
+    // 收敛成单条 common 必须换新节点 ID：节点角色里带方言，复用旧 ID 会被判 node_binding_changed。
+    let fresh_variant = |dialect: &str| {
+        let mut variant = template.clone();
+        variant["id"] = json!(Uuid::now_v7());
+        variant["dialect"] = json!(dialect);
+        variant["content"] = rich_text("used as a noun");
+        variant
+    };
+    // 反过来，重新写回 uk / us 必须沿用骨架里那两个节点 ID——方言槽位一旦建过就固定了。
+    let stored_variant = |index: usize| {
+        let mut variant = meanings["pos"][0]["grammar_structures"][0]["variants"][index].clone();
+        variant["content"] = rich_text("used as a noun");
+        variant
+    };
+    let save = async |variants: Value, revision: i64| {
+        let mut content = meanings.clone();
+        content["pos"][0]["grammar_structures"][0]["variants"] = variants;
+        call(
+            &state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+            &bearer,
+            None,
+            Some(json!({
+                "base_revision": revision,
+                "intent": "complete",
+                "content": content,
+            })),
+        )
+        .await
+    };
+
+    let revision = ready["word"]["revision"].as_i64().expect("应带 revision");
+    let (status, converged) = save(json!([fresh_variant("common")]), revision).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "distinguish 词条的单条 common 语法结构应被接受：{converged}"
+    );
+    let stored = &converged["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"];
+    assert_eq!(stored.as_array().map(Vec::len), Some(1));
+    assert_eq!(stored[0]["dialect"], "common");
+
+    let revision = converged["word"]["revision"]
+        .as_i64()
+        .expect("应带 revision");
+    let (status, rejected) = save(json!([stored_variant(0)]), revision).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        has_issue(&rejected, "grammar_variants_invalid"),
+        "只写单侧 uk 仍应被拒：{rejected}"
+    );
+    let (status, rejected) = save(json!([stored[0].clone(), stored_variant(0)]), revision).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        has_issue(&rejected, "grammar_variants_invalid"),
+        "common 之外再挂一侧 uk 仍应被拒：{rejected}"
+    );
+
+    // unified 词条不跟着放宽：它只有 common 一种合法形状。
+    let unified = create_ready_draft(&state, &pool, &bearer, "grammarunified").await;
+    let mut content = unified["word"]["meanings"].clone();
+    let mut template = content["pos"][0]["grammar_structures"][0]["variants"][0].clone();
+    template["content"] = rich_text("used as a noun");
+    content["pos"][0]["grammar_structures"][0]["variants"] = json!(
+        ["uk", "us"]
+            .into_iter()
+            .map(|dialect| {
+                let mut variant = template.clone();
+                variant["id"] = json!(Uuid::now_v7());
+                variant["dialect"] = json!(dialect);
+                variant
+            })
+            .collect::<Vec<_>>()
+    );
+    let (status, rejected) = call(
+        &state,
+        Method::PUT,
+        &format!(
+            "{ROOT}/entries/{}/steps/meanings",
+            unified["word"]["id"].as_str().unwrap()
+        ),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": unified["word"]["revision"],
+            "intent": "complete",
+            "content": content,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        has_issue(&rejected, "grammar_variants_invalid"),
+        "unified 词条写 uk + us 双条仍应被拒：{rejected}"
+    );
 }

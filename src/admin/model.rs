@@ -35,6 +35,22 @@ pub enum AdminStatus {
     Disabled,
 }
 
+/// 管理员的英语方言偏好（英美方言偏好化 A1）：账号级个人设置，默认英式。
+/// 它只决定 admin 端的录入与展示口径，**不是词条属性**——同一条词条的英美并列拼写
+/// 由 `lexicon.entry_headwords` 承载，不因某个管理员偏好英式就消失。
+// example 必须挂在枚举定义上：字段级 `#[schema(example = ...)]` 对枚举字段会被 utoipa 静默丢弃
+// （枚举生成裸 $ref，挂不住兄弟属性）。
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+#[schema(example = "uk")]
+pub enum AdminDialectPreference {
+    /// 英式（默认）。
+    Uk,
+    /// 美式。
+    Us,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Admin {
     pub id: Uuid,
@@ -47,6 +63,7 @@ pub struct Admin {
     pub failed_login_count: i32,
     pub locked_until: Option<DateTime<Utc>>,
     pub created_by_admin_id: Option<Uuid>,
+    pub dialect_preference: AdminDialectPreference,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -105,6 +122,7 @@ mod tests {
             failed_login_count: 0,
             locked_until,
             created_by_admin_id: None,
+            dialect_preference: AdminDialectPreference::Uk,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

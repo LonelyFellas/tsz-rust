@@ -714,6 +714,145 @@ JSONB snapshot 做删除判断。
 词条这几个字符串/数组的元素顺序。线上 `lexicon.relations` 目前 0 行、草稿里也没有关联数据，
 不存在需要回填的存量快照。
 
+## 10. 语法结构不再强制英美双条（后端已实现）
+
+> **状态（2026-08-20）**：后端已实现，OpenAPI schema 不变（只放宽校验），**不需要重新 `sync:openapi`**。
+> 上游依据：前端 `docs/features/dialect-preference-migration/design.md` 提案 P1。
+
+### 10.1 背景
+
+英美方言偏好化（A1）之后，平台自己写的英文行文只维护一份。但后端此前要求
+`distinguish` 词条的 `grammar_structures[].variants` **精确等于** `[uk, us]`，
+前端只能写「两条同值镜像」：wire 里多一份冗余，学习端将来会读到
+「英式：a centre／美式：a centre」这种没有信息量的两行。
+
+### 10.2 后端改动
+
+`distinguish` 词条的语法结构变体集合现在同时接受 `[common]` 与 `[uk, us]`；
+`unified` 词条维持只接受 `[common]`。缺一侧（只写 `uk`）、多一侧（`common` + `uk`）、
+方言重复，仍然照旧报 `grammar_variants_invalid`。
+
+**AI 内容补全暂未跟着收敛**（提案 P1-b）：`content_completion` 对 `distinguish` 词条
+仍生成 uk / us 两份同值镜像。**这是有意押后**——现网前端对 `distinguish` 词条硬性要求
+`[uk, us]`，后端先产单份会让 AI 补全结果在第 3 步显示为「未填写」。
+**请在阶段 3 发布后告知后端**，后端随即改成单份 `common`（另开一个小 PR）。
+
+### 10.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 删掉「两条同值镜像」shim（design.md 阶段 6），`distinguish` 词条直接写单条 `common` |
+| 2 | 前端校验口径同步放宽：`unified ⇒ [common]`，`distinguish ⇒ [common]` 或 `[uk, us]` |
+| 3 | **收敛时要给 common 变体换新节点 ID**：节点角色里带方言（`meanings.content:en:<dialect>`），沿用旧 uk 变体的 ID 只改 `dialect` 会被判 `node_binding_changed` |
+| 4 | **反向同理**：把已收敛的词条改回 uk / us 双条，必须沿用最初那两个变体的节点 ID，用新 UUID 会被判 `stable_node_id_changed` |
+| 5 | mock（`apps/admin/src/features/dictionary/mock/`）与真实后端同口径，否则 mock 绿、真机 422 |
+
+### 10.4 兼容性
+
+纯放宽：存量的双条数据继续可读可写，旧前端一行不改也照常工作，`AdminWordV2` 的 schema
+与 `required` 数组均不变。后端产出侧**没有任何行为变化**（见上，AI 补全仍产双份），
+所以本节可以先于前端任何改动上线。
+
+## 11. 管理员方言偏好持久化（后端已实现）
+
+> **状态（2026-08-20）**：后端已实现并重新导出 `docs/openapi.json`。
+> 上游依据：`design.md` 提案 P2。**wire 形状与提案一致**，落地时改了端点路径与存储选型（见 11.2）。
+
+### 11.1 背景
+
+方言偏好现在落在按管理员隔离的 `localStorage`（`packages/shared/src/dialect-preference.ts`），
+换浏览器、换设备即丢；默认值前后端各存一份，早晚会漂移成「我明明没改过它怎么变了」。
+
+### 11.2 后端改动
+
+1. `GET /api/v1/admin/profile` 响应新增 `preferences` 对象，**字段恒在**（进 `required`）：
+
+   ```jsonc
+   { "id": "…", "phone": "…", "display_name": "…", "role": "admin",
+     "permissions": ["…"], "preferences": { "dialect": "uk" } }
+   ```
+
+   `dialect` 枚举 `"uk" | "us"`（schema `AdminDialectPreference`），从未设置过的管理员返回 `"uk"`。
+
+2. 新增 `PATCH /api/v1/admin/profile/preferences`：请求 `{ "dialect": "us" }`，
+   200 返回 `{ "preferences": { "dialect": "us" } }`（返回的是落库后的值）。
+
+   - **路径与提案不同**：提案写的是 `/admin/settings/preferences`，实际落在 `/admin/profile/preferences`。
+     `/admin/settings/*` 挂的是**全局目录配置**（词性配置，仅 `super_admin` 可写），
+     个人偏好是「我自己的」，语义上属于 profile。
+   - **存储用 `admins.dialect_preference TEXT + CHECK('uk','us')`**，不是 `preferences jsonb`，
+     与同表的 `role` / `status` 一致。**wire 仍是嵌套的 `preferences.dialect`**，
+     将来加第二项偏好时前端形状不用再变。
+
+3. 权限：任何已登录 admin 读写**自己的**。请求体里没有管理员 ID，改不到别人。
+   守卫与 profile 同一组：账号禁用 → 403 `account_disabled`，需先改密 → 403 `must_change_password`，
+   缺 / 失效 token → 401。
+4. 错误：`dialect` 不在枚举内或请求体缺字段 → 422 `invalid_request_body`（`application/problem+json`）。
+5. **默认值只由后端持有**，前端不再保留第二处默认——这是本次改动的重点。
+
+### 11.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | `pnpm --filter @tsz/api-client sync:openapi` 同步 `openapi.snapshot.json` |
+| 2 | `@tsz/types` 补 wire 类型：`AdminDialectPreference`、`AdminProfileResponse.preferences`（必填）、PATCH 的请求/响应 |
+| 3 | `@tsz/shared` 偏好内核的事实源切到服务端：读取用 profile 的 `preferences.dialect`，写入调 PATCH，`localStorage` 降为离线缓存（design.md 阶段 7） |
+| 4 | 前端的 `DEFAULT_DIALECT_PREFERENCE` 不再作为事实源，只保留为「profile 还没回来」时的兜底显示值 |
+| 5 | 解除契约测试里对应的 PENDING 项 |
+
+### 11.4 兼容性
+
+`preferences` 是**新增字段**，旧前端不读它即不受影响；`AdminProfileResponse.required` 多了一项，
+`endpoints.contract.test.ts` 里对 required 的 `arrayContaining` 断言不受影响。新端点纯新增。
+回滚 = 删列 + 摘掉端点，前端回落 `localStorage` 分支，代价仅是偏好回到默认英式，无数据损失。
+
+## 12. 列表与关联词搜索补结构化词头（后端已实现）
+
+> **状态（2026-08-20）**：后端已实现并重新导出 `docs/openapi.json`。
+> 上游依据：`design.md` 提案 P3。§8 / §9 只统一了并列拼写的**顺序**，本节把**结构**也给出来。
+
+### 12.1 背景
+
+§8 / §9 之后，`headword` 已经按「`common` → 检测基准侧 → 另一侧」拼好，`dialects` 与之同序。
+但要按 A1 的**管理员方言偏好**重排（design.md 阶段 4），前端得知道每一侧各是哪个拼写——
+而 `headword` 是一个拼好的字符串，`split(" / ")` 又是 §8.3 / §9.3 明确禁止的
+（短语词条的拼写里可能出现斜杠）。
+
+### 12.2 后端改动
+
+`AdminWordListItem` 与 `RelatedWordResult` 新增 `headword_variants`，与 `dialects` **同序**：
+
+```jsonc
+{
+  "headword": "colour / color",          // 保留，未改语义
+  "dialects": ["uk", "us"],              // 保留，未改语义
+  "source_dialect": "uk",                // 列表行才有（§8）
+  "headword_variants": [
+    { "dialect": "uk", "headword": "colour" },
+    { "dialect": "us", "headword": "color" }
+  ]
+}
+```
+
+- `unified` 词条返回单元素 `[{ "dialect": "common", "headword": "…" }]`。
+- 不变量（测试钉死）：`headword_variants` 的方言序列 ≡ `dialects`；按序拼接 ≡ `headword`。
+  列表行与关联词搜索对同一词条返回的 `headword_variants` 逐字段相同。
+
+### 12.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | `pnpm --filter @tsz/api-client sync:openapi` 同步 `openapi.snapshot.json` |
+| 2 | `@tsz/types` 给 `AdminWordListItem` 与 `RelatedWordResult` 补 `headword_variants: HeadwordVariant[]`（必填） |
+| 3 | 列表「词汇」列按偏好排序：从 `headword_variants` 里挑出偏好侧在前，自己拼展示串；不想排序就继续用 `headword`，行为与今天一致 |
+| 4 | mock 同步补上该字段，否则 mock 与真实后端不同形 |
+
+### 12.4 兼容性
+
+纯新增字段，`headword` / `dialects` / `source_dialect` 的语义与取值一律未变，
+既有消费者不改一行也照常工作。`required` 数组各多一项，
+`endpoints.contract.test.ts` 里基于 `arrayContaining` 的断言不受影响。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_

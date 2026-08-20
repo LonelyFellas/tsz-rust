@@ -155,15 +155,17 @@ impl LexiconRepository {
                    ), ARRAY[]::text[]) AS dialects,
                    entry.revision,
                    entry.lifecycle_revision,
+                   -- 每侧拼写与上面的 dialects 同序；展示用的并列串由 service 按序拼接，
+                   -- 免得两个聚合各写一遍排序规则、日后又各改各的。
                    COALESCE((
-                       SELECT string_agg(headword.headword, ' / ' ORDER BY CASE
+                       SELECT array_agg(headword.headword ORDER BY CASE
                            WHEN headword.dialect = 'common' THEN 0
                            WHEN headword.dialect = entry.source_dialect THEN 1
                            WHEN headword.dialect = 'uk' THEN 2
                            ELSE 3 END)
                        FROM lexicon.entry_headwords headword
                        WHERE headword.entry_id = entry.id
-                   ), '') AS headword,
+                   ), ARRAY[]::text[]) AS headword_spellings,
                    COALESCE((
                        SELECT variant.plain_text
                        FROM lexicon.definitions definition

@@ -50,6 +50,7 @@ use utoipa::{
         crate::admin::auth::handler::admin_logout,
         crate::admin::auth::handler::change_password,
         crate::admin::profile::handler::admin_profile,
+        crate::admin::profile::handler::update_admin_preferences,
         crate::admin::accounts::handler::create_admin,
         crate::admin::accounts::handler::request_create_admin_code,
         crate::admin::accounts::handler::list_admins,
@@ -120,9 +121,13 @@ use utoipa::{
             crate::admin::auth::handler::ChangePasswordRequest,
             crate::admin::auth::handler::AdminProfile,
             crate::admin::profile::handler::AdminProfileResponse,
+            crate::admin::profile::handler::AdminPreferences,
+            crate::admin::profile::handler::UpdateAdminPreferencesRequest,
+            crate::admin::profile::handler::UpdateAdminPreferencesResponse,
             crate::admin::auth::handler::AdminToken,
             crate::admin::AdminRole,
             crate::admin::AdminStatus,
+            crate::admin::AdminDialectPreference,
             crate::admin::accounts::AdminAccountAdminResponse,
             crate::admin::accounts::AdminCreatorResponse,
             crate::admin::accounts::AdminAccountUserResponse,
@@ -226,6 +231,7 @@ use utoipa::{
             crate::lexicon::dto::AdminWordListResponse,
             crate::lexicon::dto::RelatedWordSense,
             crate::lexicon::dto::RelatedWordResult,
+            crate::lexicon::dto::HeadwordVariant,
             crate::lexicon::dto::RelatedSearchMatchMode,
             crate::lexicon::dto::RelatedSearchLegacyResponse,
             crate::lexicon::dto::RelatedSearchV2Response,
@@ -551,6 +557,7 @@ mod tests {
             ("post", "/api/v1/admin/auth/logout"),
             ("post", "/api/v1/admin/auth/change-password"),
             ("get", "/api/v1/admin/profile"),
+            ("patch", "/api/v1/admin/profile/preferences"),
             ("post", "/api/v1/admin/admins"),
             ("post", "/api/v1/admin/admins/create-code"),
             ("get", "/api/v1/admin/admins"),
@@ -687,10 +694,17 @@ mod tests {
                 "ChangePasswordRequest 应要求 {field}"
             );
         }
-        // profile 响应：flatten+inline 的 4 字段概要 + permissions 必须都出现在 schema 里
-        // （utoipa 对 serde flatten 字段需要 #[schema(inline)]，漏了 spec 会缺概要字段）。
+        // profile 响应：flatten+inline 的 4 字段概要 + permissions + preferences 必须都出现在
+        // schema 里（utoipa 对 serde flatten 字段需要 #[schema(inline)]，漏了 spec 会缺概要字段）。
         let profile_props = &json["components"]["schemas"]["AdminProfileResponse"]["properties"];
-        for field in ["id", "phone", "display_name", "role", "permissions"] {
+        for field in [
+            "id",
+            "phone",
+            "display_name",
+            "role",
+            "permissions",
+            "preferences",
+        ] {
             assert!(
                 profile_props[field].is_object(),
                 "AdminProfileResponse schema 应含 {field} 字段（flatten 展开后），实际：{profile_props}"

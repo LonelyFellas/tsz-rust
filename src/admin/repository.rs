@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    admin::{Admin, AdminRole, AdminStatus, NewAdmin},
+    admin::{Admin, AdminDialectPreference, AdminRole, AdminStatus, NewAdmin},
     platform::is_unique_violation,
 };
 
@@ -36,6 +36,7 @@ impl AdminRepository {
                       status as "status: AdminStatus",
                       must_change_password, failed_login_count, locked_until,
                       created_by_admin_id,
+                      dialect_preference as "dialect_preference: AdminDialectPreference",
                       created_at, updated_at
             "#,
             admin.id,
@@ -54,7 +55,7 @@ impl AdminRepository {
         sqlx::query_as!(
             Admin,
             r#"
-            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, created_at, updated_at
+            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", created_at, updated_at
             FROM admins
             WHERE id = $1
             "#,
@@ -69,7 +70,7 @@ impl AdminRepository {
         sqlx::query_as!(
             Admin,
             r#"
-            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, created_at, updated_at
+            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", created_at, updated_at
             FROM admins
             WHERE phone = $1
             "#,
@@ -94,6 +95,28 @@ impl AdminRepository {
         .ok_or(AdminRepositoryError::NotFound)?;
 
         Ok(role)
+    }
+
+    /// 管理员改自己的方言偏好。返回落库后的值而不是请求里的值，
+    /// 让调用方回显的一定是服务端事实（默认值也只有这一处）。
+    pub async fn set_dialect_preference(
+        &self,
+        id: &Uuid,
+        preference: AdminDialectPreference,
+    ) -> Result<AdminDialectPreference, AdminRepositoryError> {
+        sqlx::query_scalar!(
+            r#"
+            UPDATE admins
+            SET dialect_preference = $2, updated_at = NOW()
+            WHERE id = $1
+            RETURNING dialect_preference as "dialect_preference: AdminDialectPreference"
+            "#,
+            id,
+            preference as AdminDialectPreference,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(AdminRepositoryError::NotFound)
     }
 
     // 强制重置等场景，无条件更新，比如超级管理员给管理员重置密码等情况

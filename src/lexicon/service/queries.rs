@@ -229,9 +229,16 @@ impl LexiconService {
             .map(|record| {
                 let word: AdminWordV2 =
                     serde_json::from_value(record.snapshot).map_err(serialization_error)?;
-                let dialects = ordered_headword_sides(&word.headwords)
+                let headword_variants = ordered_headword_sides(&word.headwords)
                     .into_iter()
-                    .map(|(dialect, _)| dialect)
+                    .map(|(dialect, headword)| HeadwordVariant {
+                        dialect,
+                        headword: headword.to_owned(),
+                    })
+                    .collect::<Vec<_>>();
+                let dialects = headword_variants
+                    .iter()
+                    .map(|variant| variant.dialect)
                     .collect();
                 let senses = word
                     .meanings
@@ -248,6 +255,7 @@ impl LexiconService {
                     headword: published_word_headword(&word),
                     kind: word.kind,
                     dialects,
+                    headword_variants,
                     pos_labels: record.pos_labels,
                     senses,
                 })
@@ -343,38 +351,55 @@ impl LexiconService {
         };
         let words = records
             .into_iter()
-            .map(|record| AdminWordListItem {
-                schema_version: 2,
-                id: record.id,
-                headword: record.headword,
-                kind: parse_kind(&record.kind).unwrap_or(EntryKind::Word),
-                source_dialect: record
-                    .source_dialect
-                    .as_deref()
-                    .and_then(parse_source_dialect),
-                dialects: record
+            .map(|record| {
+                // 方言与拼写按同一排序键成对取回；先配对再解析，
+                // 解析失败的方言会连着它那一侧拼写一起丢掉，两个数组不会错位。
+                let headword_variants = record
                     .dialects
                     .iter()
-                    .filter_map(|dialect| parse_dialect(dialect))
-                    .collect(),
-                revision: record.revision,
-                lifecycle_revision: record.lifecycle_revision,
-                gloss: record.gloss,
-                pos_list: record.pos_list,
-                levels: record.levels,
-                status: if record.is_archived {
-                    AdminWordStatus::Archived
-                } else if record.is_published {
-                    AdminWordStatus::Published
-                } else {
-                    AdminWordStatus::Draft
-                },
-                published_revision: record.published_revision,
-                has_unpublished_changes: record.has_unpublished_changes,
-                max_reachable_step: max_reachable_step(&record.completed_steps),
-                created_by_name: record.created_by_name,
-                created_at: record.created_at,
-                updated_at: record.updated_at,
+                    .zip(record.headword_spellings)
+                    .filter_map(|(dialect, headword)| {
+                        parse_dialect(dialect).map(|dialect| HeadwordVariant { dialect, headword })
+                    })
+                    .collect::<Vec<_>>();
+                let headword = headword_variants
+                    .iter()
+                    .map(|variant| variant.headword.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                AdminWordListItem {
+                    schema_version: 2,
+                    id: record.id,
+                    headword,
+                    kind: parse_kind(&record.kind).unwrap_or(EntryKind::Word),
+                    source_dialect: record
+                        .source_dialect
+                        .as_deref()
+                        .and_then(parse_source_dialect),
+                    dialects: headword_variants
+                        .iter()
+                        .map(|variant| variant.dialect)
+                        .collect(),
+                    headword_variants,
+                    revision: record.revision,
+                    lifecycle_revision: record.lifecycle_revision,
+                    gloss: record.gloss,
+                    pos_list: record.pos_list,
+                    levels: record.levels,
+                    status: if record.is_archived {
+                        AdminWordStatus::Archived
+                    } else if record.is_published {
+                        AdminWordStatus::Published
+                    } else {
+                        AdminWordStatus::Draft
+                    },
+                    published_revision: record.published_revision,
+                    has_unpublished_changes: record.has_unpublished_changes,
+                    max_reachable_step: max_reachable_step(&record.completed_steps),
+                    created_by_name: record.created_by_name,
+                    created_at: record.created_at,
+                    updated_at: record.updated_at,
+                }
             })
             .collect();
         Ok(AdminWordListResponse {
