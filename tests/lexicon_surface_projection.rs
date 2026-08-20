@@ -8,6 +8,49 @@ use tsz_rust::lexicon::{
 };
 use uuid::Uuid;
 
+/// 屏障解除后剩下的活儿只有「拿连接 + 抢咨询锁 + 一次 Redis CAS」，正常是毫秒级。
+/// 给足余量只为在真死锁时仍能有界失败，不是对时延下断言——CI 上几百个连库测试并行
+/// 抢同一个 Postgres/Redis 时，卡到秒级属于负载抖动，不该报成 bug。
+const BARRIER_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 阻塞到本库里至少有 `expected` 个未授予的 advisory lock 等待者。
+///
+/// 用来替代「sleep 一小会儿再假定它已经排队」：`transition` 的两条路径进锁时机不
+/// 对称——enable 先抢锁，disable 先写一次 Redis 再抢锁——固定等待猜不准，排队顺序
+/// 会随负载颠倒。而顺序是有意义的：Postgres 按等待队列的到达顺序授予咨询锁，所以
+/// 「确认前一个真的排进队列了，再放下一个」就是本文件里 enable 必然先于 disable 被
+/// 授予的全部依据。
+///
+/// 两个前提：`#[sqlx::test]` 给每个测试独立的库，因此本库里任何未授予的 advisory
+/// lock 都属于当前测试（不必再按锁键过滤）；调用方连同被观测的两个任务和外层事务
+/// 一共占 4 条连接，而 sqlx 给测试池的上限是 5，再多一个并发持连接方就会把本函数
+/// 饿死在等连接上。
+async fn await_advisory_lock_waiters(pool: &PgPool, expected: i64) {
+    let deadline = tokio::time::Instant::now() + BARRIER_RELEASE_TIMEOUT;
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM pg_locks
+            WHERE locktype = 'advisory'
+              AND NOT granted
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            "#,
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting >= expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "等待 {expected} 个 advisory lock 排队者超时，当前 {waiting}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn insert_admin(pool: &PgPool) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
@@ -477,7 +520,7 @@ async fn policy_disable_barrier_waits_for_inflight_surface_writer(pool: PgPool) 
         "exclusive disable barrier must wait while a create holds the shared writer barrier"
     );
     writer.commit().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), barrier)
+    tokio::time::timeout(BARRIER_RELEASE_TIMEOUT, barrier)
         .await
         .expect("disable barrier should pass after the writer commits");
 
@@ -532,7 +575,7 @@ async fn policy_enable_waits_for_cutover_barrier_before_redis_cas(pool: PgPool) 
     );
 
     cutover.commit().await.unwrap();
-    let enabled = tokio::time::timeout(Duration::from_secs(2), enable)
+    let enabled = tokio::time::timeout(BARRIER_RELEASE_TIMEOUT, enable)
         .await
         .expect("policy enable should finish after cutover releases its barrier");
     assert!(enabled.enabled);
@@ -565,42 +608,46 @@ async fn policy_disable_reasserts_false_after_an_inflight_enable(pool: PgPool) {
     .await
     .unwrap();
 
+    // 两个转换都用独立任务驱动：屏障释放后谁先被授予锁都能自己跑完并释放。
+    // 顺序靠 pg_locks 观测确认，不靠 sleep 猜。
     let enable_pool = pool.clone();
     let enable_policy = policy.clone();
-    let mut enable = Box::pin(async move {
+    let enable = tokio::spawn(async move {
         enable_policy
             .transition_exact_headword_creation(&enable_pool, true)
             .await
             .unwrap()
     });
+    await_advisory_lock_waiters(&pool, 1).await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut enable)
-            .await
-            .is_err()
+        !enable.is_finished(),
+        "policy enable must wait while the outer cutover holds the exclusive barrier"
     );
 
     let disable_pool = pool.clone();
     let disable_policy = policy.clone();
-    let mut disable = Box::pin(async move {
+    let disable = tokio::spawn(async move {
         disable_policy
             .transition_exact_headword_creation(&disable_pool, false)
             .await
             .unwrap()
     });
+    await_advisory_lock_waiters(&pool, 2).await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut disable)
-            .await
-            .is_err()
+        !disable.is_finished(),
+        "policy disable must queue behind the in-flight enable"
     );
 
     outer_cutover.commit().await.unwrap();
-    let enabled = tokio::time::timeout(Duration::from_secs(2), enable)
+    let enabled = tokio::time::timeout(BARRIER_RELEASE_TIMEOUT, enable)
         .await
-        .expect("queued enable should finish after the outer cutover");
+        .expect("queued enable should finish after the outer cutover")
+        .unwrap();
     assert!(enabled.enabled);
-    let disabled = tokio::time::timeout(Duration::from_secs(2), disable)
+    let disabled = tokio::time::timeout(BARRIER_RELEASE_TIMEOUT, disable)
         .await
-        .expect("disable should obtain exclusive barrier after enable");
+        .expect("disable should obtain exclusive barrier after enable")
+        .unwrap();
     assert!(!disabled.enabled);
     assert!(disabled.epoch > enabled.epoch);
     assert!(!policy.exact_headword_creation().await.unwrap().enabled);
@@ -627,7 +674,7 @@ async fn lock_held_surface_requery_uses_the_same_connection(pool: PgPool) {
         .unwrap();
 
     let rows = tokio::time::timeout(
-        Duration::from_secs(2),
+        BARRIER_RELEASE_TIMEOUT,
         LexiconRepository::surface_sources_in_transaction(
             &mut transaction,
             "en",
