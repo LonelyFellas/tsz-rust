@@ -41,6 +41,22 @@ fn source_headword(headwords: &WordHeadwordsV2) -> &str {
     }
 }
 
+/// 并列展示的方言顺序：common 或检测基准侧在前。
+/// 与列表行 SQL（repository/query.rs 的 ORDER BY CASE）保持同一规则。
+pub(super) fn ordered_headword_sides(headwords: &WordHeadwordsV2) -> Vec<(Dialect, &str)> {
+    match headwords {
+        WordHeadwordsV2::Unified { common } => vec![(Dialect::Common, common.as_str())],
+        WordHeadwordsV2::Distinguish {
+            uk,
+            us,
+            source_dialect,
+        } => match source_dialect {
+            SourceDialect::Uk => vec![(Dialect::Uk, uk.as_str()), (Dialect::Us, us.as_str())],
+            SourceDialect::Us => vec![(Dialect::Us, us.as_str()), (Dialect::Uk, uk.as_str())],
+        },
+    }
+}
+
 pub(super) fn normalize_submitted_headwords(
     headwords: &mut WordHeadwordsV2,
 ) -> Result<(), LexiconServiceError> {

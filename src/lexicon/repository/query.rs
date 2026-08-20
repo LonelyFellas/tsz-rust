@@ -30,14 +30,26 @@ impl LexiconRepository {
                        entry.kind,
                        publication.id AS publication_id,
                        publication.snapshot,
+                       -- 只作排序/游标键；必须与服务端返回的 headword 逐字符相同，
+                       -- 否则下拉框会按一个和显示文本不同的串排序。
+                       -- 并列拼写一律「检测基准侧在前」，与
+                       -- service/helpers.rs 的 ordered_headword_sides 同规则。
                        CASE publication.snapshot #>> '{headwords,mode}'
                            WHEN 'unified' THEN
                                COALESCE(publication.snapshot #>> '{headwords,common}', '')
-                           WHEN 'distinguish' THEN concat_ws(
-                               ' / ',
-                               NULLIF(publication.snapshot #>> '{headwords,uk}', ''),
-                               NULLIF(publication.snapshot #>> '{headwords,us}', '')
-                           )
+                           WHEN 'distinguish' THEN
+                               CASE WHEN publication.snapshot #>> '{headwords,source_dialect}' = 'us'
+                                   THEN concat_ws(
+                                       ' / ',
+                                       NULLIF(publication.snapshot #>> '{headwords,us}', ''),
+                                       NULLIF(publication.snapshot #>> '{headwords,uk}', '')
+                                   )
+                                   ELSE concat_ws(
+                                       ' / ',
+                                       NULLIF(publication.snapshot #>> '{headwords,uk}', ''),
+                                       NULLIF(publication.snapshot #>> '{headwords,us}', '')
+                                   )
+                               END
                            ELSE ''
                        END AS headword
                 FROM lexicon.entries entry

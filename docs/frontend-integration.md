@@ -667,6 +667,53 @@ JSONB snapshot 做删除判断。
 `endpoints.contract.test.ts` 对 `AdminWordListItem.required` 的 `arrayContaining` 断言）不受影响。
 唯一的行为变化是 `distinguish` 词条 `headword` / `dialects` 的元素顺序——这正是本次要修的缺陷。
 
+## 9. 关联词搜索与引用预览：并列拼写同样按检测基准侧排序（后端已实现）
+
+> **状态（2026-08-20）**：后端已实现，OpenAPI schema 不变（仅字段取值顺序变化）。
+
+### 9.1 背景
+
+§8 只改了 `GET /admin/lexicon/entries` 列表行。关联词搜索
+（`GET /admin/lexicon/entries/related-search`）与建稿第 1 步的「已有词条被谁引用」预览，
+仍固定按 `uk → us` 拼词头，于是 `source_dialect = "us"` 的同一个词条在列表显示
+`color / colour`，在关联词搜索结果里却是 `colour / color`——正是 §8 要消灭的那类矛盾换了位置。
+
+### 9.2 后端改动
+
+统一为与 §8 完全相同的规则「`common` → 检测基准侧 → 另一侧」，涉及：
+
+1. `RelatedWordResult.headword` 与 `RelatedWordResult.dialects` 改为**同序**。
+   `source_dialect = "us"` 时返回 `"color / colour"` 与 `["us", "uk"]`，
+   `source_dialect = "uk"` 时返回 `"centre / center"` 与 `["uk", "us"]`。
+2. `RelationReferencePreviewV2.source_headword`（词条创建/词形保存/发布时返回的
+   `matched_entry_contexts[].inbound_relations.previews[].source_headword`）同规则。
+3. 建稿保存关联词时由后端回填的只读字段 `WordRelationV2.target_headword`，以及发布后落库的
+   词头快照，同规则。保存（canonicalize）与发布（verify）共用同一段计算，两者不会打架。
+
+`mode = "unified"` 的词条只有 `common` 一条词头，`headword` / `source_headword` 仍是单个拼写、
+`dialects` 仍是 `["common"]`，行为与改动前完全相同。
+
+关联词搜索的**排序键**（也是 `next_cursor` 的内容）一直就是它返回的 `headword` 那个字符串，
+本次一并改成基准侧在前，两者继续逐字符相同。副作用是 `source_dialect = "us"` 的
+`distinguish` 词条在结果里的字母序位置会变（这正是「按看到的词头排序」应有的行为）；
+`next_cursor` 的**格式与语义不变**，但上线瞬间已经发出去的游标可能落在稍有偏差的边界上，
+重新发起一次搜索即可。线上尚无已发布的 `distinguish` 词条，实际不受影响。
+
+### 9.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 关联词搜索下拉、引用预览**无需改渲染逻辑**——直接消费即可得到正确顺序 |
+| 2 | 仍然不要用 `split(" / ")` 反推英/美拼写；需要基准侧就读 `AdminWordV2.headwords.source_dialect`（列表行读 §8 新增的 `AdminWordListItem.source_dialect`） |
+| 3 | mock（`apps/admin/src/features/dictionary/mock/`）里 `distinguish` 词条的 `RelatedWordResult.headword` / `dialects` 与 `source_headword` 按基准侧在前重排，否则 mock 与真实后端不一致 |
+
+### 9.4 兼容性
+
+不新增/删除任何字段，`RelatedWordResult`、`RelationReferencePreviewV2` 的 schema 与
+`required` 数组均不变，因此**不需要重新 `sync:openapi`**。唯一的行为变化是 `distinguish`
+词条这几个字符串/数组的元素顺序。线上 `lexicon.relations` 目前 0 行、草稿里也没有关联数据，
+不存在需要回填的存量快照。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_
