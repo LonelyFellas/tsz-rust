@@ -660,7 +660,9 @@ impl LexiconService {
                 &catalog.sub_part_parents,
             )
         {
-            return Err(LexiconServiceError::ValidationFailed(issues));
+            return Err(LexiconServiceError::ValidationFailed(
+                meanings_storage_issues(entry_id, issues),
+            ));
         }
         if intent == StepSaveIntent::Complete && !issues.is_empty() {
             return Err(LexiconServiceError::ValidationFailed(issues));
@@ -1287,6 +1289,36 @@ pub(super) fn reconcile_meanings_after_forms(
 
 // --- storage validation ---
 
+/// 存储安全网拦下内容时回给调用方的 issue 列表。
+///
+/// `meaning_storage_is_safe` / `canonicalize_meanings` 与 `validate_meanings` 是两份
+/// 独立维护的判定清单，判定条件并不完全重合。安全网拦下、而 `validate_meanings` 恰好
+/// 没产出任何 issue 时，兜一条存储层问题，避免回出 `field_issues` 为空、前端无处定位
+/// 的 422。
+pub(super) fn meanings_storage_issues(
+    entry_id: Uuid,
+    issues: Vec<DraftValidationIssue>,
+) -> Vec<DraftValidationIssue> {
+    if !issues.is_empty() {
+        return issues;
+    }
+    // 走到这里说明两份清单已经漂移：安全网拦下了 validate_meanings 认可的内容。
+    // 兜底保住了响应体，但漂移本身是要修的，留一条日志让它可观测而不是被悄悄抹平。
+    tracing::warn!(
+        %entry_id,
+        "存储安全网拦下了 validate_meanings 未报错的词义内容，两份判定清单可能已漂移"
+    );
+    vec![DraftValidationIssue {
+        step: PersistedWordStep::Meanings,
+        node_id: entry_id,
+        field: "content".to_owned(),
+        code: "meanings_storage_unsafe".to_owned(),
+        message: "词义内容无法安全存储".to_owned(),
+        reference_location: None,
+        node_location: None,
+    }]
+}
+
 pub(super) fn meaning_storage_is_safe(
     entry_id: Uuid,
     forms: &DraftFormsStepContent,
@@ -1644,6 +1676,49 @@ mod forms_surface_tests {
             )
             .len(),
             1
+        );
+    }
+}
+
+#[cfg(test)]
+mod meanings_storage_issue_tests {
+    use super::*;
+
+    #[test]
+    fn storage_rejection_never_returns_an_empty_issue_list() {
+        let entry_id = Uuid::now_v7();
+        let issues = meanings_storage_issues(entry_id, Vec::new());
+        assert_eq!(issues.len(), 1, "空 issues 必须兜一条存储层问题");
+        assert_eq!(issues[0].code, "meanings_storage_unsafe");
+        assert_eq!(issues[0].step, PersistedWordStep::Meanings);
+        assert_eq!(
+            issues[0].node_id, entry_id,
+            "存储层问题锚定到词条本身，前端才有定位落点"
+        );
+    }
+
+    #[test]
+    fn existing_issues_are_passed_through_untouched() {
+        let entry_id = Uuid::now_v7();
+        let node_id = Uuid::now_v7();
+        let original = vec![DraftValidationIssue {
+            step: PersistedWordStep::Meanings,
+            node_id,
+            field: "pos_id".to_owned(),
+            code: "pos_not_found".to_owned(),
+            message: "词义引用了不存在的基本词性".to_owned(),
+            reference_location: None,
+            node_location: None,
+        }];
+        let issues = meanings_storage_issues(entry_id, original);
+        assert_eq!(issues.len(), 1, "已有具体 issue 时不得被兜底问题稀释");
+        assert_eq!(
+            issues[0].code, "pos_not_found",
+            "已有具体 issue 时不得被兜底问题替换"
+        );
+        assert_eq!(
+            issues[0].node_id, node_id,
+            "具体 issue 的节点定位必须原样保留"
         );
     }
 }
