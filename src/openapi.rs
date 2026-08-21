@@ -58,6 +58,9 @@ use utoipa::{
         crate::admin::accounts::handler::set_admin_status,
         crate::admin::accounts::handler::reset_admin_password,
         crate::admin::accounts::handler::list_users,
+        crate::admin::accounts::handler::get_user,
+        crate::admin::accounts::handler::set_user_status,
+        crate::admin::accounts::handler::update_user,
         // catalog 域
         crate::catalog::handler::catalog,
         crate::catalog::handler::list_parts,
@@ -141,6 +144,8 @@ use utoipa::{
             crate::admin::accounts::handler::CreateAdminResponse,
             crate::admin::accounts::handler::UpdateAdminStatusRequest,
             crate::admin::accounts::handler::ResetAdminPasswordResponse,
+            crate::admin::accounts::handler::UpdateUserStatusRequest,
+            crate::admin::accounts::handler::UpdateUserRequest,
             crate::user::model::UserStatus,
             // catalog
             crate::catalog::model::Actor,
@@ -563,13 +568,19 @@ mod tests {
             ("post", "/api/v1/admin/auth/refresh"),
             ("post", "/api/v1/admin/auth/login-code"),
             ("post", "/api/v1/admin/auth/logout"),
+            ("post", "/api/v1/admin/auth/logout-all"),
             ("post", "/api/v1/admin/auth/change-password"),
             ("get", "/api/v1/admin/profile"),
             ("patch", "/api/v1/admin/profile/preferences"),
             ("post", "/api/v1/admin/admins"),
             ("post", "/api/v1/admin/admins/create-code"),
             ("get", "/api/v1/admin/admins"),
+            ("patch", "/api/v1/admin/admins/{admin_id}/status"),
+            ("post", "/api/v1/admin/admins/{admin_id}/reset-password"),
             ("get", "/api/v1/admin/users"),
+            ("get", "/api/v1/admin/users/{id}"),
+            ("patch", "/api/v1/admin/users/{id}"),
+            ("patch", "/api/v1/admin/users/{id}/status"),
             ("get", "/api/v1/admin/settings/parts-of-speech/catalog"),
             ("get", "/api/v1/admin/settings/parts-of-speech"),
             ("post", "/api/v1/admin/settings/parts-of-speech"),
@@ -906,6 +917,41 @@ mod tests {
                 "{field} 不应出现在 required 中"
             );
         }
+        // 三条单用户端点：鉴权 + 路径参数 + 与列表条目同一个响应 schema。
+        for (method, path) in [
+            ("get", "/api/v1/admin/users/{id}"),
+            ("patch", "/api/v1/admin/users/{id}"),
+            ("patch", "/api/v1/admin/users/{id}/status"),
+        ] {
+            let operation = &json["paths"][path][method];
+            assert_eq!(
+                operation["security"][0]["bearer_auth"],
+                serde_json::json!([]),
+                "{method} {path} 必须声明 Bearer 鉴权"
+            );
+            assert!(
+                operation["parameters"]
+                    .as_array()
+                    .expect("应声明路径参数")
+                    .iter()
+                    .any(|parameter| parameter["name"] == "id"
+                        && parameter["in"] == "path"
+                        && parameter["required"] == serde_json::json!(true)),
+                "{method} {path} 应声明必填的 path 参数 id"
+            );
+            for status in ["200", "401", "403", "404"] {
+                assert!(
+                    operation["responses"][status].is_object(),
+                    "{method} {path} 应声明 {status} 响应"
+                );
+            }
+            assert_eq!(
+                operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/AdminAccountUserResponse",
+                "{method} {path} 应返回与列表条目同形状的 AdminUser"
+            );
+        }
+
         assert!(
             json["paths"]["/api/v1/admin/admins/users"].is_null(),
             "用户列表不得继续暴露在错误的 /api/v1/admin/admins/users 路径"

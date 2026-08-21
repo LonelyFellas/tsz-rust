@@ -17,6 +17,14 @@ pub fn router() -> Router<AppState> {
             patch(admin::profile::handler::update_admin_preferences),
         )
         .route("/users", get(admin::accounts::handler::list_users))
+        .route(
+            "/users/{id}",
+            get(admin::accounts::handler::get_user).patch(admin::accounts::handler::update_user),
+        )
+        .route(
+            "/users/{id}/status",
+            patch(admin::accounts::handler::set_user_status),
+        )
         .nest("/auth", admin::auth::router())
         .nest("/admins", admin::accounts::router())
         .nest("/settings/parts-of-speech", catalog::router::router())
