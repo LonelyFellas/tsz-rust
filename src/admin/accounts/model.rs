@@ -63,6 +63,13 @@ pub struct AdminListQueryParams {
     pub display_name: Option<String>,
 }
 
+/// `/admins/{admin_id}/...` 的路径参数。
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Path)]
+pub struct AdminIdPath {
+    pub admin_id: Uuid,
+}
+
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct UserListQueryParams {

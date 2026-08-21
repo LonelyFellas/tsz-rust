@@ -27,7 +27,7 @@ impl AdminRole {
     }
 }
 
-#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize, ToSchema)]
+#[derive(sqlx::Type, Debug, PartialEq, Clone, Copy, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum AdminStatus {

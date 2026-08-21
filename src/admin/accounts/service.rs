@@ -2,13 +2,13 @@ use uuid::Uuid;
 
 use crate::{
     admin::{
-        AdminRole, NewAdmin,
+        AdminRefreshTokenError, AdminRefreshTokenRepository, AdminRole, AdminStatus, NewAdmin,
         accounts::{
             AdminAccountAdminResponse, AdminAccountsRepository, AdminAccountsRepositoryError,
             model::{
-                AdminAccountAdminListFilter, AdminAccountUserResponse, AdminCreatorResponse,
-                AdminListQuery, AdminListResponse, AdminUserListResponse, UserListQuery,
-                UserListResponse,
+                AdminAccountAdminListFilter, AdminAccountRecord, AdminAccountUserResponse,
+                AdminCreatorResponse, AdminListQuery, AdminListResponse, AdminUserListResponse,
+                UserListQuery, UserListResponse,
             },
         },
     },
@@ -25,8 +25,19 @@ pub enum AdminAccountsServiceError {
     #[error("user repository is none")]
     UserRepositoryNone,
 
+    #[error("session repository is none")]
+    SessionRepositoryNone,
+
     #[error("{0}")]
     InvalidQuery(String),
+
+    #[error("admin not found")]
+    NotFound,
+
+    /// 治理顶点互不可管（设计 §9）：super_admin 不可被启禁用、不可被重置密码，
+    /// 含超管对自己。
+    #[error("super admin cannot be governed")]
+    SuperAdminProtected,
 
     #[error("admin phone already exists")]
     AlreadyExists,
@@ -42,6 +53,9 @@ pub enum AdminAccountsServiceError {
 
     #[error("user repository failure")]
     UserRepository(#[source] UserError),
+
+    #[error("admin session repository failure")]
+    SessionRepository(#[source] AdminRefreshTokenError),
 }
 
 fn normalize_search_pattern(value: Option<String>) -> Option<String> {
@@ -66,6 +80,8 @@ fn escape_like_literal(value: &str) -> String {
 pub struct AdminAccountsService {
     repository: AdminAccountsRepository,
     user_repository: Option<UserRepository>,
+    /// 只有重置密码需要踢会话，其余端点注入 `None`——与 `user_repository` 同惯例。
+    session_repository: Option<AdminRefreshTokenRepository>,
 }
 
 // 排除 0/O、1/I/l 等容易看错的字符
@@ -118,7 +134,17 @@ impl AdminAccountsService {
         Self {
             repository,
             user_repository,
+            session_repository: None,
         }
+    }
+
+    /// 重置密码专用装配：额外注入会话仓库，用于先踢目标的全部会话。
+    pub fn with_session_repository(
+        mut self,
+        session_repository: AdminRefreshTokenRepository,
+    ) -> Self {
+        self.session_repository = Some(session_repository);
+        self
     }
     pub async fn provision(
         &self,
@@ -207,28 +233,7 @@ impl AdminAccountsService {
             .await
             .map_err(map_repository_error)?;
 
-        let items = records
-            .into_iter()
-            .map(|record| {
-                let created_by = match (record.created_by_id, record.created_by_display_name) {
-                    (Some(id), Some(display_name)) => {
-                        Some(AdminCreatorResponse { id, display_name })
-                    }
-                    _ => None,
-                };
-
-                AdminAccountAdminResponse {
-                    id: record.id,
-                    phone: record.phone,
-                    display_name: record.display_name,
-                    role: record.role,
-                    created_by,
-                    status: record.status,
-                    created_at: record.created_at,
-                    updated_at: record.updated_at,
-                }
-            })
-            .collect();
+        let items = records.into_iter().map(admin_response_from).collect();
 
         let total_pages = if total == 0 {
             0
@@ -245,6 +250,86 @@ impl AdminAccountsService {
                 total_pages,
             },
         })
+    }
+
+    /// 启禁用普通管理员（设计 §9 治理矩阵）。目标是 super_admin 一律拒绝——
+    /// 治理顶点互不可管，含超管改自己。
+    pub async fn set_status(
+        &self,
+        target_id: &Uuid,
+        status: AdminStatus,
+    ) -> Result<AdminAccountAdminResponse, AdminAccountsServiceError> {
+        self.governable_target(target_id).await?;
+
+        let record = self
+            .repository
+            .set_status(target_id, status)
+            .await
+            .map_err(map_repository_error)?;
+
+        Ok(admin_response_from(record))
+    }
+
+    /// 超管重置普通管理员密码，返回仅此一次的明文临时密码。
+    ///
+    /// 副作用链的顺序有讲究（hardening-D5）：**先踢会话再写密码**。两步不共事务——
+    /// 踢成功而写失败 = 目标被登出但旧密码仍可登录，下次重试即自愈；反序则可能落进
+    /// 「会话没踢、临时密码没人知道」的死锁窗口。可失败且无副作用的步骤（生成、哈希）
+    /// 全部前置，真正动数据的两步压轴。
+    pub async fn reset_password(
+        &self,
+        target_id: &Uuid,
+    ) -> Result<String, AdminAccountsServiceError> {
+        let session_repository = self
+            .session_repository
+            .as_ref()
+            .ok_or(AdminAccountsServiceError::SessionRepositoryNone)?;
+
+        let target = self.governable_target(target_id).await?;
+
+        let temporary_password = generate_temporary_password(&target.phone)?;
+        let password_hash = Password::parse(&temporary_password)
+            .map_err(AdminAccountsServiceError::PasswordHash)?
+            .hash()
+            .await
+            .map_err(AdminAccountsServiceError::PasswordHash)?;
+
+        let revoked = session_repository
+            .revoke_all_by_admin_id(target_id)
+            .await
+            .map_err(AdminAccountsServiceError::SessionRepository)?;
+
+        self.repository
+            .reset_password(target_id, &password_hash)
+            .await
+            .map_err(map_repository_error)?;
+
+        tracing::info!(
+            admin_id = %target_id, revoked,
+            "admin password reset by super admin; all sessions revoked"
+        );
+
+        Ok(temporary_password)
+    }
+
+    /// 治理端点共用的目标解析：不存在 ⇒ `NotFound`，是超管 ⇒ `SuperAdminProtected`。
+    /// role 不可变（无提级/降级端点），故此处读到的角色在后续写入前不会漂移。
+    async fn governable_target(
+        &self,
+        target_id: &Uuid,
+    ) -> Result<AdminAccountRecord, AdminAccountsServiceError> {
+        let target = self
+            .repository
+            .find_by_id(target_id)
+            .await
+            .map_err(map_repository_error)?
+            .ok_or(AdminAccountsServiceError::NotFound)?;
+
+        if target.role == AdminRole::SuperAdmin {
+            return Err(AdminAccountsServiceError::SuperAdminProtected);
+        }
+
+        Ok(target)
     }
 
     pub async fn user_list(
@@ -331,9 +416,29 @@ impl AdminAccountsService {
     }
 }
 
+/// 治理视图行 → wire 响应。列表与单条写操作共用一份映射，保证形状不漂移。
+fn admin_response_from(record: AdminAccountRecord) -> AdminAccountAdminResponse {
+    let created_by = match (record.created_by_id, record.created_by_display_name) {
+        (Some(id), Some(display_name)) => Some(AdminCreatorResponse { id, display_name }),
+        _ => None,
+    };
+
+    AdminAccountAdminResponse {
+        id: record.id,
+        phone: record.phone,
+        display_name: record.display_name,
+        role: record.role,
+        created_by,
+        status: record.status,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }
+}
+
 fn map_repository_error(error: AdminAccountsRepositoryError) -> AdminAccountsServiceError {
     match error {
         AdminAccountsRepositoryError::AlreadyExists => AdminAccountsServiceError::AlreadyExists,
+        AdminAccountsRepositoryError::NotFound => AdminAccountsServiceError::NotFound,
         other => AdminAccountsServiceError::Repository(other),
     }
 }

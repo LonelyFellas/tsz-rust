@@ -9,4 +9,5 @@ pub fn router() -> Router<AppState> {
         .route("/refresh", post(handler::admin_refresh))
         .route("/login-code", post(handler::admin_login_code))
         .route("/logout", post(handler::admin_logout))
+        .route("/logout-all", post(handler::admin_logout_all))
 }

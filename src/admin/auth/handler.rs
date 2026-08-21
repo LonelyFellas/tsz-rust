@@ -298,6 +298,41 @@ pub async fn admin_logout(
     Ok((jar, StatusCode::NO_CONTENT))
 }
 
+/// POST /api/v1/admin/auth/logout-all
+///
+/// 吊销当前管理员的**全部**会话（含发起本次请求的那一枚）。属**逃生组**：
+/// 只要 Bearer 有效就放行，不过 must_change_password 守卫——被强制改密的管理员
+/// 除了改密之外，唯一的出口就是把自己全部登出（设计 §7）。
+///
+/// 目标按 access token 的 subject 判定，不读 refresh cookie：调用者可能压根没带
+/// 有效 cookie。幂等——本来就没有活跃会话时同样 204。
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/auth/logout-all",
+    tag = "admin",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "该管理员的全部会话已吊销（幂等）；附清除 admin_refresh_token 的 Set-Cookie",
+            headers(("Set-Cookie" = String, description = "清除 admin_refresh_token 的 cookie（Max-Age=0）"))),
+        (status = 401, description = "缺少/无效/过期 token"),
+        (status = 500, description = "数据库更新失败"),
+    )
+)]
+pub async fn admin_logout_all(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    auth: AdminAuth,
+) -> Result<impl IntoResponse, AppError> {
+    admin_session_svc(&state)
+        .logout_all(&auth.subject)
+        .await
+        .map_err(map_admin_session_error)?;
+
+    // 本次请求的那枚 refresh 也在吊销范围内，浏览器留着它只会换来 401——一并清掉。
+    let jar = jar.remove(clean_admin_refresh_cookie());
+    Ok((jar, StatusCode::NO_CONTENT))
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct AdminLoginOtpRequest {
     /// 登录标识：手机号

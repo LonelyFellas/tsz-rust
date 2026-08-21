@@ -1,0 +1,125 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH updated AS (\n                UPDATE admins\n                SET status = $2, updated_at = NOW()\n                WHERE id = $1\n                RETURNING id, phone, display_name, role, status, created_by_admin_id,\n                          created_at, updated_at\n            )\n            SELECT\n                u.id AS \"id!\",\n                u.phone AS \"phone!\",\n                u.display_name AS \"display_name!\",\n                u.role as \"role!: AdminRole\",\n                u.status as \"status!: AdminStatus\",\n                creator.id AS \"created_by_id?\",\n                creator.display_name AS \"created_by_display_name?\",\n                u.created_at AS \"created_at!\",\n                u.updated_at AS \"updated_at!\"\n            FROM updated u\n            LEFT JOIN admins creator\n                ON creator.id = u.created_by_admin_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "phone!",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "phone"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "role!: AdminRole",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "status!: AdminStatus",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "created_by_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "created_by_display_name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "fc03d2641a7108141369893625f58896850cd4de456dacbfbe72b74e0e261e3e"
+}
