@@ -234,6 +234,7 @@ impl LexiconService {
                         source_node_id: reference.source_node_id,
                         reference_kind: reference.reference_kind,
                     }),
+                    node_location: None,
                 })
                 .collect();
             return Err(LexiconServiceError::ValidationFailed(issues));
@@ -472,6 +473,7 @@ impl LexiconService {
                             source_node_id: reference.source_node_id,
                             reference_kind: reference.reference_kind,
                         }),
+                        node_location: None,
                     })
                     .collect(),
             ));
@@ -1142,5 +1144,6 @@ pub(super) fn reference_issue(
         code: code.to_owned(),
         message: message.to_owned(),
         reference_location: None,
+        node_location: None,
     }
 }

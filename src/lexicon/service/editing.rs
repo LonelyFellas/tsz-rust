@@ -235,7 +235,7 @@ impl LexiconService {
             LexiconRepository::node_identities(&mut transaction, entry_id, &proposed_ids)
                 .await
                 .map_err(repository_error)?;
-        let node_issues = validate_node_identities(entry_id, &proposed, &existing);
+        let node_issues = validate_node_identities(entry_id, &input.content, &proposed, &existing);
         if !node_issues.is_empty() {
             return Err(LexiconServiceError::ValidationFailed(node_issues));
         }
@@ -645,7 +645,7 @@ impl LexiconService {
             LexiconRepository::node_identities(&mut transaction, entry_id, &proposed_ids)
                 .await
                 .map_err(repository_error)?;
-        let node_issues = validate_node_identities(entry_id, &proposed, &existing);
+        let node_issues = validate_node_identities(entry_id, &current.forms, &proposed, &existing);
         if !node_issues.is_empty() {
             return Err(LexiconServiceError::ValidationFailed(node_issues));
         }
@@ -1466,6 +1466,7 @@ mod forms_surface_tests {
             code: code.to_owned(),
             message: "message".to_owned(),
             reference_location: None,
+            node_location: None,
         }
     }
 

@@ -284,5 +284,6 @@ pub(super) fn issue(
         code: code.to_owned(),
         message: message.to_owned(),
         reference_location: None,
+        node_location: None,
     });
 }

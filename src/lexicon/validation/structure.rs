@@ -1,8 +1,9 @@
 use super::*;
 use crate::lexicon::node_identity::{
-    BASE_FORM_ROLE, FORM_GROUP_ROLE, GRAMMAR_STRUCTURE_ROLE, LEGACY_NODE_ROLE, POS_ROLE,
-    PRONUNCIATION_ROLE, RELATION_ROLE, SENSE_GROUP_ROLE, SENSE_ROLE, SENTENCE_ROLE,
-    definition_role, form_slot_role, form_variant_role, text_variant_role,
+    BASE_FORM_ROLE, FORM_GROUP_ROLE, FORM_SLOT_ROLE_PREFIX, GRAMMAR_STRUCTURE_ROLE,
+    LEGACY_NODE_ROLE, POS_ROLE, PRONUNCIATION_ROLE, RELATION_ROLE, SENSE_GROUP_ROLE, SENSE_ROLE,
+    SENTENCE_ROLE, definition_role, dialect_from_name, form_slot_role, form_variant_role,
+    text_variant_role,
 };
 
 pub(crate) const MAX_ENTRY_NODES: usize = 2_000;
@@ -366,6 +367,7 @@ pub(crate) fn proposed_nodes(
 
 pub(crate) fn validate_node_identities(
     entry_id: Uuid,
+    forms: &DraftFormsStepContent,
     proposed: &[ProposedNode],
     existing: &[NodeIdentityRecord],
 ) -> Vec<DraftValidationIssue> {
@@ -388,12 +390,9 @@ pub(crate) fn validate_node_identities(
         }
     }
 
-    let proposed_by_id = proposed
-        .iter()
-        .map(|node| (node.id, node))
-        .collect::<HashMap<_, _>>();
+    let locator = NodeLocator::new(forms, proposed);
     for stored in existing {
-        let Some(node) = proposed_by_id.get(&stored.id) else {
+        let Some(node) = locator.proposed_by_id.get(&stored.id) else {
             continue;
         };
         if stored.entry_id != entry_id || stored.node_type != node.node_type {
@@ -406,11 +405,16 @@ pub(crate) fn validate_node_identities(
                 "节点 ID 已属于其他词条或节点类型",
             );
         } else if stored.node_role == LEGACY_NODE_ROLE {
-            issue(
+            tracing::warn!(
+                %entry_id,
+                node_id = %node.id,
+                proposed_node_role = %node.node_role,
+                "草稿复用了缺少父子绑定的历史节点"
+            );
+            identity_issue(
                 &mut issues,
-                node.step,
-                node.id,
-                "id",
+                &locator,
+                node,
                 "node_binding_unknown",
                 "历史节点缺少可验证的父子绑定，不能重新用于草稿内容",
             );
@@ -418,11 +422,21 @@ pub(crate) fn validate_node_identities(
             || stored.node_role != node.node_role
             || stored.stable_slot != node.stable_slot
         {
-            issue(
+            tracing::warn!(
+                %entry_id,
+                node_id = %node.id,
+                stored_parent_node_id = ?stored.parent_node_id,
+                stored_node_role = %stored.node_role,
+                stored_stable_slot = stored.stable_slot,
+                proposed_parent_node_id = ?node.parent_node_id,
+                proposed_node_role = %node.node_role,
+                proposed_stable_slot = node.stable_slot,
+                "草稿把已有节点 ID 挪到了别的父节点或槽位"
+            );
+            identity_issue(
                 &mut issues,
-                node.step,
-                node.id,
-                "id",
+                &locator,
+                node,
                 "node_binding_changed",
                 "节点 ID 不能更换父节点或内容槽位",
             );
@@ -435,21 +449,128 @@ pub(crate) fn validate_node_identities(
         .map(|node| ((node.parent_node_id, node.node_role.as_str()), node.id))
         .collect::<HashMap<_, _>>();
     for node in proposed.iter().filter(|node| node.stable_slot) {
-        if existing_stable_slots
-            .get(&(node.parent_node_id, node.node_role.as_str()))
-            .is_some_and(|existing_id| *existing_id != node.id)
+        if let Some(existing_id) =
+            existing_stable_slots.get(&(node.parent_node_id, node.node_role.as_str()))
+            && *existing_id != node.id
         {
-            issue(
+            // 存量 ID 只进服务端日志：它可能是一个已退役槽位，前端要靠
+            // `GET /entries/{id}` 的 `retired_stable_slots` 拿回来，而不是从报错里读。
+            tracing::warn!(
+                %entry_id,
+                node_role = %node.node_role,
+                parent_node_id = ?node.parent_node_id,
+                existing_node_id = %existing_id,
+                proposed_node_id = %node.id,
+                "稳定槽位被提交了新的节点 ID"
+            );
+            identity_issue(
                 &mut issues,
-                node.step,
-                node.id,
-                "id",
+                &locator,
+                node,
                 "stable_node_id_changed",
                 "已有内容槽位必须保留原节点 ID",
             );
         }
     }
     issues
+}
+
+/// 把节点身份类问题还原成界面位置。
+///
+/// 只读本次提交：祖先链沿 `ProposedNode.parent_node_id` 上溯，词性编码与词形组
+/// 序号直接取自 forms 内容。存量节点的任何信息都不进入结果。
+struct NodeLocator<'a> {
+    proposed_by_id: HashMap<Uuid, &'a ProposedNode>,
+    pos_codes: HashMap<Uuid, &'a str>,
+    form_group_indexes: HashMap<Uuid, u32>,
+}
+
+impl<'a> NodeLocator<'a> {
+    fn new(forms: &'a DraftFormsStepContent, proposed: &'a [ProposedNode]) -> Self {
+        Self {
+            proposed_by_id: proposed.iter().map(|node| (node.id, node)).collect(),
+            pos_codes: forms
+                .pos
+                .iter()
+                .map(|pos| (pos.pos_id, pos.pos.as_str()))
+                .collect(),
+            form_group_indexes: forms
+                .pos
+                .iter()
+                .flat_map(|pos| pos.form_groups.iter().enumerate())
+                .filter_map(|(index, group)| {
+                    u32::try_from(index).ok().map(|index| (group.id, index))
+                })
+                .collect(),
+        }
+    }
+
+    fn locate(&self, node: &ProposedNode) -> DraftNodeLocation {
+        let mut ancestors = Vec::new();
+        let mut parent_id = node.parent_node_id;
+        // 请求里的父子关系还没经过图校验，所以顺带防环——重复出现即停。
+        while let Some(id) = parent_id {
+            if ancestors.contains(&id) {
+                break;
+            }
+            ancestors.push(id);
+            parent_id = self
+                .proposed_by_id
+                .get(&id)
+                .and_then(|parent| parent.parent_node_id);
+        }
+        ancestors.reverse();
+        let pos_id = ancestors
+            .iter()
+            .copied()
+            .find(|id| self.pos_codes.contains_key(id));
+        DraftNodeLocation {
+            node_role: node.node_role.clone(),
+            pos: pos_id.and_then(|id| self.pos_codes.get(&id).map(|code| (*code).to_owned())),
+            pos_id,
+            form_group_index: ancestors
+                .iter()
+                .find_map(|id| self.form_group_indexes.get(id).copied()),
+            form_type: std::iter::once(node.node_role.as_str())
+                .chain(ancestors.iter().rev().filter_map(|id| {
+                    self.proposed_by_id
+                        .get(id)
+                        .map(|ancestor| ancestor.node_role.as_str())
+                }))
+                .find_map(role_form_type),
+            dialect: node
+                .node_role
+                .rsplit(':')
+                .next()
+                .and_then(dialect_from_name),
+            ancestor_node_ids: ancestors,
+        }
+    }
+}
+
+fn identity_issue(
+    issues: &mut Vec<DraftValidationIssue>,
+    locator: &NodeLocator<'_>,
+    node: &ProposedNode,
+    code: &str,
+    message: &str,
+) {
+    issues.push(DraftValidationIssue {
+        step: node.step,
+        node_id: node.id,
+        field: "id".to_owned(),
+        code: code.to_owned(),
+        message: message.to_owned(),
+        reference_location: None,
+        node_location: Some(locator.locate(node)),
+    });
+}
+
+fn role_form_type(role: &str) -> Option<WordFormTypeV2> {
+    if role == BASE_FORM_ROLE {
+        return Some(WordFormTypeV2::Base);
+    }
+    WordFormTypeV2::try_from(role.strip_prefix(FORM_SLOT_ROLE_PREFIX)?).ok()
 }
 
 pub(crate) fn validate_node_limit(

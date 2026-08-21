@@ -9,7 +9,7 @@ use super::*;
     security(("bearer_auth" = [])),
     params(EntryPath),
     responses(
-        (status = 200, description = "V2 canonical 词条草稿", body = AdminWordV2Envelope),
+        (status = 200, description = "V2 canonical 词条草稿（含已退役的稳定槽位身份）", body = AdminWordDraftV2Envelope),
         (status = 400, description = "词条 ID 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
@@ -23,7 +23,10 @@ pub async fn get(
     ApiPath(path): ApiPath<EntryPath>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
-    let response = service(&state).get(path.id).await.map_err(map_error)?;
+    let response = service(&state)
+        .get_draft(path.id)
+        .await
+        .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
 }
 

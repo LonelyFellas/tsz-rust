@@ -505,6 +505,33 @@ impl LexiconRepository {
 // --- entry lookup ---
 
 impl LexiconRepository {
+    /// 该词条所有已退役的稳定槽位身份。
+    ///
+    /// 草稿投影只含当前在用的节点，退役槽位在里面没有任何痕迹；但
+    /// `lexicon_nodes_stable_slot_key` 不过滤 `removed_from_draft_at`，这些槽位仍
+    /// 永久绑定原节点 ID。前端刷新或换设备之后只能从这里把身份取回来，否则
+    /// 重新出现的槽位会带新 ID 撞上 `stable_node_id_changed`。
+    pub(crate) async fn retired_stable_slots(
+        &self,
+        entry_id: Uuid,
+    ) -> Result<Vec<RetiredStableSlotRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, RetiredStableSlotRecord>(
+            r#"
+            SELECT id, parent_node_id, node_role
+            FROM lexicon.nodes
+            WHERE entry_id = $1
+              AND stable_slot
+              AND removed_from_draft_at IS NOT NULL
+              AND parent_node_id IS NOT NULL
+            ORDER BY parent_node_id, node_role
+            "#,
+        )
+        .bind(entry_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     pub(crate) async fn entry_by_id(
         &self,
         id: Uuid,

@@ -226,6 +226,8 @@ use utoipa::{
             crate::lexicon::dto::AdminWordStatus,
             crate::lexicon::dto::AdminWordV2,
             crate::lexicon::dto::AdminWordV2Envelope,
+            crate::lexicon::dto::RetiredStableSlotV2,
+            crate::lexicon::dto::AdminWordDraftV2Envelope,
             crate::lexicon::dto::AdminWordListItem,
             crate::lexicon::dto::AdminWordListPage,
             crate::lexicon::dto::AdminWordListResponse,
@@ -245,6 +247,7 @@ use utoipa::{
             crate::lexicon::dto::FormsImpactResponseV2,
             crate::lexicon::dto::DraftValidationIssue,
             crate::lexicon::dto::DraftReferenceLocation,
+            crate::lexicon::dto::DraftNodeLocation,
             crate::lexicon::dto::DraftValidationResponse,
             crate::lexicon::dto::ValidateAdminWordV2Input,
             crate::lexicon::dto::PublishAdminWordV2Input,
@@ -1181,6 +1184,7 @@ mod tests {
             "code",
             "message",
             "reference_location",
+            "node_location",
         ] {
             assert!(
                 issue["properties"][field].is_object(),
