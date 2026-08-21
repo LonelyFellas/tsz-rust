@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::user::repository::UserError;
 
-#[derive(sqlx::Type, Debug, Serialize, PartialEq, Clone, Copy, ToSchema)]
+#[derive(sqlx::Type, Debug, Serialize, Deserialize, PartialEq, Clone, Copy, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
 pub enum UserStatus {
@@ -27,6 +27,15 @@ pub enum UserRole {
 pub enum AccountDeletionChannel {
     Phone,
     Email,
+}
+
+impl UserStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UserStatus::Active => "active",
+            UserStatus::Disabled => "disabled",
+        }
+    }
 }
 
 impl UserRole {
