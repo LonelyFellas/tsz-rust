@@ -124,6 +124,16 @@ curl localhost:8383/healthz        # {"status":"ok"}    存活（不碰库）
 curl localhost:8383/readyz         # {"status":"ready"} 就绪（探 DB+Redis）
 ```
 
+**发音人目录**：`speech.voices` 是运营数据，不随 migration 建立。新建库或从备份恢复后要重跑一次种子，
+否则试听目录为空，前端「获取语音」按钮会全部禁用：
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /opt/tsz-rust/ops/speech-voice-catalog/seed.sql
+```
+
+幂等，可反复执行（一致时不写库，也不会启用运维停用过的发音人）；语义与改目录的注意事项见
+`ops/speech-voice-catalog/README.md`。
+
 **升级流程**：`systemctl stop` → 覆盖二进制 → `systemctl start`。新迁移会在启动时自动应用（多实例同时启动有 advisory lock 兜底，只一个真正执行）。
 
 涉及数据库写入前，先按 [PostgreSQL 备份与恢复验证](postgresql-backup-restore.md) 创建并验证当前恢复点。客户端主版本不得低于数据库服务端主版本。

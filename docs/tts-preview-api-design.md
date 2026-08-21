@@ -25,7 +25,8 @@ SSML、provider voice id、fingerprint、object key、音频、URL 或输出格�
 2. 本 PR 不提前建立 `synthesis_jobs`/`audio_assets`。同步试听由 cache row 表达生命周期，正式任务与
    发布资产仍由后续 Worker PR 一次性建立完整约束。
 
-voice 目录由数据库维护，migration 仅建立 schema/table，不硬编码生产 voice seed。空目录是合法状态；
+voice 目录由数据库维护，migration 仅建立 schema/table，不硬编码生产 voice seed；目录内容的真相源是
+`ops/speech-voice-catalog/seed.sql`（幂等，重建库或恢复备份后重跑）。空目录是合法状态；
 未配置 Azure 或 `speech` storage 不影响进程启动与 voice 查询，试听在运行时返回稳定 503。
 
 ## 3. 数据模型与回退
