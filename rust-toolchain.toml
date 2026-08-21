@@ -1,0 +1,14 @@
+# 钉死工具链版本。CI 原先用未钉版本的 `toolchain: stable`，2026-08-21 stable 滚到 1.98.0 后
+# clippy 的 result_large_err 开始对 AppError 报错，全仓库 62 处，任何 PR（含纯文档）都过不了
+# —— 而本地 stable 停在 1.95.0，于是「本地全绿、CI 全红」。钉版本让两边恒等。
+#
+# 这里是版本的唯一真相源：ci.yml 会用一步 sed 把 channel 读出来传给工具链 action，
+# 所以改这一行就够了，不需要再去改工作流。
+# 钉死解决的是「版本自己漂走把 CI 弄红」，但引入了相反的失败模式：没人再去碰它。
+# 请周期性主动上抬（升完在本地跑一遍 clippy -D warnings 再提），别让仓库卡在旧编译器上。
+#
+# 刻意不写 components：rustfmt / clippy 只有 CI 需要，由 ci.yml 的 action 输入单独指定。
+# 写在这里会让每个供给该工具链的地方都多拉两个组件——生产服务器只跑 cargo build，
+# 而它到 static.rust-lang.org 实测只有约 29 KB/s，多下的每一 MB 都是部署时长。
+[toolchain]
+channel = "1.98.0"

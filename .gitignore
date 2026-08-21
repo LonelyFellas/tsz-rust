@@ -7,3 +7,6 @@
 .claude/*
 !.claude/skills/
 !.claude/launch.json
+# Python 缓存(ops/ 下的 unittest 会生成)
+__pycache__/
+*.pyc
