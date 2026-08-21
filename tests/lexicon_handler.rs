@@ -6872,3 +6872,286 @@ async fn step_content_body_limit_is_raised_bounded_and_scoped_per_route(pool: Pg
     );
     assert_eq!(problem["code"], "payload_too_large");
 }
+
+/// 保存 forms，遇到 surface warning 就补确认 token 重放一次。
+///
+/// 方言侧切换会改写 surface 投影，本用例关心的是节点身份而不是同形提示，
+/// 所以把提示这一步吸收掉，让断言只针对身份契约。
+async fn save_forms_step(
+    state: &AppState,
+    bearer: &str,
+    entry_id: &str,
+    base_revision: i64,
+    content: &Value,
+) -> (StatusCode, Value) {
+    let input = json!({
+        "base_revision": base_revision,
+        "intent": "save",
+        "content": content,
+    });
+    let (status, body) = call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        bearer,
+        None,
+        Some(input.clone()),
+    )
+    .await;
+    if status != StatusCode::CONFLICT || body["code"] != "surface_match_acknowledgement_required" {
+        return (status, body);
+    }
+    let mut confirmed = input;
+    confirmed["confirmed_surface_match_token"] = json!(
+        body["meta"]["surface_match_page"]["surface_confirmation_token"]
+            .as_str()
+            .expect("单页 forms warning 应签发确认 token")
+    );
+    call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        bearer,
+        None,
+        Some(confirmed),
+    )
+    .await
+}
+
+/// 把一个词形槽位从单条 common 拆成 uk / us 两条，返回被替换掉的 common 节点 ID。
+fn split_slot_variants(slot: &mut Value) -> Value {
+    let common = slot["variants"][0].clone();
+    slot["variants"] = Value::Array(
+        ["uk", "us"]
+            .iter()
+            .map(|dialect| {
+                json!({
+                    "id": Uuid::now_v7(),
+                    "dialect": dialect,
+                    "spelling": common["spelling"],
+                    "origin": common["origin"],
+                    "pronunciations": [{
+                        "id": Uuid::now_v7(),
+                        "dict_phonetic": "/split/",
+                        "actual_pron": "split",
+                        "style": "normal"
+                    }]
+                })
+            })
+            .collect(),
+    );
+    common["id"].clone()
+}
+
+/// 把一个词形槽位从 uk / us 合回单条 common，沿用调用方给出的节点 ID。
+fn merge_slot_variants(slot: &mut Value, common_id: Value) {
+    let uk = slot["variants"][0].clone();
+    slot["variants"] = json!([{
+        "id": common_id,
+        "dialect": "common",
+        "spelling": uk["spelling"],
+        "origin": uk["origin"],
+        "pronunciations": [{
+            "id": Uuid::now_v7(),
+            "dict_phonetic": "/merged/",
+            "actual_pron": "merged",
+            "style": "normal"
+        }]
+    }]);
+}
+
+fn retired_slot<'a>(draft: &'a Value, node_id: &Value) -> Option<&'a Value> {
+    draft["retired_stable_slots"]
+        .as_array()
+        .expect("草稿响应应带 retired_stable_slots 数组")
+        .iter()
+        .find(|slot| slot["id"] == *node_id)
+}
+
+fn issue_for_node<'a>(body: &'a Value, node_id: &Value) -> &'a Value {
+    body["field_issues"]
+        .as_array()
+        .expect("422 应带 field_issues")
+        .iter()
+        .find(|issue| issue["node_id"] == *node_id)
+        .unwrap_or_else(|| panic!("缺少节点 {node_id} 的 issue：{body}"))
+}
+
+#[sqlx::test]
+async fn dialect_split_and_merge_round_trip_reuses_retired_stable_node_ids(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let ready = create_ready_draft(&state, &pool, &bearer, "testability").await;
+    let entry_id = ready["word"]["id"].as_str().unwrap().to_owned();
+    let unified_forms = ready["word"]["forms"].clone();
+    let pos_id = unified_forms["pos"][0]["pos_id"].clone();
+    let pos_code = unified_forms["pos"][0]["pos"].clone();
+    let base_slot_id = unified_forms["pos"][0]["base_form"]["id"].clone();
+    let derived_slot_id = unified_forms["pos"][0]["form_groups"][0]["slots"][0]["id"].clone();
+    let derived_form_type =
+        unified_forms["pos"][0]["form_groups"][0]["slots"][0]["form_type"].clone();
+
+    // 1. 共用 → 英美区分：common 变体消失，uk / us 带新 ID 出现。
+    let mut split_forms = unified_forms.clone();
+    split_forms["pos"][0]["dialect_rules"] =
+        json!({"spelling_mode": "distinguish", "phonetic_mode": "distinguish"});
+    let base_common_id = split_slot_variants(&mut split_forms["pos"][0]["base_form"]);
+    let derived_common_id =
+        split_slot_variants(&mut split_forms["pos"][0]["form_groups"][0]["slots"][0]);
+    let (status, split_saved) = save_forms_step(
+        &state,
+        &bearer,
+        &entry_id,
+        ready["word"]["revision"].as_i64().unwrap(),
+        &split_forms,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "拆分英美应保存成功：{split_saved}");
+
+    // 2. 刷新页面：草稿本身已看不到 common 变体，身份只能从 retired_stable_slots 找回。
+    let (status, draft) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "拆分后应能读回草稿：{draft}");
+    assert!(
+        !serde_json::to_string(&draft["word"]["forms"])
+            .unwrap()
+            .contains(base_common_id.as_str().unwrap()),
+        "拆分后草稿内容里不应再出现 common 变体：{draft}"
+    );
+    let retired_base = retired_slot(&draft, &base_common_id)
+        .unwrap_or_else(|| panic!("原形 common 变体身份应可找回：{draft}"));
+    assert_eq!(retired_base["parent_node_id"], base_slot_id);
+    assert_eq!(retired_base["node_role"], "forms.form_variant:common");
+    let retired_derived = retired_slot(&draft, &derived_common_id)
+        .unwrap_or_else(|| panic!("派生词形 common 变体身份应可找回：{draft}"));
+    assert_eq!(retired_derived["parent_node_id"], derived_slot_id);
+    assert_eq!(retired_derived["node_role"], "forms.form_variant:common");
+
+    // 3. 英美区分 → 共用：沿用找回的 common ID 必须放行。
+    let mut merged_forms = draft["word"]["forms"].clone();
+    merged_forms["pos"][0]["dialect_rules"] =
+        json!({"spelling_mode": "unified", "phonetic_mode": "unified"});
+    merge_slot_variants(
+        &mut merged_forms["pos"][0]["base_form"],
+        retired_base["id"].clone(),
+    );
+    merge_slot_variants(
+        &mut merged_forms["pos"][0]["form_groups"][0]["slots"][0],
+        retired_derived["id"].clone(),
+    );
+    let (status, merged) = save_forms_step(
+        &state,
+        &bearer,
+        &entry_id,
+        draft["word"]["revision"].as_i64().unwrap(),
+        &merged_forms,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "沿用退役身份合回共用应保存成功：{merged}"
+    );
+    assert_eq!(
+        merged["word"]["forms"]["pos"][0]["base_form"]["variants"][0]["id"],
+        base_common_id
+    );
+
+    // 合回之后换成退役的是 uk / us 两侧，common 重新在用。
+    let (status, remerged_draft) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "合并后应能读回草稿：{remerged_draft}"
+    );
+    assert!(
+        retired_slot(&remerged_draft, &base_common_id).is_none(),
+        "重新在用的槽位不应留在退役清单里：{remerged_draft}"
+    );
+    assert!(
+        remerged_draft["retired_stable_slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|slot| slot["node_role"] == "forms.form_variant:uk"),
+        "退役的 uk 变体应进入清单：{remerged_draft}"
+    );
+
+    // 4. 已有槽位换新 ID 仍然拒绝，并且带得出界面位置。
+    let mut rebound_forms = merged["word"]["forms"].clone();
+    let rebound_base_id = json!(Uuid::now_v7());
+    let rebound_derived_id = json!(Uuid::now_v7());
+    rebound_forms["pos"][0]["base_form"]["variants"][0]["id"] = rebound_base_id.clone();
+    rebound_forms["pos"][0]["form_groups"][0]["slots"][0]["variants"][0]["id"] =
+        rebound_derived_id.clone();
+    let (status, rejected) = save_forms_step(
+        &state,
+        &bearer,
+        &entry_id,
+        merged["word"]["revision"].as_i64().unwrap(),
+        &rebound_forms,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "已有槽位换新 ID 应拒绝：{rejected}"
+    );
+    assert!(has_issue(&rejected, "stable_node_id_changed"));
+
+    let base_issue = issue_for_node(&rejected, &rebound_base_id);
+    assert_eq!(base_issue["code"], "stable_node_id_changed");
+    let base_location = &base_issue["node_location"];
+    assert_eq!(base_location["node_role"], "forms.form_variant:common");
+    assert_eq!(base_location["pos"], pos_code);
+    assert_eq!(base_location["pos_id"], pos_id);
+    assert_eq!(base_location["form_type"], "base");
+    assert_eq!(base_location["dialect"], "common");
+    assert_eq!(
+        base_location["ancestor_node_ids"],
+        json!([pos_id, base_slot_id])
+    );
+    assert!(
+        base_location["form_group_index"].is_null(),
+        "共享原形不属于任何词形组：{base_issue}"
+    );
+
+    let derived_issue = issue_for_node(&rejected, &rebound_derived_id);
+    let derived_location = &derived_issue["node_location"];
+    assert_eq!(derived_location["form_type"], derived_form_type);
+    assert_eq!(derived_location["form_group_index"], 0);
+    assert_eq!(derived_location["dialect"], "common");
+    assert_eq!(
+        derived_location["ancestor_node_ids"],
+        json!([
+            pos_id,
+            merged["word"]["forms"]["pos"][0]["form_groups"][0]["id"],
+            derived_slot_id
+        ])
+    );
+    assert!(
+        !serde_json::to_string(base_issue)
+            .unwrap()
+            .contains(base_common_id.as_str().unwrap()),
+        "定位信息不应回传存量节点 ID：{base_issue}"
+    );
+}

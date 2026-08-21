@@ -11,8 +11,10 @@ pub(crate) const SENTENCE_ROLE: &str = "meanings.sentence";
 pub(crate) const RELATION_ROLE: &str = "meanings.relation";
 pub(crate) const LEGACY_NODE_ROLE: &str = "legacy";
 
+pub(crate) const FORM_SLOT_ROLE_PREFIX: &str = "forms.form_slot:";
+
 pub(crate) fn form_slot_role(form_type: &str) -> String {
-    format!("forms.form_slot:{form_type}")
+    format!("{FORM_SLOT_ROLE_PREFIX}{form_type}")
 }
 
 pub(crate) fn form_variant_role(dialect: Dialect) -> String {
@@ -37,5 +39,15 @@ pub(crate) const fn dialect_name(dialect: Dialect) -> &'static str {
         Dialect::Common => "common",
         Dialect::Uk => "uk",
         Dialect::Us => "us",
+    }
+}
+
+/// `dialect_name` 的逆向：节点角色末段还原成方言侧。角色不以方言结尾时返回 `None`。
+pub(crate) fn dialect_from_name(name: &str) -> Option<Dialect> {
+    match name {
+        "common" => Some(Dialect::Common),
+        "uk" => Some(Dialect::Uk),
+        "us" => Some(Dialect::Us),
+        _ => None,
     }
 }

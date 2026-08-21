@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::lexicon::dto::{
     Dialect, DialectVariantSlotV2, DraftFormsStepContent, DraftMeaningsStepContent,
-    DraftValidationIssue, EnglishTextV2, PersistedWordStep, RichText, WordDefinitionV2,
-    WordHeadwordsV2,
+    DraftNodeLocation, DraftValidationIssue, EnglishTextV2, PersistedWordStep, RichText,
+    WordDefinitionV2, WordFormTypeV2, WordHeadwordsV2,
 };
 use crate::lexicon::model::NodeIdentityRecord;
 

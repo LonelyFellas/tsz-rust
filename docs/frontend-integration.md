@@ -448,6 +448,9 @@ JSONB snapshot 做删除判断。
 
 > **状态（2026-08-20）**：后端已实现，OpenAPI schema 不变（只放宽校验），**不需要重新 `sync:openapi`**。
 > 上游依据：前端 `docs/features/dialect-preference-migration/design.md` 提案 P1。
+>
+> **补充（2026-08-21）**：10.5 是后来补的节点身份契约，**那一节改了 wire、需要重跑
+> `pnpm --filter @tsz/api-client sync:openapi`**；本节其余内容不受影响。
 
 ### 10.1 背景
 
@@ -474,14 +477,136 @@ uk / us 双份同值镜像已消失。例句仍按词条事实分方言，本项
 | 1 | 删掉「两条同值镜像」shim（design.md 阶段 6），`distinguish` 词条直接写单条 `common` |
 | 2 | 前端校验口径同步放宽：`unified ⇒ [common]`，`distinguish ⇒ [common]` 或 `[uk, us]` |
 | 3 | **收敛时要给 common 变体换新节点 ID**：节点角色里带方言（`meanings.content:en:<dialect>`），沿用旧 uk 变体的 ID 只改 `dialect` 会被判 `node_binding_changed` |
-| 4 | **反向同理**：把已收敛的词条改回 uk / us 双条，必须沿用最初那两个变体的节点 ID，用新 UUID 会被判 `stable_node_id_changed` |
+| 4 | **反向同理**：把已收敛的词条改回 uk / us 双条，必须沿用最初那两个变体的节点 ID，用新 UUID 会被判 `stable_node_id_changed`。原 ID 从哪儿拿见 10.5 |
 | 5 | mock（`apps/admin/src/features/dictionary/mock/`）与真实后端同口径，否则 mock 绿、真机 422 |
 
 ### 10.4 兼容性
 
 纯放宽：存量的双条数据继续可读可写，旧前端一行不改也照常工作，`AdminWordV2` 的 schema
-与 `required` 数组均不变。后端产出侧**没有任何行为变化**（见上，AI 补全仍产双份），
-所以本节可以先于前端任何改动上线。
+与 `required` 数组均不变。**放宽校验本身不改后端产出**——AI 补全的收敛是随后单独做的
+（见 10.2），所以本节可以先于前端任何改动上线。
+
+### 10.5 共用 ↔ 英美拆分/合并的节点身份契约（后端已实现）
+
+> **状态（2026-08-21）**：后端已实现并重新导出 `docs/openapi.json`，
+> **前端必须重跑 `pnpm --filter @tsz/api-client sync:openapi`**。
+> 上游依据：智能词库系统测试报告 TSZ-LEX-001（2026-08-20，测试词 `testability`）。
+
+#### 10.5.1 规则：稳定槽位的节点 ID 是永久的
+
+后端把「有内容的槽位」建成**稳定槽位**（stable slot），键是三元组
+
+```
+(词条 ID, 父节点 ID, 节点角色)
+```
+
+方言编在**节点角色**里，不是节点上的一个可改字段：
+
+| 槽位 | 父节点 | 节点角色 |
+| --- | --- | --- |
+| 共享原形 | 基本词性 | `forms.base_form` |
+| 派生词形 | 词形组 | `forms.form_slot:<form_type>` |
+| 词形方言行 | 词形槽位 | `forms.form_variant:common` / `:uk` / `:us` |
+| 英文正文方言行 | 释义 / 例句 / 语法结构 | `meanings.<field>:en:common` / `:uk` / `:us` |
+| 中文正文 | 释义 / 例句 | `meanings.<field>:zh:common` |
+
+**这个键一旦保存过，就永久绑定同一个节点 ID。** 槽位从草稿里消失时后端只把它标记
+为「已退役」（`removed_from_draft_at`），节点行本身保留；同一个键再次出现时必须沿用
+原 ID，后端会把它重新激活。用新 UUID 提交 → `422 validation_failed` +
+`stable_node_id_changed`（「已有内容槽位必须保留原节点 ID」）。
+
+这条规则不打算放宽：发布快照、引用关系、影响面预览都按节点 ID 追溯内容，槽位换 ID
+等于历史断链。
+
+#### 10.5.2 缺口与补法：`GET /entries/{id}` 新增 `retired_stable_slots`
+
+问题出在**已退役的身份没有任何渠道能被前端知道**：
+
+1. 管理员把某个基本词性从「英美共用」切成「英美区分」→ `common` 变体消失、`uk` / `us` 出现。
+2. 保存草稿 → `common` 节点被标记退役，草稿投影里不再有它。
+3. 刷新页面（或换台机器打开）→ `GET` 只返回 `uk` / `us`，原 `common` 节点 ID 无处可查。
+4. 管理员再切回「英美共用」→ 前端只能生成新 ID → 422 `stable_node_id_changed`，界面上无法自愈。
+
+现在 `GET /api/v1/admin/lexicon/entries/{id}` 的响应体在 `word` 旁边多了一个数组：
+
+```jsonc
+{
+  "word": { /* 原样，未改一字段 */ },
+  "retired_stable_slots": [
+    {
+      "id": "0198f3c2-1c4a-7a90-8f21-6b2f0d9a4e11",     // 该槽位永久绑定的节点 ID
+      "parent_node_id": "0198f3b7-9d02-7c31-b8aa-5c1e2f7d3a40",
+      "node_role": "forms.form_variant:common"
+    }
+  ]
+}
+```
+
+- 取值口径：该词条下 `stable_slot = TRUE AND removed_from_draft_at IS NOT NULL` 的全部节点，
+  按 `(parent_node_id, node_role)` 排序。
+- 只有 `GET` 带这个数组。保存 / 发布 / 归档等命令类接口仍然只回 `{ "word": ... }`——
+  提交方自己就知道刚退役了什么，需要服务端补身份的只有「刷新」和「换设备」。
+  wire 上对应两个类型：`AdminWordDraftV2Envelope`（GET）与 `AdminWordV2Envelope`（命令）。
+- 退役身份**不进** publication 快照，也不影响快照哈希——它是编辑器恢复用的元数据，不是词条内容。
+
+#### 10.5.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 重跑 `pnpm --filter @tsz/api-client sync:openapi`；GET 草稿的返回类型从 `AdminWordV2Envelope` 变成 `AdminWordDraftV2Envelope` |
+| 2 | 载入草稿时用 `retired_stable_slots` **播种节点身份账本**，键用 `(parent_node_id, node_role)`；这样跨刷新、跨设备都成立 |
+| 3 | 槽位重新出现时（`common` ↔ `uk`/`us` 来回切、删掉的词形又加回来）先查账本：命中就沿用 `id`，没命中才生成新 UUID |
+| 4 | 账本里**同时**放本次会话自己退役掉的 ID：后端只在 GET 时补，保存响应不带，别把会话内的记忆清掉 |
+| 5 | 父节点自己是新建的（新词形组、新释义）时不用查账本——新父节点下的槽位键必然是全新的 |
+
+拆分/合并的具体对照：
+
+| 动作 | `forms.form_variant:common` | `forms.form_variant:uk` / `:us` |
+| --- | --- | --- |
+| 共用 → 区分 | 从内容里移除（后端标记退役） | 首次出现给新 UUID；**再次出现要沿用退役身份** |
+| 区分 → 共用 | **沿用退役的 common ID** | 从内容里移除（后端标记退役） |
+
+`meanings.<field>:en:<dialect>` 完全同理（10.3 第 3、4 行说的就是这件事），只是父节点换成释义 / 例句 / 语法结构。
+
+#### 10.5.4 节点身份类错误新增 `node_location`
+
+`stable_node_id_changed`、`node_binding_changed`、`node_binding_unknown` 三个 code
+以前只带 `node_id` 加一句面向实现的中文，管理员看到的是两条一模一样的
+「已有内容槽位必须保留原节点 ID」，无从判断是哪个词性、哪个词形。现在 issue 里多一个
+可选子对象（和既有的 `reference_location` 同一形状，存量 issue 的序列化不变）：
+
+```jsonc
+{
+  "step": "forms",
+  "node_id": "0198f4aa-...",             // 本次提交里的新 ID，可直接用来定位
+  "field": "id",
+  "code": "stable_node_id_changed",
+  "message": "已有内容槽位必须保留原节点 ID",
+  "node_location": {
+    "node_role": "forms.form_variant:common",
+    "pos": "verb",                        // 基本词性编码
+    "pos_id": "0198f3a1-...",
+    "form_group_index": 0,                 // 在 pos.form_groups 里的序号；共享原形省略
+    "form_type": "third_person_singular",  // base 表示共享原形
+    "dialect": "common",
+    "ancestor_node_ids": ["0198f3a1-...", "0198f3b0-...", "0198f3b7-..."]
+  }
+}
+```
+
+- 所有字段都取自**本次提交的内容**，可以直接拿去定位到界面元素；
+  `ancestor_node_ids` 是从词条根到直接父节点的链。
+- **旧 ID / 新 ID 的对照不下发**，只写服务端日志——要找回旧 ID 走 10.5.2 的
+  `retired_stable_slots`，不要从报错里读。
+- 展示文案由前端拼，例如「动词 · 第三人称单数：词形模式切换后数据状态不一致，请恢复后重试」。
+- 非身份类 issue 整体省略 `node_location` 字段。
+
+#### 10.5.5 兼容性
+
+- `AdminWordV2` 一个字段没动；命令类接口的响应体一个字段没动。
+- GET 草稿是**纯新增字段**，旧前端忽略即可继续工作（但拿不到身份恢复能力）。
+- `DraftValidationIssue` 是**纯新增可选字段**，旧前端不读也不会炸。
+- 校验行为没有放宽：换 ID 依旧 422。变的只是「能不能查到该用哪个 ID」和「报错能不能定位」。
 
 ## 11. 管理员方言偏好持久化（后端已实现）
 

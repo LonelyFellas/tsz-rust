@@ -182,6 +182,35 @@ pub struct AdminWordV2Envelope {
     pub word: AdminWordV2,
 }
 
+/// 一个已退役但仍被永久占用的稳定槽位身份。
+///
+/// 稳定槽位的键是 `(entry_id, parent_node_id, node_role)`，方言编在 `node_role`
+/// 里（`forms.form_variant:common`）。这个键一旦保存过就永久绑定同一个节点 ID：
+/// 节点从草稿里消失只是被标记退役，重新出现时必须沿用原 ID，否则报
+/// `stable_node_id_changed`。草稿本身只含当前在用的节点，所以刷新或换设备之后
+/// 前端无从得知退役身份——本数组就是找回它们的唯一渠道。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetiredStableSlotV2 {
+    /// 该槽位永久绑定的节点 ID，重新出现时原样提交。
+    pub id: Uuid,
+    /// 槽位所挂的父节点 ID。稳定槽位必有父节点。
+    pub parent_node_id: Uuid,
+    /// 槽位角色，方言在冒号之后，例如 `forms.form_variant:common`。
+    pub node_role: String,
+}
+
+/// `GET /entries/{id}` 的响应：草稿本体 + 重建编辑态所需的节点身份信息。
+///
+/// 命令类接口仍返回 [`AdminWordV2Envelope`]（只有 `word`）；退役身份是编辑器
+/// 恢复用的元数据，不属于词条内容，也不会进入不可变的 publication 快照。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AdminWordDraftV2Envelope {
+    pub word: AdminWordV2,
+    /// 该词条下所有已退役的稳定槽位身份，按 `(parent_node_id, node_role)` 排序。
+    pub retired_stable_slots: Vec<RetiredStableSlotV2>,
+}
+
 // --- forms ---
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

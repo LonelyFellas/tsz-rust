@@ -148,6 +148,15 @@ pub(crate) struct NodeIdentityRecord {
     pub stable_slot: bool,
 }
 
+/// 一个已退役的稳定槽位：`(entry_id, parent_node_id, node_role)` 的唯一索引不带
+/// `removed_from_draft_at IS NULL`，所以退役之后这个键仍然永久绑定同一个节点 ID。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct RetiredStableSlotRecord {
+    pub id: Uuid,
+    pub parent_node_id: Uuid,
+    pub node_role: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct SenseTargetKey {
     pub target_entry_id: Uuid,

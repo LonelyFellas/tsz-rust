@@ -82,6 +82,33 @@ impl LexiconService {
         })
     }
 
+    /// 编辑器打开草稿走这里：除词条本体外还带上已退役的稳定槽位身份。
+    ///
+    /// 命令类接口只回 [`AdminWordV2Envelope`]，因为提交方自己就知道刚退役了什么；
+    /// 刷新和换设备才需要服务端把身份补回来。
+    pub async fn get_draft(
+        &self,
+        id: Uuid,
+    ) -> Result<AdminWordDraftV2Envelope, LexiconServiceError> {
+        let word = self.get(id).await?.word;
+        let retired_stable_slots = self
+            .repository
+            .retired_stable_slots(id)
+            .await
+            .map_err(repository_error)?
+            .into_iter()
+            .map(|record| RetiredStableSlotV2 {
+                id: record.id,
+                parent_node_id: record.parent_node_id,
+                node_role: record.node_role,
+            })
+            .collect();
+        Ok(AdminWordDraftV2Envelope {
+            word,
+            retired_stable_slots,
+        })
+    }
+
     pub async fn related_search(
         &self,
         actor_id: Uuid,

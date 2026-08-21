@@ -15,8 +15,9 @@ use crate::{
             HistoricalPublicationRecord, IdempotencyRecord, InboundSenseReferenceRecord,
             ListEntryRecord, ListFilter, NewPublicationSenseReference, NodeIdentityRecord,
             RegionSurfaceRecord, RelatedSearchFilter, RelatedSearchRecord,
-            ResolvedSenseTargetRecord, SenseTargetKey, StatsRecord, SurfaceEntryContextRecord,
-            SurfaceInboundRelationRecord, SurfaceLookupKey, SurfaceSourceRecord,
+            ResolvedSenseTargetRecord, RetiredStableSlotRecord, SenseTargetKey, StatsRecord,
+            SurfaceEntryContextRecord, SurfaceInboundRelationRecord, SurfaceLookupKey,
+            SurfaceSourceRecord,
         },
         node_identity::{
             BASE_FORM_ROLE, FORM_GROUP_ROLE, GRAMMAR_STRUCTURE_ROLE, POS_ROLE, PRONUNCIATION_ROLE,
