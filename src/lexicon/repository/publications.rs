@@ -276,11 +276,39 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
+    /// `(entry_id, source_revision)` 上有唯一约束，同一 revision 至多一条 publication。
+    pub(crate) async fn publication_by_source_revision_for_update(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+        source_revision: i64,
+    ) -> Result<Option<HistoricalPublicationRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, HistoricalPublicationRecord>(
+            r#"
+            SELECT id, entry_id, publication_number, source_revision, snapshot, published_at
+            FROM lexicon.entry_publications
+            WHERE entry_id = $1 AND source_revision = $2
+            FOR UPDATE
+            "#,
+        )
+        .bind(entry_id)
+        .bind(source_revision)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    /// 把一条已存在的 publication 设为 current publication。
+    ///
+    /// `scope` 同时用作幂等作用域与审计动作：显式激活走
+    /// `lexicon.publication.activate`，回滚后的「再发布一次」走
+    /// `lexicon.entry.publish`，两者写的是各自入口的幂等记录。
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn activate_historical_publication(
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
         request_id: Uuid,
+        scope: &str,
+        response_status: i16,
         idempotency_key: Uuid,
         request_hash: &[u8],
         publication: &HistoricalPublicationRecord,
@@ -342,7 +370,7 @@ impl LexiconRepository {
         insert_audit_action(
             tx,
             actor_id,
-            "lexicon.publication.activate",
+            scope,
             word.id,
             word.revision,
             request_id,
@@ -355,13 +383,13 @@ impl LexiconRepository {
         .await?;
         insert_idempotency_response(
             tx,
-            "lexicon.publication.activate",
+            scope,
             actor_id,
             idempotency_key,
             request_hash,
             Some(publication.id),
             word,
-            200,
+            response_status,
         )
         .await
     }

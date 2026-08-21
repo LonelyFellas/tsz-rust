@@ -240,6 +240,75 @@ impl LexiconService {
             return Err(LexiconServiceError::ValidationFailed(issues));
         }
 
+        // 回滚到历史发布版本只换 current publication，草稿 revision 原地不动，于是
+        // current publication 的 source_revision 会落后于 word.revision，派生出
+        // has_unpublished_changes=true。但 word.revision 自己早已有对应的 publication
+        // ——revision 只随内容保存推进，同一 revision 的草稿内容与快照逐字相同——
+        // 再插一条只会撞 (entry_id, source_revision) 唯一约束。这里唯一合理的语义是把
+        // 那条 publication 重新设为当前版本，等价于对它做一次 activate。
+        if let Some(publication) = LexiconRepository::publication_by_source_revision_for_update(
+            &mut transaction,
+            entry_id,
+            word.revision,
+        )
+        .await
+        .map_err(repository_error)?
+        {
+            word.status = AdminWordStatus::Published;
+            word.published_revision = Some(publication.source_revision);
+            word.has_unpublished_changes = false;
+            word.published_at = Some(publication.published_at);
+            word.lifecycle_revision += 1;
+            word.updated_at = Utc::now();
+            LexiconRepository::replace_surface_projection(
+                &mut transaction,
+                word.id,
+                word.revision,
+                crate::lexicon::repository::SurfaceContentScope::CurrentPublication(publication.id),
+                current_publication_id,
+                &previous_publication_sources,
+                &surface_sources,
+            )
+            .await
+            .map_err(repository_error)?;
+            LexiconRepository::activate_historical_publication(
+                &mut transaction,
+                actor_id,
+                request_id,
+                PUBLISH_SCOPE,
+                201,
+                idempotency_key,
+                &request_hash,
+                &publication,
+                current_publication_id,
+                &word,
+            )
+            .await
+            .map_err(repository_error)?;
+            if let Some(confirmation) = verified_visibility.as_ref() {
+                LexiconRepository::insert_command_surface_confirmation_audits(
+                    &mut transaction,
+                    actor_id,
+                    request_id,
+                    word.id,
+                    word.revision,
+                    confirmation,
+                )
+                .await
+                .map_err(repository_error)?;
+            }
+            transaction.commit().await.map_err(database_error)?;
+            if let Some(confirmation) = verified_visibility
+                && let Err(error) = self.surface_snapshots.remove_verified(&confirmation).await
+            {
+                tracing::warn!(
+                    ?error,
+                    "failed to remove consumed publish visibility snapshot"
+                );
+            }
+            return Ok(AdminWordV2Envelope { word });
+        }
+
         word.status = AdminWordStatus::Published;
         word.published_revision = Some(word.revision);
         word.has_unpublished_changes = false;
@@ -500,6 +569,8 @@ impl LexiconService {
             &mut transaction,
             actor_id,
             request_id,
+            ACTIVATE_PUBLICATION_SCOPE,
+            200,
             idempotency_key,
             &request_hash,
             &publication,
