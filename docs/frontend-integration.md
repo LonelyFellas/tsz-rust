@@ -782,6 +782,73 @@ if (bytes > STEP_CONTENT_BODY_LIMIT) { /* 提示拆分，别发出去 */ }
 `ErrorCode` 枚举多一个值，`endpoints.contract.test.ts` 里基于 `arrayContaining` 的断言不受影响。
 内容上限的**数值一个都没改**，只是补了文档。
 
+## 14. 词义步草稿保存不再要求词形步已完成（后端已实现）
+
+> **状态（2026-08-21）**：见 PR #45（`2a7c125`）。上游诉求：创建单词向导要能四步自由跳转——
+> 词形与发音要查词典、补音标是慢活，而词义与例句往往是管理员手上现成的资料，
+> 原先音标一时查不到就整条词条卡死，后面什么都干不了。
+
+### 14.1 背景
+
+`PUT /entries/{id}/steps/meanings` 原先无条件要求词形步已标记完成，否则直接
+409 `step_not_reachable`。这条前置卡的是「词形步**已完成**」，而词义内容结构上真正依赖的
+只是「引用的 `pos_id` 存在」——比实际需要严格得多，放宽的空间就在这个差值里。
+
+### 14.2 后端改动
+
+顺序前置从「所有 intent 都要求词形步已完成」收窄为**只对 `intent=complete` 成立**。
+
+**两条前端必须知道的行为变化：**
+
+| # | 变化 | 之前 | 现在 |
+| --- | --- | --- | --- |
+| 1 | 词形步未完成时 `intent=save` | 409 `step_not_reachable` | **200**，草稿正常落库 |
+| 2 | 该响应的 `max_reachable_step` | 只会是 `meanings` / `preview` | **新增可能返回 `forms`** |
+
+第 2 条容易被漏掉但会咬人：保存响应现在与 `GET` 详情用同一套派生口径（都按 `completed_steps`
+推导，见 `helpers::max_reachable_step`），词形步未完成时两边都给 `forms`。
+**若前端仍把 `max_reachable_step` 当导航门禁用**，就会出现「在第 3 步保存成功、响应一回来
+就被弹回第 2 步」——存完就被踢走。
+
+还有一条同源修正：该响应里的 `completed_steps` 此前把词形步**硬编码成已完成**
+（`completed_steps(true, …)`，在旧前置下恒真），现在如实上报。前端凡是拿 `completed_steps`
+画完成度的地方（步骤条、完成情况面板）都直接受益，也**必须**依赖这个如实值——不能再用
+「排在当前步之前就算完成」之类的位置推断，那种推断只在顺序门禁存在时才成立。
+
+`intent=complete` **没有**放宽：`completed_steps()` 的 `forms && meanings` 不变式使得词形未完成时
+词义的完成标记根本存不下来，放宽只会变成静默丢弃。
+
+放宽后仍然守得住，靠的是既有三层校验，本次**一层都没动**：
+
+| 层 | 位置 | 作用 |
+| --- | --- | --- |
+| 存储安全网 | `editing.rs` `meaning_storage_is_safe` | 无条件挡住引用不存在 `pos_id` 的词义，**与 intent 无关** |
+| 内容校验 | `validate_meanings` | 报出内容问题，`intent=complete` 时阻断 |
+| 发布门 | `publishing.rs` | 独立重跑 `validate_forms` + `validate_meanings`，**与 `completed_steps` 无关** |
+
+### 14.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | **不用**跑 `sync:openapi`——本次无 wire 变更，`docs/openapi.json` 重导无 diff |
+| 2 | 拆掉把 `max_reachable_step` 当导航门禁的判断，否则会撞上 §14.2 第 2 条的「存完被踢走」 |
+| 3 | 完成度一律读 `completed_steps`，别用步骤位置推断 |
+| 4 | 「完成并进入下一步」（`intent=complete`）的错误处理保持不变，它仍会 409 `step_not_reachable` |
+
+> `max_reachable_step` 本身**保留**，语义收窄为「续做落点」（第一个未完成的步骤），
+> 适合用来决定列表「继续创建」跳到哪一步，**不适合**再当权限判断。
+
+### 14.4 兼容性
+
+**放宽是纯扩大成功集**：原本 409 的请求现在 200，原本成功的一个都不受影响。
+
+旧前端也撞不到新行为——旧门禁保证「站在词义步」蕴含「词形步已完成」，此时
+`forms_complete == true`，响应仍走老分支给 `meanings` / `preview`。因此**后端先部署是安全的**；
+反过来前端先部署则会变成「能进去、能填、一保存就 409」，比放宽前更糟。**部署顺序：后端先，前端后。**
+
+发布校验（`publishing.rs`）与 `helpers::max_reachable_step` 的派生逻辑**一个字都没改**，
+无迁移、无 schema 变更。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_
