@@ -171,9 +171,17 @@ ssh tshb-test 'rm -f /opt/tsz-deploy-manifests/api.json'
 #    .env 是生产密钥(600 权限,含 JWT_SECRET/COOKIE_SECURE)——rsync 覆盖或 --delete 掉它=事故;
 #    target 巨大且服务器要自己编译; 绝不使用 --delete;
 #    .claude/worktrees 是本机 worktree 的整份源码副本(数百个文件),服务器只编译仓库根,
-#    推上去纯属浪费并会在服务器留下另一个分支的代码,容易误读。
+#    推上去纯属浪费并会在服务器留下另一个分支的代码,容易误读;
+#    rust-toolchain.toml 钉的是本地与 CI 的编译器版本,服务器只跑 cargo build 不跑 lint,
+#    版本一致对它没有价值。推上去反而会让 rustup 去下一整套具名工具链——服务器上只有
+#    stable 一套,任何具名版本(哪怕版本号相同)都算另一套安装,而它到 static.rust-lang.org
+#    实测只有约 29 KB/s,几小时起步。更糟的是这一步在「撤下旧 manifest」之后,卡住会把
+#    服务器留在「有二进制、无来源记录」的半状态。
+#    ⚠️ 由此带来一个有意接受的缺口:服务器用它自己的 stable(现为 1.97.0),与 CI 验证过的
+#    1.98.0 不是同一个编译器。若出现「CI 全绿但服务器编译失败」,先想到这一点,别一头扎进
+#    代码里找原因。
 rsync -az --exclude .git --exclude target --exclude .env --exclude .vscode \
-  --exclude .claude/worktrees \
+  --exclude .claude/worktrees --exclude rust-toolchain.toml \
   /Users/darwish/Dev/tsz-core/tsz-rust/ tshb-test:/opt/tsz-rust/
 
 # 4) 服务器编译(后台跑,增量 1-2 分钟,全量约 7 分钟)。

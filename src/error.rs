@@ -561,9 +561,22 @@ pub struct ProblemReferenceLocation {
 #[derive(Debug)]
 pub struct AppError {
     status: StatusCode,
-    response: ProblemDetails,
+    /// 装箱：`ProblemDetails` 有 472 字节（其中 `ProblemMeta` 独占 360），内联会让每个
+    /// `Result<_, AppError>` 的 Err 分支背上 488 字节，clippy 的 `result_large_err` 会在
+    /// 全仓库 62 处报错。装箱后 `AppError` 降到 24 字节，且 `ProblemDetails` 之后再长也
+    /// 不会重新触发——只装箱 `meta` 只能降到 136，离阈值 128 太近，加一个字段就又炸。
+    /// 错误是异常路径，一次堆分配的代价可以忽略。
+    response: Box<ProblemDetails>,
     source: Option<anyhow::Error>,
 }
+
+// 本次改动的全部价值在于 AppError 保持小体积。解箱 response、或往 AppError 里直接塞大字段，
+// 反馈会是 62 个分散在各 handler 的 clippy result_large_err，很难一眼看出根因在这里。
+// 编译期直接钉死，失败时就指着这一行。128 是 clippy result_large_err 的默认阈值。
+const _: () = assert!(
+    size_of::<AppError>() <= 128,
+    "AppError 超过了 clippy result_large_err 的默认阈值 128 字节：别解箱 response，也别往 AppError 里直接加大字段"
+);
 
 impl AppError {
     fn new(
@@ -575,7 +588,7 @@ impl AppError {
         let descriptor = code.descriptor();
         Self {
             status,
-            response: ProblemDetails {
+            response: Box::new(ProblemDetails {
                 type_uri: code.type_uri(),
                 title: descriptor.title,
                 status: status.as_u16(),
@@ -584,7 +597,7 @@ impl AppError {
                 field,
                 field_issues: None,
                 meta: None,
-            },
+            }),
             source: None,
         }
     }
