@@ -4,15 +4,16 @@ use utoipa::ToSchema;
 
 use crate::{
     admin::{
-        AdminAuth,
+        AdminAuth, AdminRefreshTokenRepository, AdminStatus,
         accounts::{
             AdminAccountAdminResponse, AdminAccountsRepository, AdminAccountsService,
-            AdminListQueryParams, AdminUserListResponse, model::UserListQueryParams,
+            AdminListQueryParams, AdminUserListResponse,
+            model::{AdminIdPath, UserListQueryParams},
             service::AdminAccountsServiceError,
         },
         authorization::{require_active_admin, require_super_admin},
     },
-    api::{ApiJson, ApiQuery, ListQuery, PaginatedResponse, PaginationQuery},
+    api::{ApiJson, ApiPath, ApiQuery, ListQuery, PaginatedResponse, PaginationQuery},
     error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
     platform::{Phone, PhoneError},
@@ -211,16 +212,96 @@ pub async fn request_create_admin_code(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// PATCH /api/v1/admin/admins/{id}/status
-/// 启用/禁用普通管理
-pub async fn set_admin_status() -> Result<impl IntoResponse, AppError> {
-    Ok(())
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateAdminStatusRequest {
+    /// 目标状态；枚举外的取值由 `ApiJson` 统一挡成 422 invalid_request_body。
+    pub status: AdminStatus,
 }
 
-/// POST /api/v1/admin/admins/{admin_id}/reset_password
-/// 超级管理员对普通管理员密码重置
-pub async fn reset_admin_password() -> Result<impl IntoResponse, AppError> {
-    Ok(())
+#[derive(Serialize, ToSchema)]
+pub struct ResetAdminPasswordResponse {
+    /// 仅在本次响应中返回的临时密码；目标管理员下次登录后必须改密。
+    #[schema(example = "g7MpQ2xV9rKe4sY8uW3n")]
+    pub temporary_password: String,
+}
+
+/// PATCH /api/v1/admin/admins/{admin_id}/status
+///
+/// 超级管理员启用/禁用普通管理员。目标是超管一律 403——治理顶点互不可管
+/// （设计 §9，含超管改自己）。禁用不即时踢线，接受一个 access TTL 的延迟
+/// （user-mgmt-D6），但会让后续 refresh 被拒。
+#[utoipa::path(
+    patch,
+    path = "/api/v1/admin/admins/{admin_id}/status",
+    tag = "admin-accounts",
+    security(("bearer_auth" = [])),
+    params(AdminIdPath),
+    request_body = UpdateAdminStatusRequest,
+    responses(
+        (status = 200, description = "状态已更新，返回更新后的管理员", body = AdminAccountAdminResponse),
+        (status = 400, description = "路径参数非法"),
+        (status = 401, description = "缺少/无效/过期 token，管理员不存在或账号被锁定"),
+        (status = 403, description = "账号已禁用、必须先改密、不是超级管理员，或目标是超级管理员"),
+        (status = 404, description = "目标管理员不存在"),
+        (status = 422, description = "请求体缺字段或 status 不在枚举内"),
+        (status = 500, description = "数据库更新失败"),
+    )
+)]
+pub async fn set_admin_status(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(path): ApiPath<AdminIdPath>,
+    ApiJson(req): ApiJson<UpdateAdminStatusRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    require_super_admin(&state, &auth).await?;
+
+    let service = AdminAccountsService::new(AdminAccountsRepository::new(state.pool.clone()), None);
+    let admin = service
+        .set_status(&path.admin_id, req.status)
+        .await
+        .map_err(|error| map_governance_error(error, "cannot change a super admin's status"))?;
+
+    Ok((StatusCode::OK, Json(admin)))
+}
+
+/// POST /api/v1/admin/admins/{admin_id}/reset-password
+///
+/// 超级管理员重置普通管理员密码：踢掉目标全部会话并写入一次性临时密码，
+/// 同时置 `must_change_password`——目标下次登录只能先改密。目标是超管一律 403
+/// （含超管重置自己）。明文临时密码只随本次响应返回一次，不落库、不进日志。
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/admins/{admin_id}/reset-password",
+    tag = "admin-accounts",
+    security(("bearer_auth" = [])),
+    params(AdminIdPath),
+    responses(
+        (status = 200, description = "密码已重置，返回一次性临时密码", body = ResetAdminPasswordResponse),
+        (status = 400, description = "路径参数非法"),
+        (status = 401, description = "缺少/无效/过期 token，管理员不存在或账号被锁定"),
+        (status = 403, description = "账号已禁用、必须先改密、不是超级管理员，或目标是超级管理员"),
+        (status = 404, description = "目标管理员不存在"),
+        (status = 500, description = "数据库、密码生成或密码哈希失败"),
+    )
+)]
+pub async fn reset_admin_password(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(path): ApiPath<AdminIdPath>,
+) -> Result<impl IntoResponse, AppError> {
+    require_super_admin(&state, &auth).await?;
+
+    let service = AdminAccountsService::new(AdminAccountsRepository::new(state.pool.clone()), None)
+        .with_session_repository(AdminRefreshTokenRepository::new(state.pool.clone()));
+    let temporary_password = service
+        .reset_password(&path.admin_id)
+        .await
+        .map_err(|error| map_governance_error(error, "cannot reset a super admin"))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(ResetAdminPasswordResponse { temporary_password }),
+    ))
 }
 
 fn map_otp_verify_error(error: OtpServiceError) -> AppError {
@@ -280,6 +361,21 @@ fn map_provision_err(err: AdminAccountsServiceError) -> AppError {
     }
 }
 
+/// 治理端点共用的错误映射：`forbidden_message` 由端点各自给，因为「不能改超管状态」
+/// 与「不能重置超管」是两句不同的文案（设计 §9），其余分支完全一致。
+fn map_governance_error(
+    error: AdminAccountsServiceError,
+    forbidden_message: &'static str,
+) -> AppError {
+    match error {
+        AdminAccountsServiceError::NotFound => AppError::not_found("admin not found"),
+        AdminAccountsServiceError::SuperAdminProtected => {
+            AppError::forbidden(ErrorCode::Forbidden, forbidden_message)
+        }
+        other => AppError::internal(other),
+    }
+}
+
 fn map_phone_error(error: PhoneError) -> AppError {
     let message = match error {
         PhoneError::Empty => "phone is missing",
@@ -305,5 +401,24 @@ mod tests {
         let response = map_provision_err(AdminAccountsServiceError::AlreadyExists).into_response();
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn missing_target_maps_to_http_404() {
+        let error = map_governance_error(AdminAccountsServiceError::NotFound, "unused");
+
+        assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(error.code(), ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn super_admin_target_maps_to_http_403_with_endpoint_message() {
+        let error = map_governance_error(
+            AdminAccountsServiceError::SuperAdminProtected,
+            "cannot reset a super admin",
+        );
+
+        assert_eq!(error.status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(error.code(), ErrorCode::Forbidden);
     }
 }

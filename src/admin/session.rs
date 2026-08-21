@@ -342,6 +342,17 @@ impl AdminSessionService {
         Ok(())
     }
 
+    /// /admin/logout-all：按 **access token 的属主** 吊销其全部会话，不经手 refresh 明文——
+    /// 逃生组端点的调用者可能连有效 cookie 都没有（被强制改密、或凭证已疑似泄露）。
+    /// 幂等：一枚活跃会话都没有也返回 Ok。
+    pub async fn logout_all(&self, admin_id: &Uuid) -> Result<(), AdminSessionError> {
+        let revoked = self.repository.revoke_all_by_admin_id(admin_id).await?;
+        if revoked > 0 {
+            tracing::info!(admin_id = %admin_id, revoked, "admin logged out of all sessions");
+        }
+        Ok(())
+    }
+
     /// refresh handler「轮换压轴」次序的地基：先只读定位属主 → 账号/状态都验过了
     /// → 最后才 rotate。peek 绝不消费。
     pub async fn peek_admin_id(&self, plaintext: &str) -> Result<Option<Uuid>, AdminSessionError> {
