@@ -12,9 +12,14 @@
 >
 > **实施状态（2026-08-20）**：**P1、P2、P3 已实现**，全量 `cargo test` 绿；
 > 前端对接说明见 `docs/frontend-integration.md` §10 / §11 / §12。
-> **P1-b（AI 补全改单份）刻意押后**：pre-push 评审发现现网前端仍硬性要求
-> distinguish 词条的语法结构是 `[uk, us]`，后端先改会让 AI 补全的结果被判为「未填写」。
-> 等前端阶段 3 落地后另开一个小 PR（改动只有 `content_completion/worker.rs` 一个函数）。
+> **P1-b 已于 2026-08-20 实现**：前端阶段 3 上测试服后解除押后。`content_completion` 的
+> 语法结构现在恒产单份 `common`，不再看词条是不是 distinguish。契约无变化，
+> `docs/openapi.json` 无需重导。
+>
+> **实现期新增的一个取舍**：收敛成单份后，模型只给 `uk` / `us` 两侧而 `common` 为空时
+> 必须二选一。取 `common → uk → us`——被迫选边时偏英式，与 `admins.dialect_preference`
+> 的默认值一致（迁移注释：「默认英式，存量账号一并按英式解释」）。改这个顺序等于改平台
+> 默认口径，别当成无关紧要的重构。
 
 ## 背景
 
@@ -29,7 +34,7 @@
 | 项 | 内容 | 阻塞什么 | 契约影响 | 数据迁移 | 估时 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- |
 | **P1** | 放宽语法结构的方言形状校验 | 前端阶段 6（删镜像 shim） | 纯放宽，schema 不变 | 无 | 0.5 人日 | **已实现** |
-| **P1-b** | AI 补全对 distinguish 词条改产单份 | — | 无 | 无 | 0.5 人日 | 押后（**依赖前端阶段 3 先发**） |
+| **P1-b** | AI 补全对 distinguish 词条改产单份 | — | 无 | 无 | 0.5 人日 | **已实现** |
 | **P2** | 管理员方言偏好持久化 | 前端阶段 7（偏好事实源上服务端） | profile 响应加字段 + 1 个新端点 | 1 条加列迁移 | 1 人日 | **已实现** |
 | **P3** | 列表/搜索行的每侧拼写结构化 | 「列表按偏好侧排序」这一条体验 | 新增字段 | 无 | 0.5 人日 | **已实现** |
 
@@ -66,11 +71,11 @@ wire 里出现冗余数据，学习端将来读到会显示成「英式：a cent
 
 - 持久化无需改动。`text_variant_role()` 按 dialect 生成节点 role，`common` 是合法取值；
   `lexicon.entry_editor_projection` 原样回读，round-trip 安全。
-- **AI 内容补全（P1-b）押后，不与本项同批**：`src/lexicon/content_completion/worker.rs:156-180`
-  目前对 `distinguish` 词条生成 uk/us 双份语法结构。放宽后它仍然合法，只是会继续制造
-  前端要消灭的双份。**不能先改**：现网前端 `meaningsAndExamples/validation.ts` 对
-  `distinguish` 词条硬性要求 `[uk, us]`，后端先产单份会让 AI 补全结果在第 3 步显示为
-  「未填写」、readiness 判 incomplete，管理员被迫手工重录两侧。前端阶段 3 落地后再改。
+- **AI 内容补全（P1-b）已跟进**（2026-08-20，前端阶段 3 上测试服后）：
+  `src/lexicon/content_completion/worker.rs` 的 `map_generated` 不再按 distinguish 分支，
+  语法结构恒产单份 `common`。押后的原因是现网前端 `meaningsAndExamples/validation.ts` 曾对
+  `distinguish` 词条硬性要求 `[uk, us]`，后端先产单份会让补全结果在第 3 步显示为「未填写」、
+  readiness 判 incomplete——阶段 3 发布后该约束解除。
 - 发布快照按行读取，不假设两侧齐全。
 
 **兼容性**：纯放宽。存量数据、旧前端、OpenAPI schema 全不受影响，**无需重新导出 `docs/openapi.json`**。
@@ -176,7 +181,7 @@ wire 里出现冗余数据，学习端将来读到会显示成「英式：a cent
 ## 落地检查清单
 
 - [x] P1：改 `validation/meanings.rs` + 4 条 handler 断言
-- [ ] P1-b：等前端阶段 3 发布后再改 `content_completion/worker.rs`（先改会造成回退，见上）
+- [x] P1-b：前端阶段 3 上测试服后已改 `content_completion/worker.rs`（2026-08-20）
 - [x] P2：迁移 + repository + DTO + 新端点 + 三个测试文件
 - [x] `cargo run --bin export_openapi` 重导 `docs/openapi.json`；`cargo sqlx prepare` 刷新 `.sqlx`（CI 走 `SQLX_OFFLINE`）
 - [x] `docs/frontend-integration.md` 追加 §10 / §11，沿用 §8 / §9 的四段式

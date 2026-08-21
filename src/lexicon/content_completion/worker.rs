@@ -151,44 +151,33 @@ fn map_generated(
     {
         return Err(());
     }
-    let distinguish = matches!(
-        partition.source.headwords,
-        WordHeadwordsV2::Distinguish { .. }
-    );
+    // 语法结构恒产单份 common，不看词条是不是 distinguish（提案 P1-b）。
+    // 方言区分只属于 L1 词条事实（centre / center 这类地区拼写）；语法结构属于 L3——
+    // 平台自己写的英文行文，只维护一份。此前对 distinguish 词条产 uk/us 双份同值镜像，
+    // wire 里是纯冗余，学习端读到会显示成「英式：a centre／美式：a centre」这种没有信息量的两行。
+    // P1 已放宽校验让 distinguish 词条同时接受 [common] 与 [uk, us]，所以这里改产单份是合法的。
+    // 例句仍按词条事实分方言（见 english_text），本项不涉及。
     let grammar_structures = generated
         .grammar_structures
         .iter()
         .map(|grammar| {
-            let id = Uuid::now_v7();
-            let variants = if distinguish {
-                let fallback = grammar.common.as_deref();
-                let uk = grammar
-                    .uk
-                    .as_deref()
-                    .or(fallback)
-                    .filter(|value| valid_text(value, 500))
-                    .ok_or(())?;
-                let us = grammar
-                    .us
-                    .as_deref()
-                    .or(fallback)
-                    .filter(|value| valid_text(value, 500))
-                    .ok_or(())?;
-                vec![
-                    grammar_variant(Dialect::Uk, uk),
-                    grammar_variant(Dialect::Us, us),
-                ]
-            } else {
-                let common = grammar
-                    .common
-                    .as_deref()
-                    .or(grammar.us.as_deref())
-                    .or(grammar.uk.as_deref())
-                    .filter(|value| valid_text(value, 500))
-                    .ok_or(())?;
-                vec![grammar_variant(Dialect::Common, common)]
-            };
-            Ok(GrammarStructureV2 { id, variants })
+            // 逐候选取第一个合法文本。顺序 common → uk → us：被迫二选一时偏英式，
+            // 与 admins.dialect_preference 的默认值一致（迁移注释：默认英式，存量账号
+            // 一并按英式解释）。逐个 filter 而不是先 or 再 filter——后者在 common 为空串
+            // 时会让整个分区失败，即便 uk / us 里有完全可用的文本。
+            let common = [
+                grammar.common.as_deref(),
+                grammar.uk.as_deref(),
+                grammar.us.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|value| valid_text(value, 500))
+            .ok_or(())?;
+            Ok(GrammarStructureV2 {
+                id: Uuid::now_v7(),
+                variants: vec![grammar_variant(Dialect::Common, common)],
+            })
         })
         .collect::<Result<Vec<_>, ()>>()?;
     let mut groups = Vec::with_capacity(generated.senses.len());
@@ -387,7 +376,10 @@ mod tests {
         content_completion::provider::{
             GeneratedDefinition, GeneratedExample, GeneratedGrammar, GeneratedSense,
         },
-        dto::{DialectRulesV2, DraftFormsStepContent, WordBaseFormSlotV2, WordPosFormsV2},
+        dto::{
+            DialectRulesV2, DraftFormsStepContent, SourceDialect, WordBaseFormSlotV2,
+            WordPosFormsV2,
+        },
     };
 
     fn partition() -> ClaimedPartition {
@@ -440,6 +432,23 @@ mod tests {
                 ]),
             },
         }
+    }
+
+    /// distinguish 词条的分区夹具：词条事实分英美（centre / center），
+    /// 但语法结构按 P1-b 仍应收敛成单份。
+    fn distinguish_partition() -> ClaimedPartition {
+        let mut partition = partition();
+        partition.source.headword = "centre".into();
+        for pos in &mut partition.source.forms.pos {
+            pos.dialect_rules.spelling_mode = "distinguish".into();
+            pos.dialect_rules.phonetic_mode = "distinguish".into();
+        }
+        partition.source.headwords = WordHeadwordsV2::Distinguish {
+            uk: "centre".into(),
+            us: "center".into(),
+            source_dialect: SourceDialect::Uk,
+        };
+        partition
     }
 
     fn generated() -> GeneratedPosContent {
@@ -526,6 +535,76 @@ mod tests {
         let (evidence, _) =
             dictionary_evidence_for_pos(&partition.source.dictionary_evidence_by_pos, "verb");
         assert!(!has_dictionary_content(&evidence));
+    }
+
+    // P1-b：语法结构属于 L3（平台自己写的英文行文），恒产单份 common。
+    // distinguish 词条此前会拿到 uk/us 双份同值镜像——wire 冗余，且学习端会显示成
+    // 「英式：a centre／美式：a centre」这种没有信息量的两行。
+    #[test]
+    fn grammar_structures_always_collapse_to_a_single_common_variant() {
+        let distinguish = distinguish_partition();
+
+        // 模型只给 common：不再镜像成两份。
+        let result = map_generated(&distinguish, generated()).unwrap();
+        let variants = &result.pos.grammar_structures[0].variants;
+        assert_eq!(
+            variants.len(),
+            1,
+            "distinguish 词条的语法结构应收敛为单条，实际 {variants:#?}"
+        );
+        assert_eq!(variants[0].dialect, Dialect::Common);
+
+        // 模型即便返回了英美两侧文本，也仍然只落一条 common——
+        // 提示词已禁止编造方言差异，这里再钉一道，避免镜像从模型侧漏回来。
+        // 被迫二选一时取英式，与 admins.dialect_preference 的默认值一致。
+        let mut dialect_specific = generated();
+        dialect_specific.grammar_structures = vec![GeneratedGrammar {
+            common: None,
+            uk: Some("a centre for something".into()),
+            us: Some("a center for something".into()),
+        }];
+        let result = map_generated(&distinguish, dialect_specific).unwrap();
+        let variants = &result.pos.grammar_structures[0].variants;
+        assert_eq!(variants.len(), 1, "模型给了双侧也不应产出两条");
+        assert_eq!(variants[0].dialect, Dialect::Common);
+        assert_eq!(
+            variants[0].content.text(),
+            "a centre for something",
+            "缺 common 时应取英式，不是美式"
+        );
+
+        // common 存在但非法（空白串）时要回退到下一个合法候选，而不是让整个分区失败。
+        // 两条一起钉住回退顺序：uk 在场时取 uk，uk 缺席才轮到 us。
+        // 只留后者的话，把顺序写反成 common → us → uk 也照样通过。
+        for (uk, us, expected) in [
+            (
+                Some("a centre for something"),
+                Some("a center for something"),
+                "a centre for something",
+            ),
+            (
+                None,
+                Some("a center for something"),
+                "a center for something",
+            ),
+        ] {
+            let mut empty_common = generated();
+            empty_common.grammar_structures = vec![GeneratedGrammar {
+                common: Some("   ".into()),
+                uk: uk.map(Into::into),
+                us: us.map(Into::into),
+            }];
+            let result = map_generated(&distinguish, empty_common).unwrap();
+            assert_eq!(
+                result.pos.grammar_structures[0].variants[0].content.text(),
+                expected,
+                "common 非法时应按 uk → us 回退，而不是整条分区失败"
+            );
+        }
+
+        // unified 词条的行为不受本次改动影响。
+        let result = map_generated(&partition(), generated()).unwrap();
+        assert_eq!(result.pos.grammar_structures[0].variants.len(), 1);
     }
 
     #[test]
