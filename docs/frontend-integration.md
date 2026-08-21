@@ -462,10 +462,10 @@ JSONB snapshot 做删除判断。
 `unified` 词条维持只接受 `[common]`。缺一侧（只写 `uk`）、多一侧（`common` + `uk`）、
 方言重复，仍然照旧报 `grammar_variants_invalid`。
 
-**AI 内容补全暂未跟着收敛**（提案 P1-b）：`content_completion` 对 `distinguish` 词条
-仍生成 uk / us 两份同值镜像。**这是有意押后**——现网前端对 `distinguish` 词条硬性要求
-`[uk, us]`，后端先产单份会让 AI 补全结果在第 3 步显示为「未填写」。
-**请在阶段 3 发布后告知后端**，后端随即改成单份 `common`（另开一个小 PR）。
+**AI 内容补全已跟着收敛**（提案 P1-b，2026-08-20）：前端阶段 3 上测试服后，
+`content_completion` 的语法结构**恒产单份 `common`**，不再看词条是不是 `distinguish`，
+uk / us 双份同值镜像已消失。例句仍按词条事实分方言，本项不涉及。
+契约无变化，`docs/openapi.json` 未变，前端无需重跑 `sync:openapi`。
 
 ### 10.3 前端要怎么改
 
