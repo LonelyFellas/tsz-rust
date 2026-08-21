@@ -600,7 +600,10 @@ impl LexiconService {
         let current = entry_from_record(record)?;
         ensure_active(&current)?;
         ensure_revision(&current, base_revision)?;
-        if !current.completed_steps.contains(&PersistedWordStep::Forms) {
+        // 词形步未完成也允许存词义草稿：引用合法性由 meaning_storage_is_safe 无条件兜底，
+        // 完整性由发布校验把关，顺序前置只对「标记完成」成立。
+        let forms_complete = current.completed_steps.contains(&PersistedWordStep::Forms);
+        if intent == StepSaveIntent::Complete && !forms_complete {
             return Err(LexiconServiceError::StepNotReachable);
         }
         let storage_issues =
@@ -672,11 +675,13 @@ impl LexiconService {
             revision: current.revision + 1,
             has_unpublished_changes: current.published_revision.is_some(),
             meanings: content,
-            completed_steps: completed_steps(true, meanings_complete),
-            max_reachable_step: if meanings_complete {
+            completed_steps: completed_steps(forms_complete, meanings_complete),
+            max_reachable_step: if forms_complete && meanings_complete {
                 WordCreationStep::Preview
-            } else {
+            } else if forms_complete {
                 WordCreationStep::Meanings
+            } else {
+                WordCreationStep::Forms
             },
             updated_at: now,
             ..current
