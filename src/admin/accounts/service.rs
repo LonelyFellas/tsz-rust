@@ -15,7 +15,7 @@ use crate::{
     api::{PaginatedResponse, PaginationMeta},
     platform::{Password, PasswordError, validate_password},
     user::{
-        model::UserListFilter,
+        model::{UserListFilter, UserListRecord, UserStatus},
         repository::{UserError, UserRepository},
     },
 };
@@ -33,6 +33,9 @@ pub enum AdminAccountsServiceError {
 
     #[error("admin not found")]
     NotFound,
+
+    #[error("user not found")]
+    UserNotFound,
 
     /// 治理顶点互不可管（设计 §9）：super_admin 不可被启禁用、不可被重置密码，
     /// 含超管对自己。
@@ -336,13 +339,7 @@ impl AdminAccountsService {
         &self,
         query: UserListQuery,
     ) -> Result<UserListResponse, AdminAccountsServiceError> {
-        // 检查user_repo
-        let user_repo = match &self.user_repository {
-            Some(user_repository) => user_repository,
-            None => {
-                return Err(AdminAccountsServiceError::UserRepositoryNone);
-            }
-        };
+        let user_repo = self.user_repo()?;
 
         let page = query.pagination.page.unwrap_or(1);
         let page_size = query.pagination.page_size.unwrap_or(20);
@@ -384,20 +381,7 @@ impl AdminAccountsService {
 
         let (records, total) = user_repo.user_list(&filter).await.map_err(map_user_error)?;
 
-        let items = records
-            .into_iter()
-            .map(|record| AdminAccountUserResponse {
-                id: record.id,
-                phone: record.phone,
-                email: record.email,
-                display_name: record.display_name,
-                avatar_url: record.avatar_url,
-                roles: record.roles,
-                status: record.status,
-                created_at: record.created_at,
-                updated_at: record.updated_at,
-            })
-            .collect();
+        let items = records.into_iter().map(user_response_from).collect();
         let total_pages = if total == 0 {
             0
         } else {
@@ -413,6 +397,77 @@ impl AdminAccountsService {
                 total_pages,
             },
         })
+    }
+
+    /// 单个 C 端用户的 admin 视图（三期 `GET /users/{id}`）。
+    pub async fn user_detail(
+        &self,
+        user_id: &Uuid,
+    ) -> Result<AdminAccountUserResponse, AdminAccountsServiceError> {
+        let record = self
+            .user_repo()?
+            .admin_view_by_id(user_id)
+            .await
+            .map_err(map_user_error)?
+            .ok_or(AdminAccountsServiceError::UserNotFound)?;
+
+        Ok(user_response_from(record))
+    }
+
+    /// 启禁用 C 端用户（三期 `PATCH /users/{id}/status`，super）。
+    pub async fn set_user_status(
+        &self,
+        user_id: &Uuid,
+        status: UserStatus,
+    ) -> Result<AdminAccountUserResponse, AdminAccountsServiceError> {
+        self.update_user(user_id, Some(status), None).await
+    }
+
+    /// 改 C 端用户昵称（三期 `PATCH /users/{id}`，super）。
+    /// 入参必须是已过 `DisplayName::parse` 的值——校验属于 handler 的活。
+    pub async fn set_user_display_name(
+        &self,
+        user_id: &Uuid,
+        display_name: &str,
+    ) -> Result<AdminAccountUserResponse, AdminAccountsServiceError> {
+        self.update_user(user_id, None, Some(display_name)).await
+    }
+
+    async fn update_user(
+        &self,
+        user_id: &Uuid,
+        status: Option<UserStatus>,
+        display_name: Option<&str>,
+    ) -> Result<AdminAccountUserResponse, AdminAccountsServiceError> {
+        let record = self
+            .user_repo()?
+            .update_admin_view(user_id, status, display_name)
+            .await
+            .map_err(map_user_error)?
+            .ok_or(AdminAccountsServiceError::UserNotFound)?;
+
+        Ok(user_response_from(record))
+    }
+
+    fn user_repo(&self) -> Result<&UserRepository, AdminAccountsServiceError> {
+        self.user_repository
+            .as_ref()
+            .ok_or(AdminAccountsServiceError::UserRepositoryNone)
+    }
+}
+
+/// 用户行 → wire 响应（`AdminUser`）。列表与单条读写共用一份映射，保证形状不漂移。
+fn user_response_from(record: UserListRecord) -> AdminAccountUserResponse {
+    AdminAccountUserResponse {
+        id: record.id,
+        phone: record.phone,
+        email: record.email,
+        display_name: record.display_name,
+        avatar_url: record.avatar_url,
+        roles: record.roles,
+        status: record.status,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
     }
 }
 
