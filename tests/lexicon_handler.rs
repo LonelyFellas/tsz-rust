@@ -7155,3 +7155,447 @@ async fn dialect_split_and_merge_round_trip_reuses_retired_stable_node_ids(pool:
         "定位信息不应回传存量节点 ID：{base_issue}"
     );
 }
+
+/// 建一个「只完成 basics」的草稿：词形与词义都还没做完，用于验证跨步骤跳转。
+async fn create_incomplete_draft(
+    state: &AppState,
+    pool: &PgPool,
+    bearer: &str,
+    headword: &str,
+) -> Value {
+    seed_dictionary_word(pool, headword).await;
+    let (status, detection) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        bearer,
+        None,
+        Some(json!({"language": "en", "headword": headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "检测失败：{detection}");
+    let mut create_input = json!({
+        "schema_version": 2,
+        "detection_id": detection["detection_id"],
+        "headwords": detection["builtin_dictionary"]["headwords"].clone(),
+    });
+    if let Some(surface_token) =
+        detection["smart_dictionary"]["surface_match_page"]["surface_confirmation_token"].as_str()
+    {
+        create_input["confirmed_surface_match_token"] = json!(surface_token);
+    }
+    let (status, created) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(create_input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建失败：{created}");
+    created
+}
+
+#[sqlx::test]
+async fn meanings_step_accepts_draft_before_forms_step_completes(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let headword = format!("draftfirst{}", admin_id.simple());
+    let created = create_incomplete_draft(&state, &pool, &bearer, &headword).await;
+    let entry_id = created["word"]["id"].as_str().unwrap().to_owned();
+
+    fn completed(word: &Value) -> Vec<String> {
+        word["completed_steps"]
+            .as_array()
+            .expect("completed_steps 应是数组")
+            .iter()
+            .filter_map(|step| step.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    // 音标还没查，词形步本就未完成。
+    assert!(
+        !completed(&created["word"]).contains(&"forms".to_owned()),
+        "新建草稿的词形步不应是完成态：{created}"
+    );
+
+    // 放宽点：词形步未完成，也能把现成的词义资料先存成草稿。
+    let mut meanings = created["word"]["meanings"].clone();
+    meanings["sense_groups"][0]["name_zh"] = json!("先录的含义");
+    meanings["sense_groups"][0]["name_en"] = json!("Draft meaning");
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": created["word"]["revision"],
+            "intent": "save",
+            "content": meanings.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "词形步未完成时保存词义草稿应成功：{saved}"
+    );
+    assert_eq!(
+        saved["word"]["meanings"]["sense_groups"][0]["name_zh"], "先录的含义",
+        "词义草稿内容应被存下：{saved}"
+    );
+
+    // 完成情况面板必须如实：存词义不得把词形步谎报成已完成。
+    assert!(
+        !completed(&saved["word"]).contains(&"forms".to_owned()),
+        "保存词义不应把词形步标记为完成：{saved}"
+    );
+    assert!(
+        !completed(&saved["word"]).contains(&"meanings".to_owned()),
+        "intent=save 不应把词义步标记为完成：{saved}"
+    );
+    assert_eq!(
+        saved["word"]["max_reachable_step"], "forms",
+        "词形步未完成时「继续创建」落点应停在词形步：{saved}"
+    );
+
+    // 保存响应里的落点/完成情况必须与重新读取时的派生结果一致。
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "读取词条失败：{reloaded}");
+    assert_eq!(
+        reloaded["word"]["max_reachable_step"], saved["word"]["max_reachable_step"],
+        "保存响应与重新读取的落点必须一致：{reloaded}"
+    );
+    assert_eq!(
+        completed(&reloaded["word"]),
+        completed(&saved["word"]),
+        "保存响应与重新读取的完成情况必须一致：{reloaded}"
+    );
+
+    // 「标记完成」不放宽：词形步没完成就不能把词义步标记为完成。
+    let (status, completing) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": saved["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "词形步未完成时标记词义步完成应被拒绝：{completing}"
+    );
+    assert_eq!(completing["code"], "step_not_reachable");
+
+    // 发布才是真正的守门人：内容不全仍必须被完整性校验挡下，且要独立重跑词形校验。
+    let (status, published) = publish_ready_confirming(&state, &bearer, &saved).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "内容不全的词条不应发布成功：{published}"
+    );
+    assert_eq!(published["code"], "validation_failed");
+    assert!(
+        published["field_issues"]
+            .as_array()
+            .is_some_and(|issues| issues.iter().any(|issue| issue["step"] == "forms")),
+        "发布应独立重跑词形校验并报出词形问题：{published}"
+    );
+}
+
+#[sqlx::test]
+async fn meanings_step_without_any_part_of_speech_stores_shell_but_rejects_dangling_pos(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let headword = format!("noposyet{}", admin_id.simple());
+    let created = create_incomplete_draft(&state, &pool, &bearer, &headword).await;
+    let entry_id = created["word"]["id"].as_str().unwrap().to_owned();
+    let dangling_pos_id = created["word"]["meanings"]["pos"][0]["pos_id"].clone();
+    assert!(
+        dangling_pos_id.is_string(),
+        "骨架应自带一个基本词性：{created}"
+    );
+
+    // 把词性全部删光——`pos_required` 不阻断 save，所以这是个可达的草稿状态。
+    let mut forms = created["word"]["forms"].clone();
+    forms["pos"] = json!([]);
+    let (status, forms_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": created["word"]["revision"],
+            "intent": "save",
+            "content": forms,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "清空词性的词形草稿应能保存：{forms_saved}"
+    );
+    assert_eq!(
+        forms_saved["word"]["meanings"]["pos"],
+        json!([]),
+        "词性删光后词义侧的 pos 应被一并收敛：{forms_saved}"
+    );
+
+    // 一个基本词性都没有时，不带 pos 的词义空壳仍可保存（前端第 3 步空态据此设计）。
+    let (status, shell_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": forms_saved["word"]["revision"],
+            "intent": "save",
+            "content": forms_saved["word"]["meanings"].clone(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "零词性时保存不含 pos 的词义空壳应成功：{shell_saved}"
+    );
+
+    // 但引用了 forms 里不存在的 pos_id，必须被存储层安全网挡下，与 intent 无关。
+    let mut dangling = shell_saved["word"]["meanings"].clone();
+    dangling["pos"] = json!([{
+        "pos_id": dangling_pos_id,
+        "grammar_structures": [],
+        "senses": []
+    }]);
+    let (status, rejected) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": shell_saved["word"]["revision"],
+            "intent": "save",
+            "content": dangling,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "词义引用不存在的基本词性必须被拒绝：{rejected}"
+    );
+    assert!(
+        has_issue(&rejected, "pos_not_found"),
+        "应报出 pos_not_found：{rejected}"
+    );
+}
+
+#[sqlx::test]
+async fn meanings_drafted_before_forms_survive_completing_forms_and_reach_publish(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let headword = format!("meanfirst{}", admin_id.simple());
+    let created = create_incomplete_draft(&state, &pool, &bearer, &headword).await;
+    let entry_id = created["word"]["id"].as_str().unwrap().to_owned();
+
+    // 第 1 步：音标还没查，先把手上现成的词义资料录进去。
+    let mut meanings = created["word"]["meanings"].clone();
+    meanings["sense_groups"][0]["name_zh"] = json!("先录的语义区间");
+    meanings["sense_groups"][0]["name_en"] = json!("Drafted group");
+    let grammar_variants = meanings["pos"][0]["grammar_structures"][0]["variants"]
+        .as_array()
+        .expect("语法结构应带方言行")
+        .len();
+    for index in 0..grammar_variants {
+        meanings["pos"][0]["grammar_structures"][0]["variants"][index]["content"] =
+            rich_text("used as a noun");
+    }
+    meanings["pos"][0]["senses"][0]["sub_pos"] = json!("N-COUNT");
+    meanings["pos"][0]["senses"][0]["frequency"] = json!("50");
+    meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("先录进来的释义");
+    let example = rich_text("A drafted example.");
+    let en_text = &mut meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"];
+    if en_text["mode"] == "distinguish" {
+        for side in ["uk", "us"] {
+            if en_text[side]["state"] == "ready" {
+                en_text[side]["variant"]["value"] = example.clone();
+            } else {
+                en_text[side] = json!({
+                    "state": "ready",
+                    "variant": {
+                        "id": Uuid::now_v7(),
+                        "value": example.clone(),
+                        "origin": "manual"
+                    }
+                });
+            }
+        }
+    } else {
+        en_text["common"]["value"] = example;
+    }
+    meanings["pos"][0]["senses"][0]["sentences"][0]["zh_text"] = rich_text("先录进来的例句。");
+
+    let (status, meanings_drafted) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": created["word"]["revision"],
+            "intent": "save",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "词形未完成时应能先录词义：{meanings_drafted}"
+    );
+
+    // 第 2 步：查到音标了，回头补完词形。
+    let mut forms = meanings_drafted["word"]["forms"].clone();
+    let base_variants = forms["pos"][0]["base_form"]["variants"]
+        .as_array()
+        .expect("基本形应带方言行")
+        .clone();
+    for index in 0..base_variants.len() {
+        let pronunciation =
+            &mut forms["pos"][0]["base_form"]["variants"][index]["pronunciations"][0];
+        pronunciation["dict_phonetic"] = json!("/test/");
+        pronunciation["actual_pron"] = json!("test");
+    }
+    forms["pos"][0]["form_groups"][0]["slots"] = json!([{
+        "id": Uuid::now_v7(),
+        "form_type": "plural",
+        "variants": base_variants
+            .iter()
+            .map(|variant| json!({
+                "id": Uuid::now_v7(),
+                "dialect": variant["dialect"],
+                "spelling": format!("{}s", variant["spelling"].as_str().unwrap()),
+                "origin": "manual",
+                "pronunciations": [{
+                    "id": Uuid::now_v7(),
+                    "dict_phonetic": "/tests/",
+                    "actual_pron": "tests",
+                    "style": "normal"
+                }]
+            }))
+            .collect::<Vec<_>>()
+    }]);
+    let forms_input = json!({
+        "base_revision": meanings_drafted["word"]["revision"],
+        "intent": "complete",
+        "content": forms,
+    });
+    let (mut status, mut forms_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(forms_input.clone()),
+    )
+    .await;
+    if status == StatusCode::CONFLICT
+        && forms_saved["code"] == "surface_match_acknowledgement_required"
+    {
+        let surface_token = forms_saved["meta"]["surface_match_page"]["surface_confirmation_token"]
+            .as_str()
+            .expect("单页 forms warning 应签发确认 token");
+        let mut confirmed = forms_input;
+        confirmed["confirmed_surface_match_token"] = json!(surface_token);
+        (status, forms_saved) = call(
+            &state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+            &bearer,
+            None,
+            Some(confirmed),
+        )
+        .await;
+    }
+    assert_eq!(status, StatusCode::OK, "补完词形应成功：{forms_saved}");
+
+    // 补词形不得冲掉先录进去的词义内容。
+    assert_eq!(
+        forms_saved["word"]["meanings"]["sense_groups"][0]["name_zh"], "先录的语义区间",
+        "补词形后语义区间名应保留：{forms_saved}"
+    );
+    assert_eq!(
+        forms_saved["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"],
+        "先录进来的释义",
+        "补词形后先录的释义应保留：{forms_saved}"
+    );
+    assert_eq!(
+        forms_saved["word"]["meanings"]["pos"][0]["senses"][0]["sub_pos"], "N-COUNT",
+        "补词形后先录的子词性应保留：{forms_saved}"
+    );
+
+    // 第 3 步：词形完成后，词义步才能标记完成，然后正常发布。
+    let (status, meanings_done) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": forms_saved["word"]["revision"],
+            "intent": "complete",
+            "content": forms_saved["word"]["meanings"].clone(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "词形完成后标记词义完成应成功：{meanings_done}"
+    );
+    assert_eq!(
+        meanings_done["word"]["max_reachable_step"], "preview",
+        "两步都完成后应能到预览：{meanings_done}"
+    );
+
+    let (status, published) = publish_ready_confirming(&state, &bearer, &meanings_done).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "先录词义、后补音标的词条应能正常发布：{published}"
+    );
+}
