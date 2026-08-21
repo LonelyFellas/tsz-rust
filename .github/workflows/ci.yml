@@ -65,13 +65,21 @@ jobs:
         with:
           persist-credentials: false
 
+      # 版本的唯一真相源是仓库根的 rust-toolchain.toml。这里读出来再传给 action，
+      # 避免「两处各写一遍、只靠注释约束」——只改一处时 CI 会先装旧版本、再由 cargo
+      # 触发 rustup 下载新版本，不报错，只是每次默默多花几分钟。
+      - name: Resolve pinned Rust version
+        id: rust
+        run: |
+          version="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          test -n "$version" || { echo "rust-toolchain.toml 里读不到 channel"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
-        # 尾注是该 SHA 对应的上游 tag，不代表使用 stable 通道——版本由下面的 toolchain 写死。
+        # 尾注是该 SHA 对应的上游 tag，不代表使用 stable 通道——版本来自上一步。
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # tag: stable
         with:
-          # 必须与仓库根的 rust-toolchain.toml 保持一致；写死版本而不是 `stable`，
-          # 否则 stable 每次滚动都可能让既有代码在 CI 上突然红（2026-08-21 已发生一次）。
-          toolchain: "1.98.0"
+          toolchain: ${{ steps.rust.outputs.version }}
           components: rustfmt, clippy
 
       - name: Restore Cargo cache
