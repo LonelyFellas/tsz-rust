@@ -1,47 +1,6 @@
 use super::*;
 
-pub(super) fn compatible_headwords(
-    detected: &WordHeadwordsV2,
-    matched_dialect: Dialect,
-    submitted: &WordHeadwordsV2,
-) -> Result<bool, LexiconServiceError> {
-    let detected_source = match detected {
-        WordHeadwordsV2::Distinguish { source_dialect, .. } => Some(*source_dialect),
-        WordHeadwordsV2::Unified { .. } => match matched_dialect {
-            Dialect::Uk => Some(SourceDialect::Uk),
-            Dialect::Us => Some(SourceDialect::Us),
-            Dialect::Common => None,
-        },
-    };
-    if let (Some(detected_source), WordHeadwordsV2::Distinguish { source_dialect, .. }) =
-        (detected_source, submitted)
-        && detected_source != *source_dialect
-    {
-        return Ok(false);
-    }
-    Ok(normalize_headword(source_headword(detected))
-        .map_err(map_headword_error)?
-        .key
-        == normalize_headword(source_headword(submitted))
-            .map_err(map_headword_error)?
-            .key)
-}
-
-fn source_headword(headwords: &WordHeadwordsV2) -> &str {
-    match headwords {
-        WordHeadwordsV2::Unified { common } => common,
-        WordHeadwordsV2::Distinguish {
-            uk,
-            us,
-            source_dialect,
-        } => match source_dialect {
-            SourceDialect::Uk => uk,
-            SourceDialect::Us => us,
-        },
-    }
-}
-
-/// 并列展示的方言顺序：common 或检测基准侧在前。
+/// 并列展示的方言顺序：common 或管理员主词侧在前。
 /// 与列表行 SQL（repository/query.rs 的 ORDER BY CASE）保持同一规则。
 pub(super) fn ordered_headword_sides(headwords: &WordHeadwordsV2) -> Vec<(Dialect, &str)> {
     match headwords {
@@ -72,6 +31,20 @@ pub(super) fn normalize_submitted_headwords(
         }
     }
     Ok(())
+}
+
+pub(super) fn normalized_headword_keys(
+    headwords: &WordHeadwordsV2,
+) -> Result<Vec<String>, LexiconServiceError> {
+    match headwords {
+        WordHeadwordsV2::Unified { common } => Ok(vec![
+            normalize_headword(common).map_err(map_headword_error)?.key,
+        ]),
+        WordHeadwordsV2::Distinguish { uk, us, .. } => Ok(vec![
+            normalize_headword(uk).map_err(map_headword_error)?.key,
+            normalize_headword(us).map_err(map_headword_error)?.key,
+        ]),
+    }
 }
 
 pub(super) fn map_dictionary_pos(values: &[String]) -> Vec<String> {

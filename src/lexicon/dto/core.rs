@@ -19,6 +19,8 @@ pub enum Dialect {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+/// `distinguish` 词条由管理员选择的主词侧；用于主词展示顺序及后续方言内容初始化，
+/// 不要求与内置词典的命中方言相同。
 pub enum SourceDialect {
     Uk,
     Us,
@@ -34,6 +36,8 @@ pub enum TextOrigin {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+/// 英美主词。检测响应中的值是建议；创建 matched 草稿时，管理员可选择任一模式并编辑
+/// 各侧拼写。服务端仍会规范化并拒绝空值或非法结构。
 pub enum WordHeadwordsV2 {
     Unified {
         common: String,
@@ -41,6 +45,7 @@ pub enum WordHeadwordsV2 {
     Distinguish {
         uk: String,
         us: String,
+        /// 管理员决定的主词侧，而不是不可修改的词典检测结论。
         source_dialect: SourceDialect,
     },
 }

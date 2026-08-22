@@ -226,7 +226,7 @@ API 继续暴露不可修改的稳定 code。
 | `kind` | TEXT | `word` / `phrase` |
 | `revision` | BIGINT | 从 1 开始，每次有效草稿写入加一 |
 | `headword_mode` | TEXT | `unified` / `distinguish` |
-| `source_dialect` | TEXT NULL | distinguish 时为 `uk` / `us` |
+| `source_dialect` | TEXT NULL | distinguish 时为管理员决定的主词侧 `uk` / `us`；不要求等于词典命中方言 |
 | `frequency` | NUMERIC(5,2) NULL | 0–100；是否保留两位精度见 §17 |
 | `detection_snapshot` | JSONB | 创建时采用的不可变检测证据 |
 | `current_publication_id` | UUID NULL | 学习端当前消费的发布版本 |
@@ -918,13 +918,14 @@ available 资产使用 partial unique index 覆盖：
 ### 14.1 创建草稿
 
 1. 校验管理员权限和 idempotency key；
-2. 从 Redis 读取并消费 detection 上下文；
-3. 重新检查智能词库查重键；
-4. 创建 `entries`、真实词头和 headword keys；
-5. 把 detection 证据复制进 `detection_snapshot`；
-6. 初始化稳定节点和 basics 进度；
-7. 写审计记录；
-8. 提交后返回 revision 1。
+2. 从 Redis 读取 detection 上下文并校验逻辑过期时间；
+3. 规范化管理员提交的非空主词；matched 检测中的主词是建议，不限制最终模式、拼写或 `source_dialect`；
+4. 按最终主词重新检查智能词库 surface，并校验确认 token 与策略；
+5. 在同一事务中消费 detection，创建 `entries`、真实词头和 headword keys；
+6. 把原始 detection 建议与证据复制进 `detection_snapshot`；
+7. 初始化稳定节点和 basics 进度；
+8. 写审计记录；
+9. 提交后返回 revision 1。
 
 ### 14.2 保存步骤
 

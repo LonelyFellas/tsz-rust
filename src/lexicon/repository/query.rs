@@ -32,7 +32,7 @@ impl LexiconRepository {
                        publication.snapshot,
                        -- 只作排序/游标键；必须与服务端返回的 headword 逐字符相同，
                        -- 否则下拉框会按一个和显示文本不同的串排序。
-                       -- 并列拼写一律「检测基准侧在前」，与
+                       -- 并列拼写一律「管理员主词侧在前」，与
                        -- service/helpers.rs 的 ordered_headword_sides 同规则。
                        CASE publication.snapshot #>> '{headwords,mode}'
                            WHEN 'unified' THEN
@@ -142,7 +142,7 @@ impl LexiconRepository {
             SELECT entry.id,
                    entry.kind,
                    entry.source_dialect,
-                   -- 并列拼写一律「检测基准侧在前」，与词条详情、建稿第 4 步保持一致；
+                   -- 并列拼写一律「管理员主词侧在前」，与词条详情、建稿第 4 步保持一致；
                    -- source_dialect 为 NULL（unified）时回落到 common → uk → us。
                    COALESCE((
                        SELECT array_agg(headword.dialect ORDER BY CASE

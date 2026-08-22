@@ -425,15 +425,7 @@ impl LexiconService {
         let (matches, contexts) = self
             .headword_surface_matches(&candidate_headwords, entry_kind, None)
             .await?;
-        let legacy_keys = match &candidate_headwords {
-            WordHeadwordsV2::Unified { common } => {
-                vec![normalize_headword(common).map_err(map_headword_error)?.key]
-            }
-            WordHeadwordsV2::Distinguish { uk, us, .. } => vec![
-                normalize_headword(uk).map_err(map_headword_error)?.key,
-                normalize_headword(us).map_err(map_headword_error)?.key,
-            ],
-        };
+        let legacy_keys = normalized_headword_keys(&candidate_headwords)?;
         let legacy = self
             .repository
             .legacy_exact_duplicates(entry_kind, &legacy_keys)
@@ -639,19 +631,6 @@ impl LexiconService {
                     )
                     .await;
                 }
-                if matches!(
-                    detection.smart_dictionary,
-                    SmartDictionaryResultV2::Duplicate { .. }
-                ) {
-                    return persist_create_failure(
-                        transaction,
-                        actor_id,
-                        idempotency_key,
-                        &request_hash,
-                        CreateIdempotentFailure::DuplicateWord,
-                    )
-                    .await;
-                }
                 (CreateDetectionEvidence::from_detection(&detection), None)
             };
         evidence.candidate_headwords = input.headwords.clone();
@@ -731,9 +710,6 @@ impl LexiconService {
             }
             _ => return Err(LexiconServiceError::DetectionMismatch),
         };
-        if !compatible_headwords(&detected_headwords, matched_dialect, &input.headwords)? {
-            return Err(LexiconServiceError::DetectionMismatch);
-        }
         align_base_forms(
             &mut forms,
             &detected_headwords,
@@ -823,6 +799,30 @@ impl LexiconService {
                 None,
             )
             .await?;
+        let projected_exact_entry_ids = current_matches
+            .iter()
+            .filter(|item| item.match_category == SurfaceMatchCategoryV2::ExactHeadword)
+            .map(|item| item.existing.word_id)
+            .collect::<Vec<_>>();
+        let legacy_keys = normalized_headword_keys(&input.headwords)?;
+        if LexiconRepository::has_unprojected_legacy_exact_in_transaction(
+            &mut transaction,
+            word.kind,
+            &legacy_keys,
+            &projected_exact_entry_ids,
+        )
+        .await
+        .map_err(repository_error)?
+        {
+            return persist_create_failure(
+                transaction,
+                actor_id,
+                idempotency_key,
+                &request_hash,
+                CreateIdempotentFailure::DuplicateWord,
+            )
+            .await;
+        }
         let mut verified_surface = None;
         if !current_matches.is_empty() {
             let policy_name = surface_policy_name(&current_matches);

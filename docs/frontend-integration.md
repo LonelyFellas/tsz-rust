@@ -357,14 +357,14 @@ JSONB snapshot 做删除判断。
 
 ---
 
-## 8. 智能词库列表：词汇列按检测基准侧排序（后端已实现）
+## 8. 智能词库列表：词汇列按管理员主词侧排序（后端已实现）
 
 > **状态（2026-08-19）**：后端已实现并生成 `docs/openapi.json`。
 
 ### 8.1 背景
 
 同一词条的英美并列拼写，此前在三处顺序不一致：词条详情左栏与建稿第 4 步「主词」按
-**检测基准侧**（`headwords.source_dialect`，即管理员当初输入的那一侧）排序，而
+**管理员主词侧**（`headwords.source_dialect`，由管理员创建草稿时决定）排序，而
 `GET /admin/lexicon/entries` 列表行的 `headword` 由后端 `string_agg` 固定按
 `common → uk → us` 拼好。结果 `source_dialect = "us"` 的词条在列表显示
 `colour / color`，点进详情却是 `color / colour`，管理员无法判断哪个是主词。
@@ -372,7 +372,7 @@ JSONB snapshot 做删除判断。
 ### 8.2 后端改动
 
 1. `AdminWordListItem.headword` 与 `AdminWordListItem.dialects` 改为**同序**，排序规则统一为
-   「`common` → 检测基准侧 → 另一侧」。即 `source_dialect = "us"` 时列表返回
+   「`common` → 管理员主词侧 → 另一侧」。即 `source_dialect = "us"` 时列表返回
    `"color / colour"` 与 `["us", "uk"]`；`source_dialect = "uk"` 时返回
    `"centre / center"` 与 `["uk", "us"]`。
 2. `AdminWordListItem` 新增**可选**字段 `source_dialect: "uk" | "us"`，语义与
@@ -387,9 +387,9 @@ JSONB snapshot 做删除判断。
 | 步骤 | 动作 |
 | --- | --- |
 | 1 | `pnpm --filter @tsz/api-client sync:openapi` 同步 `openapi.snapshot.json` |
-| 2 | `packages/types/src/admin-word.ts` 的 `AdminWordListItem` 补 `source_dialect?: SourceDialect`，并把 `headword` / `dialects` 的注释改为「检测基准侧在前」 |
+| 2 | `packages/types/src/admin-word.ts` 的 `AdminWordListItem` 补 `source_dialect?: SourceDialect`，并把 `headword` / `dialects` 的注释改为「管理员主词侧在前」 |
 | 3 | 智能词库列表的「词汇」「方言」列**无需改渲染逻辑**——直接消费即可得到正确顺序；如需在列表标注主词，用新增的 `source_dialect` 判断，不要切分 `" / "` |
-| 4 | mock（`apps/admin/src/features/dictionary/mock/`）里的 `distinguish` 行补上 `source_dialect` 并按基准侧在前重排 `headword` / `dialects`，否则 mock 与真实后端不一致 |
+| 4 | mock（`apps/admin/src/features/dictionary/mock/`）里的 `distinguish` 行补上 `source_dialect` 并按管理员主词侧在前重排 `headword` / `dialects`，否则 mock 与真实后端不一致 |
 
 ### 8.4 兼容性
 
@@ -397,7 +397,7 @@ JSONB snapshot 做删除判断。
 `endpoints.contract.test.ts` 对 `AdminWordListItem.required` 的 `arrayContaining` 断言）不受影响。
 唯一的行为变化是 `distinguish` 词条 `headword` / `dialects` 的元素顺序——这正是本次要修的缺陷。
 
-## 9. 关联词搜索与引用预览：并列拼写同样按检测基准侧排序（后端已实现）
+## 9. 关联词搜索与引用预览：并列拼写同样按管理员主词侧排序（后端已实现）
 
 > **状态（2026-08-20）**：后端已实现，OpenAPI schema 不变（仅字段取值顺序变化）。
 
@@ -410,7 +410,7 @@ JSONB snapshot 做删除判断。
 
 ### 9.2 后端改动
 
-统一为与 §8 完全相同的规则「`common` → 检测基准侧 → 另一侧」，涉及：
+统一为与 §8 完全相同的规则「`common` → 管理员主词侧 → 另一侧」，涉及：
 
 1. `RelatedWordResult.headword` 与 `RelatedWordResult.dialects` 改为**同序**。
    `source_dialect = "us"` 时返回 `"color / colour"` 与 `["us", "uk"]`，
@@ -424,7 +424,7 @@ JSONB snapshot 做删除判断。
 `dialects` 仍是 `["common"]`，行为与改动前完全相同。
 
 关联词搜索的**排序键**（也是 `next_cursor` 的内容）一直就是它返回的 `headword` 那个字符串，
-本次一并改成基准侧在前，两者继续逐字符相同。副作用是 `source_dialect = "us"` 的
+本次一并改成管理员主词侧在前，两者继续逐字符相同。副作用是 `source_dialect = "us"` 的
 `distinguish` 词条在结果里的字母序位置会变（这正是「按看到的词头排序」应有的行为）；
 `next_cursor` 的**格式与语义不变**，但上线瞬间已经发出去的游标可能落在稍有偏差的边界上，
 重新发起一次搜索即可。线上尚无已发布的 `distinguish` 词条，实际不受影响。
@@ -435,7 +435,7 @@ JSONB snapshot 做删除判断。
 | --- | --- |
 | 1 | 关联词搜索下拉、引用预览**无需改渲染逻辑**——直接消费即可得到正确顺序 |
 | 2 | 仍然不要用 `split(" / ")` 反推英/美拼写；需要基准侧就读 `AdminWordV2.headwords.source_dialect`（列表行读 §8 新增的 `AdminWordListItem.source_dialect`） |
-| 3 | mock（`apps/admin/src/features/dictionary/mock/`）里 `distinguish` 词条的 `RelatedWordResult.headword` / `dialects` 与 `source_headword` 按基准侧在前重排，否则 mock 与真实后端不一致 |
+| 3 | mock（`apps/admin/src/features/dictionary/mock/`）里 `distinguish` 词条的 `RelatedWordResult.headword` / `dialects` 与 `source_headword` 按管理员主词侧在前重排，否则 mock 与真实后端不一致 |
 
 ### 9.4 兼容性
 
@@ -668,7 +668,7 @@ uk / us 双份同值镜像已消失。例句仍按词条事实分方言，本项
 
 ### 12.1 背景
 
-§8 / §9 之后，`headword` 已经按「`common` → 检测基准侧 → 另一侧」拼好，`dialects` 与之同序。
+§8 / §9 之后，`headword` 已经按「`common` → 管理员主词侧 → 另一侧」拼好，`dialects` 与之同序。
 但要按 A1 的**管理员方言偏好**重排（design.md 阶段 4），前端得知道每一侧各是哪个拼写——
 而 `headword` 是一个拼好的字符串，`split(" / ")` 又是 §8.3 / §9.3 明确禁止的
 （短语词条的拼写里可能出现斜杠）。

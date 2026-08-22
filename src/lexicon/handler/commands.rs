@@ -39,11 +39,12 @@ pub async fn detect(
     request_body = CreateAdminWordV2Input,
     responses(
         (status = 201, description = "V2 词条草稿创建成功", body = AdminWordV2Envelope),
+        (status = 400, description = "主词为空、过长或含控制字符"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 409, description = "词头重复或幂等键冲突"),
         (status = 410, description = "检测上下文已过期"),
-        (status = 422, description = "检测结果与创建请求不匹配"),
+        (status = 422, description = "请求结构非法、检测上下文不匹配或词典不可用"),
         (status = 503, description = "检测上下文存储不可用")
     )
 )]
