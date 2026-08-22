@@ -520,6 +520,23 @@ async fn publish_ready(state: &AppState, bearer: &str, word: &Value) -> (StatusC
     .await
 }
 
+/// 当前发布内容的 surface 投影绑在哪条 publication 上——切版本时必须跟着走。
+async fn live_surface_publication_ids(pool: &PgPool, entry_id: Uuid) -> Vec<Uuid> {
+    sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT publication_id
+        FROM lexicon.surface_sources
+        WHERE entry_id = $1
+          AND content_scope = 'current_publication'
+          AND NOT is_deleted
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(pool)
+    .await
+    .expect("应能读取 surface 投影绑定的 publication")
+}
+
 async fn publish_ready_confirming(
     state: &AppState,
     bearer: &str,
@@ -1281,6 +1298,268 @@ async fn historical_publication_activation_increments_lifecycle_revision_across_
     .await
     .unwrap();
     assert_eq!(activation_events, vec![2, 3, 4]);
+}
+
+#[sqlx::test]
+async fn republish_after_rollback_reactivates_the_matching_publication(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let draft = create_ready_draft(&state, &pool, &bearer, "rollback-republish").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &draft).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "首次发布失败：{first_published}"
+    );
+    let entry_id = Uuid::parse_str(first_published["word"]["id"].as_str().unwrap()).unwrap();
+    let first_revision = first_published["word"]["revision"].as_i64().unwrap();
+
+    let (status, edited) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": first_revision,
+            "intent": "complete",
+            "content": first_published["word"]["meanings"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "推进 revision 失败：{edited}");
+    let (status, second_published) = publish_ready(&state, &bearer, &edited).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "第二次发布失败：{second_published}"
+    );
+    let second_revision = second_published["word"]["revision"].as_i64().unwrap();
+    assert!(second_revision > first_revision);
+
+    let publications: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM lexicon.entry_publications WHERE entry_id = $1 ORDER BY publication_number",
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(publications.len(), 2);
+    let first_publication_id = publications[0];
+    let second_publication_id = publications[1];
+
+    let (status, rolled_back) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications/{first_publication_id}/activate"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second_revision,
+            "base_lifecycle_revision": second_published["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "回滚到历史发布失败：{rolled_back}");
+    // 回滚只换 current publication，草稿 revision 原地不动，于是派生出「有未发布改动」。
+    assert_eq!(rolled_back["word"]["revision"], second_revision);
+    assert_eq!(rolled_back["word"]["published_revision"], first_revision);
+    assert_eq!(rolled_back["word"]["has_unpublished_changes"], json!(true));
+    let rolled_back_lifecycle_revision =
+        rolled_back["word"]["lifecycle_revision"].as_i64().unwrap();
+    assert_eq!(
+        live_surface_publication_ids(&pool, entry_id).await,
+        vec![first_publication_id],
+        "回滚后 surface 投影应绑在 pub#1 上"
+    );
+
+    // 前端据此显示发布按钮，管理员再点一次发布——草稿内容与 pub#2 完全一致。
+    let publish_key = Uuid::now_v7();
+    let publish_body = json!({"base_revision": rolled_back["word"]["revision"]});
+    let (status, republished) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(publish_key),
+        Some(publish_body.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "回滚后重新发布应成功：{republished}"
+    );
+    assert_eq!(republished["word"]["published_revision"], second_revision);
+    assert_eq!(republished["word"]["has_unpublished_changes"], json!(false));
+    // 换 current publication 即是一次生命周期变更，必须推进 lifecycle revision。
+    assert_eq!(
+        republished["word"]["lifecycle_revision"],
+        rolled_back_lifecycle_revision + 1
+    );
+
+    // 幂等记录写在 publish 作用域下，同一 Idempotency-Key 重放才能原样命中。
+    let (status, replayed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(publish_key),
+        Some(publish_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "重放发布失败：{replayed}");
+    assert_eq!(replayed, republished);
+
+    // 对外可见数据真正改变的一步：surface 投影必须跟着切回 pub#2。
+    assert_eq!(
+        live_surface_publication_ids(&pool, entry_id).await,
+        vec![second_publication_id],
+        "重新发布后 surface 投影应跟着切回 pub#2"
+    );
+
+    // 草稿没有变化，不该凭空多出一条 publication；应当重新激活 pub#2。
+    let current_publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(current_publication_id, second_publication_id);
+    let publication_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications WHERE entry_id = $1")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(publication_count, 2);
+
+    // 下游消费者靠 publication_activated 感知 current publication 变化，重新发布也要发；
+    // 重放不能再发一条。
+    let activation_events: Vec<i64> = sqlx::query_scalar(
+        r#"
+        SELECT aggregate_revision
+        FROM platform.outbox_events
+        WHERE aggregate_id = $1 AND event_type = 'lexicon.publication_activated'
+        ORDER BY aggregate_revision
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        activation_events,
+        vec![
+            rolled_back_lifecycle_revision,
+            rolled_back_lifecycle_revision + 1
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn publish_after_rollback_and_edit_creates_a_new_publication(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let draft = create_ready_draft(&state, &pool, &bearer, "rollback-then-edit").await;
+    let (status, first_published) = publish_ready(&state, &bearer, &draft).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "首次发布失败：{first_published}"
+    );
+    let entry_id = Uuid::parse_str(first_published["word"]["id"].as_str().unwrap()).unwrap();
+
+    let (status, edited) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": first_published["word"]["revision"],
+            "intent": "complete",
+            "content": first_published["word"]["meanings"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "推进 revision 失败：{edited}");
+    let (status, second_published) = publish_ready(&state, &bearer, &edited).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "第二次发布失败：{second_published}"
+    );
+
+    let first_publication_id: Uuid = sqlx::query_scalar(
+        r#"
+        SELECT id FROM lexicon.entry_publications
+        WHERE entry_id = $1 ORDER BY publication_number LIMIT 1
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (status, rolled_back) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications/{first_publication_id}/activate"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second_published["word"]["revision"],
+            "base_lifecycle_revision": second_published["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "回滚到历史发布失败：{rolled_back}");
+
+    // 回滚后继续改稿，revision 推到一个还没有 publication 的位置，走的仍是新建路径。
+    let (status, edited_again) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": rolled_back["word"]["revision"],
+            "intent": "complete",
+            "content": rolled_back["word"]["meanings"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "回滚后改稿失败：{edited_again}");
+    let (status, third_published) = publish_ready(&state, &bearer, &edited_again).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "回滚后改稿再发布失败：{third_published}"
+    );
+    assert_eq!(
+        third_published["word"]["published_revision"],
+        edited_again["word"]["revision"]
+    );
+
+    let publication_revisions: Vec<i64> = sqlx::query_scalar(
+        r#"
+        SELECT source_revision FROM lexicon.entry_publications
+        WHERE entry_id = $1 ORDER BY publication_number
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(publication_revisions.len(), 3);
+    assert_eq!(
+        publication_revisions[2],
+        edited_again["word"]["revision"].as_i64().unwrap()
+    );
 }
 
 #[sqlx::test]

@@ -849,6 +849,70 @@ if (bytes > STEP_CONTENT_BODY_LIMIT) { /* 提示拆分，别发出去 */ }
 发布校验（`publishing.rs`）与 `helpers::max_reachable_step` 的派生逻辑**一个字都没改**，
 无迁移、无 schema 变更。
 
+## 15. 回滚到历史发布版本之后再发布不再 500（后端已实现）
+
+> **状态（2026-08-21）**：修的是既有 bug，前端不必改代码，但**发布按钮的行为变了**，
+> 值得知道一声。
+
+### 15.1 背景
+
+`POST /entries/{id}/publications/{publication_id}/activate`（回滚）只把 current publication
+换成历史那条，**不动草稿的 `revision`**。于是回滚完 `GET /entries/{id}` 会返回：
+
+| 字段 | 值 |
+| --- | --- |
+| `revision` | 仍是回滚前的 N+1（草稿内容一个字没变） |
+| `published_revision` | 回滚到的那版 N |
+| `has_unpublished_changes` | `true`（两者派生自 `published_revision != revision`） |
+
+前端照常显示「有未发布改动」并给出发布按钮——**这个展示本身是对的**，当前对外发布的
+确实不是草稿这一版。但点下去必然失败：`revision = N+1` 早就有一条 publication，
+再插一条会撞 `(entry_id, source_revision)` 唯一约束，且没有被映射成业务错误，直接
+**500 `internal_error`**。管理员从此发不出去，只能改一次稿把 revision 推走才能绕开。
+
+### 15.2 后端改动
+
+`POST /entries/{id}/publications` 新增一条分支：**草稿 `revision` 已经有对应的 publication 时，
+把那条重新设为当前版本**，等价于对它做一次 activate。
+
+`revision` 只随内容保存推进（`replace_entry_content` 是唯一写入点），所以同一 revision
+的草稿与快照逐字相同——重新激活发布的就是管理员看到的那份内容，不存在错发。
+
+| # | 场景 | 之前 | 现在 |
+| --- | --- | --- | --- |
+| 1 | 回滚后直接发布（草稿未改） | 500 `internal_error` | **201**，current publication 换回 pub#N+1 |
+| 2 | 回滚后改稿再发布 | 201，新建 publication | 不变（revision 推到了没有 publication 的位置） |
+| 3 | 草稿版本已是当前发布版 | 201，空转 | 不变 |
+
+第 1 种情况的响应里：`published_revision` 变回 `revision`、`has_unpublished_changes` 变
+`false`、`lifecycle_revision` **加 1**（换 current publication 是一次生命周期变更，与显式
+activate 同口径），`entry_publications` 不会多出一条。
+
+**第 1 行不是无条件 201**：这条分支走的是 publish 自己的引用校验，比 activate 更严。
+若该词条有关联词、而目标词条在回滚这段时间里重新发布过（`target_headword` /
+`target_gloss` 变了），会返回 **422 `relation_target_stale`**（提示重新保存词义步骤），
+而对同一条 publication 直接调 activate 端点则是 200。两者并不矛盾——publish 的语义是
+「发布当前草稿」，草稿里的关联词快照过期就该拦下来。这条 422 是**长期既有行为、本次没动**：
+引用校验一直排在写 publication 之前，这类请求修复前后都是 422，从来没走到过那条 500。
+所以 §15.4 的「纯扩大成功集」仍然成立——这个子集行为完全未变。
+
+### 15.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | **不用**跑 `sync:openapi`——无 wire 变更，`docs/openapi.json` 重导无 diff |
+| 2 | 发布成功后照常用响应里的 `lifecycle_revision` 覆盖本地值，别沿用请求前的旧值 |
+| 3 | 若前端为了绕开这个 500 加过「回滚后隐藏/禁用发布按钮」之类的补丁，可以拆掉 |
+
+第 2 条是唯一会咬人的地方：发布过去从不推进 `lifecycle_revision`，前端若把它当常量缓存，
+下一次 activate / archive 会拿旧值撞 409 `revision_conflict`
+（`field = "base_lifecycle_revision"`，`meta.current_lifecycle_revision` 给出真值）。
+
+### 15.4 兼容性
+
+**纯扩大成功集**：原本 500 的请求现在 201，原本成功的路径一条都没改。无 schema 变更、
+无迁移，后端单独部署即可。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_
