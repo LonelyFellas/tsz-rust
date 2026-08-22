@@ -1133,6 +1133,7 @@ mod tests {
             "LexiconSurfaceMatchV2",
             "ExistingSurfaceMatchV2",
             "MatchedEntryContextV2",
+            "RelationReferencePreviewV2",
             "RelationReferenceSummaryV2",
         ] {
             assert_eq!(
@@ -1140,6 +1141,18 @@ mod tests {
                 "{schema_name} 必须拒绝未知字段"
             );
         }
+        let relation_preview = &schemas["RelationReferencePreviewV2"];
+        assert!(
+            relation_preview["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "source_status")
+        );
+        assert_eq!(
+            relation_preview["properties"]["source_status"]["$ref"],
+            "#/components/schemas/AdminWordStatus"
+        );
         for schema_name in [
             "SurfaceMatchEnabledNextPageV2",
             "SurfaceMatchEnabledTerminalPageV2",

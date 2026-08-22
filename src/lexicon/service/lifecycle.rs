@@ -46,6 +46,9 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
+            .await
+            .map_err(repository_error)?;
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -61,6 +64,10 @@ impl LexiconService {
                 current_lifecycle_revision: current.lifecycle_revision,
             });
         }
+        let relation_targets = relation_target_entry_ids(&current.meanings);
+        LexiconRepository::lock_surface_contexts(&mut transaction, &relation_targets)
+            .await
+            .map_err(repository_error)?;
         let surface_sources = crate::lexicon::repository::surface_projection_sources(&current)
             .map_err(surface_projection_error)?;
         let surface_keys =
@@ -224,6 +231,10 @@ impl LexiconService {
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
 
+        let target_entry_ids = targets.iter().map(|target| target.id).collect::<Vec<_>>();
+        LexiconRepository::lock_surface_contexts(&mut transaction, &target_entry_ids)
+            .await
+            .map_err(repository_error)?;
         LexiconRepository::lock_surface_policy_writer(&mut transaction)
             .await
             .map_err(repository_error)?;
@@ -256,6 +267,26 @@ impl LexiconService {
             }
             pending.push((target, current, already_target));
         }
+
+        let pending_entry_ids = pending
+            .iter()
+            .map(|(_, word, _)| word.id)
+            .collect::<Vec<_>>();
+        let mut affected_contexts = pending
+            .iter()
+            .flat_map(|(_, word, _)| relation_target_entry_ids(&word.meanings))
+            .collect::<Vec<_>>();
+        affected_contexts.extend(
+            LexiconRepository::current_publication_relation_target_entry_ids(
+                &mut transaction,
+                &pending_entry_ids,
+            )
+            .await
+            .map_err(repository_error)?,
+        );
+        LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
+            .await
+            .map_err(repository_error)?;
 
         let surface_sets = pending
             .iter()
@@ -319,6 +350,12 @@ impl LexiconService {
                     ));
                 }
             } else {
+                LexiconRepository::lock_current_outbound_sense_ref_targets_for_entry(
+                    &mut transaction,
+                    current.id,
+                )
+                .await
+                .map_err(repository_error)?;
                 let references = LexiconRepository::unavailable_outbound_sense_refs_for_restore(
                     &mut transaction,
                     current.id,
@@ -660,7 +697,12 @@ impl LexiconService {
         let current_digest =
             crate::lexicon::surface_snapshot::surface_match_digest(&items, &confirmation_reasons)
                 .map_err(LexiconServiceError::SurfaceSnapshot)?;
-        if current_ids != verified_ids || current_digest != verified.match_digest {
+        let current_context_digest =
+            surface_context_digest(&contexts).map_err(LexiconServiceError::SurfaceSnapshot)?;
+        if current_ids != verified_ids
+            || current_digest != verified.match_digest
+            || current_context_digest != verified.context_digest
+        {
             let snapshot = self
                 .surface_snapshots
                 .create(create_snapshot())

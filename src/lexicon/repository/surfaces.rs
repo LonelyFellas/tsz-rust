@@ -91,23 +91,82 @@ const SURFACE_ENTRY_CONTEXTS_QUERY: &str = r#"
 "#;
 
 const SURFACE_INBOUND_RELATIONS_QUERY: &str = r#"
-    SELECT reference.target_entry_id,
-           reference.entry_id AS source_entry_id,
-           reference.source_node_id,
-           publication.snapshot AS source_snapshot
-    FROM lexicon.entry_publication_sense_refs reference
-    JOIN lexicon.entries source_entry
-      ON source_entry.id = reference.entry_id
-     AND source_entry.current_publication_id = reference.publication_id
-     AND source_entry.archived_at IS NULL
-    JOIN lexicon.entry_publications publication
-      ON publication.id = reference.publication_id
-     AND publication.entry_id = reference.entry_id
-    WHERE reference.target_entry_id = ANY($1)
-      AND reference.reference_kind = 'relation'
-    ORDER BY reference.target_entry_id,
-             reference.entry_id,
-             reference.source_node_id
+    WITH inbound AS (
+        SELECT relation.target_entry_id,
+               relation.entry_id AS source_entry_id,
+               relation.id AS source_node_id,
+               CASE
+                   WHEN source_entry.archived_at IS NOT NULL THEN 'archived'
+                   WHEN source_entry.current_publication_id IS NOT NULL THEN 'published'
+                   ELSE 'draft'
+               END AS source_status,
+               source_entry.headword_mode AS source_headword_mode,
+               source_entry.source_dialect,
+               (SELECT headword FROM lexicon.entry_headwords
+                WHERE entry_id = source_entry.id AND dialect = 'common') AS source_common_headword,
+               (SELECT headword FROM lexicon.entry_headwords
+                WHERE entry_id = source_entry.id AND dialect = 'uk') AS source_uk_headword,
+               (SELECT headword FROM lexicon.entry_headwords
+                WHERE entry_id = source_entry.id AND dialect = 'us') AS source_us_headword,
+               relation.relation_type AS draft_relation_type,
+               NULL::jsonb AS source_snapshot,
+               0 AS scope_order
+        FROM lexicon.relations relation
+        JOIN lexicon.entries source_entry ON source_entry.id = relation.entry_id
+        WHERE relation.target_entry_id = ANY($1)
+
+        UNION ALL
+
+        SELECT reference.target_entry_id,
+               reference.entry_id AS source_entry_id,
+               reference.source_node_id,
+               CASE
+                   WHEN source_entry.archived_at IS NOT NULL THEN 'archived'
+                   WHEN source_entry.current_publication_id IS NOT NULL THEN 'published'
+                   ELSE 'draft'
+               END AS source_status,
+               source_entry.headword_mode AS source_headword_mode,
+               source_entry.source_dialect,
+               (SELECT headword FROM lexicon.entry_headwords
+                WHERE entry_id = source_entry.id AND dialect = 'common') AS source_common_headword,
+               (SELECT headword FROM lexicon.entry_headwords
+                WHERE entry_id = source_entry.id AND dialect = 'uk') AS source_uk_headword,
+               (SELECT headword FROM lexicon.entry_headwords
+                WHERE entry_id = source_entry.id AND dialect = 'us') AS source_us_headword,
+               NULL::text AS draft_relation_type,
+               publication.snapshot AS source_snapshot,
+               1 AS scope_order
+        FROM lexicon.entry_publication_sense_refs reference
+        JOIN lexicon.entries source_entry
+          ON source_entry.id = reference.entry_id
+         AND source_entry.current_publication_id = reference.publication_id
+        JOIN lexicon.entry_publications publication
+          ON publication.id = reference.publication_id
+         AND publication.entry_id = reference.entry_id
+        WHERE reference.target_entry_id = ANY($1)
+          AND reference.reference_kind = 'relation'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM lexicon.relations draft_relation
+              WHERE draft_relation.id = reference.source_node_id
+                AND draft_relation.entry_id = reference.entry_id
+                AND draft_relation.target_entry_id = reference.target_entry_id
+                AND draft_relation.target_sense_id = reference.target_sense_id
+          )
+    )
+    SELECT target_entry_id,
+           source_entry_id,
+           source_node_id,
+           source_status,
+           source_headword_mode,
+           source_dialect,
+           source_common_headword,
+           source_uk_headword,
+           source_us_headword,
+           draft_relation_type,
+           source_snapshot
+    FROM inbound
+    ORDER BY target_entry_id, source_entry_id, source_node_id, scope_order
 "#;
 
 impl LexiconRepository {

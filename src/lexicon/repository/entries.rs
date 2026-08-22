@@ -7,6 +7,17 @@ pub(super) fn map_entry_write_error(error: sqlx::Error) -> LexiconRepositoryErro
     if is_unique_violation(&error, "lexicon_entry_headword_keys_unique_idx") {
         return LexiconRepositoryError::DuplicateHeadword;
     }
+    if [
+        "lexicon_relations_target_fkey",
+        "lexicon_sentence_links_target_fkey",
+        "lexicon_publication_sense_refs_target_fkey",
+        "lexicon_publication_sense_refs_target_node_fkey",
+    ]
+    .iter()
+    .any(|constraint| is_foreign_key_violation(&error, constraint))
+    {
+        return LexiconRepositoryError::ReferenceTargetChanged;
+    }
     LexiconRepositoryError::Database(error)
 }
 
@@ -654,7 +665,7 @@ impl LexiconRepository {
         id: Uuid,
         revision: i64,
     ) -> Result<bool, LexiconRepositoryError> {
-        let has_inbound_draft_references = sqlx::query_scalar::<_, bool>(
+        let has_inbound_references = sqlx::query_scalar::<_, bool>(
             r#"
             SELECT EXISTS (
                 SELECT 1
@@ -666,6 +677,11 @@ impl LexiconRepository {
                 FROM lexicon.sentence_links link
                 JOIN lexicon.nodes target ON target.id = link.target_sense_id
                 WHERE target.entry_id = $1 AND link.entry_id <> $1
+                UNION ALL
+                SELECT 1
+                FROM lexicon.entry_publication_sense_refs sense_ref
+                WHERE sense_ref.target_entry_id = $1
+                  AND sense_ref.entry_id <> $1
             )
             "#,
         )
@@ -673,7 +689,7 @@ impl LexiconRepository {
         .fetch_one(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)?;
-        if has_inbound_draft_references {
+        if has_inbound_references {
             return Ok(false);
         }
         delete_current_content(tx, id).await?;
@@ -692,7 +708,7 @@ impl LexiconRepository {
         .bind(id)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(LexiconRepositoryError::Database)?;
+        .map_err(map_entry_write_error)?;
         if deleted.is_some() {
             insert_audit_action(
                 tx,
@@ -776,7 +792,7 @@ pub(super) async fn delete_current_content(
             .bind(entry_id)
             .execute(&mut **tx)
             .await
-            .map_err(LexiconRepositoryError::Database)?;
+            .map_err(map_entry_write_error)?;
     }
     Ok(())
 }

@@ -92,7 +92,14 @@ pub(crate) struct SurfaceInboundRelationRecord {
     pub target_entry_id: Uuid,
     pub source_entry_id: Uuid,
     pub source_node_id: Uuid,
-    pub source_snapshot: Value,
+    pub source_status: String,
+    pub source_headword_mode: String,
+    pub source_dialect: Option<String>,
+    pub source_common_headword: Option<String>,
+    pub source_uk_headword: Option<String>,
+    pub source_us_headword: Option<String>,
+    pub draft_relation_type: Option<String>,
+    pub source_snapshot: Option<Value>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -168,13 +175,47 @@ pub(crate) struct ResolvedSenseTargetRecord {
     pub target_entry_id: Uuid,
     pub target_sense_id: Uuid,
     pub target_publication_id: Uuid,
+    pub target_revision: i64,
     pub snapshot: Value,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct ResolvedRelationTargetRecord {
+    pub target_entry_id: Uuid,
+    pub target_sense_id: Uuid,
+    pub target_revision: i64,
+    pub target_archived: bool,
+    pub target_removed: bool,
+    pub headword_mode: String,
+    pub source_dialect: Option<String>,
+    pub common_headword: Option<String>,
+    pub uk_headword: Option<String>,
+    pub us_headword: Option<String>,
+    pub draft_meanings: Value,
+    pub target_publication_id: Option<Uuid>,
+    pub published_snapshot: Option<Value>,
+    pub published_revision: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PublicationSenseReferenceKind {
     Relation,
     SentenceContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationTargetContentScope {
+    Draft,
+    Publication,
+}
+
+impl PublicationTargetContentScope {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Publication => "publication",
+        }
+    }
 }
 
 impl PublicationSenseReferenceKind {
@@ -192,7 +233,9 @@ pub(crate) struct NewPublicationSenseReference {
     pub reference_kind: PublicationSenseReferenceKind,
     pub target_entry_id: Uuid,
     pub target_sense_id: Uuid,
-    pub target_publication_id: Uuid,
+    pub target_publication_id: Option<Uuid>,
+    pub target_content_scope: PublicationTargetContentScope,
+    pub target_revision: i64,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

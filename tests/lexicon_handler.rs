@@ -16,6 +16,7 @@ use tsz_rust::{
     lexicon::detection_store::DetectionStore,
     lexicon::dto::{DetectWordResponseV2, SurfacePolicyNameV2},
     lexicon::normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword},
+    lexicon::repository::LexiconRepository,
     lexicon::surface_backfill::{
         SURFACE_WRITER_VERSION, execute_surface_cutover, run_surface_backfill,
         run_surface_cutover_preflight, run_surface_parity, surface_cutover_artifact_sha256,
@@ -2930,6 +2931,681 @@ async fn lexicon_expiry_pagination_and_form_storage_boundaries_are_safe(pool: Pg
             .iter()
             .any(|issue| issue["code"] == "node_id_reused")
     );
+}
+
+#[sqlx::test]
+async fn draft_source_relation_is_included_in_detection_context_with_status(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_headword = format!("meadow{}", admin_id.simple());
+    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let (status, target) = publish_ready(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "目标词发布失败：{target}");
+
+    let source_headword = format!("clear{}", admin_id.simple());
+    let source = create_ready_draft(&state, &pool, &bearer, &source_headword).await;
+    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "target_word_id": target_entry_id,
+        "target_sense_id": target_sense_id,
+        "score": "90.00"
+    }]);
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "草稿来源关联保存失败：{saved}");
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": target_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "目标词重复检测失败：{detection}");
+    let context = detection["smart_dictionary"]["surface_match_page"]["matched_entry_contexts"]
+        .as_array()
+        .and_then(|contexts| {
+            contexts
+                .iter()
+                .find(|context| context["word_id"] == Value::String(target_entry_id.to_string()))
+        })
+        .expect("命中目标词时必须返回目标词条上下文");
+    assert_eq!(
+        context["inbound_relations"]["total"], 1,
+        "草稿来源 relation 必须进入检测上下文：{detection}"
+    );
+    assert_eq!(
+        context["inbound_relations"]["previews"][0],
+        json!({
+            "source_word_id": source_entry_id,
+            "source_headword": source_headword,
+            "source_status": "draft",
+            "relation": "synonym"
+        })
+    );
+}
+
+#[sqlx::test]
+async fn detection_confirmation_rejects_changed_inbound_relation_context(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let policies = state.surface_policy_store_for_test();
+    prepare_duplicate_headword_test(&pool, &policies).await;
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_headword = format!("tokenmeadow{}", admin_id.simple());
+    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let (status, target) = publish_ready(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "目标发布失败：{target}");
+
+    let source_headword = format!("tokensource{}", admin_id.simple());
+    let source = create_ready_draft(&state, &pool, &bearer, &source_headword).await;
+    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "target_word_id": target_entry_id,
+        "target_sense_id": target_sense_id,
+        "score": "90.00"
+    }]);
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": target_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "重复检测失败：{detection}");
+    let confirmation_token =
+        detection["smart_dictionary"]["surface_match_page"]["surface_confirmation_token"]
+            .as_str()
+            .expect("开启 exact-headword policy 后终页应签发 token")
+            .to_owned();
+
+    let mut relation_barrier = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_contexts(&mut relation_barrier, &[target_entry_id])
+        .await
+        .unwrap();
+    let mut unrelated_context = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_contexts(&mut unrelated_context, &[source_entry_id])
+        .await
+        .expect("不同 entry 的 context 锁不得互相阻塞");
+    unrelated_context.rollback().await.unwrap();
+    let (status, concurrent_save) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "并发上下文写入应快速失败");
+    assert_eq!(concurrent_save["code"], "reference_conflict");
+    relation_barrier.rollback().await.unwrap();
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "来源关联保存失败：{source_saved}");
+
+    let (status, changed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": detection["builtin_dictionary"]["headwords"],
+            "confirmed_surface_match_token": confirmation_token
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "旧上下文 token 不得继续创建：{changed}"
+    );
+    assert_eq!(changed["code"], "surface_matches_changed");
+    assert!(
+        changed["meta"]["surface_match_page"]["matched_entry_contexts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|context| context["inbound_relations"]["previews"].as_array().unwrap())
+            .any(
+                |preview| preview["source_word_id"] == source_entry_id.to_string()
+                    && preview["source_status"] == "draft"
+            )
+    );
+
+    let refreshed_token = changed["meta"]["surface_match_page"]["surface_confirmation_token"]
+        .as_str()
+        .expect("变化后的终页应返回新确认 token")
+        .to_owned();
+
+    let mut forms_without_pos = source_saved["word"]["forms"].clone();
+    forms_without_pos["pos"] = json!([]);
+    let (status, forms_impact) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/forms/impact"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source_saved["word"]["revision"],
+            "content": forms_without_pos.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "删除来源 POS impact 失败：{forms_impact}"
+    );
+    assert_eq!(forms_impact["requires_confirmation"], true);
+    let mut forms_barrier = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_contexts(&mut forms_barrier, &[target_entry_id])
+        .await
+        .unwrap();
+    let (status, concurrent_forms_save) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source_saved["word"]["revision"],
+            "intent": "save",
+            "confirmed_impact_token": forms_impact["confirmation_token"],
+            "content": forms_without_pos.clone(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "forms 删除 relation 时必须快速等待目标 context：{concurrent_forms_save}"
+    );
+    assert_eq!(concurrent_forms_save["code"], "reference_conflict");
+    forms_barrier.rollback().await.unwrap();
+    let (status, forms_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source_saved["word"]["revision"],
+            "intent": "save",
+            "confirmed_impact_token": forms_impact["confirmation_token"],
+            "content": forms_without_pos,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "删除来源 POS 保存失败：{forms_saved}"
+    );
+    assert_eq!(forms_saved["word"]["meanings"]["pos"], json!([]));
+
+    let (status, forms_changed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": detection["builtin_dictionary"]["headwords"],
+            "confirmed_surface_match_token": refreshed_token
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "forms 删除 relation 后旧 token 必须失效：{forms_changed}"
+    );
+    assert_eq!(forms_changed["code"], "surface_matches_changed");
+    let post_forms_token =
+        forms_changed["meta"]["surface_match_page"]["surface_confirmation_token"]
+            .as_str()
+            .expect("forms 删除 relation 后应签发新确认 token")
+            .to_owned();
+    let mut consumption_barrier = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_contexts(&mut consumption_barrier, &[target_entry_id])
+        .await
+        .unwrap();
+    let (status, concurrent_consume) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": detection["builtin_dictionary"]["headwords"],
+            "confirmed_surface_match_token": post_forms_token.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "并发 token 消费应快速失败");
+    assert_eq!(concurrent_consume["code"], "reference_conflict");
+    consumption_barrier.rollback().await.unwrap();
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": detection["builtin_dictionary"]["headwords"],
+            "confirmed_surface_match_token": post_forms_token
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "新 token 创建失败：{created}");
+
+    policies
+        .transition_exact_headword_creation(&pool, false)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn published_relation_can_target_draft_and_keeps_an_auditable_stable_anchor(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_headword = format!("draftmeadow{}", admin_id.simple());
+    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    let target_sense_id = Uuid::parse_str(
+        target["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let target_revision = target["word"]["revision"].as_i64().unwrap();
+
+    let source_headword = format!("publishedclear{}", admin_id.simple());
+    let source = create_ready_draft(&state, &pool, &bearer, &source_headword).await;
+    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let relation_id = Uuid::now_v7();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "synonym",
+        "target_word_id": target_entry_id,
+        "target_sense_id": target_sense_id,
+        "target_headword": "客户端伪造词头",
+        "target_gloss": "客户端伪造释义",
+        "score": "95.00"
+    }]);
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "relation 应能保存到草稿目标：{source_saved}"
+    );
+    let saved_relation = &source_saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(saved_relation["target_headword"], target_headword);
+    assert_eq!(
+        saved_relation["target_gloss"],
+        format!("{target_headword} 的释义"),
+        "只读快照字段必须由服务端覆盖"
+    );
+
+    let (status, validation) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_entry_id}/validate"),
+        &bearer,
+        None,
+        Some(json!({"base_revision": source_saved["word"]["revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "草稿目标关联校验失败：{validation}");
+    assert_eq!(validation["valid"], true);
+
+    let (status, source_published) = publish_ready(&state, &bearer, &source_saved).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "不得要求目标先发布才能发布来源关联：{source_published}"
+    );
+    let source_revision = source_published["word"]["revision"].as_i64().unwrap();
+    let source_publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(source_entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let anchor: (Option<Uuid>, String, i64) = sqlx::query_as(
+        r#"
+        SELECT target_publication_id, target_content_scope, target_revision
+        FROM lexicon.entry_publication_sense_refs
+        WHERE publication_id = $1 AND source_node_id = $2
+        "#,
+    )
+    .bind(source_publication_id)
+    .bind(relation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(anchor, (None, "draft".to_owned(), target_revision));
+    let publication_snapshot: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id = $1")
+            .bind(source_publication_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let snapshotted_relation =
+        &publication_snapshot["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(snapshotted_relation["target_headword"], target_headword);
+    assert_eq!(
+        snapshotted_relation["target_sense_id"],
+        json!(target_sense_id)
+    );
+
+    let (status, blocked_delete) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{target_entry_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": target_revision,
+            "base_lifecycle_revision": 1
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "正式历史引用必须阻止硬删除");
+    assert_eq!(blocked_delete["code"], "entry_not_deletable");
+
+    let (status, blocked_archive) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": target_revision,
+            "base_lifecycle_revision": 1
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "当前正式入链必须阻止目标归档");
+    assert_eq!(
+        blocked_archive["code"],
+        "entry_has_inbound_publication_refs"
+    );
+
+    let (status, target_published) = publish_ready(&state, &bearer, &target).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "目标后续发布失败：{target_published}"
+    );
+    let anchor_after_target_publish: (Option<Uuid>, String, i64) = sqlx::query_as(
+        r#"
+        SELECT target_publication_id, target_content_scope, target_revision
+        FROM lexicon.entry_publication_sense_refs
+        WHERE publication_id = $1 AND source_node_id = $2
+        "#,
+    )
+    .bind(source_publication_id)
+    .bind(relation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        anchor_after_target_publish, anchor,
+        "目标后续发布不得回写历史来源 publication 的审计锚点"
+    );
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": target_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "目标发布后检测失败：{detection}");
+    let previews = detection["smart_dictionary"]["surface_match_page"]["matched_entry_contexts"][0]
+        ["inbound_relations"]["previews"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        previews.len(),
+        1,
+        "draft/current publication 同一关联不得重复计数"
+    );
+    assert_eq!(previews[0]["source_status"], "published");
+
+    let (status, source_archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": source_revision,
+            "base_lifecycle_revision": 1
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "来源归档失败：{source_archived}");
+    let (status, archived_source_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": target_headword})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "来源归档后目标检测失败：{archived_source_detection}"
+    );
+    assert!(archived_source_detection["smart_dictionary"]["surface_match_page"]
+        ["matched_entry_contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|context| context["inbound_relations"]["previews"].as_array().unwrap())
+        .any(|preview| preview["source_word_id"] == source_entry_id.to_string()
+            && preview["source_status"] == "archived"));
+    let target_published_revision = target_published["word"]["revision"].as_i64().unwrap();
+
+    let mut target_write = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM lexicon.entries WHERE id = $1 FOR UPDATE")
+        .bind(target_entry_id)
+        .fetch_one(&mut *target_write)
+        .await
+        .unwrap();
+    let (status, concurrent_restore) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_entry_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": source_revision,
+            "base_lifecycle_revision": 2
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "恢复必须锁定正式出链目标，不能越过并发目标写入：{concurrent_restore}"
+    );
+    assert_eq!(concurrent_restore["code"], "reference_conflict");
+    target_write.rollback().await.unwrap();
+
+    let (status, target_archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": target_published_revision,
+            "base_lifecycle_revision": 1
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "来源归档后目标应可归档：{target_archived}"
+    );
+    let (status, blocked_restore) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_entry_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": source_revision,
+            "base_lifecycle_revision": 2
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "目标归档时不得恢复来源：{blocked_restore}"
+    );
+    assert_eq!(
+        blocked_restore["code"],
+        "entry_has_unavailable_publication_refs"
+    );
+}
+
+#[sqlx::test]
+async fn sentence_context_still_requires_a_published_target(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target = create_ready_draft(
+        &state,
+        &pool,
+        &bearer,
+        &format!("contextdraft{}", admin_id.simple()),
+    )
+    .await;
+    let target_entry_id = target["word"]["id"].clone();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let source = create_ready_draft(
+        &state,
+        &pool,
+        &bearer,
+        &format!("contextsource{}", admin_id.simple()),
+    )
+    .await;
+    let source_entry_id = source["word"]["id"].as_str().unwrap();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["sentences"][0]["links"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "word_id": target_entry_id,
+            "sense_id": target_sense_id,
+            "role": "context"
+        }));
+    let (status, rejected) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(has_issue(&rejected, "sentence_context_target_unavailable"));
 }
 
 #[sqlx::test]

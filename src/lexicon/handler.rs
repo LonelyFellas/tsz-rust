@@ -209,7 +209,7 @@ fn map_error(error: LexiconServiceError) -> AppError {
         LexiconServiceError::EntryNotDeletable => AppError::conflict(
             ErrorCode::EntryNotDeletable,
             None,
-            "only never-published entries without inbound draft references can be deleted",
+            "only never-published entries without inbound references can be deleted",
         ),
         LexiconServiceError::EntryHasInboundPublicationRefs(references) => AppError::conflict(
             ErrorCode::EntryHasInboundPublicationRefs,
@@ -254,7 +254,7 @@ fn map_error(error: LexiconServiceError) -> AppError {
         LexiconServiceError::ReferenceConflict => AppError::conflict(
             ErrorCode::ReferenceConflict,
             None,
-            "a referenced publication is changing; retry the command",
+            "a referenced target is changing; retry the command",
         ),
         LexiconServiceError::StepNotReachable => AppError::conflict(
             ErrorCode::StepNotReachable,

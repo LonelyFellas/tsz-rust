@@ -158,6 +158,9 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
+            .await
+            .map_err(repository_error)?;
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -209,6 +212,11 @@ impl LexiconService {
                 .position(|forms_pos| forms_pos.pos_id == meanings_pos.pos_id)
                 .unwrap_or(usize::MAX)
         });
+        let mut affected_contexts = relation_target_entry_ids(&current.meanings);
+        affected_contexts.extend(relation_target_entry_ids(&meanings));
+        LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
+            .await
+            .map_err(repository_error)?;
         let reference_resolution = resolve_meaning_references(
             &mut transaction,
             entry_id,
@@ -399,9 +407,13 @@ impl LexiconService {
                 .iter()
                 .map(String::as_str)
                 .collect::<std::collections::HashSet<_>>();
-            if unacknowledged
-                .iter()
-                .any(|item| !confirmed_ids.contains(item.match_id.as_str()))
+            let contexts_changed = surface_context_digest(&current_contexts)
+                .map_err(LexiconServiceError::SurfaceSnapshot)?
+                != confirmation.context_digest;
+            if contexts_changed
+                || unacknowledged
+                    .iter()
+                    .any(|item| !confirmed_ids.contains(item.match_id.as_str()))
             {
                 let snapshot = self
                     .create_forms_surface_snapshot(
@@ -593,6 +605,9 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
+            .await
+            .map_err(repository_error)?;
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -615,6 +630,11 @@ impl LexiconService {
             .catalog_context_for_reference(&mut transaction, &current.forms)
             .await?;
         let rich_text_is_safe = canonicalize_meanings(&mut content);
+        let mut affected_contexts = relation_target_entry_ids(&current.meanings);
+        affected_contexts.extend(relation_target_entry_ids(&content));
+        LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
+            .await
+            .map_err(repository_error)?;
         let reference_resolution = resolve_meaning_references(
             &mut transaction,
             entry_id,
@@ -765,6 +785,9 @@ impl LexiconService {
             .collect::<Vec<_>>();
         entry_ids.sort_unstable();
         entry_ids.dedup();
+        LexiconRepository::lock_surface_contexts(transaction, &entry_ids)
+            .await
+            .map_err(repository_error)?;
         let records =
             LexiconRepository::surface_entry_contexts_in_transaction(transaction, &entry_ids)
                 .await

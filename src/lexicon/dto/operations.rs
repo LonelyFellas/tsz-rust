@@ -244,7 +244,32 @@ pub struct RelationReferenceCountsV2 {
 pub struct RelationReferencePreviewV2 {
     pub source_word_id: Uuid,
     pub source_headword: String,
+    #[serde(default = "default_relation_source_status")]
+    #[schema(required = true)]
+    pub source_status: AdminWordStatus,
     pub relation: RelationTypeV2,
+}
+
+const fn default_relation_source_status() -> AdminWordStatus {
+    // 兼容部署前最长存活十分钟的 Redis snapshot：旧查询只收 current publication 且排除归档，
+    // 因此缺字段的历史 preview 唯一可能的状态就是 published。
+    AdminWordStatus::Published
+}
+
+#[cfg(test)]
+mod relation_reference_preview_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_redis_preview_without_source_status_defaults_to_published() {
+        let preview: RelationReferencePreviewV2 = serde_json::from_value(serde_json::json!({
+            "source_word_id": Uuid::now_v7(),
+            "source_headword": "legacy",
+            "relation": "synonym"
+        }))
+        .unwrap();
+        assert_eq!(preview.source_status, AdminWordStatus::Published);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

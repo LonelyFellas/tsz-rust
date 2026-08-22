@@ -1,5 +1,8 @@
 # `target_state` 判据与「不重存直接重发」短路：定稿
 
+> **实现更新（2026-08-22）**：本文基于“草稿目标不能进入来源 publication”的旧前提，已被
+> [`implemented-stable-target-anchors.md`](./implemented-stable-target-anchors.md) 取代，保留为历史评估。
+
 > **接续**：`backend-assessment.md`（PR #48）§3.3 与 §4。本文回答前端在
 > tsz 仓库 PR #158（`docs/features/related-word-draft-creation/design.md`
 > 「后端核验结论 · 仍需后端确认的一条」）提出的缺口，并把 `target_state` 的最终判据定死。
