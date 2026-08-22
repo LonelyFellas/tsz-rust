@@ -78,6 +78,11 @@ impl FakeRepository {
         let state = self.state.lock().unwrap();
         (state.active.clone(), state.stale.clone(), state.save_calls)
     }
+
+    /// 清掉命中缓存，迫使下一次请求重新走 Redis 锁。
+    fn clear_active(&self) {
+        self.state.lock().unwrap().active = None;
+    }
 }
 
 #[async_trait]
@@ -528,4 +533,107 @@ fn storage_errors_and_presigned_debug_output_redact_sensitive_payloads() {
     ] {
         assert!(!debug.contains(secret));
     }
+}
+
+/// 进入合成时发一次信号，随后慢到足以让调用方在合成途中取消。
+/// 用信号而不是猜一个超时：否则「在拿锁前就被取消」和「detach 失效」会表现成同一种失败。
+struct SlowProvider {
+    started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    delay: Duration,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl SpeechProvider for SlowProvider {
+    fn provider_name(&self) -> &'static str {
+        "azure"
+    }
+
+    async fn synthesize(
+        &self,
+        _request: &SynthesisRequest,
+    ) -> Result<SynthesizedAudio, SpeechError> {
+        if let Some(started) = self.started.lock().unwrap().take() {
+            let _ = started.send(());
+        }
+        tokio::time::sleep(self.delay).await;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(SynthesizedAudio {
+            bytes: AUDIO_SENTINEL.to_vec(),
+            content_type: "audio/mpeg",
+            provider_request_id: Some("provider-response-sensitive".to_owned()),
+        })
+    }
+}
+
+async fn wait_until(label: &str, mut condition: impl FnMut() -> bool) {
+    for _ in 0..300 {
+        if condition() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("等待超时：{label}");
+}
+
+#[tokio::test]
+async fn cancelled_request_still_completes_generation_and_releases_lock() {
+    // fingerprint 决定 Redis 锁键。用唯一文本，避免上一轮遗留的锁把本轮
+    // 挤进 InProgress 分支——本测试恰好会制造这种遗留，不能依赖 Redis 干净。
+    let label = format!("cancel-{}", Uuid::now_v7());
+    let repo = FakeRepository::default();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let provider = Arc::new(SlowProvider {
+        started: Mutex::new(Some(started_tx)),
+        delay: Duration::from_millis(400),
+        calls: AtomicUsize::new(0),
+    });
+    let store = Arc::new(FaultStore::new(Duration::from_secs(73)));
+    let service = PreviewService::new(
+        repo.clone(),
+        redis_pool(),
+        Some(provider.clone()),
+        Some(store.clone()),
+    );
+
+    // 客户端在合成途中 abort：axum 会丢弃 handler future。
+    // 等 provider 报告「已进入合成」再丢弃，取消时机因此是确定的，不依赖机器快慢。
+    let mut pending = Box::pin(service.create_preview(request(&label)));
+    tokio::select! {
+        _ = &mut pending => panic!("前置条件：不应在合成完成前返回"),
+        started = started_rx => started.expect("provider 应报告已进入合成"),
+    }
+    drop(pending);
+
+    // detach 出去的任务不受调用方消失影响，应当照常跑完。
+    wait_until("被取消的生成任务没有写入缓存", || {
+        repo.snapshot().2 == 1
+    })
+    .await;
+
+    let (active, _, saves) = repo.snapshot();
+    assert_eq!(saves, 1, "已经付过费的合成结果必须落缓存");
+    assert!(active.is_some(), "缓存行应当可被后续请求命中");
+    assert_eq!(store.put_keys.lock().unwrap().len(), 1, "对象只应写入一次");
+    assert!(
+        store.delete_keys.lock().unwrap().is_empty(),
+        "不应留下需要补偿删除的对象"
+    );
+
+    // 锁必须已经释放：清掉命中缓存，迫使同一 fingerprint 重新走锁。
+    // 若锁泄漏，这里会短轮询后返回 InProgress 而不是重新生成。
+    repo.clear_active();
+    let response = service
+        .create_preview(request(&label))
+        .await
+        .expect("锁已释放，同一 fingerprint 应能重新生成");
+    assert!(matches!(
+        response.cache_status,
+        PreviewCacheStatus::Generated
+    ));
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        2,
+        "两次生成都应真正调用 provider"
+    );
 }

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use deadpool_redis::Pool as RedisPool;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracing::Instrument;
 
 use crate::{
     platform::storage::{ObjectContentType, ObjectKey, ObjectStore, PutOptions, StorageError},
@@ -37,6 +38,8 @@ pub enum PreviewServiceError {
     Database(#[from] sqlx::Error),
     #[error("speech lock failed")]
     Lock,
+    #[error("speech preview task failed")]
+    Task(#[from] tokio::task::JoinError),
 }
 
 #[derive(Clone)]
@@ -128,17 +131,30 @@ impl PreviewService {
             return Err(PreviewServiceError::InProgress);
         };
 
-        let result = self
-            .generate_locked(&request_hash, &content_hash, voice.id, &request, storage)
-            .await;
-        if let Err(error) = lock.release().await {
-            tracing::warn!(
-                error_kind = "redis_unlock",
-                "speech preview lock release failed"
-            );
-            let _ = error;
-        }
-        result
+        // 生成过程 detach 到独立任务：客户端中途 abort（改文本、换发音人、关页面）时
+        // axum 会丢弃 handler future，若生成就地跑就会在 put 与 save_cache 之间留下无 DB 行的
+        // 孤儿对象，且 lock.release() 永远不会执行，同一 fingerprint 要等租约到期才能再试。
+        // detach 后任务照常跑完：已经付过费的合成结果被写进缓存，锁也一定释放。
+        let voice_id = voice.id;
+        let service = self.clone();
+        // 带上当前 span：任务跑在 handler 之外，不继承的话生成路径上的告警会丢掉 request_id。
+        let generation = tokio::spawn(
+            async move {
+                let result = service
+                    .generate_locked(&request_hash, &content_hash, voice_id, &request, storage)
+                    .await;
+                if let Err(error) = lock.release().await {
+                    tracing::warn!(
+                        error_kind = "redis_unlock",
+                        "speech preview lock release failed"
+                    );
+                    let _ = error;
+                }
+                result
+            }
+            .instrument(tracing::Span::current()),
+        );
+        generation.await?
     }
 
     async fn generate_locked(
