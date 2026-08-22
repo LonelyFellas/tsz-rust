@@ -76,12 +76,18 @@ voice 列表是只读操作；试听是高频、无业务真相变更的派生�
 `SET key token NX PX` → 锁后双检 → provider → ObjectStore put → PG upsert → presign → token 校验
 Lua unlock。
 
+- 拿到锁之后的生成过程 detach 到独立 tokio 任务，调用方 future 被丢弃也照常跑完。前端在
+  「生成中改文本 / 换发音人 / 关页面」时会 abort，若生成就地跑，axum 丢弃 handler future 会在
+  put 与 save_cache 之间留下无 DB 行的孤儿对象，并且 `lock.release()` 永不执行——同一
+  fingerprint 要等租约到期（provider timeout + 30s）才能再试。detach 后已付费的合成结果落缓存，
+  锁也一定释放；代价是客户端消失后仍会跑完这一次生成，这是有意接受的；
 - 锁 TTL 必须覆盖 provider request timeout 与存储/DB 尾延迟；只有 token owner 能释放；
 - 锁丢失不影响正确性：PG 主键是最终 winner，竞争方若写入失败会删除自己生成的对象；
 - put 后 DB 失败会 best-effort delete；delete 失败只记录稳定分类与 object key，不记录内容/URL；
 - DB 成功后 presign 失败保留有效 cache，下次请求可再次签名；
-- 过期 row 的旧对象在成功替换后 best-effort 删除；失败或请求被取消形成的孤儿由 bucket 生命周期
-  规则按对象年龄兜底，应用不做按年龄的批量对象删除（`ops/speech-preview-lifecycle/README.md`）；
+- 过期 row 的旧对象在成功替换后 best-effort 删除；补偿删除失败、以及进程在生成中途被杀
+  （detach 的任务不在 axum 优雅停机的等待范围内）形成的孤儿，由 bucket 生命周期规则按对象年龄
+  兜底，应用不做按年龄的批量对象删除（`ops/speech-preview-lifecycle/README.md`）；
 - 过期 row 本身由进程内定时任务每小时清理，只删 row 不碰对象，因此没有跨系统删除顺序问题；
 - 该任务删掉过期 row 之后，同 fingerprint 的再次请求读不到 stale key，旧对象不再被及时删除，
   同样落到生命周期规则回收。因此清理任务上线后，「替换时删旧对象」只覆盖过期未满一轮的窗口，

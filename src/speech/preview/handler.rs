@@ -116,5 +116,7 @@ fn map_error(error: PreviewServiceError) -> AppError {
             "speech preview coordination unavailable",
         ),
         PreviewServiceError::Database(error) => AppError::internal(error),
+        // 生成任务 panic 才会走到这里，属于 bug 而非可预期故障，按 500 暴露。
+        PreviewServiceError::Task(error) => AppError::internal(error),
     }
 }
