@@ -731,9 +731,6 @@ impl LexiconService {
             }
             _ => return Err(LexiconServiceError::DetectionMismatch),
         };
-        if !compatible_headwords(&detected_headwords, matched_dialect, &input.headwords)? {
-            return Err(LexiconServiceError::DetectionMismatch);
-        }
         align_base_forms(
             &mut forms,
             &detected_headwords,

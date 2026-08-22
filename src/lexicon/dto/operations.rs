@@ -443,6 +443,8 @@ pub struct DetectWordResponseV2 {
 pub struct CreateAdminWordV2Input {
     pub schema_version: u8,
     pub detection_id: Uuid,
+    /// matched 检测返回的英美主词仅作为建议；管理员可切换模式、编辑非空拼写并决定
+    /// `source_dialect`。检测过期、消费、幂等及最终主词 surface 确认仍由服务端校验。
     pub headwords: WordHeadwordsV2,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -857,13 +859,13 @@ pub enum RelatedSearchResponse {
 pub struct AdminWordListItem {
     pub schema_version: u8,
     pub id: Uuid,
-    /// 并列拼写按检测基准侧在前拼接，与 `dialects` 同序。
+    /// 并列拼写按管理员主词侧在前拼接，与 `dialects` 同序。
     pub headword: String,
     pub kind: EntryKind,
     pub dialects: Vec<Dialect>,
     /// 每侧拼写，与 `dialects` 同序；`headword` 即本数组按序拼接。
     pub headword_variants: Vec<HeadwordVariant>,
-    /// 检测基准侧；`mode = unified` 的词条没有基准侧，字段整体省略。
+    /// 管理员主词侧；`mode = unified` 的词条没有主词侧，字段整体省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub source_dialect: Option<SourceDialect>,

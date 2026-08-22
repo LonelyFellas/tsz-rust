@@ -4736,6 +4736,53 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "统一词形检测失败：{detection}");
+    assert_eq!(
+        detection["builtin_dictionary"]["headwords"],
+        json!({"mode": "unified", "common": "manual-common"}),
+        "检测结果继续返回词典建议"
+    );
+
+    let (status, malformed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {
+                "mode": "distinguish",
+                "uk": "manual-common",
+                "us": "manual-common"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(malformed["code"], "invalid_request_body");
+
+    let (status, empty) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {
+                "mode": "distinguish",
+                "uk": "   ",
+                "us": "manual-common",
+                "source_dialect": "us"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(empty["code"], "invalid_headword");
+
     let (status, created) = call(
         &state,
         Method::POST,
@@ -4747,7 +4794,7 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
             "detection_id": detection["detection_id"],
             "headwords": {
                 "mode": "distinguish",
-                "uk": "  manual-edited-uk  ",
+                "uk": "  manual-common  ",
                 "us": " manual-common ",
                 "source_dialect": "us"
             }
@@ -4756,8 +4803,13 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::CREATED, "统一改区分应成功：{created}");
     assert_eq!(created["word"]["headwords"]["mode"], "distinguish");
-    assert_eq!(created["word"]["headwords"]["uk"], "manual-edited-uk");
+    assert_eq!(created["word"]["headwords"]["uk"], "manual-common");
     assert_eq!(created["word"]["headwords"]["us"], "manual-common");
+    assert_eq!(
+        created["word"]["detection_snapshot"]["headwords"],
+        json!({"mode": "unified", "common": "manual-common"}),
+        "持久化检测快照必须保留原始词典建议"
+    );
     assert_eq!(
         created["word"]["forms"]["pos"][0]["dialect_rules"],
         json!({"spelling_mode": "distinguish", "phonetic_mode": "distinguish"}),
@@ -4773,7 +4825,7 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
     );
     assert_eq!(
         created["word"]["forms"]["pos"][0]["base_form"]["variants"][0]["origin"], "manual",
-        "用户修改的英式词形必须标记为手工来源"
+        "管理员补出的英式侧必须标记为手工来源"
     );
     assert_eq!(
         created["word"]["forms"]["pos"][0]["base_form"]["variants"][1]["origin"], "dictionary",
@@ -4838,12 +4890,20 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
         Some(json!({
             "schema_version": 2,
             "detection_id": detection["detection_id"],
-            "headwords": {"mode": "unified", "common": "manual-us"}
+            "headwords": {"mode": "unified", "common": "manual-unified-edited"}
         })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "区分改统一应成功：{created}");
     assert_eq!(created["word"]["headwords"]["mode"], "unified");
+    assert_eq!(
+        created["word"]["headwords"]["common"], "manual-unified-edited",
+        "改为统一时也允许覆盖词典建议拼写"
+    );
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["base_form"]["variants"][0]["origin"],
+        "manual"
+    );
     assert_eq!(
         created["word"]["forms"]["pos"][0]["dialect_rules"],
         json!({"spelling_mode": "unified", "phonetic_mode": "unified"}),
@@ -4858,18 +4918,18 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
         "区分改统一后必须只保留共同基础词形"
     );
 
-    seed_dictionary_term(&pool, "tamper-common", "word", "common_unmarked").await;
+    seed_dictionary_term(&pool, "source-edit-common", "word", "common_unmarked").await;
     let (status, detection) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/detections"),
         &bearer,
         None,
-        Some(json!({"language": "en", "headword": "tamper-common"})),
+        Some(json!({"language": "en", "headword": "source-edit-common"})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "篡改测试检测失败：{detection}");
-    let (status, rejected) = call(
+    assert_eq!(status, StatusCode::OK, "主词编辑测试检测失败：{detection}");
+    let (status, created) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries"),
@@ -4880,8 +4940,8 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
             "detection_id": detection["detection_id"],
             "headwords": {
                 "mode": "distinguish",
-                "uk": "manual-edited-uk",
-                "us": "tampered-source",
+                "uk": "source-edited-uk",
+                "us": "source-edit-common",
                 "source_dialect": "us"
             }
         })),
@@ -4889,10 +4949,18 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
     .await;
     assert_eq!(
         status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "命中侧被篡改时必须拒绝：{rejected}"
+        StatusCode::CREATED,
+        "允许管理员修改非主词侧拼写：{created}"
     );
-    assert_eq!(rejected["code"], "detection_mismatch");
+    assert_eq!(
+        created["word"]["headwords"],
+        json!({
+            "mode": "distinguish",
+            "uk": "source-edited-uk",
+            "us": "source-edit-common",
+            "source_dialect": "us"
+        })
+    );
 
     seed_dictionary_term(&pool, "single-uk", "word", "british_core").await;
     let (status, detection) = call(
@@ -4911,7 +4979,7 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
     );
     assert_eq!(detection["matched_dialect"], "uk");
 
-    let (status, rejected) = call(
+    let (status, created) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries"),
@@ -4931,34 +4999,10 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
     .await;
     assert_eq!(
         status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "单侧英式命中不得伪装为美式来源：{rejected}"
-    );
-    assert_eq!(rejected["code"], "detection_mismatch");
-
-    let (status, created) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "schema_version": 2,
-            "detection_id": detection["detection_id"],
-            "headwords": {
-                "mode": "distinguish",
-                "uk": "single-uk",
-                "us": "single-us-edited",
-                "source_dialect": "uk"
-            }
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
         StatusCode::CREATED,
-        "保持英式命中侧应允许创建：{created}"
+        "source_dialect 应表达管理员选择的主侧，不受检测命中方言限制：{created}"
     );
+    assert_eq!(created["word"]["headwords"]["source_dialect"], "us");
 }
 
 #[sqlx::test]
