@@ -173,6 +173,35 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
+    pub(crate) async fn has_unprojected_legacy_exact_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        kind: EntryKind,
+        normalized: &[String],
+        projected_entry_ids: &[Uuid],
+    ) -> Result<bool, LexiconRepositoryError> {
+        if normalized.is_empty() {
+            return Ok(false);
+        }
+        sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM lexicon.entry_headword_keys keys
+                WHERE keys.language = 'en'
+                  AND keys.kind = $1
+                  AND keys.normalized_headword = ANY($2)
+                  AND NOT (keys.entry_id = ANY($3))
+            )
+            "#,
+        )
+        .bind(kind_string(kind))
+        .bind(normalized)
+        .bind(projected_entry_ids)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     pub(crate) async fn catalog_sub_parts(
         &self,
     ) -> Result<Vec<CatalogSubPartRecord>, LexiconRepositoryError> {

@@ -5006,6 +5006,112 @@ async fn matched_dictionary_headwords_are_editable_suggestions(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn edited_matched_headwords_rebind_the_legacy_duplicate_fallback(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let duplicate = "edited-legacy-duplicate";
+    let existing = create_incomplete_draft(&state, &pool, &bearer, duplicate).await;
+    let existing_id = Uuid::parse_str(existing["word"]["id"].as_str().unwrap()).unwrap();
+    sqlx::query(
+        r#"
+        UPDATE lexicon.surface_sources
+        SET is_deleted = TRUE, source_revision = 999999,
+            event_offset = nextval('lexicon.surface_projection_event_offset_seq')
+        WHERE entry_id = $1 AND source_kind = 'headword'
+        "#,
+    )
+    .bind(existing_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // B4 cutover 会移除旧唯一索引；之后 legacy key 只承担投影缺口兜底检查。
+    sqlx::query("DROP INDEX lexicon.lexicon_entry_headword_keys_unique_idx")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    seed_dictionary_word(&pool, "edited-legacy-source").await;
+    let (status, clear_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "edited-legacy-source"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "检测失败：{clear_detection}");
+    assert_eq!(clear_detection["smart_dictionary"]["status"], "clear");
+
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": clear_detection["detection_id"],
+            "headwords": {"mode": "unified", "common": duplicate}
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "编辑后的最终词头命中 legacy-only 重复时必须拒绝：{rejected}"
+    );
+    assert_eq!(rejected["code"], "duplicate_word");
+
+    let (status, duplicate_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": duplicate})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "重复词检测失败：{duplicate_detection}"
+    );
+    assert_eq!(
+        duplicate_detection["smart_dictionary"]["status"],
+        "duplicate"
+    );
+
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": duplicate_detection["detection_id"],
+            "headwords": {"mode": "unified", "common": "edited-away-from-legacy-duplicate"}
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "检测建议是 legacy-only 重复但最终词头已改开时应允许创建：{created}"
+    );
+    assert_eq!(
+        created["word"]["headwords"],
+        json!({"mode": "unified", "common": "edited-away-from-legacy-duplicate"})
+    );
+}
+
+#[sqlx::test]
 async fn list_rows_order_headword_spellings_by_source_dialect(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
