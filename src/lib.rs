@@ -245,6 +245,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     if let Some(generator) = lexicon_content_generator {
         crate::lexicon::content_completion::run_worker(state.pool.clone(), generator);
     }
+    crate::speech::preview::run_worker(state.pool.clone());
 
     // 接优雅停机：systemctl stop / 容器停止发 SIGTERM，Ctrl+C 发 SIGINT。
     // 收到信号后停止收新连接、放在途请求跑完再退出，避免请求被硬砍。

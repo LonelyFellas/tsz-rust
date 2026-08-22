@@ -10,8 +10,9 @@ pub use config::{ObjectStorageConfig, StorageConfigError};
 pub use error::{BackendErrorKind, StorageError, StorageOperation};
 pub use memory::MemoryAdapter;
 pub use model::{
-    CacheControl, ObjectContentType, ObjectKey, ObjectKeyError, ObjectMetadata, PresignedRequest,
-    PutOptions, StoragePolicy, StoragePolicyError, StoragePrivacy, StorageSpace, StorageSpaceError,
+    CacheControl, MAX_PRESIGN_TTL, ObjectContentType, ObjectKey, ObjectKeyError, ObjectMetadata,
+    PresignedRequest, PutOptions, StoragePolicy, StoragePolicyError, StoragePrivacy, StorageSpace,
+    StorageSpaceError,
 };
 pub use oss::{OssAdapter, OssAdapterConfig, OssConfigError, SecretString};
 pub use registry::StorageRegistry;

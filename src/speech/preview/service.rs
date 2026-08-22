@@ -11,6 +11,7 @@ use crate::{
 };
 
 use super::{
+    CACHE_TTL_HOURS,
     dto::{CreatePreviewRequest, PreviewCacheStatus, PreviewResponse, VoiceListResponse},
     lock::{PreviewLock, wait_interval},
     repository::{CacheRecord, PreviewRepositoryPort},
@@ -202,7 +203,7 @@ impl PreviewService {
                     &storage,
                     CacheRecord {
                         object_key: key.to_string(),
-                        expires_at: Utc::now() + chrono::Duration::hours(24),
+                        expires_at: Utc::now() + chrono::Duration::hours(CACHE_TTL_HOURS),
                     },
                     PreviewCacheStatus::Generated,
                 )

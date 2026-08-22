@@ -57,7 +57,8 @@ voice 列表要求 active admin，返回 `{"items":[...]}`，只列 enabled voic
 ```
 
 成功统一返回 200：`cache_status` 为 `hit` 或 `generated`，另含 `audio_url`、`expires_at`、
-`url_expires_in_seconds`。URL TTL 来自 `speech` storage policy；cache row 默认保留 24 小时，URL
+`url_expires_in_seconds`。URL TTL 来自 `speech` storage policy；cache row 保留 `CACHE_TTL_HOURS`
+（当前 24 小时，上限受 OSS 生命周期规则约束，见 `ops/speech-preview-lifecycle/README.md`），URL
 不写数据库。相同 canonical fingerprint 的非 owner 请求不会调用 provider：短轮询数据库，若 owner
 仍生成则返回 409 `speech_preview_in_progress`，调用方可重试。
 
@@ -79,7 +80,12 @@ Lua unlock。
 - 锁丢失不影响正确性：PG 主键是最终 winner，竞争方若写入失败会删除自己生成的对象；
 - put 后 DB 失败会 best-effort delete；delete 失败只记录稳定分类与 object key，不记录内容/URL；
 - DB 成功后 presign 失败保留有效 cache，下次请求可再次签名；
-- 过期 row 的旧对象在成功替换后 best-effort 删除；失败形成可观测孤儿风险，由后续清理任务兜底；
+- 过期 row 的旧对象在成功替换后 best-effort 删除；失败或请求被取消形成的孤儿由 bucket 生命周期
+  规则按对象年龄兜底，应用不做按年龄的批量对象删除（`ops/speech-preview-lifecycle/README.md`）；
+- 过期 row 本身由进程内定时任务每小时清理，只删 row 不碰对象，因此没有跨系统删除顺序问题；
+- 该任务删掉过期 row 之后，同 fingerprint 的再次请求读不到 stale key，旧对象不再被及时删除，
+  同样落到生命周期规则回收。因此清理任务上线后，「替换时删旧对象」只覆盖过期未满一轮的窗口，
+  其余旧对象一律走规则——这是刻意的取舍：对象的删除职责集中在规则一侧，不与应用重复；
 - provider 可重试错误不在单个 HTTP 请求内自动重试，避免放大流量；释放锁后由客户端重试。
 
 ## 6. 测试矩阵

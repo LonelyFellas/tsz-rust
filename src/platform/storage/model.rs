@@ -6,7 +6,7 @@ use uuid::Uuid;
 pub(crate) const MAX_OBJECT_KEY_BYTES: usize = 512;
 const MAX_SPACE_NAME_BYTES: usize = 64;
 const MAX_HEADER_VALUE_BYTES: usize = 256;
-const MAX_PRESIGN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+pub const MAX_PRESIGN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ObjectKeyError {

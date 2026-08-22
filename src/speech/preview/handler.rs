@@ -75,6 +75,7 @@ pub async fn create_preview(
         .create_preview(request)
         .await
         .map_err(map_error)?;
+    tracing::info!(cache_status = ?response.cache_status, "speech preview served");
     Ok((StatusCode::OK, Json(response)))
 }
 
