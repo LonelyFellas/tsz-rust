@@ -6,7 +6,10 @@ use uuid::Uuid;
 
 use crate::speech::Voice;
 
-use super::dto::{VoiceCapabilities, VoiceListResponse, VoiceResponse};
+use super::{
+    CACHE_TTL_HOURS,
+    dto::{VoiceCapabilities, VoiceListResponse, VoiceResponse},
+};
 
 #[derive(Debug, Clone)]
 pub struct VoiceRecord {
@@ -152,7 +155,7 @@ impl PreviewRepository {
         object_key: &str,
         size_bytes: i64,
     ) -> Result<Option<String>, sqlx::Error> {
-        let expires_at = Utc::now() + Duration::hours(24);
+        let expires_at = Utc::now() + Duration::hours(CACHE_TTL_HOURS);
         let previous = sqlx::query_scalar::<_, String>(
             r#"INSERT INTO speech.preview_cache
                (request_hash, voice_id, content_hash, object_key, mime_type, size_bytes, expires_at)
@@ -173,6 +176,15 @@ impl PreviewRepository {
         .fetch_optional(&self.pool)
         .await?;
         Ok(previous)
+    }
+
+    /// 删除全部过期 row，返回删除条数。走 `speech_preview_cache_expiry_idx`。
+    /// 对应的 OSS 对象不在这里删，由 bucket 生命周期规则回收。
+    pub async fn delete_expired(&self) -> Result<u64, sqlx::Error> {
+        sqlx::query("DELETE FROM speech.preview_cache WHERE expires_at <= now()")
+            .execute(&self.pool)
+            .await
+            .map(|result| result.rows_affected())
     }
 }
 
