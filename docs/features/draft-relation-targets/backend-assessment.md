@@ -14,6 +14,11 @@
 > **状态**：**仅评估，未动任何代码**。§4 的发布规则待产品拍板；§2 的保存放宽
 > 在产品确认功能要做之后即可单独落地（它不依赖发布规则的结论）。
 >
+> **后续**：`target_state` 的最终判据与发布短路的修复形状见同目录
+> [`target-state-criteria.md`](./target-state-criteria.md)（2026-08-22）。
+> 它纠正了本文 §3.3 的一处口径、补齐了 §4 告警框的 DB 依据、并改写了 §7 的「发布短路」用例，
+> **下文这三处已就地注明**。产品结论（显式 B）以前端 tsz 仓库 PR #158 为准。
+>
 > **一句话**：保存阶段放宽**可行且代价很小**，但比提问里描述的更关键——今天这道校验
 > 不只卡词义步，**连词形步也一起卡死**；同时前端「不需要任何新接口」的结论**只对
 > 「刚创建完立刻关联」这一条路径成立**，还有两个硬缺口（新草稿 `forms.pos` 为空时压根没有
@@ -267,7 +272,7 @@ match 上加一条判断即可。本轮需求只提了近义/反义/派生，**�
 ```rust
 #[serde(default, skip_serializing_if = "Option::is_none")]
 #[schema(read_only)]
-pub target_state: Option<RelationTargetStateV2>,  // published | draft | archived | detached
+pub target_state: Option<RelationTargetStateV2>,  // 见下方注记：定稿为五态
 ```
 
 - `published`：目标当前发布版本里有这个词义（今天唯一存在的情形，快照取自 publication）
@@ -279,8 +284,14 @@ pub target_state: Option<RelationTargetStateV2>,  // published | draft | archive
 归档目标该做的是 restore（恢复后关联立即可用），词义被移除才是「必须重选或删掉」。
 合成一个状态，前端只能二选一给提示，另一半必然误导管理员去删掉本可以救回来的关联。
 
-**语义注意（要写进前端说明）**：它和 `target_headword` / `target_gloss` 一样是**保存那一刻的
-快照**，只在源词条重存词形/词义步时刷新，**不是目标的实时状态**。
+> ⚠️ **上面这段已被 [`target-state-criteria.md`](./target-state-criteria.md) 修订，以那份为准。**
+> ① 状态定稿为**五态**：`published` 拆成 `resolved` / `resolvable`（后者 = 目标已发布，
+> 但本词条存的快照、或本词条的当前发布，还没跟上），判定顺序见该文 §2.2；
+> ② 它**不是保存期快照，而是响应期现算**的派生字段，不落库、不进发布快照（该文 §1.5）。
+> 保存期快照那套做法会让「目标日后发布 / 归档」永远反映不到界面上，反而制造新的静默矛盾。
+
+**语义注意（要写进前端说明）**：它和 `target_headword` / `target_gloss` 不同——后两者是保存那一刻
+写死的快照，`target_state` 是每次读取现算的派生值，因此是**弱一致的编辑期提示**，不用于发布把关。
 
 **契约影响**：`WordRelationV2` 增 1 个可选只读字段 + 1 个新枚举 schema，纯增量、
 `required` 不变。需要重导 `docs/openapi.json`，前端重跑 `sync:openapi`。
@@ -363,6 +374,13 @@ pub target_state: Option<RelationTargetStateV2>,  // published | draft | archive
 > 也不报任何错**，前端拿到 201 会以为补发成功。
 > 所以 D 的第 3 步口径必须是「**重存词义步（revision +1）→ 再发布**」；
 > 若要让「没重存就重发」也有信号，得额外改这条短路，这笔工作量要算进 D。
+>
+> **补充（见 [`target-state-criteria.md`](./target-state-criteria.md) §3.1）**：这条短路
+> **只能改成报错，不能改成放行**。`lexicon.entry_publications` 上有
+> `UNIQUE (entry_id, source_revision)`（migration `:21`），而 publish 全程不改 `entries.revision`，
+> 所以「同一个 revision 再发一次」在结构上不可能——硬发会撞唯一约束，且该约束不在
+> `map_entry_write_error`（`repository/entries.rs:6-11`）的识别名单里，会变成 500。
+> 「重存 → 再提交生效」因此是结构性的唯一出路，不是文案偏好。
 
 **为什么推荐 D**：
 
@@ -505,8 +523,9 @@ pub target_state: Option<RelationTargetStateV2>,  // published | draft | archive
   （`pos_meanings_have_content` 因 `!relations.is_empty()` 判定有内容）
 - **AI 补全交互**：目标词条跑补全并保存后，指向它的关联落到 `target_state = "detached"`，
   且源词条**仍能保存**（不得回到 422）
-- **发布短路**：目标发布后源词条不重存直接发布 → 断言当前是 201 no-op（若最终决定改这条短路，
-  改为断言新行为）
+- **发布短路**：目标发布后源词条不重存直接发布 → **断言 422**（`relation_target_stale` 或
+  `relation_ref_not_in_publication`），不再是 201 no-op。完整断言集合见
+  [`target-state-criteria.md`](./target-state-criteria.md) §5
 - 回归：`tests/lexicon_handler.rs` 既有的「客户端伪造值被服务端覆盖」用例仍然通过
 
 ---
