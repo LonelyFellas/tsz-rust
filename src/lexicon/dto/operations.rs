@@ -22,6 +22,15 @@ pub struct DuplicateWordMatchV2 {
     pub headword: String,
     pub dialect: Dialect,
     pub status: AdminWordStatus,
+    #[serde(default = "default_duplicate_match_category")]
+    #[schema(required = true)]
+    pub match_category: SurfaceMatchCategoryV2,
+}
+
+const fn default_duplicate_match_category() -> SurfaceMatchCategoryV2 {
+    // 兼容部署前最长存活 65 分钟的 Redis detection 快照。duplicate 分支只在 legacy
+    // exact-headword 索引命中、而投影表尚未追平时触发，历史记录唯一可能的类别就是它。
+    SurfaceMatchCategoryV2::ExactHeadword
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -94,6 +103,23 @@ pub enum ExistingSurfaceSourceV2 {
         pos: String,
         form_type: WordFormTypeV2,
     },
+    /// 命中词条的词面被**另一个**词条引用为关联词。
+    ///
+    /// `lexicon.relations` 的目标是已存在词条的义项（外键约束），所以关联词永远
+    /// 不会引入新的词面：`surface` 必然等于 `ExistingSurfaceMatchV2.word_id` 这个
+    /// 词条自己的主词。因此本分支描述的不是「词面存放在哪」，而是「谁在引用它」，
+    /// `source_id` / `source_node_id` 指向的关联词节点属于 `referencing_word_id`。
+    Relation {
+        source_id: String,
+        source_node_id: Uuid,
+        content_scope: SurfaceContentScopeV2,
+        surface: String,
+        dialect: Dialect,
+        relation_type: RelationTypeV2,
+        referencing_word_id: Uuid,
+        referencing_headword: String,
+        referencing_status: AdminWordStatus,
+    },
 }
 
 /// Closed wire enum for every explicitly persisted form surface. Unlike the
@@ -151,6 +177,12 @@ pub enum SurfaceMatchCategoryV2 {
     HeadwordForm,
     FormHeadword,
     FormForm,
+    /// 本次录入的主词命中了某个词条的主词，且该词条已被别的词条引用为关联词。
+    ///
+    /// 它永远与同一个 `word_id` 上的 `exact_headword` / `cross_kind_headword`
+    /// 并存（关联词目标必须是已存在词条），是对既有命中的补充说明，不是独立的
+    /// 词面来源，因此不参与 surface policy 选择，`attention_level` 恒为 `normal`。
+    HeadwordRelation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
