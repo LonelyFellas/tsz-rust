@@ -440,6 +440,10 @@ impl LexiconService {
                         word_id: record.entry_id,
                         headword: record.headword,
                         dialect: parse_dialect(&record.dialect).unwrap_or(Dialect::Common),
+                        // 这条分支只在 legacy exact-headword 索引命中、而投影表还没
+                        // 追平时触发（legacy_exact_duplicates 按 kind 精确匹配主词），
+                        // 所以命中原因恒为 exact_headword。
+                        match_category: SurfaceMatchCategoryV2::ExactHeadword,
                         status: if record.is_archived {
                             AdminWordStatus::Archived
                         } else if record.is_published {
@@ -1296,8 +1300,22 @@ impl LexiconService {
                 matches.entry(item.match_id.clone()).or_insert(item);
             }
         }
-        let matches = matches.into_values().collect::<Vec<_>>();
-        let contexts = self.surface_match_contexts(&matches).await?;
+        let mut matches = matches.into_values().collect::<Vec<_>>();
+        let entry_ids = matched_entry_ids(&matches);
+        let inbound = inbound_relation_previews(
+            &self
+                .repository
+                .surface_inbound_relations(&entry_ids)
+                .await
+                .map_err(repository_error)?,
+        )?;
+        matches.extend(relation_surface_matches(&matches, &inbound)?);
+        let records = self
+            .repository
+            .surface_entry_contexts(&entry_ids)
+            .await
+            .map_err(repository_error)?;
+        let contexts = surface_contexts_from_records(records, &inbound)?;
         Ok((matches, contexts))
     }
 
@@ -1305,12 +1323,7 @@ impl LexiconService {
         &self,
         matches: &[LexiconSurfaceMatchV2],
     ) -> Result<Vec<MatchedEntryContextV2>, LexiconServiceError> {
-        let mut entry_ids = matches
-            .iter()
-            .map(|item| item.existing.word_id)
-            .collect::<Vec<_>>();
-        entry_ids.sort_unstable();
-        entry_ids.dedup();
+        let entry_ids = matched_entry_ids(matches);
         let records = self
             .repository
             .surface_entry_contexts(&entry_ids)
@@ -1321,54 +1334,7 @@ impl LexiconService {
             .surface_inbound_relations(&entry_ids)
             .await
             .map_err(repository_error)?;
-
-        let mut relation_summaries = HashMap::<Uuid, RelationSummaryBuilder>::new();
-        for reference in inbound {
-            let Some(preview) = inbound_relation_preview(&reference)? else {
-                continue;
-            };
-            relation_summaries
-                .entry(reference.target_entry_id)
-                .or_default()
-                .push(preview);
-        }
-
-        records
-            .into_iter()
-            .map(|record| {
-                let forms: DraftFormsStepContent =
-                    serde_json::from_value(record.forms).map_err(serialization_error)?;
-                let meanings: DraftMeaningsStepContent =
-                    serde_json::from_value(record.meanings).map_err(serialization_error)?;
-                let mut pos_labels = forms
-                    .pos
-                    .iter()
-                    .map(|pos| pos.pos.clone())
-                    .collect::<Vec<_>>();
-                pos_labels.sort();
-                pos_labels.dedup();
-                pos_labels.truncate(5);
-                let mut gloss_previews = meanings
-                    .pos
-                    .iter()
-                    .flat_map(|pos| pos.senses.iter())
-                    .map(published_sense_gloss)
-                    .filter(|gloss| !gloss.is_empty())
-                    .take(5)
-                    .collect::<Vec<_>>();
-                gloss_previews.dedup();
-                Ok(MatchedEntryContextV2 {
-                    word_id: record.entry_id,
-                    pos_labels,
-                    gloss_previews,
-                    updated_at: record.updated_at,
-                    inbound_relations: relation_summaries
-                        .remove(&record.entry_id)
-                        .unwrap_or_default()
-                        .finish(),
-                })
-            })
-            .collect()
+        surface_contexts_from_records(records, &inbound_relation_previews(&inbound)?)
     }
 
     pub(super) async fn headword_surface_matches_in_transaction(
@@ -1404,23 +1370,21 @@ impl LexiconService {
                 matches.entry(item.match_id.clone()).or_insert(item);
             }
         }
-        let matches = matches.into_values().collect::<Vec<_>>();
-        let mut entry_ids = matches
-            .iter()
-            .map(|item| item.existing.word_id)
-            .collect::<Vec<_>>();
-        entry_ids.sort_unstable();
-        entry_ids.dedup();
+        let mut matches = matches.into_values().collect::<Vec<_>>();
+        let entry_ids = matched_entry_ids(&matches);
         LexiconRepository::lock_surface_contexts(tx, &entry_ids)
             .await
             .map_err(repository_error)?;
         let records = LexiconRepository::surface_entry_contexts_in_transaction(tx, &entry_ids)
             .await
             .map_err(repository_error)?;
-        let inbound = LexiconRepository::surface_inbound_relations_in_transaction(tx, &entry_ids)
-            .await
-            .map_err(repository_error)?;
-        let contexts = surface_contexts_from_records(records, inbound)?;
+        let inbound = inbound_relation_previews(
+            &LexiconRepository::surface_inbound_relations_in_transaction(tx, &entry_ids)
+                .await
+                .map_err(repository_error)?,
+        )?;
+        matches.extend(relation_surface_matches(&matches, &inbound)?);
+        let contexts = surface_contexts_from_records(records, &inbound)?;
         Ok((matches, contexts))
     }
 
@@ -1483,17 +1447,14 @@ impl LexiconService {
 
 pub(super) fn surface_contexts_from_records(
     records: Vec<crate::lexicon::model::SurfaceEntryContextRecord>,
-    inbound: Vec<crate::lexicon::model::SurfaceInboundRelationRecord>,
+    inbound: &[InboundRelationPreview],
 ) -> Result<Vec<MatchedEntryContextV2>, LexiconServiceError> {
     let mut relation_summaries = HashMap::<Uuid, RelationSummaryBuilder>::new();
     for reference in inbound {
-        let Some(preview) = inbound_relation_preview(&reference)? else {
-            continue;
-        };
         relation_summaries
             .entry(reference.target_entry_id)
             .or_default()
-            .push(preview);
+            .push(&reference.preview);
     }
     records
         .into_iter()
@@ -1543,15 +1504,16 @@ struct RelationSummaryBuilder {
 }
 
 impl RelationSummaryBuilder {
-    fn push(&mut self, preview: RelationReferencePreviewV2) {
+    fn push(&mut self, preview: &RelationReferencePreviewV2) {
         self.total = self.total.saturating_add(1);
         match preview.relation {
             RelationTypeV2::Synonym => self.synonym = self.synonym.saturating_add(1),
             RelationTypeV2::Antonym => self.antonym = self.antonym.saturating_add(1),
             RelationTypeV2::Derivative => self.derivative = self.derivative.saturating_add(1),
         }
+        // 只有真正留下来的前 5 条才值得克隆——计数用不着所有权。
         if self.previews.len() < 5 {
-            self.previews.push(preview);
+            self.previews.push(preview.clone());
         }
     }
 
@@ -1652,6 +1614,189 @@ fn surface_match(
         candidate: candidate_wire,
         existing,
     })
+}
+
+/// 一条已解析的入站关联，附带它落在草稿还是当前发布。
+pub(super) struct InboundRelationPreview {
+    target_entry_id: Uuid,
+    source_node_id: Uuid,
+    content_scope: SurfaceContentScopeV2,
+    preview: RelationReferencePreviewV2,
+}
+
+/// 把入站关联记录一次性解析成 preview，供关联词命中行与命中词条上下文摘要共用。
+///
+/// current_publication 那一路的 `inbound_relation_preview` 要克隆整份发布快照再
+/// 反序列化成 `AdminWordV2` 才能取到关系类型，解两遍代价明显，所以两个消费方共用
+/// 同一份结果。
+pub(super) fn inbound_relation_previews(
+    inbound: &[crate::lexicon::model::SurfaceInboundRelationRecord],
+) -> Result<Vec<InboundRelationPreview>, LexiconServiceError> {
+    let mut previews = Vec::with_capacity(inbound.len());
+    for reference in inbound {
+        let Some(preview) = inbound_relation_preview(reference)? else {
+            continue;
+        };
+        previews.push(InboundRelationPreview {
+            target_entry_id: reference.target_entry_id,
+            source_node_id: reference.source_node_id,
+            content_scope: if reference.draft_relation_type.is_some() {
+                SurfaceContentScopeV2::Draft
+            } else {
+                SurfaceContentScopeV2::CurrentPublication
+            },
+            preview,
+        });
+    }
+    Ok(previews)
+}
+
+const fn relation_rank(relation: RelationTypeV2) -> u8 {
+    match relation {
+        RelationTypeV2::Synonym => 0,
+        RelationTypeV2::Antonym => 1,
+        RelationTypeV2::Derivative => 2,
+    }
+}
+
+fn matched_entry_ids(matches: &[LexiconSurfaceMatchV2]) -> Vec<Uuid> {
+    let mut entry_ids = matches
+        .iter()
+        .map(|item| item.existing.word_id)
+        .collect::<Vec<_>>();
+    entry_ids.sort_unstable();
+    entry_ids.dedup();
+    entry_ids
+}
+
+/// 按命中词条汇总入站关联词。
+///
+/// 同一个引用方词条可能在多个义项里用同一种关系指向同一个目标；对管理员来说
+/// 「被 X 引用为近义词」说一次就够，因此按 (引用方, 关系类型) 去重并保留最小的
+/// 关联词节点 id，保证同一份数据每次得到同一个 `match_id`。
+///
+/// 不额外截断：命中条目本来就由 `SurfaceMatchPageBaseV2` 分页承载，主词与词形
+/// 命中同样不设上限，这里加一道私有上限只会让命中行与
+/// `MatchedEntryContextV2.inbound_relations.previews` 各自截出不同的子集。
+fn inbound_relation_matches(
+    inbound: &[InboundRelationPreview],
+) -> HashMap<Uuid, Vec<&InboundRelationPreview>> {
+    let mut deduped = BTreeMap::<(Uuid, Uuid, u8), &InboundRelationPreview>::new();
+    for reference in inbound {
+        let key = (
+            reference.target_entry_id,
+            reference.preview.source_word_id,
+            relation_rank(reference.preview.relation),
+        );
+        match deduped.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(reference);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if reference.source_node_id < entry.get().source_node_id {
+                    entry.insert(reference);
+                }
+            }
+        }
+    }
+    let mut by_target = HashMap::<Uuid, Vec<&InboundRelationPreview>>::new();
+    for ((target_entry_id, _, _), item) in deduped {
+        by_target.entry(target_entry_id).or_default().push(item);
+    }
+    by_target
+}
+
+/// 关联词维度：给已经因主词命中的词条补上「谁把它引用为关联词」这条命中原因。
+///
+/// `lexicon.relations` 的目标受外键约束必须是已存在词条的义项，所以关联词永远
+/// 不会引入新的词面。它因此只从主词命中派生，既不需要单独进
+/// `lexicon.surface_sources` 投影，也不会把原本 clear 的检测变成 warning，更不会
+/// 影响 `surface_policy_name`（那里只看 `ExactHeadword`）。
+fn relation_surface_matches(
+    headword_matches: &[LexiconSurfaceMatchV2],
+    inbound: &[InboundRelationPreview],
+) -> Result<Vec<LexiconSurfaceMatchV2>, LexiconServiceError> {
+    let by_target = inbound_relation_matches(inbound);
+    if by_target.is_empty() {
+        return Ok(Vec::new());
+    }
+    // 「谁引用了这个词条」与本次录入撞上的是哪一侧词头无关，因此每个命中词条只挂
+    // 一次：distinguish 录入的 uk / us 两个候选、以及同一词条的 draft 与
+    // current_publication 两条主词行，都归并到同一个代表，否则同一句话会重复出现。
+    // 代表按 (candidate_ref, match_id) 取最小，保证同一份数据每次得到同一个 match_id。
+    let mut ranked = headword_matches
+        .iter()
+        .filter_map(|item| {
+            let SurfaceMatchCandidateV2::Headword { candidate_ref, .. } = &item.candidate else {
+                return None;
+            };
+            matches!(
+                item.existing.source,
+                ExistingSurfaceSourceV2::Headword { .. }
+            )
+            .then_some((candidate_ref.as_str(), item.match_id.as_str(), item))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by_key(|(candidate_ref, match_id, _)| (*candidate_ref, *match_id));
+    let mut representatives = BTreeMap::<Uuid, &LexiconSurfaceMatchV2>::new();
+    for (_, _, item) in ranked {
+        representatives.entry(item.existing.word_id).or_insert(item);
+    }
+
+    let mut matches = Vec::new();
+    for (word_id, parent) in representatives {
+        let Some(relations) = by_target.get(&word_id) else {
+            continue;
+        };
+        let ExistingSurfaceSourceV2::Headword {
+            surface, dialect, ..
+        } = &parent.existing.source
+        else {
+            return Err(invariant_record());
+        };
+        for relation in relations {
+            let existing = ExistingSurfaceMatchV2 {
+                word_id: parent.existing.word_id,
+                headword: parent.existing.headword.clone(),
+                kind: parent.existing.kind,
+                status: parent.existing.status,
+                source: ExistingSurfaceSourceV2::Relation {
+                    source_id: format!(
+                        "entry:{}:relation:{}",
+                        relation.preview.source_word_id, relation.source_node_id
+                    ),
+                    source_node_id: relation.source_node_id,
+                    content_scope: relation.content_scope,
+                    surface: surface.clone(),
+                    dialect: *dialect,
+                    relation_type: relation.preview.relation,
+                    referencing_word_id: relation.preview.source_word_id,
+                    referencing_headword: relation.preview.source_headword.clone(),
+                    referencing_status: relation.preview.source_status,
+                },
+            };
+            let match_id = crate::platform::hash_token(
+                &serde_json::to_string(&serde_json::json!({
+                    "headword_match_id": parent.match_id,
+                    "existing": existing,
+                }))
+                .map_err(serialization_error)?,
+            );
+            matches.push(LexiconSurfaceMatchV2 {
+                match_id,
+                match_category: SurfaceMatchCategoryV2::HeadwordRelation,
+                severity: SurfaceMatchSeverityV2::Warning,
+                attention_level: SurfaceAttentionLevelV2::Normal,
+                can_continue: SurfaceCanContinueTrue,
+                confirmation_reasons: vec![
+                    SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches,
+                ],
+                candidate: parent.candidate.clone(),
+                existing,
+            });
+        }
+    }
+    Ok(matches)
 }
 
 pub(super) fn existing_surface_match(
@@ -1805,8 +1950,14 @@ fn surface_warning_audit(
     current_contexts: &[MatchedEntryContextV2],
     actor_id: Uuid,
 ) -> DetectionSurfaceWarningAuditV2 {
+    // 这份 preview 会随 detection_snapshot 永久落进 lexicon.entries 与发布快照。
+    // 写入 headword_relation 会让回退到上一版二进制的实例读不出这些词条——旧的
+    // SurfaceMatchCategoryV2 没有该取值，也没有未知值兜底，entry_from_record 会硬失败。
+    // 关联词命中本就只是对词面冲突的补充说明，审计只留冲突本身；完整命中集合仍由
+    // total / match_digest / truncated 承载。
     let mut preview = current_matches
         .iter()
+        .filter(|item| item.match_category != SurfaceMatchCategoryV2::HeadwordRelation)
         .take(5)
         .map(|item| {
             let context = current_contexts
@@ -1814,7 +1965,8 @@ fn surface_warning_audit(
                 .find(|context| context.word_id == item.existing.word_id);
             let existing_dialect = match &item.existing.source {
                 ExistingSurfaceSourceV2::Headword { dialect, .. }
-                | ExistingSurfaceSourceV2::Form { dialect, .. } => *dialect,
+                | ExistingSurfaceSourceV2::Form { dialect, .. }
+                | ExistingSurfaceSourceV2::Relation { dialect, .. } => *dialect,
             };
             DetectionSurfaceMatchPreviewV2 {
                 match_id: item.match_id.clone(),
@@ -2171,6 +2323,209 @@ mod tests {
             SurfaceMatchCategoryV2::HeadwordForm
         );
         assert!(has_unprojected_legacy_exact(&fully_projected, &[form_only]));
+    }
+
+    /// 每个元组是 (命中词条 id, 引用方词条 id, 关系类型)；关联词节点 id 自动生成，
+    /// 同一元组重复出现即模拟「同一引用方在多个义项里写了同一种关系」。
+    fn inbound(records: &[(Uuid, Uuid, &str)]) -> Vec<InboundRelationPreview> {
+        let records = records
+            .iter()
+            .map(|(target, source, relation)| {
+                inbound_record(*target, *source, relation, Uuid::now_v7())
+            })
+            .collect::<Vec<_>>();
+        inbound_relation_previews(&records).unwrap()
+    }
+
+    fn inbound_record(
+        target_entry_id: Uuid,
+        source_entry_id: Uuid,
+        relation: &str,
+        source_node_id: Uuid,
+    ) -> crate::lexicon::model::SurfaceInboundRelationRecord {
+        crate::lexicon::model::SurfaceInboundRelationRecord {
+            target_entry_id,
+            source_entry_id,
+            source_node_id,
+            source_status: "published".to_owned(),
+            source_headword_mode: "unified".to_owned(),
+            source_dialect: None,
+            source_common_headword: Some("apples".to_owned()),
+            source_uk_headword: None,
+            source_us_headword: None,
+            draft_relation_type: Some(relation.to_owned()),
+            source_snapshot: None,
+        }
+    }
+
+    fn headword_candidate(surface: &str) -> HeadwordSurfaceCandidate {
+        headword_surface_candidates(
+            &WordHeadwordsV2::Unified {
+                common: surface.to_owned(),
+            },
+            EntryKind::Word,
+        )
+        .unwrap()
+        .remove(0)
+    }
+
+    #[test]
+    fn relation_matches_annotate_the_entry_that_owns_the_surface() {
+        let candidate = headword_candidate("workspace");
+        let exact = surface_match(&candidate, &source("headword", "word")).unwrap();
+        let target_id = exact.existing.word_id;
+        let referencing_id = Uuid::now_v7();
+
+        let derived = relation_surface_matches(
+            std::slice::from_ref(&exact),
+            &inbound(&[(target_id, referencing_id, "synonym")]),
+        )
+        .unwrap();
+
+        assert_eq!(derived.len(), 1);
+        let item = &derived[0];
+        assert_eq!(
+            item.match_category,
+            SurfaceMatchCategoryV2::HeadwordRelation
+        );
+        assert_eq!(item.attention_level, SurfaceAttentionLevelV2::Normal);
+        // 命中行归属拥有该词面的词条，引用方只是命中原因里的施动者。
+        assert_eq!(item.existing.word_id, target_id);
+        assert_ne!(item.match_id, exact.match_id);
+        let ExistingSurfaceSourceV2::Relation {
+            relation_type,
+            referencing_word_id,
+            referencing_headword,
+            surface,
+            ..
+        } = &item.existing.source
+        else {
+            panic!("relation dimension must use the relation source variant");
+        };
+        assert_eq!(*relation_type, RelationTypeV2::Synonym);
+        assert_eq!(*referencing_word_id, referencing_id);
+        assert_eq!(referencing_headword, "apples");
+        assert_eq!(surface, "workspace");
+    }
+
+    #[test]
+    fn relation_matches_never_derive_from_form_hits() {
+        let candidate = headword_candidate("workspaces");
+        let form = surface_match(&candidate, &source("form", "word")).unwrap();
+
+        let derived = relation_surface_matches(
+            std::slice::from_ref(&form),
+            &inbound(&[(form.existing.word_id, Uuid::now_v7(), "synonym")]),
+        )
+        .unwrap();
+
+        assert!(derived.is_empty());
+    }
+
+    #[test]
+    fn one_referencing_entry_and_relation_type_yields_one_row_across_scopes() {
+        let candidate = headword_candidate("workspace");
+        let mut draft_source = source("headword", "word");
+        let mut published_source = draft_source.clone();
+        published_source.content_scope = "current_publication".to_owned();
+        published_source.publication_id = Some(Uuid::now_v7());
+        published_source.source_id = "headword:common:published".to_owned();
+        draft_source.entry_id = published_source.entry_id;
+        let target_id = draft_source.entry_id;
+        let referencing_id = Uuid::now_v7();
+        let headword_matches = vec![
+            surface_match(&candidate, &draft_source).unwrap(),
+            surface_match(&candidate, &published_source).unwrap(),
+        ];
+
+        let derived = relation_surface_matches(
+            &headword_matches,
+            &inbound(&[
+                (target_id, referencing_id, "synonym"),
+                (target_id, referencing_id, "synonym"),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(derived.len(), 1);
+    }
+
+    #[test]
+    fn distinguish_candidates_share_one_relation_row_per_entry() {
+        // uk 与 us 两个候选撞上同一个词条时，「被 X 引用为近义词」只说一次——
+        // 主词命中每候选一行是因为两行的 surface 不同，关联词说明没有这个区别。
+        let candidates = headword_surface_candidates(
+            &WordHeadwordsV2::Distinguish {
+                uk: "colour".to_owned(),
+                us: "color".to_owned(),
+                source_dialect: SourceDialect::Uk,
+            },
+            EntryKind::Word,
+        )
+        .unwrap();
+        let mut uk_source = source("headword", "word");
+        uk_source.surface = "colour".to_owned();
+        uk_source.normalized_surface = "colour".to_owned();
+        uk_source.dialect = "uk".to_owned();
+        let mut us_source = uk_source.clone();
+        us_source.surface = "color".to_owned();
+        us_source.normalized_surface = "color".to_owned();
+        us_source.dialect = "us".to_owned();
+        us_source.source_id = "headword:us".to_owned();
+        let target_id = uk_source.entry_id;
+        let headword_matches = vec![
+            surface_match(&candidates[0], &uk_source).unwrap(),
+            surface_match(&candidates[1], &us_source).unwrap(),
+        ];
+
+        let derived = relation_surface_matches(
+            &headword_matches,
+            &inbound(&[(target_id, Uuid::now_v7(), "synonym")]),
+        )
+        .unwrap();
+
+        assert_eq!(derived.len(), 1);
+        assert_eq!(derived[0].existing.word_id, target_id);
+    }
+
+    #[test]
+    fn every_distinct_referencing_entry_and_relation_type_gets_its_own_row() {
+        let candidate = headword_candidate("workspace");
+        let exact = surface_match(&candidate, &source("headword", "word")).unwrap();
+        let target_id = exact.existing.word_id;
+        // 命中条目由分页承载，关联词维度不再自设私有上限——否则命中行与
+        // matched_entry_contexts 的 previews 会各自截出不同的子集。
+        let inbound = inbound(
+            &(0..8)
+                .map(|_| (target_id, Uuid::now_v7(), "antonym"))
+                .collect::<Vec<_>>(),
+        );
+
+        let derived = relation_surface_matches(std::slice::from_ref(&exact), &inbound).unwrap();
+
+        assert_eq!(derived.len(), 8);
+        let match_ids = derived
+            .iter()
+            .map(|item| item.match_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(match_ids.len(), 8, "每行必须有独立的 match_id");
+    }
+
+    #[test]
+    fn relation_matches_do_not_change_the_surface_policy() {
+        let candidate = headword_candidate("workspace");
+        let cross_kind = surface_match(&candidate, &source("headword", "phrase")).unwrap();
+        let derived = relation_surface_matches(
+            std::slice::from_ref(&cross_kind),
+            &inbound(&[(cross_kind.existing.word_id, Uuid::now_v7(), "derivative")]),
+        )
+        .unwrap();
+
+        assert_eq!(derived.len(), 1);
+        assert_eq!(
+            surface_policy_name(&derived),
+            SurfacePolicyNameV2::SurfaceWarningAcknowledgement
+        );
     }
 
     #[test]

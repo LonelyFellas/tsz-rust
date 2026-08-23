@@ -812,7 +812,10 @@ impl LexiconService {
             LexiconRepository::surface_inbound_relations_in_transaction(transaction, &entry_ids)
                 .await
                 .map_err(repository_error)?;
-        Ok((matches, surface_contexts_from_records(records, inbound)?))
+        Ok((
+            matches,
+            surface_contexts_from_records(records, &inbound_relation_previews(&inbound)?)?,
+        ))
     }
 
     #[expect(

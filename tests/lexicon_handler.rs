@@ -3038,6 +3038,315 @@ async fn draft_source_relation_is_included_in_detection_context_with_status(pool
 }
 
 #[sqlx::test]
+async fn detection_reports_which_entries_reference_the_matched_surface_as_a_relation(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let policies = state.surface_policy_store_for_test();
+    prepare_duplicate_headword_test(&pool, &policies).await;
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 目标词已建条，随后被另一个词条引用为近义词——这正是「录入 pome 时
+    // apples 的近义词里已经写了 pome」的场景。
+    let target_headword = format!("relhittarget{}", admin_id.simple());
+    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let (status, target) = publish_ready(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "目标发布失败：{target}");
+
+    let source_headword = format!("relhitsource{}", admin_id.simple());
+    let source = create_ready_draft(&state, &pool, &bearer, &source_headword).await;
+    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let mut meanings = source["word"]["meanings"].clone();
+    // 同一个引用方用同一种关系指向同一个目标写两条，命中行必须只出现一次。
+    meanings["pos"][0]["senses"][0]["relations"] = json!([
+        {
+            "id": Uuid::now_v7(),
+            "relation": "synonym",
+            "target_word_id": target_entry_id,
+            "target_sense_id": target_sense_id,
+            "score": "90.00"
+        },
+        {
+            "id": Uuid::now_v7(),
+            "relation": "antonym",
+            "target_word_id": target_entry_id,
+            "target_sense_id": target_sense_id,
+            "score": "10.00"
+        },
+        {
+            "id": Uuid::now_v7(),
+            "relation": "synonym",
+            "target_word_id": target_entry_id,
+            "target_sense_id": target_sense_id,
+            "score": "80.00"
+        }
+    ]);
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "来源关联保存失败：{source_saved}");
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": target_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "重复检测失败：{detection}");
+    let items = detection["smart_dictionary"]["surface_match_page"]["items"]
+        .as_array()
+        .expect("命中页应有条目");
+
+    assert!(
+        items
+            .iter()
+            .any(|item| item["match_category"] == "exact_headword"
+                && item["existing"]["word_id"] == target_entry_id.to_string()),
+        "关联词维度不得取代原有的主词命中：{items:?}"
+    );
+
+    let relation_items = items
+        .iter()
+        .filter(|item| item["match_category"] == "headword_relation")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relation_items.len(),
+        2,
+        "两种关系各一行，同一 (引用方, 关系类型) 的重复关联必须去重：{items:?}"
+    );
+    // 命中行数与 inbound_relations.total 合法地不相等：命中行是「命中原因」，
+    // 按 (引用方, 关系类型) 去重；total 数的是真实关联条数。两者都要保持原样。
+    let summary = &detection["smart_dictionary"]["surface_match_page"]["matched_entry_contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["word_id"] == target_entry_id.to_string())
+        .expect("命中词条必须有上下文")["inbound_relations"];
+    assert_eq!(
+        summary["total"], 3,
+        "total 必须数全部关联，不跟着命中行去重"
+    );
+    assert_eq!(summary["by_type"]["synonym"], 2);
+    assert_eq!(summary["by_type"]["antonym"], 1);
+    for item in &relation_items {
+        // 命中行归属拥有该词面的词条；引用方是命中原因里的施动者。
+        assert_eq!(item["existing"]["word_id"], target_entry_id.to_string());
+        assert_eq!(item["existing"]["headword"], target_headword);
+        assert_eq!(item["existing"]["source"]["source_kind"], "relation");
+        assert_eq!(
+            item["existing"]["source"]["referencing_word_id"],
+            source_entry_id.to_string()
+        );
+        assert_eq!(
+            item["existing"]["source"]["referencing_headword"],
+            source_headword
+        );
+        assert_eq!(item["existing"]["source"]["referencing_status"], "draft");
+        assert_eq!(item["existing"]["source"]["surface"], target_headword);
+        assert_eq!(item["attention_level"], "normal");
+        assert_eq!(item["can_continue"], true);
+    }
+    let mut relation_types = relation_items
+        .iter()
+        .map(|item| {
+            item["existing"]["source"]["relation_type"]
+                .as_str()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    relation_types.sort_unstable();
+    assert_eq!(relation_types, ["antonym", "synonym"]);
+
+    // 关联词维度只是补充说明，不得把 policy 从 exact-headword 那一路挪走。
+    assert_eq!(
+        detection["smart_dictionary"]["surface_match_page"]["policy_name"],
+        "allow_new_exact_headword_entries"
+    );
+
+    // 没有任何词条引用它时不得凭空产生 relation 命中。
+    let (status, source_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": source_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "来源词检测失败：{source_detection}");
+    assert!(
+        source_detection["smart_dictionary"]["surface_match_page"]["items"]
+            .as_array()
+            .expect("来源词自身也会命中主词")
+            .iter()
+            .all(|item| item["match_category"] != "headword_relation"),
+        "无入站关联的词面不得出现关联词命中：{source_detection}"
+    );
+}
+
+#[sqlx::test]
+async fn a_third_party_relation_reopens_publish_confirmation_with_a_relation_hit(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let policies = state.surface_policy_store_for_test();
+    prepare_duplicate_headword_test(&pool, &policies).await;
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 同名的在位词条留在草稿——发布同名词条只需过词面确认，不去撞「多活主词发布」
+    // 那道默认关闭的可见性闸门，测试才盯得住关联词维度本身。
+    let shared_headword = format!("relpubshared{}", admin_id.simple());
+    let incumbent = create_ready_draft(&state, &pool, &bearer, &shared_headword).await;
+    let incumbent_entry_id = Uuid::parse_str(incumbent["word"]["id"].as_str().unwrap()).unwrap();
+    let incumbent_sense_id = incumbent["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+
+    // 建稿时就确认过当时的词面冲突，此刻还没有任何关联词。
+    let challenger = create_ready_draft(&state, &pool, &bearer, &shared_headword).await;
+
+    // 第三方给在位词条挂上一条反义词——这会给同名词条的发布凭空多出一条命中，
+    // 让建稿时的确认作废。这是关联词维度带来的行为扩大，钉在这里以免悄悄回归。
+    let referencing_headword = format!("relpubsource{}", admin_id.simple());
+    let referencing = create_ready_draft(&state, &pool, &bearer, &referencing_headword).await;
+    let referencing_entry_id =
+        Uuid::parse_str(referencing["word"]["id"].as_str().unwrap()).unwrap();
+    let mut meanings = referencing["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "antonym",
+        "target_word_id": incumbent_entry_id,
+        "target_sense_id": incumbent_sense_id,
+        "score": "70.00"
+    }]);
+    let (status, referencing_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{referencing_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": referencing["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "引用方保存失败：{referencing_saved}"
+    );
+
+    let (status, blocked) = publish_ready(&state, &bearer, &challenger).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "第三方新增关联词后必须重新确认：{blocked}"
+    );
+    assert_eq!(blocked["code"], "surface_match_acknowledgement_required");
+
+    let page = &blocked["meta"]["surface_match_page"];
+    let items = page["items"].as_array().expect("确认页应有条目");
+    let relation_items = items
+        .iter()
+        .filter(|item| item["match_category"] == "headword_relation")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relation_items.len(),
+        1,
+        "发布确认页也要带关联词命中：{items:?}"
+    );
+    assert_eq!(
+        relation_items[0]["existing"]["word_id"],
+        incumbent_entry_id.to_string()
+    );
+    assert_eq!(
+        relation_items[0]["existing"]["source"]["referencing_word_id"],
+        referencing_entry_id.to_string()
+    );
+    assert_eq!(
+        relation_items[0]["existing"]["source"]["relation_type"],
+        "antonym"
+    );
+    // 关联词命中不是词面来源，不得被算进「多活主词发布」的可见性判定。
+    assert!(
+        relation_items[0]["confirmation_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|reason| reason != "visibility_activation"),
+        "关联词命中不得进入可见性确认：{items:?}"
+    );
+    // 快照校验要求每个命中条目都有对应上下文；relation 命中归属在位词条，不新增 word_id。
+    let context_ids = page["matched_entry_contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|context| context["word_id"].clone())
+        .collect::<Vec<_>>();
+    assert!(context_ids.contains(&relation_items[0]["existing"]["word_id"]));
+
+    let confirmation_token = page["surface_confirmation_token"]
+        .as_str()
+        .expect("确认页应签发 token")
+        .to_owned();
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &format!(
+            "{ROOT}/entries/{}/publications",
+            challenger["word"]["id"].as_str().unwrap()
+        ),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": challenger["word"]["revision"],
+            "confirmed_surface_match_token": confirmation_token,
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "确认后必须能发布，关联词命中不得变成死锁：{published}"
+    );
+    // 关联词命中不得写进永久落库的检测审计——旧二进制没有 headword_relation 这个
+    // 取值，写进去会让回退后的实例读不出这条词条。
+    let persisted: serde_json::Value =
+        sqlx::query_scalar("SELECT detection_snapshot FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(challenger["word"]["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .expect("应能读取检测快照");
+    assert!(
+        persisted["surface_warning"]["preview"]
+            .as_array()
+            .expect("审计预览应存在")
+            .iter()
+            .all(|item| item["match_category"] != "headword_relation"),
+        "落库的检测审计不得出现新枚举取值：{persisted}"
+    );
+}
+
+#[sqlx::test]
 async fn detection_confirmation_rejects_changed_inbound_relation_context(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
@@ -4806,6 +5115,18 @@ async fn unmatched_word_creation_still_rejects_duplicates_unavailable_and_mismat
     assert_eq!(
         duplicate_detection["smart_dictionary"]["status"],
         "duplicate"
+    );
+    // duplicate 这一路也要带命中原因，前端才不用靠分支猜。legacy 精确主词索引是
+    // 它唯一的触发来源，所以类别恒为 exact_headword。
+    let duplicates = duplicate_detection["smart_dictionary"]["duplicates"]
+        .as_array()
+        .expect("duplicate 分支必须列出重复词条");
+    assert!(!duplicates.is_empty());
+    assert!(
+        duplicates
+            .iter()
+            .all(|item| item["match_category"] == "exact_headword"),
+        "duplicate 与 warning 两条路径的信息量必须一致：{duplicates:?}"
     );
     let (status, rejected) = call(
         &state,

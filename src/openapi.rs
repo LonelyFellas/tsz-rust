@@ -1013,6 +1013,18 @@ mod tests {
         }
         assert_eq!(warning["properties"]["duplicates"]["maxItems"], 0);
         assert_eq!(schemas["DuplicateWordMatchV2"]["deprecated"], true);
+        // duplicate 与 warning 两条路径的信息量必须一致：前者也要带命中原因。
+        assert!(
+            schemas["DuplicateWordMatchV2"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "match_category")
+        );
+        assert_eq!(
+            schemas["DuplicateWordMatchV2"]["properties"]["match_category"]["$ref"],
+            "#/components/schemas/SurfaceMatchCategoryV2"
+        );
 
         let snapshot_union = schemas["WordDetectionSnapshotSmartDictionaryV2"]["oneOf"]
             .as_array()
@@ -1119,6 +1131,42 @@ mod tests {
                 "comparative",
                 "superlative"
             ])
+        );
+        assert_eq!(
+            schemas["SurfaceMatchCategoryV2"]["enum"],
+            serde_json::json!([
+                "exact_headword",
+                "cross_kind_headword",
+                "headword_form",
+                "form_headword",
+                "form_form",
+                "headword_relation"
+            ])
+        );
+        let relation_source = schemas["ExistingSurfaceSourceV2"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| branch["properties"]["source_kind"]["enum"][0] == "relation")
+            .expect("关联词维度必须有独立的 source_kind 分支");
+        for field in [
+            "relation_type",
+            "referencing_word_id",
+            "referencing_headword",
+            "referencing_status",
+        ] {
+            assert!(
+                relation_source["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|required| required == field),
+                "relation 分支必须带 {field}，前端才说得出是近义词还是反义词"
+            );
+        }
+        assert_eq!(
+            relation_source["properties"]["relation_type"]["$ref"],
+            "#/components/schemas/RelationTypeV2"
         );
         assert_eq!(
             schemas["SurfaceMatchPageBaseV2"]["properties"]["items"]["minItems"],
