@@ -913,6 +913,49 @@ activate 同口径），`entry_publications` 不会多出一条。
 **纯扩大成功集**：原本 500 的请求现在 201，原本成功的路径一条都没改。无 schema 变更、
 无迁移，后端单独部署即可。
 
+## 16. 重复词 duplicate 分支补齐被引用上下文（后端已实现）
+
+> **状态（2026-08-23）**：wire 变更，前端需重跑 `sync:openapi`；按前端现有实现**无需改代码**。
+
+### 16.1 背景
+
+关联词被自动建成主词条后（PR #59），下次录入同名词应当提示「它是 XX 的同义词」，
+避免管理员把这类空壳词条误判成「已经有人建过这个词了」。前端靠
+`matched_entry_contexts[].inbound_relations` 反查出这条提示，但该字段只挂在
+`smart_dictionary.status = "warning"` 的 `surface_match_page` 上。
+
+`duplicate` 分支没有 `surface_match_page`：它是 legacy exact 回退，
+`lexicon.entry_headword_keys` 里有精确词头键、surface 投影里却缺对应的 exact 行时触发
+（B4 backfill 未追平、投影被 tombstone 等）。PR #58 已经给它补上了 `match_category`，
+但被引用关系仍然缺，这条路径上前端什么都提示不出来。
+
+### 16.2 后端改动
+
+`DuplicateWordMatchV2` 新增**必填**字段 `inbound_relations`
+（`RelationReferenceSummaryV2`），与 `matched_entry_contexts[].inbound_relations` 同构：
+`previews` 同样最多 5 条、超出置 `truncated`，截断口径与 warning 分支共用同一段聚合代码。
+
+入站关联只按 `entry_id` 反查（`surface_inbound_relations`），与 surface 投影无关，
+所以投影缺失的回退路径照样给得全。distinguish 词条的 uk / us 两个词头键会让同一词条
+在 `duplicates[]` 出两行，两行的摘要一致。
+
+没有选「让 duplicate 分支也下发 `matched_entry_contexts`」：那要求同时下发
+`surface_match_page`（上下文的覆盖不变量绑在命中项上），而这条路径的前提正是投影里
+没有命中行可下发。
+
+### 16.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 跑 `sync:openapi`——`docs/openapi.json` 已重导，契约测试对着它对账 |
+| 2 | 无需改代码：`duplicates[]` 直接多出这一项，「有则展示、无则整项略去」的现有渲染即可生效 |
+
+### 16.4 兼容性
+
+**纯新增字段**，旧前端忽略即可，无迁移、后端可单独部署。Redis 里最长存活 65 分钟的
+detection 快照缺该字段，反序列化退化成空摘要（`total = 0`、无 preview），
+部署空窗内不会 500。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_

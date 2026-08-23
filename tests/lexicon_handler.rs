@@ -3038,6 +3038,235 @@ async fn draft_source_relation_is_included_in_detection_context_with_status(pool
 }
 
 #[sqlx::test]
+async fn legacy_duplicate_fallback_carries_the_inbound_relation_context(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_headword = format!("hollow{}", admin_id.simple());
+    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let (status, published) = publish_ready(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "目标词发布失败：{published}");
+
+    let source_headword = format!("cavity{}", admin_id.simple());
+    let source = create_ready_draft(&state, &pool, &bearer, &source_headword).await;
+    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "target_word_id": target_entry_id,
+        "target_sense_id": target_sense_id,
+        "score": "90.00"
+    }]);
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "草稿来源关联保存失败：{saved}");
+
+    // 把目标词的词头投影打成 tombstone：legacy exact 索引还在、投影缺了，
+    // 检测就落到 duplicate 回退——这条路径没有 surface_match_page 可挂上下文。
+    sqlx::query(
+        r#"
+        UPDATE lexicon.surface_sources
+        SET is_deleted = TRUE, source_revision = 999999,
+            event_offset = nextval('lexicon.surface_projection_event_offset_seq')
+        WHERE entry_id = $1 AND source_kind = 'headword'
+        "#,
+    )
+    .bind(target_entry_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": target_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "目标词重复检测失败：{detection}");
+    assert_eq!(
+        detection["smart_dictionary"]["status"], "duplicate",
+        "词头投影缺失时必须落到 legacy 回退：{detection}"
+    );
+    let duplicate = detection["smart_dictionary"]["duplicates"]
+        .as_array()
+        .and_then(|duplicates| {
+            duplicates
+                .iter()
+                .find(|item| item["word_id"] == Value::String(target_entry_id.to_string()))
+        })
+        .expect("legacy 回退必须返回命中的词条");
+    assert_eq!(duplicate["match_category"], "exact_headword");
+    assert_eq!(
+        duplicate["inbound_relations"]["total"], 1,
+        "回退路径也要说出谁在引用这条词条，否则空壳词条会被当成「已经有人建过了」：{detection}"
+    );
+    assert_eq!(
+        duplicate["inbound_relations"]["by_type"],
+        json!({"synonym": 1, "antonym": 0, "derivative": 0})
+    );
+    assert_eq!(duplicate["inbound_relations"]["truncated"], false);
+    assert_eq!(
+        duplicate["inbound_relations"]["previews"][0],
+        json!({
+            "source_word_id": source_entry_id,
+            "source_headword": source_headword,
+            "source_status": "draft",
+            "relation": "synonym"
+        })
+    );
+}
+
+#[sqlx::test]
+async fn legacy_duplicate_fallback_repeats_the_relation_context_on_every_dialect_row(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // distinguish 词条：uk / us 两个规范化词头各占一条 entry_headword_keys，
+    // legacy 回退因此会为同一个词条返回两行。
+    let uk_headword = format!("centre{}", admin_id.simple());
+    let us_headword = format!("center{}", admin_id.simple());
+    seed_dictionary_term(&pool, &us_headword, "word", "british_american").await;
+    seed_dictionary_term(&pool, &uk_headword, "word", "british_core").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES
+            ($1, $2, $2, 'british_american', ARRAY['british_core', 'american_core'],
+             ARRAY['GB', 'US'], ARRAY['spelling'], ARRAY['noun'], ARRAY[$3], true),
+            ($1, $3, $3, 'british_core', ARRAY['british_core'],
+             ARRAY['GB'], ARRAY['spelling'], ARRAY['noun'], ARRAY[$2], true)
+        "#,
+    )
+    .bind(dataset_id)
+    .bind(&us_headword)
+    .bind(&uk_headword)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let target = create_ready_draft(&state, &pool, &bearer, &us_headword).await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        target["word"]["headwords"]["mode"], "distinguish",
+        "种子数据应当产出 distinguish 词条：{target}"
+    );
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let (status, published) = publish_ready(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "目标词发布失败：{published}");
+
+    let source_headword = format!("midpoint{}", admin_id.simple());
+    let source = create_ready_draft(&state, &pool, &bearer, &source_headword).await;
+    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "target_word_id": target_entry_id,
+        "target_sense_id": target_sense_id,
+        "score": "90.00"
+    }]);
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "草稿来源关联保存失败：{saved}");
+
+    sqlx::query(
+        r#"
+        UPDATE lexicon.surface_sources
+        SET is_deleted = TRUE, source_revision = 999999,
+            event_offset = nextval('lexicon.surface_projection_event_offset_seq')
+        WHERE entry_id = $1 AND source_kind = 'headword'
+        "#,
+    )
+    .bind(target_entry_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": us_headword})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "目标词重复检测失败：{detection}");
+    assert_eq!(detection["smart_dictionary"]["status"], "duplicate");
+    let rows = detection["smart_dictionary"]["duplicates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["word_id"] == Value::String(target_entry_id.to_string()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows.len(),
+        2,
+        "distinguish 词条的 uk / us 两个词头键应当各出一行：{detection}"
+    );
+    // 摘要按词条聚合，与撞上的是哪一侧词头无关——两行必须给出同一份被引用上下文，
+    // 否则前端会在其中一行提示「被引用」、另一行什么都不提示。
+    for row in rows {
+        assert_eq!(
+            row["inbound_relations"]["total"], 1,
+            "每一行都要带上被引用上下文：{detection}"
+        );
+        assert_eq!(
+            row["inbound_relations"]["previews"][0],
+            json!({
+                "source_word_id": source_entry_id,
+                "source_headword": source_headword,
+                "source_status": "draft",
+                "relation": "synonym"
+            })
+        );
+    }
+}
+
+#[sqlx::test]
 async fn detection_reports_which_entries_reference_the_matched_surface_as_a_relation(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

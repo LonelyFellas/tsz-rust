@@ -1025,6 +1025,19 @@ mod tests {
             schemas["DuplicateWordMatchV2"]["properties"]["match_category"]["$ref"],
             "#/components/schemas/SurfaceMatchCategoryV2"
         );
+        // 被引用上下文同理：duplicate 分支没有 surface_match_page 可挂
+        // matched_entry_contexts，摘要必须直接挂在命中项上。
+        assert!(
+            schemas["DuplicateWordMatchV2"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "inbound_relations")
+        );
+        assert_eq!(
+            schemas["DuplicateWordMatchV2"]["properties"]["inbound_relations"]["$ref"],
+            "#/components/schemas/RelationReferenceSummaryV2"
+        );
 
         let snapshot_union = schemas["WordDetectionSnapshotSmartDictionaryV2"]["oneOf"]
             .as_array()
