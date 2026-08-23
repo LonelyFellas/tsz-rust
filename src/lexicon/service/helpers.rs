@@ -33,6 +33,19 @@ pub(super) fn normalize_submitted_headwords(
     Ok(())
 }
 
+pub(super) fn relation_target_entry_ids(meanings: &DraftMeaningsStepContent) -> Vec<Uuid> {
+    let mut entry_ids = meanings
+        .pos
+        .iter()
+        .flat_map(|pos| pos.senses.iter())
+        .flat_map(|sense| sense.relations.iter())
+        .map(|relation| relation.target_word_id)
+        .collect::<Vec<_>>();
+    entry_ids.sort_unstable();
+    entry_ids.dedup();
+    entry_ids
+}
+
 pub(super) fn normalized_headword_keys(
     headwords: &WordHeadwordsV2,
 ) -> Result<Vec<String>, LexiconServiceError> {
@@ -166,6 +179,8 @@ pub(super) fn repository_error(error: LexiconRepositoryError) -> LexiconServiceE
     match error {
         LexiconRepositoryError::DuplicateHeadword => LexiconServiceError::DuplicateWord,
         LexiconRepositoryError::TargetPublicationBusy => LexiconServiceError::ReferenceConflict,
+        LexiconRepositoryError::ReferenceTargetChanged => LexiconServiceError::ReferenceConflict,
+        LexiconRepositoryError::SurfaceContextBusy => LexiconServiceError::ReferenceConflict,
         other => LexiconServiceError::Repository(other),
     }
 }

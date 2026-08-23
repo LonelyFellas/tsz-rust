@@ -15,9 +15,9 @@ use crate::{
             HistoricalPublicationRecord, IdempotencyRecord, InboundSenseReferenceRecord,
             ListEntryRecord, ListFilter, NewPublicationSenseReference, NodeIdentityRecord,
             RegionSurfaceRecord, RelatedSearchFilter, RelatedSearchRecord,
-            ResolvedSenseTargetRecord, RetiredStableSlotRecord, SenseTargetKey, StatsRecord,
-            SurfaceEntryContextRecord, SurfaceInboundRelationRecord, SurfaceLookupKey,
-            SurfaceSourceRecord,
+            ResolvedRelationTargetRecord, ResolvedSenseTargetRecord, RetiredStableSlotRecord,
+            SenseTargetKey, StatsRecord, SurfaceEntryContextRecord, SurfaceInboundRelationRecord,
+            SurfaceLookupKey, SurfaceSourceRecord,
         },
         node_identity::{
             BASE_FORM_ROLE, FORM_GROUP_ROLE, GRAMMAR_STRUCTURE_ROLE, POS_ROLE, PRONUNCIATION_ROLE,
@@ -30,7 +30,7 @@ use crate::{
         },
         provenance::headword_origin,
     },
-    platform::is_unique_violation,
+    platform::{is_foreign_key_violation, is_unique_violation},
 };
 
 mod dictionary;
@@ -56,6 +56,10 @@ pub enum LexiconRepositoryError {
     Invariant(&'static str),
     #[error("a referenced publication is being changed; retry the command")]
     TargetPublicationBusy,
+    #[error("a referenced target changed while the entry was being written")]
+    ReferenceTargetChanged,
+    #[error("a surface match context is being changed; retry the command")]
+    SurfaceContextBusy,
     #[error("serialization failed")]
     Serialization(#[from] serde_json::Error),
     #[error("database operation failed")]

@@ -332,7 +332,7 @@ impl ErrorCode {
             ),
             Self::ReferenceConflict => (
                 "reference_conflict",
-                "Referenced publication changed",
+                "Referenced target changed",
                 StatusCode::CONFLICT,
             ),
             Self::DetectionMismatch => (

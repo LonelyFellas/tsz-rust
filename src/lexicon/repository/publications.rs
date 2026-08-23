@@ -120,8 +120,9 @@ impl LexiconRepository {
                 r#"
                 INSERT INTO lexicon.entry_publication_sense_refs (
                     publication_id, entry_id, source_node_id, reference_kind,
-                    target_entry_id, target_sense_id, target_publication_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    target_entry_id, target_sense_id, target_publication_id,
+                    target_content_scope, target_revision
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 "#,
             )
             .bind(publication_id)
@@ -131,6 +132,8 @@ impl LexiconRepository {
             .bind(reference.target_entry_id)
             .bind(reference.target_sense_id)
             .bind(reference.target_publication_id)
+            .bind(reference.target_content_scope.as_str())
+            .bind(reference.target_revision)
             .execute(&mut **tx)
             .await
             .map_err(LexiconRepositoryError::Database)?;
@@ -473,6 +476,7 @@ impl LexiconRepository {
             SELECT requested.target_entry_id,
                    requested.target_sense_id,
                    publication.id AS target_publication_id,
+                   publication.source_revision AS target_revision,
                    publication.snapshot
             FROM requested
             JOIN lexicon.entries entry
@@ -494,6 +498,141 @@ impl LexiconRepository {
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn resolve_relation_targets(
+        tx: &mut Transaction<'_, Postgres>,
+        targets: &[SenseTargetKey],
+    ) -> Result<Vec<ResolvedRelationTargetRecord>, LexiconRepositoryError> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let target_entry_ids = targets
+            .iter()
+            .map(|target| target.target_entry_id)
+            .collect::<Vec<_>>();
+        let target_sense_ids = targets
+            .iter()
+            .map(|target| target.target_sense_id)
+            .collect::<Vec<_>>();
+        sqlx::query_as::<_, ResolvedRelationTargetRecord>(
+            r#"
+            WITH requested AS (
+                SELECT DISTINCT target_entry_id, target_sense_id
+                FROM unnest($1::uuid[], $2::uuid[])
+                    AS target(target_entry_id, target_sense_id)
+            )
+            SELECT requested.target_entry_id,
+                   requested.target_sense_id,
+                   entry.revision AS target_revision,
+                   entry.archived_at IS NOT NULL AS target_archived,
+                   node.removed_from_draft_at IS NOT NULL AS target_removed,
+                   entry.headword_mode,
+                   entry.source_dialect,
+                   (SELECT headword FROM lexicon.entry_headwords
+                    WHERE entry_id = entry.id AND dialect = 'common') AS common_headword,
+                   (SELECT headword FROM lexicon.entry_headwords
+                    WHERE entry_id = entry.id AND dialect = 'uk') AS uk_headword,
+                   (SELECT headword FROM lexicon.entry_headwords
+                    WHERE entry_id = entry.id AND dialect = 'us') AS us_headword,
+                   projection.meanings AS draft_meanings,
+                   CASE WHEN publication_node.node_id IS NOT NULL
+                        THEN publication.id END AS target_publication_id,
+                   CASE WHEN publication_node.node_id IS NOT NULL
+                        THEN publication.snapshot END AS published_snapshot,
+                   CASE WHEN publication_node.node_id IS NOT NULL
+                        THEN publication.source_revision END AS published_revision
+            FROM requested
+            JOIN lexicon.nodes node
+              ON node.id = requested.target_sense_id
+             AND node.entry_id = requested.target_entry_id
+             AND node.node_type = 'sense'
+            JOIN lexicon.entries entry ON entry.id = requested.target_entry_id
+            JOIN lexicon.entry_editor_projection projection ON projection.entry_id = entry.id
+            LEFT JOIN lexicon.entry_publications publication
+              ON publication.id = entry.current_publication_id
+             AND publication.entry_id = entry.id
+            LEFT JOIN lexicon.entry_publication_nodes publication_node
+              ON publication_node.publication_id = publication.id
+             AND publication_node.entry_id = entry.id
+             AND publication_node.node_id = requested.target_sense_id
+             AND publication_node.node_type = 'sense'
+            ORDER BY requested.target_entry_id, requested.target_sense_id
+            "#,
+        )
+        .bind(target_entry_ids)
+        .bind(target_sense_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn resolve_relation_targets_for_publish(
+        tx: &mut Transaction<'_, Postgres>,
+        targets: &[SenseTargetKey],
+    ) -> Result<Vec<ResolvedRelationTargetRecord>, LexiconRepositoryError> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let target_entry_ids = targets
+            .iter()
+            .map(|target| target.target_entry_id)
+            .collect::<Vec<_>>();
+        let target_sense_ids = targets
+            .iter()
+            .map(|target| target.target_sense_id)
+            .collect::<Vec<_>>();
+        sqlx::query_as::<_, ResolvedRelationTargetRecord>(
+            r#"
+            WITH requested AS (
+                SELECT DISTINCT target_entry_id, target_sense_id
+                FROM unnest($1::uuid[], $2::uuid[])
+                    AS target(target_entry_id, target_sense_id)
+            )
+            SELECT requested.target_entry_id,
+                   requested.target_sense_id,
+                   entry.revision AS target_revision,
+                   entry.archived_at IS NOT NULL AS target_archived,
+                   node.removed_from_draft_at IS NOT NULL AS target_removed,
+                   entry.headword_mode,
+                   entry.source_dialect,
+                   (SELECT headword FROM lexicon.entry_headwords
+                    WHERE entry_id = entry.id AND dialect = 'common') AS common_headword,
+                   (SELECT headword FROM lexicon.entry_headwords
+                    WHERE entry_id = entry.id AND dialect = 'uk') AS uk_headword,
+                   (SELECT headword FROM lexicon.entry_headwords
+                    WHERE entry_id = entry.id AND dialect = 'us') AS us_headword,
+                   projection.meanings AS draft_meanings,
+                   CASE WHEN publication_node.node_id IS NOT NULL
+                        THEN publication.id END AS target_publication_id,
+                   CASE WHEN publication_node.node_id IS NOT NULL
+                        THEN publication.snapshot END AS published_snapshot,
+                   CASE WHEN publication_node.node_id IS NOT NULL
+                        THEN publication.source_revision END AS published_revision
+            FROM requested
+            JOIN lexicon.nodes node
+              ON node.id = requested.target_sense_id
+             AND node.entry_id = requested.target_entry_id
+             AND node.node_type = 'sense'
+            JOIN lexicon.entries entry ON entry.id = requested.target_entry_id
+            JOIN lexicon.entry_editor_projection projection ON projection.entry_id = entry.id
+            LEFT JOIN lexicon.entry_publications publication
+              ON publication.id = entry.current_publication_id
+             AND publication.entry_id = entry.id
+            LEFT JOIN lexicon.entry_publication_nodes publication_node
+              ON publication_node.publication_id = publication.id
+             AND publication_node.entry_id = entry.id
+             AND publication_node.node_id = requested.target_sense_id
+             AND publication_node.node_type = 'sense'
+            ORDER BY requested.target_entry_id, requested.target_sense_id
+            FOR SHARE OF entry NOWAIT
+            "#,
+        )
+        .bind(target_entry_ids)
+        .bind(target_sense_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_target_publication_lock_error)
     }
 
     pub(crate) async fn resolve_current_published_senses_for_publish(
@@ -521,6 +660,7 @@ impl LexiconRepository {
             SELECT requested.target_entry_id,
                    requested.target_sense_id,
                    publication.id AS target_publication_id,
+                   publication.source_revision AS target_revision,
                    publication.snapshot
             FROM requested
             JOIN lexicon.entries entry
@@ -632,13 +772,27 @@ impl LexiconRepository {
              AND target_node.entry_id = target_entry.id
              AND target_node.node_id = sense_ref.target_sense_id
              AND target_node.node_type = 'sense'
+            LEFT JOIN lexicon.nodes target_draft_node
+              ON target_draft_node.id = sense_ref.target_sense_id
+             AND target_draft_node.entry_id = target_entry.id
+             AND target_draft_node.node_type = 'sense'
             WHERE sense_ref.entry_id = $1
               AND (
-                   target_entry.current_publication_id IS NULL
-                   OR target_node.node_id IS NULL
-                   OR (
+                   (
                        target_entry.archived_at IS NOT NULL
                        AND NOT (target_entry.id = ANY($2::uuid[]))
+                   )
+                   OR (
+                       sense_ref.reference_kind = 'sentence_context'
+                       AND target_node.node_id IS NULL
+                   )
+                   OR (
+                       sense_ref.reference_kind = 'relation'
+                       AND target_node.node_id IS NULL
+                       AND (
+                           target_draft_node.id IS NULL
+                           OR target_draft_node.removed_from_draft_at IS NOT NULL
+                       )
                    )
               )
             ORDER BY sense_ref.target_sense_id,
@@ -672,11 +826,25 @@ impl LexiconRepository {
              AND target_node.entry_id = target_entry.id
              AND target_node.node_id = sense_ref.target_sense_id
              AND target_node.node_type = 'sense'
+            LEFT JOIN lexicon.nodes target_draft_node
+              ON target_draft_node.id = sense_ref.target_sense_id
+             AND target_draft_node.entry_id = target_entry.id
+             AND target_draft_node.node_type = 'sense'
             WHERE sense_ref.publication_id = $1
               AND (
                    target_entry.archived_at IS NOT NULL
-                   OR target_entry.current_publication_id IS NULL
-                   OR target_node.node_id IS NULL
+                   OR (
+                       sense_ref.reference_kind = 'sentence_context'
+                       AND target_node.node_id IS NULL
+                   )
+                   OR (
+                       sense_ref.reference_kind = 'relation'
+                       AND target_node.node_id IS NULL
+                       AND (
+                           target_draft_node.id IS NULL
+                           OR target_draft_node.removed_from_draft_at IS NOT NULL
+                       )
+                   )
               )
             ORDER BY sense_ref.target_sense_id,
                      sense_ref.entry_id,
@@ -705,6 +873,78 @@ impl LexiconRepository {
             "#,
         )
         .bind(publication_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map(|_| ())
+        .map_err(map_target_publication_lock_error)
+    }
+
+    pub(crate) async fn publication_relation_target_entry_ids(
+        tx: &mut Transaction<'_, Postgres>,
+        publication_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>, LexiconRepositoryError> {
+        if publication_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT DISTINCT sense_ref.target_entry_id
+            FROM lexicon.entry_publication_sense_refs sense_ref
+            WHERE sense_ref.publication_id = ANY($1::uuid[])
+              AND sense_ref.reference_kind = 'relation'
+            ORDER BY sense_ref.target_entry_id
+            "#,
+        )
+        .bind(publication_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn current_publication_relation_target_entry_ids(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>, LexiconRepositoryError> {
+        if entry_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT DISTINCT sense_ref.target_entry_id
+            FROM lexicon.entries source_entry
+            JOIN lexicon.entry_publication_sense_refs sense_ref
+              ON sense_ref.publication_id = source_entry.current_publication_id
+             AND sense_ref.entry_id = source_entry.id
+            WHERE source_entry.id = ANY($1::uuid[])
+              AND sense_ref.reference_kind = 'relation'
+            ORDER BY sense_ref.target_entry_id
+            "#,
+        )
+        .bind(entry_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn lock_current_outbound_sense_ref_targets_for_entry(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+    ) -> Result<(), LexiconRepositoryError> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT target_entry.id
+            FROM lexicon.entries source_entry
+            JOIN lexicon.entry_publication_sense_refs sense_ref
+              ON sense_ref.publication_id = source_entry.current_publication_id
+             AND sense_ref.entry_id = source_entry.id
+            JOIN lexicon.entries target_entry
+              ON target_entry.id = sense_ref.target_entry_id
+            WHERE source_entry.id = $1
+            ORDER BY target_entry.id
+            FOR SHARE OF target_entry NOWAIT
+            "#,
+        )
+        .bind(entry_id)
         .fetch_all(&mut **tx)
         .await
         .map(|_| ())

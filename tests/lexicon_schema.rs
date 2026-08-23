@@ -384,6 +384,83 @@ async fn publication_references_preserve_catalog_and_entry_integrity(pool: PgPoo
 }
 
 #[sqlx::test]
+async fn publication_relation_can_anchor_a_never_published_target_sense(pool: PgPool) {
+    let admin_id = insert_admin(&pool).await;
+    let source_entry_id = insert_entry(&pool, admin_id).await;
+    let target_entry_id = insert_entry(&pool, admin_id).await;
+    let source_relation_id = insert_node(&pool, source_entry_id, "relation").await;
+    let target_sense_id = insert_node(&pool, target_entry_id, "sense").await;
+    let source_publication_id = insert_publication(&pool, admin_id, source_entry_id, 1).await;
+    insert_publication_node(
+        &pool,
+        source_publication_id,
+        source_entry_id,
+        source_relation_id,
+        "relation",
+    )
+    .await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.entry_publication_sense_refs (
+            publication_id, entry_id, source_node_id, reference_kind,
+            target_entry_id, target_sense_id, target_publication_id,
+            target_content_scope, target_revision
+        ) VALUES ($1, $2, $3, 'relation', $4, $5, NULL, 'draft', 1)
+        "#,
+    )
+    .bind(source_publication_id)
+    .bind(source_entry_id)
+    .bind(source_relation_id)
+    .bind(target_entry_id)
+    .bind(target_sense_id)
+    .execute(&pool)
+    .await
+    .expect("relation publication reference 应允许锚定从未发布的目标 sense");
+
+    let delete_target = sqlx::query("DELETE FROM lexicon.nodes WHERE id = $1")
+        .bind(target_sense_id)
+        .execute(&pool)
+        .await;
+    assert_db_error(
+        delete_target,
+        FOREIGN_KEY_VIOLATION,
+        "lexicon_publication_sense_refs_target_node_fkey",
+    );
+
+    let source_sentence_id = insert_node(&pool, source_entry_id, "sentence").await;
+    insert_publication_node(
+        &pool,
+        source_publication_id,
+        source_entry_id,
+        source_sentence_id,
+        "sentence",
+    )
+    .await;
+    let draft_context = sqlx::query(
+        r#"
+        INSERT INTO lexicon.entry_publication_sense_refs (
+            publication_id, entry_id, source_node_id, reference_kind,
+            target_entry_id, target_sense_id, target_publication_id,
+            target_content_scope, target_revision
+        ) VALUES ($1, $2, $3, 'sentence_context', $4, $5, NULL, 'draft', 1)
+        "#,
+    )
+    .bind(source_publication_id)
+    .bind(source_entry_id)
+    .bind(source_sentence_id)
+    .bind(target_entry_id)
+    .bind(target_sense_id)
+    .execute(&pool)
+    .await;
+    assert_db_error(
+        draft_context,
+        CHECK_VIOLATION,
+        "lexicon_publication_sense_refs_context_target_check",
+    );
+}
+
+#[sqlx::test]
 async fn publication_sense_refs_bind_source_and_target_publication_membership(pool: PgPool) {
     let admin_id = insert_admin(&pool).await;
     let source_entry_id = insert_entry(&pool, admin_id).await;
@@ -416,8 +493,9 @@ async fn publication_sense_refs_bind_source_and_target_publication_membership(po
         r#"
         INSERT INTO lexicon.entry_publication_sense_refs (
             publication_id, entry_id, source_node_id, reference_kind,
-            target_entry_id, target_sense_id, target_publication_id
-        ) VALUES ($1, $2, $3, 'relation', $4, $5, $6)
+            target_entry_id, target_sense_id, target_publication_id,
+            target_content_scope, target_revision
+        ) VALUES ($1, $2, $3, 'relation', $4, $5, $6, 'publication', 1)
         "#,
     )
     .bind(source_publication_id)
@@ -434,8 +512,9 @@ async fn publication_sense_refs_bind_source_and_target_publication_membership(po
         r#"
         INSERT INTO lexicon.entry_publication_sense_refs (
             publication_id, entry_id, source_node_id, reference_kind,
-            target_entry_id, target_sense_id, target_publication_id
-        ) VALUES ($1, $2, $3, 'relation', $4, $5, $6)
+            target_entry_id, target_sense_id, target_publication_id,
+            target_content_scope, target_revision
+        ) VALUES ($1, $2, $3, 'relation', $4, $5, $6, 'publication', 1)
         "#,
     )
     .bind(source_publication_id)
@@ -461,12 +540,35 @@ async fn publication_sense_refs_bind_source_and_target_publication_membership(po
         "relation",
     )
     .await;
+    let mismatched_target_revision = sqlx::query(
+        r#"
+        INSERT INTO lexicon.entry_publication_sense_refs (
+            publication_id, entry_id, source_node_id, reference_kind,
+            target_entry_id, target_sense_id, target_publication_id,
+            target_content_scope, target_revision
+        ) VALUES ($1, $2, $3, 'relation', $4, $5, $6, 'publication', 2)
+        "#,
+    )
+    .bind(source_publication_id)
+    .bind(source_entry_id)
+    .bind(second_source_relation_id)
+    .bind(target_entry_id)
+    .bind(target_sense_id)
+    .bind(target_publication_id)
+    .execute(&pool)
+    .await;
+    assert_db_error(
+        mismatched_target_revision,
+        FOREIGN_KEY_VIOLATION,
+        "lexicon_publication_sense_refs_target_revision_fkey",
+    );
     let target_sense_not_in_publication = sqlx::query(
         r#"
         INSERT INTO lexicon.entry_publication_sense_refs (
             publication_id, entry_id, source_node_id, reference_kind,
-            target_entry_id, target_sense_id, target_publication_id
-        ) VALUES ($1, $2, $3, 'relation', $4, $5, $6)
+            target_entry_id, target_sense_id, target_publication_id,
+            target_content_scope, target_revision
+        ) VALUES ($1, $2, $3, 'relation', $4, $5, $6, 'publication', 2)
         "#,
     )
     .bind(source_publication_id)
@@ -491,7 +593,7 @@ async fn publication_sense_refs_bind_source_and_target_publication_membership(po
     assert_db_error(
         delete_target_publication,
         FOREIGN_KEY_VIOLATION,
-        "lexicon_publication_sense_refs_target_fkey",
+        "lexicon_publication_sense_refs_target_revision_fkey",
     );
 
     sqlx::query("DELETE FROM lexicon.entry_publications WHERE id = $1")

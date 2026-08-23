@@ -90,6 +90,7 @@ pub struct VerifiedSurfaceConfirmation {
     pub binding: SurfaceConfirmationBinding,
     pub match_ids: Vec<String>,
     pub match_digest: String,
+    pub context_digest: String,
     pub owner_bundle: Value,
 }
 
@@ -134,6 +135,8 @@ struct SurfaceSnapshotBundle {
     terminal_token_expires_at_ms: Option<i64>,
     lease_expires_at_ms: i64,
     match_digest: String,
+    #[serde(default)]
+    context_digest: String,
     active_context_digest: String,
 }
 
@@ -705,6 +708,7 @@ fn verified_confirmation(bundle: &SurfaceSnapshotBundle) -> VerifiedSurfaceConfi
             .map(|item| item.match_id.clone())
             .collect(),
         match_digest: bundle.match_digest.clone(),
+        context_digest: bundle.context_digest.clone(),
         owner_bundle: bundle.owner_bundle.clone(),
     }
 }
@@ -756,6 +760,7 @@ fn initialize_snapshot(
         .transpose()?;
     let lease_expires_at_ms = token_expires_at.unwrap_or(add_duration(now_ms, idle_ttl)?);
     let match_digest = surface_match_digest(&input.items, &input.confirmation_reasons)?;
+    let context_digest = surface_context_digest(&input.matched_entry_contexts)?;
     let active_context_digest = active_context_digest(&input.binding);
     let bundle = SurfaceSnapshotBundle {
         snapshot_id,
@@ -775,6 +780,7 @@ fn initialize_snapshot(
         terminal_token_expires_at_ms: token_expires_at,
         lease_expires_at_ms,
         match_digest,
+        context_digest,
         active_context_digest,
     };
     let page = render_page(
@@ -1085,6 +1091,14 @@ pub(crate) fn surface_match_digest(
             .collect(),
     };
     Ok(hash_token(&serde_json::to_string(&digest)?))
+}
+
+pub(crate) fn surface_context_digest(
+    contexts: &[MatchedEntryContextV2],
+) -> Result<String, SurfaceSnapshotError> {
+    let mut ordered = contexts.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|context| context.word_id);
+    Ok(hash_token(&serde_json::to_string(&ordered)?))
 }
 
 fn reason_digest(reasons: &[SurfaceConfirmationReasonV2]) -> String {
@@ -1848,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn composite_digest_binds_item_reason_membership_but_not_display_context() {
+    fn confirmation_tracks_match_membership_and_display_context_with_separate_digests() {
         let actor = Uuid::now_v7();
         let mut ordinary = input(actor, 1, 1, true);
         let mut composite = ordinary.clone();
@@ -1894,6 +1908,10 @@ mod tests {
         .unwrap()
         .bundle;
         assert_eq!(ordinary_bundle.match_digest, context_changed.match_digest);
+        assert_ne!(
+            ordinary_bundle.context_digest,
+            context_changed.context_digest
+        );
     }
 
     #[test]

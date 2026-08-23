@@ -236,6 +236,43 @@ pub(crate) fn surface_lock_keys<'a>(
 }
 
 impl LexiconRepository {
+    /// Locks only the matched-entry contexts touched by a mutation or token
+    /// recheck. Try-locking fails fast instead of occupying pool connections
+    /// behind unrelated or slow lexicon transactions.
+    pub async fn lock_surface_contexts(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_ids: &[Uuid],
+    ) -> Result<(), LexiconRepositoryError> {
+        let entry_ids = entry_ids
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if entry_ids.is_empty() {
+            return Ok(());
+        }
+        let acquired = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT pg_try_advisory_xact_lock(hashtextextended(
+                'lexicon.surface-context:' || requested.entry_id::text,
+                0
+            ))
+            FROM unnest($1::uuid[]) AS requested(entry_id)
+            ORDER BY requested.entry_id
+            "#,
+        )
+        .bind(entry_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        if acquired.into_iter().all(|locked| locked) {
+            Ok(())
+        } else {
+            Err(LexiconRepositoryError::SurfaceContextBusy)
+        }
+    }
+
     /// Joins the surface-policy writer barrier for the lifetime of `transaction`.
     ///
     /// This is public so database contract tests can prove that a policy disable

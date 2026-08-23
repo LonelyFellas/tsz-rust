@@ -969,10 +969,15 @@ impl LexiconService {
                 }
                 Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
             };
-            if surface_match_ids_changed(
-                current_matches.iter().map(|item| item.match_id.as_str()),
-                confirmation.match_ids.iter().map(String::as_str),
-            ) {
+            let contexts_changed = surface_context_digest(&current_contexts)
+                .map_err(LexiconServiceError::SurfaceSnapshot)?
+                != confirmation.context_digest;
+            if contexts_changed
+                || surface_match_ids_changed(
+                    current_matches.iter().map(|item| item.match_id.as_str()),
+                    confirmation.match_ids.iter().map(String::as_str),
+                )
+            {
                 let snapshot = match self
                     .create_detection_surface_snapshot(
                         actor_id,
@@ -1319,19 +1324,13 @@ impl LexiconService {
 
         let mut relation_summaries = HashMap::<Uuid, RelationSummaryBuilder>::new();
         for reference in inbound {
-            let source: AdminWordV2 =
-                serde_json::from_value(reference.source_snapshot).map_err(serialization_error)?;
-            let Some(relation) = relation_type_for_node(&source, reference.source_node_id) else {
+            let Some(preview) = inbound_relation_preview(&reference)? else {
                 continue;
             };
             relation_summaries
                 .entry(reference.target_entry_id)
                 .or_default()
-                .push(RelationReferencePreviewV2 {
-                    source_word_id: reference.source_entry_id,
-                    source_headword: published_word_headword(&source),
-                    relation,
-                });
+                .push(preview);
         }
 
         records
@@ -1412,6 +1411,9 @@ impl LexiconService {
             .collect::<Vec<_>>();
         entry_ids.sort_unstable();
         entry_ids.dedup();
+        LexiconRepository::lock_surface_contexts(tx, &entry_ids)
+            .await
+            .map_err(repository_error)?;
         let records = LexiconRepository::surface_entry_contexts_in_transaction(tx, &entry_ids)
             .await
             .map_err(repository_error)?;
@@ -1485,19 +1487,13 @@ pub(super) fn surface_contexts_from_records(
 ) -> Result<Vec<MatchedEntryContextV2>, LexiconServiceError> {
     let mut relation_summaries = HashMap::<Uuid, RelationSummaryBuilder>::new();
     for reference in inbound {
-        let source: AdminWordV2 =
-            serde_json::from_value(reference.source_snapshot).map_err(serialization_error)?;
-        let Some(relation) = relation_type_for_node(&source, reference.source_node_id) else {
+        let Some(preview) = inbound_relation_preview(&reference)? else {
             continue;
         };
         relation_summaries
             .entry(reference.target_entry_id)
             .or_default()
-            .push(RelationReferencePreviewV2 {
-                source_word_id: reference.source_entry_id,
-                source_headword: published_word_headword(&source),
-                relation,
-            });
+            .push(preview);
     }
     records
         .into_iter()
@@ -1751,12 +1747,56 @@ fn relation_type_for_node(word: &AdminWordV2, node_id: Uuid) -> Option<RelationT
         .flat_map(|pos| pos.senses.iter())
         .flat_map(|sense| sense.relations.iter())
         .find(|relation| relation.id == node_id)?;
-    match relation.relation.as_str() {
+    parse_relation_type(&relation.relation)
+}
+
+fn parse_relation_type(value: &str) -> Option<RelationTypeV2> {
+    match value {
         "synonym" => Some(RelationTypeV2::Synonym),
         "antonym" => Some(RelationTypeV2::Antonym),
         "derivative" => Some(RelationTypeV2::Derivative),
         _ => None,
     }
+}
+
+fn inbound_relation_preview(
+    reference: &crate::lexicon::model::SurfaceInboundRelationRecord,
+) -> Result<Option<RelationReferencePreviewV2>, LexiconServiceError> {
+    let relation = if let Some(relation) = reference.draft_relation_type.as_deref() {
+        parse_relation_type(relation)
+    } else if let Some(snapshot) = reference.source_snapshot.as_ref() {
+        let source: AdminWordV2 =
+            serde_json::from_value(snapshot.clone()).map_err(serialization_error)?;
+        relation_type_for_node(&source, reference.source_node_id)
+    } else {
+        None
+    };
+    let Some(relation) = relation else {
+        return Ok(None);
+    };
+    let source_headword = match reference.source_headword_mode.as_str() {
+        "unified" => reference.source_common_headword.clone(),
+        "distinguish" => match reference.source_dialect.as_deref() {
+            Some("uk") => reference
+                .source_uk_headword
+                .as_ref()
+                .zip(reference.source_us_headword.as_ref()),
+            Some("us") => reference
+                .source_us_headword
+                .as_ref()
+                .zip(reference.source_uk_headword.as_ref()),
+            _ => None,
+        }
+        .map(|(first, second)| format!("{first} / {second}")),
+        _ => None,
+    }
+    .ok_or_else(invariant_record)?;
+    Ok(Some(RelationReferencePreviewV2 {
+        source_word_id: reference.source_entry_id,
+        source_headword,
+        source_status: parse_surface_status(&reference.source_status)?,
+        relation,
+    }))
 }
 
 fn surface_warning_audit(

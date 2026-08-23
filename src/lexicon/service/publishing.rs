@@ -93,6 +93,9 @@ impl LexiconService {
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
 
+        LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
+            .await
+            .map_err(repository_error)?;
         LexiconRepository::lock_surface_policy_writer(&mut transaction)
             .await
             .map_err(repository_error)?;
@@ -106,6 +109,20 @@ impl LexiconService {
         let mut word = entry_from_record(record)?;
         ensure_active(&word)?;
         ensure_revision(&word, input.base_revision)?;
+        let mut affected_contexts = relation_target_entry_ids(&word.meanings);
+        if let Some(publication_id) = current_publication_id {
+            affected_contexts.extend(
+                LexiconRepository::publication_relation_target_entry_ids(
+                    &mut transaction,
+                    &[publication_id],
+                )
+                .await
+                .map_err(repository_error)?,
+            );
+        }
+        LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
+            .await
+            .map_err(repository_error)?;
         let surface_sources = crate::lexicon::repository::surface_projection_sources(&word)
             .map_err(surface_projection_error)?;
         let previous_publication_sources =
@@ -415,6 +432,9 @@ impl LexiconService {
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
 
+        LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
+            .await
+            .map_err(repository_error)?;
         LexiconRepository::lock_surface_policy_writer(&mut transaction)
             .await
             .map_err(repository_error)?;
@@ -463,6 +483,22 @@ impl LexiconService {
         publication_word.archived_by = None;
         publication_word.published_revision = Some(publication.source_revision);
         publication_word.published_at = Some(publication.published_at);
+        let mut affected_contexts = relation_target_entry_ids(&word.meanings);
+        let publication_ids = previous_publication_id
+            .into_iter()
+            .chain(std::iter::once(publication_id))
+            .collect::<Vec<_>>();
+        affected_contexts.extend(
+            LexiconRepository::publication_relation_target_entry_ids(
+                &mut transaction,
+                &publication_ids,
+            )
+            .await
+            .map_err(repository_error)?,
+        );
+        LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
+            .await
+            .map_err(repository_error)?;
         let previous_sources =
             LexiconRepository::current_publication_surface_sources(&mut transaction, &[entry_id])
                 .await
@@ -864,7 +900,12 @@ impl LexiconService {
         let current_digest =
             crate::lexicon::surface_snapshot::surface_match_digest(&items, &confirmation_reasons)
                 .map_err(LexiconServiceError::SurfaceSnapshot)?;
-        if current_ids != verified_ids || current_digest != verified.match_digest {
+        let current_context_digest =
+            surface_context_digest(&contexts).map_err(LexiconServiceError::SurfaceSnapshot)?;
+        if current_ids != verified_ids
+            || current_digest != verified.match_digest
+            || current_context_digest != verified.context_digest
+        {
             let snapshot = self
                 .surface_snapshots
                 .create(create_snapshot())
@@ -952,7 +993,7 @@ pub(super) enum ReferenceResolutionMode {
     Verify,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ReferenceUseKind {
     Relation,
     SentenceContext,
@@ -968,9 +1009,12 @@ pub(super) struct ReferenceUse {
 
 #[derive(Debug)]
 pub(super) struct ResolvedReferenceSnapshot {
-    target_publication_id: Uuid,
+    target_publication_id: Option<Uuid>,
+    target_content_scope: PublicationTargetContentScope,
+    target_revision: i64,
     headword: String,
     gloss: String,
+    available: bool,
 }
 
 #[derive(Debug, Default)]
@@ -1046,44 +1090,78 @@ pub(super) async fn resolve_meaning_references(
         }
     }
 
-    let requested = uses
+    let relation_requested = uses
         .iter()
+        .filter(|usage| usage.kind == ReferenceUseKind::Relation)
         .map(|usage| usage.target)
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let records = if lock_for_publish {
-        LexiconRepository::resolve_current_published_senses_for_publish(tx, &requested).await
+    let context_requested = uses
+        .iter()
+        .filter(|usage| usage.kind == ReferenceUseKind::SentenceContext)
+        .map(|usage| usage.target)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let relation_records = if lock_for_publish {
+        LexiconRepository::resolve_relation_targets_for_publish(tx, &relation_requested).await
     } else {
-        LexiconRepository::resolve_current_published_senses(tx, &requested).await
+        LexiconRepository::resolve_relation_targets(tx, &relation_requested).await
+    }
+    .map_err(repository_error)?;
+    let context_records = if lock_for_publish {
+        LexiconRepository::resolve_current_published_senses_for_publish(tx, &context_requested)
+            .await
+    } else {
+        LexiconRepository::resolve_current_published_senses(tx, &context_requested).await
     }
     .map_err(repository_error)?;
     let mut resolved = HashMap::new();
-    for record in records {
+    for record in relation_records {
+        let key = SenseTargetKey {
+            target_entry_id: record.target_entry_id,
+            target_sense_id: record.target_sense_id,
+        };
+        resolved.insert(
+            (ReferenceUseKind::Relation, key),
+            relation_target_snapshot(&record)?,
+        );
+    }
+    for record in context_records {
         let key = SenseTargetKey {
             target_entry_id: record.target_entry_id,
             target_sense_id: record.target_sense_id,
         };
         let (headword, gloss) = published_sense_snapshot(&record)?;
         resolved.insert(
-            key,
+            (ReferenceUseKind::SentenceContext, key),
             ResolvedReferenceSnapshot {
-                target_publication_id: record.target_publication_id,
+                target_publication_id: Some(record.target_publication_id),
+                target_content_scope: PublicationTargetContentScope::Publication,
+                target_revision: record.target_revision,
                 headword,
                 gloss,
+                available: true,
             },
         );
     }
 
     for usage in &uses {
-        if resolved.contains_key(&usage.target) {
+        let snapshot = resolved.get(&(usage.kind, usage.target));
+        let accepted = match (mode, usage.kind, snapshot) {
+            (ReferenceResolutionMode::Canonicalize, ReferenceUseKind::Relation, Some(_)) => true,
+            (_, _, Some(snapshot)) => snapshot.available,
+            _ => false,
+        };
+        if accepted {
             continue;
         }
         let (field, code, message) = match usage.kind {
             ReferenceUseKind::Relation => (
                 "target_sense_id",
                 "relation_target_unavailable",
-                "关联词目标必须是目标词条当前发布版本中的有效词义",
+                "关联词目标必须是未归档词条当前草稿或当前发布中的有效词义",
             ),
             ReferenceUseKind::SentenceContext => (
                 "links",
@@ -1101,7 +1179,7 @@ pub(super) async fn resolve_meaning_references(
                     target_entry_id: relation.target_word_id,
                     target_sense_id: relation.target_sense_id,
                 };
-                let Some(snapshot) = resolved.get(&key) else {
+                let Some(snapshot) = resolved.get(&(ReferenceUseKind::Relation, key)) else {
                     continue;
                 };
                 match mode {
@@ -1110,8 +1188,11 @@ pub(super) async fn resolve_meaning_references(
                         relation.target_gloss = Some(snapshot.gloss.clone());
                     }
                     ReferenceResolutionMode::Verify => {
-                        if relation.target_headword.as_deref() != Some(snapshot.headword.as_str())
-                            || relation.target_gloss.as_deref() != Some(snapshot.gloss.as_str())
+                        if snapshot.available
+                            && (relation.target_headword.as_deref()
+                                != Some(snapshot.headword.as_str())
+                                || relation.target_gloss.as_deref()
+                                    != Some(snapshot.gloss.as_str()))
                         {
                             issues.push(reference_issue(
                                 relation.id,
@@ -1132,9 +1213,12 @@ pub(super) async fn resolve_meaning_references(
         if !usage.external {
             continue;
         }
-        let Some(snapshot) = resolved.get(&usage.target) else {
+        let Some(snapshot) = resolved.get(&(usage.kind, usage.target)) else {
             continue;
         };
+        if !snapshot.available {
+            continue;
+        }
         let reference_kind = match usage.kind {
             ReferenceUseKind::Relation => PublicationSenseReferenceKind::Relation,
             ReferenceUseKind::SentenceContext => PublicationSenseReferenceKind::SentenceContext,
@@ -1152,6 +1236,8 @@ pub(super) async fn resolve_meaning_references(
                 target_entry_id: usage.target.target_entry_id,
                 target_sense_id: usage.target.target_sense_id,
                 target_publication_id: snapshot.target_publication_id,
+                target_content_scope: snapshot.target_content_scope,
+                target_revision: snapshot.target_revision,
             });
         }
     }
@@ -1160,6 +1246,66 @@ pub(super) async fn resolve_meaning_references(
         issues,
         publication_references,
     })
+}
+
+fn relation_target_snapshot(
+    record: &ResolvedRelationTargetRecord,
+) -> Result<ResolvedReferenceSnapshot, LexiconServiceError> {
+    if let (Some(target_publication_id), Some(snapshot), Some(target_revision)) = (
+        record.target_publication_id,
+        record.published_snapshot.as_ref(),
+        record.published_revision,
+    ) {
+        let published = ResolvedSenseTargetRecord {
+            target_entry_id: record.target_entry_id,
+            target_sense_id: record.target_sense_id,
+            target_publication_id,
+            target_revision,
+            snapshot: snapshot.clone(),
+        };
+        let (headword, gloss) = published_sense_snapshot(&published)?;
+        return Ok(ResolvedReferenceSnapshot {
+            target_publication_id: Some(target_publication_id),
+            target_content_scope: PublicationTargetContentScope::Publication,
+            target_revision,
+            headword,
+            gloss,
+            available: !record.target_archived,
+        });
+    }
+
+    let headword = draft_target_headword(record)?;
+    let meanings: DraftMeaningsStepContent =
+        serde_json::from_value(record.draft_meanings.clone()).map_err(serialization_error)?;
+    let sense = meanings
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.senses)
+        .find(|sense| sense.id == record.target_sense_id);
+    Ok(ResolvedReferenceSnapshot {
+        target_publication_id: None,
+        target_content_scope: PublicationTargetContentScope::Draft,
+        target_revision: record.target_revision,
+        headword,
+        gloss: sense.map(published_sense_gloss).unwrap_or_default(),
+        available: !record.target_archived && !record.target_removed && sense.is_some(),
+    })
+}
+
+fn draft_target_headword(
+    record: &ResolvedRelationTargetRecord,
+) -> Result<String, LexiconServiceError> {
+    match record.headword_mode.as_str() {
+        "unified" => record.common_headword.clone().ok_or_else(invariant_record),
+        "distinguish" => match record.source_dialect.as_deref() {
+            Some("uk") => record.uk_headword.as_ref().zip(record.us_headword.as_ref()),
+            Some("us") => record.us_headword.as_ref().zip(record.uk_headword.as_ref()),
+            _ => None,
+        }
+        .map(|(first, second)| format!("{first} / {second}"))
+        .ok_or_else(invariant_record),
+        _ => Err(invariant_record()),
+    }
 }
 
 pub(super) fn published_sense_snapshot(

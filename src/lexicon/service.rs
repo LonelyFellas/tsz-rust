@@ -43,8 +43,9 @@ use crate::lexicon::{
     model::{
         CatalogPartRecord, DictionaryCandidateRecord, EntryRecord,
         FormsSurfaceAcknowledgementRecord, HeadwordSurfaceAcknowledgementRecord, ListFilter,
-        NewPublicationSenseReference, PublicationSenseReferenceKind, RegionSurfaceRecord,
-        RelatedSearchFilter, ResolvedSenseTargetRecord, SenseTargetKey,
+        NewPublicationSenseReference, PublicationSenseReferenceKind, PublicationTargetContentScope,
+        RegionSurfaceRecord, RelatedSearchFilter, ResolvedRelationTargetRecord,
+        ResolvedSenseTargetRecord, SenseTargetKey,
     },
     normalization::{HeadwordNormalizationError, normalize_headword, sha256_json},
     provenance::headword_origin,
@@ -55,7 +56,7 @@ use crate::lexicon::{
         CreateSurfaceSnapshot, CreatedSurfaceSnapshot, DEFAULT_SURFACE_PAGE_SIZE,
         ExpectedSurfaceConfirmation, ExpectedSurfaceOwner, SurfaceConfirmationBinding,
         SurfaceConsumptionCommand, SurfaceSnapshotError, SurfaceSnapshotStore,
-        VerifiedSurfaceConfirmation, surface_owner_bundle_digest,
+        VerifiedSurfaceConfirmation, surface_context_digest, surface_owner_bundle_digest,
     },
     validation::{
         ProposedNode, proposed_nodes, validate_forms, validate_meanings, validate_node_identities,
@@ -119,7 +120,7 @@ pub enum LexiconServiceError {
     LifecycleRevisionConflict { current_lifecycle_revision: i64 },
     #[error("entry is archived")]
     EntryArchived,
-    #[error("entry has publication history or inbound draft references and cannot be deleted")]
+    #[error("entry has publication history or inbound references and cannot be deleted")]
     EntryNotDeletable,
     #[error("entry has inbound publication references")]
     EntryHasInboundPublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
