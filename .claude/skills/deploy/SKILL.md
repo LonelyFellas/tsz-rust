@@ -1,6 +1,6 @@
 ---
 name: deploy
-description: 仅在 GitHub origin/main 当前提交的 CI 成功后，通过 ssh 把该提交自动化部署到生产服务器 tshb-test（CI 门禁 → rsync → 服务器编译 → 重启 → 冒烟验证 → 可回退）。用户说「部署」「deploy」「推到服务器」「上线」「更新服务器代码」或提到 tshb-test / 47.121.142.19 的代码同步时使用。
+description: 仅在 GitHub origin/main 当前提交的 CI 成功后，通过 ssh 把该提交自动化部署到生产服务器 tshb-test（CI 门禁 → 取 CI 产物 → 原子替换二进制 → 重启 → 冒烟验证 → 可回退）。用户说「部署」「deploy」「推到服务器」「上线」「更新服务器代码」或提到 tshb-test / 47.121.142.19 的代码同步时使用。
 ---
 
 # tsz-rust 部署到 tshb-test
@@ -107,8 +107,17 @@ EOF
 
 ## 3. 其他前置检查
 
-1. **sqlx 离线缓存**：服务器用 `SQLX_OFFLINE=true` 编译；CI 已用提交的 `.sqlx/` 离线缓存
-   编译并检查。此时不得在本地刷新或修改缓存，否则工作区不再等于已验证提交。
+1. **CI 产物存在性（动服务器状态之前必查）**：本次部署装的是 `ci_run_id` 那个 run 的产物，
+   产物缺失就整个流程走不下去，必须在撤下旧 manifest**之前**发现：
+   ```bash
+   set -a; . ~/.config/tsz-rust/deploy-state.env; set +a
+   gh api "repos/LonelyFellas/tsz-rust/actions/runs/$ci_run_id/artifacts" \
+     --jq '.artifacts[] | select(.name == "tsz-rust-x86_64-linux-gnu") | [.name, .expired, .size_in_bytes] | @tsv'
+   ```
+   无输出或 `expired` 为 `true` 就停止：前者说明该提交早于「CI 产物部署」上线（或
+   release-artifact job 被跳过），后者说明超过了 30 天保留期。两种情况都不要绕过校验硬来，
+   先把 main 前进到含该 job 的提交、或重跑 CI 生成新产物。
+   本地 `.sqlx/` 此时不得刷新或修改——工作区必须仍等于已验证提交，第 5.1 节的 `git_tree` 依赖它。
 2. **ssh 连通性**：`ssh -o ConnectTimeout=8 tshb-test echo ok`。连不上的两大原因（都遇过）：
    - 本机 Clash/Surge 开着 TUN 模式，把 ssh 劫走非白名单出口 → 让用户关代理或给
      47.121.142.19 加 DIRECT 规则；
@@ -167,32 +176,41 @@ ssh tshb-test "python3 /opt/tsz-deploy-tools/backend-deployment-manifest.py vali
   --backup-dir '$deploy_backup_dir'"
 ssh tshb-test 'rm -f /opt/tsz-deploy-manifests/api.json'
 
-# 3) 推代码。排除项一个都不能少：
-#    .env 是生产密钥(600 权限,含 JWT_SECRET/COOKIE_SECURE)——rsync 覆盖或 --delete 掉它=事故;
-#    target 巨大且服务器要自己编译; 绝不使用 --delete;
-#    .claude/worktrees 是本机 worktree 的整份源码副本(数百个文件),服务器只编译仓库根,
-#    推上去纯属浪费并会在服务器留下另一个分支的代码,容易误读;
-#    rust-toolchain.toml 钉的是本地与 CI 的编译器版本,服务器只跑 cargo build 不跑 lint,
-#    版本一致对它没有价值。推上去反而会让 rustup 去下一整套具名工具链——服务器上只有
-#    stable 一套,任何具名版本(哪怕版本号相同)都算另一套安装,而它到 static.rust-lang.org
-#    实测只有约 29 KB/s,几小时起步。更糟的是这一步在「撤下旧 manifest」之后,卡住会把
-#    服务器留在「有二进制、无来源记录」的半状态。
-#    ⚠️ 由此带来一个有意接受的缺口:服务器用它自己的 stable(现为 1.97.0),与 CI 验证过的
-#    1.98.0 不是同一个编译器。若出现「CI 全绿但服务器编译失败」,先想到这一点,别一头扎进
-#    代码里找原因。
-rsync -az --exclude .git --exclude target --exclude .env --exclude .vscode \
-  --exclude .claude/worktrees --exclude rust-toolchain.toml \
-  /Users/darwish/Dev/tsz-core/tsz-rust/ tshb-test:/opt/tsz-rust/
+# 3) 取 CI 产物。artifact 出自门禁刚刚验证过的那个 run，因此与 deploy_sha 严格对应——
+#    不存在「服务器自己重编一份、CI 从没见过那个文件」的缺口。
+#    产物由 ci.yml 的 release-artifact job 在 ubuntu:22.04 容器里编出（与服务器 glibc 一致）。
+staging=~/.cache/tsz-rust-artifact
+rm -rf "$staging" && mkdir -p "$staging"
+gh run download "$ci_run_id" --repo LonelyFellas/tsz-rust \
+  --name tsz-rust-x86_64-linux-gnu --dir "$staging"
+# 下载不到就停：多半是在部署一个早于「CI 产物部署」上线的旧提交，那种情况只能回退到
+# 老流程（服务器自编）或先把 main 前进到含该 job 的提交，不要绕过校验硬来。
+test -s "$staging/tsz-rust"
 
-# 4) 服务器编译(后台跑,增量 1-2 分钟,全量约 7 分钟)。
-#    机器只有 3.4G 内存+2G swap,JOBS=2 防 OOM,别调高。
-ssh tshb-test 'cd /opt/tsz-rust && bash -o pipefail -c "CARGO_BUILD_JOBS=2 SQLX_OFFLINE=true ~/.cargo/bin/cargo build --release 2>&1 | tail -3"'
+# 可执行位不保证跨 zip 往返保留，无条件补一次；再用 CI 侧记录的摘要校验下载完整性。
+chmod +x "$staging/tsz-rust"
+( cd "$staging" && shasum -a 256 -c tsz-rust.sha256 )
+
+# 4) 安装到服务器。**不能直接 cp 覆盖运行中的二进制**（ETXTBSY），
+#    先传到同目录临时名，再用 mv 原子替换（rename 会解除旧 inode 的链接，进程不受影响）。
+ssh tshb-test 'install -d -m 0755 /opt/tsz-rust/target/release'
+rsync -az "$staging/tsz-rust" tshb-test:/opt/tsz-rust/target/release/tsz-rust.incoming
+ssh tshb-test 'set -eu
+  chmod 0755 /opt/tsz-rust/target/release/tsz-rust.incoming
+  mv -f /opt/tsz-rust/target/release/tsz-rust.incoming /opt/tsz-rust/target/release/tsz-rust'
 
 # 5) 重启 + 基础确认
 ssh tshb-test 'systemctl restart tsz-rust && sleep 2 && systemctl is-active tsz-rust && curl -s http://127.0.0.1:8383/healthz'
 ```
 
-编译步骤用后台执行（Bash run_in_background），完成后再继续,不要阻塞等待。
+**不再向服务器推送源码**：产物由 CI 编译，而 `include_str!` 与 `sqlx::migrate!` 都是编译期内嵌，
+服务器运行期只需要二进制与 `/opt/tsz-rust/.env`。这一并消掉了原先那串排除项
+（`.claude/worktrees`、`rust-toolchain.toml` 等）和「服务器编译器与 CI 不同版本」的缺口。
+`/opt/tsz-rust/target/` 现在只是二进制的存放目录，不再有构建产物写入。
+
+制品路径仍是 `/opt/tsz-rust/target/release/tsz-rust`：`ops/deployment_manifest.py` 里
+`EXPECTED_ARTIFACT_PATH` 硬编码了它，第 6 节的备份/回退也依赖它。路径语义有点怪
+（一个不再构建的 `target/`），但换路径要同时动 manifest 契约与既有备份，不值得。
 
 ## 5. 冒烟验证（部署不验证 = 没部署）
 
@@ -271,7 +289,7 @@ restore 会先验证备份组，再撤下正式 manifest，以同目录临时文
 
 回退后重跑 health/ready/auth smoke；若恢复了 `api.json`，必须执行 `deployment_manifest.py verify`。若旧部署没有 manifest，回退后的来源状态明确为 UNKNOWN/BLOCKED，不能伪造一个 SHA。
 
-代码文件不用回退（下次 rsync 会覆盖），二进制换回即服务回退。含迁移的改动回退要慎重——
+服务器上没有源码，二进制换回即服务回退。含迁移的改动回退要慎重——
 迁移已作用于 RDS，回退二进制前先确认旧代码兼容新 schema。
 
 ## 7. 环境变量
