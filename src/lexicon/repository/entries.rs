@@ -224,6 +224,97 @@ impl LexiconRepository {
         Ok(())
     }
 
+    /// 发布时为待物化的关联词建出占位词条。
+    ///
+    /// 与 [`Self::insert_entry`] 的区别只有两处，但都不能省：不写
+    /// `lexicon.entry.create` 的幂等记录——占位不是管理员发起的建条请求，冒充它会让
+    /// 那条记录在重放时吐出一个 201 建条响应；审计动作也换成
+    /// `lexicon.entry.materialize_relation_target`，这条审计正好回答「这个词条为什么
+    /// 会存在」，是占位唯一的来源说明。
+    pub(crate) async fn insert_relation_target_entry(
+        tx: &mut Transaction<'_, Postgres>,
+        word: &AdminWordV2,
+        actor_id: Uuid,
+        request_id: Uuid,
+        catalog_parts: &HashMap<String, Uuid>,
+        source_entry_id: Uuid,
+    ) -> Result<(), LexiconRepositoryError> {
+        let detection_snapshot = serde_json::to_value(&word.detection_snapshot)?;
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entries (
+                id, content_schema_version, language, kind, revision,
+                headword_mode, source_dialect, frequency, detection_snapshot,
+                created_by_admin_id, updated_by_admin_id, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, 'unified', NULL, NULL, $6, $7, $7, $8, $8)
+            "#,
+        )
+        .bind(word.id)
+        .bind(word.schema_version as i16)
+        .bind(&word.language)
+        .bind(kind_string(word.kind))
+        .bind(word.revision)
+        .bind(detection_snapshot)
+        .bind(actor_id)
+        .bind(word.created_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_entry_write_error)?;
+
+        insert_headwords(tx, word).await?;
+        insert_forms(tx, word, catalog_parts).await?;
+        insert_meanings(tx, word, &HashMap::new()).await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entry_step_progress (
+                entry_id, step, completed_revision, content_hash, completed_at
+            ) VALUES ($1, 'basics', $2, $3, $4)
+            "#,
+        )
+        .bind(word.id)
+        .bind(word.revision)
+        .bind(sha256_json(&word.detection_snapshot)?)
+        .bind(word.created_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entry_editor_projection (
+                entry_id, forms, meanings, rebuilt_revision, updated_at
+            ) VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(word.id)
+        .bind(serde_json::to_value(&word.forms)?)
+        .bind(serde_json::to_value(&word.meanings)?)
+        .bind(word.revision)
+        .bind(word.updated_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+
+        insert_audit_action(
+            tx,
+            actor_id,
+            "lexicon.entry.materialize_relation_target",
+            word.id,
+            word.revision,
+            request_id,
+            serde_json::json!({
+                "source_entry_id": source_entry_id,
+                "headword": match &word.headwords {
+                    WordHeadwordsV2::Unified { common } => common.as_str(),
+                    WordHeadwordsV2::Distinguish { uk, .. } => uk.as_str(),
+                },
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn insert_surface_acknowledgement(
         tx: &mut Transaction<'_, Postgres>,
         word: &AdminWordV2,

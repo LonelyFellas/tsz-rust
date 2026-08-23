@@ -225,12 +225,31 @@ impl LexiconService {
         LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
             .await
             .map_err(repository_error)?;
+        // 同名词条已经存在就顺带绑定：只绑不建，所以草稿保存依然不会产出任何词条。
+        // 这条路让「发布物化出占位之后草稿仍显示待建」自然收敛。
+        let (binding_issues, _) = self
+            .resolve_pending_relation_targets(
+                &mut transaction,
+                actor_id,
+                request_id,
+                entry_id,
+                &mut meanings,
+                crate::lexicon::service::publishing::PendingRelationResolution::BindExisting,
+            )
+            .await?;
+        // BindExisting 不建条，但会认出「关联词写成了本词条自己的主词」这类问题；
+        // 与已绑定关联词的自指一样，草稿保存就该拦下，不能等到发布。
+        if !binding_issues.is_empty() {
+            return Err(LexiconServiceError::ValidationFailed(binding_issues));
+        }
         let reference_resolution = resolve_meaning_references(
             &mut transaction,
             entry_id,
             &mut meanings,
             ReferenceResolutionMode::Canonicalize,
             false,
+            // 不物化的调用点：没有本次刚绑定的关联词。
+            &std::collections::HashSet::new(),
         )
         .await?;
         if !reference_resolution.issues.is_empty() {
@@ -651,12 +670,31 @@ impl LexiconService {
         LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
             .await
             .map_err(repository_error)?;
+        // 同名词条已经存在就顺带绑定：只绑不建，所以草稿保存依然不会产出任何词条。
+        // 这条路让「发布物化出占位之后草稿仍显示待建」自然收敛。
+        let (binding_issues, _) = self
+            .resolve_pending_relation_targets(
+                &mut transaction,
+                actor_id,
+                request_id,
+                entry_id,
+                &mut content,
+                crate::lexicon::service::publishing::PendingRelationResolution::BindExisting,
+            )
+            .await?;
+        // BindExisting 不建条，但会认出「关联词写成了本词条自己的主词」这类问题；
+        // 与已绑定关联词的自指一样，草稿保存就该拦下，不能等到发布。
+        if !binding_issues.is_empty() {
+            return Err(LexiconServiceError::ValidationFailed(binding_issues));
+        }
         let reference_resolution = resolve_meaning_references(
             &mut transaction,
             entry_id,
             &mut content,
             ReferenceResolutionMode::Canonicalize,
             false,
+            // 不物化的调用点：没有本次刚绑定的关联词。
+            &std::collections::HashSet::new(),
         )
         .await?;
         if !reference_resolution.issues.is_empty() {

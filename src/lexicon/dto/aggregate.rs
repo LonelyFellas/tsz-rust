@@ -373,12 +373,26 @@ pub struct WordSentenceV2 {
     pub links: Vec<WordSentenceLinkV2>,
 }
 
+/// 关联词有两种形态，由 `lexicon_relations_target_shape_check` 在库层保证互斥：
+///
+/// - **已绑定**：`target_word_id` + `target_sense_id` 指向真实义项，
+///   `target_headword` / `target_gloss` 是服务端回填的快照。
+/// - **待物化**：目标词还没有词条，只有 `pending_target_headword` 承载管理员录入的
+///   词面。这种形态只允许存在于草稿；发布时会先建出词条再回填 target，所以发布出去
+///   的关联词永远是已绑定的。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WordRelationV2 {
     pub id: Uuid,
     pub relation: String,
-    pub target_word_id: Uuid,
-    pub target_sense_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_word_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_sense_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub pending_target_headword: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(read_only)]
     pub target_headword: Option<String>,
@@ -386,6 +400,13 @@ pub struct WordRelationV2 {
     #[schema(read_only)]
     pub target_gloss: Option<String>,
     pub score: String,
+}
+
+impl WordRelationV2 {
+    /// 已绑定形态的目标键；待物化时返回 `None`。
+    pub fn bound_target(&self) -> Option<(Uuid, Uuid)> {
+        self.target_word_id.zip(self.target_sense_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

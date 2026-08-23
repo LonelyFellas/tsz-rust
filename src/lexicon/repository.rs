@@ -45,7 +45,8 @@ mod surfaces;
 use entries::*;
 use projections::*;
 pub(crate) use surface_writes::{
-    SurfaceContentScope, SurfaceProjectionSource, surface_lock_keys, surface_projection_sources,
+    SurfaceContentScope, SurfaceLockKey, SurfaceProjectionSource, surface_lock_keys,
+    surface_projection_sources,
 };
 
 #[derive(Debug, thiserror::Error)]
