@@ -35,9 +35,10 @@ use crate::lexicon::{
         SurfaceMatchCandidateV2, SurfaceMatchCategoryV2, SurfaceMatchPageV2,
         SurfaceMatchSeverityV2, SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, TextOrigin,
         TextVariantV2, ValidateAdminWordV2Input, WordBaseFormSlotV2, WordCreationStep,
-        WordDefinitionV2, WordDetectionSnapshotSmartDictionaryV2, WordFormGroupV2, WordFormTypeV2,
-        WordFormVariantV2, WordHeadwordsV2, WordPosFormsV2, WordPosMeaningsV2, WordPronunciationV2,
-        WordSenseV2, WordSentenceLinkV2, WordSentenceV2,
+        WordDefinitionV2, WordDetectionSnapshotSmartDictionaryV2, WordDetectionSnapshotV2,
+        WordFormGroupV2, WordFormTypeV2, WordFormVariantV2, WordHeadwordsV2, WordPosFormsV2,
+        WordPosMeaningsV2, WordPronunciationV2, WordRelationV2, WordSenseV2, WordSentenceLinkV2,
+        WordSentenceV2,
     },
     impact_store::{ImpactConfirmation, ImpactStore, ImpactStoreError},
     model::{

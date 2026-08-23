@@ -173,6 +173,93 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
+    /// 草稿保存用：找同名词条，**不加锁**。
+    ///
+    /// 这条路只绑定已有词条、不建条，所以不需要防并发建重。反过来加 FOR UPDATE
+    /// 会让保存 A 的事务一直占着 B 的行到提交，把 B 自己的保存挡在外面。
+    pub(crate) async fn find_entry_by_headword_key(
+        tx: &mut Transaction<'_, Postgres>,
+        kind: EntryKind,
+        normalized_headword: &str,
+    ) -> Result<Option<Uuid>, LexiconRepositoryError> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT entry_id
+            FROM lexicon.entry_headword_keys
+            WHERE language = 'en'
+              AND kind = $1
+              AND normalized_headword = $2
+            ORDER BY entry_id
+            LIMIT 1
+            "#,
+        )
+        .bind(kind_string(kind))
+        .bind(normalized_headword)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    /// 关联词物化用：找同名词条并锁住，避免两个并发发布各建一条同名占位。
+    ///
+    /// 用 entry_headword_keys 而不是 surface_sources —— 它才是词头唯一性的权威
+    /// （lexicon_entry_headword_keys_unique_idx 就建在它上面），投影表是可重建的派生物。
+    pub(crate) async fn find_entry_by_headword_key_for_update(
+        tx: &mut Transaction<'_, Postgres>,
+        kind: EntryKind,
+        normalized_headword: &str,
+    ) -> Result<Option<Uuid>, LexiconRepositoryError> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT keys.entry_id
+            FROM lexicon.entry_headword_keys keys
+            JOIN lexicon.entries entry ON entry.id = keys.entry_id
+            WHERE keys.language = 'en'
+              AND keys.kind = $1
+              AND keys.normalized_headword = $2
+            ORDER BY keys.entry_id
+            LIMIT 1
+            FOR UPDATE OF entry
+            "#,
+        )
+        .bind(kind_string(kind))
+        .bind(normalized_headword)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    /// 关联词物化用：取目标词条草稿里排在最前的义项。
+    ///
+    /// 目标词条可能还停在 forms 步骤、一个义项都没有，那样就没有节点可指——
+    /// 返回 None，由调用方给出可操作的校验错误，而不是去改别人的草稿。
+    ///
+    /// 刻意不加 FOR UPDATE：绑定路径本来就不建条、无需防并发建重，而锁住别人词条的
+    /// 义项行会一直占到本事务提交，把那个词条自己的保存挡在外面。义项在提交前被删的
+    /// 情况由 lexicon_relations_target_fkey 兜底。
+    pub(crate) async fn first_draft_sense(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+    ) -> Result<Option<Uuid>, LexiconRepositoryError> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT sense.id
+            FROM lexicon.senses sense
+            JOIN lexicon.nodes node
+              ON node.id = sense.id
+             AND node.entry_id = sense.entry_id
+             AND node.removed_from_draft_at IS NULL
+            WHERE sense.entry_id = $1
+            ORDER BY sense.entry_pos_id, sense.sort_order, sense.id
+            LIMIT 1
+            "#,
+        )
+        .bind(entry_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     pub(crate) async fn has_unprojected_legacy_exact_in_transaction(
         tx: &mut Transaction<'_, Postgres>,
         kind: EntryKind,

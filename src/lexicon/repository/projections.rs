@@ -471,8 +471,9 @@ pub(super) async fn insert_meanings(
                     INSERT INTO lexicon.relations (
                         id, entry_id, source_sense_id, relation_type,
                         target_entry_id, target_sense_id, score,
-                        target_headword_snapshot, target_gloss_snapshot, sort_order
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, $8, $9, $10)
+                        target_headword_snapshot, target_gloss_snapshot,
+                        pending_target_headword, sort_order
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, $8, $9, $10, $11)
                     "#,
                 )
                 .bind(relation.id)
@@ -482,8 +483,25 @@ pub(super) async fn insert_meanings(
                 .bind(relation.target_word_id)
                 .bind(relation.target_sense_id)
                 .bind(&relation.score)
-                .bind(relation.target_headword.as_deref().unwrap_or(""))
-                .bind(relation.target_gloss.as_deref().unwrap_or(""))
+                // 待物化的关联词没有目标义项可快照，必须落 NULL 而不是空串——
+                // lexicon_relations_target_shape_check 要求两组字段严格互斥。
+                .bind(
+                    relation.target_word_id.and(
+                        relation
+                            .target_headword
+                            .clone()
+                            .or_else(|| Some(String::new())),
+                    ),
+                )
+                .bind(
+                    relation.target_word_id.and(
+                        relation
+                            .target_gloss
+                            .clone()
+                            .or_else(|| Some(String::new())),
+                    ),
+                )
+                .bind(relation.pending_target_headword.as_deref())
                 .bind(relation_index as i32)
                 .execute(&mut **tx)
                 .await
