@@ -8765,3 +8765,96 @@ async fn meanings_drafted_before_forms_survive_completing_forms_and_reach_publis
         "先录词义、后补音标的词条应能正常发布：{published}"
     );
 }
+
+/// 非英文词条曾能一路落库成 `language = "en"` 的脏数据：内置词典未命中时创建路径放行，
+/// 而字符集只在 admin 前端拦，任何持 admin token 的调用方都能绕过。检测与创建两个入口
+/// 各自兜底一次——检测拦住误操作，创建拦住直接调 API。
+#[sqlx::test]
+async fn non_english_headwords_are_rejected_by_detection_and_creation(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    for headword in ["苹果测试", "apple苹果", "りんご", "яблоко", "123456", "---"] {
+        let (status, problem) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({"language": "en", "headword": headword})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{headword} 本不该通过检测：{problem}"
+        );
+        assert_eq!(problem["code"], "invalid_headword");
+        assert_eq!(problem["field"], "headword");
+    }
+
+    // 字符集只拦非英文，不收紧 not_found 的创建口子：生造词、变音符、缩写仍要放行。
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"language": "en", "headword": "café"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "合法英文词条检测失败：{detection}");
+    assert_eq!(detection["builtin_dictionary"]["status"], "not_found");
+
+    // 创建入口独立兜底：持一个合法检测也不能把非英文主词塞进来（先于检测证据比对触发，
+    // 所以拿到的是 invalid_headword 而不是 detection_mismatch）。
+    let (status, problem) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 2,
+            "detection_id": detection["detection_id"],
+            "headwords": {"mode": "unified", "common": "苹果测试"},
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "非英文主词本不该创建成功：{problem}"
+    );
+    assert_eq!(problem["code"], "invalid_headword");
+
+    let mut create_input = json!({
+        "schema_version": 2,
+        "detection_id": detection["detection_id"],
+        "headwords": {"mode": "unified", "common": "café"},
+    });
+    if let Some(surface_token) =
+        detection["smart_dictionary"]["surface_match_page"]["surface_confirmation_token"].as_str()
+    {
+        create_input["confirmed_surface_match_token"] = json!(surface_token);
+    }
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(create_input),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "合法英文词条创建失败：{created}"
+    );
+    assert_eq!(created["word"]["headwords"]["common"], "café");
+}

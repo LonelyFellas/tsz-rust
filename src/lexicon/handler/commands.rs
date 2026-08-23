@@ -39,7 +39,7 @@ pub async fn detect(
     request_body = CreateAdminWordV2Input,
     responses(
         (status = 201, description = "V2 词条草稿创建成功", body = AdminWordV2Envelope),
-        (status = 400, description = "主词为空、过长或含控制字符"),
+        (status = 400, description = "主词为空、过长、含控制字符，或不是英文词条（含非拉丁字符或不含字母）"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 409, description = "词头重复或幂等键冲突"),
