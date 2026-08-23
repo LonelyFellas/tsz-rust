@@ -25,12 +25,40 @@ pub struct DuplicateWordMatchV2 {
     #[serde(default = "default_duplicate_match_category")]
     #[schema(required = true)]
     pub match_category: SurfaceMatchCategoryV2,
+    /// 与 warning 分支 `matched_entry_contexts[].inbound_relations` 同构，
+    /// `previews` 同样最多 5 条。duplicate 分支没有 `surface_match_page` 可挂上下文，
+    /// 缺了它前端就提示不出「这条空壳词条是 XX 的同义词」。
+    // 与 match_category 同理，兼容缺字段的历史 Redis 快照：退化成「没有词条引用它」，
+    // 前端按约定整项略去。这条是部署细节，不进对外契约的 description。
+    #[serde(default)]
+    #[schema(required = true)]
+    pub inbound_relations: RelationReferenceSummaryV2,
 }
 
 const fn default_duplicate_match_category() -> SurfaceMatchCategoryV2 {
     // 兼容部署前最长存活 65 分钟的 Redis detection 快照。duplicate 分支只在 legacy
     // exact-headword 索引命中、而投影表尚未追平时触发，历史记录唯一可能的类别就是它。
     SurfaceMatchCategoryV2::ExactHeadword
+}
+
+#[cfg(test)]
+mod duplicate_word_match_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_redis_duplicate_without_inbound_relations_degrades_to_no_reference() {
+        let duplicate: DuplicateWordMatchV2 = serde_json::from_value(serde_json::json!({
+            "word_id": Uuid::now_v7(),
+            "headword": "legacy",
+            "dialect": "common",
+            "status": "draft",
+            "match_category": "exact_headword"
+        }))
+        .unwrap();
+        assert_eq!(duplicate.inbound_relations.total, 0);
+        assert!(duplicate.inbound_relations.previews.is_empty());
+        assert!(!duplicate.inbound_relations.truncated);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -263,7 +291,7 @@ pub enum RelationTypeV2 {
     Derivative,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RelationReferenceCountsV2 {
     pub synonym: u32,
@@ -304,7 +332,7 @@ mod relation_reference_preview_tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RelationReferenceSummaryV2 {
     pub total: u32,

@@ -433,6 +433,28 @@ impl LexiconService {
             .map_err(repository_error)?;
         let has_unprojected_legacy_exact = has_unprojected_legacy_exact(&legacy, &matches);
         let smart_dictionary = if has_unprojected_legacy_exact {
+            // 投影表还没追平，这条路径拿不到 surface 命中，也就没有 surface_match_page
+            // 可挂上下文；但入站关联只按 entry_id 反查，与投影无关，所以「谁在引用它」
+            // 能给到与 warning 分支一样的信息量。
+            let mut legacy_entry_ids = legacy
+                .iter()
+                .map(|record| record.entry_id)
+                .collect::<Vec<_>>();
+            legacy_entry_ids.sort_unstable();
+            legacy_entry_ids.dedup();
+            let inbound = inbound_relation_previews(
+                &self
+                    .repository
+                    .surface_inbound_relations(&legacy_entry_ids)
+                    .await
+                    .map_err(repository_error)?,
+            )?;
+            // distinguish 词条的 uk / us 两个词头键会让同一 entry 出两行，
+            // 所以先按 entry 收敛成摘要再逐行取用，避免第二行拿到空摘要。
+            let relation_summaries = relation_summary_builders(&inbound)
+                .into_iter()
+                .map(|(entry_id, builder)| (entry_id, builder.finish()))
+                .collect::<HashMap<_, _>>();
             SmartDictionaryResultV2::Duplicate {
                 duplicates: legacy
                     .into_iter()
@@ -451,6 +473,10 @@ impl LexiconService {
                         } else {
                             AdminWordStatus::Draft
                         },
+                        inbound_relations: relation_summaries
+                            .get(&record.entry_id)
+                            .cloned()
+                            .unwrap_or_default(),
                     })
                     .collect(),
             }
@@ -1449,13 +1475,7 @@ pub(super) fn surface_contexts_from_records(
     records: Vec<crate::lexicon::model::SurfaceEntryContextRecord>,
     inbound: &[InboundRelationPreview],
 ) -> Result<Vec<MatchedEntryContextV2>, LexiconServiceError> {
-    let mut relation_summaries = HashMap::<Uuid, RelationSummaryBuilder>::new();
-    for reference in inbound {
-        relation_summaries
-            .entry(reference.target_entry_id)
-            .or_default()
-            .push(&reference.preview);
-    }
+    let mut relation_summaries = relation_summary_builders(inbound);
     records
         .into_iter()
         .map(|record| {
@@ -1492,6 +1512,19 @@ pub(super) fn surface_contexts_from_records(
             })
         })
         .collect()
+}
+
+fn relation_summary_builders(
+    inbound: &[InboundRelationPreview],
+) -> HashMap<Uuid, RelationSummaryBuilder> {
+    let mut summaries = HashMap::<Uuid, RelationSummaryBuilder>::new();
+    for reference in inbound {
+        summaries
+            .entry(reference.target_entry_id)
+            .or_default()
+            .push(&reference.preview);
+    }
+    summaries
 }
 
 #[derive(Default)]
