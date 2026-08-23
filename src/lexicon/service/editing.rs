@@ -152,6 +152,14 @@ impl LexiconService {
                 message: "base_revision must be at least 1",
             });
         }
+        // A single step over the whole-entry limit is invalid regardless of
+        // stored content, so reject it before any context contention.
+        let step_nodes = proposed_nodes(&input.content, &DraftMeaningsStepContent::default());
+        let step_limit_issues =
+            validate_node_limit(entry_id, PersistedWordStep::Forms, &step_nodes);
+        if !step_limit_issues.is_empty() {
+            return Err(LexiconServiceError::ValidationFailed(step_limit_issues));
+        }
         let mut transaction = self
             .repository
             .pool()
@@ -598,6 +606,14 @@ impl LexiconService {
                 field: "base_revision",
                 message: "base_revision must be at least 1",
             });
+        }
+        // Keep the complete aggregate recheck below, but reject this
+        // state-independent lower bound before any context contention.
+        let step_nodes = proposed_nodes(&DraftFormsStepContent::default(), &content);
+        let step_limit_issues =
+            validate_node_limit(entry_id, PersistedWordStep::Meanings, &step_nodes);
+        if !step_limit_issues.is_empty() {
+            return Err(LexiconServiceError::ValidationFailed(step_limit_issues));
         }
         let mut transaction = self
             .repository

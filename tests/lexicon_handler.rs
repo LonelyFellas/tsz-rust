@@ -7701,6 +7701,10 @@ async fn forms_and_meanings_reject_aggregate_node_limit_before_writes(pool: PgPo
             .fetch_one(&pool)
             .await
             .unwrap();
+    let mut context_blocker = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_contexts(&mut context_blocker, &[entry_uuid])
+        .await
+        .expect("应能建立稳定的 context lock 竞争条件");
 
     let oversized_groups = (0..2_001)
         .map(|_| {
@@ -7713,7 +7717,7 @@ async fn forms_and_meanings_reject_aggregate_node_limit_before_writes(pool: PgPo
         .collect::<Vec<_>>();
     let mut oversized_forms = ready["word"]["forms"].clone();
     oversized_forms["pos"][0]["form_groups"] = json!(oversized_groups);
-    let (status, rejected_forms) = call(
+    let (forms_status, rejected_forms) = call(
         &state,
         Method::PUT,
         &format!("{ROOT}/entries/{entry_id}/steps/forms"),
@@ -7726,13 +7730,6 @@ async fn forms_and_meanings_reject_aggregate_node_limit_before_writes(pool: PgPo
         })),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "forms 超限应返回结构化 422：{rejected_forms}"
-    );
-    assert_eq!(rejected_forms["code"], "validation_failed");
-    assert!(has_issue(&rejected_forms, "aggregate_node_limit_exceeded"));
 
     let mut oversized_meanings = ready["word"]["meanings"].clone();
     oversized_meanings["sense_groups"]
@@ -7745,7 +7742,7 @@ async fn forms_and_meanings_reject_aggregate_node_limit_before_writes(pool: PgPo
                 "name_en": format!("Overflow {index}")
             })
         }));
-    let (status, rejected_meanings) = call(
+    let (meanings_status, rejected_meanings) = call(
         &state,
         Method::PUT,
         &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
@@ -7758,8 +7755,16 @@ async fn forms_and_meanings_reject_aggregate_node_limit_before_writes(pool: PgPo
         })),
     )
     .await;
+    context_blocker.rollback().await.unwrap();
     assert_eq!(
-        status,
+        forms_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "forms 超限应返回结构化 422：{rejected_forms}"
+    );
+    assert_eq!(rejected_forms["code"], "validation_failed");
+    assert!(has_issue(&rejected_forms, "aggregate_node_limit_exceeded"));
+    assert_eq!(
+        meanings_status,
         StatusCode::UNPROCESSABLE_ENTITY,
         "meanings 超限应返回结构化 422：{rejected_meanings}"
     );
