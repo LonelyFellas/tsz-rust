@@ -8832,6 +8832,50 @@ async fn non_english_headwords_are_rejected_by_detection_and_creation(pool: PgPo
     );
     assert_eq!(problem["code"], "invalid_headword");
 
+    // distinguish 模式的英美主词各解析一次，逐侧都要拦：只测一侧的话，另一侧漏掉
+    // 校验时测试仍会全绿。非法侧先于检测证据比对触发，所以拿到的是 invalid_headword。
+    for (label, headwords) in [
+        (
+            "英式侧",
+            json!({
+                "mode": "distinguish",
+                "uk": "苹果测试",
+                "us": "café",
+                "source_dialect": "us",
+            }),
+        ),
+        (
+            "美式侧",
+            json!({
+                "mode": "distinguish",
+                "uk": "café",
+                "us": "苹果测试",
+                "source_dialect": "uk",
+            }),
+        ),
+    ] {
+        let (status, problem) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(json!({
+                "schema_version": 2,
+                "detection_id": detection["detection_id"],
+                "headwords": headwords,
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{label}非英文主词本不该创建成功：{problem}"
+        );
+        assert_eq!(problem["code"], "invalid_headword");
+        assert_eq!(problem["field"], "headword");
+    }
+
     let mut create_input = json!({
         "schema_version": 2,
         "detection_id": detection["detection_id"],

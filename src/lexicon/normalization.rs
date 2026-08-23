@@ -201,6 +201,12 @@ mod tests {
             NormalizedHeadword::parse("   ").unwrap_err(),
             HeadwordNormalizationError::Empty
         );
+        // 制表符、换行前端报的是字符集文案，后端更早一步按控制字符拒——两侧都拒，
+        // 只是理由不同；这条断言把顺序钉住，免得字符集校验被挪到归一化之前。
+        assert_eq!(
+            NormalizedHeadword::parse("give\tup").unwrap_err(),
+            HeadwordNormalizationError::ControlCharacter
+        );
         assert_eq!(
             NormalizedHeadword::parse(&"a".repeat(201)).unwrap_err(),
             HeadwordNormalizationError::TooLong
