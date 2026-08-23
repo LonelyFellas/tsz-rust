@@ -51,6 +51,110 @@ async fn await_advisory_lock_waiters(pool: &PgPool, expected: i64) {
     }
 }
 
+#[sqlx::test]
+async fn context_lock_waits_out_a_transaction_that_is_about_to_release(pool: PgPool) {
+    // sqlx 的 Transaction::drop 只把 ROLLBACK 入队，等那条连接下次被异步使用才发出。
+    // 所以一个刚失败返回的请求，它的 advisory xact lock 会短暂地继续挂着；紧接着的
+    // 下一个请求从池里拿到别的连接，如果这里用 try-lock 就会凭空拿到 409。
+    // 这个测试把「持锁方即将释放」这一幕固定下来：等待方必须等到它，而不是立刻失败。
+    let admin_id = insert_admin(&pool).await;
+    let entry_id = insert_entry(&pool, admin_id, "word", "lockwait", "lockwait").await;
+
+    let mut holder = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_contexts(&mut holder, &[entry_id])
+        .await
+        .expect("持锁方应当直接拿到锁");
+
+    let waiter_pool = pool.clone();
+    let waiter = tokio::spawn(async move {
+        let mut waiter = waiter_pool.begin().await.unwrap();
+        let outcome = LexiconRepository::lock_surface_contexts(&mut waiter, &[entry_id]).await;
+        waiter.rollback().await.unwrap();
+        outcome
+    });
+
+    // 确认等待方真的排进了队列——它没有立刻失败，这正是修复前后的分水岭。
+    await_advisory_lock_waiters(&pool, 1).await;
+    holder.rollback().await.unwrap();
+
+    waiter
+        .await
+        .unwrap()
+        .expect("持锁方释放后，等待方必须拿到锁而不是报 SurfaceContextBusy");
+}
+
+#[sqlx::test]
+async fn context_lock_still_fails_fast_against_a_writer_that_keeps_holding(pool: PgPool) {
+    // 有界等待不能退化成无限等待：真正的并发写者仍然要在上限内被判定为占用，
+    // 否则连接池会被堵住。
+    let admin_id = insert_admin(&pool).await;
+    let entry_id = insert_entry(&pool, admin_id, "word", "lockbusy", "lockbusy").await;
+
+    let mut holder = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_contexts(&mut holder, &[entry_id])
+        .await
+        .unwrap();
+
+    let mut waiter = pool.begin().await.unwrap();
+    let outcome = LexiconRepository::lock_surface_contexts(&mut waiter, &[entry_id]).await;
+    assert!(
+        matches!(
+            outcome,
+            Err(tsz_rust::lexicon::repository::LexiconRepositoryError::SurfaceContextBusy)
+        ),
+        "持锁方一直不放时必须有界失败，实际：{outcome:?}"
+    );
+    waiter.rollback().await.unwrap();
+    holder.rollback().await.unwrap();
+}
+
+#[sqlx::test]
+async fn context_lock_reports_a_deadlock_as_busy_rather_than_an_internal_error(pool: PgPool) {
+    // save_meanings 在同一事务里先锁自身、再锁关联词目标，所以两个互相引用的词条
+    // 同时保存会按相反顺序抢同一对锁。try-lock 时代第二次直接返回 false；换成阻塞
+    // 锁之后这里会变成真的 ABBA 死锁，必须仍然收敛成可重试的占用信号，而不是 500。
+    let admin_id = insert_admin(&pool).await;
+    let first = insert_entry(&pool, admin_id, "word", "deadlockone", "deadlockone").await;
+    let second = insert_entry(&pool, admin_id, "word", "deadlocktwo", "deadlocktwo").await;
+
+    let mut left = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_contexts(&mut left, &[first])
+        .await
+        .unwrap();
+    let mut right = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_contexts(&mut right, &[second])
+        .await
+        .unwrap();
+
+    // 两边交叉抢对方已持有的锁。
+    let left_task = tokio::spawn(async move {
+        let outcome = LexiconRepository::lock_surface_contexts(&mut left, &[second]).await;
+        drop(left);
+        outcome
+    });
+    let right_task = tokio::spawn(async move {
+        let outcome = LexiconRepository::lock_surface_contexts(&mut right, &[first]).await;
+        drop(right);
+        outcome
+    });
+
+    let outcomes = [left_task.await.unwrap(), right_task.await.unwrap()];
+    assert!(
+        outcomes.iter().any(|outcome| matches!(
+            outcome,
+            Err(tsz_rust::lexicon::repository::LexiconRepositoryError::SurfaceContextBusy)
+        )),
+        "至少一方必须拿到可重试的 SurfaceContextBusy，实际：{outcomes:?}"
+    );
+    assert!(
+        !outcomes.iter().any(|outcome| matches!(
+            outcome,
+            Err(tsz_rust::lexicon::repository::LexiconRepositoryError::Database(_))
+        )),
+        "死锁与超时都不得以内部数据库错误冒出去：{outcomes:?}"
+    );
+}
+
 async fn insert_admin(pool: &PgPool) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
