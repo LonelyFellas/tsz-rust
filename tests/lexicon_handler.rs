@@ -1,5 +1,7 @@
 //! 智能词库从检测、建稿、分步保存到不可变发布的主链路契约测试。
 
+use std::time::Duration;
+
 use axum::{
     body::Body,
     http::{Method, Request, StatusCode, header},
@@ -27,6 +29,33 @@ use tsz_rust::{
 };
 
 const ROOT: &str = "/api/v1/admin/lexicon";
+const CONCURRENCY_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn await_database_lock_waiters(pool: &PgPool, expected: i64) {
+    let deadline = tokio::time::Instant::now() + CONCURRENCY_TIMEOUT;
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND state = 'active'
+              AND wait_event_type = 'Lock'
+            "#,
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting >= expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "等待 {expected} 个数据库锁排队者超时，当前 {waiting}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 fn test_redis_url() -> String {
     std::env::var("TEST_REDIS_URL")
@@ -5064,24 +5093,51 @@ async fn lifecycle_commands_preserve_publications_and_are_idempotent_under_doubl
 
     let archive_uri = format!("{ROOT}/entries/{entry_id}/archive");
     let double_click_body = json!({"base_revision": revision, "base_lifecycle_revision": 3});
-    let (first, second) = tokio::join!(
+    let mut row_barrier = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM lexicon.entries WHERE id = $1 FOR UPDATE")
+        .bind(entry_uuid)
+        .fetch_one(&mut *row_barrier)
+        .await
+        .unwrap();
+    let first_state = state.clone();
+    let first_uri = archive_uri.clone();
+    let first_bearer = bearer.clone();
+    let first_body = double_click_body.clone();
+    let first = tokio::spawn(async move {
         call(
-            &state,
+            &first_state,
             Method::POST,
-            &archive_uri,
-            &bearer,
+            &first_uri,
+            &first_bearer,
             Some(Uuid::now_v7()),
-            Some(double_click_body.clone()),
-        ),
+            Some(first_body),
+        )
+        .await
+    });
+    let second_state = state.clone();
+    let second_bearer = bearer.clone();
+    let second = tokio::spawn(async move {
         call(
-            &state,
+            &second_state,
             Method::POST,
             &archive_uri,
-            &bearer,
+            &second_bearer,
             Some(Uuid::now_v7()),
             Some(double_click_body),
         )
-    );
+        .await
+    });
+    await_database_lock_waiters(&pool, 2).await;
+    assert!(!first.is_finished() && !second.is_finished());
+    row_barrier.commit().await.unwrap();
+    let first = tokio::time::timeout(CONCURRENCY_TIMEOUT, first)
+        .await
+        .expect("释放行锁后首次归档应完成")
+        .unwrap();
+    let second = tokio::time::timeout(CONCURRENCY_TIMEOUT, second)
+        .await
+        .expect("释放行锁后第二次归档应完成")
+        .unwrap();
     assert_eq!(first.0, StatusCode::OK, "首次双击归档失败：{}", first.1);
     assert_eq!(second.0, StatusCode::OK, "第二次双击归档失败：{}", second.1);
     let lifecycle_revision: i64 =

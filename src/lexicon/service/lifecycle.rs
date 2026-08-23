@@ -232,12 +232,6 @@ impl LexiconService {
         }
 
         let target_entry_ids = targets.iter().map(|target| target.id).collect::<Vec<_>>();
-        LexiconRepository::lock_surface_contexts(&mut transaction, &target_entry_ids)
-            .await
-            .map_err(repository_error)?;
-        LexiconRepository::lock_surface_policy_writer(&mut transaction)
-            .await
-            .map_err(repository_error)?;
         let excluded_sources = if target_state == TargetState::Archived {
             targets.iter().map(|target| target.id).collect::<Vec<_>>()
         } else {
@@ -284,7 +278,11 @@ impl LexiconService {
             .await
             .map_err(repository_error)?,
         );
+        affected_contexts.extend(target_entry_ids);
         LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
+            .await
+            .map_err(repository_error)?;
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
             .await
             .map_err(repository_error)?;
 
