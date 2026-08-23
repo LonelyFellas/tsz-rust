@@ -47,7 +47,9 @@ use crate::lexicon::{
         RegionSurfaceRecord, RelatedSearchFilter, ResolvedRelationTargetRecord,
         ResolvedSenseTargetRecord, SenseTargetKey,
     },
-    normalization::{HeadwordNormalizationError, normalize_headword, sha256_json},
+    normalization::{
+        HeadwordNormalizationError, NormalizedHeadword, normalize_headword, sha256_json,
+    },
     provenance::headword_origin,
     repository::{LexiconRepository, LexiconRepositoryError},
     rich_text::canonicalize_meanings,

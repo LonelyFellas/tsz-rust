@@ -328,7 +328,7 @@ impl LexiconService {
         if input.language != "en" {
             return Err(LexiconServiceError::UnsupportedLanguage);
         }
-        let normalized = normalize_headword(&input.headword).map_err(map_headword_error)?;
+        let normalized = NormalizedHeadword::parse(&input.headword).map_err(map_headword_error)?;
         let request = DetectionRequestEcho {
             language: "en".to_owned(),
             headword: normalized.display.clone(),

@@ -21,13 +21,17 @@ pub(super) fn normalize_submitted_headwords(
 ) -> Result<(), LexiconServiceError> {
     match headwords {
         WordHeadwordsV2::Unified { common } => {
-            *common = normalize_headword(common)
+            *common = NormalizedHeadword::parse(common)
                 .map_err(map_headword_error)?
                 .display;
         }
         WordHeadwordsV2::Distinguish { uk, us, .. } => {
-            *uk = normalize_headword(uk).map_err(map_headword_error)?.display;
-            *us = normalize_headword(us).map_err(map_headword_error)?.display;
+            *uk = NormalizedHeadword::parse(uk)
+                .map_err(map_headword_error)?
+                .display;
+            *us = NormalizedHeadword::parse(us)
+                .map_err(map_headword_error)?
+                .display;
         }
     }
     Ok(())
@@ -165,6 +169,12 @@ pub(super) fn map_headword_error(error: HeadwordNormalizationError) -> LexiconSe
             HeadwordNormalizationError::Empty => "headword is required",
             HeadwordNormalizationError::TooLong => "headword is too long",
             HeadwordNormalizationError::ControlCharacter => "headword contains control characters",
+            HeadwordNormalizationError::UnsupportedCharacter => {
+                "headword must contain only Latin letters, digits and - ' . & / , characters"
+            }
+            HeadwordNormalizationError::MissingLatinLetter => {
+                "headword must contain at least one Latin letter"
+            }
         },
     }
 }
