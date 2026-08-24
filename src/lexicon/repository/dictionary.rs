@@ -177,19 +177,25 @@ impl LexiconRepository {
     ///
     /// 这条路只绑定已有词条、不建条，所以不需要防并发建重。反过来加 FOR UPDATE
     /// 会让保存 A 的事务一直占着 B 的行到提交，把 B 自己的保存挡在外面。
+    ///
+    /// 归档词条也要回出（带 `is_archived`），不能在这里过滤掉：它依然占着词头唯一键，
+    /// 「查不到」会被调用方当成「库里没这个词」而去建同名新条，撞
+    /// `lexicon_entry_headword_keys_unique_idx`。
     pub(crate) async fn find_entry_by_headword_key(
         tx: &mut Transaction<'_, Postgres>,
         kind: EntryKind,
         normalized_headword: &str,
-    ) -> Result<Option<Uuid>, LexiconRepositoryError> {
-        sqlx::query_scalar::<_, Uuid>(
+    ) -> Result<Option<HeadwordKeyRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, HeadwordKeyRecord>(
             r#"
-            SELECT entry_id
-            FROM lexicon.entry_headword_keys
-            WHERE language = 'en'
-              AND kind = $1
-              AND normalized_headword = $2
-            ORDER BY entry_id
+            SELECT keys.entry_id,
+                   entry.archived_at IS NOT NULL AS is_archived
+            FROM lexicon.entry_headword_keys keys
+            JOIN lexicon.entries entry ON entry.id = keys.entry_id
+            WHERE keys.language = 'en'
+              AND keys.kind = $1
+              AND keys.normalized_headword = $2
+            ORDER BY keys.entry_id
             LIMIT 1
             "#,
         )
@@ -208,10 +214,11 @@ impl LexiconRepository {
         tx: &mut Transaction<'_, Postgres>,
         kind: EntryKind,
         normalized_headword: &str,
-    ) -> Result<Option<Uuid>, LexiconRepositoryError> {
-        sqlx::query_scalar::<_, Uuid>(
+    ) -> Result<Option<HeadwordKeyRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, HeadwordKeyRecord>(
             r#"
-            SELECT keys.entry_id
+            SELECT keys.entry_id,
+                   entry.archived_at IS NOT NULL AS is_archived
             FROM lexicon.entry_headword_keys keys
             JOIN lexicon.entries entry ON entry.id = keys.entry_id
             WHERE keys.language = 'en'

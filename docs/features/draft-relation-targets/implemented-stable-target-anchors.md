@@ -35,6 +35,26 @@
   稳定 node 外键保留；管理员应归档目标，而不是破坏发布审计。仅有草稿入链时，移除这些草稿
   relation 后仍可删除目标。
 
+## 待建关联词遇到同名归档词条
+
+关联词搜索只回已发布且未归档的词条，所以同名词条一旦归档，管理员在下拉里看不见它，
+只会把这个词当库外新词写成待建关联词（`pending_target_headword`）。
+
+**绑定阶段一律拒绝绑到归档词条**——草稿保存的绑定与发布时的物化都是，报
+`relation_target_archived`，issue 锚在那条 relation 节点上、字段是
+`pending_target_headword`，待建词面原样留在草稿里。
+
+这与上面「目标事后被归档，来源草稿仍可保存」不矛盾，两者是不同时刻：
+
+- **已绑定**的关联词，目标事后才被归档 → 不追罚来源，保存照旧成功，发布门拦；
+- **尚未绑定**的待建关联词，绑定当刻目标就已归档 → 此刻词面还在管理员手上，是唯一
+  能提示他的时机。绑上去 `pending_target_headword` 会被清空，而发布必被
+  `relation_target_unavailable` 拒，管理员重填同一个词面还会再绑上来——「改不动也发不了」。
+
+出路是恢复那条词条（恢复后原样重存即可绑上）或改指向别的词。**不能绕过它另建同名新条**：
+归档只写 `entries.archived_at`，`entry_headword_keys` 那行还在，
+`lexicon_entry_headword_keys_unique_idx` 也建在 keys 表上，归档词条依然占着词面。
+
 ## 检测上下文与确认
 
 重复/surface 检测的 `inbound_relations` 合并两层事实：当前草稿 `lexicon.relations` 与来源词条
