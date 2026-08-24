@@ -233,6 +233,8 @@ pub(super) fn build_initial_pos_meanings(
                     sense_id,
                     role: "focus".to_owned(),
                 }],
+                associations: Vec::new(),
+                associations_state: SentenceAssociationsStateV2::Unresolved,
             }],
             relations: Vec::new(),
         }],

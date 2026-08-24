@@ -363,6 +363,74 @@ pub struct WordSentenceLinkV2 {
     pub role: String,
 }
 
+/// 例句正文里某个词的位置。
+///
+/// `start` / `end` 是所在 [`RichText`] `text` 的 **Unicode 码点**下标，左闭右开，
+/// 与 `RichTextAnnotation` 的 span 口径完全一致；`surface` 是该区间的原文词面，
+/// 既供前端直接展示，也让读取时能自检区间有没有跟着正文漂走。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceSourceRangeV1 {
+    pub start: usize,
+    pub end: usize,
+    pub surface: String,
+}
+
+/// 关联是怎么来的。仅供展示与口径质量评估，不参与任何判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceAssociationOriginV2 {
+    /// 发布时自动解析产出。
+    Auto,
+    /// 管理员事后改过或补过。
+    Manual,
+}
+
+/// `WordSentenceV2::associations` 是不是当前正文的解析结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceAssociationsStateV2 {
+    /// 当前正文还没被解析过：草稿从未发布，或正文改动后尚未重新发布。
+    /// 此时 `associations` 恒为空数组，**不代表「这句话没有可关联的词」**。
+    #[default]
+    Unresolved,
+    /// `associations` 就是当前正文的解析结果，空数组即句中确实没有可关联的词。
+    Resolved,
+}
+
+/// 例句里某个词指向别的词条某个词义的关联。
+///
+/// 整个结构是**只读投影**：发布时由后端解析正文产出，事后由
+/// `PUT /entries/{id}/sentences/{sentence_id}/associations` 修正。
+/// 草稿保存路径收到这个字段会直接丢弃，客户端填不进来。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WordSentenceAssociationV2 {
+    pub id: Uuid,
+    /// 位置落在 `en_text` 的哪一侧。distinguish 例句的 uk/us 两份正文下标会错位，
+    /// 所以位置必须绑到具体一侧；unified 例句只有 `common`。
+    pub source_dialect: Dialect,
+    pub source_range: SentenceSourceRangeV1,
+    pub target_word_id: Uuid,
+    pub target_sense_id: Uuid,
+    /// 命中目标词条的哪个词形槽位——按读者方言把 `centre`/`center` 显示成哪一个，
+    /// 靠的是它而不是原句词面。人工关联的词面在目标词条已发布词形里找不到时缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_form_slot_id: Option<Uuid>,
+    pub origin: SentenceAssociationOriginV2,
+    /// 写入时从目标词条当前发布快照取的值，读取不做跨词条 JOIN。
+    #[schema(read_only)]
+    pub target_headword: String,
+    #[schema(read_only)]
+    pub target_gloss: String,
+    #[schema(read_only)]
+    pub resolved_pos: String,
+    /// 与 `target_form_slot_id` 同生共死。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, read_only)]
+    pub resolved_form_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WordSentenceV2 {
     pub id: Uuid,
@@ -371,6 +439,17 @@ pub struct WordSentenceV2 {
     pub zh_text_id: Uuid,
     pub zh_text: RichText,
     pub links: Vec<WordSentenceLinkV2>,
+    /// 只读，按 `(source_dialect, source_range.start)` 升序。
+    /// `associations_state` 为 `unresolved` 时恒为空数组。
+    ///
+    /// `serde(default)` 是给存量编辑器投影用的——那些 JSONB 里没有这两个字段；
+    /// 服务端返回时一定带，所以契约上仍标成必填。
+    #[serde(default)]
+    #[schema(required = true)]
+    pub associations: Vec<WordSentenceAssociationV2>,
+    #[serde(default)]
+    #[schema(required = true)]
+    pub associations_state: SentenceAssociationsStateV2,
 }
 
 /// 关联词有两种形态，由 `lexicon_relations_target_shape_check` 在库层保证互斥：

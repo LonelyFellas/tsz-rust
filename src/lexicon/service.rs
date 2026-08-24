@@ -28,17 +28,19 @@ use crate::lexicon::{
         RelatedSearchLegacyResponse, RelatedSearchMatchMode, RelatedSearchQuery,
         RelatedSearchResponse, RelatedSearchV2Response, RelatedWordResult, RelatedWordSense,
         RelationReferenceCountsV2, RelationReferencePreviewV2, RelationReferenceSummaryV2,
-        RelationTypeV2, RetiredStableSlotV2, RichText, SaveFormsStepInput, SaveMeaningsStepInput,
-        SenseGroupV2, SmartDictionaryResultV2, SourceDialect, StepSaveIntent,
-        SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2, SurfaceAttentionLevelV2,
-        SurfaceCanContinueTrue, SurfaceConfirmationReasonV2, SurfaceContentScopeV2,
-        SurfaceMatchCandidateV2, SurfaceMatchCategoryV2, SurfaceMatchPageV2,
-        SurfaceMatchSeverityV2, SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, TextOrigin,
-        TextVariantV2, ValidateAdminWordV2Input, WordBaseFormSlotV2, WordCreationStep,
-        WordDefinitionV2, WordDetectionSnapshotSmartDictionaryV2, WordDetectionSnapshotV2,
-        WordFormGroupV2, WordFormTypeV2, WordFormVariantV2, WordHeadwordsV2, WordPosFormsV2,
-        WordPosMeaningsV2, WordPronunciationV2, WordRelationV2, WordSenseV2, WordSentenceLinkV2,
-        WordSentenceV2,
+        RelationTypeV2, ReplaceSentenceAssociationsInput, RetiredStableSlotV2, RichText,
+        SaveFormsStepInput, SaveMeaningsStepInput, SenseGroupV2, SentenceAssociationInputV2,
+        SentenceAssociationOriginV2, SentenceAssociationsStateV2, SentenceSourceRangeV1,
+        SmartDictionaryResultV2, SourceDialect, StepSaveIntent, SuggestDialectVariantsInputV2,
+        SuggestDialectVariantsResponseV2, SurfaceAttentionLevelV2, SurfaceCanContinueTrue,
+        SurfaceConfirmationReasonV2, SurfaceContentScopeV2, SurfaceMatchCandidateV2,
+        SurfaceMatchCategoryV2, SurfaceMatchPageV2, SurfaceMatchSeverityV2,
+        SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, TextOrigin, TextVariantV2,
+        ValidateAdminWordV2Input, WordBaseFormSlotV2, WordCreationStep, WordDefinitionV2,
+        WordDetectionSnapshotSmartDictionaryV2, WordDetectionSnapshotV2, WordFormGroupV2,
+        WordFormTypeV2, WordFormVariantV2, WordHeadwordsV2, WordPosFormsV2, WordPosMeaningsV2,
+        WordPronunciationV2, WordRelationV2, WordSenseV2, WordSentenceAssociationV2,
+        WordSentenceLinkV2, WordSentenceV2,
     },
     impact_store::{ImpactConfirmation, ImpactStore, ImpactStoreError},
     model::{
@@ -73,6 +75,7 @@ mod helpers;
 mod lifecycle;
 mod publishing;
 mod queries;
+mod sentence_association;
 
 use editing::*;
 pub(crate) use entry::entry_from_record;
@@ -113,6 +116,10 @@ pub enum LexiconServiceError {
     IdempotencyConflict,
     #[error("word not found")]
     WordNotFound,
+    #[error("sentence not found")]
+    SentenceNotFound,
+    #[error("sentence associations are not resolved for the current text")]
+    SentenceAssociationsUnresolved,
     #[error("publication not found")]
     PublicationNotFound,
     #[error("configured part of speech disappeared")]

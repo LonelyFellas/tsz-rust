@@ -70,6 +70,8 @@ pub enum ErrorCode {
     EntryHasInboundPublicationRefs,
     EntryHasUnavailablePublicationRefs,
     WordNotFound,
+    SentenceNotFound,
+    SentenceAssociationsUnresolved,
     PublicationNotFound,
     PartOfSpeechInUse,
     SubPartOfSpeechInUse,
@@ -413,6 +415,16 @@ impl ErrorCode {
                 StatusCode::CONFLICT,
             ),
             Self::WordNotFound => ("word_not_found", "Word not found", StatusCode::NOT_FOUND),
+            Self::SentenceNotFound => (
+                "sentence_not_found",
+                "Sentence not found",
+                StatusCode::NOT_FOUND,
+            ),
+            Self::SentenceAssociationsUnresolved => (
+                "sentence_associations_unresolved",
+                "Sentence associations are not resolved for the current text",
+                StatusCode::CONFLICT,
+            ),
             Self::PublicationNotFound => (
                 "publication_not_found",
                 "Publication not found",

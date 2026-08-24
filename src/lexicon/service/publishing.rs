@@ -188,6 +188,7 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?;
             }
+            Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;
             LexiconRepository::insert_idempotent_word_response(
                 &mut transaction,
                 PUBLISH_SCOPE,
@@ -308,6 +309,7 @@ impl LexiconService {
             )
             .await
             .map_err(repository_error)?;
+            Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;
             LexiconRepository::activate_historical_publication(
                 &mut transaction,
                 actor_id,
@@ -350,6 +352,12 @@ impl LexiconService {
         word.published_revision = Some(word.revision);
         word.has_unpublished_changes = false;
         word.published_at = Some(Utc::now());
+        // 例句自动关联：解析不出目标、有歧义、词面不合法都只跳过那个词，发布照常成功。
+        // 与上面的关联词物化相反——那边是管理员显式录入的意图，缺目标必须拦下。
+        // 挂在这里而不是两条早返回路径上：那两条不产出新 publication，正文与上次发布
+        // 逐字相同，解析结果不会变。
+        Self::refresh_sentence_associations(&mut transaction, entry_id, &word.meanings).await?;
+        Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;
         let publication_id = LexiconRepository::insert_publication(
             &mut transaction,
             &word,
@@ -477,6 +485,7 @@ impl LexiconService {
         .ok_or(LexiconServiceError::PublicationNotFound)?;
 
         if previous_publication_id == Some(publication_id) {
+            Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;
             LexiconRepository::insert_idempotent_word_response(
                 &mut transaction,
                 ACTIVATE_PUBLICATION_SCOPE,
@@ -621,6 +630,7 @@ impl LexiconService {
         )
         .await
         .map_err(repository_error)?;
+        Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;
         LexiconRepository::activate_historical_publication(
             &mut transaction,
             actor_id,

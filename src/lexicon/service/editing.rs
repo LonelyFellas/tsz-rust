@@ -298,7 +298,7 @@ impl LexiconService {
         let completed_steps = completed_steps(forms_complete, meanings_complete);
         let now = Utc::now();
         let previous_forms = current.forms.clone();
-        let word = AdminWordV2 {
+        let mut word = AdminWordV2 {
             revision: current.revision + 1,
             has_unpublished_changes: current.published_revision.is_some(),
             forms: input.content,
@@ -597,6 +597,7 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?;
         }
+        Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;
         transaction.commit().await.map_err(database_error)?;
         if let Some(confirmation) = verified_surface
             .as_ref()
@@ -620,6 +621,9 @@ impl LexiconService {
             intent,
             mut content,
         } = input;
+        // 只读投影不接受写入。放在最前面而不是临用前：后面每一道校验都不该看见
+        // 客户端塞进来的值，否则将来有人在校验里读到它就成了可被伪造的输入。
+        crate::lexicon::sentence_association::clear_sentence_associations(&mut content);
         if base_revision < 1 {
             return Err(LexiconServiceError::InvalidField {
                 field: "base_revision",
@@ -747,7 +751,7 @@ impl LexiconService {
                     .completed_steps
                     .contains(&PersistedWordStep::Meanings));
         let now = Utc::now();
-        let word = AdminWordV2 {
+        let mut word = AdminWordV2 {
             revision: current.revision + 1,
             has_unpublished_changes: current.published_revision.is_some(),
             meanings: content,
@@ -773,6 +777,7 @@ impl LexiconService {
         )
         .await
         .map_err(repository_error)?;
+        Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;
         transaction.commit().await.map_err(database_error)?;
         Ok(AdminWordV2Envelope { word })
     }

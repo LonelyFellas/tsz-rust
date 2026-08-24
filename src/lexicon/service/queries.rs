@@ -77,9 +77,9 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        Ok(AdminWordV2Envelope {
-            word: entry_from_record(record)?,
-        })
+        let mut word = entry_from_record(record)?;
+        self.hydrate_sentence_associations(&mut word).await?;
+        Ok(AdminWordV2Envelope { word })
     }
 
     /// 编辑器打开草稿走这里：除词条本体外还带上已退役的稳定槽位身份。

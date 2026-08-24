@@ -604,6 +604,40 @@ pub struct PublicationPath {
     pub publication_id: Uuid,
 }
 
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Path)]
+pub struct SentencePath {
+    pub id: Uuid,
+    pub sentence_id: Uuid,
+}
+
+/// 事后修正例句关联的一项。只读投影（词形槽位、词头/释义快照、词性）不接受输入，
+/// 一律由服务端按目标词条的当前发布版本解析后落值。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceAssociationInputV2 {
+    /// 关联 ID 由前端生成、跨保存稳定；沿用本仓节点 ID 的既有约定。
+    pub id: Uuid,
+    pub source_dialect: Dialect,
+    pub source_range: SentenceSourceRangeV1,
+    pub target_word_id: Uuid,
+    pub target_sense_id: Uuid,
+}
+
+/// 按例句整组替换关联：改目标 = 改列表里那一项，删 = 去掉，补 = 加一项。
+///
+/// 与词形步/词义步的整步替换同一种风格：列表就是这条例句关联的完整目标状态，
+/// 覆盖它所有存在的方言侧，空列表即清空。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceSentenceAssociationsInput {
+    #[schema(minimum = 1)]
+    pub base_revision: i64,
+    #[schema(minimum = 1)]
+    pub base_lifecycle_revision: i64,
+    pub associations: Vec<SentenceAssociationInputV2>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StepSaveIntent {

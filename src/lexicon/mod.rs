@@ -12,6 +12,7 @@ pub(crate) mod provenance;
 pub mod repository;
 pub mod rich_text;
 pub mod router;
+pub(crate) mod sentence_association;
 pub mod service;
 pub mod surface;
 pub mod surface_backfill;

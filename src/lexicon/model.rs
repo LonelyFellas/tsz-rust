@@ -349,3 +349,69 @@ pub(crate) struct ListFilter {
     pub limit: i64,
     pub offset: i64,
 }
+
+// --- 例句关联 ---
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct SentenceAssociationRecord {
+    pub id: Uuid,
+    pub sentence_id: Uuid,
+    pub source_dialect: String,
+    pub range_start: i32,
+    pub range_end: i32,
+    pub surface: String,
+    pub target_entry_id: Uuid,
+    pub target_sense_id: Uuid,
+    pub target_form_slot_id: Option<Uuid>,
+    pub origin: String,
+    pub target_headword_snapshot: String,
+    pub target_gloss_snapshot: String,
+    pub resolved_pos: String,
+    pub resolved_form_type: Option<String>,
+}
+
+/// 某条例句的某一侧正文解析到哪个版本了。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct SentenceAssociationScanRecord {
+    pub sentence_id: Uuid,
+    pub source_dialect: String,
+    pub text_hash: Vec<u8>,
+    pub resolver_version: i16,
+}
+
+/// 待写入的关联。`source_dialect` / `origin` 用库层的文本形态，与列上的 CHECK 一一对应。
+#[derive(Debug, Clone)]
+pub(crate) struct NewSentenceAssociation {
+    pub id: Uuid,
+    pub sentence_id: Uuid,
+    pub source_dialect: String,
+    pub range_start: i32,
+    pub range_end: i32,
+    pub surface: String,
+    pub target_entry_id: Uuid,
+    pub target_sense_id: Uuid,
+    pub target_form_slot_id: Option<Uuid>,
+    pub origin: String,
+    pub target_headword_snapshot: String,
+    pub target_gloss_snapshot: String,
+    pub resolved_pos: String,
+    pub resolved_form_type: Option<String>,
+}
+
+/// `surface_sources` 里一条当前发布版本的词形行。自动关联的候选就从这里来。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct PublishedFormSurfaceRecord {
+    pub normalized_surface: String,
+    pub dialect_scope: String,
+    pub entry_id: Uuid,
+    /// 命中的 `form_variant` 节点。
+    pub source_node_id: Uuid,
+    pub pos_id: Uuid,
+    pub pos: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct PublishedEntrySnapshotRecord {
+    pub entry_id: Uuid,
+    pub snapshot: Value,
+}
