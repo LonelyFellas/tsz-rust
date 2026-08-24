@@ -13,8 +13,9 @@ use crate::lexicon::{
     },
     dto::{
         Dialect, DialectVariantSlotV2, EnglishTextV2, GrammarStructureV2, GrammarVariantV2,
-        RichText, RichTextV1, SenseGroupV2, TextOrigin, TextVariantV2, WordDefinitionV2,
-        WordHeadwordsV2, WordPosMeaningsV2, WordSenseV2, WordSentenceLinkV2, WordSentenceV2,
+        RichText, RichTextV1, SenseGroupV2, SentenceAssociationsStateV2, TextOrigin, TextVariantV2,
+        WordDefinitionV2, WordHeadwordsV2, WordPosMeaningsV2, WordSenseV2, WordSentenceLinkV2,
+        WordSentenceV2,
     },
 };
 
@@ -246,6 +247,8 @@ fn map_generated(
                     sense_id,
                     role: "focus".to_owned(),
                 }],
+                associations: Vec::new(),
+                associations_state: SentenceAssociationsStateV2::Unresolved,
             });
         }
         senses.push(WordSenseV2 {

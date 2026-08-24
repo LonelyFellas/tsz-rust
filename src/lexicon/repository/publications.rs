@@ -21,8 +21,14 @@ impl LexiconRepository {
         .fetch_one(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)?;
-        let snapshot = serde_json::to_value(word)?;
-        let snapshot_hash = sha256_json(word)?;
+        // 关联是按 entry 单独维护的只读投影，不该跟着不可变快照一起冻住：
+        // 快照里存一份，回滚到历史版本时就会把一份过期的关联当成事实读回来。
+        let mut snapshot_word = word.clone();
+        crate::lexicon::sentence_association::clear_sentence_associations(
+            &mut snapshot_word.meanings,
+        );
+        let snapshot = serde_json::to_value(&snapshot_word)?;
+        let snapshot_hash = sha256_json(&snapshot_word)?;
 
         sqlx::query(
             r#"

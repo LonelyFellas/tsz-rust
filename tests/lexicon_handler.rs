@@ -535,6 +535,59 @@ async fn create_ready_draft_with_headwords(
     meanings_saved
 }
 
+/// 把词条唯一那条例句的英文正文换成 `text`，保存后返回新的 envelope。
+///
+/// 请求体直接由读到的 meanings 改出来，因此顺带覆盖「客户端把只读的 associations
+/// 原样回传，服务端必须丢弃」这条。
+async fn save_example_sentence(state: &AppState, bearer: &str, word: &Value, text: &str) -> Value {
+    let entry_id = word["word"]["id"].as_str().unwrap().to_owned();
+    let mut meanings = word["word"]["meanings"].clone();
+    let en_text = &mut meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"];
+    if en_text["mode"] == "distinguish" {
+        for side in ["uk", "us"] {
+            en_text[side]["variant"]["value"] = rich_text(text);
+        }
+    } else {
+        en_text["common"]["value"] = rich_text(text);
+    }
+    let (status, saved) = call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        bearer,
+        None,
+        Some(json!({
+            "base_revision": word["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "保存例句正文失败：{saved}");
+    saved
+}
+
+/// 建稿 → 发布，返回发布后的 envelope。自动关联的目标必须是已发布词条。
+async fn create_and_publish(
+    state: &AppState,
+    pool: &PgPool,
+    bearer: &str,
+    headword: &str,
+) -> Value {
+    let draft = create_ready_draft(state, pool, bearer, headword).await;
+    let (status, published) = publish_ready(state, bearer, &draft).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "发布 {headword} 失败：{published}"
+    );
+    published
+}
+
+fn first_sentence(word: &Value) -> &Value {
+    &word["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]
+}
+
 async fn publish_ready(state: &AppState, bearer: &str, word: &Value) -> (StatusCode, Value) {
     call(
         state,
@@ -10203,4 +10256,926 @@ async fn non_english_headwords_are_rejected_by_detection_and_creation(pool: PgPo
         "合法英文词条创建失败：{created}"
     );
     assert_eq!(created["word"]["headwords"]["common"], "café");
+}
+
+#[sqlx::test]
+async fn publishing_resolves_sentence_words_to_the_single_published_sense(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target = create_and_publish(&state, &pool, &bearer, "wall").await;
+    let target_entry_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let target_base_slot_id = target["word"]["forms"]["pos"][0]["base_form"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
+    // 草稿期不处理关联：正文存下去，句中的词一条关联都不产生。
+    let saved =
+        save_example_sentence(&state, &bearer, &source, "Center the picture on the wall.").await;
+    assert_eq!(first_sentence(&saved)["associations"], json!([]));
+    assert_eq!(first_sentence(&saved)["associations_state"], "unresolved");
+    let draft_associations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.sentence_associations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(draft_associations, 0, "草稿期不该落任何关联");
+
+    let (status, published) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+
+    let sentence = first_sentence(&published).clone();
+    assert_eq!(sentence["associations_state"], "resolved");
+    let associations = sentence["associations"].as_array().unwrap();
+    // wall 关联上；center / the / on / picture 都不关联——前两类词库里没有，
+    // on 是虚词，picture 是词条自己。
+    assert_eq!(associations.len(), 1, "{associations:?}");
+    let association = &associations[0];
+    assert_eq!(association["source_dialect"], "common");
+    assert_eq!(association["source_range"]["start"], 26);
+    assert_eq!(association["source_range"]["end"], 30);
+    assert_eq!(association["source_range"]["surface"], "wall");
+    assert_eq!(association["target_word_id"], target_entry_id.as_str());
+    assert_eq!(association["target_sense_id"], target_sense_id.as_str());
+    assert_eq!(
+        association["target_form_slot_id"],
+        target_base_slot_id.as_str()
+    );
+    assert_eq!(association["origin"], "auto");
+    assert_eq!(association["resolved_pos"], "noun");
+    assert_eq!(association["resolved_form_type"], "base");
+    assert_eq!(association["target_headword"], "wall");
+
+    // 读回一致。
+    let entry_id = published["word"]["id"].as_str().unwrap();
+    let (status, fetched) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        first_sentence(&fetched)["associations"],
+        sentence["associations"]
+    );
+    assert_eq!(first_sentence(&fetched)["associations_state"], "resolved");
+
+    // 发布快照不带只读投影：关联只有库表一份真相。
+    let snapshot: Value = sqlx::query_scalar(
+        "SELECT snapshot FROM lexicon.entry_publications WHERE entry_id = $1::uuid",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot["meanings"]["pos"][0]["senses"][0]["sentences"][0]["associations"],
+        json!([])
+    );
+}
+
+#[sqlx::test]
+async fn sentence_associations_are_position_wise_and_publish_survives_every_skip(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    create_and_publish(&state, &pool, &bearer, "wall").await;
+    let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
+    let saved = save_example_sentence(
+        &state,
+        &bearer,
+        &source,
+        "A wall behind the unknownium wall.",
+    )
+    .await;
+    let (status, published) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "跳词不该影响发布：{published}");
+
+    let associations = first_sentence(&published)["associations"]
+        .as_array()
+        .unwrap()
+        .clone();
+    // 同一拼写出现两次 → 两条位置不同的关联；库里没有的词与虚词不产生关联。
+    assert_eq!(associations.len(), 2, "{associations:?}");
+    assert_eq!(associations[0]["source_range"]["start"], 2);
+    assert_eq!(associations[1]["source_range"]["start"], 29);
+    assert!(
+        associations
+            .iter()
+            .all(|association| association["source_range"]["surface"] == "wall")
+    );
+}
+
+/// 复制一个词义（连同其下的释义与例句）并换上全新节点 ID，用来把目标词条做成多义词。
+fn duplicate_sense(sense: &Value, entry_id: &str) -> Value {
+    let mut clone = sense.clone();
+    let sense_id = Uuid::now_v7().to_string();
+    clone["id"] = json!(sense_id);
+    for definition in clone["definitions"].as_array_mut().unwrap() {
+        definition["id"] = json!(Uuid::now_v7().to_string());
+        if definition.get("content_id").is_some() {
+            definition["content_id"] = json!(Uuid::now_v7().to_string());
+        }
+    }
+    for sentence in clone["sentences"].as_array_mut().unwrap() {
+        sentence["id"] = json!(Uuid::now_v7().to_string());
+        sentence["zh_text_id"] = json!(Uuid::now_v7().to_string());
+        sentence["associations"] = json!([]);
+        let en_text = &mut sentence["en_text"];
+        if en_text["mode"] == "distinguish" {
+            for side in ["uk", "us"] {
+                en_text[side]["variant"]["id"] = json!(Uuid::now_v7().to_string());
+            }
+        } else {
+            en_text["common"]["id"] = json!(Uuid::now_v7().to_string());
+        }
+        for link in sentence["links"].as_array_mut().unwrap() {
+            if link["role"] == "focus" {
+                link["word_id"] = json!(entry_id);
+                link["sense_id"] = json!(sense_id);
+            }
+        }
+    }
+    clone
+}
+
+async fn replace_associations(
+    state: &AppState,
+    bearer: &str,
+    word: &Value,
+    sentence_id: &str,
+    idempotency_key: Uuid,
+    associations: Value,
+) -> (StatusCode, Value) {
+    let entry_id = word["word"]["id"].as_str().unwrap();
+    call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/sentences/{sentence_id}/associations"),
+        bearer,
+        Some(idempotency_key),
+        Some(json!({
+            "base_revision": word["word"]["revision"],
+            "base_lifecycle_revision": word["word"]["lifecycle_revision"],
+            "associations": associations,
+        })),
+    )
+    .await
+}
+
+#[sqlx::test]
+async fn ambiguous_targets_are_skipped_without_failing_the_publish(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 同一词性下有两个词义的目标：句中的词形指不到唯一义项，只能跳过。
+    let target = create_ready_draft(&state, &pool, &bearer, "wall").await;
+    let target_entry_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let mut meanings = target["word"]["meanings"].clone();
+    let extra = duplicate_sense(&meanings["pos"][0]["senses"][0], &target_entry_id);
+    meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(extra);
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": target["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, published_target) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published_target}");
+    assert_eq!(
+        published_target["word"]["meanings"]["pos"][0]["senses"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
+    let saved = save_example_sentence(&state, &bearer, &source, "A wall here.").await;
+    let (status, published) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+
+    let sentence = first_sentence(&published);
+    assert_eq!(
+        sentence["associations_state"], "resolved",
+        "解析跑过了，只是这个词没有唯一义项可指"
+    );
+    assert_eq!(sentence["associations"], json!([]));
+}
+
+#[sqlx::test]
+async fn published_sentence_associations_can_be_retargeted_removed_and_added(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let wall = create_and_publish(&state, &pool, &bearer, "wall").await;
+    let table = create_and_publish(&state, &pool, &bearer, "table").await;
+    let table_entry_id = table["word"]["id"].as_str().unwrap().to_owned();
+    let table_sense_id = table["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
+    let saved =
+        save_example_sentence(&state, &bearer, &source, "A wall near a table in a garden.").await;
+    let (status, published) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let sentence_id = first_sentence(&published)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let auto = first_sentence(&published)["associations"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(auto.len(), 2, "{auto:?}");
+    assert_eq!(auto[0]["target_word_id"], wall["word"]["id"]);
+    assert_eq!(auto[1]["target_word_id"], table_entry_id.as_str());
+
+    // garden 在源词条发布之后才建条：自动关联不会回填，正是「事后补」要解决的场景。
+    let garden = create_and_publish(&state, &pool, &bearer, "garden").await;
+    let garden_entry_id = garden["word"]["id"].as_str().unwrap().to_owned();
+    let garden_sense_id = garden["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // 改目标（wall 那条改指 table 的词义）+ 删（去掉 table 那条）+ 补（加上 garden）。
+    let added_id = Uuid::now_v7().to_string();
+    let (status, edited) = replace_associations(
+        &state,
+        &bearer,
+        &published,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([
+            {
+                "id": auto[0]["id"],
+                "source_dialect": "common",
+                "source_range": { "start": 2, "end": 6, "surface": "wall" },
+                "target_word_id": table_entry_id,
+                "target_sense_id": table_sense_id,
+            },
+            {
+                "id": added_id,
+                "source_dialect": "common",
+                "source_range": { "start": 25, "end": 31, "surface": "garden" },
+                "target_word_id": garden_entry_id,
+                "target_sense_id": garden_sense_id,
+            }
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+
+    let associations = first_sentence(&edited)["associations"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(associations.len(), 2, "{associations:?}");
+    assert_eq!(associations[0]["source_range"]["start"], 2);
+    assert_eq!(associations[0]["target_sense_id"], table_sense_id.as_str());
+    assert_eq!(associations[0]["origin"], "manual");
+    assert_eq!(associations[1]["source_range"]["start"], 25);
+    assert_eq!(associations[1]["target_word_id"], garden_entry_id.as_str());
+    assert_eq!(associations[1]["target_headword"], "garden");
+    assert_eq!(associations[1]["resolved_form_type"], "base");
+    assert_eq!(associations[1]["origin"], "manual");
+    assert_eq!(first_sentence(&edited)["associations_state"], "resolved");
+    // 关联修正不该把词条判成「有未发布改动」。
+    assert_eq!(edited["word"]["revision"], published["word"]["revision"]);
+    assert_eq!(edited["word"]["has_unpublished_changes"], false);
+    assert_eq!(
+        edited["word"]["lifecycle_revision"].as_i64().unwrap(),
+        published["word"]["lifecycle_revision"].as_i64().unwrap() + 1
+    );
+
+    // 乐观锁：拿旧的 lifecycle_revision 再改一次要 409。
+    let (status, conflict) = replace_associations(
+        &state,
+        &bearer,
+        &published,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["code"], "revision_conflict");
+
+    // 幂等重放返回同一份响应。
+    let key = Uuid::now_v7();
+    let body = json!([{
+        "id": added_id,
+        "source_dialect": "common",
+        "source_range": { "start": 25, "end": 31, "surface": "garden" },
+        "target_word_id": garden_entry_id,
+        "target_sense_id": garden_sense_id,
+    }]);
+    let (first_status, first_body) =
+        replace_associations(&state, &bearer, &edited, &sentence_id, key, body.clone()).await;
+    assert_eq!(first_status, StatusCode::OK, "{first_body}");
+    let (replay_status, replay_body) =
+        replace_associations(&state, &bearer, &edited, &sentence_id, key, body).await;
+    assert_eq!(replay_status, StatusCode::OK);
+    assert_eq!(replay_body, first_body, "幂等重放必须逐字返回同一份响应");
+    assert_eq!(
+        first_sentence(&first_body)["associations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "列表就是完整目标状态，没列出来的那条应被删掉"
+    );
+}
+
+#[sqlx::test]
+async fn changing_sentence_text_defers_reparsing_to_the_next_publish(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let wall = create_and_publish(&state, &pool, &bearer, "wall").await;
+    let table = create_and_publish(&state, &pool, &bearer, "table").await;
+    let table_entry_id = table["word"]["id"].as_str().unwrap().to_owned();
+    let table_sense_id = table["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
+    let saved = save_example_sentence(&state, &bearer, &source, "A wall here.").await;
+    let (status, published) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let sentence_id = first_sentence(&published)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let auto_id = first_sentence(&published)["associations"][0]["id"].clone();
+    assert_eq!(
+        first_sentence(&published)["associations"][0]["target_word_id"],
+        wall["word"]["id"]
+    );
+
+    // 人工改成 table 的词义。
+    let (status, edited) = replace_associations(
+        &state,
+        &bearer,
+        &published,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([{
+            "id": auto_id,
+            "source_dialect": "common",
+            "source_range": { "start": 2, "end": 6, "surface": "wall" },
+            "target_word_id": table_entry_id,
+            "target_sense_id": table_sense_id,
+        }]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+
+    // 正文没变的重新发布：解析整侧跳过，人工修正原样活着。
+    let resaved = save_example_sentence(&state, &bearer, &edited, "A wall here.").await;
+    let (status, republished) = publish_ready(&state, &bearer, &resaved).await;
+    assert_eq!(status, StatusCode::CREATED, "{republished}");
+    let kept = first_sentence(&republished)["associations"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0]["id"], auto_id);
+    assert_eq!(kept[0]["target_sense_id"], table_sense_id.as_str());
+    assert_eq!(kept[0]["origin"], "manual");
+
+    // 改正文：当前发布版本还是旧正文，关联要等下一次发布才重新解析。
+    let changed = save_example_sentence(&state, &bearer, &republished, "A table here.").await;
+    assert_eq!(first_sentence(&changed)["associations_state"], "unresolved");
+    assert_eq!(first_sentence(&changed)["associations"], json!([]));
+    let (status, blocked) = replace_associations(
+        &state,
+        &bearer,
+        &changed,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    assert_eq!(blocked["code"], "sentence_associations_unresolved");
+
+    let (status, republished) = publish_ready(&state, &bearer, &changed).await;
+    assert_eq!(status, StatusCode::CREATED, "{republished}");
+    let reparsed = first_sentence(&republished)["associations"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(reparsed.len(), 1, "{reparsed:?}");
+    assert_eq!(reparsed[0]["source_range"]["surface"], "table");
+    assert_eq!(
+        reparsed[0]["origin"], "auto",
+        "整侧重算，人工痕迹随旧正文一起走"
+    );
+}
+
+#[sqlx::test]
+async fn sentence_association_edits_reject_bad_ranges_and_unavailable_targets(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let table = create_and_publish(&state, &pool, &bearer, "table").await;
+    let table_entry_id = table["word"]["id"].as_str().unwrap().to_owned();
+    let table_sense_id = table["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let draft_target = create_ready_draft(&state, &pool, &bearer, "garden").await;
+
+    let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
+    let saved = save_example_sentence(&state, &bearer, &source, "A wall near a table.").await;
+    let sentence_id = first_sentence(&saved)["id"].as_str().unwrap().to_owned();
+
+    // 从未发布的草稿：当前正文没解析过，编辑入口不开放。
+    let (status, unresolved) = replace_associations(
+        &state,
+        &bearer,
+        &saved,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{unresolved}");
+    assert_eq!(unresolved["code"], "sentence_associations_unresolved");
+
+    let (status, published) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let source_entry_id = published["word"]["id"].as_str().unwrap().to_owned();
+
+    let (status, missing) = replace_associations(
+        &state,
+        &bearer,
+        &published,
+        &Uuid::now_v7().to_string(),
+        Uuid::now_v7(),
+        json!([]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(missing["code"], "sentence_not_found");
+
+    let duplicate_id = Uuid::now_v7().to_string();
+    let (status, rejected) = replace_associations(
+        &state,
+        &bearer,
+        &published,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([
+            {
+                "id": Uuid::now_v7().to_string(),
+                "source_dialect": "common",
+                "source_range": { "start": 100, "end": 200, "surface": "table" },
+                "target_word_id": table_entry_id,
+                "target_sense_id": table_sense_id,
+            },
+            {
+                "id": Uuid::now_v7().to_string(),
+                "source_dialect": "common",
+                "source_range": { "start": 2, "end": 6, "surface": "walk" },
+                "target_word_id": table_entry_id,
+                "target_sense_id": table_sense_id,
+            },
+            {
+                "id": Uuid::now_v7().to_string(),
+                "source_dialect": "uk",
+                "source_range": { "start": 14, "end": 19, "surface": "table" },
+                "target_word_id": table_entry_id,
+                "target_sense_id": table_sense_id,
+            },
+            {
+                "id": Uuid::now_v7().to_string(),
+                "source_dialect": "common",
+                "source_range": { "start": 2, "end": 6, "surface": "wall" },
+                "target_word_id": source_entry_id,
+                "target_sense_id": table_sense_id,
+            },
+            {
+                "id": Uuid::now_v7().to_string(),
+                "source_dialect": "common",
+                "source_range": { "start": 14, "end": 19, "surface": "table" },
+                "target_word_id": draft_target["word"]["id"],
+                "target_sense_id": draft_target["word"]["meanings"]["pos"][0]["senses"][0]["id"],
+            },
+            {
+                "id": duplicate_id,
+                "source_dialect": "common",
+                "source_range": { "start": 14, "end": 19, "surface": "table" },
+                "target_word_id": table_entry_id,
+                "target_sense_id": table_sense_id,
+            },
+            {
+                "id": duplicate_id,
+                "source_dialect": "common",
+                "source_range": { "start": 14, "end": 19, "surface": "table" },
+                "target_word_id": table_entry_id,
+                "target_sense_id": table_sense_id,
+            },
+            {
+                "id": Uuid::now_v7().to_string(),
+                "source_dialect": "common",
+                "source_range": { "start": 15, "end": 19, "surface": "able" },
+                "target_word_id": table_entry_id,
+                "target_sense_id": table_sense_id,
+            }
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    for code in [
+        "sentence_association_range_invalid",
+        "sentence_association_surface_mismatch",
+        "sentence_association_dialect_unavailable",
+        "sentence_association_self_target",
+        "sentence_association_target_unavailable",
+        "sentence_association_duplicate_id",
+        "sentence_association_range_overlap",
+    ] {
+        assert!(has_issue(&rejected, code), "缺少 {code}：{rejected}");
+    }
+
+    // 校验失败不落任何行。
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.sentence_associations WHERE sentence_id = $1::uuid",
+    )
+    .bind(&sentence_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, 1, "只该留下发布时自动建的那条 table 关联");
+}
+
+#[sqlx::test]
+async fn distinguish_sentences_anchor_associations_to_each_dialect_side(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let wall = create_and_publish(&state, &pool, &bearer, "wall").await;
+    let wall_entry_id = wall["word"]["id"].as_str().unwrap().to_owned();
+
+    let source = create_ready_draft_with_headwords(
+        &state,
+        &pool,
+        &bearer,
+        "centre",
+        Some(json!({
+            "mode": "distinguish",
+            "uk": "centre",
+            "us": "center",
+            "source_dialect": "uk",
+        })),
+    )
+    .await;
+    let entry_id = source["word"]["id"].as_str().unwrap().to_owned();
+    let mut meanings = source["word"]["meanings"].clone();
+    // 两侧正文的拼写长度不同，同一个词的下标必然错开——位置只能绑到具体一侧。
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["uk"]["variant"]["value"] =
+        rich_text("A colour wall.");
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["us"]["variant"]["value"] =
+        rich_text("A color wall.");
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let (status, published) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let sentence = first_sentence(&published);
+    assert_eq!(sentence["associations_state"], "resolved");
+    let associations = sentence["associations"].as_array().unwrap();
+    assert_eq!(associations.len(), 2, "{associations:?}");
+    assert_eq!(associations[0]["source_dialect"], "uk");
+    assert_eq!(associations[0]["source_range"]["start"], 9);
+    assert_eq!(associations[1]["source_dialect"], "us");
+    assert_eq!(associations[1]["source_range"]["start"], 8);
+    assert!(
+        associations
+            .iter()
+            .all(
+                |association| association["target_word_id"] == wall_entry_id.as_str()
+                    && association["source_range"]["surface"] == "wall"
+            )
+    );
+}
+
+#[sqlx::test]
+async fn one_surface_owned_by_two_entries_is_left_unlinked(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // wall 的复数是 walls，而 walls 自己也是一个词条的基本形——同一个词面落在两个词条上，
+    // 句中出现时指不到唯一词条，只能跳过。
+    let wall = create_ready_draft(&state, &pool, &bearer, "wall").await;
+    let (status, published) = publish_ready_confirming(&state, &bearer, &wall).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let walls = create_ready_draft(&state, &pool, &bearer, "walls").await;
+    let (status, published) = publish_ready_confirming(&state, &bearer, &walls).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+
+    // 先确认歧义确实成立：两个不同词条都在当前发布版本里认领了 walls 这个词面。
+    let owners: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(DISTINCT source.entry_id)
+        FROM lexicon.surface_sources source
+        JOIN lexicon.entries entry
+          ON entry.id = source.entry_id
+         AND entry.current_publication_id = source.publication_id
+        WHERE source.normalized_surface = 'walls'
+          AND source.content_scope = 'current_publication'
+          AND source.source_kind = 'form'
+          AND source.is_deleted = FALSE
+        "#,
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(owners, 2, "测试前提：walls 必须同时属于两个已发布词条");
+
+    let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
+    let saved = save_example_sentence(&state, &bearer, &source, "Two walls stand here.").await;
+    let (status, published) = publish_ready_confirming(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+
+    let sentence = first_sentence(&published);
+    assert_eq!(sentence["associations_state"], "resolved");
+    assert_eq!(sentence["associations"], json!([]));
+}
+
+#[sqlx::test]
+async fn manual_association_input_that_the_column_would_reject_is_a_422(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let table = create_and_publish(&state, &pool, &bearer, "table").await;
+    let table_entry_id = table["word"]["id"].as_str().unwrap().to_owned();
+    let table_sense_id = table["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
+    let saved = save_example_sentence(&state, &bearer, &source, "A wall near a table.").await;
+    let sentence_id = first_sentence(&saved)["id"].as_str().unwrap().to_owned();
+    let (status, published) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+
+    // 区间多带一个尾随空格：surface 与正文切片一致，能过 surface_mismatch，
+    // 但库层的 surface = btrim(surface) 会拒。必须在服务层挡成 422，不能漏到 500。
+    let (status, rejected) = replace_associations(
+        &state,
+        &bearer,
+        &published,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([{
+            "id": Uuid::now_v7().to_string(),
+            "source_dialect": "common",
+            "source_range": { "start": 2, "end": 7, "surface": "wall " },
+            "target_word_id": table_entry_id,
+            "target_sense_id": table_sense_id,
+        }]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "带首尾空白的区间必须是 422：{rejected}"
+    );
+    assert!(has_issue(&rejected, "sentence_association_range_invalid"));
+
+    // 发布时自动建的那条不受影响。
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.sentence_associations WHERE sentence_id = $1::uuid",
+    )
+    .bind(&sentence_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, 1);
+}
+
+#[sqlx::test]
+async fn a_surface_shared_by_several_slots_of_one_pos_links_without_guessing_the_slot(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 不规则动词：原形与过去式同拼写。词义仍唯一，关联该建；但槽位没有证据，
+    // 不能按变体 ID 顺序随手挑一个。
+    let target = create_ready_draft(&state, &pool, &bearer, "cut").await;
+    let target_entry_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let mut forms = target["word"]["forms"].clone();
+    // 只改拼写，槽位与变体的节点 ID 必须原样保留（stable_node_id_changed 会拦）。
+    let base_spellings = forms["pos"][0]["base_form"]["variants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|variant| variant["spelling"].clone())
+        .collect::<Vec<_>>();
+    for (index, spelling) in base_spellings.into_iter().enumerate() {
+        forms["pos"][0]["form_groups"][0]["slots"][0]["variants"][index]["spelling"] = spelling;
+    }
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": target["word"]["revision"],
+            "intent": "complete",
+            "content": forms,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, published_target) = publish_ready_confirming(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published_target}");
+
+    let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
+    let saved = save_example_sentence(&state, &bearer, &source, "A cut here.").await;
+    let (status, published) = publish_ready_confirming(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+
+    let associations = first_sentence(&published)["associations"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(associations.len(), 1, "{associations:?}");
+    assert_eq!(associations[0]["target_word_id"], target_entry_id.as_str());
+    assert_eq!(associations[0]["resolved_pos"], "noun");
+    assert!(
+        associations[0].get("target_form_slot_id").is_none(),
+        "槽位没有证据时应缺省，而不是按变体 ID 猜一个：{associations:?}"
+    );
+    assert!(associations[0].get("resolved_form_type").is_none());
+}
+
+#[sqlx::test]
+async fn dropping_one_dialect_side_stops_serving_that_side_s_associations(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    create_and_publish(&state, &pool, &bearer, "wall").await;
+    let source = create_ready_draft_with_headwords(
+        &state,
+        &pool,
+        &bearer,
+        "centre",
+        Some(json!({
+            "mode": "distinguish",
+            "uk": "centre",
+            "us": "center",
+            "source_dialect": "uk",
+        })),
+    )
+    .await;
+    let entry_id = source["word"]["id"].as_str().unwrap().to_owned();
+    let mut meanings = source["word"]["meanings"].clone();
+    for side in ["uk", "us"] {
+        meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"][side]["variant"]["value"] =
+            rich_text("A wall here.");
+    }
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, published) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    assert_eq!(
+        first_sentence(&published)["associations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // 把 us 侧撤回 missing。uk 侧正文没变，整条例句仍算已解析；但 us 侧的历史关联
+    // 指向一份前端已经渲染不出来的正文，不该再出现在响应里。
+    let mut meanings = published["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["us"] = json!({"state": "missing"});
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": published["word"]["revision"],
+            "intent": "save",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let sentence = first_sentence(&saved);
+    assert_eq!(sentence["associations_state"], "resolved");
+    let associations = sentence["associations"].as_array().unwrap();
+    assert_eq!(associations.len(), 1, "{associations:?}");
+    assert_eq!(associations[0]["source_dialect"], "uk");
+    // 库里那条 us 关联还在，等下一次发布 prune；只是不再对外返回。
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.sentence_associations WHERE source_dialect = 'us'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, 1);
 }

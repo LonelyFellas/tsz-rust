@@ -66,6 +66,10 @@ pub fn router() -> Router<AppState> {
                 .layer(DefaultBodyLimit::max(MAX_STEP_CONTENT_BODY_BYTES)),
         )
         .route(
+            "/entries/{id}/sentences/{sentence_id}/associations",
+            axum::routing::put(handler::replace_sentence_associations),
+        )
+        .route(
             "/entries/{id}/content-completion-jobs",
             axum::routing::post(
                 crate::lexicon::content_completion::handler::create_content_completion_job,

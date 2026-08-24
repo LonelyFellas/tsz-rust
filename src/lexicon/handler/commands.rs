@@ -268,6 +268,50 @@ pub async fn publish(
 }
 
 #[utoipa::path(
+    put,
+    path = "/api/v1/admin/lexicon/entries/{id}/sentences/{sentence_id}/associations",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(
+        SentencePath,
+        ("Idempotency-Key" = Uuid, Header, description = "关联修正命令幂等键（UUID）")
+    ),
+    request_body = ReplaceSentenceAssociationsInput,
+    responses(
+        (status = 200, description = "例句关联已整组替换", body = AdminWordV2Envelope),
+        (status = 400, description = "路径、header 或 JSON 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 404, description = "词条或例句不存在"),
+        (status = 409, description = "revision、幂等键冲突，词条已归档，或当前正文尚未解析过"),
+        (status = 422, description = "关联区间或目标非法")
+    )
+)]
+pub async fn replace_sentence_associations(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    ApiPath(path): ApiPath<SentencePath>,
+    ApiJson(input): ApiJson<ReplaceSentenceAssociationsInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    let idempotency_key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
+    let response = service(&state)
+        .replace_sentence_associations(
+            admin.id,
+            request_id.as_uuid(),
+            path.id,
+            path.sentence_id,
+            idempotency_key,
+            input,
+        )
+        .await
+        .map_err(map_error)?;
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/activate",
     tag = "admin-lexicon",

@@ -17,8 +17,9 @@ use crate::{
             DeleteDraftInput, DetectWordInputV2, DetectWordResponseV2, DraftValidationResponse,
             EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput, EntryPath,
             FormsImpactResponseV2, PreviewFormsImpactInputV2, PublicationPath,
-            PublishAdminWordV2Input, RelatedSearchQuery, RelatedSearchResponse, SaveFormsStepInput,
-            SaveMeaningsStepInput, SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2,
+            PublishAdminWordV2Input, RelatedSearchQuery, RelatedSearchResponse,
+            ReplaceSentenceAssociationsInput, SaveFormsStepInput, SaveMeaningsStepInput,
+            SentencePath, SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2,
             SurfaceMatchPageV2, SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2,
             ValidateAdminWordV2Input,
         },
@@ -37,8 +38,8 @@ pub(crate) mod lifecycle;
 pub(crate) mod query;
 
 pub use commands::{
-    activate_publication, create, detect, preview_forms_impact, publish, save_forms, save_meanings,
-    suggest_dialect_variants, validate,
+    activate_publication, create, detect, preview_forms_impact, publish,
+    replace_sentence_associations, save_forms, save_meanings, suggest_dialect_variants, validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_draft, restore, restore_batch};
 pub use query::{get, list, related_search, stats, surface_match_snapshot_page};
@@ -173,6 +174,14 @@ fn map_error(error: LexiconServiceError) -> AppError {
         LexiconServiceError::WordNotFound => {
             AppError::not_found_with_code(ErrorCode::WordNotFound, "word not found")
         }
+        LexiconServiceError::SentenceNotFound => {
+            AppError::not_found_with_code(ErrorCode::SentenceNotFound, "sentence not found")
+        }
+        LexiconServiceError::SentenceAssociationsUnresolved => AppError::conflict(
+            ErrorCode::SentenceAssociationsUnresolved,
+            None,
+            "sentence associations are not resolved for the current text",
+        ),
         LexiconServiceError::PublicationNotFound => {
             AppError::not_found_with_code(ErrorCode::PublicationNotFound, "publication not found")
         }
