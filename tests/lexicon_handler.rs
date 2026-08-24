@@ -6933,6 +6933,343 @@ async fn materialization_refuses_a_target_entry_that_has_no_sense(pool: PgPool) 
     assert_eq!(rollback_probe, 0, "发布失败时先建出来的占位必须跟着回滚");
 }
 
+/// 关联词搜索只搜「已发布且未归档」的词条，所以同名词条一旦归档，管理员在下拉里
+/// 看不到它，只会把这个词当库外新词写成待建关联词。此时绑上去就是死结：草稿存得下、
+/// 发布必被拒，而待建词面已被清空，重填同一个词还会再绑上来。必须在绑定这一步拦住。
+#[sqlx::test]
+async fn saving_a_draft_refuses_to_bind_a_pending_relation_onto_an_archived_twin(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_headword = format!("arctarget{}", admin_id.simple());
+    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": target["word"]["revision"],
+            "base_lifecycle_revision": target["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "归档目标词条失败：{archived}");
+
+    let source = create_ready_draft(
+        &state,
+        &pool,
+        &bearer,
+        &format!("arcsource{}", admin_id.simple()),
+    )
+    .await;
+    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let relation_id = Uuid::now_v7();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "synonym",
+        "pending_target_headword": target_headword,
+        "score": "70.00"
+    }]);
+    let save = |content: Value, base_revision: Value| {
+        let state = state.clone();
+        let bearer = bearer.clone();
+        async move {
+            call(
+                &state,
+                Method::PUT,
+                &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+                &bearer,
+                None,
+                Some(json!({
+                    "base_revision": base_revision,
+                    "intent": "complete",
+                    "content": content,
+                })),
+            )
+            .await
+        }
+    };
+
+    let (status, blocked) = save(meanings.clone(), source["word"]["revision"].clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "同名词条已归档时草稿保存就该被拦下：{blocked}"
+    );
+    let issue = blocked["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "relation_target_archived")
+        .unwrap_or_else(|| panic!("错误必须说清是同名词条已归档：{blocked}"));
+    // 锚回具体那一条关联词，并指向管理员实际填过的字段——他没填过 target_sense_id。
+    assert_eq!(issue["node_id"], relation_id.to_string());
+    assert_eq!(issue["field"], "pending_target_headword");
+
+    // 被拒的保存必须整笔回滚——revision 不许往前走，否则前端手里的 base_revision
+    // 会平白失效，管理员改完词面再存就撞 revision 冲突，等于换了个方式卡死。
+    let (status, reread) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "重读词条失败：{reread}");
+    assert_eq!(
+        reread["word"]["revision"], source["word"]["revision"],
+        "被拒的保存不得推进 revision：{reread}"
+    );
+
+    // 出路必须真的存在：恢复那条词条之后，同一份草稿就能存下并绑上去。
+    let (status, restored) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_entry_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": archived["word"]["revision"],
+            "base_lifecycle_revision": archived["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "恢复目标词条失败：{restored}");
+
+    let (status, saved) = save(meanings, source["word"]["revision"].clone()).await;
+    assert_eq!(status, StatusCode::OK, "恢复之后应能存下：{saved}");
+    let bound = &saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(
+        bound["target_word_id"],
+        target_entry_id.to_string(),
+        "恢复之后应当绑上原来那条词条：{bound}"
+    );
+}
+
+/// 待建关联词是先存下、后发布的，目标可能在这中间才被建出来并归档。发布时的物化
+/// 同样不能绑上去——归档词条占着词头唯一键，绕过它另建同名新条会撞唯一索引。
+#[sqlx::test]
+async fn publishing_refuses_to_materialize_a_pending_relation_onto_an_archived_twin(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_headword = format!("arclate{}", admin_id.simple());
+    let source = create_ready_draft(
+        &state,
+        &pool,
+        &bearer,
+        &format!("arclatesrc{}", admin_id.simple()),
+    )
+    .await;
+    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let relation_id = Uuid::now_v7();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "synonym",
+        "pending_target_headword": target_headword,
+        "score": "65.00"
+    }]);
+
+    // 存下时库里还没有这个词，草稿留在待物化形态。
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "保存失败：{saved}");
+    assert!(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
+            .is_null(),
+        "前置：目标不存在时应留在待物化形态：{saved}"
+    );
+
+    // 之后别人把这个词建了出来，又把它归档了。
+    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": target["word"]["revision"],
+            "base_lifecycle_revision": target["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "归档目标词条失败：{archived}");
+
+    let (status, blocked) = publish_ready(&state, &bearer, &saved).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "应被拦下：{blocked}"
+    );
+    let issue = blocked["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "relation_target_archived")
+        .unwrap_or_else(|| panic!("错误必须说清是同名词条已归档：{blocked}"));
+    assert_eq!(issue["node_id"], relation_id.to_string());
+    assert_eq!(issue["field"], "pending_target_headword");
+
+    // 既没绑上归档词条，也没另建一条同名的——那会撞词头唯一索引。
+    let twin_count: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT entry_id) FROM lexicon.entry_headword_keys
+         WHERE normalized_headword = $1",
+    )
+    .bind(&target_headword)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(twin_count, 1, "不得为同一个词面再建一条词条");
+    let pending: Option<String> =
+        sqlx::query_scalar("SELECT pending_target_headword FROM lexicon.relations WHERE id = $1")
+            .bind(relation_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .flatten();
+    assert_eq!(
+        pending.as_deref(),
+        Some(target_headword.as_str()),
+        "发布失败后关联词必须仍是待物化形态，词面还在管理员手上"
+    );
+}
+
+/// 词形步骤保存也会顺带绑定待物化关联词（`save_forms` 与 `save_meanings` 各有一个
+/// `BindExisting` 调用点），所以同名词条被第三方归档之后，管理员**在词形步骤也存不下**。
+///
+/// 这是有意的：放行就等于让词形保存把关联词绑成死结。但代价是错误落在一个他当时
+/// 看不见的地方——`reference_issue` 把 `step` 硬编码成 `meanings`，`node_id` 指向词义
+/// 步骤的关联词节点。这里把这个形态钉住，将来要调整必须是有意为之。
+#[sqlx::test]
+async fn saving_the_forms_step_is_blocked_by_an_archived_relation_twin_too(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_headword = format!("arcforms{}", admin_id.simple());
+    let source = create_ready_draft(
+        &state,
+        &pool,
+        &bearer,
+        &format!("arcformssrc{}", admin_id.simple()),
+    )
+    .await;
+    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let relation_id = Uuid::now_v7();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "synonym",
+        "pending_target_headword": target_headword,
+        "score": "55.00"
+    }]);
+
+    // 存下时库里还没有这个词，关联词留在待物化形态。
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": source["word"]["revision"],
+            "intent": "complete",
+            "content": meanings,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "保存失败：{saved}");
+
+    // 之后别人把这个词建了出来，又把它归档了。
+    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": target["word"]["revision"],
+            "base_lifecycle_revision": target["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "归档目标词条失败：{archived}");
+
+    // 管理员回来改词形——内容原样重存，跟关联词毫无关系。
+    let (status, blocked) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": saved["word"]["revision"],
+            "intent": "complete",
+            "content": saved["word"]["forms"],
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "词形步骤同样绑定待物化关联词，归档目标必须一并拦下：{blocked}"
+    );
+    let issue = blocked["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "relation_target_archived")
+        .unwrap_or_else(|| panic!("错误必须说清是同名词条已归档：{blocked}"));
+    // 已知的错位：人在词形步骤，issue 却锚在词义步骤的关联词节点上。前端得据此
+    // 把管理员引到词义步骤，不能就地渲染。
+    assert_eq!(issue["step"], "meanings");
+    assert_eq!(issue["node_id"], relation_id.to_string());
+    assert_eq!(issue["field"], "pending_target_headword");
+
+    // 词面仍在草稿里，管理员去词义步骤就能改。
+    let pending: Option<String> =
+        sqlx::query_scalar("SELECT pending_target_headword FROM lexicon.relations WHERE id = $1")
+            .bind(relation_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .flatten();
+    assert_eq!(pending.as_deref(), Some(target_headword.as_str()));
+}
+
 #[sqlx::test]
 async fn relation_target_headwords_follow_the_source_dialect(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())

@@ -1179,7 +1179,7 @@ impl LexiconService {
                 // 关联词写成了本词条自己的主词。绑上去只会在随后的复核里以
                 // relation_self_target 报错，而那条错误指向管理员根本没填过的
                 // target_word_id；直接在这里按他实际写的字段报出来。
-                Some(existing_entry_id) if existing_entry_id == entry_id => {
+                Some(found) if found.entry_id == entry_id => {
                     issues.extend(target.relation_ids.iter().map(|relation_id| {
                         reference_issue(
                             *relation_id,
@@ -1190,12 +1190,30 @@ impl LexiconService {
                     }));
                     continue;
                 }
-                Some(existing_entry_id) => {
-                    let sense = LexiconRepository::first_draft_sense(tx, existing_entry_id)
+                // 同名词条已归档。这里必须报错，且草稿保存就报——别的绑不上的情形
+                // （目标还没建、目标还没写词义）都会自愈，留着待物化等下一次即可，
+                // 归档不会：关联词搜索只搜已发布未归档词条，管理员根本看不见它，
+                // 绑上去就是「草稿存得下、发布必被拒」，而那时待建词面已被清空，
+                // 他重填同一个词还会再绑上来。归档词条又占着词头唯一键，绕过它
+                // 另建同名新条会撞 lexicon_entry_headword_keys_unique_idx。
+                // 趁词面还在手上报出来，管理员才能改词面、或先去恢复那条词条。
+                Some(found) if found.is_archived => {
+                    issues.extend(target.relation_ids.iter().map(|relation_id| {
+                        reference_issue(
+                            *relation_id,
+                            "pending_target_headword",
+                            "relation_target_archived",
+                            "同名词条已归档，请先恢复它再关联，或改指向其他词",
+                        )
+                    }));
+                    continue;
+                }
+                Some(found) => {
+                    let sense = LexiconRepository::first_draft_sense(tx, found.entry_id)
                         .await
                         .map_err(repository_error)?;
                     match sense {
-                        Some(sense_id) => (existing_entry_id, sense_id),
+                        Some(sense_id) => (found.entry_id, sense_id),
                         // 目标词条已存在但还停在 forms 步骤，没有义项可指。草稿保存不该
                         // 因此失败，留着待物化即可；发布必须落定，就报出可操作的错误，
                         // 让管理员先去把那边的词义补上，而不是替他改别人的草稿。

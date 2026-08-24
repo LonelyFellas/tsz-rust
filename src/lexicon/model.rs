@@ -36,6 +36,18 @@ pub(crate) struct DuplicateRecord {
     pub is_published: bool,
 }
 
+/// 词头唯一键上的同名词条。
+///
+/// `is_archived` 必须跟着回出：归档只写 `entries.archived_at`，
+/// `entry_headword_keys` 那行还在，`lexicon_entry_headword_keys_unique_idx`
+/// 也建在 keys 表上（`archived_at` 在 entries 表，做不成部分索引），
+/// 所以归档词条依然占着词面——既不能当作可绑目标，也不能绕过它另建同名新条。
+#[derive(Debug, Clone, Copy, sqlx::FromRow)]
+pub(crate) struct HeadwordKeyRecord {
+    pub entry_id: Uuid,
+    pub is_archived: bool,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct CatalogPartRecord {
     pub id: Uuid,

@@ -12,9 +12,9 @@ use crate::{
         model::{
             CatalogPartRecord, CatalogSubPartRecord, DictionaryCandidateRecord,
             DictionaryTermRecord, DuplicateRecord, EntryRecord, FormsSurfaceAcknowledgementRecord,
-            HistoricalPublicationRecord, IdempotencyRecord, InboundSenseReferenceRecord,
-            ListEntryRecord, ListFilter, NewPublicationSenseReference, NodeIdentityRecord,
-            RegionSurfaceRecord, RelatedSearchFilter, RelatedSearchRecord,
+            HeadwordKeyRecord, HistoricalPublicationRecord, IdempotencyRecord,
+            InboundSenseReferenceRecord, ListEntryRecord, ListFilter, NewPublicationSenseReference,
+            NodeIdentityRecord, RegionSurfaceRecord, RelatedSearchFilter, RelatedSearchRecord,
             ResolvedRelationTargetRecord, ResolvedSenseTargetRecord, RetiredStableSlotRecord,
             SenseTargetKey, StatsRecord, SurfaceEntryContextRecord, SurfaceInboundRelationRecord,
             SurfaceLookupKey, SurfaceSourceRecord,
