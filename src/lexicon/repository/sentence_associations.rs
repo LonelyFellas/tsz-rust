@@ -165,9 +165,13 @@ impl LexiconRepository {
 
     /// 事后修正关联只推进 `lifecycle_revision`：改的是已发布内容的附属数据，
     /// 推进 `revision` 会把词条判成「有未发布改动」，逼出一次没必要的重新发布。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn record_sentence_association_edit(
         tx: &mut Transaction<'_, Postgres>,
-        word: &AdminWordV2,
+        entry_id: Uuid,
+        revision: i64,
+        lifecycle_revision: i64,
+        updated_at: chrono::DateTime<chrono::Utc>,
         actor_id: Uuid,
         request_id: Uuid,
         sentence_id: Uuid,
@@ -181,12 +185,12 @@ impl LexiconRepository {
             WHERE id = $1 AND lifecycle_revision = $5 AND revision = $6
             "#,
         )
-        .bind(word.id)
-        .bind(word.lifecycle_revision)
+        .bind(entry_id)
+        .bind(lifecycle_revision)
         .bind(actor_id)
-        .bind(word.updated_at)
-        .bind(word.lifecycle_revision - 1)
-        .bind(word.revision)
+        .bind(updated_at)
+        .bind(lifecycle_revision - 1)
+        .bind(revision)
         .execute(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)?;
@@ -199,12 +203,12 @@ impl LexiconRepository {
             tx,
             actor_id,
             "lexicon.sentence_associations.replace",
-            word.id,
-            word.revision,
+            entry_id,
+            revision,
             request_id,
             serde_json::json!({
                 "sentence_id": sentence_id,
-                "lifecycle_revision": word.lifecycle_revision,
+                "lifecycle_revision": lifecycle_revision,
             }),
         )
         .await
@@ -212,9 +216,8 @@ impl LexiconRepository {
 
     /// 自动关联的候选词形：只认未归档词条**当前发布版本**里真实录入的词形。
     ///
-    /// 只查 `source_kind = 'form'`——headword 行的 `pos` / `form_type` 是 NULL
-    /// （`lexicon_surface_sources_source_shape_check`），而这两列正是筛选口径与
-    /// 只读投影的依据；发布必过 `validate_forms`，词头拼写一定同时以 form 行存在。
+    /// 只查各 schema 的真实词形行（V2 `form` / V3 `form_variant`）——headword 行的
+    /// `pos` / `form_type` 是 NULL，而这两列正是筛选口径与只读投影的依据。
     ///
     /// 刻意不加行锁：自动关联不登记 publication 引用，目标变了也只是快照旧一点，
     /// 为它把几十个无关词条锁进发布事务只会凭空造出 `reference_conflict`。
@@ -223,6 +226,7 @@ impl LexiconRepository {
         source_entry_id: Uuid,
         dialect_scopes: &[String],
         normalized_surfaces: &[String],
+        allow_v3: bool,
     ) -> Result<Vec<PublishedFormSurfaceRecord>, LexiconRepositoryError> {
         if normalized_surfaces.is_empty() {
             return Ok(Vec::new());
@@ -245,7 +249,7 @@ impl LexiconRepository {
               AND source.content_scope = 'current_publication'
               AND source.language = 'en'
               AND source.entry_kind = 'word'
-              AND source.source_kind = 'form'
+              AND source.source_kind = ANY($5::text[])
               AND source.normalization_version = $1
               AND source.entry_id <> $2
               AND source.dialect_scope = ANY($3::text[])
@@ -256,6 +260,7 @@ impl LexiconRepository {
         .bind(source_entry_id)
         .bind(dialect_scopes)
         .bind(normalized_surfaces)
+        .bind(association_form_source_kinds(allow_v3))
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)

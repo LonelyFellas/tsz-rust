@@ -531,6 +531,11 @@ impl<'a> NodeLocator<'a> {
             form_group_index: ancestors
                 .iter()
                 .find_map(|id| self.form_group_indexes.get(id).copied()),
+            form_group_id: None,
+            membership_id: None,
+            form_id: None,
+            variant_id: None,
+            pronunciation_id: None,
             form_type: std::iter::once(node.node_role.as_str())
                 .chain(ancestors.iter().rev().filter_map(|id| {
                     self.proposed_by_id

@@ -187,96 +187,270 @@ pub(super) struct ResolvedTarget {
     pub(super) resolved_form_type: Option<String>,
 }
 
-/// 词性下只有一个词义才算解析成功——多义即歧义，一律跳过。
-fn resolve_unique_sense(word: &AdminWordV2, pos_id: Uuid) -> Option<&WordSenseV2> {
-    let pos = word.meanings.pos.iter().find(|pos| pos.pos_id == pos_id)?;
-    match pos.senses.as_slice() {
-        [sense] => Some(sense),
-        _ => None,
-    }
+#[derive(Debug)]
+struct PublishedAssociationForm {
+    id: Uuid,
+    form_type: String,
+    variant_ids: Vec<Uuid>,
+    normalized_surfaces: Vec<String>,
 }
 
-/// 命中的词形变体属于哪个词形槽位。槽位才是「按读者方言换拼写」的锚点，
-/// 变体本身是某一侧的拼写。
-fn locate_form_slot(word: &AdminWordV2, pos_id: Uuid, variant_id: Uuid) -> Option<(Uuid, String)> {
-    let pos = word.forms.pos.iter().find(|pos| pos.pos_id == pos_id)?;
-    if pos
-        .base_form
-        .variants
-        .iter()
-        .any(|variant| variant.id == variant_id)
-    {
-        return Some((pos.base_form.id, pos.base_form.form_type.clone()));
-    }
-    pos.form_groups
-        .iter()
-        .flat_map(|group| &group.slots)
-        .find(|slot| slot.variants.iter().any(|variant| variant.id == variant_id))
-        .map(|slot| (slot.id, slot.form_type.clone()))
+#[derive(Debug)]
+struct PublishedAssociationSense {
+    id: Uuid,
+    gloss: String,
 }
 
-/// 人工补关联时按词面找槽位：管理员选的是文字和词义，没有变体 ID 可用。
-/// 词库里没有这个词形是允许的（管理员可能比词库知道得多），此时槽位缺省。
-fn locate_form_slot_by_surface(
-    word: &AdminWordV2,
-    pos_id: Uuid,
-    normalized_surface: &str,
-) -> Option<(Uuid, String)> {
-    let pos = word.forms.pos.iter().find(|pos| pos.pos_id == pos_id)?;
-    let matches = |variants: &[WordFormVariantV2]| {
-        variants.iter().any(|variant| {
-            crate::lexicon::normalization::normalize_headword(&variant.spelling)
-                .is_ok_and(|normalized| normalized.key == normalized_surface)
+#[derive(Debug)]
+struct PublishedAssociationPos {
+    id: Uuid,
+    pos: String,
+    forms: Vec<PublishedAssociationForm>,
+    senses: Vec<PublishedAssociationSense>,
+}
+
+/// 例句关联只消费已发布词条的一小块稳定视图。先把 V2/V3 快照收敛到同一形状，
+/// resolver 与人工编辑器就不会把某个 schema 的聚合 DTO 当成唯一事实来源。
+#[derive(Debug)]
+struct PublishedAssociationTarget {
+    schema_version: i16,
+    id: Uuid,
+    headword: String,
+    pos: Vec<PublishedAssociationPos>,
+}
+
+impl PublishedAssociationTarget {
+    fn from_v2(word: AdminWordV2) -> Self {
+        let pos =
+            word.forms
+                .pos
+                .iter()
+                .map(|forms| {
+                    let mut slots = Vec::new();
+                    slots.push(PublishedAssociationForm {
+                        id: forms.base_form.id,
+                        form_type: forms.base_form.form_type.clone(),
+                        variant_ids: forms
+                            .base_form
+                            .variants
+                            .iter()
+                            .map(|variant| variant.id)
+                            .collect(),
+                        normalized_surfaces: normalized_v2_surfaces(&forms.base_form.variants),
+                    });
+                    slots.extend(forms.form_groups.iter().flat_map(|group| &group.slots).map(
+                        |slot| PublishedAssociationForm {
+                            id: slot.id,
+                            form_type: slot.form_type.clone(),
+                            variant_ids: slot.variants.iter().map(|variant| variant.id).collect(),
+                            normalized_surfaces: normalized_v2_surfaces(&slot.variants),
+                        },
+                    ));
+                    PublishedAssociationPos {
+                        id: forms.pos_id,
+                        pos: forms.pos.clone(),
+                        forms: slots,
+                        senses: association_senses(&word.meanings, forms.pos_id),
+                    }
+                })
+                .collect();
+        Self {
+            schema_version: 2,
+            id: word.id,
+            headword: published_word_headword(&word),
+            pos,
+        }
+    }
+
+    fn from_v3(word: AdminWordV3) -> Result<Self, LexiconServiceError> {
+        let meanings: DraftMeaningsStepContent = serde_json::from_value(
+            serde_json::to_value(&word.meanings).map_err(serialization_error)?,
+        )
+        .map_err(serialization_error)?;
+        let pos = word
+            .forms
+            .pos
+            .iter()
+            .map(|forms| PublishedAssociationPos {
+                id: forms.pos_id,
+                pos: forms.pos.clone(),
+                forms: forms
+                    .forms
+                    .iter()
+                    .map(|form| {
+                        let variants = v3_form_variants(&form.regional_variants);
+                        PublishedAssociationForm {
+                            id: form.id,
+                            form_type: v3_form_type_name(form.form_type).to_owned(),
+                            variant_ids: variants.iter().map(|(id, _)| *id).collect(),
+                            normalized_surfaces: variants
+                                .iter()
+                                .filter_map(|(_, spelling)| normalized_surface(spelling))
+                                .collect(),
+                        }
+                    })
+                    .collect(),
+                senses: association_senses(&meanings, forms.pos_id),
+            })
+            .collect();
+        Ok(Self {
+            schema_version: 3,
+            id: word.id,
+            headword: word.presentation.label,
+            pos,
         })
-    };
-    if matches(&pos.base_form.variants) {
-        return Some((pos.base_form.id, pos.base_form.form_type.clone()));
     }
-    pos.form_groups
-        .iter()
-        .flat_map(|group| &group.slots)
-        .find(|slot| matches(&slot.variants))
-        .map(|slot| (slot.id, slot.form_type.clone()))
+
+    fn from_snapshot(
+        snapshot: serde_json::Value,
+        allow_v3: bool,
+    ) -> Result<Self, LexiconServiceError> {
+        let version = snapshot
+            .get("schema_version")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i16::try_from(value).ok())
+            .unwrap_or(-1);
+        match version {
+            2 => Ok(Self::from_v2(v2_publication_snapshot(snapshot)?)),
+            3 if allow_v3 => {
+                Self::from_v3(serde_json::from_value(snapshot).map_err(serialization_error)?)
+            }
+            3 => Err(LexiconServiceError::V3StorageUnavailable),
+            version => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
+        }
+    }
+
+    fn automatic_target(&self, pos_id: Uuid, variant_ids: &[Uuid]) -> Option<ResolvedTarget> {
+        let pos = self.pos.iter().find(|pos| pos.id == pos_id)?;
+        let [sense] = pos.senses.as_slice() else {
+            return None;
+        };
+        let slots = pos
+            .forms
+            .iter()
+            .filter(|form| {
+                form.variant_ids
+                    .iter()
+                    .any(|variant_id| variant_ids.contains(variant_id))
+            })
+            .map(|form| (form.id, form.form_type.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let slot = (slots.len() == 1)
+            .then(|| slots.into_iter().next())
+            .flatten();
+        Some(ResolvedTarget {
+            target_entry_id: self.id,
+            target_sense_id: sense.id,
+            target_form_slot_id: slot.as_ref().map(|(id, _)| *id),
+            target_headword: self.headword.clone(),
+            target_gloss: sense.gloss.clone(),
+            resolved_pos: pos.pos.clone(),
+            resolved_form_type: slot.map(|(_, form_type)| form_type),
+        })
+    }
+
+    fn manual_target(&self, sense_id: Uuid, normalized_surface: &str) -> Option<ResolvedTarget> {
+        let pos = self
+            .pos
+            .iter()
+            .find(|pos| pos.senses.iter().any(|sense| sense.id == sense_id))?;
+        let sense = pos.senses.iter().find(|sense| sense.id == sense_id)?;
+        let matching_slots = pos
+            .forms
+            .iter()
+            .filter(|form| {
+                form.normalized_surfaces
+                    .iter()
+                    .any(|surface| surface == normalized_surface)
+            })
+            .map(|form| (form.id, form.form_type.clone()))
+            .collect::<Vec<_>>();
+        // V2 沿用历史的「按目录顺序取首个槽位」行为；V3 允许同类 concrete form
+        // 重复，不能把第一个误当成管理员选择，只有唯一命中时才固化 form_id。
+        let slot = if self.schema_version == 2 {
+            matching_slots.into_iter().next()
+        } else {
+            (matching_slots.len() == 1)
+                .then(|| matching_slots.into_iter().next())
+                .flatten()
+        };
+        Some(ResolvedTarget {
+            target_entry_id: self.id,
+            target_sense_id: sense_id,
+            target_form_slot_id: slot.as_ref().map(|(id, _)| *id),
+            target_headword: self.headword.clone(),
+            target_gloss: sense.gloss.clone(),
+            resolved_pos: pos.pos.clone(),
+            resolved_form_type: slot.map(|(_, form_type)| form_type),
+        })
+    }
 }
 
-/// 某个词义所属的词性节点与词性代码。
-fn sense_pos(word: &AdminWordV2, sense_id: Uuid) -> Option<(Uuid, String)> {
-    let pos = word
-        .meanings
+fn association_senses(
+    meanings: &DraftMeaningsStepContent,
+    pos_id: Uuid,
+) -> Vec<PublishedAssociationSense> {
+    meanings
         .pos
         .iter()
-        .find(|pos| pos.senses.iter().any(|sense| sense.id == sense_id))?;
-    let code = word
-        .forms
-        .pos
-        .iter()
-        .find(|forms| forms.pos_id == pos.pos_id)
-        .map(|forms| forms.pos.clone())?;
-    Some((pos.pos_id, code))
+        .find(|pos| pos.pos_id == pos_id)
+        .map(|pos| {
+            pos.senses
+                .iter()
+                .map(|sense| PublishedAssociationSense {
+                    id: sense.id,
+                    gloss: published_sense_gloss(sense),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-pub(super) fn manual_target(
-    word: &AdminWordV2,
+fn normalized_surface(spelling: &str) -> Option<String> {
+    crate::lexicon::normalization::normalize_headword(spelling)
+        .ok()
+        .map(|normalized| normalized.key)
+}
+
+fn normalized_v2_surfaces(variants: &[WordFormVariantV2]) -> Vec<String> {
+    variants
+        .iter()
+        .filter_map(|variant| normalized_surface(&variant.spelling))
+        .collect()
+}
+
+fn v3_form_variants(variants: &crate::lexicon::dto::WordRegionalVariantsV3) -> Vec<(Uuid, &str)> {
+    use crate::lexicon::dto::WordRegionalVariantsV3;
+
+    match variants {
+        WordRegionalVariantsV3::Common { common } => vec![(common.id, common.spelling.as_str())],
+        WordRegionalVariantsV3::UkUs { uk, us } => {
+            vec![(uk.id, uk.spelling.as_str()), (us.id, us.spelling.as_str())]
+        }
+    }
+}
+
+fn v3_form_type_name(form_type: crate::lexicon::dto::WordFormTypeV3) -> &'static str {
+    use crate::lexicon::dto::WordFormTypeV3;
+
+    match form_type {
+        WordFormTypeV3::Base => "base",
+        WordFormTypeV3::ThirdPersonSingular => "third_person_singular",
+        WordFormTypeV3::PresentParticiple => "present_participle",
+        WordFormTypeV3::PastTense => "past_tense",
+        WordFormTypeV3::PastParticiple => "past_participle",
+        WordFormTypeV3::Plural => "plural",
+        WordFormTypeV3::Comparative => "comparative",
+        WordFormTypeV3::Superlative => "superlative",
+    }
+}
+
+fn manual_target(
+    target: &PublishedAssociationTarget,
     sense_id: Uuid,
     normalized_surface: &str,
 ) -> Option<ResolvedTarget> {
-    let (pos_id, pos_code) = sense_pos(word, sense_id)?;
-    let sense = word
-        .meanings
-        .pos
-        .iter()
-        .flat_map(|pos| &pos.senses)
-        .find(|sense| sense.id == sense_id)?;
-    let slot = locate_form_slot_by_surface(word, pos_id, normalized_surface);
-    Some(ResolvedTarget {
-        target_entry_id: word.id,
-        target_sense_id: sense_id,
-        target_form_slot_id: slot.as_ref().map(|(id, _)| *id),
-        target_headword: published_word_headword(word),
-        target_gloss: published_sense_gloss(sense),
-        resolved_pos: pos_code,
-        resolved_form_type: slot.map(|(_, form_type)| form_type),
-    })
+    target.manual_target(sense_id, normalized_surface)
 }
 
 impl LexiconService {
@@ -315,6 +489,51 @@ impl LexiconService {
         Ok(())
     }
 
+    pub(super) async fn hydrate_v3_sentence_associations_in(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        entry_id: Uuid,
+        meanings: &mut crate::lexicon::dto::DraftMeaningsStepContentV3,
+    ) -> Result<(), LexiconServiceError> {
+        let mut legacy_meanings: DraftMeaningsStepContent =
+            serde_json::from_value(serde_json::to_value(&*meanings).map_err(serialization_error)?)
+                .map_err(serialization_error)?;
+        let associations = LexiconRepository::sentence_associations(&mut **tx, entry_id)
+            .await
+            .map_err(repository_error)?;
+        let scans = LexiconRepository::sentence_association_scans(&mut **tx, entry_id)
+            .await
+            .map_err(repository_error)?;
+        apply_sentence_associations(&mut legacy_meanings, associations, scans);
+        *meanings = serde_json::from_value(
+            serde_json::to_value(legacy_meanings).map_err(serialization_error)?,
+        )
+        .map_err(serialization_error)?;
+        Ok(())
+    }
+
+    pub(super) async fn hydrate_v3_sentence_associations(
+        &self,
+        entry_id: Uuid,
+        meanings: &mut crate::lexicon::dto::DraftMeaningsStepContentV3,
+    ) -> Result<(), LexiconServiceError> {
+        let mut legacy_meanings: DraftMeaningsStepContent =
+            serde_json::from_value(serde_json::to_value(&*meanings).map_err(serialization_error)?)
+                .map_err(serialization_error)?;
+        let associations =
+            LexiconRepository::sentence_associations(self.repository.pool(), entry_id)
+                .await
+                .map_err(repository_error)?;
+        let scans = LexiconRepository::sentence_association_scans(self.repository.pool(), entry_id)
+            .await
+            .map_err(repository_error)?;
+        apply_sentence_associations(&mut legacy_meanings, associations, scans);
+        *meanings = serde_json::from_value(
+            serde_json::to_value(legacy_meanings).map_err(serialization_error)?,
+        )
+        .map_err(serialization_error)?;
+        Ok(())
+    }
+
     /// 发布时重新解析本词条的例句关联。
     ///
     /// 失败语义与关联词物化相反：解析不出目标、有歧义、词面不合法都只是「这个词不关联」，
@@ -326,6 +545,7 @@ impl LexiconService {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         entry_id: Uuid,
         meanings: &DraftMeaningsStepContent,
+        allow_v3_targets: bool,
     ) -> Result<(), LexiconServiceError> {
         let variants = sentence_variants(meanings);
         let live_sentence_ids = variants
@@ -393,13 +613,18 @@ impl LexiconService {
         surfaces.sort_unstable();
         surfaces.dedup();
 
-        let candidates =
-            LexiconRepository::published_form_surfaces(tx, entry_id, &scopes, &surfaces)
-                .await
-                .map_err(repository_error)?
-                .into_iter()
-                .filter(|candidate| associable_pos(&candidate.pos))
-                .collect::<Vec<_>>();
+        let candidates = LexiconRepository::published_form_surfaces(
+            tx,
+            entry_id,
+            &scopes,
+            &surfaces,
+            allow_v3_targets,
+        )
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .filter(|candidate| associable_pos(&candidate.pos))
+        .collect::<Vec<_>>();
         let mut target_entry_ids = candidates
             .iter()
             .map(|candidate| candidate.entry_id)
@@ -411,9 +636,8 @@ impl LexiconService {
             .map_err(repository_error)?
             .into_iter()
             .map(|record| {
-                serde_json::from_value::<AdminWordV2>(record.snapshot)
-                    .map(|word| (record.entry_id, word))
-                    .map_err(serialization_error)
+                PublishedAssociationTarget::from_snapshot(record.snapshot, allow_v3_targets)
+                    .map(|target| (record.entry_id, target))
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
 
@@ -466,7 +690,7 @@ fn resolve_token(
     token: &SentenceToken,
     scopes: &[&str],
     candidates: &[PublishedFormSurfaceRecord],
-    snapshots: &HashMap<Uuid, AdminWordV2>,
+    snapshots: &HashMap<Uuid, PublishedAssociationTarget>,
 ) -> Option<ResolvedTarget> {
     let mut matched = candidates
         .iter()
@@ -493,35 +717,18 @@ fn resolve_token(
         return None;
     }
 
-    let word = snapshots.get(&entry_id)?;
-    let sense = resolve_unique_sense(word, pos_id)?;
     // 同一个词性下可能有多个槽位共用一个拼写——不规则动词 cut 的原形、过去式、
     // 过去分词都是 cut。词义仍然唯一，所以关联成立；但槽位是哪一个没有证据，
     // 按变体 ID 的大小随手挑一个等于给猜测背书，这里留空，前端回落到原句词面。
     // 按槽位 ID 去重要用有序集合：matched 是按变体 ID 排的，同一槽位的两个方言变体
     // 之间可能夹着别的槽位，Vec::dedup_by 只并相邻项会漏掉。
-    let slots = matched
+    let variant_ids = matched
         .iter()
-        .filter_map(|(_, _, variant_id)| locate_form_slot(word, pos_id, *variant_id))
-        .collect::<BTreeMap<Uuid, String>>();
-    let slot = (slots.len() == 1)
-        .then(|| slots.into_iter().next())
-        .flatten();
-    let pos_code = word
-        .forms
-        .pos
-        .iter()
-        .find(|pos| pos.pos_id == pos_id)
-        .map(|pos| pos.pos.clone())?;
-    Some(ResolvedTarget {
-        target_entry_id: entry_id,
-        target_sense_id: sense.id,
-        target_form_slot_id: slot.as_ref().map(|(id, _)| *id),
-        target_headword: published_word_headword(word),
-        target_gloss: published_sense_gloss(sense),
-        resolved_pos: pos_code,
-        resolved_form_type: slot.map(|(_, form_type)| form_type),
-    })
+        .map(|(_, _, variant_id)| *variant_id)
+        .collect::<Vec<_>>();
+    snapshots
+        .get(&entry_id)?
+        .automatic_target(pos_id, &variant_ids)
 }
 
 impl LexiconService {
@@ -533,6 +740,7 @@ impl LexiconService {
     ///
     /// 推进的是 `lifecycle_revision` 而不是 `revision`：修正的是已发布内容的附属数据，
     /// 不该把词条判成「有未发布改动」再逼一次重新发布。
+    #[allow(clippy::too_many_arguments)]
     pub async fn replace_sentence_associations(
         &self,
         actor_id: Uuid,
@@ -541,7 +749,8 @@ impl LexiconService {
         sentence_id: Uuid,
         idempotency_key: Uuid,
         input: ReplaceSentenceAssociationsInput,
-    ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
+        allow_v3: bool,
+    ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         if input.base_revision < 1 {
             return Err(LexiconServiceError::InvalidField {
                 field: "base_revision",
@@ -585,21 +794,37 @@ impl LexiconService {
             if existing.request_hash != request_hash {
                 return Err(LexiconServiceError::IdempotencyConflict);
             }
+            let response: AdminWordAnyEnvelope =
+                serde_json::from_value(existing.response_body).map_err(serialization_error)?;
+            ensure_association_response_capability(&response, allow_v3)?;
             transaction.commit().await.map_err(database_error)?;
-            return serde_json::from_value(existing.response_body).map_err(serialization_error);
+            return Ok(response);
         }
 
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        let mut word = entry_from_record(record)?;
-        ensure_active(&word)?;
-        ensure_revision(&word, input.base_revision)?;
-        super::lifecycle::ensure_lifecycle_revision(&word, input.base_lifecycle_revision)?;
+        let record_revision = record.revision;
+        let record_lifecycle_revision = record.lifecycle_revision;
+        let mut word = match record.content_schema_version {
+            2 => AdminWordAny::V2(Box::new(entry_from_record(record)?)),
+            3 if allow_v3 => {
+                let word = self.get_v3(entry_id).await?;
+                if word.revision != record_revision
+                    || word.lifecycle_revision != record_lifecycle_revision
+                {
+                    return Err(invariant_record());
+                }
+                AdminWordAny::V3(Box::new(word))
+            }
+            3 => return Err(LexiconServiceError::V3StorageUnavailable),
+            version => return Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
+        };
+        ensure_association_source_state(&word, input.base_revision, input.base_lifecycle_revision)?;
 
-        let sentence = word
-            .meanings
+        let meanings = association_source_meanings(&word)?;
+        let sentence = meanings
             .pos
             .iter()
             .flat_map(|pos| &pos.senses)
@@ -648,9 +873,8 @@ impl LexiconService {
                 .map_err(repository_error)?
                 .into_iter()
                 .map(|record| {
-                    serde_json::from_value::<AdminWordV2>(record.snapshot)
+                    PublishedAssociationTarget::from_snapshot(record.snapshot, allow_v3)
                         .map(|target| (record.entry_id, target))
-                        .map_err(serialization_error)
                 })
                 .collect::<Result<HashMap<_, _>, _>>()?;
 
@@ -685,32 +909,114 @@ impl LexiconService {
             .map_err(repository_error)?;
         }
 
-        word.lifecycle_revision += 1;
-        word.updated_at = Utc::now();
+        let updated_at = Utc::now();
+        let (revision, lifecycle_revision) = match &mut word {
+            AdminWordAny::V2(word) => {
+                word.lifecycle_revision += 1;
+                word.updated_at = updated_at;
+                (word.revision, word.lifecycle_revision)
+            }
+            AdminWordAny::V3(word) => {
+                word.lifecycle_revision += 1;
+                word.updated_at = updated_at;
+                (word.revision, word.lifecycle_revision)
+            }
+        };
         LexiconRepository::record_sentence_association_edit(
             &mut transaction,
-            &word,
+            entry_id,
+            revision,
+            lifecycle_revision,
+            updated_at,
             actor_id,
             request_id,
             sentence_id,
         )
         .await
         .map_err(repository_error)?;
-        Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;
-        LexiconRepository::insert_idempotent_word_response(
+        match &mut word {
+            AdminWordAny::V2(word) => {
+                Self::hydrate_sentence_associations_in(&mut transaction, word).await?
+            }
+            AdminWordAny::V3(word) => {
+                Self::hydrate_v3_sentence_associations_in(
+                    &mut transaction,
+                    word.id,
+                    &mut word.meanings,
+                )
+                .await?
+            }
+        }
+        let response = AdminWordAnyEnvelope { word };
+        LexiconRepository::insert_idempotent_response(
             &mut transaction,
             REPLACE_ASSOCIATIONS_SCOPE,
             actor_id,
             idempotency_key,
             &request_hash,
             Some(sentence_id),
-            &word,
+            &response,
             200,
         )
         .await
         .map_err(repository_error)?;
         transaction.commit().await.map_err(database_error)?;
-        Ok(AdminWordV2Envelope { word })
+        Ok(response)
+    }
+}
+
+fn ensure_association_source_state(
+    word: &AdminWordAny,
+    base_revision: i64,
+    base_lifecycle_revision: i64,
+) -> Result<(), LexiconServiceError> {
+    let (revision, lifecycle_revision, archived) = match word {
+        AdminWordAny::V2(word) => (
+            word.revision,
+            word.lifecycle_revision,
+            word.archived_at.is_some(),
+        ),
+        AdminWordAny::V3(word) => (
+            word.revision,
+            word.lifecycle_revision,
+            word.archived_at.is_some(),
+        ),
+    };
+    if archived {
+        return Err(LexiconServiceError::EntryArchived);
+    }
+    if revision != base_revision {
+        return Err(LexiconServiceError::RevisionConflict {
+            current_revision: revision,
+        });
+    }
+    if lifecycle_revision != base_lifecycle_revision {
+        return Err(LexiconServiceError::LifecycleRevisionConflict {
+            current_lifecycle_revision: lifecycle_revision,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_association_response_capability(
+    response: &AdminWordAnyEnvelope,
+    allow_v3: bool,
+) -> Result<(), LexiconServiceError> {
+    if !allow_v3 && matches!(&response.word, AdminWordAny::V3(_)) {
+        return Err(LexiconServiceError::V3StorageUnavailable);
+    }
+    Ok(())
+}
+
+fn association_source_meanings(
+    word: &AdminWordAny,
+) -> Result<DraftMeaningsStepContent, LexiconServiceError> {
+    match word {
+        AdminWordAny::V2(word) => Ok(word.meanings.clone()),
+        AdminWordAny::V3(word) => serde_json::from_value(
+            serde_json::to_value(&word.meanings).map_err(serialization_error)?,
+        )
+        .map_err(serialization_error),
     }
 }
 
@@ -722,7 +1028,7 @@ fn validate_manual_associations(
     variants: &[(Dialect, String)],
     inputs: &[SentenceAssociationInputV2],
     existing: &HashMap<Uuid, SentenceAssociationRecord>,
-    targets: &HashMap<Uuid, AdminWordV2>,
+    targets: &HashMap<Uuid, PublishedAssociationTarget>,
 ) -> (Vec<NewSentenceAssociation>, Vec<DraftValidationIssue>) {
     let mut issues = Vec::new();
     let mut rows: Vec<NewSentenceAssociation> = Vec::new();
@@ -848,3 +1154,7 @@ fn validate_manual_associations(
     }
     (rows, issues)
 }
+
+#[cfg(test)]
+#[path = "sentence_association_tests.rs"]
+mod tests;

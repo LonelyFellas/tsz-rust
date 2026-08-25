@@ -384,6 +384,9 @@ pub enum SurfaceContinuationDisabledV2 {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SurfaceMatchPageBaseV2 {
+    #[serde(deserialize_with = "deserialize_schema_version_2")]
+    #[schema(schema_with = schema_version_2_schema)]
+    pub schema_version: u8,
     pub snapshot_id: Uuid,
     #[schema(min_items = 1, max_items = 50)]
     pub items: Vec<LexiconSurfaceMatchV2>,
@@ -511,6 +514,9 @@ pub enum BuiltinDictionaryResultV2 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DetectWordResponseV2 {
+    #[serde(deserialize_with = "deserialize_schema_version_2")]
+    #[schema(schema_with = schema_version_2_schema)]
+    pub schema_version: u8,
     pub detection_id: Uuid,
     pub expires_at: DateTime<Utc>,
     pub request: DetectionRequestEcho,
@@ -526,6 +532,8 @@ pub struct DetectWordResponseV2 {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAdminWordV2Input {
+    #[serde(deserialize_with = "deserialize_schema_version_2")]
+    #[schema(schema_with = schema_version_2_schema)]
     pub schema_version: u8,
     pub detection_id: Uuid,
     /// matched 检测返回的英美主词仅作为建议；管理员可切换模式、编辑非空拼写并决定
@@ -713,6 +721,8 @@ pub struct FormsImpactItemV2 {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct FormsImpactResponseV2 {
+    #[schema(schema_with = schema_version_2_schema)]
+    pub schema_version: u8,
     pub base_revision: i64,
     pub requires_confirmation: bool,
     pub affected: Vec<FormsImpactItemV2>,
@@ -763,6 +773,7 @@ pub struct DraftValidationIssue {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DraftReferenceLocation {
     pub source_entry_id: Uuid,
     pub source_publication_id: Uuid,
@@ -775,6 +786,7 @@ pub struct DraftReferenceLocation {
 /// 所有字段都取自**本次提交的内容**，不含任何服务端存量节点 ID——旧 ID / 新 ID
 /// 的对照只写服务端日志。`message` 面向实现，展示文案由前端按这里的字段自行拼装。
 #[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DraftNodeLocation {
     /// 出问题节点的角色，方言编在冒号之后，例如 `forms.form_variant:common`。
     pub node_role: String,
@@ -790,6 +802,26 @@ pub struct DraftNodeLocation {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub form_group_index: Option<u32>,
+    /// V3 词形组稳定 ID；V2 issue 省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub form_group_id: Option<Uuid>,
+    /// V3 group membership 稳定 ID；V2 issue 省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub membership_id: Option<Uuid>,
+    /// V3 concrete form 稳定 ID；V2 issue 省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub form_id: Option<Uuid>,
+    /// V3 regional variant 稳定 ID；V2 issue 省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub variant_id: Option<Uuid>,
+    /// V3 pronunciation 稳定 ID；V2 issue 省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub pronunciation_id: Option<Uuid>,
     /// 所在词形槽位的类型；`base` 表示共享原形。词形之外的节点省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -804,6 +836,8 @@ pub struct DraftNodeLocation {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DraftValidationResponse {
+    #[schema(schema_with = schema_version_2_schema)]
+    pub schema_version: u8,
     pub validated_revision: i64,
     pub valid: bool,
     pub issues: Vec<DraftValidationIssue>,
@@ -942,6 +976,8 @@ pub struct HeadwordVariant {
 
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
 pub struct RelatedWordResult {
+    #[schema(schema_with = schema_version_2_schema)]
+    pub schema_version: u8,
     pub word_id: Uuid,
     pub headword: String,
     pub kind: EntryKind,
@@ -955,13 +991,13 @@ pub struct RelatedWordResult {
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelatedSearchLegacyResponse {
-    pub results: Vec<RelatedWordResult>,
+    pub results: Vec<RelatedWordResultAny>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelatedSearchV2Response {
-    pub results: Vec<RelatedWordResult>,
+    pub results: Vec<RelatedWordResultAny>,
     pub total: u64,
     #[schema(required = true, nullable = true)]
     pub next_cursor: Option<String>,
@@ -976,6 +1012,7 @@ pub enum RelatedSearchResponse {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AdminWordListItem {
+    #[schema(schema_with = schema_version_2_schema)]
     pub schema_version: u8,
     pub id: Uuid,
     /// 并列拼写按管理员主词侧在前拼接，与 `dialects` 同序。
@@ -1005,6 +1042,7 @@ pub struct AdminWordListItem {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AdminWordListPage {
     pub page: u32,
     pub page_size: u32,
@@ -1012,8 +1050,9 @@ pub struct AdminWordListPage {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AdminWordListResponse {
-    pub words: Vec<AdminWordListItem>,
+    pub words: Vec<AdminWordListItemAny>,
     pub page: AdminWordListPage,
 }
 

@@ -240,6 +240,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         object_storage,
         speech_provider,
         lexicon_content_generator: lexicon_content_generator.clone(),
+        smart_lexicon_v3_flags: config.smart_lexicon_v3_flags,
     };
 
     if let Some(generator) = lexicon_content_generator {

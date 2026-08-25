@@ -285,14 +285,15 @@ pub(super) async fn insert_form_variants(
 
 pub(super) async fn insert_meanings(
     tx: &mut Transaction<'_, Postgres>,
-    word: &AdminWordV2,
+    entry_id: Uuid,
+    meanings: &DraftMeaningsStepContent,
     sub_parts: &HashMap<String, Uuid>,
 ) -> Result<(), LexiconRepositoryError> {
-    for (index, group) in word.meanings.sense_groups.iter().enumerate() {
+    for (index, group) in meanings.sense_groups.iter().enumerate() {
         insert_node(
             tx,
             group.id,
-            word.id,
+            entry_id,
             "sense_group",
             None,
             SENSE_GROUP_ROLE,
@@ -306,7 +307,7 @@ pub(super) async fn insert_meanings(
             "#,
         )
         .bind(group.id)
-        .bind(word.id)
+        .bind(entry_id)
         .bind(&group.name_zh)
         .bind(&group.name_en)
         .bind(index as i32)
@@ -315,14 +316,14 @@ pub(super) async fn insert_meanings(
         .map_err(map_entry_write_error)?;
     }
 
-    for meanings in &word.meanings.pos {
-        for (grammar_index, grammar) in meanings.grammar_structures.iter().enumerate() {
+    for pos_meanings in &meanings.pos {
+        for (grammar_index, grammar) in pos_meanings.grammar_structures.iter().enumerate() {
             insert_node(
                 tx,
                 grammar.id,
-                word.id,
+                entry_id,
                 "grammar_structure",
-                Some(meanings.pos_id),
+                Some(pos_meanings.pos_id),
                 GRAMMAR_STRUCTURE_ROLE,
                 false,
             )
@@ -334,8 +335,8 @@ pub(super) async fn insert_meanings(
                 "#,
             )
             .bind(grammar.id)
-            .bind(word.id)
-            .bind(meanings.pos_id)
+            .bind(entry_id)
+            .bind(pos_meanings.pos_id)
             .bind(grammar_index as i32)
             .execute(&mut **tx)
             .await
@@ -344,7 +345,7 @@ pub(super) async fn insert_meanings(
                 insert_text_variant(
                     tx,
                     variant.id,
-                    word.id,
+                    entry_id,
                     grammar.id,
                     "content",
                     "en",
@@ -357,7 +358,7 @@ pub(super) async fn insert_meanings(
             }
         }
 
-        for (sense_index, sense) in meanings.senses.iter().enumerate() {
+        for (sense_index, sense) in pos_meanings.senses.iter().enumerate() {
             let sub_part_id = if sense.sub_pos.is_empty() {
                 None
             } else {
@@ -368,9 +369,9 @@ pub(super) async fn insert_meanings(
             insert_node(
                 tx,
                 sense.id,
-                word.id,
+                entry_id,
                 "sense",
-                Some(meanings.pos_id),
+                Some(pos_meanings.pos_id),
                 SENSE_ROLE,
                 false,
             )
@@ -384,8 +385,8 @@ pub(super) async fn insert_meanings(
                 "#,
             )
             .bind(sense.id)
-            .bind(word.id)
-            .bind(meanings.pos_id)
+            .bind(entry_id)
+            .bind(pos_meanings.pos_id)
             .bind(sub_part_id)
             .bind(sense.sense_group_id)
             .bind(&sense.level)
@@ -397,14 +398,14 @@ pub(super) async fn insert_meanings(
             .map_err(map_entry_write_error)?;
 
             for (definition_index, definition) in sense.definitions.iter().enumerate() {
-                insert_definition(tx, word.id, sense.id, definition, definition_index as i32)
+                insert_definition(tx, entry_id, sense.id, definition, definition_index as i32)
                     .await?;
             }
             for (sentence_index, sentence) in sense.sentences.iter().enumerate() {
                 insert_node(
                     tx,
                     sentence.id,
-                    word.id,
+                    entry_id,
                     "sentence",
                     Some(sense.id),
                     SENTENCE_ROLE,
@@ -415,18 +416,19 @@ pub(super) async fn insert_meanings(
                     "INSERT INTO lexicon.sentences (id, entry_id, sense_id, level, sort_order) VALUES ($1, $2, $3, $4, $5)",
                 )
                 .bind(sentence.id)
-                .bind(word.id)
+                .bind(entry_id)
                 .bind(sense.id)
                 .bind(&sentence.level)
                 .bind(sentence_index as i32)
                 .execute(&mut **tx)
                 .await
                 .map_err(map_entry_write_error)?;
-                insert_english_text(tx, word.id, sentence.id, "en_text", &sentence.en_text).await?;
+                insert_english_text(tx, entry_id, sentence.id, "en_text", &sentence.en_text)
+                    .await?;
                 insert_text_variant(
                     tx,
                     sentence.zh_text_id,
-                    word.id,
+                    entry_id,
                     sentence.id,
                     "zh_text",
                     "zh",
@@ -445,7 +447,7 @@ pub(super) async fn insert_meanings(
                         "#,
                     )
                     .bind(sentence.id)
-                    .bind(word.id)
+                    .bind(entry_id)
                     .bind(link.word_id)
                     .bind(link.sense_id)
                     .bind(&link.role)
@@ -459,7 +461,7 @@ pub(super) async fn insert_meanings(
                 insert_node(
                     tx,
                     relation.id,
-                    word.id,
+                    entry_id,
                     "relation",
                     Some(sense.id),
                     RELATION_ROLE,
@@ -477,7 +479,7 @@ pub(super) async fn insert_meanings(
                     "#,
                 )
                 .bind(relation.id)
-                .bind(word.id)
+                .bind(entry_id)
                 .bind(sense.id)
                 .bind(&relation.relation)
                 .bind(relation.target_word_id)

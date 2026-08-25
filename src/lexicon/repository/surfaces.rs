@@ -14,8 +14,8 @@ const SURFACE_SOURCES_QUERY: &str = r#"
     )
     SELECT requested.dialect_scope AS matched_dialect_scope,
            source.entry_id,
-           entry_headword.headword AS entry_headword,
-           entry_headword.dialect AS entry_headword_dialect,
+           COALESCE(entry_headword.headword, presentation.label) AS entry_headword,
+           COALESCE(entry_headword.dialect, source.dialect) AS entry_headword_dialect,
            source.entry_kind,
            CASE
                WHEN entry.archived_at IS NOT NULL THEN 'archived'
@@ -43,7 +43,7 @@ const SURFACE_SOURCES_QUERY: &str = r#"
      AND source.normalized_surface = requested.normalized_surface
      AND source.is_deleted = FALSE
     JOIN lexicon.entries entry ON entry.id = source.entry_id
-    JOIN LATERAL (
+    LEFT JOIN LATERAL (
         SELECT headword.surface AS headword, headword.dialect
         FROM lexicon.surface_sources headword
         WHERE headword.entry_id = source.entry_id
@@ -61,7 +61,11 @@ const SURFACE_SOURCES_QUERY: &str = r#"
                  headword.source_id
         LIMIT 1
     ) entry_headword ON TRUE
+    LEFT JOIN lexicon.entry_presentation_projection presentation
+      ON presentation.entry_id = source.entry_id
+     AND presentation.content_schema_version = 3
     WHERE ($4::uuid IS NULL OR source.entry_id <> $4)
+      AND COALESCE(entry_headword.headword, presentation.label) IS NOT NULL
       AND (
           source.content_scope = 'draft'
           OR (
@@ -80,6 +84,7 @@ const SURFACE_SOURCES_QUERY: &str = r#"
 
 const SURFACE_ENTRY_CONTEXTS_QUERY: &str = r#"
     SELECT entry.id AS entry_id,
+           entry.content_schema_version,
            projection.forms,
            projection.meanings,
            entry.updated_at
@@ -108,11 +113,15 @@ const SURFACE_INBOUND_RELATIONS_QUERY: &str = r#"
                 WHERE entry_id = source_entry.id AND dialect = 'uk') AS source_uk_headword,
                (SELECT headword FROM lexicon.entry_headwords
                 WHERE entry_id = source_entry.id AND dialect = 'us') AS source_us_headword,
+               source_presentation.label AS source_presentation_label,
                relation.relation_type AS draft_relation_type,
                NULL::jsonb AS source_snapshot,
                0 AS scope_order
         FROM lexicon.relations relation
         JOIN lexicon.entries source_entry ON source_entry.id = relation.entry_id
+        LEFT JOIN lexicon.entry_presentation_projection source_presentation
+          ON source_presentation.entry_id = source_entry.id
+         AND source_presentation.content_schema_version = 3
         WHERE relation.target_entry_id = ANY($1)
 
         UNION ALL
@@ -133,6 +142,7 @@ const SURFACE_INBOUND_RELATIONS_QUERY: &str = r#"
                 WHERE entry_id = source_entry.id AND dialect = 'uk') AS source_uk_headword,
                (SELECT headword FROM lexicon.entry_headwords
                 WHERE entry_id = source_entry.id AND dialect = 'us') AS source_us_headword,
+               source_presentation.label AS source_presentation_label,
                NULL::text AS draft_relation_type,
                publication.snapshot AS source_snapshot,
                1 AS scope_order
@@ -140,6 +150,9 @@ const SURFACE_INBOUND_RELATIONS_QUERY: &str = r#"
         JOIN lexicon.entries source_entry
           ON source_entry.id = reference.entry_id
          AND source_entry.current_publication_id = reference.publication_id
+        LEFT JOIN lexicon.entry_presentation_projection source_presentation
+          ON source_presentation.entry_id = source_entry.id
+         AND source_presentation.content_schema_version = 3
         JOIN lexicon.entry_publications publication
           ON publication.id = reference.publication_id
          AND publication.entry_id = reference.entry_id
@@ -163,6 +176,7 @@ const SURFACE_INBOUND_RELATIONS_QUERY: &str = r#"
            source_common_headword,
            source_uk_headword,
            source_us_headword,
+           source_presentation_label,
            draft_relation_type,
            source_snapshot
     FROM inbound

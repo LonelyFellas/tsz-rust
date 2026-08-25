@@ -5,6 +5,70 @@ use crate::lexicon::content_completion::LexiconGeneratorConfig;
 use crate::platform::storage::ObjectStorageConfig;
 use crate::speech::AzureSpeechConfig;
 
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SmartLexiconV3Flags {
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_read",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub read: bool,
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_create",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub create: bool,
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_edit",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub edit: bool,
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_publish",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub publish: bool,
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_projection",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub projection: bool,
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_legacy_bridge_read",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub legacy_bridge_read: bool,
+}
+
+fn deserialize_explicit_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    value
+        .parse()
+        .map_err(|_| serde::de::Error::custom("expected true or false"))
+}
+
+impl SmartLexiconV3Flags {
+    #[doc(hidden)]
+    pub const fn all_enabled() -> Self {
+        Self {
+            read: true,
+            create: true,
+            edit: true,
+            publish: true,
+            projection: true,
+            legacy_bridge_read: true,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_port")]
@@ -33,6 +97,8 @@ pub struct Config {
     pub admin_access_ttl_minutes: u64,
     #[serde(default = "default_admin_refresh_ttl_days")]
     pub admin_refresh_ttl_days: u64,
+    #[serde(flatten)]
+    pub smart_lexicon_v3_flags: SmartLexiconV3Flags,
     #[serde(skip)]
     pub object_storage: ObjectStorageConfig,
     #[serde(skip)]
@@ -133,6 +199,17 @@ mod tests {
     // 但喂入键值对、不触碰进程全局环境变量（testing-guide 铁律 7：禁 set_var）。
     fn parse(pairs: &[(&str, &str)]) -> Result<Config, envy::Error> {
         Config::from_pairs(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+    }
+
+    fn smart_lexicon_v3_flag_values(flags: SmartLexiconV3Flags) -> [bool; 6] {
+        [
+            flags.read,
+            flags.create,
+            flags.edit,
+            flags.publish,
+            flags.projection,
+            flags.legacy_bridge_read,
+        ]
     }
 
     #[test]
@@ -367,5 +444,61 @@ mod tests {
         ];
         let cfg = parse(&input).expect("小写键也应能匹配到字段");
         assert_eq!(cfg.database_url, "postgres://localhost/tsz");
+    }
+
+    #[test]
+    fn smart_lexicon_v3_flags_default_to_disabled() {
+        let cfg = parse(&valid_baseline()).expect("核心必填项齐全应能解析");
+
+        assert_eq!(
+            smart_lexicon_v3_flag_values(cfg.smart_lexicon_v3_flags),
+            [false; 6],
+            "未配置时六项 V3 能力必须全部关闭"
+        );
+    }
+
+    #[test]
+    fn smart_lexicon_v3_flags_parse_each_explicit_boolean() {
+        let mut enabled = valid_baseline();
+        enabled.extend([
+            ("SMART_LEXICON_V3_READ", "true"),
+            ("SMART_LEXICON_V3_CREATE", "true"),
+            ("SMART_LEXICON_V3_EDIT", "true"),
+            ("SMART_LEXICON_V3_PUBLISH", "true"),
+            ("SMART_LEXICON_V3_PROJECTION", "true"),
+            ("SMART_LEXICON_V3_LEGACY_BRIDGE_READ", "true"),
+        ]);
+        let enabled = parse(&enabled).expect("显式 true 应能解析");
+        assert_eq!(
+            smart_lexicon_v3_flag_values(enabled.smart_lexicon_v3_flags),
+            [true; 6]
+        );
+
+        let mut disabled = valid_baseline();
+        disabled.extend([
+            ("SMART_LEXICON_V3_READ", "false"),
+            ("SMART_LEXICON_V3_CREATE", "false"),
+            ("SMART_LEXICON_V3_EDIT", "false"),
+            ("SMART_LEXICON_V3_PUBLISH", "false"),
+            ("SMART_LEXICON_V3_PROJECTION", "false"),
+            ("SMART_LEXICON_V3_LEGACY_BRIDGE_READ", "false"),
+        ]);
+        let disabled = parse(&disabled).expect("显式 false 应能解析");
+
+        assert_eq!(
+            smart_lexicon_v3_flag_values(disabled.smart_lexicon_v3_flags),
+            [false; 6]
+        );
+    }
+
+    #[test]
+    fn smart_lexicon_v3_flags_reject_non_boolean_values() {
+        let mut input = valid_baseline();
+        input.push(("SMART_LEXICON_V3_CREATE", "1"));
+
+        assert!(
+            parse(&input).is_err(),
+            "功能开关只接受明确的 true/false，不接受 1 等模糊值"
+        );
     }
 }

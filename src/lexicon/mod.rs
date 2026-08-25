@@ -18,5 +18,8 @@ pub mod surface;
 pub mod surface_backfill;
 pub mod surface_policy;
 pub mod surface_snapshot;
+pub(crate) mod v3_contract;
+pub mod v3_migration;
+pub(crate) mod v3_projection;
 pub mod validation;
 mod visibility;

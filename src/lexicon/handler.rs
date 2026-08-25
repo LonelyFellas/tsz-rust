@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use serde_json::Value;
 
 use crate::{
     admin::{AdminAuth, authorization::require_active_admin},
@@ -12,22 +13,30 @@ use crate::{
     lexicon::{
         detection_store::DetectionStore,
         dto::{
-            ActivatePublicationInput, AdminWordDraftV2Envelope, AdminWordListQuery,
-            AdminWordListResponse, AdminWordStats, AdminWordV2Envelope, CreateAdminWordV2Input,
-            DeleteDraftInput, DetectWordInputV2, DetectWordResponseV2, DraftValidationResponse,
-            EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput, EntryPath,
-            FormsImpactResponseV2, PreviewFormsImpactInputV2, PublicationPath,
-            PublishAdminWordV2Input, RelatedSearchQuery, RelatedSearchResponse,
-            ReplaceSentenceAssociationsInput, SaveFormsStepInput, SaveMeaningsStepInput,
-            SentencePath, SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2,
-            SurfaceMatchPageV2, SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2,
-            ValidateAdminWordV2Input,
+            ActivatePublicationAnyInput, ActivatePublicationInput, ActivatePublicationV3Input,
+            AdminWordAny, AdminWordAnyEnvelope, AdminWordDraftAnyEnvelope, AdminWordListQuery,
+            AdminWordListResponse, AdminWordPublicationAny, AdminWordPublicationEnvelope,
+            AdminWordPublicationListResponse, AdminWordStats, CreateAdminWordAnyInput,
+            CreateAdminWordV2Input, CreateAdminWordV3Input, DeleteDraftInput,
+            DetectLexiconInputAny, DetectLexiconResponseAny, DetectLexiconSurfaceV3Input,
+            DetectWordInputV2, DraftValidationResponseAny, EntryLifecycleBatchInput,
+            EntryLifecycleBatchResponseAny, EntryLifecycleInput, EntryPath, FormsImpactResponseAny,
+            PreviewFormsImpactInputAny, PreviewFormsImpactInputV2, PreviewFormsImpactInputV3,
+            PublicationPath, PublishAdminWordAnyInput, PublishAdminWordV2Input,
+            PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
+            ReplaceSentenceAssociationsInput, SaveFormsStepInput, SaveFormsStepInputAny,
+            SaveFormsStepInputV3, SaveMeaningsStepInput, SaveMeaningsStepInputAny,
+            SaveMeaningsStepInputV3, SentencePath, StepSaveIntent, SuggestDialectVariantsInputV2,
+            SuggestDialectVariantsResponseV2, SurfaceMatchPageAny, SurfaceMatchSnapshotPathV2,
+            SurfaceMatchSnapshotQueryV2, ValidateAdminWordAnyInput, ValidateAdminWordV2Input,
+            ValidateAdminWordV3Input,
         },
         impact_store::ImpactStore,
         repository::LexiconRepository,
         service::{LexiconService, LexiconServiceError},
         surface_policy::SurfacePolicyStore,
         surface_snapshot::SurfaceSnapshotStore,
+        v3_contract,
     },
     request_id::RequestId,
     state::AppState,
@@ -42,7 +51,10 @@ pub use commands::{
     replace_sentence_associations, save_forms, save_meanings, suggest_dialect_variants, validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_draft, restore, restore_batch};
-pub use query::{get, list, related_search, stats, surface_match_snapshot_page};
+pub use query::{
+    get, get_publication, list, list_publications, related_search, stats,
+    surface_match_snapshot_page,
+};
 
 fn service(state: &AppState) -> LexiconService {
     LexiconService::new(
@@ -68,6 +80,63 @@ pub(crate) fn required_idempotency_key(headers: &HeaderMap) -> Result<uuid::Uuid
 
 pub(crate) fn idempotency_key_error(message: &'static str) -> AppError {
     AppError::validation(ErrorCode::InvalidRequestBody, "idempotency_key", message)
+}
+
+fn v3_storage_unavailable() -> AppError {
+    AppError::unavailable(
+        ErrorCode::SmartLexiconV3StorageUnavailable,
+        "Smart Lexicon V3 storage or projection capability is disabled",
+    )
+}
+
+fn v3_detection_unavailable() -> AppError {
+    AppError::unavailable(
+        ErrorCode::SmartLexiconV3DetectionUnavailable,
+        "Smart Lexicon V3 form-surface detection requires the C2 projection capability",
+    )
+}
+
+fn v3_publication_requires_migration_canary() -> AppError {
+    AppError::conflict(
+        ErrorCode::SmartLexiconV3PublicationRequiresMigrationCanary,
+        None,
+        "Phase 1 only permits server-whitelisted migrated V3 entries to publish",
+    )
+}
+
+fn apply_legacy_bridge_read_flag(response: &mut AdminWordAnyEnvelope, enabled: bool) {
+    if !enabled && let AdminWordAny::V3(word) = &mut response.word {
+        word.compatibility = None;
+    }
+}
+
+fn apply_lifecycle_batch_legacy_bridge_read_flag(
+    response: &mut EntryLifecycleBatchResponseAny,
+    enabled: bool,
+) {
+    if enabled {
+        return;
+    }
+    for word in &mut response.words {
+        if let AdminWordAny::V3(word) = word {
+            word.compatibility = None;
+        }
+    }
+}
+
+fn apply_draft_legacy_bridge_read_flag(response: &mut AdminWordDraftAnyEnvelope, enabled: bool) {
+    if !enabled && let AdminWordDraftAnyEnvelope::V3(envelope) = response {
+        envelope.word.compatibility = None;
+    }
+}
+
+fn apply_publication_legacy_bridge_read_flag(
+    publication: &mut AdminWordPublicationAny,
+    enabled: bool,
+) {
+    if !enabled && let AdminWordPublicationAny::V3(publication) = publication {
+        publication.word.compatibility = None;
+    }
 }
 
 fn map_error(error: LexiconServiceError) -> AppError {
@@ -102,6 +171,11 @@ fn map_error(error: LexiconServiceError) -> AppError {
         LexiconServiceError::UnsupportedLanguage => {
             AppError::unprocessable(ErrorCode::UnsupportedLanguage, "unsupported language")
         }
+        LexiconServiceError::UnsupportedSchemaVersion(_) => AppError::unprocessable(
+            ErrorCode::UnsupportedSchemaVersion,
+            "unsupported lexicon schema version",
+        ),
+        LexiconServiceError::V3StorageUnavailable => v3_storage_unavailable(),
         LexiconServiceError::DetectionMismatch => AppError::unprocessable(
             ErrorCode::DetectionMismatch,
             "detection does not match create request",
@@ -115,7 +189,16 @@ fn map_error(error: LexiconServiceError) -> AppError {
             "surface match acknowledgement is required",
         )
         .with_meta(ProblemMeta {
-            surface_match_page: Some(*page),
+            surface_match_page: Some(SurfaceMatchPageAny::V2(*page)),
+            ..ProblemMeta::default()
+        }),
+        LexiconServiceError::SurfaceMatchAcknowledgementRequiredV3(page) => AppError::conflict(
+            ErrorCode::SurfaceMatchAcknowledgementRequired,
+            None,
+            "surface match acknowledgement is required",
+        )
+        .with_meta(ProblemMeta {
+            surface_match_page: Some(SurfaceMatchPageAny::V3(*page)),
             ..ProblemMeta::default()
         }),
         LexiconServiceError::SurfaceMatchesChanged(page) => AppError::conflict(
@@ -124,9 +207,23 @@ fn map_error(error: LexiconServiceError) -> AppError {
             "surface matches changed since confirmation",
         )
         .with_meta(ProblemMeta {
-            surface_match_page: Some(*page),
+            surface_match_page: Some(SurfaceMatchPageAny::V2(*page)),
             ..ProblemMeta::default()
         }),
+        LexiconServiceError::SurfaceMatchesChangedV3(page) => AppError::conflict(
+            ErrorCode::SurfaceMatchesChanged,
+            None,
+            "surface matches changed since confirmation",
+        )
+        .with_meta(ProblemMeta {
+            surface_match_page: Some(SurfaceMatchPageAny::V3(*page)),
+            ..ProblemMeta::default()
+        }),
+        LexiconServiceError::SurfaceMatchesChangedWithoutSnapshot => AppError::conflict(
+            ErrorCode::SurfaceMatchesChanged,
+            None,
+            "surface matches changed since confirmation; retry without the stale token",
+        ),
         LexiconServiceError::SurfaceMatchSnapshotExpired => AppError::gone(
             ErrorCode::SurfaceMatchSnapshotExpired,
             "surface confirmation snapshot expired",
@@ -147,7 +244,7 @@ fn map_error(error: LexiconServiceError) -> AppError {
             "exact headword creation is temporarily disabled",
         )
         .with_meta(ProblemMeta {
-            surface_match_page: Some(*page),
+            surface_match_page: Some(SurfaceMatchPageAny::V2(*page)),
             ..ProblemMeta::default()
         }),
         LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(page) => {
@@ -157,7 +254,18 @@ fn map_error(error: LexiconServiceError) -> AppError {
                 "multiple active exact headword publications are not enabled",
             )
             .with_meta(ProblemMeta {
-                surface_match_page: Some(*page),
+                surface_match_page: Some(SurfaceMatchPageAny::V2(*page)),
+                ..ProblemMeta::default()
+            })
+        }
+        LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabledV3(page) => {
+            AppError::conflict(
+                ErrorCode::MultipleActiveExactHeadwordPublicationsNotEnabled,
+                None,
+                "multiple active exact headword publications are not enabled",
+            )
+            .with_meta(ProblemMeta {
+                surface_match_page: Some(SurfaceMatchPageAny::V3(*page)),
                 ..ProblemMeta::default()
             })
         }
@@ -265,6 +373,19 @@ fn map_error(error: LexiconServiceError) -> AppError {
             None,
             "a referenced target is changing; retry the command",
         ),
+        LexiconServiceError::StableNodeIdChanged => AppError::conflict(
+            ErrorCode::StableNodeIdChanged,
+            None,
+            "a stable V3 node identity changed",
+        ),
+        LexiconServiceError::FormReferenceConflict => AppError::conflict(
+            ErrorCode::FormReferenceConflict,
+            None,
+            "the form operation would break an existing reference",
+        ),
+        LexiconServiceError::V3PublicationRequiresMigrationCanary => {
+            v3_publication_requires_migration_canary()
+        }
         LexiconServiceError::StepNotReachable => AppError::conflict(
             ErrorCode::StepNotReachable,
             None,
@@ -273,6 +394,10 @@ fn map_error(error: LexiconServiceError) -> AppError {
         LexiconServiceError::ValidationFailed(issues) => {
             AppError::unprocessable(ErrorCode::ValidationFailed, "draft validation failed")
                 .with_field_issues(&issues)
+        }
+        LexiconServiceError::ValidationFailedV3(issues) => {
+            AppError::unprocessable(ErrorCode::ValidationFailed, "V3 draft validation failed")
+                .with_v3_field_issues(issues)
         }
         LexiconServiceError::DownstreamConfirmationRequired(affected_node_ids) => {
             AppError::conflict(

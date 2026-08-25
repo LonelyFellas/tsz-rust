@@ -1,4 +1,29 @@
 use super::*;
+use uuid::Uuid;
+
+async fn require_lifecycle_v3_capabilities(
+    state: &AppState,
+    entry_ids: &[Uuid],
+) -> Result<(), AppError> {
+    let contains_v3 = service(state)
+        .lifecycle_contains_v3(entry_ids)
+        .await
+        .map_err(map_error)?;
+    if contains_v3
+        && (!state.smart_lexicon_v3_flags.read
+            || !state.smart_lexicon_v3_flags.edit
+            || !state.smart_lexicon_v3_flags.projection)
+    {
+        return Err(v3_storage_unavailable());
+    }
+    Ok(())
+}
+
+fn lifecycle_v3_capabilities_enabled(state: &AppState) -> bool {
+    state.smart_lexicon_v3_flags.read
+        && state.smart_lexicon_v3_flags.edit
+        && state.smart_lexicon_v3_flags.projection
+}
 
 #[utoipa::path(
     delete,
@@ -25,8 +50,15 @@ pub async fn delete_draft(
     ApiJson(input): ApiJson<DeleteDraftInput>,
 ) -> Result<StatusCode, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
+    require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
     service(&state)
-        .delete_draft(admin.id, request_id.as_uuid(), path.id, input)
+        .delete_draft(
+            admin.id,
+            request_id.as_uuid(),
+            path.id,
+            input,
+            lifecycle_v3_capabilities_enabled(&state),
+        )
         .await
         .map_err(map_error)?;
     Ok(StatusCode::NO_CONTENT)
@@ -40,7 +72,7 @@ pub async fn delete_draft(
     params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "归档命令幂等键（UUID）")),
     request_body = EntryLifecycleInput,
     responses(
-        (status = 200, description = "词条已归档且 publication 历史保持不变", body = AdminWordV2Envelope),
+        (status = 200, description = "词条已归档且 publication 历史保持不变", body = AdminWordAnyEnvelope),
         (status = 400, description = "路径、header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
@@ -59,10 +91,22 @@ pub async fn archive(
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
-    let response = service(&state)
-        .archive(admin.id, request_id.as_uuid(), path.id, key, input)
+    require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
+    let mut response = service(&state)
+        .archive(
+            admin.id,
+            request_id.as_uuid(),
+            path.id,
+            key,
+            input,
+            lifecycle_v3_capabilities_enabled(&state),
+        )
         .await
         .map_err(map_error)?;
+    apply_legacy_bridge_read_flag(
+        &mut response,
+        state.smart_lexicon_v3_flags.legacy_bridge_read,
+    );
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -74,7 +118,7 @@ pub async fn archive(
     params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "恢复命令幂等键（UUID）")),
     request_body = EntryLifecycleInput,
     responses(
-        (status = 200, description = "词条已恢复且 publication 历史保持不变", body = AdminWordV2Envelope),
+        (status = 200, description = "词条已恢复且 publication 历史保持不变", body = AdminWordAnyEnvelope),
         (status = 400, description = "路径、header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
@@ -95,10 +139,22 @@ pub async fn restore(
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
-    let response = service(&state)
-        .restore(admin.id, request_id.as_uuid(), path.id, key, input)
+    require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
+    let mut response = service(&state)
+        .restore(
+            admin.id,
+            request_id.as_uuid(),
+            path.id,
+            key,
+            input,
+            lifecycle_v3_capabilities_enabled(&state),
+        )
         .await
         .map_err(map_error)?;
+    apply_legacy_bridge_read_flag(
+        &mut response,
+        state.smart_lexicon_v3_flags.legacy_bridge_read,
+    );
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -110,7 +166,7 @@ pub async fn restore(
     params(("Idempotency-Key" = Uuid, Header, description = "批量归档命令幂等键（UUID）")),
     request_body = EntryLifecycleBatchInput,
     responses(
-        (status = 200, description = "原子批量归档结果", body = EntryLifecycleBatchResponse),
+        (status = 200, description = "原子批量归档结果", body = EntryLifecycleBatchResponseAny),
         (status = 400, description = "header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
@@ -128,10 +184,26 @@ pub async fn archive_batch(
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
-    let response = service(&state)
-        .archive_batch(admin.id, request_id.as_uuid(), key, input)
+    let entry_ids = input
+        .entries
+        .iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    require_lifecycle_v3_capabilities(&state, &entry_ids).await?;
+    let mut response = service(&state)
+        .archive_batch(
+            admin.id,
+            request_id.as_uuid(),
+            key,
+            input,
+            lifecycle_v3_capabilities_enabled(&state),
+        )
         .await
         .map_err(map_error)?;
+    apply_lifecycle_batch_legacy_bridge_read_flag(
+        &mut response,
+        state.smart_lexicon_v3_flags.legacy_bridge_read,
+    );
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -143,7 +215,7 @@ pub async fn archive_batch(
     params(("Idempotency-Key" = Uuid, Header, description = "批量恢复命令幂等键（UUID）")),
     request_body = EntryLifecycleBatchInput,
     responses(
-        (status = 200, description = "原子批量恢复结果", body = EntryLifecycleBatchResponse),
+        (status = 200, description = "原子批量恢复结果", body = EntryLifecycleBatchResponseAny),
         (status = 400, description = "header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
@@ -163,9 +235,25 @@ pub async fn restore_batch(
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
-    let response = service(&state)
-        .restore_batch(admin.id, request_id.as_uuid(), key, input)
+    let entry_ids = input
+        .entries
+        .iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    require_lifecycle_v3_capabilities(&state, &entry_ids).await?;
+    let mut response = service(&state)
+        .restore_batch(
+            admin.id,
+            request_id.as_uuid(),
+            key,
+            input,
+            lifecycle_v3_capabilities_enabled(&state),
+        )
         .await
         .map_err(map_error)?;
+    apply_lifecycle_batch_legacy_bridge_read_flag(
+        &mut response,
+        state.smart_lexicon_v3_flags.legacy_bridge_read,
+    );
     Ok((StatusCode::OK, Json(response)))
 }

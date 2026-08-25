@@ -10,45 +10,50 @@ use crate::lexicon::{
     detection_store::{DetectionStore, DetectionStoreError},
     dialect_provider::{DialectSuggestionProvider, DictionaryRegionRulesProvider, evidence_keys},
     dto::{
-        AcknowledgedTrue, ActivatePublicationInput, AdminWordDraftV2Envelope, AdminWordListItem,
-        AdminWordListPage, AdminWordListQuery, AdminWordListResponse, AdminWordStats,
-        AdminWordStatus, AdminWordV2, AdminWordV2Envelope, BuiltinDictionaryResultV2,
-        CreateAdminWordV2Input, DeleteDraftInput, DetectWordInputV2, DetectWordResponseV2,
-        DetectionRequestEcho, DetectionSurfaceMatchPreviewV2, DetectionSurfaceWarningAuditV2,
-        Dialect, DialectRulesV2, DialectSuggestionFieldKind, DialectSuggestionProviderV2,
-        DialectVariantSlotV2, DialectVariantSuggestionItemV2, DictionaryCoverageStateV2,
-        DictionaryCoverageV2, DictionaryProvenanceV2, DictionaryProviderV2, DraftFormsStepContent,
-        DraftMeaningsStepContent, DraftReferenceLocation, DraftValidationIssue,
-        DraftValidationResponse, DuplicateWordMatchV2, EnglishTextV2, EntryKind,
-        EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput,
-        EntryLifecycleTarget, ExistingSurfaceMatchV2, ExistingSurfaceSourceV2, FormsImpactItemV2,
-        FormsImpactNodeType, FormsImpactResponseV2, GrammarStructureV2, GrammarVariantV2,
-        HeadwordVariant, LexiconSurfaceMatchV2, MatchedEntryContextV2, PersistedWordStep,
-        PreviewFormsImpactInputV2, PronunciationStyle, PublishAdminWordV2Input,
-        RelatedSearchLegacyResponse, RelatedSearchMatchMode, RelatedSearchQuery,
-        RelatedSearchResponse, RelatedSearchV2Response, RelatedWordResult, RelatedWordSense,
-        RelationReferenceCountsV2, RelationReferencePreviewV2, RelationReferenceSummaryV2,
-        RelationTypeV2, ReplaceSentenceAssociationsInput, RetiredStableSlotV2, RichText,
-        SaveFormsStepInput, SaveMeaningsStepInput, SenseGroupV2, SentenceAssociationInputV2,
-        SentenceAssociationOriginV2, SentenceAssociationsStateV2, SentenceSourceRangeV1,
-        SmartDictionaryResultV2, SourceDialect, StepSaveIntent, SuggestDialectVariantsInputV2,
-        SuggestDialectVariantsResponseV2, SurfaceAttentionLevelV2, SurfaceCanContinueTrue,
-        SurfaceConfirmationReasonV2, SurfaceContentScopeV2, SurfaceMatchCandidateV2,
-        SurfaceMatchCategoryV2, SurfaceMatchPageV2, SurfaceMatchSeverityV2,
-        SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, TextOrigin, TextVariantV2,
-        ValidateAdminWordV2Input, WordBaseFormSlotV2, WordCreationStep, WordDefinitionV2,
-        WordDetectionSnapshotSmartDictionaryV2, WordDetectionSnapshotV2, WordFormGroupV2,
-        WordFormTypeV2, WordFormVariantV2, WordHeadwordsV2, WordPosFormsV2, WordPosMeaningsV2,
-        WordPronunciationV2, WordRelationV2, WordSenseV2, WordSentenceAssociationV2,
-        WordSentenceLinkV2, WordSentenceV2,
+        AcknowledgedTrue, ActivatePublicationInput, AdminWordAny, AdminWordAnyEnvelope,
+        AdminWordDraftV2Envelope, AdminWordListItem, AdminWordListItemAny, AdminWordListItemV3,
+        AdminWordListPage, AdminWordListQuery, AdminWordListResponse, AdminWordPublicationAny,
+        AdminWordPublicationEnvelope, AdminWordPublicationListResponse, AdminWordPublicationV2,
+        AdminWordPublicationV3, AdminWordStats, AdminWordStatus, AdminWordV2, AdminWordV2Envelope,
+        AdminWordV3, BuiltinDictionaryResultV2, CreateAdminWordV2Input, DeleteDraftInput,
+        DetectWordInputV2, DetectWordResponseV2, DetectionRequestEcho,
+        DetectionSurfaceMatchPreviewV2, DetectionSurfaceWarningAuditV2, Dialect, DialectRulesV2,
+        DialectSuggestionFieldKind, DialectSuggestionProviderV2, DialectVariantSlotV2,
+        DialectVariantSuggestionItemV2, DictionaryCoverageStateV2, DictionaryCoverageV2,
+        DictionaryProvenanceV2, DictionaryProviderV2, DraftFormsStepContent,
+        DraftFormsStepContentV3, DraftMeaningsStepContent, DraftReferenceLocation,
+        DraftValidationIssue, DraftValidationResponse, DuplicateWordMatchV2, EnglishTextV2,
+        EntryKind, EntryLifecycleBatchInput, EntryLifecycleBatchResponseAny, EntryLifecycleInput,
+        EntryLifecycleTarget, EntryPresentationV3, ExistingSurfaceMatchV2, ExistingSurfaceSourceV2,
+        FormsImpactItemV2, FormsImpactNodeType, FormsImpactResponseV2, GrammarStructureV2,
+        GrammarVariantV2, HeadwordVariant, LegacyHeadwordsCompatibilityV3, LexiconSurfaceMatchV2,
+        MatchedEntryContextV2, PersistedWordStep, PreviewFormsImpactInputV2, PronunciationStyle,
+        PublishAdminWordV2Input, RelatedSearchLegacyResponse, RelatedSearchMatchMode,
+        RelatedSearchQuery, RelatedSearchResponse, RelatedSearchV2Response, RelatedWordMatchV3,
+        RelatedWordResult, RelatedWordResultAny, RelatedWordResultV3, RelatedWordSense,
+        RelatedWordSenseV3, RelationReferenceCountsV2, RelationReferencePreviewV2,
+        RelationReferenceSummaryV2, RelationTypeV2, ReplaceSentenceAssociationsInput,
+        RetiredStableSlotV2, RichText, SaveFormsStepInput, SaveMeaningsStepInput, SenseGroupV2,
+        SentenceAssociationInputV2, SentenceAssociationOriginV2, SentenceAssociationsStateV2,
+        SentenceSourceRangeV1, SmartDictionaryResultV2, SourceDialect, StepSaveIntent,
+        SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2, SurfaceAttentionLevelV2,
+        SurfaceCanContinueTrue, SurfaceConfirmationReasonV2, SurfaceContentScopeV2,
+        SurfaceMatchCandidateV2, SurfaceMatchCategoryV2, SurfaceMatchPageV2, SurfaceMatchPageV3,
+        SurfaceMatchSeverityV2, SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, TextOrigin,
+        TextVariantV2, ValidateAdminWordV2Input, WordBaseFormSlotV2, WordCreationStep,
+        WordDefinitionV2, WordDetectionSnapshotSmartDictionaryV2, WordDetectionSnapshotV2,
+        WordEntryKindV3, WordFormGroupV2, WordFormTypeV2, WordFormVariantV2, WordHeadwordsV2,
+        WordPosFormsV2, WordPosMeaningsV2, WordPronunciationV2, WordRegionalVariantsV3,
+        WordRelationV2, WordSenseV2, WordSenseV3, WordSentenceAssociationV2, WordSentenceLinkV2,
+        WordSentenceV2,
     },
     impact_store::{ImpactConfirmation, ImpactStore, ImpactStoreError},
     model::{
         CatalogPartRecord, DictionaryCandidateRecord, EntryRecord,
         FormsSurfaceAcknowledgementRecord, HeadwordSurfaceAcknowledgementRecord, ListFilter,
-        NewPublicationSenseReference, PublicationSenseReferenceKind, PublicationTargetContentScope,
-        RegionSurfaceRecord, RelatedSearchFilter, ResolvedRelationTargetRecord,
-        ResolvedSenseTargetRecord, SenseTargetKey,
+        NewPublicationSenseReference, PublicationReadRecord, PublicationSenseReferenceKind,
+        PublicationTargetContentScope, RegionSurfaceRecord, RelatedSearchFilter,
+        ResolvedRelationTargetRecord, ResolvedSenseTargetRecord, SenseTargetKey,
     },
     normalization::{
         HeadwordNormalizationError, NormalizedHeadword, normalize_headword, sha256_json,
@@ -76,6 +81,9 @@ mod lifecycle;
 mod publishing;
 mod queries;
 mod sentence_association;
+mod v3;
+mod v3_publication;
+mod v3_surface;
 
 use editing::*;
 pub(crate) use entry::entry_from_record;
@@ -106,6 +114,10 @@ pub enum LexiconServiceError {
     },
     #[error("unsupported language")]
     UnsupportedLanguage,
+    #[error("unsupported lexicon schema version {0}")]
+    UnsupportedSchemaVersion(i16),
+    #[error("Smart Lexicon V3 storage or projection capability is disabled")]
+    V3StorageUnavailable,
     #[error("detection does not exist")]
     DetectionMismatch,
     #[error("detection expired")]
@@ -138,16 +150,30 @@ pub enum LexiconServiceError {
     EntryHasUnavailablePublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
     #[error("a referenced publication is changing")]
     ReferenceConflict,
+    #[error("a stable V3 node identity changed")]
+    StableNodeIdChanged,
+    #[error("a V3 form operation would break an existing reference")]
+    FormReferenceConflict,
+    #[error("V3 publication requires a whitelisted migrated entry")]
+    V3PublicationRequiresMigrationCanary,
     #[error("step is not reachable")]
     StepNotReachable,
     #[error("draft validation failed")]
     ValidationFailed(Vec<crate::lexicon::dto::DraftValidationIssue>),
+    #[error("V3 draft validation failed")]
+    ValidationFailedV3(Vec<crate::lexicon::dto::V3DraftValidationIssue>),
     #[error("downstream confirmation is required")]
     DownstreamConfirmationRequired(Vec<Uuid>),
     #[error("surface match acknowledgement is required")]
     SurfaceMatchAcknowledgementRequired(Box<SurfaceMatchPageV2>),
+    #[error("V3 surface match acknowledgement is required")]
+    SurfaceMatchAcknowledgementRequiredV3(Box<SurfaceMatchPageV3>),
     #[error("surface matches changed")]
     SurfaceMatchesChanged(Box<SurfaceMatchPageV2>),
+    #[error("V3 surface matches changed")]
+    SurfaceMatchesChangedV3(Box<SurfaceMatchPageV3>),
+    #[error("surface matches changed and no replacement snapshot is required")]
+    SurfaceMatchesChangedWithoutSnapshot,
     #[error("surface confirmation snapshot expired")]
     SurfaceMatchSnapshotExpired,
     #[error("surface policy changed")]
@@ -156,6 +182,8 @@ pub enum LexiconServiceError {
     ExactHeadwordCreationTemporarilyDisabled(Box<SurfaceMatchPageV2>),
     #[error("multiple active exact headword publications are not enabled")]
     MultipleActiveExactHeadwordPublicationsNotEnabled(Box<SurfaceMatchPageV2>),
+    #[error("multiple active exact headword publications are not enabled for a V3 command")]
+    MultipleActiveExactHeadwordPublicationsNotEnabledV3(Box<SurfaceMatchPageV3>),
     #[error("surface snapshot store failed")]
     SurfaceSnapshot(#[source] SurfaceSnapshotError),
     #[error("surface policy store failed")]
@@ -166,6 +194,48 @@ pub enum LexiconServiceError {
     ImpactStore(#[source] ImpactStoreError),
     #[error("lexicon repository failed")]
     Repository(#[source] LexiconRepositoryError),
+}
+
+fn v3_validation_failed(
+    issues: Vec<crate::lexicon::dto::DraftValidationIssue>,
+) -> LexiconServiceError {
+    LexiconServiceError::ValidationFailedV3(crate::lexicon::v3_contract::v3_issues(&issues))
+}
+
+fn v3_meaning_validation_forms(forms: &DraftFormsStepContentV3) -> DraftFormsStepContent {
+    DraftFormsStepContent {
+        pos: forms
+            .pos
+            .iter()
+            .map(|pos| WordPosFormsV2 {
+                pos_id: pos.pos_id,
+                pos: pos.pos.clone(),
+                dialect_rules: DialectRulesV2 {
+                    spelling_mode: "distinguish".to_owned(),
+                    phonetic_mode: "distinguish".to_owned(),
+                },
+                // V3 meanings are POS-owned. This adapter exists only to reuse the
+                // established meanings validator and is never persisted or exposed.
+                base_form: WordBaseFormSlotV2 {
+                    id: Uuid::nil(),
+                    form_type: "base".to_owned(),
+                    variants: Vec::new(),
+                },
+                form_groups: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+fn v3_meaning_validation_headwords() -> WordHeadwordsV2 {
+    // Distinguish mode accepts either a common grammar variant or a complete
+    // UK/US pair. The placeholder is validation-only and never becomes a V3
+    // identity, presentation label, surface, or stored compatibility value.
+    WordHeadwordsV2::Distinguish {
+        uk: "v3".to_owned(),
+        us: "v3".to_owned(),
+        source_dialect: SourceDialect::Uk,
+    }
 }
 
 pub struct LexiconService {

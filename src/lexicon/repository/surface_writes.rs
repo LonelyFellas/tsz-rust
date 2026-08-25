@@ -338,9 +338,9 @@ impl LexiconRepository {
         if entry_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let snapshots = sqlx::query_scalar::<_, serde_json::Value>(
+        let snapshots = sqlx::query_as::<_, (i16, serde_json::Value)>(
             r#"
-            SELECT publication.snapshot
+            SELECT publication.content_schema_version, publication.snapshot
             FROM lexicon.entries entry
             JOIN lexicon.entry_publications publication
               ON publication.id = entry.current_publication_id
@@ -355,7 +355,12 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)?;
 
         let mut sources = Vec::new();
-        for snapshot in snapshots {
+        for (schema_version, snapshot) in snapshots {
+            if schema_version != 2 {
+                return Err(LexiconRepositoryError::Invariant(
+                    "surface writer v1 cannot consume a non-V2 publication",
+                ));
+            }
             let word: AdminWordV2 = serde_json::from_value(snapshot)?;
             sources.extend(surface_projection_sources(&word).map_err(|_| {
                 LexiconRepositoryError::Invariant(

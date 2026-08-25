@@ -3,6 +3,72 @@ use super::*;
 // --- publication ---
 
 impl LexiconRepository {
+    pub(crate) async fn publication_history(
+        &self,
+        entry_id: Uuid,
+    ) -> Result<Option<Vec<PublicationReadRecord>>, LexiconRepositoryError> {
+        let entry_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id = $1)",
+        )
+        .bind(entry_id)
+        .fetch_one(self.pool())
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        if !entry_exists {
+            return Ok(None);
+        }
+        sqlx::query_as::<_, PublicationReadRecord>(
+            r#"
+            SELECT publication.id,
+                   publication.entry_id,
+                   publication.publication_number,
+                   publication.source_revision,
+                   publication.content_schema_version,
+                   publication.snapshot,
+                   publication.published_by_admin_id,
+                   publication.published_at,
+                   entry.current_publication_id = publication.id AS is_current
+            FROM lexicon.entry_publications publication
+            JOIN lexicon.entries entry ON entry.id = publication.entry_id
+            WHERE publication.entry_id = $1
+            ORDER BY publication.publication_number DESC
+            "#,
+        )
+        .bind(entry_id)
+        .fetch_all(self.pool())
+        .await
+        .map(Some)
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn publication(
+        &self,
+        entry_id: Uuid,
+        publication_id: Uuid,
+    ) -> Result<Option<PublicationReadRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, PublicationReadRecord>(
+            r#"
+            SELECT publication.id,
+                   publication.entry_id,
+                   publication.publication_number,
+                   publication.source_revision,
+                   publication.content_schema_version,
+                   publication.snapshot,
+                   publication.published_by_admin_id,
+                   publication.published_at,
+                   entry.current_publication_id = publication.id AS is_current
+            FROM lexicon.entry_publications publication
+            JOIN lexicon.entries entry ON entry.id = publication.entry_id
+            WHERE publication.entry_id = $1 AND publication.id = $2
+            "#,
+        )
+        .bind(entry_id)
+        .bind(publication_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn insert_publication(
         tx: &mut Transaction<'_, Postgres>,
@@ -295,7 +361,7 @@ impl LexiconRepository {
             r#"
             SELECT id, entry_id, publication_number, source_revision, snapshot, published_at
             FROM lexicon.entry_publications
-            WHERE entry_id = $1 AND source_revision = $2
+            WHERE entry_id = $1 AND content_schema_version = 2 AND source_revision = $2
             FOR UPDATE
             "#,
         )
@@ -533,6 +599,7 @@ impl LexiconRepository {
                    entry.revision AS target_revision,
                    entry.archived_at IS NOT NULL AS target_archived,
                    node.removed_from_draft_at IS NOT NULL AS target_removed,
+                   entry.content_schema_version,
                    entry.headword_mode,
                    entry.source_dialect,
                    (SELECT headword FROM lexicon.entry_headwords
@@ -541,6 +608,7 @@ impl LexiconRepository {
                     WHERE entry_id = entry.id AND dialect = 'uk') AS uk_headword,
                    (SELECT headword FROM lexicon.entry_headwords
                     WHERE entry_id = entry.id AND dialect = 'us') AS us_headword,
+                   presentation.label AS presentation_label,
                    projection.meanings AS draft_meanings,
                    CASE WHEN publication_node.node_id IS NOT NULL
                         THEN publication.id END AS target_publication_id,
@@ -555,6 +623,10 @@ impl LexiconRepository {
              AND node.node_type = 'sense'
             JOIN lexicon.entries entry ON entry.id = requested.target_entry_id
             JOIN lexicon.entry_editor_projection projection ON projection.entry_id = entry.id
+            LEFT JOIN lexicon.entry_presentation_projection presentation
+              ON presentation.entry_id = entry.id
+             AND presentation.content_schema_version = 3
+             AND presentation.source_revision = entry.revision
             LEFT JOIN lexicon.entry_publications publication
               ON publication.id = entry.current_publication_id
              AND publication.entry_id = entry.id
@@ -600,6 +672,7 @@ impl LexiconRepository {
                    entry.revision AS target_revision,
                    entry.archived_at IS NOT NULL AS target_archived,
                    node.removed_from_draft_at IS NOT NULL AS target_removed,
+                   entry.content_schema_version,
                    entry.headword_mode,
                    entry.source_dialect,
                    (SELECT headword FROM lexicon.entry_headwords
@@ -608,6 +681,7 @@ impl LexiconRepository {
                     WHERE entry_id = entry.id AND dialect = 'uk') AS uk_headword,
                    (SELECT headword FROM lexicon.entry_headwords
                     WHERE entry_id = entry.id AND dialect = 'us') AS us_headword,
+                   presentation.label AS presentation_label,
                    projection.meanings AS draft_meanings,
                    CASE WHEN publication_node.node_id IS NOT NULL
                         THEN publication.id END AS target_publication_id,
@@ -622,6 +696,10 @@ impl LexiconRepository {
              AND node.node_type = 'sense'
             JOIN lexicon.entries entry ON entry.id = requested.target_entry_id
             JOIN lexicon.entry_editor_projection projection ON projection.entry_id = entry.id
+            LEFT JOIN lexicon.entry_presentation_projection presentation
+              ON presentation.entry_id = entry.id
+             AND presentation.content_schema_version = 3
+             AND presentation.source_revision = entry.revision
             LEFT JOIN lexicon.entry_publications publication
               ON publication.id = entry.current_publication_id
              AND publication.entry_id = entry.id

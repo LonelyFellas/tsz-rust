@@ -29,28 +29,34 @@ impl LexiconRepository {
                 SELECT entry.id,
                        entry.kind,
                        publication.id AS publication_id,
+                       publication.content_schema_version,
                        publication.snapshot,
-                       -- 只作排序/游标键；必须与服务端返回的 headword 逐字符相同，
-                       -- 否则下拉框会按一个和显示文本不同的串排序。
-                       -- 并列拼写一律「管理员主词侧在前」，与
-                       -- service/helpers.rs 的 ordered_headword_sides 同规则。
-                       CASE publication.snapshot #>> '{headwords,mode}'
-                           WHEN 'unified' THEN
-                               COALESCE(publication.snapshot #>> '{headwords,common}', '')
-                           WHEN 'distinguish' THEN
-                               CASE WHEN publication.snapshot #>> '{headwords,source_dialect}' = 'us'
-                                   THEN concat_ws(
-                                       ' / ',
-                                       NULLIF(publication.snapshot #>> '{headwords,us}', ''),
-                                       NULLIF(publication.snapshot #>> '{headwords,uk}', '')
-                                   )
-                                   ELSE concat_ws(
-                                       ' / ',
-                                       NULLIF(publication.snapshot #>> '{headwords,uk}', ''),
-                                       NULLIF(publication.snapshot #>> '{headwords,us}', '')
-                                   )
-                               END
-                           ELSE ''
+                       -- 只作排序/游标键；必须与服务端展示字段逐字符相同。
+                       -- V2 并列拼写仍按管理员主词侧在前；V3 没有主词，直接使用
+                       -- publication snapshot 内冻结的 presentation label。
+                       CASE publication.content_schema_version
+                           WHEN 3 THEN COALESCE(
+                               publication.snapshot #>> '{presentation,label}',
+                               ''
+                           )
+                           ELSE CASE publication.snapshot #>> '{headwords,mode}'
+                               WHEN 'unified' THEN
+                                   COALESCE(publication.snapshot #>> '{headwords,common}', '')
+                               WHEN 'distinguish' THEN
+                                   CASE WHEN publication.snapshot #>> '{headwords,source_dialect}' = 'us'
+                                       THEN concat_ws(
+                                           ' / ',
+                                           NULLIF(publication.snapshot #>> '{headwords,us}', ''),
+                                           NULLIF(publication.snapshot #>> '{headwords,uk}', '')
+                                       )
+                                       ELSE concat_ws(
+                                           ' / ',
+                                           NULLIF(publication.snapshot #>> '{headwords,uk}', ''),
+                                           NULLIF(publication.snapshot #>> '{headwords,us}', '')
+                                       )
+                                   END
+                               ELSE ''
+                           END
                        END AS headword
                 FROM lexicon.entries entry
                 JOIN lexicon.entry_publications publication
@@ -61,7 +67,8 @@ impl LexiconRepository {
                 SELECT *, headword AS sort_headword
                 FROM published_entry
             )
-            SELECT snapshot,
+            SELECT content_schema_version,
+                   snapshot,
                    COALESCE((
                        SELECT array_agg(DISTINCT part.code ORDER BY part.code)
                        FROM lexicon.entry_publication_part_of_speech_refs pos_ref
@@ -73,7 +80,8 @@ impl LexiconRepository {
                    sort_headword,
                    count(*) OVER() AS total
             FROM searchable_entry
-            WHERE ($2::text IS NULL OR kind = $2)
+            WHERE ($10::boolean OR content_schema_version = 2)
+              AND ($2::text IS NULL OR kind = $2)
               AND CASE WHEN $3 THEN
                     EXISTS (
                         SELECT 1
@@ -81,7 +89,13 @@ impl LexiconRepository {
                         WHERE surface.entry_id = searchable_entry.id
                           AND surface.publication_id = searchable_entry.publication_id
                           AND surface.content_scope = 'current_publication'
-                          AND surface.source_kind = 'headword'
+                          AND surface.content_schema_version = searchable_entry.content_schema_version
+                          AND (
+                              (searchable_entry.content_schema_version = 2
+                                  AND surface.source_kind = 'headword')
+                              OR (searchable_entry.content_schema_version = 3
+                                  AND surface.source_kind = 'form_variant')
+                          )
                           AND surface.is_deleted = FALSE
                           AND surface.normalized_surface = $5
                     )
@@ -92,7 +106,13 @@ impl LexiconRepository {
                         WHERE surface.entry_id = searchable_entry.id
                           AND surface.publication_id = searchable_entry.publication_id
                           AND surface.content_scope = 'current_publication'
-                          AND surface.source_kind = 'headword'
+                          AND surface.content_schema_version = searchable_entry.content_schema_version
+                          AND (
+                              (searchable_entry.content_schema_version = 2
+                                  AND surface.source_kind = 'headword')
+                              OR (searchable_entry.content_schema_version = 3
+                                  AND surface.source_kind = 'form_variant')
+                          )
                           AND surface.is_deleted = FALSE
                           AND surface.normalized_surface LIKE $1 ESCAPE '\'
                     )
@@ -104,7 +124,13 @@ impl LexiconRepository {
                         WHERE surface.entry_id = searchable_entry.id
                           AND surface.publication_id = searchable_entry.publication_id
                           AND surface.content_scope = 'current_publication'
-                          AND surface.source_kind = 'headword'
+                          AND surface.content_schema_version = searchable_entry.content_schema_version
+                          AND (
+                              (searchable_entry.content_schema_version = 2
+                                  AND surface.source_kind = 'headword')
+                              OR (searchable_entry.content_schema_version = 3
+                                  AND surface.source_kind = 'form_variant')
+                          )
                           AND surface.is_deleted = FALSE
                           AND surface.normalized_surface = $5
                     )
@@ -128,6 +154,7 @@ impl LexiconRepository {
         .bind(filter.last_headword)
         .bind(filter.last_word_id)
         .bind(filter.limit)
+        .bind(filter.include_v3)
         .fetch_all(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)
@@ -140,6 +167,7 @@ impl LexiconRepository {
         sqlx::query_as::<_, ListEntryRecord>(
             r#"
             SELECT entry.id,
+                   entry.content_schema_version,
                    entry.kind,
                    entry.source_dialect,
                    -- 并列拼写一律「管理员主词侧在前」，与词条详情、建稿第 4 步保持一致；
@@ -166,6 +194,10 @@ impl LexiconRepository {
                        FROM lexicon.entry_headwords headword
                        WHERE headword.entry_id = entry.id
                    ), ARRAY[]::text[]) AS headword_spellings,
+                   editor.forms,
+                   presentation.label AS presentation_label,
+                   presentation.matched_surfaces AS presentation_surfaces,
+                   presentation.strategy_version AS presentation_strategy,
                    COALESCE((
                        SELECT variant.plain_text
                        FROM lexicon.definitions definition
@@ -205,18 +237,31 @@ impl LexiconRepository {
                    count(*) OVER() AS total
             FROM lexicon.entries entry
             JOIN admins creator ON creator.id = entry.created_by_admin_id
+            JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
             LEFT JOIN lexicon.entry_publications publication
                 ON publication.id = entry.current_publication_id
+            LEFT JOIN lexicon.entry_presentation_projection presentation
+                ON presentation.entry_id = entry.id
+               AND presentation.source_revision = entry.revision
             WHERE (
                     ($6::text IS NULL AND entry.archived_at IS NULL)
                     OR ($6 = 'draft' AND entry.archived_at IS NULL AND entry.current_publication_id IS NULL)
                     OR ($6 = 'published' AND entry.archived_at IS NULL AND entry.current_publication_id IS NOT NULL)
                     OR ($6 = 'archived' AND entry.archived_at IS NOT NULL)
                   )
+              AND ($11::boolean OR entry.content_schema_version = 2)
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
                    OR EXISTS (
                        SELECT 1 FROM lexicon.entry_headwords h
                        WHERE h.entry_id = entry.id AND h.headword ILIKE '%' || $1 || '%'
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM lexicon.surface_sources surface
+                       WHERE surface.entry_id = entry.id
+                         AND surface.content_schema_version = 3
+                         AND surface.is_deleted = FALSE
+                         AND surface.source_revision = entry.revision
+                         AND surface.surface ILIKE '%' || $1 || '%'
                    ))
               AND ($2::text IS NULL OR EXISTS (
                    SELECT 1 FROM lexicon.text_variants v
@@ -248,6 +293,7 @@ impl LexiconRepository {
         .bind(filter.created_to)
         .bind(filter.limit)
         .bind(filter.offset)
+        .bind(filter.include_v3)
         .fetch_all(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)
@@ -268,10 +314,19 @@ impl LexiconRepository {
                     OR ($6 = 'published' AND entry.archived_at IS NULL AND entry.current_publication_id IS NOT NULL)
                     OR ($6 = 'archived' AND entry.archived_at IS NOT NULL)
                   )
+              AND ($9::boolean OR entry.content_schema_version = 2)
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
                    OR EXISTS (
                        SELECT 1 FROM lexicon.entry_headwords h
                        WHERE h.entry_id = entry.id AND h.headword ILIKE '%' || $1 || '%'
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM lexicon.surface_sources surface
+                       WHERE surface.entry_id = entry.id
+                         AND surface.content_schema_version = 3
+                         AND surface.is_deleted = FALSE
+                         AND surface.source_revision = entry.revision
+                         AND surface.surface ILIKE '%' || $1 || '%'
                    ))
               AND ($2::text IS NULL OR EXISTS (
                    SELECT 1 FROM lexicon.text_variants v
@@ -299,12 +354,16 @@ impl LexiconRepository {
         .bind(filter.status.as_deref())
         .bind(filter.created_from)
         .bind(filter.created_to)
+        .bind(filter.include_v3)
         .fetch_one(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)
     }
 
-    pub(crate) async fn stats(&self) -> Result<StatsRecord, LexiconRepositoryError> {
+    pub(crate) async fn stats(
+        &self,
+        include_v3: bool,
+    ) -> Result<StatsRecord, LexiconRepositoryError> {
         sqlx::query_as::<_, StatsRecord>(
             r#"
             SELECT count(*)::bigint AS total,
@@ -318,8 +377,10 @@ impl LexiconRepository {
                    )::bigint AS month
             FROM lexicon.entries
             WHERE archived_at IS NULL
+              AND ($1 OR content_schema_version = 2)
             "#,
         )
+        .bind(include_v3)
         .fetch_one(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)

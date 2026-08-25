@@ -137,6 +137,8 @@ pub enum AdminWordStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AdminWordV2 {
+    #[serde(deserialize_with = "deserialize_schema_version_2")]
+    #[schema(schema_with = schema_version_2_schema)]
     pub schema_version: u8,
     pub id: Uuid,
     pub language: String,
@@ -213,7 +215,7 @@ pub struct AdminWordDraftV2Envelope {
 
 // --- forms ---
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum PronunciationStyle {
     Normal,

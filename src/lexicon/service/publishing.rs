@@ -43,6 +43,7 @@ impl LexiconService {
         issues.extend(reference_resolution.issues);
         transaction.commit().await.map_err(database_error)?;
         Ok(DraftValidationResponse {
+            schema_version: 2,
             validated_revision: word.revision,
             valid: issues.is_empty(),
             issues,
@@ -56,6 +57,7 @@ impl LexiconService {
         entry_id: Uuid,
         idempotency_key: Uuid,
         input: PublishAdminWordV2Input,
+        allow_v3_targets: bool,
     ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
         if input.base_revision < 1 {
             return Err(LexiconServiceError::InvalidField {
@@ -356,7 +358,13 @@ impl LexiconService {
         // 与上面的关联词物化相反——那边是管理员显式录入的意图，缺目标必须拦下。
         // 挂在这里而不是两条早返回路径上：那两条不产出新 publication，正文与上次发布
         // 逐字相同，解析结果不会变。
-        Self::refresh_sentence_associations(&mut transaction, entry_id, &word.meanings).await?;
+        Self::refresh_sentence_associations(
+            &mut transaction,
+            entry_id,
+            &word.meanings,
+            allow_v3_targets,
+        )
+        .await?;
         Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;
         let publication_id = LexiconRepository::insert_publication(
             &mut transaction,
@@ -502,8 +510,7 @@ impl LexiconService {
             return Ok(AdminWordV2Envelope { word });
         }
 
-        let mut publication_word: AdminWordV2 =
-            serde_json::from_value(publication.snapshot.clone()).map_err(serialization_error)?;
+        let mut publication_word = v2_publication_snapshot(publication.snapshot.clone())?;
         if publication.entry_id != entry_id || publication_word.id != entry_id {
             return Err(invariant_record());
         }
@@ -1533,11 +1540,7 @@ pub(super) async fn resolve_meaning_references(
 
     for usage in &uses {
         let snapshot = resolved.get(&(usage.kind, usage.target));
-        let accepted = match (mode, usage.kind, snapshot) {
-            (ReferenceResolutionMode::Canonicalize, ReferenceUseKind::Relation, Some(_)) => true,
-            (_, _, Some(snapshot)) => snapshot.available,
-            _ => false,
-        };
+        let accepted = snapshot.is_some_and(|snapshot| snapshot.available);
         if accepted {
             continue;
         }
@@ -1689,27 +1692,52 @@ fn relation_target_snapshot(
 fn draft_target_headword(
     record: &ResolvedRelationTargetRecord,
 ) -> Result<String, LexiconServiceError> {
-    match record.headword_mode.as_str() {
-        "unified" => record.common_headword.clone().ok_or_else(invariant_record),
-        "distinguish" => match record.source_dialect.as_deref() {
-            Some("uk") => record.uk_headword.as_ref().zip(record.us_headword.as_ref()),
-            Some("us") => record.us_headword.as_ref().zip(record.uk_headword.as_ref()),
-            _ => None,
-        }
-        .map(|(first, second)| format!("{first} / {second}"))
-        .ok_or_else(invariant_record),
-        _ => Err(invariant_record()),
+    match record.content_schema_version {
+        2 => match record.headword_mode.as_deref() {
+            Some("unified") => record.common_headword.clone().ok_or_else(invariant_record),
+            Some("distinguish") => match record.source_dialect.as_deref() {
+                Some("uk") => record.uk_headword.as_ref().zip(record.us_headword.as_ref()),
+                Some("us") => record.us_headword.as_ref().zip(record.uk_headword.as_ref()),
+                _ => None,
+            }
+            .map(|(first, second)| format!("{first} / {second}"))
+            .ok_or_else(invariant_record),
+            _ => Err(invariant_record()),
+        },
+        3 => record
+            .presentation_label
+            .clone()
+            .ok_or_else(invariant_record),
+        version => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
     }
 }
 
 pub(super) fn published_sense_snapshot(
     record: &ResolvedSenseTargetRecord,
 ) -> Result<(String, String), LexiconServiceError> {
-    let word: AdminWordV2 =
-        serde_json::from_value(record.snapshot.clone()).map_err(serialization_error)?;
-    let headword = published_word_headword(&word);
-    let sense = word
-        .meanings
+    let version = record
+        .snapshot
+        .get("schema_version")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i16::try_from(value).ok())
+        .unwrap_or(-1);
+    let (headword, meanings) = match version {
+        2 => {
+            let word = v2_publication_snapshot(record.snapshot.clone())?;
+            (published_word_headword(&word), word.meanings)
+        }
+        3 => {
+            let word: AdminWordV3 =
+                serde_json::from_value(record.snapshot.clone()).map_err(serialization_error)?;
+            let meanings: DraftMeaningsStepContent = serde_json::from_value(
+                serde_json::to_value(word.meanings).map_err(serialization_error)?,
+            )
+            .map_err(serialization_error)?;
+            (word.presentation.label, meanings)
+        }
+        version => return Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
+    };
+    let sense = meanings
         .pos
         .iter()
         .flat_map(|pos| &pos.senses)
