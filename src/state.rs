@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{Realm, TokenManager},
+    config::SmartLexiconV3Flags,
     lexicon::content_completion::LexiconContentGenerator,
     lexicon::surface_policy::SurfacePolicyStore,
     otp::{sender::OtpSender, service::OtpService, store::OtpStore},
@@ -29,6 +30,7 @@ pub struct AppState {
     pub object_storage: StorageRegistry,
     pub speech_provider: Option<Arc<dyn SpeechProvider>>,
     pub lexicon_content_generator: Option<Arc<dyn LexiconContentGenerator>>,
+    pub smart_lexicon_v3_flags: SmartLexiconV3Flags,
 }
 
 impl AppState {
@@ -45,6 +47,17 @@ impl AppState {
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("测试 redis pool 应能创建（惰性，不立即连接）");
         Self::for_test_with_redis(pool, redis)
+    }
+
+    #[doc(hidden)]
+    pub fn for_test_with_smart_lexicon_v3_flags(pool: PgPool, flags: SmartLexiconV3Flags) -> Self {
+        Self::for_test(pool).with_smart_lexicon_v3_flags_for_test(flags)
+    }
+
+    #[doc(hidden)]
+    pub fn with_smart_lexicon_v3_flags_for_test(mut self, flags: SmartLexiconV3Flags) -> Self {
+        self.smart_lexicon_v3_flags = flags;
+        self
     }
 
     /// 需要**注入特定 redis pool** 的测试用——如 readyz 的「Redis 宕机」场景要塞一个
@@ -82,6 +95,7 @@ impl AppState {
             object_storage: StorageRegistry::empty(),
             speech_provider: None,
             lexicon_content_generator: None,
+            smart_lexicon_v3_flags: SmartLexiconV3Flags::default(),
         }
     }
 
@@ -126,6 +140,7 @@ impl AppState {
             object_storage: StorageRegistry::empty(),
             speech_provider: None,
             lexicon_content_generator: None,
+            smart_lexicon_v3_flags: SmartLexiconV3Flags::default(),
         };
         (state, store)
     }
@@ -147,5 +162,65 @@ impl FromRef<AppState> for deadpool_redis::Pool {
 impl FromRef<AppState> for StorageRegistry {
     fn from_ref(state: &AppState) -> Self {
         state.object_storage.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::*;
+
+    fn lazy_pool() -> PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1/tsz_rust")
+            .expect("测试数据库 pool 应可惰性创建")
+    }
+
+    fn smart_lexicon_v3_flag_values(flags: SmartLexiconV3Flags) -> [bool; 6] {
+        [
+            flags.read,
+            flags.create,
+            flags.edit,
+            flags.publish,
+            flags.projection,
+            flags.legacy_bridge_read,
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_state_defaults_every_smart_lexicon_v3_flag_to_disabled() {
+        let state = AppState::for_test(lazy_pool());
+
+        assert_eq!(
+            smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
+            [false; 6]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_can_enable_every_smart_lexicon_v3_flag() {
+        let state = AppState::for_test_with_smart_lexicon_v3_flags(
+            lazy_pool(),
+            SmartLexiconV3Flags::all_enabled(),
+        );
+
+        assert_eq!(
+            smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
+            [true; 6]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_state_builder_accepts_a_specific_smart_lexicon_v3_flag_set() {
+        let flags = SmartLexiconV3Flags {
+            read: true,
+            edit: true,
+            legacy_bridge_read: true,
+            ..SmartLexiconV3Flags::default()
+        };
+        let state = AppState::for_test(lazy_pool()).with_smart_lexicon_v3_flags_for_test(flags);
+
+        assert_eq!(state.smart_lexicon_v3_flags, flags);
     }
 }

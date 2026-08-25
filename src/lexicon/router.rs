@@ -41,7 +41,11 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/entries/{id}/publications",
-            axum::routing::post(handler::publish),
+            get(handler::list_publications).post(handler::publish),
+        )
+        .route(
+            "/entries/{id}/publications/{publication_id}",
+            get(handler::get_publication),
         )
         .route(
             "/entries/{id}/publications/{publication_id}/activate",

@@ -9,11 +9,12 @@ use super::*;
     security(("bearer_auth" = [])),
     params(EntryPath),
     responses(
-        (status = 200, description = "V2 canonical 词条草稿（含已退役的稳定槽位身份）", body = AdminWordDraftV2Envelope),
+        (status = 200, description = "版本化 canonical 词条草稿", body = AdminWordDraftAnyEnvelope),
         (status = 400, description = "词条 ID 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条不存在"),
+        (status = 422, description = "词条 schema_version 不受当前 reader 支持"),
         (status = 500, description = "数据库查询失败")
     )
 )]
@@ -23,10 +24,91 @@ pub async fn get(
     ApiPath(path): ApiPath<EntryPath>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
-    let response = service(&state)
-        .get_draft(path.id)
+    let mut response = service(&state)
+        .get_draft_any(path.id)
         .await
         .map_err(map_error)?;
+    if matches!(&response, AdminWordDraftAnyEnvelope::V3(_)) && !state.smart_lexicon_v3_flags.read {
+        return Err(v3_storage_unavailable());
+    }
+    apply_draft_legacy_bridge_read_flag(
+        &mut response,
+        state.smart_lexicon_v3_flags.legacy_bridge_read,
+    );
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/lexicon/entries/{id}/publications",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(EntryPath),
+    responses(
+        (status = 200, description = "不可变 publication 历史，按各 snapshot 自身 schema_version 判别", body = AdminWordPublicationListResponse),
+        (status = 400, description = "词条 ID 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 404, description = "词条不存在"),
+        (status = 422, description = "历史 snapshot schema_version 不受当前 reader 支持"),
+        (status = 500, description = "数据库查询或 snapshot 解码失败")
+    )
+)]
+pub async fn list_publications(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(path): ApiPath<EntryPath>,
+) -> Result<(StatusCode, Json<AdminWordPublicationListResponse>), AppError> {
+    require_active_admin(&state, &auth).await?;
+    let mut response = service(&state)
+        .publication_history(path.id, state.smart_lexicon_v3_flags.read)
+        .await
+        .map_err(map_error)?;
+    for publication in &mut response.publications {
+        apply_publication_legacy_bridge_read_flag(
+            publication,
+            state.smart_lexicon_v3_flags.legacy_bridge_read,
+        );
+    }
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(PublicationPath),
+    responses(
+        (status = 200, description = "按 snapshot 自身 schema_version 判别的不可变 publication", body = AdminWordPublicationEnvelope),
+        (status = 400, description = "词条或 publication ID 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 404, description = "publication 不存在"),
+        (status = 422, description = "历史 snapshot schema_version 不受当前 reader 支持"),
+        (status = 503, description = "V3 reader 能力未启用"),
+        (status = 500, description = "数据库查询或 snapshot 解码失败")
+    )
+)]
+pub async fn get_publication(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(path): ApiPath<PublicationPath>,
+) -> Result<(StatusCode, Json<AdminWordPublicationEnvelope>), AppError> {
+    require_active_admin(&state, &auth).await?;
+    let mut response = service(&state)
+        .publication(path.id, path.publication_id)
+        .await
+        .map_err(map_error)?;
+    if matches!(&response.publication, AdminWordPublicationAny::V3(_))
+        && !state.smart_lexicon_v3_flags.read
+    {
+        return Err(v3_storage_unavailable());
+    }
+    apply_publication_legacy_bridge_read_flag(
+        &mut response.publication,
+        state.smart_lexicon_v3_flags.legacy_bridge_read,
+    );
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -37,7 +119,7 @@ pub async fn get(
     security(("bearer_auth" = [])),
     params(SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2),
     responses(
-        (status = 200, description = "不可变 surface match snapshot 的下一页", body = SurfaceMatchPageV2),
+        (status = 200, description = "不可变且可按 schema_version 判别的 surface match snapshot 下一页", body = SurfaceMatchPageAny),
         (status = 400, description = "snapshot ID 或 cursor 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
@@ -51,7 +133,7 @@ pub async fn surface_match_snapshot_page(
     auth: AdminAuth,
     ApiPath(path): ApiPath<SurfaceMatchSnapshotPathV2>,
     ApiQuery(query): ApiQuery<SurfaceMatchSnapshotQueryV2>,
-) -> Result<(StatusCode, Json<SurfaceMatchPageV2>), AppError> {
+) -> Result<(StatusCode, Json<SurfaceMatchPageAny>), AppError> {
     require_active_admin(&state, &auth).await?;
     let snapshots = crate::lexicon::surface_snapshot::SurfaceSnapshotStore::with_policy_prefix(
         state.redis.clone(),
@@ -129,6 +211,7 @@ fn surface_policy_store_unavailable(
         (status = 400, description = "查询参数非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 422, description = "列表包含当前 reader 不支持的 schema_version"),
         (status = 500, description = "数据库查询失败")
     )
 )]
@@ -138,7 +221,10 @@ pub async fn list(
     ApiQuery(query): ApiQuery<AdminWordListQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
-    let response = service(&state).list(query).await.map_err(map_error)?;
+    let response = service(&state)
+        .list(query, state.smart_lexicon_v3_flags.read)
+        .await
+        .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -153,6 +239,7 @@ pub async fn list(
         (status = 400, description = "查询参数非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 422, description = "publication snapshot schema_version 不受当前 reader 支持"),
         (status = 500, description = "数据库查询或发布快照解析失败")
     )
 )]
@@ -163,7 +250,7 @@ pub async fn related_search(
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
     let response = service(&state)
-        .related_search(auth.subject, query)
+        .related_search(auth.subject, query, state.smart_lexicon_v3_flags.read)
         .await
         .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
@@ -186,6 +273,9 @@ pub async fn stats(
     auth: AdminAuth,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
-    let response = service(&state).stats().await.map_err(map_error)?;
+    let response = service(&state)
+        .stats(state.smart_lexicon_v3_flags.read)
+        .await
+        .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
 }

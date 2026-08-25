@@ -204,6 +204,23 @@ pub(super) fn serialization_error(error: serde_json::Error) -> LexiconServiceErr
     LexiconServiceError::Repository(LexiconRepositoryError::Serialization(error))
 }
 
+/// Existing projection/association writers are intentionally V2-only until their C2 V3 mapping
+/// exists. Check the snapshot discriminator first so a V3/unknown snapshot fails closed with the
+/// public unsupported-schema error instead of surfacing as an opaque serialization failure.
+pub(super) fn v2_publication_snapshot(
+    snapshot: serde_json::Value,
+) -> Result<AdminWordV2, LexiconServiceError> {
+    let version = snapshot
+        .get("schema_version")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i16::try_from(value).ok())
+        .unwrap_or(-1);
+    if version != 2 {
+        return Err(LexiconServiceError::UnsupportedSchemaVersion(version));
+    }
+    serde_json::from_value(snapshot).map_err(serialization_error)
+}
+
 pub(super) fn invariant_record() -> LexiconServiceError {
     LexiconServiceError::Repository(LexiconRepositoryError::Invariant(
         "stored entry shape is invalid",

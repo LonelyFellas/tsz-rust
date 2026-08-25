@@ -9,10 +9,13 @@ use uuid::Uuid;
 use crate::{
     lexicon::{
         dto::{
-            LexiconSurfaceMatchV2, MatchedEntryContextV2, SurfaceConfirmationReasonV2,
-            SurfaceContinuationDisabledV2, SurfaceContinuationEnabledV2,
-            SurfaceMatchEnabledNextPageV2, SurfaceMatchEnabledTerminalPageV2,
-            SurfaceMatchPageBaseV2, SurfaceMatchPageV2, SurfaceMatchTemporarilyDisabledPageV2,
+            LexiconSurfaceMatchV2, MatchedEntryContextV2, MatchedEntryContextV3,
+            SurfaceConfirmationReasonV2, SurfaceContinuationDisabledV2,
+            SurfaceContinuationEnabledV2, SurfaceMatchEnabledNextPageV2,
+            SurfaceMatchEnabledNextPageV3, SurfaceMatchEnabledTerminalPageV2,
+            SurfaceMatchEnabledTerminalPageV3, SurfaceMatchItemV3, SurfaceMatchPageAny,
+            SurfaceMatchPageBaseV2, SurfaceMatchPageBaseV3, SurfaceMatchPageV2, SurfaceMatchPageV3,
+            SurfaceMatchTemporarilyDisabledPageV2, SurfaceMatchTemporarilyDisabledPageV3,
             SurfacePolicyBlockCodeV2, SurfacePolicyNameV2,
         },
         surface_policy::{SURFACE_POLICY_PREFIX, SurfaceCreationPolicy},
@@ -70,6 +73,24 @@ pub struct CreatedSurfaceSnapshot {
     pub snapshot_id: Uuid,
     pub page: SurfaceMatchPageV2,
 }
+
+/// V3 page material is stored inside the immutable owner bundle while the
+/// existing snapshot engine continues to use its battle-tested V2 membership
+/// records for ordering, cursor advancement and token digests. The synthetic
+/// V2 records never cross the HTTP boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct V3SurfaceSnapshotItem {
+    pub match_id: String,
+    pub item: SurfaceMatchItemV3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct V3SurfaceSnapshotPageData {
+    pub items: Vec<V3SurfaceSnapshotItem>,
+    pub matched_entry_contexts: Vec<MatchedEntryContextV3>,
+}
+
+pub(crate) const V3_SURFACE_PAGE_DATA_KEY: &str = "v3_surface_page_data";
 
 #[derive(Debug, Clone)]
 pub struct ExpectedSurfaceConfirmation {
@@ -327,7 +348,7 @@ impl SurfaceSnapshotStore {
         actor_id: Uuid,
         snapshot_id: Uuid,
         cursor: &str,
-    ) -> Result<SurfaceMatchPageV2, SurfaceSnapshotError> {
+    ) -> Result<SurfaceMatchPageAny, SurfaceSnapshotError> {
         let next_cursor = generate_token_plaintext();
         let terminal_token = generate_token_plaintext();
         let terminal_impact_token = Uuid::now_v7();
@@ -428,7 +449,7 @@ impl SurfaceSnapshotStore {
                     .parse::<usize>()
                     .map_err(|_| SurfaceSnapshotError::InvalidInput("invalid Redis page end"))?;
                 let terminal = result[4] == "1";
-                Ok(render_page(
+                let page = render_page(
                     &bundle,
                     start,
                     end,
@@ -436,7 +457,8 @@ impl SurfaceSnapshotStore {
                     (terminal && bundle.policy_enabled).then_some(terminal_token),
                     (terminal && bundle.policy_enabled && bundle.issue_impact_confirmation_token)
                         .then_some(terminal_impact_token),
-                ))
+                );
+                surface_page_any(page, &bundle.owner_bundle)
             }
             _ => Err(SurfaceSnapshotError::InvalidInput(
                 "invalid Redis snapshot response",
@@ -1025,6 +1047,7 @@ fn render_page(
         })
         .collect();
     let page = SurfaceMatchPageBaseV2 {
+        schema_version: 2,
         snapshot_id: bundle.snapshot_id,
         items,
         total: bundle.items.len() as u64,
@@ -1063,6 +1086,111 @@ fn render_page(
                 .policy_block_code
                 .expect("validated disabled snapshot block code"),
         })
+    }
+}
+
+pub(crate) fn surface_page_v3(
+    page: SurfaceMatchPageV2,
+    owner_bundle: &Value,
+) -> Result<SurfaceMatchPageV3, SurfaceSnapshotError> {
+    let data: V3SurfaceSnapshotPageData = owner_bundle
+        .get(V3_SURFACE_PAGE_DATA_KEY)
+        .cloned()
+        .ok_or(SurfaceSnapshotError::InvalidInput(
+            "V3 snapshot owner bundle is missing page data",
+        ))
+        .and_then(|value| serde_json::from_value(value).map_err(SurfaceSnapshotError::Json))?;
+    match page {
+        SurfaceMatchPageV2::EnabledNext(page) => Ok(SurfaceMatchPageV3::EnabledNext(
+            SurfaceMatchEnabledNextPageV3 {
+                page: surface_page_base_v3(page.page, &data)?,
+                continuation_policy: page.continuation_policy,
+                next_cursor: page.next_cursor,
+            },
+        )),
+        SurfaceMatchPageV2::EnabledTerminal(page) => Ok(SurfaceMatchPageV3::EnabledTerminal(
+            SurfaceMatchEnabledTerminalPageV3 {
+                page: surface_page_base_v3(page.page, &data)?,
+                continuation_policy: page.continuation_policy,
+                next_cursor: page.next_cursor,
+                surface_confirmation_token: page.surface_confirmation_token,
+                impact_confirmation_token: page.impact_confirmation_token,
+            },
+        )),
+        SurfaceMatchPageV2::TemporarilyDisabled(page) => Ok(
+            SurfaceMatchPageV3::TemporarilyDisabled(SurfaceMatchTemporarilyDisabledPageV3 {
+                page: surface_page_base_v3(page.page, &data)?,
+                continuation_policy: page.continuation_policy,
+                next_cursor: page.next_cursor,
+                policy_block_code: page.policy_block_code,
+            }),
+        ),
+    }
+}
+
+fn surface_page_any(
+    page: SurfaceMatchPageV2,
+    owner_bundle: &Value,
+) -> Result<SurfaceMatchPageAny, SurfaceSnapshotError> {
+    if owner_bundle.get(V3_SURFACE_PAGE_DATA_KEY).is_some() {
+        surface_page_v3(page, owner_bundle).map(SurfaceMatchPageAny::V3)
+    } else {
+        Ok(SurfaceMatchPageAny::V2(page))
+    }
+}
+
+fn surface_page_base_v3(
+    page: SurfaceMatchPageBaseV2,
+    data: &V3SurfaceSnapshotPageData,
+) -> Result<SurfaceMatchPageBaseV3, SurfaceSnapshotError> {
+    let items_by_id = data
+        .items
+        .iter()
+        .map(|item| (item.match_id.as_str(), &item.item))
+        .collect::<HashMap<_, _>>();
+    let items = page
+        .items
+        .iter()
+        .map(|item| {
+            items_by_id
+                .get(item.match_id.as_str())
+                .map(|item| (*item).clone())
+                .ok_or(SurfaceSnapshotError::InvalidInput(
+                    "V3 snapshot page membership is inconsistent",
+                ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let entry_ids = items
+        .iter()
+        .map(surface_match_item_entry_id)
+        .collect::<std::collections::HashSet<_>>();
+    let matched_entry_contexts = data
+        .matched_entry_contexts
+        .iter()
+        .filter(|context| entry_ids.contains(&context.entry_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if matched_entry_contexts.len() != entry_ids.len() {
+        return Err(SurfaceSnapshotError::InvalidInput(
+            "V3 snapshot page is missing matched entry context",
+        ));
+    }
+    Ok(SurfaceMatchPageBaseV3 {
+        schema_version: 3,
+        snapshot_id: page.snapshot_id,
+        items,
+        total: page.total,
+        matched_entry_contexts,
+        confirmation_reasons: page.confirmation_reasons,
+        policy_name: page.policy_name,
+        policy_epoch: page.policy_epoch,
+    })
+}
+
+const fn surface_match_item_entry_id(item: &SurfaceMatchItemV3) -> Uuid {
+    match item {
+        SurfaceMatchItemV3::LegacyV2(item) => item.existing.word_id,
+        SurfaceMatchItemV3::FormVariantV3(item) => item.entry_id,
     }
 }
 
@@ -1950,5 +2078,129 @@ mod tests {
                 "snapshot match IDs must be unique"
             ))
         ));
+    }
+
+    #[test]
+    fn v3_page_projection_preserves_cursor_membership_and_terminal_tokens() {
+        let actor = Uuid::now_v7();
+        let mut snapshot_input = input(actor, 2, 1, true);
+        let page_data = V3SurfaceSnapshotPageData {
+            items: (0..2)
+                .map(|index| V3SurfaceSnapshotItem {
+                    match_id: format!("match-{index:02}"),
+                    item: serde_json::from_value(if index == 0 {
+                        json!({
+                            "match_kind": "legacy_v2",
+                            "match": {
+                                "source_schema_version": 2,
+                                "existing": {
+                                    "word_id": Uuid::from_u128(0x1000 + index),
+                                    "headword": "workspace",
+                                    "kind": "word",
+                                    "status": "draft",
+                                    "source": {
+                                        "source_kind": "headword",
+                                        "source_id": "headword:common",
+                                        "content_scope": "draft",
+                                        "surface": "workspace",
+                                        "dialect": "common"
+                                    }
+                                }
+                            }
+                        })
+                    } else {
+                        json!({
+                            "match_kind": "form_variant_v3",
+                            "match": {
+                                "source_schema_version": 3,
+                                "entry_id": Uuid::from_u128(0x1000 + index),
+                                "status": "draft",
+                                "content_scope": "draft",
+                                "pos_id": Uuid::from_u128(0x2000 + index),
+                                "group_ids": [Uuid::from_u128(0x3000 + index)],
+                                "form_id": Uuid::from_u128(0x4000 + index),
+                                "variant_id": Uuid::from_u128(0x5000 + index),
+                                "form_type": "base",
+                                "dialect": "common",
+                                "spelling": "workspace"
+                            }
+                        })
+                    })
+                    .unwrap(),
+                })
+                .collect(),
+            matched_entry_contexts: (0..2)
+                .map(|index| {
+                    serde_json::from_value(json!({
+                        "entry_id": Uuid::from_u128(0x1000 + index),
+                        "presentation": {
+                            "label": format!("workspace-{index}"),
+                            "matched_surfaces": ["workspace"],
+                            "strategy_version": "surface_summary_v1"
+                        },
+                        "pos_labels": ["noun"],
+                        "gloss_previews": [],
+                        "updated_at": Utc.timestamp_opt(1_700_000_000 + index as i64, 0).unwrap(),
+                        "inbound_relations": {
+                            "total": 0,
+                            "by_type": {"synonym": 0, "antonym": 0, "derivative": 0},
+                            "previews": [],
+                            "truncated": false
+                        }
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+        };
+        snapshot_input.owner_bundle[V3_SURFACE_PAGE_DATA_KEY] =
+            serde_json::to_value(page_data).unwrap();
+        snapshot_input.binding.owner_evidence_digest =
+            surface_owner_bundle_digest(&snapshot_input.owner_bundle).unwrap();
+        let mut initialized = initialize_snapshot(
+            snapshot_input,
+            1_000,
+            IDLE_TTL,
+            TOKEN_TTL,
+            "cursor-1".to_owned(),
+            "unused".to_owned(),
+            None,
+        )
+        .unwrap();
+
+        let first = surface_page_v3(initialized.page, &initialized.bundle.owner_bundle).unwrap();
+        let SurfaceMatchPageV3::EnabledNext(first) = first else {
+            panic!("expected V3 next page");
+        };
+        assert_eq!(first.page.schema_version, 3);
+        assert_eq!(first.page.items.len(), 1);
+        assert!(matches!(
+            first.page.items[0],
+            SurfaceMatchItemV3::LegacyV2(_)
+        ));
+        assert_eq!(first.page.matched_entry_contexts.len(), 1);
+        assert_eq!(first.next_cursor, "cursor-1");
+
+        let terminal_v2 = advance_bundle(
+            &mut initialized.bundle,
+            actor,
+            "cursor-1",
+            1_100,
+            IDLE_TTL,
+            TOKEN_TTL,
+            "unused-next".to_owned(),
+            "terminal-token".to_owned(),
+            Uuid::now_v7(),
+        )
+        .unwrap();
+        let terminal = surface_page_v3(terminal_v2, &initialized.bundle.owner_bundle).unwrap();
+        let SurfaceMatchPageV3::EnabledTerminal(terminal) = terminal else {
+            panic!("expected V3 terminal page");
+        };
+        assert_eq!(terminal.page.items.len(), 1);
+        assert!(matches!(
+            terminal.page.items[0],
+            SurfaceMatchItemV3::FormVariantV3(_)
+        ));
+        assert_eq!(terminal.surface_confirmation_token, "terminal-token");
     }
 }

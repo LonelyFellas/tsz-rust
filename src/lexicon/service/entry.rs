@@ -3,11 +3,16 @@ use super::*;
 // --- aggregate ---
 
 pub(crate) fn entry_from_record(record: EntryRecord) -> Result<AdminWordV2, LexiconServiceError> {
-    let headwords = match record.headword_mode.as_str() {
-        "unified" => WordHeadwordsV2::Unified {
+    if record.content_schema_version != 2 {
+        return Err(LexiconServiceError::UnsupportedSchemaVersion(
+            record.content_schema_version,
+        ));
+    }
+    let headwords = match record.headword_mode.as_deref() {
+        Some("unified") => WordHeadwordsV2::Unified {
             common: record.common_headword.ok_or_else(invariant_record)?,
         },
-        "distinguish" => WordHeadwordsV2::Distinguish {
+        Some("distinguish") => WordHeadwordsV2::Distinguish {
             uk: record.uk_headword.ok_or_else(invariant_record)?,
             us: record.us_headword.ok_or_else(invariant_record)?,
             source_dialect: match record.source_dialect.as_deref() {
@@ -39,7 +44,7 @@ pub(crate) fn entry_from_record(record: EntryRecord) -> Result<AdminWordV2, Lexi
         })
         .collect::<Vec<_>>();
     Ok(AdminWordV2 {
-        schema_version: record.content_schema_version as u8,
+        schema_version: 2,
         id: record.id,
         language: record.language,
         kind: parse_kind(&record.kind).ok_or_else(invariant_record)?,
@@ -498,6 +503,7 @@ impl LexiconService {
         };
 
         let detection = DetectWordResponseV2 {
+            schema_version: 2,
             detection_id,
             expires_at,
             request,
@@ -1481,26 +1487,37 @@ pub(super) fn surface_contexts_from_records(
     records
         .into_iter()
         .map(|record| {
-            let forms: DraftFormsStepContent =
-                serde_json::from_value(record.forms).map_err(serialization_error)?;
-            let meanings: DraftMeaningsStepContent =
-                serde_json::from_value(record.meanings).map_err(serialization_error)?;
-            let mut pos_labels = forms
-                .pos
-                .iter()
-                .map(|pos| pos.pos.clone())
-                .collect::<Vec<_>>();
+            let (mut pos_labels, mut gloss_previews) = match record.content_schema_version {
+                2 => {
+                    let forms: DraftFormsStepContent =
+                        serde_json::from_value(record.forms).map_err(serialization_error)?;
+                    let meanings: DraftMeaningsStepContent =
+                        serde_json::from_value(record.meanings).map_err(serialization_error)?;
+                    (
+                        forms.pos.into_iter().map(|pos| pos.pos).collect::<Vec<_>>(),
+                        meanings
+                            .pos
+                            .iter()
+                            .flat_map(|pos| pos.senses.iter())
+                            .map(published_sense_gloss)
+                            .filter(|gloss| !gloss.is_empty())
+                            .take(5)
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                3 => {
+                    let forms: DraftFormsStepContentV3 =
+                        serde_json::from_value(record.forms).map_err(serialization_error)?;
+                    (
+                        forms.pos.into_iter().map(|pos| pos.pos).collect::<Vec<_>>(),
+                        Vec::new(),
+                    )
+                }
+                version => return Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
+            };
             pos_labels.sort();
             pos_labels.dedup();
             pos_labels.truncate(5);
-            let mut gloss_previews = meanings
-                .pos
-                .iter()
-                .flat_map(|pos| pos.senses.iter())
-                .map(published_sense_gloss)
-                .filter(|gloss| !gloss.is_empty())
-                .take(5)
-                .collect::<Vec<_>>();
             gloss_previews.dedup();
             Ok(MatchedEntryContextV2 {
                 word_id: record.entry_id,
@@ -1610,7 +1627,7 @@ fn surface_match(
     source: &crate::lexicon::model::SurfaceSourceRecord,
 ) -> Result<LexiconSurfaceMatchV2, LexiconServiceError> {
     let (existing_kind, existing) = existing_surface_match(source)?;
-    let category = if source.source_kind == "form" {
+    let category = if matches!(source.source_kind.as_str(), "form" | "form_variant") {
         SurfaceMatchCategoryV2::HeadwordForm
     } else if existing_kind == candidate.entry_kind {
         SurfaceMatchCategoryV2::ExactHeadword
@@ -1653,10 +1670,10 @@ fn surface_match(
 
 /// 一条已解析的入站关联，附带它落在草稿还是当前发布。
 pub(super) struct InboundRelationPreview {
-    target_entry_id: Uuid,
-    source_node_id: Uuid,
-    content_scope: SurfaceContentScopeV2,
-    preview: RelationReferencePreviewV2,
+    pub(super) target_entry_id: Uuid,
+    pub(super) source_node_id: Uuid,
+    pub(super) content_scope: SurfaceContentScopeV2,
+    pub(super) preview: RelationReferencePreviewV2,
 }
 
 /// 把入站关联记录一次性解析成 preview，供关联词命中行与命中词条上下文摘要共用。
@@ -1852,7 +1869,7 @@ pub(super) fn existing_surface_match(
             surface: source.surface.clone(),
             dialect: existing_dialect,
         },
-        "form" => ExistingSurfaceSourceV2::Form {
+        "form" | "form_variant" => ExistingSurfaceSourceV2::Form {
             source_id: source.source_id.clone(),
             source_node_id: source.source_node_id.ok_or_else(invariant_record)?,
             content_scope,
@@ -1945,18 +1962,16 @@ fn inbound_relation_preview(
     let relation = if let Some(relation) = reference.draft_relation_type.as_deref() {
         parse_relation_type(relation)
     } else if let Some(snapshot) = reference.source_snapshot.as_ref() {
-        let source: AdminWordV2 =
-            serde_json::from_value(snapshot.clone()).map_err(serialization_error)?;
-        relation_type_for_node(&source, reference.source_node_id)
+        relation_type_for_publication_snapshot(snapshot, reference.source_node_id)?
     } else {
         None
     };
     let Some(relation) = relation else {
         return Ok(None);
     };
-    let source_headword = match reference.source_headword_mode.as_str() {
-        "unified" => reference.source_common_headword.clone(),
-        "distinguish" => match reference.source_dialect.as_deref() {
+    let source_headword = match reference.source_headword_mode.as_deref() {
+        Some("unified") => reference.source_common_headword.clone(),
+        Some("distinguish") => match reference.source_dialect.as_deref() {
             Some("uk") => reference
                 .source_uk_headword
                 .as_ref()
@@ -1968,7 +1983,8 @@ fn inbound_relation_preview(
             _ => None,
         }
         .map(|(first, second)| format!("{first} / {second}")),
-        _ => None,
+        None => reference.source_presentation_label.clone(),
+        Some(_) => None,
     }
     .ok_or_else(invariant_record)?;
     Ok(Some(RelationReferencePreviewV2 {
@@ -1977,6 +1993,37 @@ fn inbound_relation_preview(
         source_status: parse_surface_status(&reference.source_status)?,
         relation,
     }))
+}
+
+fn relation_type_for_publication_snapshot(
+    snapshot: &serde_json::Value,
+    node_id: Uuid,
+) -> Result<Option<RelationTypeV2>, LexiconServiceError> {
+    match snapshot
+        .get("schema_version")
+        .and_then(serde_json::Value::as_i64)
+    {
+        Some(2) => {
+            let source = v2_publication_snapshot(snapshot.clone())?;
+            Ok(relation_type_for_node(&source, node_id))
+        }
+        Some(3) => {
+            let source: AdminWordV3 =
+                serde_json::from_value(snapshot.clone()).map_err(serialization_error)?;
+            Ok(source
+                .meanings
+                .pos
+                .iter()
+                .flat_map(|pos| &pos.senses)
+                .flat_map(|sense| &sense.relations)
+                .find(|relation| relation.id == node_id)
+                .and_then(|relation| parse_relation_type(&relation.relation)))
+        }
+        Some(version) => Err(LexiconServiceError::UnsupportedSchemaVersion(
+            i16::try_from(version).unwrap_or(-1),
+        )),
+        None => Err(invariant_record()),
+    }
 }
 
 fn surface_warning_audit(
@@ -2383,11 +2430,12 @@ mod tests {
             source_entry_id,
             source_node_id,
             source_status: "published".to_owned(),
-            source_headword_mode: "unified".to_owned(),
+            source_headword_mode: Some("unified".to_owned()),
             source_dialect: None,
             source_common_headword: Some("apples".to_owned()),
             source_uk_headword: None,
             source_us_headword: None,
+            source_presentation_label: None,
             draft_relation_type: Some(relation.to_owned()),
             source_snapshot: None,
         }

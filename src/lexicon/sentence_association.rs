@@ -15,6 +15,19 @@ use crate::lexicon::{
 /// 已解析过的例句会因为版本对不上，在各自下次发布时自然重算，不需要数据迁移。
 pub(crate) const RESOLVER_VERSION: i16 = 1;
 
+const V2_ASSOCIATION_FORM_SOURCE_KINDS: &[&str] = &["form"];
+const V3_ASSOCIATION_FORM_SOURCE_KINDS: &[&str] = &["form", "form_variant"];
+
+/// rollback 时只消费 V2 publication；调用方确认所需 V3 capability 后才纳入
+/// `form_variant`，避免关闭开关后旧 V3 publication 仍被后台 resolver 静默读取。
+pub(crate) fn association_form_source_kinds(allow_v3: bool) -> &'static [&'static str] {
+    if allow_v3 {
+        V3_ASSOCIATION_FORM_SOURCE_KINDS
+    } else {
+        V2_ASSOCIATION_FORM_SOURCE_KINDS
+    }
+}
+
 /// 单个词面能有多长。与 `lexicon.sentence_associations.surface` 的库层约束一致——
 /// 自动切词和人工补关联都得先在这一层挡住，否则会以 CHECK 违例的形式变成 500。
 pub(crate) const MAX_ASSOCIATION_SURFACE_CODEPOINTS: usize = 200;

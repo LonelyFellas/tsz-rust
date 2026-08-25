@@ -100,6 +100,7 @@ impl LexiconService {
                 )
                 .await?;
             return Ok(FormsImpactResponseV2 {
+                schema_version: 2,
                 base_revision: current.revision,
                 requires_confirmation: !affected.is_empty(),
                 affected,
@@ -109,6 +110,7 @@ impl LexiconService {
         }
         if affected.is_empty() {
             return Ok(FormsImpactResponseV2 {
+                schema_version: 2,
                 base_revision: current.revision,
                 requires_confirmation: false,
                 affected,
@@ -131,6 +133,7 @@ impl LexiconService {
             .await
             .map_err(LexiconServiceError::ImpactStore)?;
         Ok(FormsImpactResponseV2 {
+            schema_version: 2,
             base_revision: current.revision,
             requires_confirmation: true,
             affected,
@@ -1005,7 +1008,7 @@ fn form_surface_match(
     let (_, existing) = existing_surface_match(source)?;
     let category = match source.source_kind.as_str() {
         "headword" => SurfaceMatchCategoryV2::FormHeadword,
-        "form" => SurfaceMatchCategoryV2::FormForm,
+        "form" | "form_variant" => SurfaceMatchCategoryV2::FormForm,
         _ => return Err(invariant_record()),
     };
     let candidate_wire = SurfaceMatchCandidateV2::Form {

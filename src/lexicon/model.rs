@@ -94,6 +94,7 @@ pub struct SurfaceSourceRecord {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct SurfaceEntryContextRecord {
     pub entry_id: Uuid,
+    pub content_schema_version: i16,
     pub forms: Value,
     pub meanings: Value,
     pub updated_at: DateTime<Utc>,
@@ -105,11 +106,12 @@ pub(crate) struct SurfaceInboundRelationRecord {
     pub source_entry_id: Uuid,
     pub source_node_id: Uuid,
     pub source_status: String,
-    pub source_headword_mode: String,
+    pub source_headword_mode: Option<String>,
     pub source_dialect: Option<String>,
     pub source_common_headword: Option<String>,
     pub source_uk_headword: Option<String>,
     pub source_us_headword: Option<String>,
+    pub source_presentation_label: Option<String>,
     pub draft_relation_type: Option<String>,
     pub source_snapshot: Option<Value>,
 }
@@ -146,6 +148,19 @@ pub(crate) struct HistoricalPublicationRecord {
     pub source_revision: i64,
     pub snapshot: Value,
     pub published_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct PublicationReadRecord {
+    pub id: Uuid,
+    pub entry_id: Uuid,
+    pub publication_number: i32,
+    pub source_revision: i64,
+    pub content_schema_version: i16,
+    pub snapshot: Value,
+    pub published_by_admin_id: Uuid,
+    pub published_at: DateTime<Utc>,
+    pub is_current: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -198,11 +213,13 @@ pub(crate) struct ResolvedRelationTargetRecord {
     pub target_revision: i64,
     pub target_archived: bool,
     pub target_removed: bool,
-    pub headword_mode: String,
+    pub content_schema_version: i16,
+    pub headword_mode: Option<String>,
     pub source_dialect: Option<String>,
     pub common_headword: Option<String>,
     pub uk_headword: Option<String>,
     pub us_headword: Option<String>,
+    pub presentation_label: Option<String>,
     pub draft_meanings: Value,
     pub target_publication_id: Option<Uuid>,
     pub published_snapshot: Option<Value>,
@@ -267,7 +284,7 @@ pub(crate) struct EntryRecord {
     pub kind: String,
     pub revision: i64,
     pub lifecycle_revision: i64,
-    pub headword_mode: String,
+    pub headword_mode: Option<String>,
     pub source_dialect: Option<String>,
     pub frequency: Option<String>,
     pub detection_snapshot: Value,
@@ -289,6 +306,7 @@ pub(crate) struct EntryRecord {
 
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct RelatedSearchRecord {
+    pub content_schema_version: i16,
     pub snapshot: Value,
     pub pos_labels: Vec<String>,
     pub sort_headword: String,
@@ -298,6 +316,7 @@ pub(crate) struct RelatedSearchRecord {
 pub(crate) struct RelatedSearchFilter<'a> {
     pub q: &'a str,
     pub kind: Option<crate::lexicon::dto::EntryKind>,
+    pub include_v3: bool,
     pub exact: bool,
     pub exclude_exact: bool,
     pub limit: i64,
@@ -309,12 +328,17 @@ pub(crate) struct RelatedSearchFilter<'a> {
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct ListEntryRecord {
     pub id: Uuid,
+    pub content_schema_version: i16,
     pub kind: String,
     pub source_dialect: Option<String>,
     pub dialects: Vec<String>,
     pub revision: i64,
     pub lifecycle_revision: i64,
     pub headword_spellings: Vec<String>,
+    pub forms: Value,
+    pub presentation_label: Option<String>,
+    pub presentation_surfaces: Option<Vec<String>>,
+    pub presentation_strategy: Option<String>,
     pub gloss: String,
     pub pos_list: Vec<String>,
     pub levels: Vec<String>,
@@ -348,6 +372,7 @@ pub(crate) struct ListFilter {
     pub created_to: Option<DateTime<Utc>>,
     pub limit: i64,
     pub offset: i64,
+    pub include_v3: bool,
 }
 
 // --- 例句关联 ---

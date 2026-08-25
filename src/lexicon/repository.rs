@@ -6,20 +6,22 @@ use uuid::Uuid;
 use crate::{
     lexicon::{
         dto::{
-            AdminWordV2, AdminWordV2Envelope, Dialect, DialectVariantSlotV2, EnglishTextV2,
-            EntryKind, RichText, TextOrigin, WordDefinitionV2, WordHeadwordsV2,
+            AdminWordAny, AdminWordV2, AdminWordV2Envelope, Dialect, DialectVariantSlotV2,
+            DraftMeaningsStepContent, EnglishTextV2, EntryKind, RichText, TextOrigin,
+            WordDefinitionV2, WordHeadwordsV2,
         },
         model::{
             CatalogPartRecord, CatalogSubPartRecord, DictionaryCandidateRecord,
             DictionaryTermRecord, DuplicateRecord, EntryRecord, FormsSurfaceAcknowledgementRecord,
             HeadwordKeyRecord, HistoricalPublicationRecord, IdempotencyRecord,
             InboundSenseReferenceRecord, ListEntryRecord, ListFilter, NewPublicationSenseReference,
-            NewSentenceAssociation, NodeIdentityRecord, PublishedEntrySnapshotRecord,
-            PublishedFormSurfaceRecord, RegionSurfaceRecord, RelatedSearchFilter,
-            RelatedSearchRecord, ResolvedRelationTargetRecord, ResolvedSenseTargetRecord,
-            RetiredStableSlotRecord, SenseTargetKey, SentenceAssociationRecord,
-            SentenceAssociationScanRecord, StatsRecord, SurfaceEntryContextRecord,
-            SurfaceInboundRelationRecord, SurfaceLookupKey, SurfaceSourceRecord,
+            NewSentenceAssociation, NodeIdentityRecord, PublicationReadRecord,
+            PublishedEntrySnapshotRecord, PublishedFormSurfaceRecord, RegionSurfaceRecord,
+            RelatedSearchFilter, RelatedSearchRecord, ResolvedRelationTargetRecord,
+            ResolvedSenseTargetRecord, RetiredStableSlotRecord, SenseTargetKey,
+            SentenceAssociationRecord, SentenceAssociationScanRecord, StatsRecord,
+            SurfaceEntryContextRecord, SurfaceInboundRelationRecord, SurfaceLookupKey,
+            SurfaceSourceRecord,
         },
         node_identity::{
             BASE_FORM_ROLE, FORM_GROUP_ROLE, GRAMMAR_STRUCTURE_ROLE, POS_ROLE, PRONUNCIATION_ROLE,
@@ -31,6 +33,7 @@ use crate::{
             sha256_json,
         },
         provenance::headword_origin,
+        sentence_association::association_form_source_kinds,
     },
     platform::{is_foreign_key_violation, is_unique_violation},
 };

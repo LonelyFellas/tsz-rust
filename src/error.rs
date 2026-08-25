@@ -20,6 +20,7 @@ pub enum ErrorCode {
     InvalidPartOfSpeech,
     InvalidHeadword,
     UnsupportedLanguage,
+    UnsupportedSchemaVersion,
     InvalidPhone,
     InvalidEmail,
     InvalidIdentifier,
@@ -52,6 +53,8 @@ pub enum ErrorCode {
     SubPartOfSpeechConflict,
     RevisionConflict,
     ReferenceConflict,
+    StableNodeIdChanged,
+    FormReferenceConflict,
     DetectionMismatch,
     DetectionExpired,
     DuplicateWord,
@@ -64,6 +67,9 @@ pub enum ErrorCode {
     IdempotencyConflict,
     StepNotReachable,
     ValidationFailed,
+    SmartLexiconV3StorageUnavailable,
+    SmartLexiconV3DetectionUnavailable,
+    SmartLexiconV3PublicationRequiresMigrationCanary,
     DownstreamConfirmationRequired,
     EntryArchived,
     EntryNotDeletable,
@@ -93,7 +99,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 70] = [
+    pub const ALL: [Self; 76] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -103,6 +109,7 @@ impl ErrorCode {
         Self::InvalidPartOfSpeech,
         Self::InvalidHeadword,
         Self::UnsupportedLanguage,
+        Self::UnsupportedSchemaVersion,
         Self::InvalidPhone,
         Self::InvalidEmail,
         Self::InvalidIdentifier,
@@ -135,6 +142,8 @@ impl ErrorCode {
         Self::SubPartOfSpeechConflict,
         Self::RevisionConflict,
         Self::ReferenceConflict,
+        Self::StableNodeIdChanged,
+        Self::FormReferenceConflict,
         Self::DetectionMismatch,
         Self::DetectionExpired,
         Self::DuplicateWord,
@@ -147,6 +156,9 @@ impl ErrorCode {
         Self::IdempotencyConflict,
         Self::StepNotReachable,
         Self::ValidationFailed,
+        Self::SmartLexiconV3StorageUnavailable,
+        Self::SmartLexiconV3DetectionUnavailable,
+        Self::SmartLexiconV3PublicationRequiresMigrationCanary,
         Self::DownstreamConfirmationRequired,
         Self::EntryArchived,
         Self::EntryNotDeletable,
@@ -199,6 +211,11 @@ impl ErrorCode {
             Self::UnsupportedLanguage => (
                 "unsupported_language",
                 "Unsupported language",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            Self::UnsupportedSchemaVersion => (
+                "unsupported_schema_version",
+                "Unsupported schema version",
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
             Self::InvalidPhone => ("invalid_phone", "Invalid phone", StatusCode::BAD_REQUEST),
@@ -337,6 +354,16 @@ impl ErrorCode {
                 "Referenced target changed",
                 StatusCode::CONFLICT,
             ),
+            Self::StableNodeIdChanged => (
+                "stable_node_id_changed",
+                "Stable node identity changed",
+                StatusCode::CONFLICT,
+            ),
+            Self::FormReferenceConflict => (
+                "form_reference_conflict",
+                "Form reference conflict",
+                StatusCode::CONFLICT,
+            ),
             Self::DetectionMismatch => (
                 "detection_mismatch",
                 "Detection does not match",
@@ -392,6 +419,21 @@ impl ErrorCode {
                 "validation_failed",
                 "Validation failed",
                 StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            Self::SmartLexiconV3StorageUnavailable => (
+                "smart_lexicon_v3_storage_unavailable",
+                "Smart Lexicon V3 storage unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::SmartLexiconV3DetectionUnavailable => (
+                "smart_lexicon_v3_detection_unavailable",
+                "Smart Lexicon V3 surface detection unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::SmartLexiconV3PublicationRequiresMigrationCanary => (
+                "smart_lexicon_v3_publication_requires_migration_canary",
+                "Smart Lexicon V3 publication requires an approved migration canary",
+                StatusCode::CONFLICT,
             ),
             Self::DownstreamConfirmationRequired => (
                 "downstream_confirmation_required",
@@ -494,6 +536,7 @@ impl ErrorCode {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProblemDetails {
     /// RFC 9457 问题类型；同一 code 永久映射到同一 URI。
     #[serde(rename = "type")]
@@ -514,7 +557,7 @@ pub struct ProblemDetails {
     /// 多字段/多节点校验问题；智能词库等复杂表单按稳定 node_id 定位。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
-    pub field_issues: Option<Vec<crate::lexicon::dto::DraftValidationIssue>>,
+    pub field_issues: Option<Vec<crate::lexicon::dto::DraftValidationIssueAny>>,
     /// 领域错误的结构化上下文；客户端不得解析 detail 文案。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -522,6 +565,7 @@ pub struct ProblemDetails {
 }
 
 #[derive(Debug, Default, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProblemMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -552,7 +596,7 @@ pub struct ProblemMeta {
     pub reference_locations: Option<Vec<ProblemReferenceLocation>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
-    pub surface_match_page: Option<crate::lexicon::dto::SurfaceMatchPageV2>,
+    pub surface_match_page: Option<crate::lexicon::dto::SurfaceMatchPageAny>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub current_policy_name: Option<crate::lexicon::dto::SurfacePolicyNameV2>,
@@ -562,6 +606,7 @@ pub struct ProblemMeta {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProblemReferenceLocation {
     pub target_sense_id: uuid::Uuid,
     pub source_entry_id: uuid::Uuid,
@@ -690,7 +735,25 @@ impl AppError {
         mut self,
         issues: &[crate::lexicon::dto::DraftValidationIssue],
     ) -> Self {
-        self.response.field_issues = Some(issues.to_vec());
+        self.response.field_issues = Some(
+            issues
+                .iter()
+                .map(|issue| crate::lexicon::dto::DraftValidationIssueAny::V2(issue.into()))
+                .collect(),
+        );
+        self
+    }
+
+    pub fn with_v3_field_issues(
+        mut self,
+        issues: Vec<crate::lexicon::dto::V3DraftValidationIssue>,
+    ) -> Self {
+        self.response.field_issues = Some(
+            issues
+                .into_iter()
+                .map(crate::lexicon::dto::DraftValidationIssueAny::V3)
+                .collect(),
+        );
         self
     }
 
@@ -781,6 +844,21 @@ mod tests {
                 "field":"phone"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn v3_identity_conflicts_have_distinct_stable_409_problem_codes() {
+        for (code, slug) in [
+            (ErrorCode::StableNodeIdChanged, "stable_node_id_changed"),
+            (ErrorCode::FormReferenceConflict, "form_reference_conflict"),
+        ] {
+            let (status, body) =
+                response_json(AppError::conflict(code, None, "V3 contract conflict")).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body["status"], 409);
+            assert_eq!(body["code"], slug);
+            assert_eq!(body["type"], format!("urn:tsz:problem:{slug}"));
+        }
     }
 
     #[tokio::test]
@@ -879,5 +957,25 @@ mod tests {
         assert_eq!(body["status"], 422);
         assert_eq!(body["code"], "invalid_request_body");
         assert!(body.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn v2_field_issues_are_versioned_in_the_actual_problem_payload() {
+        let issue = crate::lexicon::dto::DraftValidationIssue {
+            step: crate::lexicon::dto::PersistedWordStep::Forms,
+            node_id: uuid::Uuid::nil(),
+            field: "content".to_owned(),
+            code: "legacy_validation".to_owned(),
+            message: "legacy validation failed".to_owned(),
+            reference_location: None,
+            node_location: None,
+        };
+        let (_, body) = response_json(
+            AppError::unprocessable(ErrorCode::ValidationFailed, "validation failed")
+                .with_field_issues(&[issue]),
+        )
+        .await;
+        assert_eq!(body["field_issues"][0]["schema_version"], 2);
+        assert_eq!(body["field_issues"][0]["code"], "legacy_validation");
     }
 }

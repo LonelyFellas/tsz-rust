@@ -113,6 +113,7 @@ struct CanonicalSurfaceRow {
 struct PublicationSnapshotRow {
     publication_id: Uuid,
     source_revision: i64,
+    content_schema_version: i16,
     snapshot: serde_json::Value,
 }
 
@@ -178,6 +179,11 @@ pub async fn run_surface_backfill(pool: &PgPool) -> anyhow::Result<SurfaceBackfi
         }
 
         let publication_changed = if let Some(publication) = publication {
+            anyhow::ensure!(
+                publication.content_schema_version == 2,
+                "surface writer v1 cannot consume publication schema_version {}",
+                publication.content_schema_version
+            );
             let published_word: AdminWordV2 = serde_json::from_value(publication.snapshot)?;
             let publication_sources = surface_projection_sources(&published_word)?;
             let expected = canonical_sources(
@@ -387,6 +393,11 @@ async fn surface_parity_in_transaction(
             lifecycle,
         ));
         if let Some(publication) = current_publication(&mut *transaction, entry_id).await? {
+            anyhow::ensure!(
+                publication.content_schema_version == 2,
+                "surface parity v1 cannot consume publication schema_version {}",
+                publication.content_schema_version
+            );
             let published_word: AdminWordV2 = serde_json::from_value(publication.snapshot)?;
             expected.extend(canonical_sources(
                 &surface_projection_sources(&published_word)?,
@@ -424,6 +435,7 @@ async fn current_publication(
         r#"
         SELECT publication.id AS publication_id,
                publication.source_revision,
+               publication.content_schema_version,
                publication.snapshot
         FROM lexicon.entries entry
         JOIN lexicon.entry_publications publication

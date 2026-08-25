@@ -156,7 +156,7 @@ impl LexiconRepository {
 
         insert_headwords(tx, word).await?;
         insert_forms(tx, word, catalog_parts).await?;
-        insert_meanings(tx, word, &HashMap::new()).await?;
+        insert_meanings(tx, word.id, &word.meanings, &HashMap::new()).await?;
 
         let basics_hash = sha256_json(&word.detection_snapshot)?;
         sqlx::query(
@@ -263,7 +263,7 @@ impl LexiconRepository {
 
         insert_headwords(tx, word).await?;
         insert_forms(tx, word, catalog_parts).await?;
-        insert_meanings(tx, word, &HashMap::new()).await?;
+        insert_meanings(tx, word.id, &word.meanings, &HashMap::new()).await?;
 
         sqlx::query(
             r#"
@@ -511,7 +511,7 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)?;
         delete_current_content(tx, word.id).await?;
         insert_forms(tx, word, catalog_parts).await?;
-        insert_meanings(tx, word, sub_parts).await?;
+        insert_meanings(tx, word.id, &word.meanings, sub_parts).await?;
 
         let updated = sqlx::query(
             r#"
@@ -965,6 +965,54 @@ impl LexiconRepository {
             .await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn replace_meanings_content(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+        meanings: &DraftMeaningsStepContent,
+        sub_parts: &HashMap<String, Uuid>,
+    ) -> Result<(), LexiconRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE lexicon.nodes
+            SET removed_from_draft_at = now()
+            WHERE entry_id = $1
+              AND removed_from_draft_at IS NULL
+              AND node_type = ANY($2)
+            "#,
+        )
+        .bind(entry_id)
+        .bind([
+            "sense_group",
+            "grammar_structure",
+            "sense",
+            "definition",
+            "sentence",
+            "text_variant",
+            "relation",
+        ])
+        .execute(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+
+        for statement in [
+            "DELETE FROM lexicon.relations WHERE entry_id = $1",
+            "DELETE FROM lexicon.sentence_links WHERE entry_id = $1",
+            "DELETE FROM lexicon.text_variants WHERE entry_id = $1",
+            "DELETE FROM lexicon.definitions WHERE entry_id = $1",
+            "DELETE FROM lexicon.sentences WHERE entry_id = $1",
+            "DELETE FROM lexicon.senses WHERE entry_id = $1",
+            "DELETE FROM lexicon.grammar_structures WHERE entry_id = $1",
+            "DELETE FROM lexicon.sense_groups WHERE entry_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(entry_id)
+                .execute(&mut **tx)
+                .await
+                .map_err(map_entry_write_error)?;
+        }
+        insert_meanings(tx, entry_id, meanings, sub_parts).await
     }
 }
 
