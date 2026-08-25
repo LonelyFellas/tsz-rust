@@ -37,6 +37,7 @@
 | `last_active_role` | TEXT | CHECK(student/teacher)、可空 | **000004**：当前激活角色要**持久化**，否则每次 refresh 都重置成默认角色、悄悄撤销用户的「切换角色」。NULL = 从未切换 → 回落默认角色 |
 | `status` | TEXT | NOT NULL DEFAULT 'active'、CHECK(active/disabled) | **000008**：账号生命周期。`disabled` 在登录边界拦截（密码/验证码登录、refresh 都拒绝），一个 TTL 内生效 |
 | `avatar_url` | TEXT | NOT NULL DEFAULT '' | **000015**：头像的**不透明字符串引用**（文件在 OSS，不是图片字节）。默认 `''`，格式（key 还是 URL）故意未定，等存储后端落地再定 |
+| `registration_ip` | TEXT | 可空 | 注册那一刻的客户端 IP，取自可信反代覆盖写入的 `X-Forwarded-For` 最左段，**只写一次、之后不更新**。用途是后台按地区看用户分布；IP→省市的解析放在读取侧，这里只存原始地址。反代没配该头（或本地直连）时为 NULL，不影响注册 |
 | `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
 
 **约束与索引（重点）：**

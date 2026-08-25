@@ -15,7 +15,12 @@ use crate::{
         service::{LoginError, RegisterError, UserService, normalize_identifier},
     },
 };
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 use axum_extra::extract::{
     CookieJar,
     cookie::{Cookie, SameSite},
@@ -175,6 +180,7 @@ pub struct RegisterRequest {
 pub async fn register(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
     ApiJson(payload): ApiJson<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // 1) 解析并归一化手机号。
@@ -205,7 +211,7 @@ pub async fn register(
     // 5) 用户、初始角色和 refresh token 同事务提交。
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let user = service
-        .register_verified_phone_in(&mut tx, phone, password_hash)
+        .register_verified_phone_in(&mut tx, phone, password_hash, client_ip(&headers))
         .await
         .map_err(map_register_error)?;
 
@@ -235,6 +241,19 @@ pub async fn register(
     };
 
     Ok((StatusCode::CREATED, jar, Json(resp)))
+}
+
+/// 取注册来源 IP。应用只在反向代理后面跑（见 docs/deployment.md §5），可信反代必须
+/// 覆盖客户端传入的 `X-Forwarded-For`。头形如 `client, proxy1, proxy2`，最左一段是
+/// 原始客户端。解析成 `IpAddr` 再转回字符串，既挡住畸形值落库，也顺带归一化格式。
+/// 反代未配置该头（或本地直连）时返回 None——注册照常成功，只是这行没有来源地址。
+fn client_ip(headers: &HeaderMap) -> Option<String> {
+    let forwarded = headers.get("x-forwarded-for")?.to_str().ok()?;
+    let client = forwarded.split(',').next()?.trim();
+    client
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
 }
 
 /// 组装登录响应：查角色 + 签 access token（可失败、无副作用）→ 签发 refresh cookie

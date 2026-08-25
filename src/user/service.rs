@@ -94,6 +94,7 @@ impl UserService {
             password_hash,
             display_name: generate_display_name(),
             first_role: UserRole::Student,
+            registration_ip: None,
         })
         .await
     }
@@ -104,13 +105,21 @@ impl UserService {
         connection: &mut sqlx::PgConnection,
         phone: String,
         password_hash: String,
+        registration_ip: Option<String>,
     ) -> Result<User, RegisterError> {
-        UserRepository::create_in(connection, Self::verified_phone_input(phone, password_hash))
-            .await
-            .map_err(Self::map_create_error)
+        UserRepository::create_in(
+            connection,
+            Self::verified_phone_input(phone, password_hash, registration_ip),
+        )
+        .await
+        .map_err(Self::map_create_error)
     }
 
-    fn verified_phone_input(phone: String, password_hash: String) -> NewUser {
+    fn verified_phone_input(
+        phone: String,
+        password_hash: String,
+        registration_ip: Option<String>,
+    ) -> NewUser {
         NewUser {
             id: Uuid::now_v7(),
             phone: Some(phone),
@@ -118,6 +127,7 @@ impl UserService {
             password_hash,
             display_name: generate_display_name(),
             first_role: UserRole::Student,
+            registration_ip,
         }
     }
 

@@ -20,6 +20,7 @@ fn new_user(phone: Option<&str>, email: Option<&str>, role: UserRole) -> NewUser
         password_hash: "hashed-pw".to_owned(),
         display_name: "Alice".to_owned(),
         first_role: role,
+        registration_ip: None,
     }
 }
 

@@ -22,6 +22,7 @@ async fn refresh_insert_failure_rolls_back_new_user(pool: PgPool) {
             password_hash: "test-hash".to_owned(),
             display_name: "测试用户".to_owned(),
             first_role: UserRole::Student,
+            registration_ip: None,
         },
     )
     .await

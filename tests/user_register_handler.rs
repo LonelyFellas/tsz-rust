@@ -228,3 +228,83 @@ async fn malformed_json_uses_structured_error_response(pool: PgPool) {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["code"], "invalid_json");
 }
+
+/// 带上（或省略）反代注入的 `X-Forwarded-For` 发一次注册，返回响应状态。
+async fn register_forwarded(state: &AppState, forwarded_for: Option<&str>) -> StatusCode {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/api/v1/auth/register")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(value) = forwarded_for {
+        builder = builder.header("x-forwarded-for", value);
+    }
+    let body = json!({"phone": PHONE, "password": PASSWORD, "code": CODE}).to_string();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(builder.body(Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    response.status()
+}
+
+async fn stored_registration_ip(pool: &PgPool) -> Option<String> {
+    sqlx::query_scalar("SELECT registration_ip FROM users WHERE phone = $1")
+        .bind(PHONE)
+        .fetch_one(pool)
+        .await
+        .expect("注册用户应已落库")
+}
+
+#[sqlx::test]
+async fn records_leftmost_forwarded_for_as_registration_ip(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, PHONE).await;
+
+    // 反代注入的形态是 `客户端, 中间跳...`，最左一段才是真实来源。
+    let status = register_forwarded(&state, Some("203.0.113.9, 10.0.0.1")).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        stored_registration_ip(&pool).await.as_deref(),
+        Some("203.0.113.9"),
+        "应只保留最左侧的客户端地址"
+    );
+}
+
+#[sqlx::test]
+async fn normalizes_ipv6_registration_ip(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, PHONE).await;
+
+    let status = register_forwarded(&state, Some("2001:0db8:0:0:0:0:0:1")).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        stored_registration_ip(&pool).await.as_deref(),
+        Some("2001:db8::1"),
+        "IPv6 地址应按标准文本形式归一化"
+    );
+}
+
+#[sqlx::test]
+async fn registration_succeeds_without_forwarded_for(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, PHONE).await;
+
+    // 反代没配 XFF（或本地直连）时，注册不能因为拿不到 IP 就失败。
+    let status = register_forwarded(&state, None).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(stored_registration_ip(&pool).await, None);
+}
+
+#[sqlx::test]
+async fn ignores_malformed_forwarded_for(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, PHONE).await;
+
+    // 畸形值不落库，避免把任意头内容当成地址存进去。
+    let status = register_forwarded(&state, Some("not-an-ip")).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(stored_registration_ip(&pool).await, None);
+}
