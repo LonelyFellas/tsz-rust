@@ -181,7 +181,17 @@ manifest schema version 1 记录 repository、Git commit/tree、远端 main ref�
   }
   ```
 
-- **nginx**：`proxy_pass http://127.0.0.1:8383;` + certbot 签证书。
+- **nginx**：certbot 签证书，并显式覆盖客户端传入的 `X-Forwarded-For`：
+
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:8383;
+      proxy_set_header X-Forwarded-For $remote_addr;
+  }
+  ```
+
+注册接口把该头最左段记录为 `users.registration_ip`。Caddy 默认忽略客户端传入的
+`X-Forwarded-For`；nginx 必须使用上面的覆盖配置，不能原样透传不可信请求头。
 
 **暂时无法上 TLS 时**（如域名备案审核中）：env 文件里显式设 `COOKIE_SECURE=false`（见 §3），
 否则 refresh cookie 带 Secure 会被浏览器在 http 源静默丢弃，登录后刷新永远 401。

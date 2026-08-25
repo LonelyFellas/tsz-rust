@@ -36,6 +36,8 @@ pub struct NewUser {
     pub password_hash: String,
     pub display_name: String,
     pub first_role: UserRole,
+    /// 注册来源 IP，取自反代 X-Forwarded-For；反代没配这个头时为 None。
+    pub registration_ip: Option<String>,
 }
 
 pub struct UserRepository {
@@ -63,15 +65,16 @@ impl UserRepository {
         // 1) 插入users， RETURNING 拿回 DB 填的列
         let row = sqlx::query!(
             r#"
-            INSERT INTO users (id, phone, email, password_hash, display_name, last_active_role)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO users (id, phone, email, password_hash, display_name, last_active_role, registration_ip)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING created_at, updated_at, status AS "status: UserStatus", avatar_url"#,
             input.id,
             input.phone,
             input.email,
             input.password_hash,
             input.display_name,
-            input.first_role as UserRole
+            input.first_role as UserRole,
+            input.registration_ip
         )
         .fetch_one(&mut *connection)
         .await
