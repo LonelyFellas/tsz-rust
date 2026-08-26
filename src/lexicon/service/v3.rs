@@ -185,9 +185,7 @@ impl LexiconService {
             presentation,
             capabilities: AdminWordV3Capabilities {
                 publication: match state.origin.as_str() {
-                    "native" => V3PublicationCapability::ShadowOnly {
-                        blocked_code: V3PublicationBlockCode::Phase2ConsumersNotReady,
-                    },
+                    "native" => V3PublicationCapability::Native,
                     "migrated_v2" => V3PublicationCapability::MigrationCanary {
                         whitelisted: state.publication_canary_enabled,
                         blocked_code: (!state.publication_canary_enabled)
@@ -518,9 +516,7 @@ impl LexiconService {
             has_unpublished_changes: false,
             presentation,
             capabilities: AdminWordV3Capabilities {
-                publication: V3PublicationCapability::ShadowOnly {
-                    blocked_code: V3PublicationBlockCode::Phase2ConsumersNotReady,
-                },
+                publication: V3PublicationCapability::Native,
                 pronunciation_normalization_version:
                     PronunciationNormalizationVersionV3::NfkcTrimLowerV1,
             },

@@ -15,7 +15,7 @@ use crate::lexicon::model::NewPublicationSenseReference;
 const V3_PUBLISH_SCOPE: &str = "lexicon.entry.publish.v3";
 const V3_ACTIVATE_SCOPE: &str = "lexicon.publication.activate.v3";
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 struct V3PublicationState {
     origin: String,
     migration_batch_id: Option<Uuid>,
@@ -68,7 +68,7 @@ impl LexiconService {
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
         lock_v3_migration_entry(&mut tx, entry_id).await?;
-        preflight_migration_canary(&mut tx, entry_id).await?;
+        preflight_v3_publication_eligibility(&mut tx, entry_id).await?;
 
         let verified_surface = self
             .confirm_v3_publish_surface(
@@ -92,7 +92,7 @@ impl LexiconService {
             });
         }
         let state = v3_publication_state_for_update(&mut tx, entry_id).await?;
-        ensure_migration_canary(&mut tx, entry_id, &state).await?;
+        ensure_v3_publication_eligibility(&mut tx, entry_id, &state).await?;
 
         let mut issues =
             crate::lexicon::v3_contract::validate_forms(&word.forms, StepSaveIntent::Complete);
@@ -343,7 +343,7 @@ impl LexiconService {
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
         lock_v3_migration_entry(&mut tx, entry_id).await?;
-        preflight_migration_canary(&mut tx, entry_id).await?;
+        preflight_v3_publication_eligibility(&mut tx, entry_id).await?;
 
         let publication = versioned_publication(&mut tx, entry_id, publication_id)
             .await?
@@ -378,7 +378,7 @@ impl LexiconService {
             });
         }
         let state = v3_publication_state_for_update(&mut tx, entry_id).await?;
-        ensure_migration_canary(&mut tx, entry_id, &state).await?;
+        ensure_v3_publication_eligibility(&mut tx, entry_id, &state).await?;
 
         if record.current_publication_id == Some(publication.id) {
             word.status = AdminWordStatus::Published;
@@ -580,6 +580,30 @@ async fn v3_publication_state_for_update(
     .ok_or_else(invariant_record)
 }
 
+async fn preflight_v3_publication_eligibility(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+) -> Result<(), LexiconServiceError> {
+    let state = sqlx::query_as::<_, V3PublicationState>(
+        r#"
+        SELECT origin, migration_batch_id, source_publication_id,
+               publication_canary_enabled
+        FROM lexicon.v3_entry_state
+        WHERE entry_id = $1
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?
+    .ok_or(LexiconServiceError::V3PublicationRequiresMigrationCanary)?;
+    match state.origin.as_str() {
+        "native" => ensure_native_publication_state(&state),
+        "migrated_v2" => preflight_migration_canary(tx, entry_id).await,
+        _ => Err(invariant_record()),
+    }
+}
+
 async fn preflight_migration_canary(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
@@ -666,6 +690,29 @@ async fn ensure_migration_canary(
         Ok(())
     } else {
         Err(LexiconServiceError::V3PublicationRequiresMigrationCanary)
+    }
+}
+
+async fn ensure_v3_publication_eligibility(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    state: &V3PublicationState,
+) -> Result<(), LexiconServiceError> {
+    match state.origin.as_str() {
+        "native" => ensure_native_publication_state(state),
+        "migrated_v2" => ensure_migration_canary(tx, entry_id, state).await,
+        _ => Err(invariant_record()),
+    }
+}
+
+fn ensure_native_publication_state(state: &V3PublicationState) -> Result<(), LexiconServiceError> {
+    if state.migration_batch_id.is_none()
+        && state.source_publication_id.is_none()
+        && !state.publication_canary_enabled
+    {
+        Ok(())
+    } else {
+        Err(invariant_record())
     }
 }
 
@@ -1512,5 +1559,38 @@ const fn v3_form_type_name(value: WordFormTypeV3) -> &'static str {
         WordFormTypeV3::Plural => "plural",
         WordFormTypeV3::Comparative => "comparative",
         WordFormTypeV3::Superlative => "superlative",
+    }
+}
+
+#[cfg(test)]
+mod eligibility_tests {
+    use super::*;
+
+    #[test]
+    fn native_publication_requires_absent_migration_provenance() {
+        let native = V3PublicationState {
+            origin: "native".to_owned(),
+            migration_batch_id: None,
+            source_publication_id: None,
+            publication_canary_enabled: false,
+        };
+        assert!(ensure_native_publication_state(&native).is_ok());
+
+        for invalid in [
+            V3PublicationState {
+                migration_batch_id: Some(Uuid::now_v7()),
+                ..native.clone()
+            },
+            V3PublicationState {
+                source_publication_id: Some(Uuid::now_v7()),
+                ..native.clone()
+            },
+            V3PublicationState {
+                publication_canary_enabled: true,
+                ..native.clone()
+            },
+        ] {
+            assert!(ensure_native_publication_state(&invalid).is_err());
+        }
     }
 }
