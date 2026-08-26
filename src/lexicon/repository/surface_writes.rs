@@ -517,6 +517,33 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)?;
         Ok(event_offset)
     }
+
+    pub(crate) async fn advance_draft_surface_revision(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+        previous_revision: i64,
+        next_revision: i64,
+    ) -> Result<(), LexiconRepositoryError> {
+        sqlx::query(
+            r#"
+            UPDATE lexicon.surface_sources
+            SET source_revision = $3,
+                updated_at = now()
+            WHERE entry_id = $1
+              AND content_schema_version = 2
+              AND content_scope = 'draft'
+              AND is_deleted = FALSE
+              AND source_revision = $2
+            "#,
+        )
+        .bind(entry_id)
+        .bind(previous_revision)
+        .bind(next_revision)
+        .execute(&mut **tx)
+        .await
+        .map(|_| ())
+        .map_err(LexiconRepositoryError::Database)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

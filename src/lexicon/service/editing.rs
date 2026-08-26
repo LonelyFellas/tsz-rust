@@ -650,6 +650,9 @@ impl LexiconService {
         LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
             .await
             .map_err(repository_error)?;
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -777,6 +780,14 @@ impl LexiconService {
             "meanings",
             &catalog.part_ids,
             &catalog.sub_part_ids,
+        )
+        .await
+        .map_err(repository_error)?;
+        LexiconRepository::advance_draft_surface_revision(
+            &mut transaction,
+            word.id,
+            base_revision,
+            word.revision,
         )
         .await
         .map_err(repository_error)?;
