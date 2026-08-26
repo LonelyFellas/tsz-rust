@@ -2078,6 +2078,32 @@ async fn historical_publication_activation_rejects_missing_current_inbound_sense
 }
 
 #[sqlx::test]
+async fn saving_meanings_after_backfill_keeps_surface_parity_ready(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let draft = create_ready_draft(&state, &pool, &bearer, "workspace").await;
+
+    let backfill = run_surface_backfill(&pool).await.unwrap();
+    assert!(backfill.parity.ready, "backfill 后必须零差异: {backfill:?}");
+
+    let saved = save_example_sentence(&state, &bearer, &draft, "Updated workspace example.").await;
+    assert_eq!(
+        saved["word"]["revision"].as_i64().unwrap(),
+        draft["word"]["revision"].as_i64().unwrap() + 1
+    );
+
+    let parity = run_surface_parity(&pool).await.unwrap();
+    assert!(
+        parity.ready,
+        "仅保存 meanings 后 surface parity 必须保持零差异: {parity:?}"
+    );
+}
+
+#[sqlx::test]
 async fn b4_backfill_is_repeatable_and_cutover_requires_clean_parity(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
