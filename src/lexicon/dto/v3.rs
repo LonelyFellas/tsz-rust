@@ -674,6 +674,7 @@ pub enum V3PublicationCapability {
     ShadowOnly {
         blocked_code: V3PublicationBlockCode,
     },
+    Native,
     MigrationCanary {
         whitelisted: bool,
         #[serde(skip_serializing_if = "Option::is_none")]

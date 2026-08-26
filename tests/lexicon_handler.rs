@@ -12106,7 +12106,7 @@ async fn v3_form_storage_uses_the_authoritative_surface_normalization(pool: PgPo
 }
 
 #[sqlx::test]
-async fn v3_real_http_create_edit_read_validate_and_native_publish_gate(pool: PgPool) {
+async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -12153,6 +12153,10 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish_gate(pool: Pg
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["word"]["schema_version"], 3);
     assert_eq!(created["word"]["revision"], 1);
+    assert_eq!(
+        created["word"]["capabilities"]["publication"],
+        json!({"mode": "native"})
+    );
     assert!(created["word"].get("headwords").is_none());
     assert!(created["word"].get("compatibility").is_none());
     let entry_id = created["word"]["id"].as_str().unwrap();
@@ -12359,33 +12363,256 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish_gate(pool: Pg
     .unwrap();
     assert_eq!(surface_rows, 4, "common 展开 UK/US，显式 uk/us 各一行");
 
-    let publications_before: i64 =
+    let publish_key = Uuid::now_v7();
+    let publish_body = json!({"schema_version": 3, "base_revision": 3});
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(publish_key),
+        Some(publish_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    assert_eq!(published["word"]["schema_version"], 3);
+    assert_eq!(published["word"]["status"], "published");
+    assert_eq!(published["word"]["published_revision"], 3);
+    assert!(published["word"].get("compatibility").is_none());
+
+    let (publication_count, publication_schema, current_publication_id): (i64, i16, Uuid) =
+        sqlx::query_as(
+            r#"
+            SELECT
+              (SELECT count(*) FROM lexicon.entry_publications WHERE entry_id = entry.id),
+              publication.content_schema_version,
+              entry.current_publication_id
+            FROM lexicon.entries entry
+            JOIN lexicon.entry_publications publication
+              ON publication.id = entry.current_publication_id
+            WHERE entry.id = $1
+            "#,
+        )
+        .bind(entry_uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(publication_count, 1);
+    assert_eq!(publication_schema, 3);
+    assert_eq!(
+        published["word"]["published_revision"],
+        published["word"]["revision"]
+    );
+
+    let current_surface_rows: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM lexicon.surface_sources
+        WHERE entry_id = $1
+          AND content_scope = 'current_publication'
+          AND publication_id = $2
+          AND content_schema_version = 3
+          AND is_deleted = FALSE
+        "#,
+    )
+    .bind(entry_uuid)
+    .bind(current_publication_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(current_surface_rows, 4);
+
+    let (status, replayed_publish) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(publish_key),
+        Some(publish_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed_publish}");
+    assert_eq!(
+        replayed_publish["word"]["published_revision"],
+        published["word"]["published_revision"]
+    );
+    let publication_count_after_replay: i64 =
         sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications WHERE entry_id = $1")
             .bind(entry_uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
-    let (status, _, blocked) = call_problem(
+    assert_eq!(publication_count_after_replay, 1);
+
+    let (status, edited_again) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": published["word"]["revision"],
+            "intent": "complete",
+            "content": meanings_saved["word"]["meanings"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "创建第二版 native 草稿失败：{edited_again}"
+    );
+    let second_publish_body = json!({
+        "schema_version": 3,
+        "base_revision": edited_again["word"]["revision"]
+    });
+    let (status, second_published) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries/{entry_id}/publications"),
         &bearer,
         Some(Uuid::now_v7()),
-        json!({"schema_version": 3, "base_revision": 3}),
+        Some(second_publish_body),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
     assert_eq!(
-        blocked["code"],
-        "smart_lexicon_v3_publication_requires_migration_canary"
+        status,
+        StatusCode::CREATED,
+        "第二版 native publication 发布失败：{second_published}"
     );
-    let publications_after: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications WHERE entry_id = $1")
+    let publications: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM lexicon.entry_publications WHERE entry_id = $1 ORDER BY publication_number",
+    )
+    .bind(entry_uuid)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(publications.len(), 2);
+    assert_eq!(publications[0], current_publication_id);
+    let second_publication_id = publications[1];
+
+    let (status, history) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    assert_eq!(history["publications"].as_array().unwrap().len(), 2);
+    assert_eq!(history["publications"][0]["schema_version"], 3);
+    assert_eq!(history["publications"][0]["is_current"], true);
+
+    let (status, published_list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?page=1&page_size=20&q=harbour"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{published_list}");
+    assert_eq!(published_list["words"][0]["status"], "published");
+    let (status, stats) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/stats"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stats}");
+    assert_eq!(stats["total"], 1);
+    let (status, related) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{related}");
+    assert_eq!(related["results"][0]["entry_id"], entry_id, "{related}");
+
+    let mut lifecycle_revision = second_published["word"]["lifecycle_revision"]
+        .as_i64()
+        .unwrap();
+    for publication_id in [current_publication_id, second_publication_id] {
+        let (status, activated) = activate_v3_history(
+            &state,
+            &bearer,
+            entry_uuid,
+            publication_id,
+            second_published["word"]["revision"].as_i64().unwrap(),
+            lifecycle_revision,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "native A→B→A 激活失败：{activated}");
+        lifecycle_revision += 1;
+        assert_eq!(activated["word"]["lifecycle_revision"], lifecycle_revision);
+        let current: Uuid =
+            sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+                .bind(entry_uuid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(current, publication_id);
+        assert_eq!(
+            live_surface_publication_ids(&pool, entry_uuid).await,
+            vec![publication_id]
+        );
+    }
+
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second_published["word"]["revision"],
+            "base_lifecycle_revision": lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    assert_eq!(archived["word"]["status"], "archived");
+    lifecycle_revision += 1;
+    let (status, restored) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": second_published["word"]["revision"],
+            "base_lifecycle_revision": lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["word"]["status"], "published");
+    assert_eq!(
+        restored["word"]["lifecycle_revision"],
+        lifecycle_revision + 1
+    );
+    let current_after_restore: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
             .bind(entry_uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(publications_after, publications_before);
+    assert_eq!(current_after_restore, second_publication_id);
+    assert_eq!(
+        live_surface_publication_ids(&pool, entry_uuid).await,
+        vec![second_publication_id]
+    );
 }
 
 #[sqlx::test]
