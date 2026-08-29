@@ -365,6 +365,9 @@ jobs:
       - name: Verify exact main source
         id: source
         run: |
+          # checkout 运行在宿主，后续命令运行在 job container；两边 uid 不同会触发
+          # Git dubious ownership。该 job 仅 trusted main 运行，workspace 由 Actions 固定。
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$GITHUB_REPOSITORY" = "LonelyFellas/tsz-rust"
           test "$GITHUB_REF" = "refs/heads/main"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
