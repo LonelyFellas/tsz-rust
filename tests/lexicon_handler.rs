@@ -15070,26 +15070,6 @@ async fn migrated_verified_v3_canary_publish_and_dual_version_activation(pool: P
     .await
     .unwrap();
     assert_eq!(v3_publication_schema, 3);
-    let mut legacy_v3_snapshot: Value =
-        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id = $1")
-            .bind(v3_publication_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    for pos in legacy_v3_snapshot["forms"]["pos"].as_array_mut().unwrap() {
-        pos.as_object_mut().unwrap().remove("dialect_rules");
-    }
-    let legacy_v3_hash = sha256_json(&legacy_v3_snapshot).unwrap();
-    sqlx::query(
-        "UPDATE lexicon.entry_publications SET snapshot = $2, snapshot_hash = $3 WHERE id = $1",
-    )
-    .bind(v3_publication_id)
-    .bind(&legacy_v3_snapshot)
-    .bind(legacy_v3_hash)
-    .execute(&pool)
-    .await
-    .unwrap();
-
     let read_disabled_state = state
         .clone()
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::default());
