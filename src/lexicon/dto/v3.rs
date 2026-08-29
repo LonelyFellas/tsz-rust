@@ -1763,6 +1763,10 @@ pub struct DetectLexiconSurfaceResponseV3 {
     pub request: DetectionSurfaceRequestEchoV3,
     pub normalized_surface: String,
     pub builtin_dictionary: BuiltinDictionaryEvidenceV3,
+    /// 内置词典与合法同表面已有词条 POS 的服务端权威合并结果。
+    /// builtin evidence 本身保持来源纯净；已有词条只贡献 POS code。
+    #[schema(max_items = 2000)]
+    pub suggested_pos: Vec<String>,
     pub matches: Vec<SurfaceMatchItemV3>,
     pub requires_acknowledgement: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

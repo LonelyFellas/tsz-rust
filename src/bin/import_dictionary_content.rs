@@ -22,13 +22,17 @@ struct Args {
     dataset_version: String,
     contents: PathBuf,
     source_locator: String,
+    source_version: String,
     expected_records: Option<u64>,
+    parser_version: String,
+    replace_existing: bool,
     validate_only: bool,
 }
 
 fn usage() -> &'static str {
     "usage: import_dictionary_content --dataset-version VERSION --contents FILE \
-     --source-locator URL [--expected-records N] [--validate-only]"
+     --source-locator URL --source-version VERSION [--expected-records N] [--parser-version VERSION] \
+     [--replace-existing] [--validate-only]"
 }
 
 fn next_value(iter: &mut impl Iterator<Item = OsString>, flag: &str) -> anyhow::Result<OsString> {
@@ -47,7 +51,10 @@ fn parse_args_from(values: impl IntoIterator<Item = OsString>) -> anyhow::Result
     let mut dataset_version = None;
     let mut contents = None;
     let mut source_locator = None;
+    let mut source_version = None;
     let mut expected_records = None;
+    let mut parser_version = "forms-sounds-v1".to_owned();
+    let mut replace_existing = false;
     let mut validate_only = false;
     while let Some(flag) = iter.next() {
         let flag = text_value(flag, "argument name")?;
@@ -59,6 +66,9 @@ fn parse_args_from(values: impl IntoIterator<Item = OsString>) -> anyhow::Result
             "--source-locator" => {
                 source_locator = Some(text_value(next_value(&mut iter, &flag)?, &flag)?);
             }
+            "--source-version" => {
+                source_version = Some(text_value(next_value(&mut iter, &flag)?, &flag)?);
+            }
             "--expected-records" => {
                 expected_records = Some(
                     text_value(next_value(&mut iter, &flag)?, &flag)?
@@ -66,6 +76,10 @@ fn parse_args_from(values: impl IntoIterator<Item = OsString>) -> anyhow::Result
                         .with_context(|| format!("{flag} must be a non-negative integer"))?,
                 );
             }
+            "--parser-version" => {
+                parser_version = text_value(next_value(&mut iter, &flag)?, &flag)?;
+            }
+            "--replace-existing" => replace_existing = true,
             "--validate-only" => validate_only = true,
             "-h" | "--help" => {
                 println!("{}", usage());
@@ -78,7 +92,10 @@ fn parse_args_from(values: impl IntoIterator<Item = OsString>) -> anyhow::Result
         dataset_version: dataset_version.context("--dataset-version is required")?,
         contents: contents.context("--contents is required")?,
         source_locator: source_locator.context("--source-locator is required")?,
+        source_version: source_version.context("--source-version is required")?,
         expected_records,
+        parser_version,
+        replace_existing,
         validate_only,
     })
 }
@@ -136,8 +153,18 @@ fn parse_record(raw: &str, line_number: u64) -> anyhow::Result<(String, Value)> 
         payload["senses"].is_array(),
         "record senses must be an array"
     );
+    ensure!(
+        payload.get("forms").is_none_or(Value::is_array),
+        "record forms must be an array"
+    );
+    ensure!(
+        payload.get("sounds").is_none_or(Value::is_array),
+        "record sounds must be an array"
+    );
     let normalized = normalize_headword(word)
-        .with_context(|| format!("cannot normalize dictionary word {word:?}"))?
+        .with_context(|| {
+            format!("cannot normalize dictionary word {word:?} at line {line_number}")
+        })?
         .key;
     Ok((normalized, payload))
 }
@@ -159,6 +186,26 @@ fn validate_contents(path: &Path) -> anyhow::Result<u64> {
         rows += 1;
     }
     Ok(rows)
+}
+
+fn validate_replacement(
+    existing: Option<(&str, &str)>,
+    replace_existing: bool,
+    input_sha256: &str,
+    source_locator: &str,
+) -> anyhow::Result<()> {
+    let Some((existing_sha256, existing_locator)) = existing else {
+        return Ok(());
+    };
+    ensure!(
+        replace_existing,
+        "content is already imported for this dataset"
+    );
+    ensure!(
+        existing_sha256 == input_sha256 && existing_locator == source_locator,
+        "replacement content must keep the existing input SHA-256 and source locator"
+    );
+    Ok(())
 }
 
 async fn copy_contents(connection: &mut PgConnection, path: &Path) -> anyhow::Result<u64> {
@@ -224,6 +271,14 @@ async fn main() -> anyhow::Result<()> {
         !args.source_locator.trim().is_empty(),
         "source locator is empty"
     );
+    ensure!(
+        !args.parser_version.trim().is_empty(),
+        "parser version is empty"
+    );
+    ensure!(
+        !args.source_version.trim().is_empty(),
+        "source version is empty"
+    );
     let input_sha256 = sha256(&args.contents)?;
     if args.validate_only {
         let records = validate_contents(&args.contents)?;
@@ -247,15 +302,26 @@ async fn main() -> anyhow::Result<()> {
     .fetch_optional(&mut *tx)
     .await?
     .with_context(|| format!("active dataset not found: {}", args.dataset_version))?;
-    ensure!(
-        !sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM dictionary.content_imports WHERE dataset_id=$1)",
-        )
-        .bind(dataset_id)
-        .fetch_one(&mut *tx)
-        .await?,
-        "content is already imported for this dataset"
-    );
+    let existing = sqlx::query_as::<_, (String, String)>(
+        "SELECT input_sha256, source_locator FROM dictionary.content_imports WHERE dataset_id=$1",
+    )
+    .bind(dataset_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    validate_replacement(
+        existing
+            .as_ref()
+            .map(|(sha256, locator)| (sha256.as_str(), locator.as_str())),
+        args.replace_existing,
+        &input_sha256,
+        &args.source_locator,
+    )?;
+    if existing.is_some() {
+        sqlx::query("DELETE FROM dictionary.entry_contents WHERE dataset_id=$1")
+            .bind(dataset_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query(
         "CREATE TEMP TABLE dictionary_import_contents (normalized_term TEXT NOT NULL, payload JSONB NOT NULL) ON COMMIT DROP",
     )
@@ -270,11 +336,13 @@ async fn main() -> anyhow::Result<()> {
     }
     let inserted = sqlx::query(
         r#"INSERT INTO dictionary.entry_contents (
-               dataset_id, source_key, normalized_term, pos, senses, source_locator
+               dataset_id, source_key, normalized_term, pos, senses, forms, sounds, source_locator
            )
            SELECT $1,
                   concat('kaikki:', normalized_term, ':', payload->>'pos', ':', md5(payload::text)),
-                  normalized_term, payload->>'pos', payload->'senses', $2
+                  normalized_term, payload->>'pos', payload->'senses',
+                  coalesce(payload->'forms', '[]'::jsonb),
+                  coalesce(payload->'sounds', '[]'::jsonb), $2
            FROM dictionary_import_contents"#,
     )
     .bind(dataset_id)
@@ -288,13 +356,19 @@ async fn main() -> anyhow::Result<()> {
     );
     sqlx::query(
         r#"INSERT INTO dictionary.content_imports
-           (dataset_id, input_sha256, source_locator, record_count)
-           VALUES ($1, $2, $3, $4)"#,
+           (dataset_id, input_sha256, source_locator, source_version, record_count, parser_version)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (dataset_id) DO UPDATE SET
+             record_count = EXCLUDED.record_count,
+             parser_version = EXCLUDED.parser_version,
+             imported_at = now()"#,
     )
     .bind(dataset_id)
     .bind(&input_sha256)
     .bind(&args.source_locator)
+    .bind(&args.source_version)
     .bind(i64::try_from(staged).context("record count exceeds BIGINT")?)
+    .bind(&args.parser_version)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -322,6 +396,8 @@ mod tests {
                 "english.jsonl.gz",
                 "--source-locator",
                 "https://kaikki.org/source",
+                "--source-version",
+                "enwiktionary-test",
                 "--expected-records",
                 "12",
                 "--validate-only",
@@ -331,6 +407,9 @@ mod tests {
         .unwrap();
         assert_eq!(args.dataset_version, "v1");
         assert_eq!(args.expected_records, Some(12));
+        assert_eq!(args.source_version, "enwiktionary-test");
+        assert_eq!(args.parser_version, "forms-sounds-v1");
+        assert!(!args.replace_existing);
         assert!(args.validate_only);
     }
 
@@ -339,5 +418,40 @@ mod tests {
         let mut value = String::new();
         append_csv_field(&mut value, r#"{"word":"bank"}"#);
         assert_eq!(value, r#""{""word"":""bank""}""#);
+    }
+
+    #[test]
+    fn rejects_non_array_forms_and_sounds() {
+        assert!(
+            parse_record(
+                r#"{"lang_code":"en","word":"child","pos":"noun","senses":[],"forms":{}}"#,
+                1
+            )
+            .is_err()
+        );
+        assert!(
+            parse_record(
+                r#"{"lang_code":"en","word":"child","pos":"noun","senses":[],"sounds":"ipa"}"#,
+                1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn replacement_requires_explicit_flag_and_identical_source_identity() {
+        let existing = Some(("same-sha", "https://kaikki.org/source"));
+        assert!(
+            validate_replacement(existing, false, "same-sha", "https://kaikki.org/source").is_err()
+        );
+        assert!(
+            validate_replacement(existing, true, "different", "https://kaikki.org/source").is_err()
+        );
+        assert!(
+            validate_replacement(existing, true, "same-sha", "https://other.example/source")
+                .is_err()
+        );
+        validate_replacement(existing, true, "same-sha", "https://kaikki.org/source").unwrap();
+        validate_replacement(None, false, "new-sha", "https://kaikki.org/source").unwrap();
     }
 }

@@ -74,6 +74,7 @@ use crate::lexicon::{
     },
 };
 
+mod dictionary_suggestions;
 mod editing;
 mod entry;
 mod helpers;

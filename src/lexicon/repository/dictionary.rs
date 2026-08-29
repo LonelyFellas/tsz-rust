@@ -21,6 +21,29 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
+    pub(crate) async fn dictionary_contents(
+        &self,
+        normalized: &str,
+    ) -> Result<Vec<DictionaryContentRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, DictionaryContentRecord>(
+            r#"
+            SELECT content.pos, content.forms, content.sounds,
+                   datasets.source_name AS provider_name,
+                   content_import.source_version AS provider_version
+            FROM dictionary.entry_contents content
+            JOIN dictionary.datasets datasets ON datasets.id = content.dataset_id
+            JOIN dictionary.content_imports content_import
+              ON content_import.dataset_id = content.dataset_id
+            WHERE datasets.status = 'active' AND content.normalized_term = $1
+            ORDER BY content.source_key
+            "#,
+        )
+        .bind(normalized)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     pub(crate) async fn region_surface(
         &self,
         normalized: &str,

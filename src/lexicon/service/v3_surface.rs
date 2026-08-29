@@ -67,6 +67,12 @@ struct V3SurfaceContextRecord {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+struct V3SuggestedPosRecord {
+    content_schema_version: i16,
+    forms: Value,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 struct V3RelationSourcePresentationRecord {
     entry_id: Uuid,
     label: String,
@@ -646,7 +652,14 @@ impl LexiconService {
         actor_id: Uuid,
         detection_id: Uuid,
         normalized_surface: &str,
-    ) -> Result<(Vec<SurfaceMatchItemV3>, Option<SurfaceMatchPageV3>), LexiconServiceError> {
+    ) -> Result<
+        (
+            Vec<SurfaceMatchItemV3>,
+            Option<SurfaceMatchPageV3>,
+            Vec<String>,
+        ),
+        LexiconServiceError,
+    > {
         let keys = detection_surface_keys(normalized_surface);
         let mut transaction = self
             .repository
@@ -657,9 +670,12 @@ impl LexiconService {
         let material = self
             .v3_surface_material_in(&mut transaction, &keys, None, false)
             .await?;
+        let suggested_pos = self
+            .v3_surface_suggested_pos_in(&mut transaction, &material)
+            .await?;
         transaction.commit().await.map_err(database_error)?;
         if material.matches.is_empty() {
-            return Ok((Vec::new(), None));
+            return Ok((Vec::new(), None, suggested_pos));
         }
         let policy = self
             .surface_policies
@@ -676,7 +692,61 @@ impl LexiconService {
         let snapshot = self
             .create_v3_surface_snapshot(binding, owner_bundle, &material, false, policy)
             .await?;
-        Ok((material.public_matches(), Some(snapshot)))
+        Ok((material.public_matches(), Some(snapshot), suggested_pos))
+    }
+
+    async fn v3_surface_suggested_pos_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        material: &V3SurfaceMaterial,
+    ) -> Result<Vec<String>, LexiconServiceError> {
+        let entry_ids = material
+            .matches
+            .iter()
+            .filter(|resolved| match &resolved.item {
+                SurfaceMatchItemV3::LegacyV2(item) => {
+                    item.existing.status != AdminWordStatus::Archived
+                }
+                SurfaceMatchItemV3::FormVariantV3(item) => item.status != AdminWordStatus::Archived,
+            })
+            .map(|resolved| surface_match_item_entry_id(&resolved.item))
+            .collect::<HashSet<_>>();
+        if entry_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let records = sqlx::query_as::<_, V3SuggestedPosRecord>(
+            r#"
+            SELECT entry.content_schema_version, editor.forms
+            FROM lexicon.entries entry
+            JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
+            WHERE entry.id = ANY($1)
+              AND entry.archived_at IS NULL
+            ORDER BY entry.id
+            "#,
+        )
+        .bind(entry_ids.into_iter().collect::<Vec<_>>())
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        let mut suggested_pos = BTreeSet::new();
+        for record in records {
+            match record.content_schema_version {
+                2 => {
+                    let forms: DraftFormsStepContent =
+                        serde_json::from_value(record.forms).map_err(serialization_error)?;
+                    suggested_pos.extend(forms.pos.into_iter().map(|pos| pos.pos));
+                }
+                3 => {
+                    let forms: DraftFormsStepContentV3 =
+                        serde_json::from_value(record.forms).map_err(serialization_error)?;
+                    suggested_pos.extend(forms.pos.into_iter().map(|pos| pos.pos));
+                }
+                version => {
+                    return Err(LexiconServiceError::UnsupportedSchemaVersion(version));
+                }
+            }
+        }
+        Ok(suggested_pos.into_iter().collect())
     }
 
     pub(super) async fn verify_v3_detection_surface_for_create(
