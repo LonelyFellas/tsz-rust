@@ -17,7 +17,7 @@ use tsz_rust::{
     admin::{AdminRepository, AdminRole, NewAdmin},
     config::SmartLexiconV3Flags,
     lexicon::detection_store::DetectionStore,
-    lexicon::dto::{DetectWordResponseV2, SurfacePolicyNameV2},
+    lexicon::dto::{DetectLexiconSurfaceResponseV3, DetectWordResponseV2, SurfacePolicyNameV2},
     lexicon::normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword},
     lexicon::repository::LexiconRepository,
     lexicon::surface_backfill::{
@@ -10502,7 +10502,8 @@ async fn non_english_headwords_are_rejected_by_detection_and_creation(pool: PgPo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let state = AppState::for_test_with_redis(pool.clone(), redis.clone())
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
 
@@ -10524,6 +10525,90 @@ async fn non_english_headwords_are_rejected_by_detection_and_creation(pool: PgPo
         assert_eq!(problem["code"], "invalid_headword");
         assert_eq!(problem["field"], "headword");
     }
+
+    for surface in ["苹果测试", "apple苹果", "りんご", "яблоко", "123456", "---"] {
+        let (status, problem) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": surface,
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "V3 surface {surface} 本不该通过检测：{problem}"
+        );
+        assert_eq!(problem["code"], "invalid_headword");
+        assert_eq!(problem["field"], "surface");
+    }
+
+    let (status, valid_v3_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "café",
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "合法 V3 surface 检测失败：{valid_v3_detection}"
+    );
+    let mut tampered_v3_detection: DetectLexiconSurfaceResponseV3 =
+        serde_json::from_value(valid_v3_detection).unwrap();
+    tampered_v3_detection.request.surface = "苹果测试".to_owned();
+    tampered_v3_detection.normalized_surface = "苹果测试".to_owned();
+    DetectionStore::new(redis)
+        .save_v3(admin_id, &tampered_v3_detection, Duration::from_secs(300))
+        .await
+        .unwrap();
+    let entries_before: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entries")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (status, problem) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": tampered_v3_detection.detection_id,
+            "kind": "word",
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "历史非法 V3 detection 本不该创建成功：{problem}"
+    );
+    assert_eq!(problem["code"], "invalid_headword");
+    assert_eq!(problem["field"], "surface");
+    let entries_after: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entries")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        entries_after, entries_before,
+        "非法 V3 detection 不得写入 entry"
+    );
 
     // 字符集只拦非英文，不收紧 not_found 的创建口子：生造词、变音符、缩写仍要放行。
     let (status, detection) = call(

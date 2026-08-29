@@ -188,17 +188,28 @@ pub(super) fn trimmed(value: Option<String>) -> Option<String> {
 pub(super) fn map_headword_error(error: HeadwordNormalizationError) -> LexiconServiceError {
     LexiconServiceError::InvalidField {
         field: "headword",
-        message: match error {
-            HeadwordNormalizationError::Empty => "headword is required",
-            HeadwordNormalizationError::TooLong => "headword is too long",
-            HeadwordNormalizationError::ControlCharacter => "headword contains control characters",
-            HeadwordNormalizationError::UnsupportedCharacter => {
-                "headword must contain only Latin letters, digits and - ' . & / , characters"
-            }
-            HeadwordNormalizationError::MissingLatinLetter => {
-                "headword must contain at least one Latin letter"
-            }
-        },
+        message: headword_error_message(error),
+    }
+}
+
+pub(super) fn map_surface_error(error: HeadwordNormalizationError) -> LexiconServiceError {
+    LexiconServiceError::InvalidField {
+        field: "surface",
+        message: headword_error_message(error),
+    }
+}
+
+fn headword_error_message(error: HeadwordNormalizationError) -> &'static str {
+    match error {
+        HeadwordNormalizationError::Empty => "headword is required",
+        HeadwordNormalizationError::TooLong => "headword is too long",
+        HeadwordNormalizationError::ControlCharacter => "headword contains control characters",
+        HeadwordNormalizationError::UnsupportedCharacter => {
+            "headword must contain only Latin letters, digits and - ' . & / , characters"
+        }
+        HeadwordNormalizationError::MissingLatinLetter => {
+            "headword must contain at least one Latin letter"
+        }
     }
 }
 

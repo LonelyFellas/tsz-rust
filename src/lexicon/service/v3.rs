@@ -475,11 +475,7 @@ impl LexiconService {
         actor_id: Uuid,
         input: DetectLexiconSurfaceV3Input,
     ) -> Result<DetectLexiconSurfaceResponseV3, LexiconServiceError> {
-        let normalized = crate::lexicon::normalization::normalize_headword(&input.surface)
-            .map_err(|_| LexiconServiceError::InvalidField {
-                field: "surface",
-                message: "surface must contain between 1 and 200 valid codepoints",
-            })?;
+        let normalized = NormalizedHeadword::parse(&input.surface).map_err(map_surface_error)?;
         let term = self
             .repository
             .dictionary_term(&normalized.key)
@@ -613,6 +609,14 @@ impl LexiconService {
             .await
             .map_err(LexiconServiceError::DetectionStore)?
             .ok_or(LexiconServiceError::DetectionMismatch)?;
+        let normalized_detection =
+            NormalizedHeadword::parse(&detection.request.surface).map_err(map_surface_error)?;
+        if normalized_detection.key != detection.normalized_surface {
+            return Err(LexiconServiceError::InvalidField {
+                field: "surface",
+                message: "surface normalization does not match detection",
+            });
+        }
         if detection.expires_at <= Utc::now() {
             return Err(LexiconServiceError::DetectionExpired);
         }
