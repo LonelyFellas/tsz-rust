@@ -85,16 +85,6 @@ pub fn validate_forms(
             );
         }
         let allowed_form_types = crate::lexicon::form_types::allowed_form_types(&pos.pos);
-        if allowed_form_types.is_empty() && pos.form_groups.len() > 1 {
-            issue(
-                &mut issues,
-                PersistedWordStep::Forms,
-                pos.pos_id,
-                "form_groups",
-                "form_groups_not_supported",
-                "当前基本词性不支持多组词形变化",
-            );
-        }
 
         unique_node(
             &mut issues,
@@ -801,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_empty_form_groups_for_words_without_derived_forms() {
+    fn every_part_accepts_empty_or_multiple_form_groups() {
         let mut pronoun = forms(&[("pronoun", &[])]);
         let pronoun_parts = HashSet::from(["pronoun".to_owned()]);
         let legacy_issues = validate_forms(
@@ -846,7 +836,7 @@ mod tests {
         assert!(
             duplicate_issues
                 .iter()
-                .any(|issue| issue.code == "form_groups_not_supported")
+                .all(|issue| issue.code != "form_groups_not_supported")
         );
 
         let mut noun = forms(&[("noun", &["plural"])]);
@@ -965,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregates_every_pos_form_type_mismatch_at_the_slot() {
+    fn accepts_every_fixed_form_type_for_every_part() {
         let content = forms(&[
             ("adjective", &["past_tense"]),
             ("verb", &["comparative"]),
@@ -980,24 +970,10 @@ mod tests {
             },
             &configured,
         );
-        let mismatches = issues
-            .iter()
-            .filter(|issue| issue.code == "invalid_form_type_for_part_of_speech")
-            .collect::<Vec<_>>();
-        assert_eq!(mismatches.len(), 3);
-        assert_eq!(mismatches[0].step, PersistedWordStep::Forms);
-        assert_eq!(mismatches[0].field, "form_type");
-        assert_eq!(
-            mismatches[0].node_id,
-            content.pos[0].form_groups[0].slots[0].id
-        );
-        assert_eq!(
-            mismatches[1].node_id,
-            content.pos[1].form_groups[0].slots[0].id
-        );
-        assert_eq!(
-            mismatches[2].node_id,
-            content.pos[2].form_groups[0].slots[0].id
+        assert!(
+            issues
+                .iter()
+                .all(|issue| issue.code != "invalid_form_type_for_part_of_speech")
         );
     }
 }

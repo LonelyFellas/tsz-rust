@@ -11,8 +11,9 @@ use crate::lexicon::dto::DraftMeaningsStepContent;
 use crate::lexicon::dto::{
     AdminWordAny, AdminWordAnyEnvelope, AdminWordDraftAnyEnvelope, AdminWordDraftV3Envelope,
     AdminWordV3, AdminWordV3Capabilities, AdminWordV3Compatibility, BuiltinDictionaryEvidenceV3,
-    CreateAdminWordV3Input, DetectLexiconSurfaceResponseV3, DetectLexiconSurfaceV3Input,
-    DetectionSurfaceRequestEchoV3, DictionaryCoverageV3, DictionaryProvenanceV3,
+    CreateAdminWordV3Input, DetectLexiconSurfaceResponseV3,
+    DetectLexiconSurfaceV3Input, DetectionSurfaceRequestEchoV3, DialectRulesV3,
+    DictionaryCoverageV3, DictionaryProvenanceV3,
     DictionaryProviderEvidenceV3, DraftFormsStepContentV3, DraftMeaningsStepContentV3,
     DraftValidationResponseV3, EnglishLanguageV3, EntryPresentationV3, FormsImpactItemV3,
     FormsImpactNodeTypeV3, FormsImpactResponseV3, LegacyHeadwordsCompatibilityV3,
@@ -930,7 +931,12 @@ impl LexiconService {
             content,
             ..
         } = input;
-        let issues = crate::lexicon::v3_contract::validate_meanings(&content);
+        let mut issues = crate::lexicon::v3_contract::validate_meanings(&content);
+        if intent == StepSaveIntent::Complete {
+            issues.extend(
+                crate::lexicon::v3_contract::validate_complete_definition_grammar(&content),
+            );
+        }
         if !issues.is_empty() {
             return Err(v3_validation_failed(issues));
         }
@@ -1212,6 +1218,9 @@ impl LexiconService {
         issues.extend(crate::lexicon::v3_contract::validate_meanings(
             &word.meanings,
         ));
+        issues.extend(
+            crate::lexicon::v3_contract::validate_complete_definition_grammar(&word.meanings),
+        );
         issues.extend(crate::lexicon::v3_contract::validate_aggregate_node_limit(
             &word.forms,
             &word.meanings,
@@ -1759,9 +1768,11 @@ async fn replace_v3_forms(
             INSERT INTO lexicon.entry_pos (
                 id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode,
                 sort_order, content_schema_version
-            ) VALUES ($1, $2, $3, NULL, NULL, $4, 3)
+            ) VALUES ($1, $2, $3, $4, $5, $6, 3)
             ON CONFLICT (id) DO UPDATE
-            SET sort_order = EXCLUDED.sort_order
+            SET spelling_mode = EXCLUDED.spelling_mode,
+                phonetic_mode = EXCLUDED.phonetic_mode,
+                sort_order = EXCLUDED.sort_order
             WHERE lexicon.entry_pos.entry_id = EXCLUDED.entry_id
               AND lexicon.entry_pos.content_schema_version = 3
               AND lexicon.entry_pos.part_of_speech_id = EXCLUDED.part_of_speech_id
@@ -1770,6 +1781,8 @@ async fn replace_v3_forms(
         .bind(pos.pos_id)
         .bind(entry_id)
         .bind(part_id)
+        .bind(pos.dialect_rules.spelling_mode.as_str())
+        .bind(pos.dialect_rules.phonetic_mode.as_str())
         .bind(pos_ordinal as i32)
         .execute(&mut **tx)
         .await
@@ -2396,8 +2409,9 @@ mod tests {
 
     use super::*;
     use crate::lexicon::dto::{
-        CommonDialectV3, V3ValidationIssueCode, WordCommonFormVariantV3, WordConcreteFormV3,
-        WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3, WordPronunciationV3,
+        CommonDialectV3, DialectRulesV3, V3ValidationIssueCode, WordCommonFormVariantV3,
+        WordConcreteFormV3, WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3,
+        WordPronunciationV3,
     };
 
     fn fixed_id(value: u128) -> Uuid {
@@ -2459,6 +2473,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: fixed_id(100),
                 pos: "noun".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms,
                 form_groups,
             }],

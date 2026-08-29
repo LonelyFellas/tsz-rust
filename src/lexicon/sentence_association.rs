@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 
 use crate::lexicon::{
     dto::{DraftMeaningsStepContent, SentenceAssociationsStateV2},
-    form_types::allowed_form_types,
     normalization::normalize_headword,
 };
 
@@ -97,12 +96,9 @@ pub(crate) fn is_stopword(normalized: &str) -> bool {
 
 /// 参与自动关联的词性：实词。
 ///
-/// 判据借用词库既有的「有没有形态表」——`noun` / `verb` / `adjective` / `adverb` 四类有，
-/// `article` / `determiner` / `preposition` / `pronoun` / `conjunction` / `numeral` /
-/// `interjection` 没有。词性目录是管理员可配的，自定义词性同样落在「没有」这一侧，
-/// 即 fail-closed 不关联。
+/// 词形类型能力对所有 POS 开放后，这里仍保留原有实词范围；自定义 POS fail closed 不关联。
 pub(crate) fn associable_pos(part_of_speech: &str) -> bool {
-    !allowed_form_types(part_of_speech).is_empty()
+    matches!(part_of_speech, "noun" | "verb" | "adjective" | "adverb")
 }
 
 /// 清空只读投影。两处都要用：草稿保存时客户端可能把读到的关联原样回传，

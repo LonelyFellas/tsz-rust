@@ -189,15 +189,115 @@ pub struct WordFormGroupV3 {
     pub members: Vec<WordFormGroupMemberV3>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DialectModeV3 {
+    Unified,
+    Distinguish,
+}
+
+impl DialectModeV3 {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unified => "unified",
+            Self::Distinguish => "distinguish",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DialectRulesV3 {
+    pub spelling_mode: DialectModeV3,
+    pub phonetic_mode: DialectModeV3,
+}
+
+impl DialectRulesV3 {
+    pub(crate) const UNIFIED: Self = Self {
+        spelling_mode: DialectModeV3::Unified,
+        phonetic_mode: DialectModeV3::Unified,
+    };
+    pub(crate) const UNIFIED_DISTINGUISH: Self = Self {
+        spelling_mode: DialectModeV3::Unified,
+        phonetic_mode: DialectModeV3::Distinguish,
+    };
+    pub(crate) const DISTINGUISH: Self = Self {
+        spelling_mode: DialectModeV3::Distinguish,
+        phonetic_mode: DialectModeV3::Distinguish,
+    };
+
+    pub(crate) const fn is_valid(self) -> bool {
+        !matches!(
+            (self.spelling_mode, self.phonetic_mode),
+            (DialectModeV3::Distinguish, DialectModeV3::Unified)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordPosFormsV3 {
     pub pos_id: Uuid,
     pub pos: String,
+    pub dialect_rules: DialectRulesV3,
     #[schema(max_items = 2000)]
     pub forms: Vec<WordConcreteFormV3>,
     #[schema(max_items = 2000)]
     pub form_groups: Vec<WordFormGroupV3>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WordPosFormsV3Wire {
+    pos_id: Uuid,
+    pos: String,
+    #[serde(default)]
+    dialect_rules: Option<DialectRulesV3>,
+    forms: Vec<WordConcreteFormV3>,
+    form_groups: Vec<WordFormGroupV3>,
+}
+
+impl<'de> Deserialize<'de> for WordPosFormsV3 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = WordPosFormsV3Wire::deserialize(deserializer)?;
+        let dialect_rules = wire
+            .dialect_rules
+            .unwrap_or_else(|| infer_legacy_dialect_rules_v3(&wire.forms));
+        Ok(Self {
+            pos_id: wire.pos_id,
+            pos: wire.pos,
+            dialect_rules,
+            forms: wire.forms,
+            form_groups: wire.form_groups,
+        })
+    }
+}
+
+fn infer_legacy_dialect_rules_v3(forms: &[WordConcreteFormV3]) -> DialectRulesV3 {
+    let Some(first) = forms.first() else {
+        return DialectRulesV3::UNIFIED;
+    };
+    if matches!(
+        &first.regional_variants,
+        WordRegionalVariantsV3::Common { .. }
+    ) {
+        return DialectRulesV3::UNIFIED;
+    }
+    let all_uk_us_spellings_match = forms
+        .iter()
+        .filter_map(|form| match &form.regional_variants {
+            WordRegionalVariantsV3::Common { .. } => None,
+            WordRegionalVariantsV3::UkUs { uk, us } => Some(uk.spelling == us.spelling),
+        })
+        .all(|matches| matches);
+    if all_uk_us_spellings_match {
+        DialectRulesV3::UNIFIED_DISTINGUISH
+    } else {
+        DialectRulesV3::DISTINGUISH
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1033,6 +1133,7 @@ pub enum FormsImpactResponseAny {
 #[serde(rename_all = "snake_case")]
 pub enum V3ValidationIssueCode {
     InvalidRegionalVariantShape,
+    DialectRulesInvalid,
     InvalidFormTypeForPartOfSpeech,
     ForbiddenV3Field,
     DuplicateNodeId,
@@ -1088,6 +1189,7 @@ impl V3ValidationIssueCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidRegionalVariantShape => "invalid_regional_variant_shape",
+            Self::DialectRulesInvalid => "dialect_rules_invalid",
             Self::InvalidFormTypeForPartOfSpeech => "invalid_form_type_for_part_of_speech",
             Self::ForbiddenV3Field => "forbidden_v3_field",
             Self::DuplicateNodeId => "duplicate_node_id",
@@ -1143,6 +1245,7 @@ impl V3ValidationIssueCode {
     pub fn from_wire(value: &str) -> Option<Self> {
         Some(match value {
             "invalid_regional_variant_shape" => Self::InvalidRegionalVariantShape,
+            "dialect_rules_invalid" => Self::DialectRulesInvalid,
             "invalid_form_type_for_part_of_speech" => Self::InvalidFormTypeForPartOfSpeech,
             "forbidden_v3_field" => Self::ForbiddenV3Field,
             "duplicate_node_id" => Self::DuplicateNodeId,

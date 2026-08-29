@@ -130,6 +130,9 @@ pub(crate) fn presentation_from_native_forms(
     let mut matched_surfaces = Vec::new();
     for pos in &forms.pos {
         for form in &pos.forms {
+            if form.form_type != WordFormTypeV3::Base {
+                continue;
+            }
             for (variant_id, spelling) in regional_variant_spellings(&form.regional_variants) {
                 let Some(normalized) = projectable_surface(variant_id, spelling)? else {
                     continue;
@@ -338,9 +341,9 @@ mod tests {
     use uuid::Uuid;
 
     use crate::lexicon::dto::{
-        CommonDialectV3, DraftFormsStepContentV3, LegacyHeadwordsCompatibilityV3, SourceDialect,
-        TextOrigin, UkDialectV3, UsDialectV3, WordCommonFormVariantV3, WordConcreteFormV3,
-        WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordPosFormsV3,
+        CommonDialectV3, DialectRulesV3, DraftFormsStepContentV3, LegacyHeadwordsCompatibilityV3,
+        SourceDialect, TextOrigin, UkDialectV3, UsDialectV3, WordCommonFormVariantV3,
+        WordConcreteFormV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordPosFormsV3,
         WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
     };
 
@@ -415,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn native_presentation_uses_wire_order_without_prioritizing_base_forms() {
+    fn native_presentation_uses_only_base_forms_in_wire_order() {
         let first_form_id = id(1);
         let second_form_id = id(2);
         let comparative_form_id = id(3);
@@ -425,6 +428,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(10),
                 pos: "adjective".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![
                     comparative,
                     common_form(first_form_id, id(11), "Color"),
@@ -453,11 +457,8 @@ mod tests {
 
         let presentation = presentation_from_native_forms(id(0xfeed), &forms).unwrap();
 
-        assert_eq!(
-            presentation.matched_surfaces,
-            ["more colourful", "Color", "colour"]
-        );
-        assert_eq!(presentation.label, "more colourful / Color / colour");
+        assert_eq!(presentation.matched_surfaces, ["Color", "colour"]);
+        assert_eq!(presentation.label, "Color / colour");
         assert_eq!(
             presentation.strategy_version,
             NATIVE_PRESENTATION_STRATEGY_VERSION
@@ -492,6 +493,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(500),
                 pos: "noun".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![
                     common_form(blank_common_form_id, blank_common_variant_id, "   "),
                     uk_us_form(
@@ -542,6 +544,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(600),
                 pos: "verb".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(form_id, id(602), "\t\n")],
                 form_groups: vec![WordFormGroupV3 {
                     id: id(603),
@@ -572,6 +575,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(700),
                 pos: "noun".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(form_id, variant_id, "bad\0surface")],
                 form_groups: vec![WordFormGroupV3 {
                     id: id(703),
@@ -613,6 +617,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id,
                 pos: "noun".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(form_id, variant_id, "Workspaces")],
                 form_groups: vec![
                     WordFormGroupV3 {
@@ -669,6 +674,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(201),
                 pos: "noun".to_owned(),
+                dialect_rules: DialectRulesV3::DISTINGUISH,
                 forms: vec![uk_us_form(
                     form_id,
                     uk_variant_id,
@@ -707,6 +713,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(300),
                 pos: "noun".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(orphan_form_id, id(303), "orphan")],
                 form_groups: Vec::new(),
             }],
@@ -724,6 +731,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(300),
                 pos: "noun".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(orphan_form_id, id(303), "orphan")],
                 form_groups: vec![WordFormGroupV3 {
                     id: id(304),
