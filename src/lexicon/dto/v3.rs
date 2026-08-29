@@ -54,6 +54,7 @@ pub enum EnglishLanguageV3 {
 #[serde(rename_all = "snake_case")]
 pub enum WordEntryKindV3 {
     Word,
+    Phrase,
 }
 
 /// Phase 1 固定词形目录。`base` 与其余值平级且都允许重复。
@@ -189,11 +190,57 @@ pub struct WordFormGroupV3 {
     pub members: Vec<WordFormGroupMemberV3>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DialectModeV3 {
+    Unified,
+    Distinguish,
+}
+
+impl DialectModeV3 {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unified => "unified",
+            Self::Distinguish => "distinguish",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DialectRulesV3 {
+    pub spelling_mode: DialectModeV3,
+    pub phonetic_mode: DialectModeV3,
+}
+
+impl DialectRulesV3 {
+    pub(crate) const UNIFIED: Self = Self {
+        spelling_mode: DialectModeV3::Unified,
+        phonetic_mode: DialectModeV3::Unified,
+    };
+    pub(crate) const UNIFIED_DISTINGUISH: Self = Self {
+        spelling_mode: DialectModeV3::Unified,
+        phonetic_mode: DialectModeV3::Distinguish,
+    };
+    pub(crate) const DISTINGUISH: Self = Self {
+        spelling_mode: DialectModeV3::Distinguish,
+        phonetic_mode: DialectModeV3::Distinguish,
+    };
+
+    pub(crate) const fn is_valid(self) -> bool {
+        !matches!(
+            (self.spelling_mode, self.phonetic_mode),
+            (DialectModeV3::Distinguish, DialectModeV3::Unified)
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordPosFormsV3 {
     pub pos_id: Uuid,
     pub pos: String,
+    pub dialect_rules: DialectRulesV3,
     #[schema(max_items = 2000)]
     pub forms: Vec<WordConcreteFormV3>,
     #[schema(max_items = 2000)]
@@ -492,6 +539,9 @@ pub struct WordRelationV3 {
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 5000)]
+    pub pending_target_gloss: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, read_only)]
     pub target_headword: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -580,6 +630,9 @@ pub struct WordRelationWritableV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 5000)]
+    pub pending_target_gloss: Option<String>,
     pub score: String,
 }
 
@@ -1033,6 +1086,7 @@ pub enum FormsImpactResponseAny {
 #[serde(rename_all = "snake_case")]
 pub enum V3ValidationIssueCode {
     InvalidRegionalVariantShape,
+    DialectRulesInvalid,
     InvalidFormTypeForPartOfSpeech,
     ForbiddenV3Field,
     DuplicateNodeId,
@@ -1076,6 +1130,11 @@ pub enum V3ValidationIssueCode {
     RelationTargetStale,
     SentenceContextTargetUnavailable,
     RelationPendingHeadwordInvalid,
+    RelationTargetShapeInvalid,
+    RelationPendingGlossWithoutHeadword,
+    RelationPendingGlossInvalid,
+    RelationPendingGlossConflict,
+    RelationPendingGlossTargetExists,
     NodeIdReused,
     NodeBindingUnknown,
     NodeBindingChanged,
@@ -1088,6 +1147,7 @@ impl V3ValidationIssueCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidRegionalVariantShape => "invalid_regional_variant_shape",
+            Self::DialectRulesInvalid => "dialect_rules_invalid",
             Self::InvalidFormTypeForPartOfSpeech => "invalid_form_type_for_part_of_speech",
             Self::ForbiddenV3Field => "forbidden_v3_field",
             Self::DuplicateNodeId => "duplicate_node_id",
@@ -1131,6 +1191,11 @@ impl V3ValidationIssueCode {
             Self::RelationTargetStale => "relation_target_stale",
             Self::SentenceContextTargetUnavailable => "sentence_context_target_unavailable",
             Self::RelationPendingHeadwordInvalid => "relation_pending_headword_invalid",
+            Self::RelationTargetShapeInvalid => "relation_target_shape_invalid",
+            Self::RelationPendingGlossWithoutHeadword => "relation_pending_gloss_without_headword",
+            Self::RelationPendingGlossInvalid => "relation_pending_gloss_invalid",
+            Self::RelationPendingGlossConflict => "relation_pending_gloss_conflict",
+            Self::RelationPendingGlossTargetExists => "relation_pending_gloss_target_exists",
             Self::NodeIdReused => "node_id_reused",
             Self::NodeBindingUnknown => "node_binding_unknown",
             Self::NodeBindingChanged => "node_binding_changed",
@@ -1143,6 +1208,7 @@ impl V3ValidationIssueCode {
     pub fn from_wire(value: &str) -> Option<Self> {
         Some(match value {
             "invalid_regional_variant_shape" => Self::InvalidRegionalVariantShape,
+            "dialect_rules_invalid" => Self::DialectRulesInvalid,
             "invalid_form_type_for_part_of_speech" => Self::InvalidFormTypeForPartOfSpeech,
             "forbidden_v3_field" => Self::ForbiddenV3Field,
             "duplicate_node_id" => Self::DuplicateNodeId,
@@ -1186,6 +1252,11 @@ impl V3ValidationIssueCode {
             "relation_target_stale" => Self::RelationTargetStale,
             "sentence_context_target_unavailable" => Self::SentenceContextTargetUnavailable,
             "relation_pending_headword_invalid" => Self::RelationPendingHeadwordInvalid,
+            "relation_target_shape_invalid" => Self::RelationTargetShapeInvalid,
+            "relation_pending_gloss_without_headword" => Self::RelationPendingGlossWithoutHeadword,
+            "relation_pending_gloss_invalid" => Self::RelationPendingGlossInvalid,
+            "relation_pending_gloss_conflict" => Self::RelationPendingGlossConflict,
+            "relation_pending_gloss_target_exists" => Self::RelationPendingGlossTargetExists,
             "node_id_reused" => Self::NodeIdReused,
             "node_binding_unknown" => Self::NodeBindingUnknown,
             "node_binding_changed" => Self::NodeBindingChanged,
@@ -1320,6 +1391,7 @@ pub struct FormSurfaceMatchV3 {
     #[schema(schema_with = schema_version_3_schema)]
     pub source_schema_version: u8,
     pub entry_id: Uuid,
+    pub entry_kind: WordEntryKindV3,
     pub status: AdminWordStatus,
     pub content_scope: SurfaceContentScopeV2,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1660,6 +1732,10 @@ pub struct DetectLexiconSurfaceResponseV3 {
     pub request: DetectionSurfaceRequestEchoV3,
     pub normalized_surface: String,
     pub builtin_dictionary: BuiltinDictionaryEvidenceV3,
+    /// 内置词典与合法同表面已有词条 POS 的服务端权威合并结果。
+    /// builtin evidence 本身保持来源纯净；已有词条只贡献 POS code。
+    #[schema(max_items = 2000)]
+    pub suggested_pos: Vec<String>,
     pub matches: Vec<SurfaceMatchItemV3>,
     pub requires_acknowledgement: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1850,6 +1926,7 @@ mod tests {
         let form = SurfaceMatchItemV3::FormVariantV3(FormSurfaceMatchV3 {
             source_schema_version: 3,
             entry_id,
+            entry_kind: WordEntryKindV3::Word,
             status: AdminWordStatus::Published,
             content_scope: SurfaceContentScopeV2::CurrentPublication,
             publication_id: Some(Uuid::now_v7()),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::lexicon::dto::RichTextV1;
 
 // --- publication ---
 
@@ -245,6 +246,19 @@ impl LexiconService {
             return Err(LexiconServiceError::ValidationFailed(
                 reference_resolution.issues,
             ));
+        }
+        if !newly_bound_relations.is_empty() {
+            let editor_meanings =
+                serde_json::to_value(&word.meanings).map_err(serialization_error)?;
+            LexiconRepository::sync_canonical_meanings(
+                &mut transaction,
+                entry_id,
+                &word.meanings,
+                &editor_meanings,
+                &catalog.sub_part_ids,
+            )
+            .await
+            .map_err(repository_error)?;
         }
         let retained_sense_ids = word
             .meanings
@@ -1079,6 +1093,7 @@ pub(super) enum PendingRelationResolution {
 struct PendingRelationTarget {
     display: String,
     kind: EntryKind,
+    gloss: Option<String>,
     relation_ids: Vec<Uuid>,
 }
 
@@ -1102,9 +1117,10 @@ impl LexiconService {
     ) -> Result<(Vec<DraftValidationIssue>, std::collections::HashSet<Uuid>), LexiconServiceError>
     {
         let mut pending = BTreeMap::<String, PendingRelationTarget>::new();
-        for pos in &meanings.pos {
-            for sense in &pos.senses {
-                for relation in &sense.relations {
+        let mut issues = Vec::new();
+        for pos in &mut meanings.pos {
+            for sense in &mut pos.senses {
+                for relation in &mut sense.relations {
                     if relation.bound_target().is_some() {
                         continue;
                     }
@@ -1123,17 +1139,51 @@ impl LexiconService {
                     } else {
                         EntryKind::Word
                     };
-                    pending
-                        .entry(normalized.key)
-                        .or_insert_with(|| PendingRelationTarget {
-                            display: normalized.display,
-                            kind,
-                            relation_ids: Vec::new(),
-                        })
-                        .relation_ids
-                        .push(relation.id);
+                    let gloss = relation
+                        .pending_target_gloss
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned);
+                    relation.pending_target_gloss = gloss.clone();
+                    if gloss.as_deref().is_some_and(|value| {
+                        value.contains('\0')
+                            || value.chars().count()
+                                > crate::lexicon::rich_text::MAX_RICH_TEXT_CODEPOINTS
+                    }) {
+                        issues.push(reference_issue(
+                            relation.id,
+                            "pending_target_gloss",
+                            "relation_pending_gloss_invalid",
+                            "预定义词义不能超过 5000 个字符",
+                        ));
+                        continue;
+                    }
+                    let target =
+                        pending
+                            .entry(normalized.key)
+                            .or_insert_with(|| PendingRelationTarget {
+                                display: normalized.display,
+                                kind,
+                                gloss: gloss.clone(),
+                                relation_ids: Vec::new(),
+                            });
+                    if target.gloss.is_none() {
+                        target.gloss = gloss.clone();
+                    } else if gloss.is_some() && gloss != target.gloss {
+                        issues.push(reference_issue(
+                            relation.id,
+                            "pending_target_gloss",
+                            "relation_pending_gloss_conflict",
+                            "同一待建关联词不能填写不同的预定义词义",
+                        ));
+                    }
+                    target.relation_ids.push(relation.id);
                 }
             }
+        }
+        if !issues.is_empty() {
+            return Ok((issues, std::collections::HashSet::new()));
         }
         if pending.is_empty() {
             return Ok((Vec::new(), std::collections::HashSet::new()));
@@ -1153,7 +1203,6 @@ impl LexiconService {
             None
         };
 
-        let mut issues = Vec::new();
         let mut bindings = HashMap::<String, (Uuid, Uuid)>::new();
         for (normalized_key, target) in pending {
             let existing = if materializing {
@@ -1221,6 +1270,17 @@ impl LexiconService {
                             "pending_target_headword",
                             "relation_target_archived",
                             "同名词条已归档，请先恢复它再关联，或改指向其他词",
+                        )
+                    }));
+                    continue;
+                }
+                Some(_) if target.gloss.is_some() => {
+                    issues.extend(target.relation_ids.iter().map(|relation_id| {
+                        reference_issue(
+                            *relation_id,
+                            "pending_target_gloss",
+                            "relation_pending_gloss_target_exists",
+                            "同名词条已存在，请选择它的具体词义，预定义词义不会覆盖已有内容",
                         )
                     }));
                     continue;
@@ -1308,6 +1368,7 @@ impl LexiconService {
                     relation.target_word_id = Some(*target_word_id);
                     relation.target_sense_id = Some(*target_sense_id);
                     relation.pending_target_headword = None;
+                    relation.pending_target_gloss = None;
                     newly_bound.insert(relation.id);
                 }
             }
@@ -1340,7 +1401,7 @@ fn build_relation_target_stub(
         std::slice::from_ref(part),
     );
     let sense_group_id = Uuid::now_v7();
-    let meanings = DraftMeaningsStepContent {
+    let mut meanings = DraftMeaningsStepContent {
         sense_groups: vec![SenseGroupV2 {
             id: sense_group_id,
             name_zh: String::new(),
@@ -1359,6 +1420,20 @@ fn build_relation_target_stub(
             })
             .collect(),
     };
+    if let Some(gloss) = target.gloss.as_ref()
+        && let Some(WordDefinitionV2::ZhDefinition { content, .. }) = meanings
+            .pos
+            .first_mut()
+            .and_then(|pos| pos.senses.first_mut())
+            .and_then(|sense| sense.definitions.first_mut())
+    {
+        *content = RichText::V1(RichTextV1 {
+            version: 1,
+            text: gloss.clone(),
+            spans: Vec::new(),
+            liaisons: Vec::new(),
+        });
+    }
     AdminWordV2 {
         schema_version: 2,
         id: word_id,
@@ -1768,6 +1843,29 @@ fn pending_relation_issue(
             "target_sense_id",
             "relation_target_unavailable",
             "关联词目标必须是未归档词条当前草稿或当前发布中的有效词义",
+        ));
+    }
+    if relation.pending_target_headword.is_none() && relation.pending_target_gloss.is_some() {
+        return Some(reference_issue(
+            relation.id,
+            "pending_target_gloss",
+            "relation_pending_gloss_without_headword",
+            "预定义词义只能用于待建关联词",
+        ));
+    }
+    if relation
+        .pending_target_gloss
+        .as_deref()
+        .is_some_and(|value| {
+            value.contains('\0')
+                || value.chars().count() > crate::lexicon::rich_text::MAX_RICH_TEXT_CODEPOINTS
+        })
+    {
+        return Some(reference_issue(
+            relation.id,
+            "pending_target_gloss",
+            "relation_pending_gloss_invalid",
+            "预定义词义不能超过 5000 个字符",
         ));
     }
     let headword = relation.pending_target_headword.as_deref().unwrap_or("");

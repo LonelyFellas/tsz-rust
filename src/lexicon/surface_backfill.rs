@@ -142,9 +142,11 @@ struct StoredSurfaceRow {
 pub async fn run_surface_backfill(pool: &PgPool) -> anyhow::Result<SurfaceBackfillReport> {
     let started_at = Utc::now();
     let start_watermark = projection_watermark(pool).await?;
-    let entry_ids = sqlx::query_scalar::<_, Uuid>("SELECT id FROM lexicon.entries ORDER BY id")
-        .fetch_all(pool)
-        .await?;
+    let entry_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM lexicon.entries WHERE content_schema_version = 2 ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
     let mut changed_entries = 0;
 
     for entry_id in &entry_ids {
@@ -373,9 +375,11 @@ async fn run_surface_cutover(
 async fn surface_parity_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> anyhow::Result<SurfaceParityReport> {
-    let entry_ids = sqlx::query_scalar::<_, Uuid>("SELECT id FROM lexicon.entries ORDER BY id")
-        .fetch_all(&mut **transaction)
-        .await?;
+    let entry_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM lexicon.entries WHERE content_schema_version = 2 ORDER BY id",
+    )
+    .fetch_all(&mut **transaction)
+    .await?;
     let mut expected = Vec::new();
     for entry_id in entry_ids {
         let Some(record) =
@@ -506,6 +510,7 @@ async fn all_active_surfaces(
         FROM lexicon.surface_sources source
         LEFT JOIN lexicon.entries entry ON entry.id = source.entry_id
         WHERE source.is_deleted = FALSE
+          AND source.content_schema_version = 2
         ORDER BY source.source_id, source.content_scope,
                  source.dialect_scope, source.normalization_version
         "#,
@@ -671,16 +676,21 @@ async fn surface_outbox_lag(transaction: &mut Transaction<'_, Postgres>) -> anyh
     Ok(sqlx::query_scalar::<_, i64>(
         r#"
         WITH latest_event AS (
-            SELECT aggregate_id AS entry_id,
-                   payload->>'content_scope' AS content_scope,
-                   max((payload->>'event_offset')::bigint) AS event_offset
-            FROM platform.outbox_events
-            WHERE aggregate_type = 'lexicon.surface_projection'
-              AND event_type = 'lexicon.surface_projection_replaced'
-            GROUP BY aggregate_id, payload->>'content_scope'
+            SELECT event.aggregate_id AS entry_id,
+                   event.payload->>'content_scope' AS content_scope,
+                   max((event.payload->>'event_offset')::bigint) AS event_offset
+            FROM platform.outbox_events event
+            JOIN lexicon.entries entry
+              ON entry.id = event.aggregate_id
+             AND entry.content_schema_version = 2
+            WHERE event.aggregate_type = 'lexicon.surface_projection'
+              AND event.event_type = 'lexicon.surface_projection_replaced'
+              AND COALESCE((event.payload->>'content_schema_version')::smallint, 2) = 2
+            GROUP BY event.aggregate_id, event.payload->>'content_scope'
         ), latest_projection AS (
             SELECT entry_id, content_scope, max(event_offset) AS event_offset
             FROM lexicon.surface_sources
+            WHERE content_schema_version = 2
             GROUP BY entry_id, content_scope
         )
         SELECT count(*)

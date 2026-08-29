@@ -108,6 +108,28 @@ pub(super) fn parse_kind(value: &str) -> Option<EntryKind> {
     }
 }
 
+pub(super) fn parse_v3_kind(value: &str) -> Option<WordEntryKindV3> {
+    match value {
+        "word" => Some(WordEntryKindV3::Word),
+        "phrase" => Some(WordEntryKindV3::Phrase),
+        _ => None,
+    }
+}
+
+pub(super) const fn v3_kind_string(kind: WordEntryKindV3) -> &'static str {
+    match kind {
+        WordEntryKindV3::Word => "word",
+        WordEntryKindV3::Phrase => "phrase",
+    }
+}
+
+pub(super) const fn entry_kind_from_v3(kind: WordEntryKindV3) -> EntryKind {
+    match kind {
+        WordEntryKindV3::Word => EntryKind::Word,
+        WordEntryKindV3::Phrase => EntryKind::Phrase,
+    }
+}
+
 pub(super) fn parse_source_dialect(value: &str) -> Option<SourceDialect> {
     match value {
         "uk" => Some(SourceDialect::Uk),
@@ -166,17 +188,28 @@ pub(super) fn trimmed(value: Option<String>) -> Option<String> {
 pub(super) fn map_headword_error(error: HeadwordNormalizationError) -> LexiconServiceError {
     LexiconServiceError::InvalidField {
         field: "headword",
-        message: match error {
-            HeadwordNormalizationError::Empty => "headword is required",
-            HeadwordNormalizationError::TooLong => "headword is too long",
-            HeadwordNormalizationError::ControlCharacter => "headword contains control characters",
-            HeadwordNormalizationError::UnsupportedCharacter => {
-                "headword must contain only Latin letters, digits and - ' . & / , characters"
-            }
-            HeadwordNormalizationError::MissingLatinLetter => {
-                "headword must contain at least one Latin letter"
-            }
-        },
+        message: headword_error_message(error),
+    }
+}
+
+pub(super) fn map_surface_error(error: HeadwordNormalizationError) -> LexiconServiceError {
+    LexiconServiceError::InvalidField {
+        field: "surface",
+        message: headword_error_message(error),
+    }
+}
+
+fn headword_error_message(error: HeadwordNormalizationError) -> &'static str {
+    match error {
+        HeadwordNormalizationError::Empty => "headword is required",
+        HeadwordNormalizationError::TooLong => "headword is too long",
+        HeadwordNormalizationError::ControlCharacter => "headword contains control characters",
+        HeadwordNormalizationError::UnsupportedCharacter => {
+            "headword must contain only Latin letters, digits and - ' . & / , characters"
+        }
+        HeadwordNormalizationError::MissingLatinLetter => {
+            "headword must contain at least one Latin letter"
+        }
     }
 }
 

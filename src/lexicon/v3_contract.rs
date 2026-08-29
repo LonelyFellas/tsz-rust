@@ -8,11 +8,11 @@ use uuid::Uuid;
 use crate::{
     error::{AppError, ErrorCode},
     lexicon::dto::{
-        Dialect, DialectVariantRichTextSlotV3, DraftFormsStepContentV3, DraftMeaningsStepContentV3,
-        DraftNodeLocation, DraftValidationIssue, EnglishTextV3, PersistedWordStep, RichTextV3,
-        StepSaveIntent, V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode,
-        WordConcreteFormV3, WordDefinitionV3, WordFormTypeV2, WordFormTypeV3,
-        WordRegionalVariantsV3,
+        Dialect, DialectModeV3, DialectRulesV3, DialectVariantRichTextSlotV3,
+        DraftFormsStepContentV3, DraftMeaningsStepContentV3, DraftNodeLocation,
+        DraftValidationIssue, EnglishTextV3, PersistedWordStep, RichTextV3, StepSaveIntent,
+        V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode, WordConcreteFormV3,
+        WordDefinitionV3, WordFormTypeV2, WordFormTypeV3, WordRegionalVariantsV3,
     },
     lexicon::form_types::allowed_form_types,
     lexicon::normalization::MAX_HEADWORD_CODEPOINTS,
@@ -144,6 +144,7 @@ pub(crate) fn validate_forms(
             location_for(node_id, None, None, None, None, None, None),
         ));
     }
+    issues.extend(validate_dialect_rules(content));
 
     for pos in &content.pos {
         register_node(
@@ -335,6 +336,63 @@ pub(crate) fn validate_forms(
     issues
 }
 
+pub(crate) fn validate_dialect_rules(
+    content: &DraftFormsStepContentV3,
+) -> Vec<DraftValidationIssue> {
+    let mut issues = Vec::new();
+    for pos in &content.pos {
+        if !pos.dialect_rules.is_valid() {
+            issues.push(issue(
+                V3ValidationIssueCode::DialectRulesInvalid,
+                "dialect_rules",
+                pos.pos_id,
+                "distinguish/unified is not a valid dialect rule combination",
+                location_for(pos.pos_id, Some(pos.pos_id), None, None, None, None, None),
+            ));
+            continue;
+        }
+        for form in &pos.forms {
+            if !regional_variants_match_rules(&form.regional_variants, pos.dialect_rules) {
+                issues.push(issue(
+                    V3ValidationIssueCode::InvalidRegionalVariantShape,
+                    "regional_variants",
+                    form.id,
+                    "regional_variants do not match the part-of-speech dialect_rules",
+                    location_for(
+                        form.id,
+                        Some(pos.pos_id),
+                        None,
+                        None,
+                        Some(form.id),
+                        None,
+                        None,
+                    ),
+                ));
+            }
+        }
+    }
+    issues
+}
+
+fn regional_variants_match_rules(variants: &WordRegionalVariantsV3, rules: DialectRulesV3) -> bool {
+    match (rules.spelling_mode, rules.phonetic_mode, variants) {
+        (DialectModeV3::Unified, DialectModeV3::Unified, WordRegionalVariantsV3::Common { .. }) => {
+            true
+        }
+        (
+            DialectModeV3::Unified,
+            DialectModeV3::Distinguish,
+            WordRegionalVariantsV3::UkUs { uk, us },
+        ) => uk.spelling == us.spelling,
+        (
+            DialectModeV3::Distinguish,
+            DialectModeV3::Distinguish,
+            WordRegionalVariantsV3::UkUs { .. },
+        ) => true,
+        _ => false,
+    }
+}
+
 pub(crate) fn validate_meanings(content: &DraftMeaningsStepContentV3) -> Vec<DraftValidationIssue> {
     let mut issues = Vec::new();
     let node_count = meanings_node_count(content);
@@ -389,6 +447,66 @@ pub(crate) fn validate_meanings(content: &DraftMeaningsStepContentV3) -> Vec<Dra
                     "zh_text",
                     &mut issues,
                 );
+            }
+        }
+    }
+    issues
+}
+
+pub(crate) fn validate_complete_definition_grammar(
+    content: &DraftMeaningsStepContentV3,
+) -> Vec<DraftValidationIssue> {
+    let mut issues = Vec::new();
+    for pos in &content.pos {
+        for sense in &pos.senses {
+            for definition in &sense.definitions {
+                let (definition_id, grammar_structure_id) = match definition {
+                    WordDefinitionV3::ZhDefinition {
+                        id,
+                        grammar_structure_id,
+                        ..
+                    }
+                    | WordDefinitionV3::ZhSentence {
+                        id,
+                        grammar_structure_id,
+                        ..
+                    }
+                    | WordDefinitionV3::EnDefinition {
+                        id,
+                        grammar_structure_id,
+                        ..
+                    }
+                    | WordDefinitionV3::EnSentence {
+                        id,
+                        grammar_structure_id,
+                        ..
+                    } => (*id, *grammar_structure_id),
+                };
+                if grammar_structure_id.is_some() {
+                    continue;
+                }
+                issues.push(DraftValidationIssue {
+                    step: PersistedWordStep::Meanings,
+                    node_id: definition_id,
+                    field: "grammar_structure_id".to_owned(),
+                    code: V3ValidationIssueCode::DefinitionInvalid.as_str().to_owned(),
+                    message: "请选择语法结构".to_owned(),
+                    reference_location: None,
+                    node_location: Some(DraftNodeLocation {
+                        node_role: "meanings.definition".to_owned(),
+                        pos: None,
+                        pos_id: Some(pos.pos_id),
+                        form_group_index: None,
+                        form_group_id: None,
+                        membership_id: None,
+                        form_id: None,
+                        variant_id: None,
+                        pronunciation_id: None,
+                        form_type: None,
+                        dialect: None,
+                        ancestor_node_ids: vec![pos.pos_id, sense.id],
+                    }),
+                });
             }
         }
     }
@@ -899,6 +1017,16 @@ fn raw_forms_issues(value: &Value) -> Vec<DraftValidationIssue> {
     };
     for pos in pos_items {
         let pos_id = uuid_field(pos, "pos_id");
+        let pos_node_id = pos_id.unwrap_or_else(Uuid::nil);
+        if !valid_raw_dialect_rules(pos.get("dialect_rules")) {
+            issues.push(issue(
+                V3ValidationIssueCode::DialectRulesInvalid,
+                "dialect_rules",
+                pos_node_id,
+                "dialect_rules must be one of unified/unified, unified/distinguish, or distinguish/distinguish",
+                location_for(pos_node_id, pos_id, None, None, None, None, None),
+            ));
+        }
         let Some(forms) = pos.get("forms").and_then(Value::as_array) else {
             continue;
         };
@@ -928,6 +1056,19 @@ fn raw_forms_issues(value: &Value) -> Vec<DraftValidationIssue> {
         }
     }
     issues
+}
+
+fn valid_raw_dialect_rules(value: Option<&Value>) -> bool {
+    let Some(object) = value.and_then(Value::as_object) else {
+        return false;
+    };
+    if object.len() != 2 {
+        return false;
+    }
+    let spelling = object.get("spelling_mode").and_then(Value::as_str);
+    let phonetic = object.get("phonetic_mode").and_then(Value::as_str);
+    (spelling == Some("unified") && matches!(phonetic, Some("unified") | Some("distinguish")))
+        || (spelling == Some("distinguish") && phonetic == Some("distinguish"))
 }
 
 fn valid_regional_shape(value: Option<&Value>) -> bool {
@@ -1037,6 +1178,10 @@ mod tests {
                 "pos": [{
                     "pos_id": "019d2a80-0000-7000-8000-000000000001",
                     "pos": "noun",
+                    "dialect_rules": {
+                        "spelling_mode": "unified",
+                        "phonetic_mode": "unified"
+                    },
                     "forms": [{
                         "id": "019d2a80-0000-7000-8000-000000000002",
                         "form_type": "base",
@@ -1078,6 +1223,63 @@ mod tests {
 
     fn decode_valid(value: Value) -> SaveFormsStepInputV3 {
         decode_v3_forms_request(value).expect("valid V3 forms request should decode")
+    }
+
+    fn two_common_forms_across_groups() -> Value {
+        let mut request = valid_request();
+        let mut second_form = request["content"]["pos"][0]["forms"][0].clone();
+        second_form["id"] = json!("019d2a80-0000-7000-8000-000000000011");
+        second_form["regional_variants"]["common"]["id"] =
+            json!("019d2a80-0000-7000-8000-000000000012");
+        second_form["regional_variants"]["common"]["pronunciations"][0]["id"] =
+            json!("019d2a80-0000-7000-8000-000000000013");
+        request["content"]["pos"][0]["forms"]
+            .as_array_mut()
+            .unwrap()
+            .push(second_form);
+        request["content"]["pos"][0]["form_groups"][1]["members"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "019d2a80-0000-7000-8000-000000000014",
+                "form_id": "019d2a80-0000-7000-8000-000000000011"
+            }));
+        request
+    }
+
+    fn uk_us_regional_variants(
+        uk_variant_id: &str,
+        uk_pronunciation_id: &str,
+        us_variant_id: &str,
+        us_pronunciation_id: &str,
+    ) -> Value {
+        json!({
+            "mode": "uk_us",
+            "uk": {
+                "id": uk_variant_id,
+                "dialect": "uk",
+                "spelling": "colour",
+                "origin": "manual",
+                "pronunciations": [{
+                    "id": uk_pronunciation_id,
+                    "dict_phonetic": "/kala/",
+                    "actual_pron": "kala",
+                    "style": "normal"
+                }]
+            },
+            "us": {
+                "id": us_variant_id,
+                "dialect": "us",
+                "spelling": "color",
+                "origin": "manual",
+                "pronunciations": [{
+                    "id": us_pronunciation_id,
+                    "dict_phonetic": "/kalar/",
+                    "actual_pron": "kalar",
+                    "style": "normal"
+                }]
+            }
+        })
     }
 
     fn has_code(issues: &[DraftValidationIssue], code: V3ValidationIssueCode) -> bool {
@@ -1128,52 +1330,231 @@ mod tests {
             validate_forms(&repeated_type.content, repeated_type.intent).is_empty(),
             "同 POS/同 group 内多个 base 和同拼写 form 都应合法"
         );
+        let mut repeated_non_base = valid_request();
+        repeated_non_base["content"]["pos"][0]["forms"][0]["form_type"] = json!("plural");
+        let mut second_form = repeated_non_base["content"]["pos"][0]["forms"][0].clone();
+        second_form["id"] = json!("019d2a80-0000-7000-8000-000000000015");
+        second_form["regional_variants"]["common"]["id"] =
+            json!("019d2a80-0000-7000-8000-000000000016");
+        second_form["regional_variants"]["common"]["pronunciations"][0]["id"] =
+            json!("019d2a80-0000-7000-8000-000000000017");
+        repeated_non_base["content"]["pos"][0]["forms"]
+            .as_array_mut()
+            .unwrap()
+            .push(second_form);
+        repeated_non_base["content"]["pos"][0]["form_groups"][0]["members"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "019d2a80-0000-7000-8000-000000000018",
+                "form_id": "019d2a80-0000-7000-8000-000000000015"
+            }));
+        let repeated_non_base = decode_valid(repeated_non_base);
+        assert!(
+            validate_forms(&repeated_non_base.content, repeated_non_base.intent).is_empty(),
+            "同 POS/同 group 内同一非 base form_type 多条应合法"
+        );
     }
 
     #[test]
-    fn form_type_must_match_the_authoritative_part_of_speech_catalog() {
-        for (pos, form_type) in [
-            ("noun", "comparative"),
-            ("verb", "plural"),
-            ("preposition", "superlative"),
-        ] {
-            let mut request = valid_request();
-            request["content"]["pos"][0]["pos"] = json!(pos);
-            request["content"]["pos"][0]["forms"][0]["form_type"] = json!(form_type);
-            let input = decode_valid(request);
-            let issues = validate_forms(&input.content, StepSaveIntent::Save);
-            let issue = issues
+    fn dialect_rules_control_one_pos_across_groups_and_shared_forms() {
+        let common = decode_valid(two_common_forms_across_groups());
+        assert!(
+            validate_forms(&common.content, common.intent)
                 .iter()
-                .find(|issue| {
-                    issue.code == V3ValidationIssueCode::InvalidFormTypeForPartOfSpeech.as_str()
-                })
-                .unwrap_or_else(|| panic!("{pos} + {form_type} must be rejected"));
-            assert_eq!(issue.field, "form_type");
-            assert_eq!(
-                issue
-                    .node_location
-                    .as_ref()
-                    .and_then(|location| location.form_id),
-                Some(issue.node_id)
-            );
-        }
+                .all(|issue| issue.code != "invalid_regional_variant_shape"),
+            "全部 common 且共享 form membership 应合法"
+        );
 
-        for (pos, form_type) in [
-            ("noun", "base"),
-            ("noun", "plural"),
-            ("verb", "past_tense"),
-            ("adjective", "comparative"),
-            ("adverb", "superlative"),
-        ] {
-            let mut request = valid_request();
-            request["content"]["pos"][0]["pos"] = json!(pos);
-            request["content"]["pos"][0]["forms"][0]["form_type"] = json!(form_type);
-            let input = decode_valid(request);
-            assert!(
-                validate_forms(&input.content, StepSaveIntent::Save).is_empty(),
-                "{pos} + {form_type} must remain valid"
+        let mut uk_us = two_common_forms_across_groups();
+        uk_us["content"]["pos"][0]["forms"][0]["regional_variants"] = uk_us_regional_variants(
+            "019d2a80-0000-7000-8000-000000000021",
+            "019d2a80-0000-7000-8000-000000000022",
+            "019d2a80-0000-7000-8000-000000000023",
+            "019d2a80-0000-7000-8000-000000000024",
+        );
+        uk_us["content"]["pos"][0]["forms"][1]["regional_variants"] = uk_us_regional_variants(
+            "019d2a80-0000-7000-8000-000000000025",
+            "019d2a80-0000-7000-8000-000000000026",
+            "019d2a80-0000-7000-8000-000000000027",
+            "019d2a80-0000-7000-8000-000000000028",
+        );
+        uk_us["content"]["pos"][0]["dialect_rules"] = json!({
+            "spelling_mode": "distinguish",
+            "phonetic_mode": "distinguish"
+        });
+        let uk_us = decode_valid(uk_us);
+        assert!(
+            validate_forms(&uk_us.content, uk_us.intent)
+                .iter()
+                .all(|issue| issue.code != "invalid_regional_variant_shape"),
+            "全部 uk_us 应合法"
+        );
+
+        let mut unified_spelling = two_common_forms_across_groups();
+        unified_spelling["content"]["pos"][0]["forms"][0]["regional_variants"] =
+            uk_us_regional_variants(
+                "019d2a80-0000-7000-8000-000000000041",
+                "019d2a80-0000-7000-8000-000000000042",
+                "019d2a80-0000-7000-8000-000000000043",
+                "019d2a80-0000-7000-8000-000000000044",
             );
+        unified_spelling["content"]["pos"][0]["forms"][1]["regional_variants"] =
+            uk_us_regional_variants(
+                "019d2a80-0000-7000-8000-000000000045",
+                "019d2a80-0000-7000-8000-000000000046",
+                "019d2a80-0000-7000-8000-000000000047",
+                "019d2a80-0000-7000-8000-000000000048",
+            );
+        for form in unified_spelling["content"]["pos"][0]["forms"]
+            .as_array_mut()
+            .unwrap()
+        {
+            form["regional_variants"]["us"]["spelling"] =
+                form["regional_variants"]["uk"]["spelling"].clone();
         }
+        unified_spelling["content"]["pos"][0]["dialect_rules"] = json!({
+            "spelling_mode": "unified",
+            "phonetic_mode": "distinguish"
+        });
+        let mut mismatched_spelling = unified_spelling.clone();
+        mismatched_spelling["content"]["pos"][0]["forms"][1]["regional_variants"]["us"]["spelling"] =
+            json!("different");
+        let mismatched_spelling = decode_valid(mismatched_spelling);
+        let issue = validate_forms(&mismatched_spelling.content, StepSaveIntent::Save)
+            .into_iter()
+            .find(|issue| issue.code == "invalid_regional_variant_shape")
+            .expect("unified/distinguish 必须拒绝 UK/US 异拼写");
+        assert_eq!(issue.field, "regional_variants");
+        assert_eq!(
+            issue.node_id,
+            mismatched_spelling.content.pos[0].forms[1].id
+        );
+        let unified_spelling = decode_valid(unified_spelling);
+        assert!(
+            validate_forms(&unified_spelling.content, unified_spelling.intent)
+                .iter()
+                .all(|issue| issue.code != "invalid_regional_variant_shape"),
+            "uk_us 同拼写应满足 unified/distinguish"
+        );
+
+        let mut illegal_rules = two_common_forms_across_groups();
+        illegal_rules["content"]["pos"][0]["dialect_rules"] = json!({
+            "spelling_mode": "distinguish",
+            "phonetic_mode": "unified"
+        });
+        let illegal_content: DraftFormsStepContentV3 =
+            serde_json::from_value(illegal_rules["content"].clone()).unwrap();
+        let issue = validate_forms(&illegal_content, StepSaveIntent::Save)
+            .into_iter()
+            .find(|issue| issue.code == "dialect_rules_invalid")
+            .expect("distinguish/unified 必须 fail closed");
+        assert_eq!(issue.field, "dialect_rules");
+        assert_eq!(issue.node_id, illegal_content.pos[0].pos_id);
+        let location = issue.node_location.unwrap();
+        assert_eq!(location.pos_id, Some(issue.node_id));
+        assert_eq!(location.form_id, None);
+
+        let mut mixed = two_common_forms_across_groups();
+        mixed["content"]["pos"][0]["forms"][1]["regional_variants"] = uk_us_regional_variants(
+            "019d2a80-0000-7000-8000-000000000031",
+            "019d2a80-0000-7000-8000-000000000032",
+            "019d2a80-0000-7000-8000-000000000033",
+            "019d2a80-0000-7000-8000-000000000034",
+        );
+        let mixed = decode_valid(mixed);
+        let preserved = serde_json::to_value(&mixed.content).unwrap();
+        assert_eq!(
+            preserved["pos"][0]["forms"][0]["regional_variants"]["mode"],
+            "common"
+        );
+        assert_eq!(
+            preserved["pos"][0]["forms"][1]["regional_variants"]["mode"],
+            "uk_us"
+        );
+        let issues = validate_forms(&mixed.content, StepSaveIntent::Save);
+        let mode_issues = issues
+            .iter()
+            .filter(|issue| issue.code == "invalid_regional_variant_shape")
+            .collect::<Vec<_>>();
+        assert_eq!(mode_issues.len(), 1);
+        assert_eq!(mode_issues[0].field, "regional_variants");
+        assert_eq!(
+            mode_issues[0].node_id.to_string(),
+            "019d2a80-0000-7000-8000-000000000011"
+        );
+        let location = mode_issues[0].node_location.as_ref().unwrap();
+        assert_eq!(location.pos_id, Some(mixed.content.pos[0].pos_id));
+        assert_eq!(location.form_id, Some(mode_issues[0].node_id));
+        assert_eq!(location.form_group_id, None);
+        assert!(
+            validate_forms(&mixed.content, StepSaveIntent::Complete)
+                .iter()
+                .any(|issue| {
+                    issue.code == "invalid_regional_variant_shape"
+                        && issue.node_id == mode_issues[0].node_id
+                })
+        );
+    }
+
+    #[test]
+    fn missing_dialect_rules_are_rejected_for_requests_and_stored_data() {
+        let mut request = valid_request();
+        request["content"]["pos"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("dialect_rules");
+
+        let request_result: Result<SaveFormsStepInputV3, AppError> =
+            decode_v3_forms_request(request.clone());
+        assert!(request_result.is_err(), "新请求缺 dialect_rules 必须失败");
+
+        let stored_result: Result<DraftFormsStepContentV3, _> =
+            serde_json::from_value(request["content"].clone());
+        assert!(
+            stored_result.is_err(),
+            "未上线词库已清空，stored V3 也必须遵循 latest dialect_rules 合同"
+        );
+    }
+
+    #[test]
+    fn every_part_accepts_every_fixed_form_type() {
+        for pos in [
+            "noun",
+            "pronoun",
+            "preposition",
+            "interjection",
+            "custom_part",
+        ] {
+            for form_type in [
+                "base",
+                "third_person_singular",
+                "present_participle",
+                "past_tense",
+                "past_participle",
+                "plural",
+                "comparative",
+                "superlative",
+            ] {
+                let mut request = valid_request();
+                request["content"]["pos"][0]["pos"] = json!(pos);
+                request["content"]["pos"][0]["forms"][0]["form_type"] = json!(form_type);
+                let input = decode_valid(request);
+                assert!(
+                    validate_forms(&input.content, StepSaveIntent::Save).is_empty(),
+                    "{pos} + {form_type} must be valid"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_form_type_fails_closed_with_a_contract_error() {
+        let mut request = valid_request();
+        request["content"]["pos"][0]["pos"] = json!("pronoun");
+        request["content"]["pos"][0]["forms"][0]["form_type"] = json!("future_form_type");
+        let decoded: Result<SaveFormsStepInputV3, AppError> = decode_v3_forms_request(request);
+        assert!(decoded.is_err());
     }
 
     #[test]
@@ -1208,6 +1589,10 @@ mod tests {
             .push(json!({
                 "pos_id": "019d2a80-0000-7000-8000-000000000010",
                 "pos": "verb",
+                "dialect_rules": {
+                    "spelling_mode": "unified",
+                    "phonetic_mode": "unified"
+                },
                 "forms": [form],
                 "form_groups": []
             }));
@@ -1233,6 +1618,7 @@ mod tests {
             pos: vec![crate::lexicon::dto::WordPosFormsV3 {
                 pos_id: Uuid::now_v7(),
                 pos: "noun".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: Vec::new(),
                 form_groups: Vec::new(),
             }],

@@ -1014,6 +1014,29 @@ impl LexiconRepository {
         }
         insert_meanings(tx, entry_id, meanings, sub_parts).await
     }
+
+    pub(crate) async fn sync_canonical_meanings(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+        relational_meanings: &DraftMeaningsStepContent,
+        editor_meanings: &serde_json::Value,
+        sub_parts: &HashMap<String, Uuid>,
+    ) -> Result<(), LexiconRepositoryError> {
+        Self::replace_meanings_content(tx, entry_id, relational_meanings, sub_parts).await?;
+        sqlx::query(
+            r#"
+            UPDATE lexicon.entry_editor_projection
+            SET meanings = $2, updated_at = now()
+            WHERE entry_id = $1
+            "#,
+        )
+        .bind(entry_id)
+        .bind(editor_meanings)
+        .execute(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

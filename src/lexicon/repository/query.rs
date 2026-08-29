@@ -250,6 +250,23 @@ impl LexiconRepository {
                     OR ($6 = 'archived' AND entry.archived_at IS NOT NULL)
                   )
               AND ($11::boolean OR entry.content_schema_version = 2)
+              -- Native V3 empty shells remain addressable by ID, but they are not
+              -- dictionary rows until the current draft projects a real surface.
+              -- Published V3 entries stay visible even while a newer draft is incomplete.
+              AND (
+                    entry.content_schema_version = 2
+                    OR entry.current_publication_id IS NOT NULL
+                    OR EXISTS (
+                        SELECT 1
+                        FROM lexicon.surface_sources visible_surface
+                        WHERE visible_surface.entry_id = entry.id
+                          AND visible_surface.content_schema_version = 3
+                          AND visible_surface.content_scope = 'draft'
+                          AND visible_surface.source_revision = entry.revision
+                          AND visible_surface.source_kind = 'form_variant'
+                          AND visible_surface.is_deleted = FALSE
+                    )
+                  )
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
                    OR EXISTS (
                        SELECT 1 FROM lexicon.entry_headwords h
@@ -315,6 +332,20 @@ impl LexiconRepository {
                     OR ($6 = 'archived' AND entry.archived_at IS NOT NULL)
                   )
               AND ($9::boolean OR entry.content_schema_version = 2)
+              AND (
+                    entry.content_schema_version = 2
+                    OR entry.current_publication_id IS NOT NULL
+                    OR EXISTS (
+                        SELECT 1
+                        FROM lexicon.surface_sources visible_surface
+                        WHERE visible_surface.entry_id = entry.id
+                          AND visible_surface.content_schema_version = 3
+                          AND visible_surface.content_scope = 'draft'
+                          AND visible_surface.source_revision = entry.revision
+                          AND visible_surface.source_kind = 'form_variant'
+                          AND visible_surface.is_deleted = FALSE
+                    )
+                  )
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
                    OR EXISTS (
                        SELECT 1 FROM lexicon.entry_headwords h
@@ -375,9 +406,23 @@ impl LexiconRepository {
                        WHERE date_trunc('month', created_at AT TIME ZONE 'Asia/Shanghai') =
                              date_trunc('month', now() AT TIME ZONE 'Asia/Shanghai')
                    )::bigint AS month
-            FROM lexicon.entries
-            WHERE archived_at IS NULL
-              AND ($1 OR content_schema_version = 2)
+            FROM lexicon.entries entry
+            WHERE entry.archived_at IS NULL
+              AND ($1 OR entry.content_schema_version = 2)
+              AND (
+                    entry.content_schema_version = 2
+                    OR entry.current_publication_id IS NOT NULL
+                    OR EXISTS (
+                        SELECT 1
+                        FROM lexicon.surface_sources visible_surface
+                        WHERE visible_surface.entry_id = entry.id
+                          AND visible_surface.content_schema_version = 3
+                          AND visible_surface.content_scope = 'draft'
+                          AND visible_surface.source_revision = entry.revision
+                          AND visible_surface.source_kind = 'form_variant'
+                          AND visible_surface.is_deleted = FALSE
+                    )
+                  )
             "#,
         )
         .bind(include_v3)

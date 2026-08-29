@@ -142,7 +142,7 @@ fn apply_publication_legacy_bridge_read_flag(
 fn map_error(error: LexiconServiceError) -> AppError {
     match error {
         LexiconServiceError::InvalidField { field, message } => {
-            let code = if field == "headword" {
+            let code = if matches!(field, "headword" | "surface") {
                 ErrorCode::InvalidHeadword
             } else if matches!(
                 field,

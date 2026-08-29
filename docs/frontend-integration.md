@@ -329,12 +329,82 @@ function refreshOnce(): Promise<boolean> {
 
 基本词性 catalog item 与基本词性管理 item 均额外返回有序的
 `allowed_form_types` / `default_form_types`。两者当前相同，后者供新建表单初始化，前者是服务端
-保存和发布的权威白名单：`noun=[plural]`，`verb=[third_person_singular,
-present_participle,past_tense,past_participle]`，`adjective` 与
-`adverb=[comparative,superlative]`。其他（包括以后新增的自定义）基本词性返回空数组并
-fail closed。forms 保存（`save` 和 `complete`）、validate、publish 对每个不匹配 slot 聚合返回
-`DraftValidationIssue`，稳定字段为 `step=forms`、`node_id=slot.id`、`field=form_type`、
-`code=invalid_form_type_for_part_of_speech`。
+保存和发布的权威能力。所有基本词性（包括以后新增的自定义词性）都返回同一完整 fixed enum：
+
+```json
+[
+  "third_person_singular",
+  "present_participle",
+  "past_tense",
+  "past_participle",
+  "plural",
+  "comparative",
+  "superlative"
+]
+```
+
+`base` 不出现在这两个 non-base 能力数组中，但在 V3 `WordFormTypeV3` 中与其他 concrete form
+同级、可有多条，并归属于当前词条及对应 POS。V3 forms save/complete/validate/publish 接受任一
+POS 与任一 fixed enum 的组合；fixed enum 之外的未知值返回 `validation_failed`，其中 issue 的
+`code=invalid_form_type_for_part_of_speech`、`field=form_type` 且定位具体 form UUID，不得由前端
+回退或转换。前端应删除按 POS code 推断类型的 fixture/逻辑，完全使用 catalog 返回顺序。
+
+V3 Step 2 新增必填 POS 级正式字段：
+
+```json
+"dialect_rules": {
+  "spelling_mode": "unified",
+  "phonetic_mode": "distinguish"
+}
+```
+
+两个字段均引用 `DialectModeV3 = "unified" | "distinguish"`，完整对象为
+`DialectRulesV3`。合法规则为 UU、UD、DD；DU 非法。UU 要求该 POS 全部 form 为 common；UD 要求
+全部 form 为 uk_us 且每个 form 的 UK/US spelling 相同；DD 要求全部 form 为 uk_us。规则不属于
+form group，shared membership 继续引用同一个 form UUID。
+
+缺字段、未知 mode 或 DU 返回：
+
+```json
+{
+  "schema_version": 3,
+  "step": "forms",
+  "node_id": "<pos-id>",
+  "field": "dialect_rules",
+  "code": "dialect_rules_invalid",
+  "node_location": {
+    "node_role": "forms.pos",
+    "ancestor_node_ids": [],
+    "pos_id": "<pos-id>"
+  }
+}
+```
+
+规则与 form shape 不一致或 UD 异拼写返回：
+
+```json
+{
+  "schema_version": 3,
+  "step": "forms",
+  "node_id": "<conflicting-form-id>",
+  "field": "regional_variants",
+  "code": "invalid_regional_variant_shape",
+  "node_location": {
+    "node_role": "forms.concrete_form",
+    "ancestor_node_ids": ["<pos-id>"],
+    "pos_id": "<pos-id>",
+    "form_id": "<conflicting-form-id>"
+  }
+}
+```
+
+V3 尚未上线且历史 Smart Lexicon 数据已清理；服务端和客户端只支持 latest contract。所有 V3
+editor/publication JSON 都必须显式携带该字段，缺字段、mixed common/uk_us 或规则不一致直接
+fail closed，不推导或静默转换。该决定不影响仍在产品中使用的 V2 路由与功能。
+
+V3 detection/create 当前不直接持久化 POS；前端从 `suggested_forms` 物化新 POS 时必须在首次 forms
+payload 中显式生成规则：common→UU、uk_us 同拼写→UD、uk_us 异拼写→DD。该映射只用于尚未存在
+用户意图的新 POS 预填；已保存或历史返回的 `dialect_rules` 必须原样使用，不能再次按文本反推。
 
 `builtin_dictionary.status=matched` 保留既有 `headwords` / `suggested_forms`，并增加
 `provider`、`suggested_meanings`、`suggested_frequency`、`coverage` 和 `provenance`。coverage 的
@@ -342,11 +412,11 @@ fail closed。forms 保存（`save` 和 `complete`）、validate、publish 对�
 `complete|partial|missing`。create 仍只接受 `detection_id/headwords`，并在后端事务中消费检测
 快照里的全部建议；客户端不得回传或重建建议。
 
-当前激活 Kaikki 导入只持久化词头、基本词性和地区证据，因此 matched 的 forms 仅含词头/POS
-骨架，准确标为 `partial`；音标、实际发音、释义、例句和词频均为空并标为 `missing`，相应
-provenance 为 null。不得由客户端或服务端按拼写规则猜测这些值。要升级为 complete，必须先
-扩展离线清洗产物、dictionary schema 与导入器，保存 Kaikki 原始 forms/sounds/senses/examples，
-并另接有授权且可追踪版本的词频数据源。
+Kaikki 轻量索引只持久化词头、基本词性和地区证据；完整内容导入另保留原始 forms/sounds/senses。
+V3 detection 只映射有确定 tag 的七类平台词形和非空 IPA，未知/冲突/单侧地区证据不猜测。
+matched forms 第一阶段最高标为 `partial`；至少一条有效 IPA 时 pronunciations 为 `partial`，否则
+为 `missing`；`actual_pron`、释义、例句和词频仍不生成。客户端必须展示 coverage，并继续把
+suggested forms 作为只读建议；不得回传、重建或把智能词库内容冒充 builtin provenance。
 
 active draft 的 `entry_pos` / `senses` FK 不能保护已从新草稿移除的发布内容；发布事务还必须写
 `entry_publication_part_of_speech_refs` / `entry_publication_sub_part_of_speech_refs` 结构化引用，

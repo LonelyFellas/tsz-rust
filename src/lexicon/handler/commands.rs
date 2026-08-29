@@ -26,16 +26,6 @@ pub async fn detect(
     match v3_contract::request_schema_version_or_legacy(&input)? {
         Some(3) => {
             let input: DetectLexiconSurfaceV3Input = v3_contract::decode_request(input)?;
-            crate::lexicon::normalization::normalize_headword(&input.surface).map_err(|_| {
-                AppError::unprocessable(
-                    ErrorCode::InvalidRequestBody,
-                    "V3 detection surface must contain between 1 and 200 valid codepoints",
-                )
-                .with_meta(ProblemMeta {
-                    code: Some("surface".to_owned()),
-                    ..ProblemMeta::default()
-                })
-            })?;
             if !state.smart_lexicon_v3_flags.projection {
                 return Err(v3_detection_unavailable());
             }

@@ -458,9 +458,9 @@ pub struct WordSentenceV2 {
 ///
 /// - **已绑定**：`target_word_id` + `target_sense_id` 指向真实义项，
 ///   `target_headword` / `target_gloss` 是服务端回填的快照。
-/// - **待物化**：目标词还没有词条，只有 `pending_target_headword` 承载管理员录入的
-///   词面。这种形态只允许存在于草稿；发布时会先建出词条再回填 target，所以发布出去
-///   的关联词永远是已绑定的。
+/// - **待物化**：目标词还没有词条，`pending_target_headword` 承载管理员录入的词面，
+///   `pending_target_gloss` 可选地承载创建目标草稿时预填的中文词义。这种形态只允许存在
+///   于草稿；发布时会先建出词条再回填 target，所以发布出去的关联词永远是已绑定的。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WordRelationV2 {
     pub id: Uuid,
@@ -474,6 +474,9 @@ pub struct WordRelationV2 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 5000)]
+    pub pending_target_gloss: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(read_only)]
     pub target_headword: Option<String>,

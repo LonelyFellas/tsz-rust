@@ -15,12 +15,12 @@ use uuid::Uuid;
 
 use crate::lexicon::{
     dto::{
-        CommonDialectV3, Dialect, DraftFormsStepContent, DraftFormsStepContentV3,
-        DraftMeaningsStepContentV3, EntryPresentationV3, LegacyHeadwordsCompatibilityV3,
-        PronunciationStyle, SourceDialect, StepSaveIntent, TextOrigin, UkDialectV3, UsDialectV3,
-        WordCommonFormVariantV3, WordConcreteFormV3, WordFormGroupMemberV3, WordFormGroupV3,
-        WordFormTypeV3, WordFormVariantV2, WordPosFormsV3, WordPronunciationV3,
-        WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
+        CommonDialectV3, Dialect, DialectModeV3, DialectRulesV3, DraftFormsStepContent,
+        DraftFormsStepContentV3, DraftMeaningsStepContentV3, EntryPresentationV3,
+        LegacyHeadwordsCompatibilityV3, PronunciationStyle, SourceDialect, StepSaveIntent,
+        TextOrigin, UkDialectV3, UsDialectV3, WordCommonFormVariantV3, WordConcreteFormV3,
+        WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordFormVariantV2, WordPosFormsV3,
+        WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
     },
     v3_contract,
     v3_projection::{
@@ -490,6 +490,25 @@ fn expected_uk_us_variants(spelling_mode: &str, phonetic_mode: &str) -> Result<b
     Ok(spelling_mode == "distinguish" || phonetic_mode == "distinguish")
 }
 
+fn dialect_rules_v3(
+    spelling_mode: &str,
+    phonetic_mode: &str,
+) -> Result<DialectRulesV3, PlanBlocked> {
+    expected_uk_us_variants(spelling_mode, phonetic_mode)?;
+    let parse = |value| match value {
+        "unified" => Ok(DialectModeV3::Unified),
+        "distinguish" => Ok(DialectModeV3::Distinguish),
+        _ => Err(PlanBlocked::new(
+            "invalid_v2_dialect_rules",
+            "V2 dialect mode is invalid",
+        )),
+    };
+    Ok(DialectRulesV3 {
+        spelling_mode: parse(spelling_mode)?,
+        phonetic_mode: parse(phonetic_mode)?,
+    })
+}
+
 fn convert_forms(
     entry_id: Uuid,
     source: &DraftFormsStepContent,
@@ -682,6 +701,10 @@ fn convert_forms(
         target_pos.push(WordPosFormsV3 {
             pos_id: pos.pos_id,
             pos: pos.pos.clone(),
+            dialect_rules: dialect_rules_v3(
+                &pos.dialect_rules.spelling_mode,
+                &pos.dialect_rules.phonetic_mode,
+            )?,
             forms,
             form_groups,
         });
@@ -1711,13 +1734,15 @@ async fn write_v3_forms(
         let updated = sqlx::query(
             r#"
             UPDATE lexicon.entry_pos
-            SET content_schema_version = 3, spelling_mode = NULL,
-                phonetic_mode = NULL, sort_order = $3
+            SET content_schema_version = 3, spelling_mode = $3,
+                phonetic_mode = $4, sort_order = $5
             WHERE id = $1 AND entry_id = $2 AND content_schema_version = 2
             "#,
         )
         .bind(pos.pos_id)
         .bind(plan.entry_id)
+        .bind(pos.dialect_rules.spelling_mode.as_str())
+        .bind(pos.dialect_rules.phonetic_mode.as_str())
         .bind(pos_ordinal as i32)
         .execute(&mut **tx)
         .await?;

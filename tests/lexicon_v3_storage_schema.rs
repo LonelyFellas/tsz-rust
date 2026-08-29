@@ -3,6 +3,7 @@
 //! These tests deliberately exercise PostgreSQL constraints directly. Service-level
 //! completeness and authorization remain separate concerns.
 
+use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -132,7 +133,7 @@ async fn insert_v3_pos(
         INSERT INTO lexicon.entry_pos (
             id, entry_id, part_of_speech_id, content_schema_version,
             spelling_mode, phonetic_mode, sort_order
-        ) VALUES ($1, $2, $3, 3, NULL, NULL, $4)
+        ) VALUES ($1, $2, $3, 3, 'unified', 'unified', $4)
         "#,
     )
     .bind(id)
@@ -177,6 +178,96 @@ async fn insert_v3_group(
     .await
     .unwrap();
     id
+}
+
+#[sqlx::test]
+async fn v3_dialect_rules_migration_installs_latest_contract_on_fresh_data(pool: PgPool) {
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260827100000_add_lexicon_v3_dialect_rules.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260827100000_add_lexicon_v3_dialect_rules.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260829110000_require_fresh_v3_dialect_contract.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let admin_id = insert_admin(&pool).await;
+    let entry_id = insert_v3_entry(&pool, admin_id).await;
+    let catalog_id = catalog_pos_id(&pool, "noun").await;
+    let mut tx = pool.begin().await.unwrap();
+    let pos_id = insert_v3_pos(&mut tx, entry_id, catalog_id, 0).await;
+    tx.commit().await.unwrap();
+    let forms = json!({
+        "pos": [{
+            "pos_id": pos_id,
+            "pos": "noun",
+            "dialect_rules": {
+                "spelling_mode": "unified",
+                "phonetic_mode": "unified"
+            },
+            "forms": [],
+            "form_groups": []
+        }]
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.entry_editor_projection (
+            entry_id, forms, meanings, rebuilt_revision
+        ) VALUES ($1, $2, '{}', 1)
+        "#,
+    )
+    .bind(entry_id)
+    .bind(&forms)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let modes: (String, String) =
+        sqlx::query_as("SELECT spelling_mode, phonetic_mode FROM lexicon.entry_pos WHERE id = $1")
+            .bind(pos_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(modes, ("unified".to_owned(), "unified".to_owned()));
+    let stored_forms: serde_json::Value =
+        sqlx::query_scalar("SELECT forms FROM lexicon.entry_editor_projection WHERE entry_id = $1")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored_forms, forms);
+
+    let invalid_du = sqlx::query(
+        "UPDATE lexicon.entry_pos SET spelling_mode = 'distinguish', phonetic_mode = 'unified' WHERE id = $1",
+    )
+    .bind(pos_id)
+    .execute(&pool)
+    .await;
+    assert_db_error(
+        invalid_du,
+        CHECK_VIOLATION,
+        "lexicon_entry_pos_versioned_modes_check",
+    );
+    let missing_rules =
+        sqlx::query("UPDATE lexicon.entry_pos SET spelling_mode = NULL WHERE id = $1")
+            .bind(pos_id)
+            .execute(&pool)
+            .await;
+    assert_db_error(
+        missing_rules,
+        CHECK_VIOLATION,
+        "lexicon_entry_pos_versioned_modes_check",
+    );
 }
 
 async fn insert_v3_form(
@@ -327,15 +418,21 @@ async fn entry_schema_version_controls_kind_and_legacy_headword_shape(pool: PgPo
         "migrated V3 may retain a read-only bridge"
     );
 
+    let native_v3_phrase = insert_entry(&pool, admin_id, 3, "phrase", None, None)
+        .await
+        .expect("native V3 phrase has the same aggregate shape as a V3 word");
+    sqlx::query(
+        "INSERT INTO lexicon.v3_entry_state (entry_id, origin, first_v3_write_revision) VALUES ($1, 'native', 1)",
+    )
+    .bind(native_v3_phrase)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     assert_db_error(
         insert_entry(&pool, admin_id, 2, "word", None, None).await,
         CHECK_VIOLATION,
         "lexicon_entries_versioned_headword_shape_check",
-    );
-    assert_db_error(
-        insert_entry(&pool, admin_id, 3, "phrase", None, None).await,
-        CHECK_VIOLATION,
-        "lexicon_entries_schema_kind_check",
     );
     assert_db_error(
         insert_entry(&pool, admin_id, 4, "word", None, None).await,
@@ -844,7 +941,7 @@ async fn v3_sibling_ordinals_are_unique(pool: PgPool) {
         INSERT INTO lexicon.entry_pos (
             id, entry_id, part_of_speech_id, content_schema_version,
             spelling_mode, phonetic_mode, sort_order
-        ) VALUES ($1, $2, $3, 3, NULL, NULL, 0)
+        ) VALUES ($1, $2, $3, 3, 'unified', 'unified', 0)
         "#,
     )
     .bind(duplicate_pos_id)

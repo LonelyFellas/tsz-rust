@@ -109,6 +109,10 @@ async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid, migrated: bool) -> Uuid {
         "pos": [{
             "pos_id": pos_id,
             "pos": "noun",
+            "dialect_rules": {
+                "spelling_mode": "unified",
+                "phonetic_mode": "unified"
+            },
             "forms": [{
                 "id": form_id,
                 "form_type": "base",

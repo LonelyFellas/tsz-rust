@@ -99,6 +99,9 @@ impl LexiconService {
         issues.extend(crate::lexicon::v3_contract::validate_meanings(
             &word.meanings,
         ));
+        issues.extend(
+            crate::lexicon::v3_contract::validate_complete_definition_grammar(&word.meanings),
+        );
         issues.extend(crate::lexicon::v3_contract::validate_aggregate_node_limit(
             &word.forms,
             &word.meanings,
@@ -158,6 +161,21 @@ impl LexiconService {
         if !reference_resolution.issues.is_empty() {
             return Err(v3_validation_failed(reference_resolution.issues));
         }
+        if !newly_bound.is_empty() {
+            let canonical_v3_meanings = v2_meanings_to_v3(relational_meanings.clone())?;
+            let editor_meanings =
+                serde_json::to_value(&canonical_v3_meanings).map_err(serialization_error)?;
+            LexiconRepository::sync_canonical_meanings(
+                &mut tx,
+                entry_id,
+                &relational_meanings,
+                &editor_meanings,
+                &catalog.sub_part_ids,
+            )
+            .await
+            .map_err(repository_error)?;
+            word.meanings = canonical_v3_meanings;
+        }
         ensure_no_removed_inbound_senses(&mut tx, entry_id, &relational_meanings).await?;
 
         if let Some(publication) =
@@ -174,6 +192,7 @@ impl LexiconService {
                     &mut tx,
                     publication.id,
                     publication.source_revision,
+                    word.kind,
                     &word.forms,
                 )
                 .await?;
@@ -256,6 +275,7 @@ impl LexiconService {
             &mut tx,
             publication.id,
             publication.source_revision,
+            word.kind,
             &word.forms,
         )
         .await?;
@@ -349,6 +369,12 @@ impl LexiconService {
             .await?
             .ok_or(LexiconServiceError::PublicationNotFound)?;
         ensure_publication_snapshot_identity(&publication, entry_id)?;
+        if let Some(forms) = publication_forms_for_activation(&publication)? {
+            let issues = crate::lexicon::v3_contract::validate_dialect_rules(&forms);
+            if !issues.is_empty() {
+                return Err(v3_validation_failed(issues));
+            }
+        }
         let verified_surface = self
             .confirm_v3_activation_surface(
                 &mut tx,
@@ -787,6 +813,18 @@ fn publication_meanings_for_reference_validation(
     }
 }
 
+fn publication_forms_for_activation(
+    publication: &VersionedPublication,
+) -> Result<Option<DraftFormsStepContentV3>, LexiconServiceError> {
+    match publication.content_schema_version {
+        2 => Ok(None),
+        3 => serde_json::from_value::<AdminWordV3>(publication.snapshot.clone())
+            .map(|word| Some(word.forms))
+            .map_err(serialization_error),
+        version => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
+    }
+}
+
 async fn ensure_no_removed_inbound_senses(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
@@ -1112,6 +1150,7 @@ async fn replace_current_publication_surfaces_v3(
     tx: &mut Transaction<'_, Postgres>,
     publication_id: Uuid,
     source_revision: i64,
+    entry_kind: WordEntryKindV3,
     forms: &DraftFormsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
     let entry_id = sqlx::query_scalar::<_, Uuid>(
@@ -1125,8 +1164,15 @@ async fn replace_current_publication_surfaces_v3(
         .map_err(|_| invariant_record())?;
     let event_offset = retire_current_publication_surfaces(tx, entry_id, source_revision).await?;
     for source in sources {
-        upsert_v3_publication_surface(tx, &source, publication_id, source_revision, event_offset)
-            .await?;
+        upsert_v3_publication_surface(
+            tx,
+            &source,
+            entry_kind,
+            publication_id,
+            source_revision,
+            event_offset,
+        )
+        .await?;
     }
     insert_surface_projection_event(
         tx,
@@ -1182,6 +1228,7 @@ async fn replace_current_publication_surfaces_from_snapshot(
                 tx,
                 publication.id,
                 publication.source_revision,
+                word.kind,
                 &word.forms,
             )
             .await
@@ -1223,6 +1270,7 @@ async fn retire_current_publication_surfaces(
 async fn upsert_v3_publication_surface(
     tx: &mut Transaction<'_, Postgres>,
     source: &crate::lexicon::v3_projection::V3FormVariantSurfaceSource,
+    entry_kind: WordEntryKindV3,
     publication_id: Uuid,
     source_revision: i64,
     event_offset: i64,
@@ -1238,11 +1286,11 @@ async fn upsert_v3_publication_surface(
             form_id, variant_id, group_ids, projection_version, updated_at
         ) VALUES (
             $1, $2, 'form_variant', $3,
-            'en', 'word', $4, $5,
-            $6, $7, $8,
-            $9, $10, FALSE, 'current_publication',
-            $11, $12, $13, $14, 3,
-            $15, $16, $17, $18, now()
+            'en', $4, $5, $6,
+            $7, $8, $9,
+            $10, $11, FALSE, 'current_publication',
+            $12, $13, $14, $15, 3,
+            $16, $17, $18, $19, now()
         )
         ON CONFLICT (source_id, content_scope, dialect_scope, normalization_version)
         DO UPDATE SET
@@ -1270,6 +1318,7 @@ async fn upsert_v3_publication_surface(
     .bind(source.entry_id)
     .bind(&source.source_id)
     .bind(source.variant_id)
+    .bind(v3_kind_string(entry_kind))
     .bind(source.dialect.as_str())
     .bind(source.dialect_scope.as_str())
     .bind(&source.surface)

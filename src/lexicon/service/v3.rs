@@ -6,21 +6,25 @@ use sqlx::{Postgres, Transaction};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
+use super::dictionary_suggestions::build_dictionary_suggestions;
 use super::*;
 use crate::lexicon::dto::DraftMeaningsStepContent;
 use crate::lexicon::dto::{
     AdminWordAny, AdminWordAnyEnvelope, AdminWordDraftAnyEnvelope, AdminWordDraftV3Envelope,
     AdminWordV3, AdminWordV3Capabilities, AdminWordV3Compatibility, BuiltinDictionaryEvidenceV3,
-    CreateAdminWordV3Input, DetectLexiconSurfaceResponseV3, DetectLexiconSurfaceV3Input,
-    DetectionSurfaceRequestEchoV3, DictionaryCoverageV3, DictionaryProvenanceV3,
+    CommonDialectV3, CreateAdminWordV3Input, DetectLexiconSurfaceResponseV3,
+    DetectLexiconSurfaceV3Input, DetectionSurfaceRequestEchoV3, DialectRulesV3,
+    DictionaryCoverageV3, DictionaryPronunciationEvidenceV3, DictionaryProvenanceV3,
     DictionaryProviderEvidenceV3, DraftFormsStepContentV3, DraftMeaningsStepContentV3,
     DraftValidationResponseV3, EnglishLanguageV3, EntryPresentationV3, FormsImpactItemV3,
     FormsImpactNodeTypeV3, FormsImpactResponseV3, LegacyHeadwordsCompatibilityV3,
-    PreviewFormsImpactInputV3, PronunciationNormalizationVersionV3, RetiredStableNodeV3,
-    SaveFormsStepInputV3, SaveMeaningsStepInputV3, SuggestedCommonFormVariantV3,
-    SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, V3PublicationBlockCode,
-    V3PublicationCapability, V3RetiredNodeRole, ValidateAdminWordV3Input, WordEntryKindV3,
-    WordFormTypeV3, WordRegionalVariantsV3,
+    PreviewFormsImpactInputV3, PronunciationNormalizationVersionV3, PronunciationStyle,
+    RetiredStableNodeV3, SaveFormsStepInputV3, SaveMeaningsStepInputV3, SuggestedConcreteFormV3,
+    SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3, UsDialectV3, V3PublicationBlockCode,
+    V3PublicationCapability, V3RetiredNodeRole, ValidateAdminWordV3Input, WordCommonFormVariantV3,
+    WordConcreteFormV3, WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3,
+    WordPosFormsV3, WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3,
+    WordUsFormVariantV3,
 };
 use crate::lexicon::model::NodeIdentityRecord;
 
@@ -54,6 +58,174 @@ struct V3AuditNodeDelta {
     generated_node_ids: Vec<Uuid>,
     changed_node_ids: Vec<Uuid>,
     retired_node_ids: Vec<Uuid>,
+}
+
+fn blank_v3_pronunciation() -> WordPronunciationV3 {
+    WordPronunciationV3 {
+        id: Uuid::now_v7(),
+        dict_phonetic: String::new(),
+        actual_pron: String::new(),
+        style: Some(PronunciationStyle::Normal),
+    }
+}
+
+fn suggested_v3_pronunciations(
+    values: &[DictionaryPronunciationEvidenceV3],
+) -> Vec<WordPronunciationV3> {
+    if values.is_empty() {
+        return vec![blank_v3_pronunciation()];
+    }
+    values
+        .iter()
+        .map(|value| WordPronunciationV3 {
+            id: Uuid::now_v7(),
+            dict_phonetic: value.dict_phonetic.clone(),
+            actual_pron: value.actual_pron.clone().unwrap_or_default(),
+            style: Some(value.style.unwrap_or(PronunciationStyle::Normal)),
+        })
+        .collect()
+}
+
+fn suggested_v3_dialect_rules(forms: &[&SuggestedConcreteFormV3]) -> DialectRulesV3 {
+    let mut saw_uk_us = false;
+    for form in forms {
+        if let SuggestedRegionalVariantsV3::UkUs { uk, us } = &form.regional_variants {
+            saw_uk_us = true;
+            if uk.spelling != us.spelling {
+                return DialectRulesV3::DISTINGUISH;
+            }
+        }
+    }
+    if saw_uk_us {
+        DialectRulesV3::UNIFIED_DISTINGUISH
+    } else {
+        DialectRulesV3::UNIFIED
+    }
+}
+
+fn materialize_suggested_v3_form(
+    form: &SuggestedConcreteFormV3,
+    rules: DialectRulesV3,
+) -> WordConcreteFormV3 {
+    let regional_variants = match (&form.regional_variants, rules) {
+        (SuggestedRegionalVariantsV3::Common { common }, DialectRulesV3::UNIFIED) => {
+            WordRegionalVariantsV3::Common {
+                common: WordCommonFormVariantV3 {
+                    id: Uuid::now_v7(),
+                    dialect: CommonDialectV3::Common,
+                    spelling: common.spelling.clone(),
+                    origin: TextOrigin::Dictionary,
+                    pronunciations: suggested_v3_pronunciations(&common.pronunciations),
+                },
+            }
+        }
+        (SuggestedRegionalVariantsV3::Common { common }, _) => WordRegionalVariantsV3::UkUs {
+            uk: WordUkFormVariantV3 {
+                id: Uuid::now_v7(),
+                dialect: UkDialectV3::Uk,
+                spelling: common.spelling.clone(),
+                origin: TextOrigin::Dictionary,
+                pronunciations: suggested_v3_pronunciations(&common.pronunciations),
+            },
+            us: WordUsFormVariantV3 {
+                id: Uuid::now_v7(),
+                dialect: UsDialectV3::Us,
+                spelling: common.spelling.clone(),
+                origin: TextOrigin::Dictionary,
+                pronunciations: suggested_v3_pronunciations(&common.pronunciations),
+            },
+        },
+        (SuggestedRegionalVariantsV3::UkUs { uk, us }, _) => WordRegionalVariantsV3::UkUs {
+            uk: WordUkFormVariantV3 {
+                id: Uuid::now_v7(),
+                dialect: UkDialectV3::Uk,
+                spelling: uk.spelling.clone(),
+                origin: TextOrigin::Dictionary,
+                pronunciations: suggested_v3_pronunciations(&uk.pronunciations),
+            },
+            us: WordUsFormVariantV3 {
+                id: Uuid::now_v7(),
+                dialect: UsDialectV3::Us,
+                spelling: us.spelling.clone(),
+                origin: TextOrigin::Dictionary,
+                pronunciations: suggested_v3_pronunciations(&us.pronunciations),
+            },
+        },
+    };
+    WordConcreteFormV3 {
+        id: Uuid::now_v7(),
+        form_type: form.form_type,
+        regional_variants,
+    }
+}
+
+fn blank_v3_base_form() -> WordConcreteFormV3 {
+    WordConcreteFormV3 {
+        id: Uuid::now_v7(),
+        form_type: WordFormTypeV3::Base,
+        regional_variants: WordRegionalVariantsV3::Common {
+            common: WordCommonFormVariantV3 {
+                id: Uuid::now_v7(),
+                dialect: CommonDialectV3::Common,
+                spelling: String::new(),
+                origin: TextOrigin::Manual,
+                pronunciations: vec![blank_v3_pronunciation()],
+            },
+        },
+    }
+}
+
+fn materialize_v3_detection_forms(
+    detection: &DetectLexiconSurfaceResponseV3,
+) -> DraftFormsStepContentV3 {
+    let builtin_forms = match &detection.builtin_dictionary {
+        BuiltinDictionaryEvidenceV3::Matched {
+            suggested_forms, ..
+        } => suggested_forms.as_slice(),
+        BuiltinDictionaryEvidenceV3::NotFound | BuiltinDictionaryEvidenceV3::Unavailable { .. } => {
+            &[]
+        }
+    };
+    let pos = detection
+        .suggested_pos
+        .iter()
+        .map(|pos_code| {
+            let suggestions = builtin_forms
+                .iter()
+                .filter(|form| &form.pos == pos_code)
+                .collect::<Vec<_>>();
+            let dialect_rules = suggested_v3_dialect_rules(&suggestions);
+            let mut forms = suggestions
+                .iter()
+                .map(|form| materialize_suggested_v3_form(form, dialect_rules))
+                .collect::<Vec<_>>();
+            if !forms
+                .iter()
+                .any(|form| form.form_type == WordFormTypeV3::Base)
+            {
+                forms.insert(0, blank_v3_base_form());
+            }
+            let members = forms
+                .iter()
+                .map(|form| WordFormGroupMemberV3 {
+                    id: Uuid::now_v7(),
+                    form_id: form.id,
+                })
+                .collect();
+            WordPosFormsV3 {
+                pos_id: Uuid::now_v7(),
+                pos: pos_code.clone(),
+                dialect_rules,
+                forms,
+                form_groups: vec![WordFormGroupV3 {
+                    id: Uuid::now_v7(),
+                    is_regular: true,
+                    members,
+                }],
+            }
+        })
+        .collect();
+    DraftFormsStepContentV3 { pos }
 }
 
 impl LexiconService {
@@ -123,9 +295,10 @@ impl LexiconService {
                 record.content_schema_version,
             ));
         }
-        if record.language != "en" || record.kind != "word" {
+        if record.language != "en" {
             return Err(invariant_record());
         }
+        let kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
         let forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
         let mut meanings: DraftMeaningsStepContentV3 =
@@ -168,7 +341,7 @@ impl LexiconService {
             schema_version: 3,
             id: record.id,
             language: EnglishLanguageV3::En,
-            kind: WordEntryKindV3::Word,
+            kind,
             status: if record.archived_at.is_some() {
                 AdminWordStatus::Archived
             } else if record.current_publication_id.is_some() {
@@ -302,62 +475,75 @@ impl LexiconService {
         actor_id: Uuid,
         input: DetectLexiconSurfaceV3Input,
     ) -> Result<DetectLexiconSurfaceResponseV3, LexiconServiceError> {
-        let normalized = crate::lexicon::normalization::normalize_headword(&input.surface)
-            .map_err(|_| LexiconServiceError::InvalidField {
-                field: "surface",
-                message: "surface must contain between 1 and 200 valid codepoints",
-            })?;
+        let normalized = NormalizedHeadword::parse(&input.surface).map_err(map_surface_error)?;
         let term = self
             .repository
             .dictionary_term(&normalized.key)
             .await
             .map_err(repository_error)?;
-        let builtin_dictionary = if let Some(term) = term {
-            let suggested_pos = map_dictionary_pos(&term.pos);
-            let suggested_forms = suggested_pos
-                .iter()
-                .map(|pos| SuggestedConcreteFormV3 {
-                    pos: pos.clone(),
-                    form_type: WordFormTypeV3::Base,
-                    regional_variants: SuggestedRegionalVariantsV3::Common {
-                        common: SuggestedCommonFormVariantV3 {
-                            dialect: crate::lexicon::dto::CommonDialectV3::Common,
-                            spelling: term.term.clone(),
-                            pronunciations: Vec::new(),
-                        },
-                    },
-                })
-                .collect();
+        let (builtin_dictionary, mut suggested_pos) = if let Some(term) = term {
+            let builtin_suggested_pos = map_dictionary_pos(&term.pos);
+            let content = self
+                .repository
+                .dictionary_contents(&normalized.key)
+                .await
+                .map_err(repository_error)?;
+            let suggestions =
+                build_dictionary_suggestions(&term.term, &builtin_suggested_pos, &content);
             let provider = DictionaryProviderEvidenceV3 {
                 name: term.provider_name,
                 version: term.provider_version,
             };
-            BuiltinDictionaryEvidenceV3::Matched {
-                provider: provider.clone(),
-                suggested_pos,
-                suggested_forms,
-                coverage: DictionaryCoverageV3 {
-                    forms: DictionaryCoverageStateV2::Partial,
-                    pronunciations: DictionaryCoverageStateV2::Missing,
-                    meanings: DictionaryCoverageStateV2::Missing,
-                    examples: DictionaryCoverageStateV2::Missing,
-                    frequency: DictionaryCoverageStateV2::Missing,
+            let content_provider = content.first().map(|record| DictionaryProviderEvidenceV3 {
+                name: record.provider_name.clone(),
+                version: record.provider_version.clone(),
+            });
+            let pronunciation_coverage = if suggestions.has_pronunciations {
+                DictionaryCoverageStateV2::Partial
+            } else {
+                DictionaryCoverageStateV2::Missing
+            };
+            (
+                BuiltinDictionaryEvidenceV3::Matched {
+                    provider: provider.clone(),
+                    suggested_pos: builtin_suggested_pos.clone(),
+                    suggested_forms: suggestions.forms,
+                    coverage: DictionaryCoverageV3 {
+                        forms: DictionaryCoverageStateV2::Partial,
+                        pronunciations: pronunciation_coverage,
+                        meanings: DictionaryCoverageStateV2::Missing,
+                        examples: DictionaryCoverageStateV2::Missing,
+                        frequency: DictionaryCoverageStateV2::Missing,
+                    },
+                    provenance: DictionaryProvenanceV3 {
+                        forms: if suggestions.has_form_evidence {
+                            content_provider.clone()
+                        } else {
+                            Some(provider.clone())
+                        },
+                        pronunciations: suggestions
+                            .has_pronunciations
+                            .then_some(content_provider)
+                            .flatten(),
+                        meanings: None,
+                        examples: None,
+                        frequency: None,
+                    },
                 },
-                provenance: DictionaryProvenanceV3 {
-                    forms: Some(provider),
-                    pronunciations: None,
-                    meanings: None,
-                    examples: None,
-                    frequency: None,
-                },
-            }
+                builtin_suggested_pos,
+            )
         } else {
-            BuiltinDictionaryEvidenceV3::NotFound
+            (BuiltinDictionaryEvidenceV3::NotFound, Vec::new())
         };
         let detection_id = Uuid::now_v7();
-        let (matches, surface_match_page) = self
+        let (matches, surface_match_page, existing_suggested_pos) = self
             .detect_v3_surface_warning(actor_id, detection_id, &normalized.key)
             .await?;
+        for pos in existing_suggested_pos {
+            if !suggested_pos.contains(&pos) {
+                suggested_pos.push(pos);
+            }
+        }
         let now = Utc::now();
         let detection = DetectLexiconSurfaceResponseV3 {
             schema_version: 3,
@@ -373,6 +559,7 @@ impl LexiconService {
             matches,
             surface_match_page,
             builtin_dictionary,
+            suggested_pos,
         };
         self.detections
             .save_v3(actor_id, &detection, V3_DETECTION_RETENTION_TTL)
@@ -422,6 +609,14 @@ impl LexiconService {
             .await
             .map_err(LexiconServiceError::DetectionStore)?
             .ok_or(LexiconServiceError::DetectionMismatch)?;
+        let normalized_detection =
+            NormalizedHeadword::parse(&detection.request.surface).map_err(map_surface_error)?;
+        if normalized_detection.key != detection.normalized_surface {
+            return Err(LexiconServiceError::InvalidField {
+                field: "surface",
+                message: "surface normalization does not match detection",
+            });
+        }
         if detection.expires_at <= Utc::now() {
             return Err(LexiconServiceError::DetectionExpired);
         }
@@ -442,18 +637,20 @@ impl LexiconService {
         };
         let entry_id = Uuid::now_v7();
         let now = Utc::now();
-        let forms = DraftFormsStepContentV3::default();
+        let forms = materialize_v3_detection_forms(&detection);
         let meanings = DraftMeaningsStepContentV3::default();
+        let catalog_parts = resolve_v3_catalog_parts(&mut transaction, &forms).await?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.entries (
                 id, content_schema_version, language, kind, revision,
                 headword_mode, source_dialect, detection_snapshot,
                 created_by_admin_id, updated_by_admin_id, created_at, updated_at
-            ) VALUES ($1, 3, 'en', 'word', 1, NULL, NULL, $2, $3, $3, $4, $4)
+            ) VALUES ($1, 3, 'en', $2, 1, NULL, NULL, $3, $4, $4, $5, $5)
             "#,
         )
         .bind(entry_id)
+        .bind(v3_kind_string(input.kind))
         .bind(serde_json::to_value(&detection).map_err(serialization_error)?)
         .bind(actor_id)
         .bind(now)
@@ -471,6 +668,7 @@ impl LexiconService {
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
+        replace_v3_forms(&mut transaction, entry_id, &forms, &catalog_parts).await?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.entry_editor_projection (
@@ -503,12 +701,14 @@ impl LexiconService {
                 .map_err(|_| invariant_record())?;
         if write_projection {
             upsert_presentation(&mut transaction, entry_id, 1, &presentation).await?;
+            replace_v3_surface_projection(&mut transaction, entry_id, input.kind, 1, &forms)
+                .await?;
         }
         let word = AdminWordV3 {
             schema_version: 3,
             id: entry_id,
             language: EnglishLanguageV3::En,
-            kind: WordEntryKindV3::Word,
+            kind: input.kind,
             status: AdminWordStatus::Draft,
             revision: 1,
             lifecycle_revision: 1,
@@ -874,6 +1074,7 @@ impl LexiconService {
             replace_v3_surface_projection(
                 &mut transaction,
                 entry_id,
+                parse_v3_kind(&record.kind).ok_or_else(invariant_record)?,
                 next_revision,
                 &input.content,
             )
@@ -930,7 +1131,12 @@ impl LexiconService {
             content,
             ..
         } = input;
-        let issues = crate::lexicon::v3_contract::validate_meanings(&content);
+        let mut issues = crate::lexicon::v3_contract::validate_meanings(&content);
+        if intent == StepSaveIntent::Complete {
+            issues.extend(
+                crate::lexicon::v3_contract::validate_complete_definition_grammar(&content),
+            );
+        }
         if !issues.is_empty() {
             return Err(v3_validation_failed(issues));
         }
@@ -1212,6 +1418,9 @@ impl LexiconService {
         issues.extend(crate::lexicon::v3_contract::validate_meanings(
             &word.meanings,
         ));
+        issues.extend(
+            crate::lexicon::v3_contract::validate_complete_definition_grammar(&word.meanings),
+        );
         issues.extend(crate::lexicon::v3_contract::validate_aggregate_node_limit(
             &word.forms,
             &word.meanings,
@@ -1759,9 +1968,11 @@ async fn replace_v3_forms(
             INSERT INTO lexicon.entry_pos (
                 id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode,
                 sort_order, content_schema_version
-            ) VALUES ($1, $2, $3, NULL, NULL, $4, 3)
+            ) VALUES ($1, $2, $3, $4, $5, $6, 3)
             ON CONFLICT (id) DO UPDATE
-            SET sort_order = EXCLUDED.sort_order
+            SET spelling_mode = EXCLUDED.spelling_mode,
+                phonetic_mode = EXCLUDED.phonetic_mode,
+                sort_order = EXCLUDED.sort_order
             WHERE lexicon.entry_pos.entry_id = EXCLUDED.entry_id
               AND lexicon.entry_pos.content_schema_version = 3
               AND lexicon.entry_pos.part_of_speech_id = EXCLUDED.part_of_speech_id
@@ -1770,6 +1981,8 @@ async fn replace_v3_forms(
         .bind(pos.pos_id)
         .bind(entry_id)
         .bind(part_id)
+        .bind(pos.dialect_rules.spelling_mode.as_str())
+        .bind(pos.dialect_rules.phonetic_mode.as_str())
         .bind(pos_ordinal as i32)
         .execute(&mut **tx)
         .await
@@ -2154,6 +2367,7 @@ fn canonicalize_v3_spelling(spelling: &mut String) -> Result<(), LexiconServiceE
 async fn replace_v3_surface_projection(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
+    entry_kind: WordEntryKindV3,
     revision: i64,
     forms: &DraftFormsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
@@ -2201,11 +2415,11 @@ async fn replace_v3_surface_projection(
                 form_id, variant_id, group_ids, projection_version, updated_at
             ) VALUES (
                 $1, $2, 'form_variant', $3,
-                'en', 'word', $4, $5,
-                $6, $7, $8,
-                $9, $10, FALSE, 'draft', NULL,
-                $11, $12, $13, 3,
-                $14, $15, $16, $17, now()
+                'en', $4, $5, $6,
+                $7, $8, $9,
+                $10, $11, FALSE, 'draft', NULL,
+                $12, $13, $14, 3,
+                $15, $16, $17, $18, now()
             )
             ON CONFLICT (source_id, content_scope, dialect_scope, normalization_version)
             DO UPDATE SET
@@ -2235,6 +2449,7 @@ async fn replace_v3_surface_projection(
         .bind(source.entry_id)
         .bind(source.source_id)
         .bind(source.variant_id)
+        .bind(v3_kind_string(entry_kind))
         .bind(source.dialect.as_str())
         .bind(source.dialect_scope.as_str())
         .bind(source.surface)
@@ -2396,8 +2611,9 @@ mod tests {
 
     use super::*;
     use crate::lexicon::dto::{
-        CommonDialectV3, V3ValidationIssueCode, WordCommonFormVariantV3, WordConcreteFormV3,
-        WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3, WordPronunciationV3,
+        CommonDialectV3, DialectRulesV3, V3ValidationIssueCode, WordCommonFormVariantV3,
+        WordConcreteFormV3, WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3,
+        WordPronunciationV3,
     };
 
     fn fixed_id(value: u128) -> Uuid {
@@ -2459,6 +2675,7 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: fixed_id(100),
                 pos: "noun".to_owned(),
+                dialect_rules: DialectRulesV3::UNIFIED,
                 forms,
                 form_groups,
             }],

@@ -67,6 +67,10 @@ fn v3_fixture(form_count: usize) -> V3Fixture {
             "pos": [{
                 "pos_id": pos_id,
                 "pos": "noun",
+                "dialect_rules": {
+                    "spelling_mode": "unified",
+                    "phonetic_mode": "unified"
+                },
                 "forms": forms,
                 "form_groups": []
             }]

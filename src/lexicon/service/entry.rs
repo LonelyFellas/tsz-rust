@@ -2288,7 +2288,7 @@ mod tests {
     }
 
     #[test]
-    fn suggested_forms_only_create_groups_for_parts_with_derived_forms() {
+    fn suggested_forms_create_groups_for_every_part() {
         let parts = [
             CatalogPartRecord {
                 id: Uuid::now_v7(),
@@ -2307,7 +2307,7 @@ mod tests {
         );
 
         assert_eq!(forms.pos[0].form_groups.len(), 1);
-        assert!(forms.pos[1].form_groups.is_empty());
+        assert_eq!(forms.pos[1].form_groups.len(), 1);
     }
 
     #[test]

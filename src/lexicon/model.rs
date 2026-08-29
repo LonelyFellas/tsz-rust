@@ -28,6 +28,15 @@ pub(crate) struct DictionaryCandidateRecord {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct DictionaryContentRecord {
+    pub pos: String,
+    pub forms: Value,
+    pub sounds: Value,
+    pub provider_name: String,
+    pub provider_version: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct DuplicateRecord {
     pub entry_id: Uuid,
     pub headword: String,
