@@ -98,6 +98,18 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertNotRegex(self.workflow, r"(?i)cache.*(test[-_ ]?pass|test[-_ ]?result)")
         self.assertNotRegex(self.workflow, r"(?i)(database_url|redis_url).*cache")
 
+    def test_ci15_release_container_marks_workspace_safe_before_git_checks(self) -> None:
+        release = self._job("release-artifact")
+        safe_directory = (
+            'git config --global --add safe.directory "$GITHUB_WORKSPACE"'
+        )
+
+        self.assertIn(safe_directory, release)
+        self.assertLess(
+            release.index(safe_directory),
+            release.index('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"'),
+        )
+
     def test_ci12_quality_and_unit_doc_keep_every_original_gate(self) -> None:
         quality = self._job("quality")
         unit_doc = self._job("unit-doc")
