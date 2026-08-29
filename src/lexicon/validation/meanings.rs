@@ -431,6 +431,23 @@ pub fn validate_meanings(
                         "关联词类型无效",
                     );
                 }
+                if relation.bound_target().is_some()
+                    && (relation.pending_target_headword.is_some()
+                        || relation.pending_target_gloss.is_some())
+                {
+                    issue(
+                        &mut issues,
+                        PersistedWordStep::Meanings,
+                        relation.id,
+                        if relation.pending_target_gloss.is_some() {
+                            "pending_target_gloss"
+                        } else {
+                            "pending_target_headword"
+                        },
+                        "relation_target_shape_invalid",
+                        "已绑定关联词不能再携带待建词面或预定义词义",
+                    );
+                }
             }
         }
     }

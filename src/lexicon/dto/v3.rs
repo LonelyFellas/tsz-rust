@@ -593,6 +593,9 @@ pub struct WordRelationV3 {
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 5000)]
+    pub pending_target_gloss: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, read_only)]
     pub target_headword: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -681,6 +684,9 @@ pub struct WordRelationWritableV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 5000)]
+    pub pending_target_gloss: Option<String>,
     pub score: String,
 }
 
@@ -1178,6 +1184,11 @@ pub enum V3ValidationIssueCode {
     RelationTargetStale,
     SentenceContextTargetUnavailable,
     RelationPendingHeadwordInvalid,
+    RelationTargetShapeInvalid,
+    RelationPendingGlossWithoutHeadword,
+    RelationPendingGlossInvalid,
+    RelationPendingGlossConflict,
+    RelationPendingGlossTargetExists,
     NodeIdReused,
     NodeBindingUnknown,
     NodeBindingChanged,
@@ -1234,6 +1245,11 @@ impl V3ValidationIssueCode {
             Self::RelationTargetStale => "relation_target_stale",
             Self::SentenceContextTargetUnavailable => "sentence_context_target_unavailable",
             Self::RelationPendingHeadwordInvalid => "relation_pending_headword_invalid",
+            Self::RelationTargetShapeInvalid => "relation_target_shape_invalid",
+            Self::RelationPendingGlossWithoutHeadword => "relation_pending_gloss_without_headword",
+            Self::RelationPendingGlossInvalid => "relation_pending_gloss_invalid",
+            Self::RelationPendingGlossConflict => "relation_pending_gloss_conflict",
+            Self::RelationPendingGlossTargetExists => "relation_pending_gloss_target_exists",
             Self::NodeIdReused => "node_id_reused",
             Self::NodeBindingUnknown => "node_binding_unknown",
             Self::NodeBindingChanged => "node_binding_changed",
@@ -1290,6 +1306,11 @@ impl V3ValidationIssueCode {
             "relation_target_stale" => Self::RelationTargetStale,
             "sentence_context_target_unavailable" => Self::SentenceContextTargetUnavailable,
             "relation_pending_headword_invalid" => Self::RelationPendingHeadwordInvalid,
+            "relation_target_shape_invalid" => Self::RelationTargetShapeInvalid,
+            "relation_pending_gloss_without_headword" => Self::RelationPendingGlossWithoutHeadword,
+            "relation_pending_gloss_invalid" => Self::RelationPendingGlossInvalid,
+            "relation_pending_gloss_conflict" => Self::RelationPendingGlossConflict,
+            "relation_pending_gloss_target_exists" => Self::RelationPendingGlossTargetExists,
             "node_id_reused" => Self::NodeIdReused,
             "node_binding_unknown" => Self::NodeBindingUnknown,
             "node_binding_changed" => Self::NodeBindingChanged,
