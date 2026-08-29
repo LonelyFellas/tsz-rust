@@ -294,6 +294,8 @@ use utoipa::{
             crate::lexicon::dto::WordConcreteFormV3,
             crate::lexicon::dto::WordFormGroupMemberV3,
             crate::lexicon::dto::WordFormGroupV3,
+            crate::lexicon::dto::DialectModeV3,
+            crate::lexicon::dto::DialectRulesV3,
             crate::lexicon::dto::WordPosFormsV3,
             crate::lexicon::dto::DraftFormsStepContentV3,
             crate::lexicon::dto::RichTextSpanV3,
@@ -2068,6 +2070,23 @@ mod tests {
             ])
         );
         assert_eq!(
+            schemas["WordEntryKindV3"]["enum"],
+            serde_json::json!(["word", "phrase"])
+        );
+        assert_eq!(
+            schemas["DialectModeV3"]["enum"],
+            serde_json::json!(["unified", "distinguish"])
+        );
+        assert_eq!(
+            schemas["WordPosFormsV3"]["properties"]["dialect_rules"]["$ref"],
+            "#/components/schemas/DialectRulesV3"
+        );
+        assert!(
+            schemas["WordPosFormsV3"]["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|field| field == "dialect_rules"))
+        );
+        assert_eq!(
             schemas["PronunciationNormalizationVersionV3"]["enum"],
             serde_json::json!(["nfkc_trim_lower_v1"])
         );
@@ -2097,6 +2116,15 @@ mod tests {
             false
         );
         assert_eq!(schemas["FormSurfaceMatchV3"]["additionalProperties"], false);
+        assert_eq!(
+            schemas["FormSurfaceMatchV3"]["properties"]["entry_kind"]["$ref"],
+            "#/components/schemas/WordEntryKindV3"
+        );
+        assert!(
+            schemas["FormSurfaceMatchV3"]["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|field| field == "entry_kind"))
+        );
         for schema in [
             "AdminWordV3",
             "AdminWordAnyEnvelope",
@@ -2105,6 +2133,7 @@ mod tests {
             "WordConcreteFormV3",
             "WordFormGroupMemberV3",
             "WordFormGroupV3",
+            "DialectRulesV3",
             "WordPosFormsV3",
             "WordPronunciationV3",
             "DraftFormsStepContentV3",
@@ -2184,6 +2213,12 @@ mod tests {
             assert!(
                 schemas["WordRelationV3"]["properties"][field].is_object(),
                 "{field} must remain available in relation responses"
+            );
+        }
+        for schema in ["WordRelationV2", "WordRelationV3", "WordRelationWritableV3"] {
+            assert_eq!(
+                schemas[schema]["properties"]["pending_target_gloss"]["maxLength"], 5000,
+                "{schema} 必须声明可选的待建目标预定义词义"
             );
         }
         for schema in ["RichTextV1V3", "RichTextV2V3"] {
