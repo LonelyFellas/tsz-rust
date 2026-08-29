@@ -108,6 +108,28 @@ pub(super) fn parse_kind(value: &str) -> Option<EntryKind> {
     }
 }
 
+pub(super) fn parse_v3_kind(value: &str) -> Option<WordEntryKindV3> {
+    match value {
+        "word" => Some(WordEntryKindV3::Word),
+        "phrase" => Some(WordEntryKindV3::Phrase),
+        _ => None,
+    }
+}
+
+pub(super) const fn v3_kind_string(kind: WordEntryKindV3) -> &'static str {
+    match kind {
+        WordEntryKindV3::Word => "word",
+        WordEntryKindV3::Phrase => "phrase",
+    }
+}
+
+pub(super) const fn entry_kind_from_v3(kind: WordEntryKindV3) -> EntryKind {
+    match kind {
+        WordEntryKindV3::Word => EntryKind::Word,
+        WordEntryKindV3::Phrase => EntryKind::Phrase,
+    }
+}
+
 pub(super) fn parse_source_dialect(value: &str) -> Option<SourceDialect> {
     match value {
         "uk" => Some(SourceDialect::Uk),

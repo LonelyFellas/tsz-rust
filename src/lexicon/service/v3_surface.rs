@@ -83,6 +83,7 @@ struct V3RelationSourcePresentationRecord {
 #[derive(Debug, sqlx::FromRow)]
 struct V3RestorePublicSurfaceRecord {
     content_schema_version: i16,
+    entry_kind: String,
     lifecycle_status: String,
     publication_id: Option<Uuid>,
     pos_id: Option<Uuid>,
@@ -190,10 +191,10 @@ impl V3SurfaceMaterial {
         self.matches
             .iter()
             .map(|resolved| {
-                let (spelling, dialect, existing) = match &resolved.item {
+                let (spelling, dialect, entry_kind, existing) = match &resolved.item {
                     SurfaceMatchItemV3::LegacyV2(item) => {
                         let (spelling, dialect) = legacy_surface_and_dialect(&item.existing.source);
-                        (spelling, dialect, item.existing.clone())
+                        (spelling, dialect, item.existing.kind, item.existing.clone())
                     }
                     SurfaceMatchItemV3::FormVariantV3(item) => {
                         let presentation = presentations
@@ -202,10 +203,11 @@ impl V3SurfaceMaterial {
                         (
                             item.spelling.as_str(),
                             item.dialect,
+                            entry_kind_from_v3(item.entry_kind),
                             ExistingSurfaceMatchV2 {
                                 word_id: item.entry_id,
                                 headword: (*presentation).to_owned(),
-                                kind: EntryKind::Word,
+                                kind: entry_kind_from_v3(item.entry_kind),
                                 status: item.status,
                                 source: ExistingSurfaceSourceV2::Form {
                                     source_id: format!("v3:form_variant:{}", item.variant_id),
@@ -237,7 +239,7 @@ impl V3SurfaceMaterial {
                         surface: spelling.to_owned(),
                         normalized_surface: normalized.key,
                         dialect,
-                        entry_kind: EntryKind::Word,
+                        entry_kind,
                     },
                     existing,
                 })
@@ -567,7 +569,7 @@ impl LexiconService {
         let record = if let Some(source_id) = source_id {
             sqlx::query_as::<_, V3RestorePublicSurfaceRecord>(
                 r#"
-                SELECT source.content_schema_version,
+                SELECT source.content_schema_version, source.entry_kind,
                        CASE
                            WHEN entry.archived_at IS NOT NULL THEN 'archived'
                            WHEN entry.current_publication_id IS NOT NULL THEN 'published'
@@ -606,6 +608,7 @@ impl LexiconService {
             return Ok(SurfaceMatchItemV3::FormVariantV3(FormSurfaceMatchV3 {
                 source_schema_version: 3,
                 entry_id: existing.word_id,
+                entry_kind: parse_v3_kind(&record.entry_kind).ok_or_else(invariant_record)?,
                 status: parse_surface_status(&record.lifecycle_status)?,
                 content_scope,
                 publication_id: record.publication_id,
@@ -1613,6 +1616,8 @@ impl LexiconService {
                         SurfaceMatchItemV3::FormVariantV3(FormSurfaceMatchV3 {
                             source_schema_version: 3,
                             entry_id: record.entry_id,
+                            entry_kind: parse_v3_kind(&record.entry_kind)
+                                .ok_or_else(invariant_record)?,
                             status,
                             content_scope,
                             publication_id: record.publication_id,

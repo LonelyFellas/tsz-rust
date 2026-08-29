@@ -2114,6 +2114,7 @@ mod tests {
                             "match": {
                                 "source_schema_version": 3,
                                 "entry_id": Uuid::from_u128(0x1000 + index),
+                                "entry_kind": "word",
                                 "status": "draft",
                                 "content_scope": "draft",
                                 "pos_id": Uuid::from_u128(0x2000 + index),

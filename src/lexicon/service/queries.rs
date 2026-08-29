@@ -451,7 +451,9 @@ impl LexiconService {
             let last = results.last().expect("non-empty page has a last result");
             let (last_kind, last_word_id) = match last {
                 RelatedWordResultAny::V2(result) => (result.kind, result.word_id),
-                RelatedWordResultAny::V3(result) => (EntryKind::Word, result.entry_id),
+                RelatedWordResultAny::V3(result) => {
+                    (entry_kind_from_v3(result.kind), result.entry_id)
+                }
             };
             let next = RelatedSearchCursor {
                 total,
@@ -629,7 +631,7 @@ impl LexiconService {
                         Ok(AdminWordListItemAny::V3(AdminWordListItemV3 {
                             schema_version: 3,
                             id: record.id,
-                            kind: WordEntryKindV3::Word,
+                            kind: parse_v3_kind(&record.kind).ok_or_else(invariant_record)?,
                             presentation,
                             revision: record.revision,
                             lifecycle_revision: record.lifecycle_revision,

@@ -284,6 +284,10 @@ fn v3_forms(surface: &str) -> Value {
         "pos": [{
             "pos_id": pos_id,
             "pos": "noun",
+            "dialect_rules": {
+                "spelling_mode": "unified",
+                "phonetic_mode": "unified"
+            },
             "forms": [{
                 "id": form_id,
                 "form_type": "base",
@@ -353,12 +357,36 @@ async fn create_v3_source_forms(
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let entry_id = created["word"]["id"].as_str().unwrap();
-    let input = json!({
+    let forms = v3_forms(surface);
+    let (status, impact) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": 1,
+            "content": forms.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    let mut input = json!({
         "schema_version": 3,
         "base_revision": 1,
         "intent": "complete",
-        "content": v3_forms(surface)
+        "content": forms
     });
+    if let Some(token) = impact["confirmation_token"].as_str() {
+        input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["impact_confirmation_token"].as_str() {
+        input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+        input["confirmed_surface_match_token"] = json!(token);
+    }
     let (mut status, mut saved) = call(
         state,
         Method::PUT,
@@ -490,6 +518,10 @@ fn target_forms() -> Value {
         "pos": [{
             "pos_id": pos_id,
             "pos": "noun",
+            "dialect_rules": {
+                "spelling_mode": "distinguish",
+                "phonetic_mode": "distinguish"
+            },
             "forms": [{
                 "id": form_id,
                 "form_type": "base",

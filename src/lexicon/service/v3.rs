@@ -295,9 +295,10 @@ impl LexiconService {
                 record.content_schema_version,
             ));
         }
-        if record.language != "en" || record.kind != "word" {
+        if record.language != "en" {
             return Err(invariant_record());
         }
+        let kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
         let forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
         let mut meanings: DraftMeaningsStepContentV3 =
@@ -340,7 +341,7 @@ impl LexiconService {
             schema_version: 3,
             id: record.id,
             language: EnglishLanguageV3::En,
-            kind: WordEntryKindV3::Word,
+            kind,
             status: if record.archived_at.is_some() {
                 AdminWordStatus::Archived
             } else if record.current_publication_id.is_some() {
@@ -1069,6 +1070,7 @@ impl LexiconService {
             replace_v3_surface_projection(
                 &mut transaction,
                 entry_id,
+                parse_v3_kind(&record.kind).ok_or_else(invariant_record)?,
                 next_revision,
                 &input.content,
             )

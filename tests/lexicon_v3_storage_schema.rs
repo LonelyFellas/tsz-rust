@@ -539,15 +539,21 @@ async fn entry_schema_version_controls_kind_and_legacy_headword_shape(pool: PgPo
         "migrated V3 may retain a read-only bridge"
     );
 
+    let native_v3_phrase = insert_entry(&pool, admin_id, 3, "phrase", None, None)
+        .await
+        .expect("native V3 phrase has the same aggregate shape as a V3 word");
+    sqlx::query(
+        "INSERT INTO lexicon.v3_entry_state (entry_id, origin, first_v3_write_revision) VALUES ($1, 'native', 1)",
+    )
+    .bind(native_v3_phrase)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     assert_db_error(
         insert_entry(&pool, admin_id, 2, "word", None, None).await,
         CHECK_VIOLATION,
         "lexicon_entries_versioned_headword_shape_check",
-    );
-    assert_db_error(
-        insert_entry(&pool, admin_id, 3, "phrase", None, None).await,
-        CHECK_VIOLATION,
-        "lexicon_entries_schema_kind_check",
     );
     assert_db_error(
         insert_entry(&pool, admin_id, 4, "word", None, None).await,

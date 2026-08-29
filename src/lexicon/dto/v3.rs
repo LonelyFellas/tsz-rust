@@ -54,6 +54,7 @@ pub enum EnglishLanguageV3 {
 #[serde(rename_all = "snake_case")]
 pub enum WordEntryKindV3 {
     Word,
+    Phrase,
 }
 
 /// Phase 1 固定词形目录。`base` 与其余值平级且都允许重复。
@@ -1423,6 +1424,7 @@ pub struct FormSurfaceMatchV3 {
     #[schema(schema_with = schema_version_3_schema)]
     pub source_schema_version: u8,
     pub entry_id: Uuid,
+    pub entry_kind: WordEntryKindV3,
     pub status: AdminWordStatus,
     pub content_scope: SurfaceContentScopeV2,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1957,6 +1959,7 @@ mod tests {
         let form = SurfaceMatchItemV3::FormVariantV3(FormSurfaceMatchV3 {
             source_schema_version: 3,
             entry_id,
+            entry_kind: WordEntryKindV3::Word,
             status: AdminWordStatus::Published,
             content_scope: SurfaceContentScopeV2::CurrentPublication,
             publication_id: Some(Uuid::now_v7()),
