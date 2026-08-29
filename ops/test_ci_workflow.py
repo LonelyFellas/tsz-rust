@@ -1,10 +1,6 @@
-import hashlib
 import pathlib
 import re
 import unittest
-
-
-RELEASE_JOB_SHA256 = "976d981ac3b8bd585bc46a4c8c045f96c6c1dd926f5d5dfd4835253eb8290aef"
 
 
 class CiWorkflowTests(unittest.TestCase):
@@ -47,12 +43,60 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("needs['unit-doc'].result", summary)
         self.assertIn("needs.integration.result", summary)
 
-    def test_ci10_release_artifact_job_is_byte_for_byte_unchanged(self) -> None:
+    def test_ci10_release_artifact_is_exact_main_and_auditable(self) -> None:
         release = self._job("release-artifact")
 
-        self.assertEqual(
-            hashlib.sha256(release.encode()).hexdigest(), RELEASE_JOB_SHA256
-        )
+        self.assertIn("github.repository == 'LonelyFellas/tsz-rust'", release)
+        self.assertIn("github.ref == 'refs/heads/main'", release)
+        self.assertNotIn("github.event_name == 'pull_request'", release)
+        self.assertIn("tsz-rust.manifest.json", release)
+        self.assertIn("${{ github.sha }}", release)
+        self.assertIn("${{ github.run_attempt }}", release)
+        self.assertIn("release_artifact_manifest.py create", release)
+        self.assertIn("release_artifact_manifest.py verify", release)
+
+    def test_ci11_caches_are_explicit_restore_only_outside_trusted_main(self) -> None:
+        jobs = [
+            self._job("quality"),
+            self._job("unit-doc"),
+            self._job("integration"),
+            self._job("release-artifact"),
+        ]
+
+        for job in jobs:
+            with self.subTest(job=job.splitlines()[0]):
+                self.assertIn("id: cargo-cache", job)
+                self.assertLess(job.index("id: ci-fingerprint"), job.index("id: cargo-cache"))
+                self.assertIn("continue-on-error: true", job)
+                self.assertIn("cache-bin: false", job)
+                self.assertIn("cache-targets: false", job)
+                self.assertIn("cache-on-failure: false", job)
+                self.assertIn("steps.ci-fingerprint.outputs.cache_key", job)
+                self.assertIn("github.event_name == 'push'", job)
+                self.assertIn("github.ref == 'refs/heads/main'", job)
+                self.assertIn("github.repository == 'LonelyFellas/tsz-rust'", job)
+                self.assertIn("ops/ci_cargo_fetch.py", job)
+
+    def test_ci13_phase_zero_metrics_cover_every_cargo_gate(self) -> None:
+        quality = self._job("quality")
+        unit_doc = self._job("unit-doc")
+        integration = self._job("integration")
+        release = self._job("release-artifact")
+
+        self.assertIn("--name clippy", quality)
+        self.assertIn("--name lib-bins", unit_doc)
+        self.assertIn("--name doc-tests", unit_doc)
+        self.assertIn("--name integration-${{ matrix.module }}", integration)
+        self.assertIn("--name release-build", release)
+        for job in (quality, unit_doc, integration, release):
+            self.assertIn("--name cargo-fetch", job)
+            self.assertIn("--name cargo-cache-hit", job)
+
+    def test_ci14_workflow_does_not_promote_test_results_or_secrets(self) -> None:
+        self.assertNotIn("pull_request_target:", self.workflow)
+        self.assertNotIn("workflow_run:", self.workflow)
+        self.assertNotRegex(self.workflow, r"(?i)cache.*(test[-_ ]?pass|test[-_ ]?result)")
+        self.assertNotRegex(self.workflow, r"(?i)(database_url|redis_url).*cache")
 
     def test_ci12_quality_and_unit_doc_keep_every_original_gate(self) -> None:
         quality = self._job("quality")
@@ -62,6 +106,12 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("python3 -m unittest ops/test_deployment_manifest.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_test_modules.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_workflow.py", quality)
+        self.assertIn("python3 -m unittest ops/test_ci_fingerprint.py", quality)
+        self.assertIn("python3 -m unittest ops/test_ci_metrics.py", quality)
+        self.assertIn("python3 -m unittest ops/test_ci_cargo_fetch.py", quality)
+        self.assertIn("python3 -m unittest ops/test_release_artifact_manifest.py", quality)
+        self.assertIn("python3 -m unittest ops/test_deployment_preflight.py", quality)
+        self.assertIn("python3 -m unittest ops/test_deploy_skill.py", quality)
         self.assertIn(
             "cargo clippy --locked --all-targets --all-features -- -D warnings",
             quality,

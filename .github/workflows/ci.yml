@@ -53,10 +53,38 @@ jobs:
           toolchain: ${{ steps.rust.outputs.version }}
           components: rustfmt, clippy
 
+      - name: Resolve CI cache fingerprint
+        id: ci-fingerprint
+        run: >-
+          python3 ops/ci_fingerprint.py
+          --profile dev-test --features all --sqlx-offline true
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Restore Cargo cache
+        id: cargo-cache
+        continue-on-error: true
         uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ steps.ci-fingerprint.outputs.cache_key }}
+          env-vars: CARGO SQLX_OFFLINE
+          cache-bin: false
+          cache-targets: false
+          cache-on-failure: false
+          save-if: >-
+            ${{ github.event_name == 'push' &&
+                github.ref == 'refs/heads/main' &&
+                github.repository == 'LonelyFellas/tsz-rust' }}
+
+      - name: Record Cargo cache result
+        run: >-
+          python3 ops/ci_metrics.py record --name cargo-cache-hit
+          --value "${{ steps.cargo-cache.outputs.cache-hit || 'false' }}"
+          --unit boolean
+
+      - name: Fetch locked Cargo dependencies
+        run: >-
+          python3 ops/ci_metrics.py run --name cargo-fetch --
+          python3 ops/ci_cargo_fetch.py
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -70,8 +98,28 @@ jobs:
       - name: Test CI workflow structure
         run: python3 -m unittest ops/test_ci_workflow.py
 
+      - name: Test CI build fingerprints
+        run: python3 -m unittest ops/test_ci_fingerprint.py
+
+      - name: Test CI metrics
+        run: python3 -m unittest ops/test_ci_metrics.py
+
+      - name: Test Cargo fetch fallback
+        run: python3 -m unittest ops/test_ci_cargo_fetch.py
+
+      - name: Test release artifact manifests
+        run: python3 -m unittest ops/test_release_artifact_manifest.py
+
+      - name: Test deployment preflight
+        run: python3 -m unittest ops/test_deployment_preflight.py
+
+      - name: Test deploy skill artifact contract
+        run: python3 -m unittest ops/test_deploy_skill.py
+
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: >-
+          python3 ops/ci_metrics.py run --name clippy --
+          cargo clippy --locked --all-targets --all-features -- -D warnings
 
   unit-doc:
     name: Unit and doc tests
@@ -125,16 +173,48 @@ jobs:
         with:
           toolchain: ${{ steps.rust.outputs.version }}
 
+      - name: Resolve CI cache fingerprint
+        id: ci-fingerprint
+        run: >-
+          python3 ops/ci_fingerprint.py
+          --profile test --features all --sqlx-offline true
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Restore Cargo cache
+        id: cargo-cache
+        continue-on-error: true
         uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ steps.ci-fingerprint.outputs.cache_key }}
+          env-vars: CARGO SQLX_OFFLINE
+          cache-bin: false
+          cache-targets: false
+          cache-on-failure: false
+          save-if: >-
+            ${{ github.event_name == 'push' &&
+                github.ref == 'refs/heads/main' &&
+                github.repository == 'LonelyFellas/tsz-rust' }}
+
+      - name: Record Cargo cache result
+        run: >-
+          python3 ops/ci_metrics.py record --name cargo-cache-hit
+          --value "${{ steps.cargo-cache.outputs.cache-hit || 'false' }}"
+          --unit boolean
+
+      - name: Fetch locked Cargo dependencies
+        run: >-
+          python3 ops/ci_metrics.py run --name cargo-fetch --
+          python3 ops/ci_cargo_fetch.py
 
       - name: Run unit and binary tests
-        run: cargo test --locked --all-features --lib --bins
+        run: >-
+          python3 ops/ci_metrics.py run --name lib-bins --
+          cargo test --locked --all-features --lib --bins
 
       - name: Run doc tests
-        run: cargo test --locked --all-features --doc
+        run: >-
+          python3 ops/ci_metrics.py run --name doc-tests --
+          cargo test --locked --all-features --doc
 
   integration:
     name: Integration (${{ matrix.module }})
@@ -193,13 +273,44 @@ jobs:
         with:
           toolchain: ${{ steps.rust.outputs.version }}
 
+      - name: Resolve CI cache fingerprint
+        id: ci-fingerprint
+        run: >-
+          python3 ops/ci_fingerprint.py
+          --profile test-${{ matrix.module }} --features all --sqlx-offline true
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Restore Cargo cache
+        id: cargo-cache
+        continue-on-error: true
         uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ steps.ci-fingerprint.outputs.cache_key }}
+          env-vars: CARGO SQLX_OFFLINE
+          cache-bin: false
+          cache-targets: false
+          cache-on-failure: false
+          save-if: >-
+            ${{ github.event_name == 'push' &&
+                github.ref == 'refs/heads/main' &&
+                github.repository == 'LonelyFellas/tsz-rust' }}
+
+      - name: Record Cargo cache result
+        run: >-
+          python3 ops/ci_metrics.py record --name cargo-cache-hit
+          --value "${{ steps.cargo-cache.outputs.cache-hit || 'false' }}"
+          --unit boolean
+
+      - name: Fetch locked Cargo dependencies
+        run: >-
+          python3 ops/ci_metrics.py run --name cargo-fetch --
+          python3 ops/ci_cargo_fetch.py
 
       - name: Run ${{ matrix.module }} integration tests
-        run: python3 ops/ci_test_modules.py run ${{ matrix.module }}
+        run: >-
+          python3 ops/ci_metrics.py run
+          --name integration-${{ matrix.module }} --
+          python3 ops/ci_test_modules.py run ${{ matrix.module }}
 
   ci-summary:
     name: Format, lint and test
@@ -224,8 +335,11 @@ jobs:
     # 只在 main 推送与手动触发时跑。PR 不需要 release 产物，而它会给每个 PR 的 CI
     # 多加数分钟。代价是「只在 release profile 下才暴露的编译错误」要到合并后才发现；
     # clippy 已覆盖 --all-targets --all-features（debug profile），这类差异极少见，接受。
-    # workflow_dispatch 允许在合并前于特性分支上手动验证本 job。
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # workflow_dispatch 只允许 main；PR 与特性分支不产生可部署 artifact。
+    if: >-
+      github.repository == 'LonelyFellas/tsz-rust' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -241,12 +355,20 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential pkg-config cmake
+            ca-certificates curl git python3 build-essential pkg-config cmake
 
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Verify exact main source
+        id: source
+        run: |
+          test "$GITHUB_REPOSITORY" = "LonelyFellas/tsz-rust"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "git_tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
 
       - name: Resolve pinned Rust version
         id: rust
@@ -261,14 +383,45 @@ jobs:
         with:
           toolchain: ${{ steps.rust.outputs.version }}
 
+      - name: Resolve CI cache fingerprint
+        id: ci-fingerprint
+        run: >-
+          python3 ops/ci_fingerprint.py
+          --profile release --features default --sqlx-offline true
+          --output "$RUNNER_TEMP/release-fingerprint.json"
+          --github-output "$GITHUB_OUTPUT"
+
       - name: Restore Cargo cache
+        id: cargo-cache
+        continue-on-error: true
         uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ steps.ci-fingerprint.outputs.cache_key }}
+          env-vars: CARGO SQLX_OFFLINE
+          cache-bin: false
+          cache-targets: false
+          cache-on-failure: false
+          save-if: >-
+            ${{ github.event_name == 'push' &&
+                github.ref == 'refs/heads/main' &&
+                github.repository == 'LonelyFellas/tsz-rust' }}
+
+      - name: Record Cargo cache result
+        run: >-
+          python3 ops/ci_metrics.py record --name cargo-cache-hit
+          --value "${{ steps.cargo-cache.outputs.cache-hit || 'false' }}"
+          --unit boolean
+
+      - name: Fetch locked Cargo dependencies
+        run: >-
+          python3 ops/ci_metrics.py run --name cargo-fetch --
+          python3 ops/ci_cargo_fetch.py
 
       # 默认 feature：服务器不开 swagger，产物必须与它一致，不能用 --all-features。
       - name: Build release binary
-        run: cargo build --locked --release
+        run: >-
+          python3 ops/ci_metrics.py run --name release-build --
+          cargo build --locked --release
 
       # 摘要打进 job 日志，作为「CI 见过的那个文件」的独立记录；
       # 部署时会重新计算并比对，制品从 CI 到服务器全程可追。
@@ -276,11 +429,29 @@ jobs:
         # 用裸文件名生成：artifact 解包后文件在根目录，带 target/release/ 前缀会让
         # 部署侧的 `shasum -a 256 -c` 找不到文件。
         run: |
-          cd target/release
-          sha256sum tsz-rust | tee tsz-rust.sha256
+          (cd target/release && sha256sum tsz-rust | tee tsz-rust.sha256)
+          python3 ops/release_artifact_manifest.py create \
+            --artifact target/release/tsz-rust \
+            --output target/release/tsz-rust.manifest.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --git-ref "$GITHUB_REF" \
+            --git-sha "$GITHUB_SHA" \
+            --git-tree "${{ steps.source.outputs.git_tree }}" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --fingerprint "$RUNNER_TEMP/release-fingerprint.json"
+          python3 ops/release_artifact_manifest.py verify \
+            --manifest target/release/tsz-rust.manifest.json \
+            --artifact target/release/tsz-rust \
+            --expected-git-sha "$GITHUB_SHA" \
+            --expected-git-tree "${{ steps.source.outputs.git_tree }}" \
+            --expected-run-id "$GITHUB_RUN_ID"
+          python3 ops/ci_metrics.py record --name artifact-size \
+            --value "$(stat -c %s target/release/tsz-rust)" --unit bytes
           echo "--- 动态依赖（须只有 libc/libm/libgcc_s，且 GLIBC 版本不高于服务器）---"
-          ldd tsz-rust
-          objdump -T tsz-rust | sed -n 's/.*GLIBC_\([0-9.]*\).*/\1/p' | sort -uV | tail -1 \
+          ldd target/release/tsz-rust
+          objdump -T target/release/tsz-rust | sed -n 's/.*GLIBC_\([0-9.]*\).*/\1/p' | sort -uV | tail -1 \
             | xargs -I{} echo "所需最高 GLIBC 版本: {}"
 
       # artifact 以 zip 传输，可执行位不保证跨往返保留（实测当前组合会保留），
@@ -288,9 +459,10 @@ jobs:
       - name: Upload release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: tsz-rust-x86_64-linux-gnu
+          name: tsz-rust-x86_64-linux-gnu-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: |
             target/release/tsz-rust
             target/release/tsz-rust.sha256
+            target/release/tsz-rust.manifest.json
           if-no-files-found: error
           retention-days: 30

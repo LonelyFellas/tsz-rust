@@ -29,8 +29,9 @@ SQLX_OFFLINE=true cargo build --release
 
 > **tshb-test 不走上面任何一条**：它装的是 CI 产物。`.github/workflows/ci.yml` 的
 > `release-artifact` job 在 `ubuntu:22.04` 容器里（与服务器 glibc 2.35 一致）编出
-> `tsz-rust-x86_64-linux-gnu`，部署时由 `deploy` skill 用 `gh run download` 取回、校验摘要、
-> 原子替换。服务器不再编译、也不再需要源码与 rustup。新开环境若发行版不是 Ubuntu 22.04，
+> `tsz-rust-x86_64-linux-gnu-<git-sha>-attempt-<run-attempt>`，并附带 SHA256 与严格的 build manifest。部署时由
+> `deploy` skill 用 `gh run download` 取回，同时验证 run/SHA/tree/toolchain/features/SQLx
+> 指纹和二进制摘要后原子替换。服务器不再编译、也不再需要源码与 rustup。新开环境若发行版不是 Ubuntu 22.04，
 > 必须同步改 workflow 里的 `container:`——判据是容器 glibc 不得高于目标机 glibc。
 
 ## 2. 放置文件
