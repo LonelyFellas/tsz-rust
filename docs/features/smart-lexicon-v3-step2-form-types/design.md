@@ -167,19 +167,18 @@ V3 新增独立正式 schema：
 ### 3.7 持久化与历史迁移
 
 active draft 复用 `lexicon.entry_pos.spelling_mode/phonetic_mode`，并继续把完整 forms 保存到
-`entry_editor_projection.forms`。migration
-`20260827100000_add_lexicon_v3_dialect_rules`：
+`entry_editor_projection.forms`。已落库 migration
+`20260827100000_add_lexicon_v3_dialect_rules` 保持 checksum 不变；follow-up
+`20260829110000_require_fresh_v3_dialect_contract` 在正式启用 latest contract 前执行一次性数据门禁：
 
-1. 按 POS 数组原顺序为缺字段 JSON 推导 UU/UD/DD；
-2. 用稳定 `pos_id` 同步回填 relational mode；
-3. 更新 versioned CHECK，使 V2/V3 均要求合法非 NULL mode；
-4. 不修改 form/variant/pronunciation/group/membership UUID、文本或数组顺序；
-5. 不重写 immutable publication snapshot；旧 snapshot 由兼容反序列化推导；
-6. down migration 删除 active JSON 新字段、把 V3 relational mode 恢复 NULL，并恢复旧 CHECK。
+1. 前一 migration 更新 versioned CHECK，使 V2/V3 均要求合法非 NULL mode；
+2. 若发现 migration 前已经存在 schema 3 entry，则明确失败并要求先执行已批准的数据清理；
+3. 不回填 editor JSON，不读取或转换缺字段 snapshot；
+4. 新 HTTP 请求、数据库 editor projection 与 publication snapshot 均必须显式携带合法规则；
+5. down migration 仅承担代码回滚，不构成旧 V3 数据兼容承诺。
 
-新 HTTP 请求仍由 raw contract 强制要求 `dialect_rules`，兼容推导只用于后端读取历史 JSON，不能
-让新客户端继续省略。mixed legacy 数据以首个 form shape 决定推导规则，后续冲突 form 在统一
-authority 中返回 issue，内容本身不被转换。
+2026-08-29 产品决定：Smart Lexicon 未上线历史数据全部清理，代码只支持 latest contract。缺字段或
+mixed common/uk_us shape 不做推导；仍在产品中使用的 V2 路由和功能不受该决定影响。
 
 ## 4. 本期不选：V3 可配置/自定义词形类型
 
@@ -322,7 +321,8 @@ snapshot，汇总同一 `(pos, form_type)`。审计只报告，不写数据。
 | dialect rules | DU / 缺字段 | `dialect_rules_invalid` 定位 POS |
 | rule/shape | UU/UD/DD 与 form 不一致 | `invalid_regional_variant_shape` 定位 form |
 | shared form | 同一 form 被多个 group 引用 | form 只校验一次，不复制、不重复 issue |
-| history | 缺字段 active/snapshot | 确定性推导，不改 UUID/顺序；activation 复核 authority |
+| latest storage | 缺字段 active/snapshot | 读取失败；不推导、不改写 |
+| migration | fresh schema / 已存在 V3 行 | fresh 安装约束；遗留 V3 行 fail closed |
 
 验证命令：
 

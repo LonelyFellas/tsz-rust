@@ -398,9 +398,9 @@ form group，shared membership 继续引用同一个 form UUID。
 }
 ```
 
-缺字段历史数据由后端按 common→UU、uk_us 同拼写→UD、uk_us 异拼写→DD 推导并在响应中显式
-返回；UUID、文本和数组顺序不变。新写请求必须携带该字段。前端不得自行重新推导或静默转换；
-收到不一致历史内容时应按 issue 定位让用户显式统一。
+V3 尚未上线且历史 Smart Lexicon 数据已清理；服务端和客户端只支持 latest contract。所有 V3
+editor/publication JSON 都必须显式携带该字段，缺字段、mixed common/uk_us 或规则不一致直接
+fail closed，不推导或静默转换。该决定不影响仍在产品中使用的 V2 路由与功能。
 
 V3 detection/create 当前不直接持久化 POS；前端从 `suggested_forms` 物化新 POS 时必须在首次 forms
 payload 中显式生成规则：common→UU、uk_us 同拼写→UD、uk_us 异拼写→DD。该映射只用于尚未存在

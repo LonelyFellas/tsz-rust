@@ -1,0 +1,1 @@
+-- Contract-only rollout gate. No schema objects are created by the up migration.

@@ -1330,7 +1330,6 @@ mod tests {
             validate_forms(&repeated_type.content, repeated_type.intent).is_empty(),
             "同 POS/同 group 内多个 base 和同拼写 form 都应合法"
         );
-
         let mut repeated_non_base = valid_request();
         repeated_non_base["content"]["pos"][0]["forms"][0]["form_type"] = json!("plural");
         let mut second_form = repeated_non_base["content"]["pos"][0]["forms"][0].clone();
@@ -1499,72 +1498,22 @@ mod tests {
     }
 
     #[test]
-    fn missing_historical_dialect_rules_are_inferred_but_new_requests_require_them() {
-        for (regional_variants, expected_spelling, expected_phonetic) in [
-            (
-                valid_request()["content"]["pos"][0]["forms"][0]["regional_variants"].clone(),
-                "unified",
-                "unified",
-            ),
-            (
-                uk_us_regional_variants(
-                    "019d2a80-0000-7000-8000-000000000051",
-                    "019d2a80-0000-7000-8000-000000000052",
-                    "019d2a80-0000-7000-8000-000000000053",
-                    "019d2a80-0000-7000-8000-000000000054",
-                ),
-                "distinguish",
-                "distinguish",
-            ),
-        ] {
-            let mut request = valid_request();
-            request["content"]["pos"][0]
-                .as_object_mut()
-                .unwrap()
-                .remove("dialect_rules");
-            request["content"]["pos"][0]["forms"][0]["regional_variants"] = regional_variants;
-
-            let request_result: Result<SaveFormsStepInputV3, AppError> =
-                decode_v3_forms_request(request.clone());
-            assert!(request_result.is_err(), "新请求缺 dialect_rules 必须失败");
-
-            let historical: DraftFormsStepContentV3 =
-                serde_json::from_value(request["content"].clone()).unwrap();
-            let encoded = serde_json::to_value(historical).unwrap();
-            assert_eq!(
-                encoded["pos"][0]["dialect_rules"]["spelling_mode"],
-                expected_spelling
-            );
-            assert_eq!(
-                encoded["pos"][0]["dialect_rules"]["phonetic_mode"],
-                expected_phonetic
-            );
-            assert_eq!(
-                encoded["pos"][0]["forms"][0]["id"],
-                request["content"]["pos"][0]["forms"][0]["id"]
-            );
-        }
-
-        let mut same_spelling = valid_request();
-        same_spelling["content"]["pos"][0]
+    fn missing_dialect_rules_are_rejected_for_requests_and_stored_data() {
+        let mut request = valid_request();
+        request["content"]["pos"][0]
             .as_object_mut()
             .unwrap()
             .remove("dialect_rules");
-        same_spelling["content"]["pos"][0]["forms"][0]["regional_variants"] =
-            uk_us_regional_variants(
-                "019d2a80-0000-7000-8000-000000000061",
-                "019d2a80-0000-7000-8000-000000000062",
-                "019d2a80-0000-7000-8000-000000000063",
-                "019d2a80-0000-7000-8000-000000000064",
-            );
-        same_spelling["content"]["pos"][0]["forms"][0]["regional_variants"]["us"]["spelling"] =
-            json!("colour");
-        let historical: DraftFormsStepContentV3 =
-            serde_json::from_value(same_spelling["content"].clone()).unwrap();
-        let encoded = serde_json::to_value(historical).unwrap();
-        assert_eq!(
-            encoded["pos"][0]["dialect_rules"],
-            json!({"spelling_mode": "unified", "phonetic_mode": "distinguish"})
+
+        let request_result: Result<SaveFormsStepInputV3, AppError> =
+            decode_v3_forms_request(request.clone());
+        assert!(request_result.is_err(), "新请求缺 dialect_rules 必须失败");
+
+        let stored_result: Result<DraftFormsStepContentV3, _> =
+            serde_json::from_value(request["content"].clone());
+        assert!(
+            stored_result.is_err(),
+            "未上线词库已清空，stored V3 也必须遵循 latest dialect_rules 合同"
         );
     }
 

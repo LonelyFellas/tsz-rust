@@ -247,6 +247,19 @@ impl LexiconService {
                 reference_resolution.issues,
             ));
         }
+        if !newly_bound_relations.is_empty() {
+            let editor_meanings =
+                serde_json::to_value(&word.meanings).map_err(serialization_error)?;
+            LexiconRepository::sync_canonical_meanings(
+                &mut transaction,
+                entry_id,
+                &word.meanings,
+                &editor_meanings,
+                &catalog.sub_part_ids,
+            )
+            .await
+            .map_err(repository_error)?;
+        }
         let retained_sense_ids = word
             .meanings
             .pos

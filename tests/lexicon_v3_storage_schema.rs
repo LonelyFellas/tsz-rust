@@ -181,9 +181,21 @@ async fn insert_v3_group(
 }
 
 #[sqlx::test]
-async fn v3_dialect_rules_migration_backfills_in_order_and_rolls_back(pool: PgPool) {
+async fn v3_dialect_rules_migration_installs_latest_contract_on_fresh_data(pool: PgPool) {
     sqlx::raw_sql(include_str!(
         "../migrations/20260827100000_add_lexicon_v3_dialect_rules.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260827100000_add_lexicon_v3_dialect_rules.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260829110000_require_fresh_v3_dialect_contract.up.sql"
     ))
     .execute(&pool)
     .await
@@ -191,88 +203,22 @@ async fn v3_dialect_rules_migration_backfills_in_order_and_rolls_back(pool: PgPo
 
     let admin_id = insert_admin(&pool).await;
     let entry_id = insert_v3_entry(&pool, admin_id).await;
-    let pos_specs = [
-        (Uuid::now_v7(), "noun", "common", "colour", "colour"),
-        (Uuid::now_v7(), "verb", "uk_us", "learned", "learned"),
-        (
-            Uuid::now_v7(),
-            "adjective",
-            "uk_us",
-            "colourful",
-            "colorful",
-        ),
-    ];
+    let catalog_id = catalog_pos_id(&pool, "noun").await;
     let mut tx = pool.begin().await.unwrap();
-    for (ordinal, (pos_id, code, ..)) in pos_specs.iter().enumerate() {
-        insert_node(&mut tx, *pos_id, entry_id, "pos", None, "forms.pos", false).await;
-        let catalog_id = catalog_pos_id(&pool, code).await;
-        sqlx::query(
-            r#"
-            INSERT INTO lexicon.entry_pos (
-                id, entry_id, part_of_speech_id, content_schema_version,
-                spelling_mode, phonetic_mode, sort_order
-            ) VALUES ($1, $2, $3, 3, NULL, NULL, $4)
-            "#,
-        )
-        .bind(pos_id)
-        .bind(entry_id)
-        .bind(catalog_id)
-        .bind(ordinal as i32)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    }
+    let pos_id = insert_v3_pos(&mut tx, entry_id, catalog_id, 0).await;
     tx.commit().await.unwrap();
-
-    let pos_json = pos_specs
-        .iter()
-        .map(|(pos_id, code, mode, uk, us)| {
-            let regional_variants = if *mode == "common" {
-                json!({
-                    "mode": "common",
-                    "common": {
-                        "id": Uuid::now_v7(),
-                        "dialect": "common",
-                        "spelling": uk,
-                        "origin": "manual",
-                        "pronunciations": []
-                    }
-                })
-            } else {
-                json!({
-                    "mode": "uk_us",
-                    "uk": {
-                        "id": Uuid::now_v7(),
-                        "dialect": "uk",
-                        "spelling": uk,
-                        "origin": "manual",
-                        "pronunciations": []
-                    },
-                    "us": {
-                        "id": Uuid::now_v7(),
-                        "dialect": "us",
-                        "spelling": us,
-                        "origin": "manual",
-                        "pronunciations": []
-                    }
-                })
-            };
-            json!({
-                "pos_id": pos_id,
-                "pos": code,
-                "forms": [{
-                    "id": Uuid::now_v7(),
-                    "form_type": "base",
-                    "regional_variants": regional_variants
-                }],
-                "form_groups": []
-            })
-        })
-        .collect::<Vec<_>>();
-    let original_pos_ids = pos_json
-        .iter()
-        .map(|pos| pos["pos_id"].clone())
-        .collect::<Vec<_>>();
+    let forms = json!({
+        "pos": [{
+            "pos_id": pos_id,
+            "pos": "noun",
+            "dialect_rules": {
+                "spelling_mode": "unified",
+                "phonetic_mode": "unified"
+            },
+            "forms": [],
+            "form_groups": []
+        }]
+    });
     sqlx::query(
         r#"
         INSERT INTO lexicon.entry_editor_projection (
@@ -281,69 +227,30 @@ async fn v3_dialect_rules_migration_backfills_in_order_and_rolls_back(pool: PgPo
         "#,
     )
     .bind(entry_id)
-    .bind(json!({"pos": pos_json}))
+    .bind(&forms)
     .execute(&pool)
     .await
     .unwrap();
 
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260827100000_add_lexicon_v3_dialect_rules.up.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let forms: serde_json::Value =
+    let modes: (String, String) =
+        sqlx::query_as("SELECT spelling_mode, phonetic_mode FROM lexicon.entry_pos WHERE id = $1")
+            .bind(pos_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(modes, ("unified".to_owned(), "unified".to_owned()));
+    let stored_forms: serde_json::Value =
         sqlx::query_scalar("SELECT forms FROM lexicon.entry_editor_projection WHERE entry_id = $1")
             .bind(entry_id)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(
-        forms["pos"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|pos| pos["pos_id"].clone())
-            .collect::<Vec<_>>(),
-        original_pos_ids
-    );
-    assert_eq!(
-        forms["pos"][0]["dialect_rules"],
-        json!({"spelling_mode": "unified", "phonetic_mode": "unified"})
-    );
-    assert_eq!(
-        forms["pos"][1]["dialect_rules"],
-        json!({"spelling_mode": "unified", "phonetic_mode": "distinguish"})
-    );
-    assert_eq!(
-        forms["pos"][2]["dialect_rules"],
-        json!({"spelling_mode": "distinguish", "phonetic_mode": "distinguish"})
-    );
-    let modes: Vec<(String, String)> = sqlx::query_as(
-        r#"
-        SELECT spelling_mode, phonetic_mode
-        FROM lexicon.entry_pos
-        WHERE entry_id = $1
-        ORDER BY sort_order
-        "#,
-    )
-    .bind(entry_id)
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        modes,
-        [
-            ("unified".to_owned(), "unified".to_owned()),
-            ("unified".to_owned(), "distinguish".to_owned()),
-            ("distinguish".to_owned(), "distinguish".to_owned()),
-        ]
-    );
+    assert_eq!(stored_forms, forms);
+
     let invalid_du = sqlx::query(
         "UPDATE lexicon.entry_pos SET spelling_mode = 'distinguish', phonetic_mode = 'unified' WHERE id = $1",
     )
-    .bind(pos_specs[0].0)
+    .bind(pos_id)
     .execute(&pool)
     .await;
     assert_db_error(
@@ -353,7 +260,7 @@ async fn v3_dialect_rules_migration_backfills_in_order_and_rolls_back(pool: PgPo
     );
     let missing_rules =
         sqlx::query("UPDATE lexicon.entry_pos SET spelling_mode = NULL WHERE id = $1")
-            .bind(pos_specs[0].0)
+            .bind(pos_id)
             .execute(&pool)
             .await;
     assert_db_error(
@@ -361,34 +268,6 @@ async fn v3_dialect_rules_migration_backfills_in_order_and_rolls_back(pool: PgPo
         CHECK_VIOLATION,
         "lexicon_entry_pos_versioned_modes_check",
     );
-
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260827100000_add_lexicon_v3_dialect_rules.down.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    let rolled_back: serde_json::Value =
-        sqlx::query_scalar("SELECT forms FROM lexicon.entry_editor_projection WHERE entry_id = $1")
-            .bind(entry_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!(
-        rolled_back["pos"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|pos| pos.get("dialect_rules").is_none())
-    );
-    let null_modes: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM lexicon.entry_pos WHERE entry_id = $1 AND spelling_mode IS NULL AND phonetic_mode IS NULL",
-    )
-    .bind(entry_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(null_modes, 3);
 }
 
 async fn insert_v3_form(

@@ -116,19 +116,16 @@ Rust closed enum 穷举所有业务类型。
 本期使用当前 `base + 7` fixed enum，不建设在线自定义类型系统，不新增 variant，不保留 POS
 白名单。所有 POS 对 fixed enum 的能力完全相同。
 
-## 6. 历史数据兼容要求
+## 6. 数据基线要求
 
-fixed enum 模型执行以下规则：
+V3 尚未上线，2026-08-29 已明确清空本地 Smart Lexicon 历史业务数据。fixed enum 模型只执行
+latest contract：
 
-1. 发布前提供只读审计，枚举 active V3 draft、当前及历史 schema 3 publication 中实际出现的
-   `(pos, form_type)`；审计有未知值时阻塞上线，不自动改数据。
-2. 已知且仍允许的历史值原样保留，UUID、顺序、membership、地区变体和发音全部不变。
-3. 固定枚举之外的数据库脏值继续 fail closed；上线前审计必须报告并阻塞，不自动转换。
-4. 缺 `dialect_rules` 的历史 V3 JSON 按 canonical forms 确定性推导：common→UU；uk_us 同拼写→UD；
-   uk_us 异拼写→DD。推导不改变任何 UUID、数组顺序、文本或 membership。
-5. active editor projection 与 `entry_pos` 由 migration 同步回填；immutable publication snapshot 不
-   重写，在读取/历史激活时兼容推导。非法组合在 save/complete/validate/publish/history activation
-   返回稳定 issue，不静默转换。
+1. 所有 V3 editor/publication JSON 必须显式携带 `dialect_rules`，缺字段直接拒绝。
+2. 固定枚举之外的值、mixed common/uk_us shape、DU 或 rule/shape 不一致均 fail closed。
+3. migration 仅为 fresh/latest 数据安装约束；检测到 migration 前遗留的 V3 行时明确失败，不回填、
+   推导或转换。
+4. 本决定不删除或停用仍在产品中使用的 V2 路由与功能。
 
 ## 7. 验收标准
 
@@ -141,15 +138,15 @@ fixed enum 模型执行以下规则：
 - [x] 同一 form 被多个 group 共享，地区变体、多发音和稳定 UUID 不回归。
 - [x] 扩展词形能力不会把 pronoun/preposition 等自动加入例句自动关联；该判据必须与词形能力
       解耦并保持现有实词集合。
-- [x] 历史不匹配值按 §6 处理，没有静默删除或转换。
+- [x] latest contract 之外的数据按 §6 fail closed，不做旧 V3 兼容。
 - [x] `cargo test --locked --all-features`、OpenAPI 导出和相关 contract fixture 通过。
 - [x] 同一 POS 全部 common 可保存/完成，全部 uk_us 可保存/完成。
 - [x] 同一 POS 跨 form group 混用 common/uk_us 返回稳定 issue，shared form 不被复制或重复报错。
-- [x] mixed-mode 历史内容可原样读取，但 save/complete/validate/publish fail closed。
+- [x] mixed-mode 内容在读取/保存/完成/发布/激活均不受支持。
 - [x] `WordPosFormsV3.dialect_rules` 在 OpenAPI 中必填，使用独立 V3 schema。
 - [x] UU、UD、DD 均可 HTTP 保存、关系库存储、读取回显、完成与发布；DU 稳定拒绝。
 - [x] rule/shape 与 UD 异拼写均定位冲突 form；缺字段新请求定位 POS。
-- [x] migration up/down 可审计、可回滚，历史 snapshot 不重写且 activation 共用 authority。
+- [x] migration 在 fresh/latest 基线上安装约束，遇到遗留 V3 数据明确失败。
 
 ## 8. 决策记录
 

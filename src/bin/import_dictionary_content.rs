@@ -189,12 +189,13 @@ fn validate_contents(path: &Path) -> anyhow::Result<u64> {
 }
 
 fn validate_replacement(
-    existing: Option<(&str, &str)>,
+    existing: Option<(&str, &str, &str)>,
     replace_existing: bool,
     input_sha256: &str,
     source_locator: &str,
+    source_version: &str,
 ) -> anyhow::Result<()> {
-    let Some((existing_sha256, existing_locator)) = existing else {
+    let Some((existing_sha256, existing_locator, existing_source_version)) = existing else {
         return Ok(());
     };
     ensure!(
@@ -202,8 +203,10 @@ fn validate_replacement(
         "content is already imported for this dataset"
     );
     ensure!(
-        existing_sha256 == input_sha256 && existing_locator == source_locator,
-        "replacement content must keep the existing input SHA-256 and source locator"
+        existing_sha256 == input_sha256
+            && existing_locator == source_locator
+            && existing_source_version == source_version,
+        "replacement content must keep the existing input SHA-256, source locator and source version"
     );
     Ok(())
 }
@@ -302,19 +305,20 @@ async fn main() -> anyhow::Result<()> {
     .fetch_optional(&mut *tx)
     .await?
     .with_context(|| format!("active dataset not found: {}", args.dataset_version))?;
-    let existing = sqlx::query_as::<_, (String, String)>(
-        "SELECT input_sha256, source_locator FROM dictionary.content_imports WHERE dataset_id=$1",
+    let existing = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT input_sha256, source_locator, source_version FROM dictionary.content_imports WHERE dataset_id=$1",
     )
     .bind(dataset_id)
     .fetch_optional(&mut *tx)
     .await?;
     validate_replacement(
-        existing
-            .as_ref()
-            .map(|(sha256, locator)| (sha256.as_str(), locator.as_str())),
+        existing.as_ref().map(|(sha256, locator, source_version)| {
+            (sha256.as_str(), locator.as_str(), source_version.as_str())
+        }),
         args.replace_existing,
         &input_sha256,
         &args.source_locator,
+        &args.source_version,
     )?;
     if existing.is_some() {
         sqlx::query("DELETE FROM dictionary.entry_contents WHERE dataset_id=$1")
@@ -440,18 +444,73 @@ mod tests {
 
     #[test]
     fn replacement_requires_explicit_flag_and_identical_source_identity() {
-        let existing = Some(("same-sha", "https://kaikki.org/source"));
+        let existing = Some(("same-sha", "https://kaikki.org/source", "kaikki-2026-08-05"));
         assert!(
-            validate_replacement(existing, false, "same-sha", "https://kaikki.org/source").is_err()
+            validate_replacement(
+                existing,
+                false,
+                "same-sha",
+                "https://kaikki.org/source",
+                "kaikki-2026-08-05"
+            )
+            .is_err()
         );
         assert!(
-            validate_replacement(existing, true, "different", "https://kaikki.org/source").is_err()
+            validate_replacement(
+                existing,
+                true,
+                "different",
+                "https://kaikki.org/source",
+                "kaikki-2026-08-05"
+            )
+            .is_err()
         );
         assert!(
-            validate_replacement(existing, true, "same-sha", "https://other.example/source")
-                .is_err()
+            validate_replacement(
+                existing,
+                true,
+                "same-sha",
+                "https://other.example/source",
+                "kaikki-2026-08-05"
+            )
+            .is_err()
         );
-        validate_replacement(existing, true, "same-sha", "https://kaikki.org/source").unwrap();
-        validate_replacement(None, false, "new-sha", "https://kaikki.org/source").unwrap();
+        validate_replacement(
+            existing,
+            true,
+            "same-sha",
+            "https://kaikki.org/source",
+            "kaikki-2026-08-05",
+        )
+        .unwrap();
+        validate_replacement(
+            None,
+            false,
+            "new-sha",
+            "https://kaikki.org/source",
+            "kaikki-2026-08-05",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn replacement_rejects_conflicting_source_version() {
+        let existing_source_version = "kaikki-2026-08-05";
+        let incoming_source_version = "kaikki-2026-08-06";
+        let result = validate_replacement(
+            Some((
+                "same-sha",
+                "https://kaikki.org/source",
+                existing_source_version,
+            )),
+            true,
+            "same-sha",
+            "https://kaikki.org/source",
+            incoming_source_version,
+        );
+        assert!(
+            result.is_err(),
+            "相同 SHA/locator 不得忽略冲突版本：existing={existing_source_version}, incoming={incoming_source_version}"
+        );
     }
 }

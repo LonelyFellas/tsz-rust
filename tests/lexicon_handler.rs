@@ -7235,6 +7235,86 @@ async fn publishing_materializes_a_relation_word_that_has_no_entry_yet(pool: PgP
         "绑定后不得再留待建预定义词义：{published_relation}"
     );
 
+    let (status, reloaded_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "发布后读取源词条失败：{reloaded_source}"
+    );
+    let reloaded_relation =
+        &reloaded_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(
+        reloaded_relation["target_word_id"],
+        materialized.to_string(),
+        "发布后的 canonical 草稿必须同步为已绑定关系：{reloaded_relation}"
+    );
+    assert!(
+        reloaded_relation["pending_target_headword"].is_null(),
+        "发布后的 canonical 草稿不得残留 pending headword：{reloaded_relation}"
+    );
+    assert!(
+        reloaded_relation["pending_target_gloss"].is_null(),
+        "发布后的 canonical 草稿不得残留 pending gloss：{reloaded_relation}"
+    );
+
+    let stored_editor_meanings: Value = sqlx::query_scalar(
+        "SELECT meanings FROM lexicon.entry_editor_projection WHERE entry_id = $1",
+    )
+    .bind(source_entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let stored_editor_relation = &stored_editor_meanings["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(stored_editor_relation, reloaded_relation);
+
+    let (stored_target, stored_pending_headword, stored_pending_gloss): (
+        Option<Uuid>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT target_entry_id, pending_target_headword, pending_target_gloss FROM lexicon.relations WHERE entry_id = $1",
+    )
+    .bind(source_entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored_target, Some(materialized));
+    assert_eq!(stored_pending_headword, None);
+    assert_eq!(stored_pending_gloss, None);
+
+    let (status, resaved_source) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": reloaded_source["word"]["revision"],
+            "intent": "complete",
+            "content": reloaded_source["word"]["meanings"].clone(),
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "发布后 canonical 草稿应可再次保存：{resaved_source}"
+    );
+    let (status, republished_source) = publish_ready(&state, &bearer, &resaved_source).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "发布后再次保存并重复发布应保持可用：{republished_source}"
+    );
+
     let (status, materialized_word) = call(
         &state,
         Method::GET,
@@ -13156,6 +13236,26 @@ async fn v3_pending_relation_gloss_round_trips_and_materializes(pool: PgPool) {
     assert!(published_relation["target_word_id"].is_string());
     assert!(published_relation["pending_target_headword"].is_null());
     assert!(published_relation["pending_target_gloss"].is_null());
+
+    let (status, reloaded_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "发布后读取 V3 源词条失败：{reloaded_source}"
+    );
+    let reloaded_relation =
+        &reloaded_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert!(reloaded_relation["target_word_id"].is_string());
+    assert!(reloaded_relation["pending_target_headword"].is_null());
+    assert!(reloaded_relation["pending_target_gloss"].is_null());
 
     let materialized_id: Uuid = sqlx::query_scalar(
         "SELECT entry_id FROM lexicon.entry_headword_keys WHERE normalized_headword = $1 LIMIT 1",

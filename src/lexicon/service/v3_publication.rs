@@ -161,6 +161,21 @@ impl LexiconService {
         if !reference_resolution.issues.is_empty() {
             return Err(v3_validation_failed(reference_resolution.issues));
         }
+        if !newly_bound.is_empty() {
+            let canonical_v3_meanings = v2_meanings_to_v3(relational_meanings.clone())?;
+            let editor_meanings =
+                serde_json::to_value(&canonical_v3_meanings).map_err(serialization_error)?;
+            LexiconRepository::sync_canonical_meanings(
+                &mut tx,
+                entry_id,
+                &relational_meanings,
+                &editor_meanings,
+                &catalog.sub_part_ids,
+            )
+            .await
+            .map_err(repository_error)?;
+            word.meanings = canonical_v3_meanings;
+        }
         ensure_no_removed_inbound_senses(&mut tx, entry_id, &relational_meanings).await?;
 
         if let Some(publication) =

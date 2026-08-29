@@ -235,7 +235,7 @@ impl DialectRulesV3 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordPosFormsV3 {
     pub pos_id: Uuid,
@@ -245,60 +245,6 @@ pub struct WordPosFormsV3 {
     pub forms: Vec<WordConcreteFormV3>,
     #[schema(max_items = 2000)]
     pub form_groups: Vec<WordFormGroupV3>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WordPosFormsV3Wire {
-    pos_id: Uuid,
-    pos: String,
-    #[serde(default)]
-    dialect_rules: Option<DialectRulesV3>,
-    forms: Vec<WordConcreteFormV3>,
-    form_groups: Vec<WordFormGroupV3>,
-}
-
-impl<'de> Deserialize<'de> for WordPosFormsV3 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = WordPosFormsV3Wire::deserialize(deserializer)?;
-        let dialect_rules = wire
-            .dialect_rules
-            .unwrap_or_else(|| infer_legacy_dialect_rules_v3(&wire.forms));
-        Ok(Self {
-            pos_id: wire.pos_id,
-            pos: wire.pos,
-            dialect_rules,
-            forms: wire.forms,
-            form_groups: wire.form_groups,
-        })
-    }
-}
-
-fn infer_legacy_dialect_rules_v3(forms: &[WordConcreteFormV3]) -> DialectRulesV3 {
-    let Some(first) = forms.first() else {
-        return DialectRulesV3::UNIFIED;
-    };
-    if matches!(
-        &first.regional_variants,
-        WordRegionalVariantsV3::Common { .. }
-    ) {
-        return DialectRulesV3::UNIFIED;
-    }
-    let all_uk_us_spellings_match = forms
-        .iter()
-        .filter_map(|form| match &form.regional_variants {
-            WordRegionalVariantsV3::Common { .. } => None,
-            WordRegionalVariantsV3::UkUs { uk, us } => Some(uk.spelling == us.spelling),
-        })
-        .all(|matches| matches);
-    if all_uk_us_spellings_match {
-        DialectRulesV3::UNIFIED_DISTINGUISH
-    } else {
-        DialectRulesV3::DISTINGUISH
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
