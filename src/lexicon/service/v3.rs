@@ -234,6 +234,269 @@ fn materialize_v3_detection_forms(
     DraftFormsStepContentV3 { pos }
 }
 
+fn cloned_v3_pronunciations(values: &[WordPronunciationV3]) -> Vec<WordPronunciationV3> {
+    values
+        .iter()
+        .map(|value| WordPronunciationV3 {
+            id: Uuid::now_v7(),
+            dict_phonetic: value.dict_phonetic.clone(),
+            actual_pron: value.actual_pron.clone(),
+            style: value.style,
+        })
+        .collect()
+}
+
+fn cloned_v3_component_usages(values: &[PhraseComponentUsageV3]) -> Vec<PhraseComponentUsageV3> {
+    values
+        .iter()
+        .cloned()
+        .map(|value| match value {
+            PhraseComponentUsageV3::Unresolved { literal, .. } => {
+                PhraseComponentUsageV3::Unresolved {
+                    id: Uuid::now_v7(),
+                    literal,
+                }
+            }
+            PhraseComponentUsageV3::Resolved {
+                literal,
+                target_word_id,
+                target_publication_id,
+                target_pos_id,
+                target_base_form_id,
+                target_sense_id,
+                target_form_id,
+                target_variant_id,
+                target_dialect,
+                target_form_type,
+                target_headword,
+                target_gloss,
+                ..
+            } => PhraseComponentUsageV3::Resolved {
+                id: Uuid::now_v7(),
+                literal,
+                target_word_id,
+                target_publication_id,
+                target_pos_id,
+                target_base_form_id,
+                target_sense_id,
+                target_form_id,
+                target_variant_id,
+                target_dialect,
+                target_form_type,
+                target_headword,
+                target_gloss,
+            },
+        })
+        .collect()
+}
+
+fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: &WordHeadwordsV2) {
+    for pos in &mut forms.pos {
+        let has_suggested_base = pos.forms.iter().any(|form| {
+            form.form_type == WordFormTypeV3::Base
+                && match &form.regional_variants {
+                    WordRegionalVariantsV3::Common { common } => !common.spelling.is_empty(),
+                    WordRegionalVariantsV3::UkUs { uk, us } => {
+                        !uk.spelling.is_empty() || !us.spelling.is_empty()
+                    }
+                }
+        });
+        if !has_suggested_base {
+            continue;
+        }
+        match headwords {
+            WordHeadwordsV2::Distinguish { .. } => {
+                pos.dialect_rules = DialectRulesV3::DISTINGUISH;
+                for form in &mut pos.forms {
+                    if let WordRegionalVariantsV3::Common { common } = &form.regional_variants {
+                        form.regional_variants = WordRegionalVariantsV3::UkUs {
+                            uk: WordUkFormVariantV3 {
+                                id: common.id,
+                                dialect: UkDialectV3::Uk,
+                                spelling: common.spelling.clone(),
+                                origin: common.origin,
+                                pronunciations: common.pronunciations.clone(),
+                                component_usages: common.component_usages.clone(),
+                            },
+                            us: WordUsFormVariantV3 {
+                                id: Uuid::now_v7(),
+                                dialect: UsDialectV3::Us,
+                                spelling: common.spelling.clone(),
+                                origin: common.origin,
+                                pronunciations: cloned_v3_pronunciations(&common.pronunciations),
+                                component_usages: cloned_v3_component_usages(
+                                    &common.component_usages,
+                                )
+                                .into(),
+                            },
+                        };
+                    }
+                }
+            }
+            WordHeadwordsV2::Unified { .. } => {
+                pos.dialect_rules = if pos.dialect_rules.phonetic_mode
+                    == crate::lexicon::dto::DialectModeV3::Distinguish
+                {
+                    DialectRulesV3::UNIFIED_DISTINGUISH
+                } else {
+                    DialectRulesV3::UNIFIED
+                };
+                for form in &mut pos.forms {
+                    match (&mut form.regional_variants, pos.dialect_rules) {
+                        (
+                            WordRegionalVariantsV3::UkUs { uk, us },
+                            DialectRulesV3::UNIFIED_DISTINGUISH,
+                        ) => us.spelling.clone_from(&uk.spelling),
+                        (WordRegionalVariantsV3::UkUs { uk, .. }, DialectRulesV3::UNIFIED) => {
+                            form.regional_variants = WordRegionalVariantsV3::Common {
+                                common: WordCommonFormVariantV3 {
+                                    id: uk.id,
+                                    dialect: CommonDialectV3::Common,
+                                    spelling: uk.spelling.clone(),
+                                    origin: uk.origin,
+                                    pronunciations: uk.pronunciations.clone(),
+                                    component_usages: uk.component_usages.clone(),
+                                },
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        for form in &mut pos.forms {
+            if form.form_type != WordFormTypeV3::Base {
+                continue;
+            }
+            match (headwords, &mut form.regional_variants) {
+                (
+                    WordHeadwordsV2::Unified { common },
+                    WordRegionalVariantsV3::Common { common: variant },
+                ) => {
+                    if variant.spelling != *common {
+                        variant.origin = TextOrigin::Manual;
+                    }
+                    variant.spelling.clone_from(common);
+                }
+                (WordHeadwordsV2::Unified { common }, WordRegionalVariantsV3::UkUs { uk, us }) => {
+                    if uk.spelling != *common {
+                        uk.origin = TextOrigin::Manual;
+                    }
+                    if us.spelling != *common {
+                        us.origin = TextOrigin::Manual;
+                    }
+                    uk.spelling.clone_from(common);
+                    us.spelling.clone_from(common);
+                }
+                (
+                    WordHeadwordsV2::Distinguish {
+                        uk: confirmed_uk,
+                        us: confirmed_us,
+                        ..
+                    },
+                    WordRegionalVariantsV3::UkUs { uk, us },
+                ) => {
+                    if uk.spelling != *confirmed_uk {
+                        uk.origin = TextOrigin::Manual;
+                    }
+                    if us.spelling != *confirmed_us {
+                        us.origin = TextOrigin::Manual;
+                    }
+                    uk.spelling.clone_from(confirmed_uk);
+                    us.spelling.clone_from(confirmed_us);
+                }
+                (WordHeadwordsV2::Distinguish { .. }, WordRegionalVariantsV3::Common { .. }) => {
+                    unreachable!("distinguish headwords convert every V3 form to uk_us")
+                }
+            }
+        }
+    }
+}
+
+fn compatibility_v3_headwords(
+    detection: &DetectLexiconSurfaceResponseV3,
+    forms: &DraftFormsStepContentV3,
+) -> Result<WordHeadwordsV2, LexiconServiceError> {
+    let mut candidates = std::collections::BTreeSet::new();
+    for form in forms
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.forms)
+        .filter(|form| form.form_type == WordFormTypeV3::Base)
+    {
+        match &form.regional_variants {
+            WordRegionalVariantsV3::Common { common } if !common.spelling.trim().is_empty() => {
+                candidates.insert(("common", common.spelling.clone(), String::new()));
+            }
+            WordRegionalVariantsV3::UkUs { uk, us }
+                if !uk.spelling.trim().is_empty() && !us.spelling.trim().is_empty() =>
+            {
+                candidates.insert(("uk_us", uk.spelling.clone(), us.spelling.clone()));
+            }
+            _ => {}
+        }
+    }
+    if candidates.len() == 1 {
+        let (mode, first, second) = candidates.into_iter().next().expect("one candidate");
+        if mode == "common" {
+            return Ok(WordHeadwordsV2::Unified { common: first });
+        }
+        let normalized_uk = normalize_headword(&first).map_err(map_headword_error)?.key;
+        let normalized_us = normalize_headword(&second).map_err(map_headword_error)?.key;
+        let source_dialect = if detection.normalized_surface == normalized_us
+            && detection.normalized_surface != normalized_uk
+        {
+            SourceDialect::Us
+        } else {
+            SourceDialect::Uk
+        };
+        return Ok(WordHeadwordsV2::Distinguish {
+            uk: first,
+            us: second,
+            source_dialect,
+        });
+    }
+    Ok(WordHeadwordsV2::Unified {
+        common: NormalizedHeadword::parse(&detection.request.surface)
+            .map_err(map_surface_error)?
+            .display,
+    })
+}
+
+fn confirmed_v3_headwords_presentation(headwords: &WordHeadwordsV2) -> EntryPresentationV3 {
+    let matched_surfaces = ordered_headword_sides(headwords)
+        .into_iter()
+        .map(|(_, spelling)| spelling.to_owned())
+        .collect::<Vec<_>>();
+    EntryPresentationV3 {
+        label: matched_surfaces.join(" / "),
+        matched_surfaces,
+        strategy_version: crate::lexicon::v3_projection::NATIVE_PRESENTATION_STRATEGY_VERSION
+            .to_owned(),
+    }
+}
+
+fn initial_v3_headword_keys(
+    headwords: &WordHeadwordsV2,
+) -> Result<Vec<String>, LexiconServiceError> {
+    match headwords {
+        WordHeadwordsV2::Unified { common } => {
+            let key = normalize_headword(common).map_err(map_headword_error)?.key;
+            Ok(vec![format!("uk:{key}"), format!("us:{key}")])
+        }
+        WordHeadwordsV2::Distinguish { uk, us, .. } => Ok(vec![
+            format!(
+                "uk:{}",
+                normalize_headword(uk).map_err(map_headword_error)?.key
+            ),
+            format!(
+                "us:{}",
+                normalize_headword(us).map_err(map_headword_error)?.key
+            ),
+        ]),
+    }
+}
+
 fn preserve_missing_component_usages(
     proposed: &mut DraftFormsStepContentV3,
     current: &DraftFormsStepContentV3,
@@ -644,9 +907,13 @@ impl LexiconService {
         actor_id: Uuid,
         request_id: Uuid,
         idempotency_key: Uuid,
-        input: CreateAdminWordV3Input,
+        mut input: CreateAdminWordV3Input,
         write_projection: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
+        let explicit_headwords = input.headwords.is_some();
+        if let Some(headwords) = &mut input.headwords {
+            normalize_submitted_headwords(headwords)?;
+        }
         let request_hash = sha256_json(&input).map_err(serialization_error)?;
         let mut transaction = self
             .repository
@@ -694,21 +961,50 @@ impl LexiconService {
         if detection.request.kind != input.kind {
             return Err(LexiconServiceError::DetectionMismatch);
         }
+        let entry_id = Uuid::now_v7();
+        let now = Utc::now();
+        let mut forms = materialize_v3_detection_forms(&detection);
+        let confirmed_headwords = if let Some(headwords) = &input.headwords {
+            apply_confirmed_v3_headwords(&mut forms, headwords);
+            headwords.clone()
+        } else {
+            tracing::info!(
+                actor_id = %actor_id,
+                detection_id = %detection.detection_id,
+                "accepted legacy V3 create body without explicit headwords"
+            );
+            compatibility_v3_headwords(&detection, &forms)?
+        };
+        let initial_headword_keys = initial_v3_headword_keys(&confirmed_headwords)?;
         let verified_surface = if write_projection {
-            self.verify_v3_detection_surface_for_create(
-                &mut transaction,
-                actor_id,
-                detection.detection_id,
-                &detection.normalized_surface,
-                input.confirmed_surface_match_token.as_deref(),
-            )
-            .await?
+            if explicit_headwords {
+                self.verify_v3_final_surface_for_create(
+                    &mut transaction,
+                    actor_id,
+                    detection.detection_id,
+                    entry_id,
+                    input.kind,
+                    &forms,
+                    &confirmed_headwords,
+                    &initial_headword_keys,
+                    input.confirmed_surface_match_token.as_deref(),
+                )
+                .await?
+            } else {
+                self.verify_v3_detection_surface_for_create(
+                    &mut transaction,
+                    actor_id,
+                    detection.detection_id,
+                    input.kind,
+                    &detection.normalized_surface,
+                    &initial_headword_keys,
+                    input.confirmed_surface_match_token.as_deref(),
+                )
+                .await?
+            }
         } else {
             None
         };
-        let entry_id = Uuid::now_v7();
-        let now = Utc::now();
-        let forms = materialize_v3_detection_forms(&detection);
         let meanings = DraftMeaningsStepContentV3::default();
         let catalog_parts = resolve_v3_catalog_parts(&mut transaction, &forms).await?;
         sqlx::query(
@@ -731,11 +1027,14 @@ impl LexiconService {
         sqlx::query(
             r#"
             INSERT INTO lexicon.v3_entry_state (
-                entry_id, content_schema_version, origin, publication_canary_enabled
-            ) VALUES ($1, 3, 'native', FALSE)
+                entry_id, content_schema_version, origin,
+                publication_canary_enabled, initial_headwords, initial_headword_keys
+            ) VALUES ($1, 3, 'native', FALSE, $2, $3)
             "#,
         )
         .bind(entry_id)
+        .bind(serde_json::to_value(&confirmed_headwords).map_err(serialization_error)?)
+        .bind(&initial_headword_keys)
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
@@ -762,14 +1061,23 @@ impl LexiconService {
             "#,
         )
         .bind(entry_id)
-        .bind(sha256_json(&detection).map_err(serialization_error)?)
+        .bind(
+            sha256_json(&serde_json::json!({
+                "detection": detection,
+                "headwords": confirmed_headwords,
+            }))
+            .map_err(serialization_error)?,
+        )
         .bind(now)
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
-        let presentation =
+        let presentation = if explicit_headwords {
+            confirmed_v3_headwords_presentation(&confirmed_headwords)
+        } else {
             crate::lexicon::v3_projection::presentation_from_native_forms(entry_id, &forms)
-                .map_err(|_| invariant_record())?;
+                .map_err(|_| invariant_record())?
+        };
         if write_projection {
             upsert_presentation(&mut transaction, entry_id, 1, &presentation).await?;
             replace_v3_surface_projection(&mut transaction, entry_id, input.kind, 1, &forms)
@@ -828,6 +1136,7 @@ impl LexiconService {
             1,
             serde_json::json!({
                 "schema_version": 3,
+                "explicit_headwords": explicit_headwords,
                 "surface_snapshot_id": verified_surface.as_ref().map(|value| value.snapshot_id),
             }),
         )
@@ -1013,6 +1322,7 @@ impl LexiconService {
                     &mut transaction,
                     actor_id,
                     entry_id,
+                    parse_v3_kind(&record.kind).ok_or_else(invariant_record)?,
                     record.revision,
                     next_revision,
                     &current_forms,

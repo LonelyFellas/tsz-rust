@@ -1,5 +1,5 @@
 use anyhow::Context;
-use tsz_rust::lexicon::v3_migration;
+use tsz_rust::lexicon::{v3_initial_headword_backfill, v3_migration};
 use uuid::Uuid;
 
 #[tokio::main]
@@ -7,7 +7,7 @@ async fn main() -> anyhow::Result<()> {
     let command = std::env::args()
         .nth(1)
         .context(
-            "usage: lexicon_v3_migration <inventory|dry-run|approve|apply|verify|enable-canary|rollback>",
+            "usage: lexicon_v3_migration <inventory|dry-run|approve|apply|verify|enable-canary|rollback|initial-headwords-dry-run|initial-headwords-apply>",
         )?;
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
     let pool = tsz_rust::platform::connect_db(&database_url).await?;
@@ -68,6 +68,16 @@ async fn main() -> anyhow::Result<()> {
                 required_uuid("MIGRATION_BATCH_ID")?,
                 required_uuid("MIGRATION_ACTOR_ADMIN_ID")?,
                 required_uuid("MIGRATION_REQUEST_ID")?,
+            )
+            .await?,
+        )?,
+        "initial-headwords-dry-run" => {
+            serde_json::to_value(v3_initial_headword_backfill::dry_run(&pool).await?)?
+        }
+        "initial-headwords-apply" => serde_json::to_value(
+            v3_initial_headword_backfill::apply(
+                &pool,
+                &required_string("MIGRATION_MANIFEST_DIGEST")?,
             )
             .await?,
         )?,
