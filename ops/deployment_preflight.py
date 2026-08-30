@@ -51,13 +51,14 @@ def collect_snapshot(
         "PATH": os.environ.get("PATH", os.defpath),
         "LC_ALL": "C",
         "PGCONNECT_TIMEOUT": "8",
-        "PGDATABASE": database_url,
     }
     for name, query in SCALAR_QUERIES:
         try:
             completed = runner(
                 [
                     "psql",
+                    "--dbname",
+                    database_url,
                     "-X",
                     "-A",
                     "-t",
@@ -72,8 +73,8 @@ def collect_snapshot(
                 text=True,
                 env=psql_environment,
             )
-        except OSError as error:
-            raise PreflightError(f"{name} query could not start: {error.strerror}") from error
+        except OSError:
+            raise PreflightError(f"{name} query could not start") from None
         snapshot[name] = _parse_scalar(name, completed)
     return snapshot
 
