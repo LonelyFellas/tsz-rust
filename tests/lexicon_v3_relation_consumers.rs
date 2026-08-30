@@ -1566,8 +1566,10 @@ async fn sentence_associations_resolve_v3_targets_and_edit_v3_sources(pool: PgPo
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("test Redis connection should succeed");
+    let mut flags = SmartLexiconV3Flags::all_enabled();
+    flags.sentence_target_discovery = false;
     let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+        .with_smart_lexicon_v3_flags_for_test(flags);
     let admin_id = seed_admin(&pool).await;
     let bearer = bearer(&state, admin_id);
     let target = seed_migrated_target(&pool, admin_id, "legacyharbour").await;

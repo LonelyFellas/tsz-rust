@@ -445,6 +445,7 @@ fn convert_regional_variants(
                         mappings,
                         counts,
                     ),
+                    component_usages: Vec::new().into(),
                 },
             })
         }
@@ -460,6 +461,7 @@ fn convert_regional_variants(
                     spelling: uk.spelling.clone(),
                     origin: uk.origin,
                     pronunciations: uk_pronunciations,
+                    component_usages: Vec::new().into(),
                 },
                 us: WordUsFormVariantV3 {
                     id: us.id,
@@ -467,6 +469,7 @@ fn convert_regional_variants(
                     spelling: us.spelling.clone(),
                     origin: us.origin,
                     pronunciations: us_pronunciations,
+                    component_usages: Vec::new().into(),
                 },
             })
         }

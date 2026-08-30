@@ -51,6 +51,7 @@ impl LexiconService {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn publish(
         &self,
         actor_id: Uuid,
@@ -59,6 +60,7 @@ impl LexiconService {
         idempotency_key: Uuid,
         input: PublishAdminWordV2Input,
         allow_v3_targets: bool,
+        allow_automatic_associations: bool,
     ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
         if input.base_revision < 1 {
             return Err(LexiconServiceError::InvalidField {
@@ -377,6 +379,8 @@ impl LexiconService {
             entry_id,
             &word.meanings,
             allow_v3_targets,
+            allow_automatic_associations,
+            None,
         )
         .await?;
         Self::hydrate_sentence_associations_in(&mut transaction, &mut word).await?;

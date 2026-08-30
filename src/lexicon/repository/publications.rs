@@ -1034,4 +1034,46 @@ impl LexiconRepository {
         .map(|_| ())
         .map_err(map_target_publication_lock_error)
     }
+
+    pub(crate) async fn phrase_component_publication_targets_for_publish(
+        tx: &mut Transaction<'_, Postgres>,
+        target_entry_ids: &[Uuid],
+        target_publication_ids: &[Uuid],
+        target_sense_ids: &[Uuid],
+    ) -> Result<Vec<(Uuid, Uuid, Uuid, i64)>, LexiconRepositoryError> {
+        if target_entry_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_as(
+            r#"
+            WITH requested AS (
+                SELECT *
+                FROM unnest($1::uuid[], $2::uuid[], $3::uuid[])
+                    AS target(entry_id, publication_id, sense_id)
+            )
+            SELECT entry.id, publication.id, target.sense_id,
+                   publication.source_revision
+            FROM requested target
+            JOIN lexicon.entries entry
+              ON entry.id = target.entry_id
+             AND entry.archived_at IS NULL
+            JOIN lexicon.entry_publications publication
+              ON publication.id = target.publication_id
+             AND publication.entry_id = entry.id
+            JOIN lexicon.entry_publication_nodes sense
+              ON sense.publication_id = publication.id
+             AND sense.entry_id = entry.id
+             AND sense.node_id = target.sense_id
+             AND sense.node_type = 'sense'
+            ORDER BY entry.id, publication.id, target.sense_id
+            FOR SHARE OF entry NOWAIT
+            "#,
+        )
+        .bind(target_entry_ids)
+        .bind(target_publication_ids)
+        .bind(target_sense_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_target_publication_lock_error)
+    }
 }

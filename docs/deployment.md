@@ -145,6 +145,20 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /opt/tsz-rust/ops/speech-voice-catalo
 
 涉及数据库写入前，先按 [PostgreSQL 备份与恢复验证](postgresql-backup-restore.md) 创建并验证当前恢复点。客户端主版本不得低于数据库服务端主版本。
 
+### Smart Lexicon V3 例句关联升级边界
+
+多片段关联、分层译文与短语成分用词采用 expand-only 迁移。部署新后端时必须保持
+`SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS=false` 和
+`SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY=false`，先完成兼容前端、迁移与新后端 smoke，再部署激活前端。
+
+开启两个写闸前必须完成并验证数据库备份。首次写入多片段关联、分层译文或成分用词后，本次升级进入
+**forward-only** 状态：旧二进制和 down migration 不再是安全回退目标，只允许关闭两个新写闸后以前向修复版本恢复服务。
+不得在已有新格式数据时恢复旧 writer；对应 down migration 会主动拒绝删除仍有业务数据的结构。
+
+本阶段一键发现的生产范围限定为单词与连续短语；管理员手选 `selected_segments` 可保存多个
+不连续片段。可分离短语状态机已有内部核心，但生产 pattern 数据源与自动召回留待后续版本，
+本次发布不宣称自动发现可分离短语。
+
 ### 部署来源 manifest
 
 服务器目录不是 Git checkout。每次部署只有在精确 `origin/main` 的 CI success、二进制编译/重启和 health/ready/auth smoke 全部通过后，才使用仓库工具发布正式 manifest：
