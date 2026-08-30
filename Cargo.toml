@@ -6,6 +6,7 @@ edition = "2024"
 default-run = "tsz-rust"
 
 [dependencies]
+aho-corasick = "1.1.4"
 anyhow = "1.0.103"
 async-trait = "0.1.89"
 axum = "0.8.9"
@@ -19,6 +20,7 @@ redis = { version = "1", default-features = false, features = ["script"] }
 dotenvy = "0.15.7"
 envy = "0.4.2"
 flate2 = "1.1.9"
+fst = "0.4.7"
 futures-util = "0.3.33"
 getrandom = "0.4.3"
 http = "1.4.0"

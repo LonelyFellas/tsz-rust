@@ -3,6 +3,37 @@ use super::*;
 // --- entry query ---
 
 #[utoipa::path(
+    post,
+    path = "/api/v1/admin/lexicon/entries/sentence-targets/resolve",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    request_body = ResolveSentenceTargetsV3Input,
+    responses(
+        (status = 200, description = "发现句中已发布词条目标及手选草稿候选", body = ResolveSentenceTargetsV3Response),
+        (status = 400, description = "JSON 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 422, description = "正文、片段或分页参数非法"),
+        (status = 503, description = "V3 发现能力未开启")
+    )
+)]
+pub async fn resolve_sentence_targets(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiJson(input): ApiJson<ResolveSentenceTargetsV3Input>,
+) -> Result<(StatusCode, Json<ResolveSentenceTargetsV3Response>), AppError> {
+    require_active_admin(&state, &auth).await?;
+    let response = service(&state)
+        .resolve_sentence_targets_v3(
+            input,
+            sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+        )
+        .await
+        .map_err(map_error)?;
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
     get,
     path = "/api/v1/admin/lexicon/entries/{id}",
     tag = "admin-lexicon",
@@ -35,6 +66,47 @@ pub async fn get(
         &mut response,
         state.smart_lexicon_v3_flags.legacy_bridge_read,
     );
+    apply_draft_sentence_association_flag(
+        &mut response,
+        sentence_association_enabled(state.smart_lexicon_v3_flags),
+        sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+    );
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/lexicon/entries/{id}/pending-sentence-associations",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(EntryPath, PendingSentenceAssociationListQuery),
+    responses(
+        (status = 200, description = "当前目标词条可认领的 Pending 例句关联", body = PendingSentenceAssociationListResponse),
+        (status = 400, description = "词条 ID、cursor 或 page_size 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 404, description = "目标词条不存在、已归档或尚未发布"),
+        (status = 503, description = "V3 读取、编辑或投影能力未开启")
+    )
+)]
+pub async fn list_pending_sentence_associations(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(path): ApiPath<EntryPath>,
+    ApiQuery(query): ApiQuery<PendingSentenceAssociationListQuery>,
+) -> Result<(StatusCode, Json<PendingSentenceAssociationListResponse>), AppError> {
+    require_active_admin(&state, &auth).await?;
+    let response = service(&state)
+        .pending_sentence_associations(
+            path.id,
+            query,
+            state.smart_lexicon_v3_flags.read
+                && state.smart_lexicon_v3_flags.edit
+                && state.smart_lexicon_v3_flags.projection
+                && state.smart_lexicon_v3_flags.sentence_associations,
+        )
+        .await
+        .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -68,6 +140,11 @@ pub async fn list_publications(
         apply_publication_legacy_bridge_read_flag(
             publication,
             state.smart_lexicon_v3_flags.legacy_bridge_read,
+        );
+        apply_publication_sentence_association_flag(
+            publication,
+            sentence_association_enabled(state.smart_lexicon_v3_flags),
+            sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
         );
     }
     Ok((StatusCode::OK, Json(response)))
@@ -108,6 +185,11 @@ pub async fn get_publication(
     apply_publication_legacy_bridge_read_flag(
         &mut response.publication,
         state.smart_lexicon_v3_flags.legacy_bridge_read,
+    );
+    apply_publication_sentence_association_flag(
+        &mut response.publication,
+        sentence_association_enabled(state.smart_lexicon_v3_flags),
+        sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
     );
     Ok((StatusCode::OK, Json(response)))
 }

@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::{
     admin::{AdminAuth, authorization::require_active_admin},
     api::{ApiJson, ApiPath, ApiQuery},
+    config::SmartLexiconV3Flags,
     error::{AppError, ErrorCode, ProblemMeta},
     lexicon::{
         detection_store::DetectionStore,
@@ -16,15 +17,18 @@ use crate::{
             ActivatePublicationAnyInput, ActivatePublicationInput, ActivatePublicationV3Input,
             AdminWordAny, AdminWordAnyEnvelope, AdminWordDraftAnyEnvelope, AdminWordListQuery,
             AdminWordListResponse, AdminWordPublicationAny, AdminWordPublicationEnvelope,
-            AdminWordPublicationListResponse, AdminWordStats, CreateAdminWordAnyInput,
-            CreateAdminWordV2Input, CreateAdminWordV3Input, DeleteDraftInput,
-            DetectLexiconInputAny, DetectLexiconResponseAny, DetectLexiconSurfaceV3Input,
-            DetectWordInputV2, DraftValidationResponseAny, EntryLifecycleBatchInput,
-            EntryLifecycleBatchResponseAny, EntryLifecycleInput, EntryPath, FormsImpactResponseAny,
+            AdminWordPublicationListResponse, AdminWordStats, ClaimPendingSentenceAssociationInput,
+            CreateAdminWordAnyInput, CreateAdminWordV2Input, CreateAdminWordV3Input,
+            DeleteDraftInput, DetectLexiconInputAny, DetectLexiconResponseAny,
+            DetectLexiconSurfaceV3Input, DetectWordInputV2, DraftValidationResponseAny,
+            EntryLifecycleBatchInput, EntryLifecycleBatchResponseAny, EntryLifecycleInput,
+            EntryPath, FormsImpactResponseAny, PendingSentenceAssociationListQuery,
+            PendingSentenceAssociationListResponse, PendingSentenceAssociationPath,
             PreviewFormsImpactInputAny, PreviewFormsImpactInputV2, PreviewFormsImpactInputV3,
             PublicationPath, PublishAdminWordAnyInput, PublishAdminWordV2Input,
             PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
-            ReplaceSentenceAssociationsInput, SaveFormsStepInput, SaveFormsStepInputAny,
+            ReplaceSentenceAssociationsInput, ResolveSentenceTargetsV3Input,
+            ResolveSentenceTargetsV3Response, SaveFormsStepInput, SaveFormsStepInputAny,
             SaveFormsStepInputV3, SaveMeaningsStepInput, SaveMeaningsStepInputAny,
             SaveMeaningsStepInputV3, SentencePath, StepSaveIntent, SuggestDialectVariantsInputV2,
             SuggestDialectVariantsResponseV2, SurfaceMatchPageAny, SurfaceMatchSnapshotPathV2,
@@ -47,13 +51,14 @@ pub(crate) mod lifecycle;
 pub(crate) mod query;
 
 pub use commands::{
-    activate_publication, create, detect, preview_forms_impact, publish,
-    replace_sentence_associations, save_forms, save_meanings, suggest_dialect_variants, validate,
+    activate_publication, claim_pending_sentence_association, create, detect, preview_forms_impact,
+    publish, replace_sentence_associations, save_forms, save_meanings, suggest_dialect_variants,
+    validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_draft, restore, restore_batch};
 pub use query::{
-    get, get_publication, list, list_publications, related_search, stats,
-    surface_match_snapshot_page,
+    get, get_publication, list, list_pending_sentence_associations, list_publications,
+    related_search, resolve_sentence_targets, stats, surface_match_snapshot_page,
 };
 
 fn service(state: &AppState) -> LexiconService {
@@ -110,6 +115,25 @@ fn apply_legacy_bridge_read_flag(response: &mut AdminWordAnyEnvelope, enabled: b
     }
 }
 
+fn sentence_association_enabled(flags: SmartLexiconV3Flags) -> bool {
+    flags.read && flags.edit && flags.projection && flags.sentence_associations
+}
+
+fn sentence_target_discovery_enabled(flags: SmartLexiconV3Flags) -> bool {
+    sentence_association_enabled(flags) && flags.sentence_target_discovery
+}
+
+fn apply_sentence_association_flag(
+    response: &mut AdminWordAnyEnvelope,
+    associations_enabled: bool,
+    discovery_enabled: bool,
+) {
+    if let AdminWordAny::V3(word) = &mut response.word {
+        word.capabilities.sentence_associations = Some(associations_enabled);
+        word.capabilities.sentence_target_discovery = Some(discovery_enabled);
+    }
+}
+
 fn apply_lifecycle_batch_legacy_bridge_read_flag(
     response: &mut EntryLifecycleBatchResponseAny,
     enabled: bool,
@@ -127,6 +151,28 @@ fn apply_lifecycle_batch_legacy_bridge_read_flag(
 fn apply_draft_legacy_bridge_read_flag(response: &mut AdminWordDraftAnyEnvelope, enabled: bool) {
     if !enabled && let AdminWordDraftAnyEnvelope::V3(envelope) = response {
         envelope.word.compatibility = None;
+    }
+}
+
+fn apply_draft_sentence_association_flag(
+    response: &mut AdminWordDraftAnyEnvelope,
+    associations_enabled: bool,
+    discovery_enabled: bool,
+) {
+    if let AdminWordDraftAnyEnvelope::V3(envelope) = response {
+        envelope.word.capabilities.sentence_associations = Some(associations_enabled);
+        envelope.word.capabilities.sentence_target_discovery = Some(discovery_enabled);
+    }
+}
+
+fn apply_publication_sentence_association_flag(
+    publication: &mut AdminWordPublicationAny,
+    associations_enabled: bool,
+    discovery_enabled: bool,
+) {
+    if let AdminWordPublicationAny::V3(publication) = publication {
+        publication.word.capabilities.sentence_associations = Some(associations_enabled);
+        publication.word.capabilities.sentence_target_discovery = Some(discovery_enabled);
     }
 }
 
@@ -289,6 +335,20 @@ fn map_error(error: LexiconServiceError) -> AppError {
             ErrorCode::SentenceAssociationsUnresolved,
             None,
             "sentence associations are not resolved for the current text",
+        ),
+        LexiconServiceError::SentenceAssociationClientUpgradeRequired => AppError::conflict(
+            ErrorCode::SentenceAssociationClientUpgradeRequired,
+            None,
+            "upgrade the editor before replacing segmented sentence associations",
+        ),
+        LexiconServiceError::PendingSentenceAssociationNotFound => AppError::not_found_with_code(
+            ErrorCode::PendingSentenceAssociationNotFound,
+            "pending sentence association not found",
+        ),
+        LexiconServiceError::PendingSentenceAssociationClaimed => AppError::conflict(
+            ErrorCode::PendingSentenceAssociationClaimed,
+            None,
+            "pending sentence association was already claimed",
         ),
         LexiconServiceError::PublicationNotFound => {
             AppError::not_found_with_code(ErrorCode::PublicationNotFound, "publication not found")

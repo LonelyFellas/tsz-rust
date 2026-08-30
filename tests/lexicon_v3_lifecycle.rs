@@ -1338,7 +1338,7 @@ async fn v3_lifecycle_flags_fail_closed_without_affecting_v2(pool: PgPool) {
     let v2_id = seed_v2_entry(&pool, admin_id, "flags-do-not-block-v2").await;
     let disabled = base
         .clone()
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::default());
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_disabled());
     let (status, archived) = call(
         &disabled,
         Method::POST,
@@ -1408,7 +1408,7 @@ async fn v2_to_v3_race_is_rechecked_after_the_entry_row_lock(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let state = AppState::for_test_with_smart_lexicon_v3_flags(
         pool.clone(),
-        SmartLexiconV3Flags::default(),
+        SmartLexiconV3Flags::all_disabled(),
     );
     let bearer = bearer(&state, admin_id);
     let entry_id = seed_v2_entry(&pool, admin_id, "lifecycle-race").await;

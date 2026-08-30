@@ -388,6 +388,13 @@ pub enum SentenceAssociationOriginV2 {
     Manual,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceAssociationStateV1 {
+    Linked,
+    Pending,
+}
+
 /// `WordSentenceV2::associations` 是不是当前正文的解析结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -406,31 +413,48 @@ pub enum SentenceAssociationsStateV2 {
 /// `PUT /entries/{id}/sentences/{sentence_id}/associations` 修正。
 /// 草稿保存路径收到这个字段会直接丢弃，客户端填不进来。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct WordSentenceAssociationV2 {
-    pub id: Uuid,
-    /// 位置落在 `en_text` 的哪一侧。distinguish 例句的 uk/us 两份正文下标会错位，
-    /// 所以位置必须绑到具体一侧；unified 例句只有 `common`。
-    pub source_dialect: Dialect,
-    pub source_range: SentenceSourceRangeV1,
-    pub target_word_id: Uuid,
-    pub target_sense_id: Uuid,
-    /// 命中目标词条的哪个词形槽位——按读者方言把 `centre`/`center` 显示成哪一个，
-    /// 靠的是它而不是原句词面。人工关联的词面在目标词条已发布词形里找不到时缺省。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub target_form_slot_id: Option<Uuid>,
-    pub origin: SentenceAssociationOriginV2,
-    /// 写入时从目标词条当前发布快照取的值，读取不做跨词条 JOIN。
-    #[schema(read_only)]
-    pub target_headword: String,
-    #[schema(read_only)]
-    pub target_gloss: String,
-    #[schema(read_only)]
-    pub resolved_pos: String,
-    /// 与 `target_form_slot_id` 同生共死。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false, read_only)]
-    pub resolved_form_type: Option<String>,
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WordSentenceAssociationV2 {
+    Linked {
+        id: Uuid,
+        /// 位置落在 `en_text` 的哪一侧。distinguish 例句的 uk/us 两份正文下标会错位，
+        /// 所以位置必须绑到具体一侧；unified 例句只有 `common`。
+        source_dialect: Dialect,
+        source_range: SentenceSourceRangeV1,
+        target_word_id: Uuid,
+        target_sense_id: Uuid,
+        /// 命中目标词条的哪个词形槽位——按读者方言把 `centre`/`center` 显示成哪一个，
+        /// 靠的是它而不是原句词面。人工关联的词面在目标词条已发布词形里找不到时缺省。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        target_form_slot_id: Option<Uuid>,
+        origin: SentenceAssociationOriginV2,
+        /// 写入时从目标词条当前发布快照取的值，读取不做跨词条 JOIN。
+        #[schema(read_only)]
+        target_headword: String,
+        #[schema(read_only)]
+        target_gloss: String,
+        #[schema(read_only)]
+        resolved_pos: String,
+        /// 与 `target_form_slot_id` 同生共死。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false, read_only)]
+        resolved_form_type: Option<String>,
+    },
+    Pending {
+        id: Uuid,
+        source_dialect: Dialect,
+        source_range: SentenceSourceRangeV1,
+        origin: SentenceAssociationOriginV2,
+        pending_target_kind: EntryKind,
+        #[schema(max_length = 200)]
+        pending_target_headword: String,
+        #[schema(read_only, max_length = 200)]
+        normalized_pending_target_headword: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false, max_length = 5000)]
+        pending_target_gloss: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -533,6 +557,74 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn association_common(state: &str) -> serde_json::Value {
+        json!({
+            "id": Uuid::now_v7(),
+            "state": state,
+            "source_dialect": "common",
+            "source_range": {"start": 0, "end": 4, "surface": "word"},
+            "origin": "manual"
+        })
+    }
+
+    #[test]
+    fn sentence_association_v2_is_a_strict_linked_or_pending_union() {
+        let mut linked = association_common("linked");
+        linked.as_object_mut().unwrap().extend(
+            json!({
+                "target_word_id": Uuid::now_v7(),
+                "target_sense_id": Uuid::now_v7(),
+                "target_headword": "word",
+                "target_gloss": "单词",
+                "resolved_pos": "noun"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let linked_value = serde_json::to_value(
+            serde_json::from_value::<WordSentenceAssociationV2>(linked.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(linked_value, linked);
+
+        let mut missing_linked_target = linked;
+        missing_linked_target
+            .as_object_mut()
+            .unwrap()
+            .remove("target_sense_id");
+        assert!(
+            serde_json::from_value::<WordSentenceAssociationV2>(missing_linked_target).is_err()
+        );
+
+        let mut pending = association_common("pending");
+        pending.as_object_mut().unwrap().extend(
+            json!({
+                "pending_target_kind": "word",
+                "pending_target_headword": "word",
+                "normalized_pending_target_headword": "word",
+                "pending_target_gloss": "单词"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let pending_value = serde_json::to_value(
+            serde_json::from_value::<WordSentenceAssociationV2>(pending.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pending_value, pending);
+
+        let mut missing_pending_target = pending;
+        missing_pending_target
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_target_headword");
+        assert!(
+            serde_json::from_value::<WordSentenceAssociationV2>(missing_pending_target).is_err()
+        );
+    }
 
     fn warning_acknowledgement(acknowledged: bool) -> serde_json::Value {
         json!({

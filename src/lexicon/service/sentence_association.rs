@@ -1,18 +1,28 @@
 use super::*;
 
 use crate::lexicon::{
+    dto::{
+        DialectVariantRichTextSlotV3, DraftMeaningsStepContentV3, EnglishTextV3,
+        PhraseComponentUsageV3, PublishedSentenceTargetCandidateV3, SentenceTargetMatchEvidenceV3,
+        SentenceTargetSenseV3, WordFormTypeV3, WordSentenceAssociationV3,
+    },
     model::{
-        NewSentenceAssociation, PublishedFormSurfaceRecord, SentenceAssociationRecord,
-        SentenceAssociationScanRecord,
+        NewSentenceAssociation, NewSentenceAssociationSegment, PublishedFormSurfaceRecord,
+        SentenceAssociationRecord, SentenceAssociationScanRecord,
     },
     node_identity::{dialect_from_name, dialect_name},
     sentence_association::{
-        RESOLVER_VERSION, SentenceToken, associable_pos, codepoint_slice, is_stopword,
-        is_storable_surface, text_hash, tokenize,
+        RESOLVER_VERSION, SentenceToken, associable_pos, codepoint_slice,
+        is_contiguous_phrase_surface, is_stopword, is_storable_surface, text_hash, tokenize,
+    },
+    sentence_target_discovery::{
+        CodepointRange as DiscoveryCodepointRange, SourceSegment as DiscoverySourceSegment,
+        any_segment_intersection,
     },
 };
 
 const REPLACE_ASSOCIATIONS_SCOPE: &str = "lexicon.sentence.associations.replace";
+const CLAIM_PENDING_ASSOCIATION_SCOPE: &str = "lexicon.sentence.associations.claim";
 
 /// 例句的一侧正文。位置只在这一侧内部有意义：distinguish 例句的 uk/us 两份正文
 /// 长度不同，`colour` / `color` 之后的下标就对不上了。
@@ -138,6 +148,15 @@ fn present_variants(en_text: &EnglishTextV2) -> Vec<(Dialect, &str)> {
 }
 
 fn association_wire(record: SentenceAssociationRecord) -> Option<WordSentenceAssociationV2> {
+    if record.segment_count != 1 {
+        tracing::warn!(
+            association_id = %record.id,
+            sentence_id = %record.sentence_id,
+            segment_count = record.segment_count,
+            "refused to project a segmented association into the V2 source_range contract"
+        );
+        return None;
+    }
     // 这三项都由库层 CHECK 保证，走到 None 说明数据坏了或迁移出了问题。
     // 静默少一条关联和「这个词本来就没关联」在界面上一模一样，排查时没有任何线索，
     // 所以至少留一条日志。
@@ -154,26 +173,243 @@ fn association_wire(record: SentenceAssociationRecord) -> Option<WordSentenceAss
         );
         return None;
     };
-    Some(WordSentenceAssociationV2 {
+    let source_range = SentenceSourceRangeV1 {
+        start,
+        end,
+        surface: record.surface,
+    };
+    let origin = match record.origin.as_str() {
+        "manual" => SentenceAssociationOriginV2::Manual,
+        _ => SentenceAssociationOriginV2::Auto,
+    };
+    match record.state.as_str() {
+        "linked" => Some(WordSentenceAssociationV2::Linked {
+            id: record.id,
+            source_dialect,
+            source_range,
+            target_word_id: record.target_entry_id?,
+            target_sense_id: record.target_sense_id?,
+            target_form_slot_id: record.target_form_slot_id,
+            origin,
+            target_headword: record.target_headword_snapshot?,
+            target_gloss: record.target_gloss_snapshot?,
+            resolved_pos: record.resolved_pos?,
+            resolved_form_type: record.resolved_form_type,
+        }),
+        "pending" => {
+            let pending_target_kind = match record.pending_target_kind.as_deref() {
+                Some("word") => EntryKind::Word,
+                Some("phrase") => EntryKind::Phrase,
+                Some(kind) => {
+                    tracing::warn!(
+                        association_id = %record.id,
+                        sentence_id = %record.sentence_id,
+                        pending_target_kind = %kind,
+                        "dropped a sentence association row with an unknown pending target kind"
+                    );
+                    return None;
+                }
+                None => return None,
+            };
+            Some(WordSentenceAssociationV2::Pending {
+                id: record.id,
+                source_dialect,
+                source_range,
+                origin,
+                pending_target_kind,
+                pending_target_headword: record.pending_target_headword?,
+                normalized_pending_target_headword: record.normalized_pending_target_headword?,
+                pending_target_gloss: record.pending_target_gloss,
+            })
+        }
+        _ => {
+            tracing::warn!(
+                association_id = %record.id,
+                sentence_id = %record.sentence_id,
+                state = %record.state,
+                "dropped a sentence association row with an unknown state"
+            );
+            None
+        }
+    }
+}
+
+fn association_wire_v3(record: SentenceAssociationRecord) -> Option<WordSentenceAssociationV3> {
+    let source_dialect = dialect_from_name(&record.source_dialect)?;
+    let source_segments =
+        serde_json::from_value::<Vec<SentenceSourceRangeV1>>(record.source_segments.clone())
+            .ok()?;
+    if source_segments.is_empty()
+        || source_segments.len() != usize::try_from(record.segment_count).ok()?
+    {
+        tracing::warn!(
+            association_id = %record.id,
+            sentence_id = %record.sentence_id,
+            segment_count = record.segment_count,
+            "dropped a V3 sentence association with inconsistent segments"
+        );
+        return None;
+    }
+    let state = match record.state.as_str() {
+        "linked" => SentenceAssociationStateV1::Linked,
+        "pending" => SentenceAssociationStateV1::Pending,
+        _ => return None,
+    };
+    let pending_target_kind = match record.pending_target_kind.as_deref() {
+        Some("word") => Some(EntryKind::Word),
+        Some("phrase") => Some(EntryKind::Phrase),
+        None => None,
+        Some(_) => return None,
+    };
+    let target_component_usages = record
+        .target_component_usages_snapshot
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    let origin = match record.origin.as_str() {
+        "manual" => SentenceAssociationOriginV2::Manual,
+        _ => SentenceAssociationOriginV2::Auto,
+    };
+    match state {
+        SentenceAssociationStateV1::Linked => Some(WordSentenceAssociationV3::Linked {
+            id: record.id,
+            association_schema_version: 3,
+            source_dialect,
+            source_segments,
+            target_word_id: record.target_entry_id?,
+            target_sense_id: record.target_sense_id?,
+            target_form_slot_id: record.target_form_slot_id,
+            target_publication_id: record.target_publication_id,
+            target_form_variant_id: record.target_form_variant_id,
+            target_component_usages,
+            origin,
+            target_headword: record.target_headword_snapshot?,
+            target_gloss: record.target_gloss_snapshot?,
+            resolved_pos: record.resolved_pos?,
+            resolved_form_type: record.resolved_form_type,
+        }),
+        SentenceAssociationStateV1::Pending => Some(WordSentenceAssociationV3::Pending {
+            id: record.id,
+            association_schema_version: 3,
+            source_dialect,
+            source_segments,
+            origin,
+            pending_target_kind: pending_target_kind?,
+            pending_target_headword: record.pending_target_headword?,
+            normalized_pending_target_headword: record.normalized_pending_target_headword,
+            pending_target_gloss: record.pending_target_gloss,
+        }),
+    }
+}
+
+fn present_variants_v3(en_text: &EnglishTextV3) -> Vec<(Dialect, &str)> {
+    match en_text {
+        EnglishTextV3::Unified { common } => vec![(Dialect::Common, common.value.text())],
+        EnglishTextV3::Distinguish { uk, us, .. } => [(Dialect::Uk, uk), (Dialect::Us, us)]
+            .into_iter()
+            .filter_map(|(dialect, slot)| match slot {
+                DialectVariantRichTextSlotV3::Ready { variant } => {
+                    Some((dialect, variant.value.text()))
+                }
+                DialectVariantRichTextSlotV3::Missing => None,
+            })
+            .collect(),
+    }
+}
+
+fn apply_sentence_associations_v3(
+    meanings: &mut DraftMeaningsStepContentV3,
+    associations: Vec<SentenceAssociationRecord>,
+    scans: Vec<SentenceAssociationScanRecord>,
+) {
+    let scanned = scans
+        .into_iter()
+        .filter(|scan| scan.resolver_version == RESOLVER_VERSION)
+        .filter_map(|scan| {
+            let dialect = dialect_from_name(&scan.source_dialect)?;
+            Some(((scan.sentence_id, dialect), scan.text_hash))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut by_sentence: HashMap<Uuid, Vec<SentenceAssociationRecord>> = HashMap::new();
+    for association in associations {
+        by_sentence
+            .entry(association.sentence_id)
+            .or_default()
+            .push(association);
+    }
+
+    for sentence in meanings
+        .pos
+        .iter_mut()
+        .flat_map(|pos| &mut pos.senses)
+        .flat_map(|sense| &mut sense.sentences)
+    {
+        let present = present_variants_v3(&sentence.en_text);
+        let resolved = !present.is_empty()
+            && present.iter().all(|(dialect, text)| {
+                scanned
+                    .get(&(sentence.id, *dialect))
+                    .is_some_and(|hash| hash == &text_hash(text))
+            });
+        if !resolved {
+            sentence.associations.clear();
+            sentence.associations_state = SentenceAssociationsStateV2::Unresolved;
+            continue;
+        }
+        let mut rows = by_sentence.remove(&sentence.id).unwrap_or_default();
+        rows.retain(|row| {
+            dialect_from_name(&row.source_dialect)
+                .is_some_and(|dialect| present.iter().any(|(candidate, _)| *candidate == dialect))
+        });
+        rows.sort_by(|left, right| {
+            left.source_dialect
+                .cmp(&right.source_dialect)
+                .then(left.range_start.cmp(&right.range_start))
+        });
+        sentence.associations = rows.into_iter().filter_map(association_wire_v3).collect();
+        sentence.associations_state = SentenceAssociationsStateV2::Resolved;
+    }
+}
+
+fn new_association_from_record(record: SentenceAssociationRecord) -> NewSentenceAssociation {
+    let source_segments =
+        serde_json::from_value::<Vec<SentenceSourceRangeV1>>(record.source_segments.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|segment| {
+                Some(NewSentenceAssociationSegment {
+                    range_start: i32::try_from(segment.start).ok()?,
+                    range_end: i32::try_from(segment.end).ok()?,
+                    surface: segment.surface,
+                })
+            })
+            .collect::<Vec<_>>();
+    NewSentenceAssociation {
         id: record.id,
-        source_dialect,
-        source_range: SentenceSourceRangeV1 {
-            start,
-            end,
-            surface: record.surface,
-        },
-        target_word_id: record.target_entry_id,
+        sentence_id: record.sentence_id,
+        source_dialect: record.source_dialect,
+        association_schema_version: record.association_schema_version,
+        source_segments,
+        segments_fingerprint: record.segments_fingerprint,
+        range_start: record.range_start,
+        range_end: record.range_end,
+        surface: record.surface,
+        state: record.state,
+        target_entry_id: record.target_entry_id,
         target_sense_id: record.target_sense_id,
         target_form_slot_id: record.target_form_slot_id,
-        origin: match record.origin.as_str() {
-            "manual" => SentenceAssociationOriginV2::Manual,
-            _ => SentenceAssociationOriginV2::Auto,
-        },
-        target_headword: record.target_headword_snapshot,
-        target_gloss: record.target_gloss_snapshot,
+        target_publication_id: record.target_publication_id,
+        target_form_variant_id: record.target_form_variant_id,
+        target_component_usages_snapshot: record.target_component_usages_snapshot,
+        origin: record.origin,
+        target_headword_snapshot: record.target_headword_snapshot,
+        target_gloss_snapshot: record.target_gloss_snapshot,
         resolved_pos: record.resolved_pos,
         resolved_form_type: record.resolved_form_type,
-    })
+        pending_target_kind: record.pending_target_kind,
+        pending_target_headword: record.pending_target_headword,
+        normalized_pending_target_headword: record.normalized_pending_target_headword,
+        pending_target_gloss: record.pending_target_gloss,
+    }
 }
 
 /// 目标词条当前发布快照里能拿到的、一条关联需要固化的全部信息。
@@ -181,6 +417,9 @@ pub(super) struct ResolvedTarget {
     pub(super) target_entry_id: Uuid,
     pub(super) target_sense_id: Uuid,
     pub(super) target_form_slot_id: Option<Uuid>,
+    pub(super) target_publication_id: Option<Uuid>,
+    pub(super) target_form_variant_id: Option<Uuid>,
+    pub(super) target_component_usages: Vec<PhraseComponentUsageV3>,
     pub(super) target_headword: String,
     pub(super) target_gloss: String,
     pub(super) resolved_pos: String,
@@ -191,13 +430,23 @@ pub(super) struct ResolvedTarget {
 struct PublishedAssociationForm {
     id: Uuid,
     form_type: String,
-    variant_ids: Vec<Uuid>,
+    base_form_ids: Vec<Uuid>,
+    variants: Vec<PublishedAssociationVariant>,
     normalized_surfaces: Vec<String>,
+}
+
+#[derive(Debug)]
+struct PublishedAssociationVariant {
+    id: Uuid,
+    dialect: Dialect,
+    normalized_surface: Option<String>,
+    component_usages: Vec<PhraseComponentUsageV3>,
 }
 
 #[derive(Debug)]
 struct PublishedAssociationSense {
     id: Uuid,
+    level: String,
     gloss: String,
 }
 
@@ -212,16 +461,18 @@ struct PublishedAssociationPos {
 /// 例句关联只消费已发布词条的一小块稳定视图。先把 V2/V3 快照收敛到同一形状，
 /// resolver 与人工编辑器就不会把某个 schema 的聚合 DTO 当成唯一事实来源。
 #[derive(Debug)]
-struct PublishedAssociationTarget {
+pub(super) struct PublishedAssociationTarget {
     schema_version: i16,
     id: Uuid,
+    publication_id: Uuid,
+    kind: EntryKind,
     headword: String,
     pos: Vec<PublishedAssociationPos>,
 }
 
 impl PublishedAssociationTarget {
-    fn from_v2(word: AdminWordV2) -> Self {
-        let pos =
+    fn from_v2(word: AdminWordV2, publication_id: Uuid) -> Self {
+        let mut pos: Vec<PublishedAssociationPos> =
             word.forms
                 .pos
                 .iter()
@@ -230,20 +481,38 @@ impl PublishedAssociationTarget {
                     slots.push(PublishedAssociationForm {
                         id: forms.base_form.id,
                         form_type: forms.base_form.form_type.clone(),
-                        variant_ids: forms
+                        base_form_ids: vec![forms.base_form.id],
+                        variants: forms
                             .base_form
                             .variants
                             .iter()
-                            .map(|variant| variant.id)
+                            .map(|variant| PublishedAssociationVariant {
+                                id: variant.id,
+                                dialect: variant.dialect,
+                                normalized_surface: normalized_surface(&variant.spelling),
+                                component_usages: Vec::new(),
+                            })
                             .collect(),
                         normalized_surfaces: normalized_v2_surfaces(&forms.base_form.variants),
                     });
                     slots.extend(forms.form_groups.iter().flat_map(|group| &group.slots).map(
-                        |slot| PublishedAssociationForm {
-                            id: slot.id,
-                            form_type: slot.form_type.clone(),
-                            variant_ids: slot.variants.iter().map(|variant| variant.id).collect(),
-                            normalized_surfaces: normalized_v2_surfaces(&slot.variants),
+                        |slot| {
+                            PublishedAssociationForm {
+                                id: slot.id,
+                                form_type: slot.form_type.clone(),
+                                base_form_ids: vec![forms.base_form.id],
+                                variants: slot
+                                    .variants
+                                    .iter()
+                                    .map(|variant| PublishedAssociationVariant {
+                                        id: variant.id,
+                                        dialect: variant.dialect,
+                                        normalized_surface: normalized_surface(&variant.spelling),
+                                        component_usages: Vec::new(),
+                                    })
+                                    .collect(),
+                                normalized_surfaces: normalized_v2_surfaces(&slot.variants),
+                            }
                         },
                     ));
                     PublishedAssociationPos {
@@ -254,15 +523,38 @@ impl PublishedAssociationTarget {
                     }
                 })
                 .collect();
+        if pos.is_empty() && word.kind == EntryKind::Phrase {
+            pos = word
+                .meanings
+                .pos
+                .iter()
+                .map(|meanings| PublishedAssociationPos {
+                    id: meanings.pos_id,
+                    pos: "phrase".to_owned(),
+                    forms: Vec::new(),
+                    senses: meanings
+                        .senses
+                        .iter()
+                        .map(|sense| PublishedAssociationSense {
+                            id: sense.id,
+                            level: sense.level.clone(),
+                            gloss: published_sense_gloss(sense),
+                        })
+                        .collect(),
+                })
+                .collect();
+        }
         Self {
             schema_version: 2,
             id: word.id,
+            publication_id,
+            kind: word.kind,
             headword: published_word_headword(&word),
             pos,
         }
     }
 
-    fn from_v3(word: AdminWordV3) -> Result<Self, LexiconServiceError> {
+    fn from_v3(word: AdminWordV3, publication_id: Uuid) -> Result<Self, LexiconServiceError> {
         let meanings: DraftMeaningsStepContent = serde_json::from_value(
             serde_json::to_value(&word.meanings).map_err(serialization_error)?,
         )
@@ -279,13 +571,44 @@ impl PublishedAssociationTarget {
                     .iter()
                     .map(|form| {
                         let variants = v3_form_variants(&form.regional_variants);
+                        let mut base_form_ids = forms
+                            .form_groups
+                            .iter()
+                            .filter(|group| {
+                                group.members.iter().any(|member| member.form_id == form.id)
+                            })
+                            .flat_map(|group| &group.members)
+                            .filter_map(|member| {
+                                forms.forms.iter().find(|candidate| {
+                                    candidate.id == member.form_id
+                                        && candidate.form_type == WordFormTypeV3::Base
+                                })
+                            })
+                            .map(|base| base.id)
+                            .collect::<Vec<_>>();
+                        if base_form_ids.is_empty() && form.form_type == WordFormTypeV3::Base {
+                            base_form_ids.push(form.id);
+                        }
+                        base_form_ids.sort_unstable();
+                        base_form_ids.dedup();
                         PublishedAssociationForm {
                             id: form.id,
                             form_type: v3_form_type_name(form.form_type).to_owned(),
-                            variant_ids: variants.iter().map(|(id, _)| *id).collect(),
+                            base_form_ids,
+                            variants: variants
+                                .iter()
+                                .map(|(id, dialect, spelling, component_usages)| {
+                                    PublishedAssociationVariant {
+                                        id: *id,
+                                        dialect: *dialect,
+                                        normalized_surface: normalized_surface(spelling),
+                                        component_usages: component_usages.to_vec(),
+                                    }
+                                })
+                                .collect(),
                             normalized_surfaces: variants
                                 .iter()
-                                .filter_map(|(_, spelling)| normalized_surface(spelling))
+                                .filter_map(|(_, _, spelling, _)| normalized_surface(spelling))
                                 .collect(),
                         }
                     })
@@ -296,14 +619,20 @@ impl PublishedAssociationTarget {
         Ok(Self {
             schema_version: 3,
             id: word.id,
+            publication_id,
+            kind: match word.kind {
+                WordEntryKindV3::Word => EntryKind::Word,
+                WordEntryKindV3::Phrase => EntryKind::Phrase,
+            },
             headword: word.presentation.label,
             pos,
         })
     }
 
-    fn from_snapshot(
+    pub(super) fn from_snapshot(
         snapshot: serde_json::Value,
         allow_v3: bool,
+        publication_id: Uuid,
     ) -> Result<Self, LexiconServiceError> {
         let version = snapshot
             .get("schema_version")
@@ -311,13 +640,77 @@ impl PublishedAssociationTarget {
             .and_then(|value| i16::try_from(value).ok())
             .unwrap_or(-1);
         match version {
-            2 => Ok(Self::from_v2(v2_publication_snapshot(snapshot)?)),
-            3 if allow_v3 => {
-                Self::from_v3(serde_json::from_value(snapshot).map_err(serialization_error)?)
-            }
+            2 => Ok(Self::from_v2(
+                v2_publication_snapshot(snapshot)?,
+                publication_id,
+            )),
+            3 if allow_v3 => Self::from_v3(
+                serde_json::from_value(snapshot).map_err(serialization_error)?,
+                publication_id,
+            ),
             3 => Err(LexiconServiceError::V3StorageUnavailable),
             version => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
         }
+    }
+
+    pub(super) fn sentence_discovery_candidates(
+        &self,
+        publication_id: Uuid,
+        pos_id: Uuid,
+        matched_form_id: Uuid,
+        matched_variant_id: Uuid,
+        evidence: SentenceTargetMatchEvidenceV3,
+    ) -> Vec<PublishedSentenceTargetCandidateV3> {
+        let Some(pos) = self.pos.iter().find(|pos| pos.id == pos_id) else {
+            return Vec::new();
+        };
+        let Some(form) = pos.forms.iter().find(|form| {
+            form.id == matched_form_id
+                || form.variants.iter().any(|variant| {
+                    variant.id == matched_form_id || variant.id == matched_variant_id
+                })
+        }) else {
+            return Vec::new();
+        };
+        let Some(variant) = form
+            .variants
+            .iter()
+            .find(|variant| variant.id == matched_variant_id || variant.id == matched_form_id)
+        else {
+            return Vec::new();
+        };
+        let Some(form_type) = parse_v3_form_type_name(&form.form_type) else {
+            return Vec::new();
+        };
+        form.base_form_ids
+            .iter()
+            .map(|base_form_id| PublishedSentenceTargetCandidateV3 {
+                entry_id: self.id,
+                publication_id,
+                pos_id,
+                base_form_id: *base_form_id,
+                headword: self.headword.clone(),
+                pos: pos.pos.clone(),
+                matched_form_id: form.id,
+                matched_variant_id: variant.id,
+                matched_dialect: variant.dialect,
+                matched_form_type: form_type,
+                component_usages: variant.component_usages.clone(),
+                matches: vec![evidence.clone()],
+                senses: pos
+                    .senses
+                    .iter()
+                    .map(|sense| SentenceTargetSenseV3 {
+                        sense_id: sense.id,
+                        publication_id,
+                        pos_id,
+                        base_form_id: *base_form_id,
+                        level: sense.level.clone(),
+                        gloss: sense.gloss.clone(),
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 
     fn automatic_target(&self, pos_id: Uuid, variant_ids: &[Uuid]) -> Option<ResolvedTarget> {
@@ -329,9 +722,9 @@ impl PublishedAssociationTarget {
             .forms
             .iter()
             .filter(|form| {
-                form.variant_ids
+                form.variants
                     .iter()
-                    .any(|variant_id| variant_ids.contains(variant_id))
+                    .any(|variant| variant_ids.contains(&variant.id))
             })
             .map(|form| (form.id, form.form_type.clone()))
             .collect::<BTreeMap<_, _>>();
@@ -342,6 +735,9 @@ impl PublishedAssociationTarget {
             target_entry_id: self.id,
             target_sense_id: sense.id,
             target_form_slot_id: slot.as_ref().map(|(id, _)| *id),
+            target_publication_id: None,
+            target_form_variant_id: None,
+            target_component_usages: Vec::new(),
             target_headword: self.headword.clone(),
             target_gloss: sense.gloss.clone(),
             resolved_pos: pos.pos.clone(),
@@ -349,35 +745,90 @@ impl PublishedAssociationTarget {
         })
     }
 
-    fn manual_target(&self, sense_id: Uuid, normalized_surface: &str) -> Option<ResolvedTarget> {
+    fn manual_target(
+        &self,
+        sense_id: Uuid,
+        normalized_surface: &str,
+        requested_publication_id: Option<Uuid>,
+        requested_variant_id: Option<Uuid>,
+    ) -> Option<ResolvedTarget> {
+        if requested_publication_id.is_some_and(|id| id != self.publication_id) {
+            return None;
+        }
         let pos = self
             .pos
             .iter()
             .find(|pos| pos.senses.iter().any(|sense| sense.id == sense_id))?;
         let sense = pos.senses.iter().find(|sense| sense.id == sense_id)?;
-        let matching_slots = pos
+        let matching_variants = pos
             .forms
             .iter()
-            .filter(|form| {
-                form.normalized_surfaces
+            .flat_map(|form| {
+                form.variants
                     .iter()
-                    .any(|surface| surface == normalized_surface)
+                    .filter(move |variant| {
+                        variant.normalized_surface.as_deref() == Some(normalized_surface)
+                    })
+                    .map(move |variant| {
+                        (
+                            form.id,
+                            form.form_type.clone(),
+                            variant.id,
+                            variant.dialect,
+                            variant.component_usages.clone(),
+                        )
+                    })
             })
-            .map(|form| (form.id, form.form_type.clone()))
             .collect::<Vec<_>>();
+        let selected_variant = match requested_variant_id {
+            Some(id) => matching_variants
+                .iter()
+                .find(|(_, _, variant_id, _, _)| *variant_id == id)
+                .cloned(),
+            None if matching_variants.len() == 1 => matching_variants.first().cloned(),
+            None => None,
+        };
         // V2 沿用历史的「按目录顺序取首个槽位」行为；V3 允许同类 concrete form
         // 重复，不能把第一个误当成管理员选择，只有唯一命中时才固化 form_id。
         let slot = if self.schema_version == 2 {
-            matching_slots.into_iter().next()
+            matching_variants
+                .into_iter()
+                .next()
+                .map(|(form_id, form_type, _, _, _)| (form_id, form_type))
         } else {
-            (matching_slots.len() == 1)
-                .then(|| matching_slots.into_iter().next())
-                .flatten()
+            selected_variant
+                .as_ref()
+                .map(|(form_id, form_type, _, _, _)| (*form_id, form_type.clone()))
         };
+        if self.schema_version == 3
+            && self.kind == EntryKind::Phrase
+            && (requested_variant_id.is_none() || selected_variant.is_none())
+        {
+            return None;
+        }
+        let persist_exact_identity = self.schema_version == 3
+            && (self.kind == EntryKind::Phrase
+                || requested_publication_id.is_some()
+                || requested_variant_id.is_some());
         Some(ResolvedTarget {
             target_entry_id: self.id,
             target_sense_id: sense_id,
             target_form_slot_id: slot.as_ref().map(|(id, _)| *id),
+            target_publication_id: persist_exact_identity.then_some(self.publication_id),
+            target_form_variant_id: if persist_exact_identity {
+                selected_variant
+                    .as_ref()
+                    .map(|(_, _, variant_id, _, _)| *variant_id)
+            } else {
+                None
+            },
+            target_component_usages: if persist_exact_identity {
+                selected_variant
+                    .map(|(_, _, _, _, component_usages)| component_usages)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            },
             target_headword: self.headword.clone(),
             target_gloss: sense.gloss.clone(),
             resolved_pos: pos.pos.clone(),
@@ -399,6 +850,7 @@ fn association_senses(
                 .iter()
                 .map(|sense| PublishedAssociationSense {
                     id: sense.id,
+                    level: sense.level.clone(),
                     gloss: published_sense_gloss(sense),
                 })
                 .collect()
@@ -419,15 +871,47 @@ fn normalized_v2_surfaces(variants: &[WordFormVariantV2]) -> Vec<String> {
         .collect()
 }
 
-fn v3_form_variants(variants: &crate::lexicon::dto::WordRegionalVariantsV3) -> Vec<(Uuid, &str)> {
+fn v3_form_variants(
+    variants: &crate::lexicon::dto::WordRegionalVariantsV3,
+) -> Vec<(Uuid, Dialect, &str, &[PhraseComponentUsageV3])> {
     use crate::lexicon::dto::WordRegionalVariantsV3;
 
     match variants {
-        WordRegionalVariantsV3::Common { common } => vec![(common.id, common.spelling.as_str())],
-        WordRegionalVariantsV3::UkUs { uk, us } => {
-            vec![(uk.id, uk.spelling.as_str()), (us.id, us.spelling.as_str())]
-        }
+        WordRegionalVariantsV3::Common { common } => vec![(
+            common.id,
+            Dialect::Common,
+            common.spelling.as_str(),
+            &common.component_usages,
+        )],
+        WordRegionalVariantsV3::UkUs { uk, us } => vec![
+            (
+                uk.id,
+                Dialect::Uk,
+                uk.spelling.as_str(),
+                &uk.component_usages,
+            ),
+            (
+                us.id,
+                Dialect::Us,
+                us.spelling.as_str(),
+                &us.component_usages,
+            ),
+        ],
     }
+}
+
+fn parse_v3_form_type_name(value: &str) -> Option<WordFormTypeV3> {
+    Some(match value {
+        "base" => WordFormTypeV3::Base,
+        "third_person_singular" => WordFormTypeV3::ThirdPersonSingular,
+        "present_participle" => WordFormTypeV3::PresentParticiple,
+        "past_tense" => WordFormTypeV3::PastTense,
+        "past_participle" => WordFormTypeV3::PastParticiple,
+        "plural" => WordFormTypeV3::Plural,
+        "comparative" => WordFormTypeV3::Comparative,
+        "superlative" => WordFormTypeV3::Superlative,
+        _ => return None,
+    })
 }
 
 fn v3_form_type_name(form_type: crate::lexicon::dto::WordFormTypeV3) -> &'static str {
@@ -449,8 +933,15 @@ fn manual_target(
     target: &PublishedAssociationTarget,
     sense_id: Uuid,
     normalized_surface: &str,
+    target_publication_id: Option<Uuid>,
+    target_form_variant_id: Option<Uuid>,
 ) -> Option<ResolvedTarget> {
-    target.manual_target(sense_id, normalized_surface)
+    target.manual_target(
+        sense_id,
+        normalized_surface,
+        target_publication_id,
+        target_form_variant_id,
+    )
 }
 
 impl LexiconService {
@@ -494,20 +985,13 @@ impl LexiconService {
         entry_id: Uuid,
         meanings: &mut crate::lexicon::dto::DraftMeaningsStepContentV3,
     ) -> Result<(), LexiconServiceError> {
-        let mut legacy_meanings: DraftMeaningsStepContent =
-            serde_json::from_value(serde_json::to_value(&*meanings).map_err(serialization_error)?)
-                .map_err(serialization_error)?;
         let associations = LexiconRepository::sentence_associations(&mut **tx, entry_id)
             .await
             .map_err(repository_error)?;
         let scans = LexiconRepository::sentence_association_scans(&mut **tx, entry_id)
             .await
             .map_err(repository_error)?;
-        apply_sentence_associations(&mut legacy_meanings, associations, scans);
-        *meanings = serde_json::from_value(
-            serde_json::to_value(legacy_meanings).map_err(serialization_error)?,
-        )
-        .map_err(serialization_error)?;
+        apply_sentence_associations_v3(meanings, associations, scans);
         Ok(())
     }
 
@@ -516,9 +1000,6 @@ impl LexiconService {
         entry_id: Uuid,
         meanings: &mut crate::lexicon::dto::DraftMeaningsStepContentV3,
     ) -> Result<(), LexiconServiceError> {
-        let mut legacy_meanings: DraftMeaningsStepContent =
-            serde_json::from_value(serde_json::to_value(&*meanings).map_err(serialization_error)?)
-                .map_err(serialization_error)?;
         let associations =
             LexiconRepository::sentence_associations(self.repository.pool(), entry_id)
                 .await
@@ -526,11 +1007,7 @@ impl LexiconService {
         let scans = LexiconRepository::sentence_association_scans(self.repository.pool(), entry_id)
             .await
             .map_err(repository_error)?;
-        apply_sentence_associations(&mut legacy_meanings, associations, scans);
-        *meanings = serde_json::from_value(
-            serde_json::to_value(legacy_meanings).map_err(serialization_error)?,
-        )
-        .map_err(serialization_error)?;
+        apply_sentence_associations_v3(meanings, associations, scans);
         Ok(())
     }
 
@@ -546,8 +1023,13 @@ impl LexiconService {
         entry_id: Uuid,
         meanings: &DraftMeaningsStepContent,
         allow_v3_targets: bool,
+        allow_automatic_associations: bool,
+        only_sentence_id: Option<Uuid>,
     ) -> Result<(), LexiconServiceError> {
-        let variants = sentence_variants(meanings);
+        let variants = sentence_variants(meanings)
+            .into_iter()
+            .filter(|variant| only_sentence_id.is_none_or(|id| variant.sentence_id == id))
+            .collect::<Vec<_>>();
         let live_sentence_ids = variants
             .iter()
             .map(|variant| variant.sentence_id)
@@ -556,21 +1038,27 @@ impl LexiconService {
             .iter()
             .map(|variant| dialect_name(variant.dialect).to_owned())
             .collect::<Vec<_>>();
-        LexiconRepository::prune_sentence_associations(
-            tx,
-            entry_id,
-            &live_sentence_ids,
-            &live_dialects,
-        )
-        .await
-        .map_err(repository_error)?;
+        if only_sentence_id.is_none() {
+            LexiconRepository::prune_sentence_associations(
+                tx,
+                entry_id,
+                &live_sentence_ids,
+                &live_dialects,
+            )
+            .await
+            .map_err(repository_error)?;
+        }
 
         let scanned = LexiconRepository::sentence_association_scans(&mut **tx, entry_id)
             .await
             .map_err(repository_error)?
             .into_iter()
-            .filter(|scan| scan.resolver_version == RESOLVER_VERSION)
-            .map(|scan| ((scan.sentence_id, scan.source_dialect), scan.text_hash))
+            .map(|scan| {
+                (
+                    (scan.sentence_id, scan.source_dialect),
+                    (scan.text_hash, scan.resolver_version),
+                )
+            })
             .collect::<HashMap<_, _>>();
 
         let pending = variants
@@ -581,16 +1069,65 @@ impl LexiconService {
                     variant.sentence_id,
                     dialect_name(variant.dialect).to_owned(),
                 );
-                (scanned.get(&key) != Some(&hash)).then_some((variant, hash))
+                let previous = scanned.get(&key);
+                let unchanged_text = previous
+                    .map(|(text_hash, _)| text_hash == &hash)
+                    .unwrap_or(false);
+                let current = previous
+                    .map(|(text_hash, resolver_version)| {
+                        text_hash == &hash && *resolver_version == RESOLVER_VERSION
+                    })
+                    .unwrap_or(false);
+                (!current).then_some((variant, hash, unchanged_text))
             })
             .collect::<Vec<_>>();
         if pending.is_empty() {
             return Ok(());
         }
 
+        let mut preserved_manual = LexiconRepository::sentence_associations(&mut **tx, entry_id)
+            .await
+            .map_err(repository_error)?
+            .into_iter()
+            .filter(|association| association.origin == "manual")
+            .fold(HashMap::new(), |mut grouped, association| {
+                grouped
+                    .entry((association.sentence_id, association.source_dialect.clone()))
+                    .or_insert_with(Vec::new)
+                    .push(association);
+                grouped
+            });
+
+        if !allow_automatic_associations {
+            for (variant, hash, unchanged_text) in pending {
+                let dialect = dialect_name(variant.dialect);
+                let associations = if unchanged_text {
+                    preserved_manual
+                        .remove(&(variant.sentence_id, dialect.to_owned()))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(new_association_from_record)
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                LexiconRepository::replace_sentence_associations(
+                    tx,
+                    entry_id,
+                    variant.sentence_id,
+                    dialect,
+                    &associations,
+                    Some((&hash, RESOLVER_VERSION)),
+                )
+                .await
+                .map_err(repository_error)?;
+            }
+            return Ok(());
+        }
+
         let tokenized = pending
             .iter()
-            .map(|(variant, _)| {
+            .map(|(variant, _, _)| {
                 tokenize(variant.text)
                     .into_iter()
                     .filter(|token| !is_stopword(&token.normalized))
@@ -600,7 +1137,7 @@ impl LexiconService {
 
         let mut scopes = pending
             .iter()
-            .flat_map(|(variant, _)| lookup_scopes(variant.dialect))
+            .flat_map(|(variant, _, _)| lookup_scopes(variant.dialect))
             .map(|scope| (*scope).to_owned())
             .collect::<Vec<_>>();
         scopes.sort_unstable();
@@ -636,15 +1173,19 @@ impl LexiconService {
             .map_err(repository_error)?
             .into_iter()
             .map(|record| {
-                PublishedAssociationTarget::from_snapshot(record.snapshot, allow_v3_targets)
-                    .map(|target| (record.entry_id, target))
+                PublishedAssociationTarget::from_snapshot(
+                    record.snapshot,
+                    allow_v3_targets,
+                    record.publication_id,
+                )
+                .map(|target| (record.entry_id, target))
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
 
-        for ((variant, hash), tokens) in pending.into_iter().zip(tokenized) {
+        for ((variant, hash, unchanged_text), tokens) in pending.into_iter().zip(tokenized) {
             let dialect = dialect_name(variant.dialect);
             let scopes = lookup_scopes(variant.dialect);
-            let associations = tokens
+            let mut associations = tokens
                 .iter()
                 .filter_map(|token| {
                     let target = resolve_token(token, scopes, &candidates, &snapshots)?;
@@ -652,20 +1193,48 @@ impl LexiconService {
                         id: Uuid::now_v7(),
                         sentence_id: variant.sentence_id,
                         source_dialect: dialect.to_owned(),
+                        association_schema_version: 2,
+                        source_segments: vec![NewSentenceAssociationSegment {
+                            range_start: i32::try_from(token.start).ok()?,
+                            range_end: i32::try_from(token.end).ok()?,
+                            surface: token.surface.clone(),
+                        }],
+                        segments_fingerprint: None,
                         range_start: i32::try_from(token.start).ok()?,
                         range_end: i32::try_from(token.end).ok()?,
                         surface: token.surface.clone(),
-                        target_entry_id: target.target_entry_id,
-                        target_sense_id: target.target_sense_id,
+                        state: "linked".to_owned(),
+                        target_entry_id: Some(target.target_entry_id),
+                        target_sense_id: Some(target.target_sense_id),
                         target_form_slot_id: target.target_form_slot_id,
+                        target_publication_id: None,
+                        target_form_variant_id: None,
+                        target_component_usages_snapshot: None,
                         origin: "auto".to_owned(),
-                        target_headword_snapshot: target.target_headword,
-                        target_gloss_snapshot: target.target_gloss,
-                        resolved_pos: target.resolved_pos,
+                        target_headword_snapshot: Some(target.target_headword),
+                        target_gloss_snapshot: Some(target.target_gloss),
+                        resolved_pos: Some(target.resolved_pos),
                         resolved_form_type: target.resolved_form_type,
+                        pending_target_kind: None,
+                        pending_target_headword: None,
+                        normalized_pending_target_headword: None,
+                        pending_target_gloss: None,
                     })
                 })
                 .collect::<Vec<_>>();
+            if unchanged_text {
+                let manual = preserved_manual
+                    .remove(&(variant.sentence_id, dialect.to_owned()))
+                    .unwrap_or_default();
+                associations.retain(|automatic| {
+                    manual.iter().all(|existing| {
+                        automatic.range_end <= existing.range_start
+                            || automatic.range_start >= existing.range_end
+                    })
+                });
+                associations.extend(manual.into_iter().map(new_association_from_record));
+                associations.sort_by_key(|association| association.range_start);
+            }
             LexiconRepository::replace_sentence_associations(
                 tx,
                 entry_id,
@@ -734,9 +1303,8 @@ fn resolve_token(
 impl LexiconService {
     /// 事后修正一条例句的关联：整组替换，覆盖这条例句所有存在的方言侧。
     ///
-    /// 只对「当前正文已经解析过」的例句开放（`associations_state = resolved`）。
-    /// 草稿从未发布、或正文改了还没重新发布时，库里的区间对不上当前正文，
-    /// 此时允许编辑只会写进一批下次发布就被冲掉的数据。
+    /// 人工整组保存会针对当前正文重新校验所有 range/surface，并写入对应 scan；因此它既
+    /// 能修正已解析例句，也能作为新增例句两阶段保存的第二步把 unresolved 建立为 resolved。
     ///
     /// 推进的是 `lifecycle_revision` 而不是 `revision`：修正的是已发布内容的附属数据，
     /// 不该把词条判成「有未发布改动」再逼一次重新发布。
@@ -750,14 +1318,16 @@ impl LexiconService {
         idempotency_key: Uuid,
         input: ReplaceSentenceAssociationsInput,
         allow_v3: bool,
+        allow_pending: bool,
+        allow_automatic_associations: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
-        if input.base_revision < 1 {
+        if input.base_revision() < 1 {
             return Err(LexiconServiceError::InvalidField {
                 field: "base_revision",
                 message: "base_revision must be at least 1",
             });
         }
-        if input.base_lifecycle_revision < 1 {
+        if input.base_lifecycle_revision() < 1 {
             return Err(LexiconServiceError::InvalidField {
                 field: "base_lifecycle_revision",
                 message: "base_lifecycle_revision must be at least 1",
@@ -807,6 +1377,13 @@ impl LexiconService {
             .ok_or(LexiconServiceError::WordNotFound)?;
         let record_revision = record.revision;
         let record_lifecycle_revision = record.lifecycle_revision;
+        if !input.is_v3()
+            && LexiconRepository::sentence_has_segmented_associations(&mut transaction, sentence_id)
+                .await
+                .map_err(repository_error)?
+        {
+            return Err(LexiconServiceError::SentenceAssociationClientUpgradeRequired);
+        }
         let mut word = match record.content_schema_version {
             2 => AdminWordAny::V2(Box::new(entry_from_record(record)?)),
             3 if allow_v3 => {
@@ -821,7 +1398,38 @@ impl LexiconService {
             3 => return Err(LexiconServiceError::V3StorageUnavailable),
             version => return Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
         };
-        ensure_association_source_state(&word, input.base_revision, input.base_lifecycle_revision)?;
+        ensure_association_source_state(
+            &word,
+            input.base_revision(),
+            input.base_lifecycle_revision(),
+        )?;
+        if input.is_v3() && !matches!(word, AdminWordAny::V3(_)) {
+            return Err(LexiconServiceError::ValidationFailed(vec![
+                reference_issue(
+                    sentence_id,
+                    "associations",
+                    "sentence_association_v3_requires_v3_entry",
+                    "多片段例句关联只允许写入 V3 词条",
+                ),
+            ]));
+        }
+        let normalized_inputs = normalize_manual_association_inputs(&input);
+        let has_pending = normalized_inputs
+            .iter()
+            .any(|association| association.pending_target_kind.is_some());
+        if has_pending && !allow_pending {
+            return Err(LexiconServiceError::V3StorageUnavailable);
+        }
+        if matches!(word, AdminWordAny::V2(_)) && has_pending {
+            return Err(LexiconServiceError::ValidationFailed(vec![
+                reference_issue(
+                    sentence_id,
+                    "associations",
+                    "sentence_association_pending_requires_v3",
+                    "Pending 例句关联只允许由 V3 词条创建",
+                ),
+            ]));
+        }
 
         let meanings = association_source_meanings(&word)?;
         let sentence = meanings
@@ -835,22 +1443,29 @@ impl LexiconService {
             .into_iter()
             .map(|(dialect, text)| (dialect, text.to_owned()))
             .collect::<Vec<_>>();
-        let scanned = LexiconRepository::sentence_association_scans(&mut *transaction, entry_id)
+        let scans = LexiconRepository::sentence_association_scans(&mut *transaction, entry_id)
             .await
-            .map_err(repository_error)?
-            .into_iter()
-            .filter(|scan| scan.sentence_id == sentence_id)
-            .filter(|scan| scan.resolver_version == RESOLVER_VERSION)
-            .map(|scan| (scan.source_dialect, scan.text_hash))
-            .collect::<HashMap<_, _>>();
-        let resolved = !variants.is_empty()
+            .map_err(repository_error)?;
+        let was_resolved = !variants.is_empty()
             && variants.iter().all(|(dialect, text)| {
-                scanned.get(dialect_name(*dialect)) == Some(&text_hash(text))
+                scans.iter().any(|scan| {
+                    scan.sentence_id == sentence_id
+                        && scan.source_dialect == dialect_name(*dialect)
+                        && scan.resolver_version == RESOLVER_VERSION
+                        && scan.text_hash == text_hash(text)
+                })
             });
-        if !resolved {
-            return Err(LexiconServiceError::SentenceAssociationsUnresolved);
+        if !was_resolved {
+            Self::refresh_sentence_associations(
+                &mut transaction,
+                entry_id,
+                &meanings,
+                allow_v3,
+                allow_automatic_associations,
+                Some(sentence_id),
+            )
+            .await?;
         }
-
         let existing = LexiconRepository::sentence_associations(&mut *transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -859,30 +1474,58 @@ impl LexiconService {
             .map(|association| (association.id, association))
             .collect::<HashMap<_, _>>();
 
-        let mut target_ids = input
-            .associations
+        let mut target_ids = normalized_inputs
             .iter()
-            .map(|association| association.target_word_id)
+            .filter(|association| association.target_publication_id.is_none())
+            .filter_map(|association| association.target_word_id)
             .filter(|target_id| *target_id != entry_id)
             .collect::<Vec<_>>();
         target_ids.sort_unstable();
         target_ids.dedup();
-        let targets =
+        let mut historical_targets = normalized_inputs
+            .iter()
+            .filter_map(|association| {
+                Some((
+                    association.target_word_id?,
+                    association.target_publication_id?,
+                ))
+            })
+            .filter(|(target_id, _)| *target_id != entry_id)
+            .collect::<Vec<_>>();
+        historical_targets.sort_unstable();
+        historical_targets.dedup();
+        let current_records =
             LexiconRepository::current_publication_snapshots(&mut transaction, &target_ids)
                 .await
-                .map_err(repository_error)?
-                .into_iter()
-                .map(|record| {
-                    PublishedAssociationTarget::from_snapshot(record.snapshot, allow_v3)
-                        .map(|target| (record.entry_id, target))
-                })
-                .collect::<Result<HashMap<_, _>, _>>()?;
+                .map_err(repository_error)?;
+        let historical_records = LexiconRepository::historical_publication_snapshots(
+            &mut transaction,
+            &historical_targets,
+        )
+        .await
+        .map_err(repository_error)?;
+        let targets = current_records
+            .into_iter()
+            .map(|record| (record, None))
+            .chain(historical_records.into_iter().map(|record| {
+                let publication_id = record.publication_id;
+                (record, Some(publication_id))
+            }))
+            .map(|(record, requested_publication_id)| {
+                PublishedAssociationTarget::from_snapshot(
+                    record.snapshot,
+                    allow_v3,
+                    record.publication_id,
+                )
+                .map(|target| ((record.entry_id, requested_publication_id), target))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
 
         let (rows, issues) = validate_manual_associations(
             entry_id,
             sentence_id,
             &variants,
-            &input.associations,
+            &normalized_inputs,
             &existing,
             &targets,
         );
@@ -890,20 +1533,38 @@ impl LexiconService {
             return Err(LexiconServiceError::ValidationFailed(issues));
         }
 
-        for (dialect, _) in &variants {
+        for (dialect, text) in &variants {
             let dialect = dialect_name(*dialect);
-            let side = rows
+            let hash = text_hash(text);
+            let mut side = rows
                 .iter()
                 .filter(|row| row.source_dialect == dialect)
                 .cloned()
                 .collect::<Vec<_>>();
+            if !was_resolved {
+                let automatic = existing
+                    .values()
+                    .filter(|association| {
+                        association.origin == "auto" && association.source_dialect == dialect
+                    })
+                    .cloned()
+                    .map(new_association_from_record)
+                    .filter(|association| {
+                        side.iter().all(|manual| {
+                            !segments_overlap(&association.source_segments, &manual.source_segments)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                side.extend(automatic);
+                side.sort_by_key(|association| association.range_start);
+            }
             LexiconRepository::replace_sentence_associations(
                 &mut transaction,
                 entry_id,
                 sentence_id,
                 dialect,
                 &side,
-                None,
+                Some((&hash, RESOLVER_VERSION)),
             )
             .await
             .map_err(repository_error)?;
@@ -931,6 +1592,7 @@ impl LexiconService {
             actor_id,
             request_id,
             sentence_id,
+            "lexicon.sentence_associations.replace",
         )
         .await
         .map_err(repository_error)?;
@@ -963,6 +1625,422 @@ impl LexiconService {
         transaction.commit().await.map_err(database_error)?;
         Ok(response)
     }
+
+    pub async fn pending_sentence_associations(
+        &self,
+        target_entry_id: Uuid,
+        query: PendingSentenceAssociationListQuery,
+        allow_v3: bool,
+    ) -> Result<PendingSentenceAssociationListResponse, LexiconServiceError> {
+        if !allow_v3 {
+            return Err(LexiconServiceError::V3StorageUnavailable);
+        }
+        let page_size = query.page_size.unwrap_or(20);
+        if !(1..=100).contains(&page_size) {
+            return Err(LexiconServiceError::InvalidField {
+                field: "page_size",
+                message: "page_size must be between 1 and 100",
+            });
+        }
+        let target_kind = LexiconRepository::published_sentence_association_target_kind(
+            self.repository.pool(),
+            target_entry_id,
+        )
+        .await
+        .map_err(repository_error)?
+        .ok_or(LexiconServiceError::WordNotFound)?;
+        if target_kind != "word" && target_kind != "phrase" {
+            return Err(LexiconServiceError::WordNotFound);
+        }
+        let scan_limit = i64::from(page_size) * 4 + 1;
+        let mut records = LexiconRepository::pending_sentence_associations_for_target(
+            self.repository.pool(),
+            target_entry_id,
+            query.cursor,
+            scan_limit,
+        )
+        .await
+        .map_err(repository_error)?;
+        let scan_has_more = records.len() == scan_limit as usize;
+        let last_scanned_id = records.last().map(|record| record.id);
+        records.retain(|record| {
+            record.scan_resolver_version == RESOLVER_VERSION
+                && record.scan_text_hash == text_hash(&record.sentence_text)
+        });
+        let total = LexiconRepository::pending_sentence_association_count_for_target(
+            self.repository.pool(),
+            target_entry_id,
+            RESOLVER_VERSION,
+        )
+        .await
+        .map_err(repository_error)? as u64;
+        let has_more = records.len() > page_size as usize || scan_has_more;
+        records.truncate(page_size as usize);
+        let next_cursor = has_more
+            .then(|| {
+                records
+                    .last()
+                    .map(|record| record.id)
+                    .or(last_scanned_id)
+                    .map(|id| id.to_string())
+            })
+            .flatten();
+        let results = records
+            .into_iter()
+            .map(pending_sentence_association_item)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PendingSentenceAssociationListResponse {
+            results,
+            total,
+            next_cursor,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_pending_sentence_association(
+        &self,
+        actor_id: Uuid,
+        request_id: Uuid,
+        association_id: Uuid,
+        idempotency_key: Uuid,
+        input: ClaimPendingSentenceAssociationInput,
+        allow_v3: bool,
+    ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
+        if !allow_v3 {
+            return Err(LexiconServiceError::V3StorageUnavailable);
+        }
+        if input.base_owner_entry_revision < 1 {
+            return Err(LexiconServiceError::InvalidField {
+                field: "base_owner_entry_revision",
+                message: "base_owner_entry_revision must be at least 1",
+            });
+        }
+        if input.base_owner_lifecycle_revision < 1 {
+            return Err(LexiconServiceError::InvalidField {
+                field: "base_owner_lifecycle_revision",
+                message: "base_owner_lifecycle_revision must be at least 1",
+            });
+        }
+        let request_hash = sha256_json(&serde_json::json!({
+            "association_id": association_id,
+            "input": input,
+        }))
+        .map_err(serialization_error)?;
+        let mut transaction = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "{CLAIM_PENDING_ASSOCIATION_SCOPE}:{actor_id}:{idempotency_key}"
+            ))
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+        if let Some(existing) = LexiconRepository::idempotency(
+            &mut transaction,
+            CLAIM_PENDING_ASSOCIATION_SCOPE,
+            actor_id,
+            idempotency_key,
+        )
+        .await
+        .map_err(repository_error)?
+        {
+            if existing.request_hash != request_hash {
+                return Err(LexiconServiceError::IdempotencyConflict);
+            }
+            let response: AdminWordAnyEnvelope =
+                serde_json::from_value(existing.response_body).map_err(serialization_error)?;
+            ensure_association_response_capability(&response, allow_v3)?;
+            transaction.commit().await.map_err(database_error)?;
+            return Ok(response);
+        }
+
+        let owner_entry_id =
+            LexiconRepository::sentence_association_owner_id(&mut transaction, association_id)
+                .await
+                .map_err(repository_error)?
+                .ok_or(LexiconServiceError::PendingSentenceAssociationNotFound)?;
+        let record = LexiconRepository::entry_by_id_for_update(&mut transaction, owner_entry_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(LexiconServiceError::WordNotFound)?;
+        let record_revision = record.revision;
+        let record_lifecycle_revision = record.lifecycle_revision;
+        let mut word = match record.content_schema_version {
+            2 => return Err(LexiconServiceError::PendingSentenceAssociationNotFound),
+            3 => {
+                let word = self.get_v3(owner_entry_id).await?;
+                if word.revision != record_revision
+                    || word.lifecycle_revision != record_lifecycle_revision
+                {
+                    return Err(invariant_record());
+                }
+                AdminWordAny::V3(Box::new(word))
+            }
+            version => return Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
+        };
+        let association = LexiconRepository::sentence_association_by_id_for_update(
+            &mut transaction,
+            association_id,
+        )
+        .await
+        .map_err(repository_error)?
+        .ok_or(LexiconServiceError::PendingSentenceAssociationNotFound)?;
+        if association.entry_id != owner_entry_id {
+            return Err(LexiconServiceError::PendingSentenceAssociationNotFound);
+        }
+        if association.state != "pending" {
+            return Err(LexiconServiceError::PendingSentenceAssociationClaimed);
+        }
+        ensure_association_source_state(
+            &word,
+            input.base_owner_entry_revision,
+            input.base_owner_lifecycle_revision,
+        )?;
+        let source_text = LexiconRepository::sentence_association_current_text(
+            &mut transaction,
+            owner_entry_id,
+            association.sentence_id,
+            &association.source_dialect,
+        )
+        .await
+        .map_err(repository_error)?
+        .ok_or(LexiconServiceError::PendingSentenceAssociationNotFound)?;
+        let active_scan =
+            LexiconRepository::sentence_association_scans(&mut *transaction, owner_entry_id)
+                .await
+                .map_err(repository_error)?
+                .into_iter()
+                .find(|scan| {
+                    scan.sentence_id == association.sentence_id
+                        && scan.source_dialect == association.source_dialect
+                });
+        let source_segments = serde_json::from_value::<Vec<SentenceSourceRangeV1>>(
+            association.source_segments.clone(),
+        )
+        .map_err(serialization_error)?;
+        let active_range = source_segments.len()
+            == usize::try_from(association.segment_count).unwrap_or_default()
+            && !source_segments.is_empty()
+            && source_segments.iter().all(|segment| {
+                codepoint_slice(&source_text, segment.start, segment.end)
+                    .is_some_and(|surface| surface == segment.surface)
+            });
+        let active_scan = active_scan.is_some_and(|scan| {
+            scan.resolver_version == RESOLVER_VERSION && scan.text_hash == text_hash(&source_text)
+        });
+        if !active_scan || !active_range {
+            return Err(LexiconServiceError::PendingSentenceAssociationNotFound);
+        }
+        if input.target_word_id == owner_entry_id {
+            return Err(LexiconServiceError::ValidationFailed(vec![
+                reference_issue(
+                    association.sentence_id,
+                    "associations",
+                    "sentence_association_self_target",
+                    "例句关联不能指向当前词条自身",
+                ),
+            ]));
+        }
+        let snapshot = LexiconRepository::current_publication_snapshots(
+            &mut transaction,
+            &[input.target_word_id],
+        )
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            LexiconServiceError::ValidationFailed(vec![reference_issue(
+                association.sentence_id,
+                "associations",
+                "sentence_association_target_unavailable",
+                "认领目标必须是未归档词条当前发布版本中的有效词义",
+            )])
+        })?;
+        let target = PublishedAssociationTarget::from_snapshot(
+            snapshot.snapshot,
+            allow_v3,
+            snapshot.publication_id,
+        )?;
+        let pending_kind = association.pending_target_kind.as_deref();
+        let target_kind = match target.kind {
+            EntryKind::Word => "word",
+            EntryKind::Phrase => "phrase",
+        };
+        if pending_kind != Some(target_kind) {
+            return Err(LexiconServiceError::ValidationFailed(vec![
+                reference_issue(
+                    association.sentence_id,
+                    "associations",
+                    "sentence_association_target_kind_mismatch",
+                    "认领目标种类必须与 Pending 的 word/phrase 种类一致",
+                ),
+            ]));
+        }
+        let normalized = association
+            .normalized_pending_target_headword
+            .as_deref()
+            .unwrap_or_default();
+        let target_surface_matches = normalized_surface(&target.headword).as_deref()
+            == Some(normalized)
+            || target.pos.iter().flat_map(|pos| &pos.forms).any(|form| {
+                form.normalized_surfaces
+                    .iter()
+                    .any(|surface| surface == normalized)
+            });
+        if !target_surface_matches {
+            return Err(LexiconServiceError::ValidationFailed(vec![
+                reference_issue(
+                    association.sentence_id,
+                    "associations",
+                    "sentence_association_target_surface_mismatch",
+                    "认领目标的当前发布词面必须与 Pending 词面一致",
+                ),
+            ]));
+        }
+        let resolved = manual_target(
+            &target,
+            input.target_sense_id,
+            normalized,
+            input
+                .target_publication_id
+                .or(Some(snapshot.publication_id)),
+            input.target_form_variant_id,
+        )
+        .ok_or_else(|| {
+            LexiconServiceError::ValidationFailed(vec![reference_issue(
+                association.sentence_id,
+                "associations",
+                "sentence_association_target_unavailable",
+                "认领目标必须包含可用的具体词义",
+            )])
+        })?;
+        let target_component_usages_snapshot = resolved
+            .target_form_variant_id
+            .map(|_| serde_json::to_value(&resolved.target_component_usages))
+            .transpose()
+            .map_err(serialization_error)?;
+        LexiconRepository::claim_pending_sentence_association(
+            &mut transaction,
+            association_id,
+            resolved.target_entry_id,
+            resolved.target_sense_id,
+            resolved.target_form_slot_id,
+            resolved.target_publication_id,
+            resolved.target_form_variant_id,
+            target_component_usages_snapshot.as_ref(),
+            &resolved.target_headword,
+            &resolved.target_gloss,
+            &resolved.resolved_pos,
+            resolved.resolved_form_type.as_deref(),
+        )
+        .await
+        .map_err(repository_error)?;
+
+        let updated_at = Utc::now();
+        let (revision, lifecycle_revision) = match &mut word {
+            AdminWordAny::V2(word) => {
+                word.lifecycle_revision += 1;
+                word.updated_at = updated_at;
+                (word.revision, word.lifecycle_revision)
+            }
+            AdminWordAny::V3(word) => {
+                word.lifecycle_revision += 1;
+                word.updated_at = updated_at;
+                (word.revision, word.lifecycle_revision)
+            }
+        };
+        LexiconRepository::record_sentence_association_edit(
+            &mut transaction,
+            owner_entry_id,
+            revision,
+            lifecycle_revision,
+            updated_at,
+            actor_id,
+            request_id,
+            association.sentence_id,
+            "lexicon.sentence_associations.claim",
+        )
+        .await
+        .map_err(repository_error)?;
+        match &mut word {
+            AdminWordAny::V2(word) => {
+                Self::hydrate_sentence_associations_in(&mut transaction, word).await?
+            }
+            AdminWordAny::V3(word) => {
+                Self::hydrate_v3_sentence_associations_in(
+                    &mut transaction,
+                    word.id,
+                    &mut word.meanings,
+                )
+                .await?
+            }
+        }
+        let response = AdminWordAnyEnvelope { word };
+        LexiconRepository::insert_idempotent_response(
+            &mut transaction,
+            CLAIM_PENDING_ASSOCIATION_SCOPE,
+            actor_id,
+            idempotency_key,
+            &request_hash,
+            Some(association_id),
+            &response,
+            200,
+        )
+        .await
+        .map_err(repository_error)?;
+        transaction.commit().await.map_err(database_error)?;
+        Ok(response)
+    }
+}
+
+fn pending_sentence_association_item(
+    record: PendingSentenceAssociationListRecord,
+) -> Result<PendingSentenceAssociationItemV3, LexiconServiceError> {
+    let source_dialect = dialect_from_name(&record.source_dialect).ok_or_else(|| {
+        LexiconServiceError::Repository(LexiconRepositoryError::Invariant(
+            "pending sentence association has invalid source dialect",
+        ))
+    })?;
+    let pending_target_kind = match record.pending_target_kind.as_str() {
+        "word" => EntryKind::Word,
+        "phrase" => EntryKind::Phrase,
+        _ => {
+            return Err(LexiconServiceError::Repository(
+                LexiconRepositoryError::Invariant(
+                    "pending sentence association has invalid target kind",
+                ),
+            ));
+        }
+    };
+    if !matches!(record.association_schema_version, 2 | 3) {
+        return Err(invariant_record());
+    }
+    let source_segments =
+        serde_json::from_value::<Vec<SentenceSourceRangeV1>>(record.source_segments)
+            .map_err(serialization_error)?;
+    if source_segments.is_empty()
+        || source_segments.len() != usize::try_from(record.segment_count).unwrap_or_default()
+    {
+        return Err(invariant_record());
+    }
+    Ok(PendingSentenceAssociationItemV3 {
+        association_id: record.id,
+        owner_entry_id: record.entry_id,
+        owner_entry_revision: record.owner_revision,
+        owner_lifecycle_revision: record.owner_lifecycle_revision,
+        sentence_id: record.sentence_id,
+        source_dialect,
+        source_segments,
+        sentence_text: record.sentence_text,
+        pending_target_kind,
+        pending_target_headword: record.pending_target_headword,
+        pending_target_gloss: record.pending_target_gloss,
+    })
 }
 
 fn ensure_association_source_state(
@@ -1013,22 +2091,126 @@ fn association_source_meanings(
 ) -> Result<DraftMeaningsStepContent, LexiconServiceError> {
     match word {
         AdminWordAny::V2(word) => Ok(word.meanings.clone()),
-        AdminWordAny::V3(word) => serde_json::from_value(
-            serde_json::to_value(&word.meanings).map_err(serialization_error)?,
-        )
-        .map_err(serialization_error),
+        AdminWordAny::V3(word) => {
+            let mut meanings = word.meanings.clone();
+            for sentence in meanings
+                .pos
+                .iter_mut()
+                .flat_map(|pos| &mut pos.senses)
+                .flat_map(|sense| &mut sense.sentences)
+            {
+                sentence.associations.clear();
+                sentence.associations_state = SentenceAssociationsStateV2::Unresolved;
+            }
+            serde_json::from_value(serde_json::to_value(meanings).map_err(serialization_error)?)
+                .map_err(serialization_error)
+        }
     }
 }
 
-/// 逐条校验人工关联，顺带把只读投影解析出来。返回待写入的行与全部 issue；
-/// 有 issue 时行不会被使用，但仍然全量校验，一次把所有问题报给管理员。
+#[derive(Debug, Clone)]
+struct ManualAssociationInput {
+    id: Uuid,
+    source_dialect: Dialect,
+    association_schema_version: i16,
+    source_segments: Vec<SentenceSourceRangeV1>,
+    target_word_id: Option<Uuid>,
+    target_sense_id: Option<Uuid>,
+    target_publication_id: Option<Uuid>,
+    target_form_variant_id: Option<Uuid>,
+    pending_target_kind: Option<EntryKind>,
+    pending_target_headword: Option<String>,
+    pending_target_gloss: Option<String>,
+}
+
+fn normalize_manual_association_inputs(
+    input: &ReplaceSentenceAssociationsInput,
+) -> Vec<ManualAssociationInput> {
+    match input {
+        ReplaceSentenceAssociationsInput::V2(input) => input
+            .associations
+            .iter()
+            .map(|association| ManualAssociationInput {
+                id: association.id,
+                source_dialect: association.source_dialect,
+                association_schema_version: 2,
+                source_segments: vec![association.source_range.clone()],
+                target_word_id: association.target_word_id,
+                target_sense_id: association.target_sense_id,
+                target_publication_id: None,
+                target_form_variant_id: None,
+                pending_target_kind: association.pending_target_kind,
+                pending_target_headword: association.pending_target_headword.clone(),
+                pending_target_gloss: association.pending_target_gloss.clone(),
+            })
+            .collect(),
+        ReplaceSentenceAssociationsInput::V3(input) => input
+            .associations
+            .iter()
+            .map(|association| ManualAssociationInput {
+                id: association.id,
+                source_dialect: association.source_dialect,
+                association_schema_version: 3,
+                source_segments: association.source_segments.clone(),
+                target_word_id: association.target_word_id,
+                target_sense_id: association.target_sense_id,
+                target_publication_id: association.target_publication_id,
+                target_form_variant_id: association.target_form_variant_id,
+                pending_target_kind: association.pending_target_kind,
+                pending_target_headword: association.pending_target_headword.clone(),
+                pending_target_gloss: association.pending_target_gloss.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn segments_overlap(
+    left: &[NewSentenceAssociationSegment],
+    right: &[NewSentenceAssociationSegment],
+) -> bool {
+    let as_discovery_segments = |segments: &[NewSentenceAssociationSegment]| {
+        segments
+            .iter()
+            .filter_map(|segment| {
+                Some(DiscoverySourceSegment {
+                    range: DiscoveryCodepointRange {
+                        start: usize::try_from(segment.range_start).ok()?,
+                        end: usize::try_from(segment.range_end).ok()?,
+                    },
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    any_segment_intersection(&as_discovery_segments(left), &as_discovery_segments(right))
+}
+
+fn segments_fingerprint(
+    sentence_id: Uuid,
+    dialect: &str,
+    text: &str,
+    segments: &[NewSentenceAssociationSegment],
+) -> Vec<u8> {
+    let positions = segments
+        .iter()
+        .map(|segment| format!("{}:{}", segment.range_start, segment.range_end))
+        .collect::<Vec<_>>()
+        .join("|");
+    text_hash(&format!(
+        "3|{sentence_id}|{dialect}|{}|{}|{positions}",
+        format_args!("{:x?}", text_hash(text)),
+        segments.len()
+    ))
+}
+
+/// 逐条校验人工关联，顺带把只读投影解析出来。V3 的位置权威始终是
+/// `source_segments`；parent 上的 legacy range 只保存第一段，供 V2 迁移期读取。
 fn validate_manual_associations(
     entry_id: Uuid,
     sentence_id: Uuid,
     variants: &[(Dialect, String)],
-    inputs: &[SentenceAssociationInputV2],
+    inputs: &[ManualAssociationInput],
     existing: &HashMap<Uuid, SentenceAssociationRecord>,
-    targets: &HashMap<Uuid, PublishedAssociationTarget>,
+    targets: &HashMap<(Uuid, Option<Uuid>), PublishedAssociationTarget>,
 ) -> (Vec<NewSentenceAssociation>, Vec<DraftValidationIssue>) {
     let mut issues = Vec::new();
     let mut rows: Vec<NewSentenceAssociation> = Vec::new();
@@ -1055,89 +2237,273 @@ fn validate_manual_associations(
             ));
             continue;
         };
-        let Some(slice) = codepoint_slice(text, input.source_range.start, input.source_range.end)
-        else {
+        if input.source_segments.is_empty() || input.source_segments.len() > 20 {
             issues.push(issue(
-                "sentence_association_range_invalid",
-                "关联区间必须是正文内非空的 [start, end)",
-            ));
-            continue;
-        };
-        if slice != input.source_range.surface {
-            issues.push(issue(
-                "sentence_association_surface_mismatch",
-                "关联区间与 surface 对不上，正文可能已经变了",
+                "sentence_association_segments_invalid",
+                "关联必须包含 1 到 20 个有序片段",
             ));
             continue;
         }
-        // 库层对 surface 还有 btrim 与 200 码点两条约束。不在这里挡住的话，
-        // 框选时多带一个尾随空格就会一路走到 INSERT，以 CHECK 违例变成 500。
-        let (Ok(range_start), Ok(range_end), true) = (
-            i32::try_from(input.source_range.start),
-            i32::try_from(input.source_range.end),
-            is_storable_surface(&input.source_range.surface),
-        ) else {
-            issues.push(issue(
-                "sentence_association_range_invalid",
-                "关联区间必须落在正文内，且首尾不含空白、不超过 200 个码点",
-            ));
+
+        let mut source_segments = Vec::with_capacity(input.source_segments.len());
+        let mut previous_end = None;
+        let mut segment_error = None;
+        for segment in &input.source_segments {
+            let Some(slice) = codepoint_slice(text, segment.start, segment.end) else {
+                segment_error = Some((
+                    "sentence_association_range_invalid",
+                    "关联片段必须是正文内非空的 [start, end)",
+                ));
+                break;
+            };
+            if slice != segment.surface {
+                segment_error = Some((
+                    "sentence_association_surface_mismatch",
+                    "关联片段与 surface 对不上，正文可能已经变了",
+                ));
+                break;
+            }
+            let (Ok(range_start), Ok(range_end), true) = (
+                i32::try_from(segment.start),
+                i32::try_from(segment.end),
+                is_storable_surface(&segment.surface),
+            ) else {
+                segment_error = Some((
+                    "sentence_association_range_invalid",
+                    "关联片段必须落在正文内，且首尾不含空白、不超过 200 个码点",
+                ));
+                break;
+            };
+            if previous_end.is_some_and(|end| end > range_start) {
+                segment_error = Some((
+                    "sentence_association_segments_invalid",
+                    "关联片段必须按正文顺序排列且互不重叠",
+                ));
+                break;
+            }
+            previous_end = Some(range_end);
+            source_segments.push(NewSentenceAssociationSegment {
+                range_start,
+                range_end,
+                surface: segment.surface.clone(),
+            });
+        }
+        if let Some((code, message)) = segment_error {
+            issues.push(issue(code, message));
             continue;
-        };
+        }
         if rows.iter().any(|row| {
             row.source_dialect == dialect
-                && row.range_start < range_end
-                && range_start < row.range_end
+                && segments_overlap(&row.source_segments, &source_segments)
         }) {
             issues.push(issue(
                 "sentence_association_range_overlap",
-                "同一侧正文里的关联区间不能重叠",
+                "同一侧正文里的关联片段不能重叠",
             ));
             continue;
         }
-        if input.target_word_id == entry_id {
+
+        let canonical_surface = input
+            .source_segments
+            .iter()
+            .map(|segment| segment.surface.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if canonical_surface.chars().count() > 200 {
+            issues.push(issue(
+                "sentence_association_segments_invalid",
+                "关联片段拼接后的词面不能超过 200 个码点",
+            ));
+            continue;
+        }
+        let first = source_segments.first().expect("segments were checked");
+        let range_start = first.range_start;
+        let range_end = first.range_end;
+        let legacy_surface = first.surface.clone();
+        let fingerprint = (input.association_schema_version == 3)
+            .then(|| segments_fingerprint(sentence_id, dialect, text, &source_segments));
+
+        let linked_shape = match (
+            input.target_word_id,
+            input.target_sense_id,
+            input.target_publication_id,
+            input.target_form_variant_id,
+            input.pending_target_kind,
+            input.pending_target_headword.as_deref(),
+            input.pending_target_gloss.as_deref(),
+        ) {
+            (
+                Some(target_word_id),
+                Some(target_sense_id),
+                target_publication_id,
+                target_form_variant_id,
+                None,
+                None,
+                None,
+            ) if (input.association_schema_version == 2
+                && target_publication_id.is_none()
+                && target_form_variant_id.is_none())
+                || (input.association_schema_version == 3
+                    && target_publication_id.is_some() == target_form_variant_id.is_some()) =>
+            {
+                Some((target_word_id, target_sense_id))
+            }
+            (None, None, None, None, Some(pending_kind), Some(pending_headword), pending_gloss) => {
+                let pending_headword = pending_headword.trim();
+                let pending_gloss = pending_gloss
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let token_count = tokenize(&canonical_surface).len();
+                let pending_kind = match pending_kind {
+                    EntryKind::Word if token_count == 1 => "word",
+                    EntryKind::Phrase
+                        if token_count >= 2
+                            && (input.association_schema_version == 3
+                                || is_contiguous_phrase_surface(&canonical_surface)) =>
+                    {
+                        "phrase"
+                    }
+                    EntryKind::Phrase => {
+                        issues.push(issue(
+                            "sentence_association_pending_phrase_invalid",
+                            "Pending 短语必须包含至少两个按原句顺序选择的单词",
+                        ));
+                        continue;
+                    }
+                    EntryKind::Word => {
+                        issues.push(issue(
+                            "sentence_association_pending_word_invalid",
+                            "Pending 单词只能包含一个单词",
+                        ));
+                        continue;
+                    }
+                };
+                let normalized_source =
+                    crate::lexicon::normalization::normalize_headword(&canonical_surface);
+                let normalized_pending =
+                    crate::lexicon::normalization::normalize_headword(pending_headword);
+                let (Ok(normalized_source), Ok(normalized_pending)) =
+                    (normalized_source, normalized_pending)
+                else {
+                    issues.push(issue(
+                        "sentence_association_pending_target_invalid",
+                        "Pending 目标词面必须是可规范化的英文词或短语",
+                    ));
+                    continue;
+                };
+                if normalized_source.key != normalized_pending.key {
+                    issues.push(issue(
+                        "sentence_association_pending_surface_mismatch",
+                        "Pending 目标词面必须与所选片段拼接后的词面一致",
+                    ));
+                    continue;
+                }
+                if pending_headword.chars().count() > 200
+                    || pending_gloss.is_some_and(|value| value.chars().count() > 5000)
+                {
+                    issues.push(issue(
+                        "sentence_association_pending_target_invalid",
+                        "Pending 目标词面或预填词义超过长度限制",
+                    ));
+                    continue;
+                }
+                rows.push(NewSentenceAssociation {
+                    id: input.id,
+                    sentence_id,
+                    source_dialect: dialect.to_owned(),
+                    association_schema_version: input.association_schema_version,
+                    source_segments,
+                    segments_fingerprint: fingerprint,
+                    range_start,
+                    range_end,
+                    surface: legacy_surface,
+                    state: "pending".to_owned(),
+                    target_entry_id: None,
+                    target_sense_id: None,
+                    target_form_slot_id: None,
+                    target_publication_id: None,
+                    target_form_variant_id: None,
+                    target_component_usages_snapshot: None,
+                    origin: "manual".to_owned(),
+                    target_headword_snapshot: None,
+                    target_gloss_snapshot: None,
+                    resolved_pos: None,
+                    resolved_form_type: None,
+                    pending_target_kind: Some(pending_kind.to_owned()),
+                    pending_target_headword: Some(pending_headword.to_owned()),
+                    normalized_pending_target_headword: Some(normalized_pending.key),
+                    pending_target_gloss: pending_gloss.map(str::to_owned),
+                });
+                continue;
+            }
+            _ => None,
+        };
+        let Some((target_word_id, target_sense_id)) = linked_shape else {
+            issues.push(issue(
+                "sentence_association_target_shape_invalid",
+                "关联目标必须是完整的已发布词义或待关联词条形状",
+            ));
+            continue;
+        };
+        if target_word_id == entry_id {
             issues.push(issue(
                 "sentence_association_self_target",
                 "例句关联不能指向当前词条自身",
             ));
             continue;
         }
-        let Some(target) = targets.get(&input.target_word_id) else {
+        let Some(target) = targets.get(&(target_word_id, input.target_publication_id)) else {
             issues.push(issue(
                 "sentence_association_target_unavailable",
                 "关联目标必须是未归档词条当前发布版本中的有效词义",
             ));
             continue;
         };
-        let normalized =
-            crate::lexicon::normalization::normalize_headword(&input.source_range.surface)
-                .map(|normalized| normalized.key)
-                .unwrap_or_default();
-        let Some(resolved) = manual_target(target, input.target_sense_id, &normalized) else {
+        let normalized = crate::lexicon::normalization::normalize_headword(&canonical_surface)
+            .map(|normalized| normalized.key)
+            .unwrap_or_default();
+        let Some(resolved) = manual_target(
+            target,
+            target_sense_id,
+            &normalized,
+            input.target_publication_id,
+            input.target_form_variant_id,
+        ) else {
             issues.push(issue(
                 "sentence_association_target_unavailable",
                 "关联目标必须是未归档词条当前发布版本中的有效词义",
             ));
             continue;
         };
-        // 与库里逐字相同的那条保持原样：整组替换不该把没动过的自动关联改写成人工。
-        let unchanged = existing.get(&input.id).is_some_and(|record| {
-            record.source_dialect == dialect
-                && record.range_start == range_start
-                && record.range_end == range_end
-                && record.surface == input.source_range.surface
-                && record.target_entry_id == input.target_word_id
-                && record.target_sense_id == input.target_sense_id
-        });
+        let unchanged = input.association_schema_version == 2
+            && existing.get(&input.id).is_some_and(|record| {
+                record.source_dialect == dialect
+                    && record.range_start == range_start
+                    && record.range_end == range_end
+                    && record.surface == legacy_surface
+                    && record.state == "linked"
+                    && record.target_entry_id == Some(target_word_id)
+                    && record.target_sense_id == Some(target_sense_id)
+            });
         rows.push(NewSentenceAssociation {
             id: input.id,
             sentence_id,
             source_dialect: dialect.to_owned(),
+            association_schema_version: input.association_schema_version,
+            source_segments,
+            segments_fingerprint: fingerprint,
             range_start,
             range_end,
-            surface: input.source_range.surface.clone(),
-            target_entry_id: input.target_word_id,
-            target_sense_id: resolved.target_sense_id,
+            surface: legacy_surface,
+            state: "linked".to_owned(),
+            target_entry_id: Some(target_word_id),
+            target_sense_id: Some(resolved.target_sense_id),
             target_form_slot_id: resolved.target_form_slot_id,
+            target_publication_id: resolved.target_publication_id,
+            target_form_variant_id: resolved.target_form_variant_id,
+            target_component_usages_snapshot: resolved
+                .target_form_variant_id
+                .and_then(|_| serde_json::to_value(&resolved.target_component_usages).ok()),
             origin: if unchanged {
                 existing
                     .get(&input.id)
@@ -1146,10 +2512,14 @@ fn validate_manual_associations(
             } else {
                 "manual".to_owned()
             },
-            target_headword_snapshot: resolved.target_headword,
-            target_gloss_snapshot: resolved.target_gloss,
-            resolved_pos: resolved.resolved_pos,
+            target_headword_snapshot: Some(resolved.target_headword),
+            target_gloss_snapshot: Some(resolved.target_gloss),
+            resolved_pos: Some(resolved.resolved_pos),
             resolved_form_type: resolved.resolved_form_type,
+            pending_target_kind: None,
+            pending_target_headword: None,
+            normalized_pending_target_headword: None,
+            pending_target_gloss: None,
         });
     }
     (rows, issues)

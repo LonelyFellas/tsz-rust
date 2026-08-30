@@ -78,6 +78,9 @@ pub enum ErrorCode {
     WordNotFound,
     SentenceNotFound,
     SentenceAssociationsUnresolved,
+    SentenceAssociationClientUpgradeRequired,
+    PendingSentenceAssociationNotFound,
+    PendingSentenceAssociationClaimed,
     PublicationNotFound,
     PartOfSpeechInUse,
     SubPartOfSpeechInUse,
@@ -99,7 +102,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 76] = [
+    pub const ALL: [Self; 79] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -165,6 +168,9 @@ impl ErrorCode {
         Self::EntryHasInboundPublicationRefs,
         Self::EntryHasUnavailablePublicationRefs,
         Self::WordNotFound,
+        Self::SentenceAssociationClientUpgradeRequired,
+        Self::PendingSentenceAssociationNotFound,
+        Self::PendingSentenceAssociationClaimed,
         Self::PublicationNotFound,
         Self::PartOfSpeechInUse,
         Self::SubPartOfSpeechInUse,
@@ -465,6 +471,21 @@ impl ErrorCode {
             Self::SentenceAssociationsUnresolved => (
                 "sentence_associations_unresolved",
                 "Sentence associations are not resolved for the current text",
+                StatusCode::CONFLICT,
+            ),
+            Self::SentenceAssociationClientUpgradeRequired => (
+                "sentence_association_client_upgrade_required",
+                "Sentence association client upgrade required",
+                StatusCode::CONFLICT,
+            ),
+            Self::PendingSentenceAssociationNotFound => (
+                "pending_sentence_association_not_found",
+                "Pending sentence association not found",
+                StatusCode::NOT_FOUND,
+            ),
+            Self::PendingSentenceAssociationClaimed => (
+                "pending_sentence_association_claimed",
+                "Pending sentence association already claimed",
                 StatusCode::CONFLICT,
             ),
             Self::PublicationNotFound => (
