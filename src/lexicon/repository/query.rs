@@ -4,13 +4,17 @@ impl LexiconRepository {
     pub(crate) async fn related_search_dataset_version(
         &self,
     ) -> Result<i64, LexiconRepositoryError> {
-        // aggregate_type 是 outbox 唯一索引的首列；这里只扫描词库发布/生命周期索引区间，
-        // 草稿保存与其他业务事件不会让已签名游标无故失效。
+        // 草稿候选进入数据集后，forms surface projection 与 meanings 保存事件都必须
+        // 使已签名游标失效；发布/归档/恢复继续由 entry/lifecycle 事件覆盖。
         sqlx::query_scalar(
             r#"
             SELECT count(*)
             FROM platform.outbox_events
-            WHERE aggregate_type IN ('lexicon.entry', 'lexicon.entry.lifecycle')
+            WHERE aggregate_type IN (
+                'lexicon.entry',
+                'lexicon.entry.lifecycle',
+                'lexicon.surface_projection'
+            )
             "#,
         )
         .fetch_one(&self.pool)
@@ -25,12 +29,15 @@ impl LexiconRepository {
         let pattern = format!("%{}%", escape_like_literal(filter.q));
         sqlx::query_as::<_, RelatedSearchRecord>(
             r#"
-            WITH published_entry AS (
+            WITH searchable_entry AS (
                 SELECT entry.id,
                        entry.kind,
                        publication.id AS publication_id,
+                       NULL::bigint AS source_revision,
                        publication.content_schema_version,
                        publication.snapshot,
+                       'published'::text AS status,
+                       0::smallint AS status_rank,
                        -- 只作排序/游标键；必须与服务端展示字段逐字符相同。
                        -- V2 并列拼写仍按管理员主词侧在前；V3 没有主词，直接使用
                        -- publication snapshot 内冻结的 presentation label。
@@ -57,39 +64,96 @@ impl LexiconRepository {
                                    END
                                ELSE ''
                            END
-                       END AS headword
+                       END AS sort_headword
                 FROM lexicon.entries entry
                 JOIN lexicon.entry_publications publication
                   ON publication.id = entry.current_publication_id
                  AND publication.entry_id = entry.id
                 WHERE entry.archived_at IS NULL
-            ), searchable_entry AS (
-                SELECT *, headword AS sort_headword
-                FROM published_entry
+
+                UNION ALL
+
+                SELECT entry.id,
+                       entry.kind,
+                       NULL::uuid AS publication_id,
+                       entry.revision AS source_revision,
+                       3::smallint AS content_schema_version,
+                       jsonb_build_object(
+                           'id', entry.id,
+                           'kind', entry.kind,
+                           'presentation', jsonb_build_object(
+                               'label', presentation.label,
+                               'matched_surfaces', presentation.matched_surfaces,
+                               'strategy_version', presentation.strategy_version
+                           ),
+                           'forms', editor.forms,
+                           'meanings', editor.meanings
+                       ) AS snapshot,
+                       'draft'::text AS status,
+                       1::smallint AS status_rank,
+                       presentation.label AS sort_headword
+                FROM lexicon.entries entry
+                JOIN lexicon.entry_editor_projection editor
+                  ON editor.entry_id = entry.id
+                 AND editor.rebuilt_revision = entry.revision
+                JOIN lexicon.entry_presentation_projection presentation
+                  ON presentation.entry_id = entry.id
+                 AND presentation.content_schema_version = 3
+                 AND presentation.source_revision = entry.revision
+                WHERE $12::boolean
+                  AND entry.content_schema_version = 3
+                  AND entry.current_publication_id IS NULL
+                  AND entry.archived_at IS NULL
             )
-            SELECT content_schema_version,
+            SELECT id AS entry_id,
+                   kind,
+                   content_schema_version,
                    snapshot,
+                   status,
+                   status_rank,
                    COALESCE((
-                       SELECT array_agg(DISTINCT part.code ORDER BY part.code)
-                       FROM lexicon.entry_publication_part_of_speech_refs pos_ref
-                       JOIN catalog.parts_of_speech part
-                         ON part.id = pos_ref.part_of_speech_id
-                       WHERE pos_ref.publication_id = searchable_entry.publication_id
-                         AND pos_ref.entry_id = searchable_entry.id
+                       SELECT array_agg(DISTINCT labels.code ORDER BY labels.code)
+                       FROM (
+                           SELECT part.code
+                           FROM lexicon.entry_publication_part_of_speech_refs pos_ref
+                           JOIN catalog.parts_of_speech part
+                             ON part.id = pos_ref.part_of_speech_id
+                           WHERE searchable_entry.status = 'published'
+                             AND pos_ref.publication_id = searchable_entry.publication_id
+                             AND pos_ref.entry_id = searchable_entry.id
+                           UNION
+                           SELECT part.code
+                           FROM lexicon.entry_pos pos
+                           JOIN catalog.parts_of_speech part
+                             ON part.id = pos.part_of_speech_id
+                           WHERE searchable_entry.status = 'draft'
+                             AND pos.entry_id = searchable_entry.id
+                       ) labels
                    ), ARRAY[]::text[]) AS pos_labels,
                    sort_headword,
                    count(*) OVER() AS total
             FROM searchable_entry
-            WHERE ($10::boolean OR content_schema_version = 2)
+            WHERE ($11::boolean OR content_schema_version = 2)
               AND ($2::text IS NULL OR kind = $2)
               AND CASE WHEN $3 THEN
                     EXISTS (
                         SELECT 1
                         FROM lexicon.surface_sources surface
                         WHERE surface.entry_id = searchable_entry.id
-                          AND surface.publication_id = searchable_entry.publication_id
-                          AND surface.content_scope = 'current_publication'
                           AND surface.content_schema_version = searchable_entry.content_schema_version
+                          AND (
+                              (
+                                  searchable_entry.status = 'published'
+                                  AND surface.publication_id = searchable_entry.publication_id
+                                  AND surface.content_scope = 'current_publication'
+                              )
+                              OR (
+                                  searchable_entry.status = 'draft'
+                                  AND surface.publication_id IS NULL
+                                  AND surface.content_scope = 'draft'
+                                  AND surface.source_revision = searchable_entry.source_revision
+                              )
+                          )
                           AND (
                               (searchable_entry.content_schema_version = 2
                                   AND surface.source_kind = 'headword')
@@ -104,9 +168,20 @@ impl LexiconRepository {
                         SELECT 1
                         FROM lexicon.surface_sources surface
                         WHERE surface.entry_id = searchable_entry.id
-                          AND surface.publication_id = searchable_entry.publication_id
-                          AND surface.content_scope = 'current_publication'
                           AND surface.content_schema_version = searchable_entry.content_schema_version
+                          AND (
+                              (
+                                  searchable_entry.status = 'published'
+                                  AND surface.publication_id = searchable_entry.publication_id
+                                  AND surface.content_scope = 'current_publication'
+                              )
+                              OR (
+                                  searchable_entry.status = 'draft'
+                                  AND surface.publication_id IS NULL
+                                  AND surface.content_scope = 'draft'
+                                  AND surface.source_revision = searchable_entry.source_revision
+                              )
+                          )
                           AND (
                               (searchable_entry.content_schema_version = 2
                                   AND surface.source_kind = 'headword')
@@ -122,9 +197,20 @@ impl LexiconRepository {
                         SELECT 1
                         FROM lexicon.surface_sources surface
                         WHERE surface.entry_id = searchable_entry.id
-                          AND surface.publication_id = searchable_entry.publication_id
-                          AND surface.content_scope = 'current_publication'
                           AND surface.content_schema_version = searchable_entry.content_schema_version
+                          AND (
+                              (
+                                  searchable_entry.status = 'published'
+                                  AND surface.publication_id = searchable_entry.publication_id
+                                  AND surface.content_scope = 'current_publication'
+                              )
+                              OR (
+                                  searchable_entry.status = 'draft'
+                                  AND surface.publication_id IS NULL
+                                  AND surface.content_scope = 'draft'
+                                  AND surface.source_revision = searchable_entry.source_revision
+                              )
+                          )
                           AND (
                               (searchable_entry.content_schema_version = 2
                                   AND surface.source_kind = 'headword')
@@ -138,11 +224,12 @@ impl LexiconRepository {
               AND ($6::text IS NULL OR (
                     kind,
                     sort_headword COLLATE "C",
+                    status_rank,
                     id
-                  ) > ($6, $7 COLLATE "C", $8)
+                  ) > ($6, $7 COLLATE "C", $8, $9)
               )
-            ORDER BY kind ASC, sort_headword COLLATE "C" ASC, id ASC
-            LIMIT $9
+            ORDER BY kind ASC, sort_headword COLLATE "C" ASC, status_rank ASC, id ASC
+            LIMIT $10
             "#,
         )
         .bind(pattern)
@@ -152,9 +239,11 @@ impl LexiconRepository {
         .bind(filter.q)
         .bind(filter.last_kind.map(kind_string))
         .bind(filter.last_headword)
+        .bind(filter.last_status_rank)
         .bind(filter.last_word_id)
         .bind(filter.limit)
         .bind(filter.include_v3)
+        .bind(filter.include_drafts)
         .fetch_all(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)

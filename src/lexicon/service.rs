@@ -155,12 +155,16 @@ pub enum LexiconServiceError {
     EntryArchived,
     #[error("entry has publication history or inbound references and cannot be deleted")]
     EntryNotDeletable,
+    #[error("entry has inbound prebound relations and cannot be deleted")]
+    EntryHasInboundPreboundRelations,
     #[error("entry has inbound publication references")]
     EntryHasInboundPublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
     #[error("entry has unavailable outbound publication references")]
     EntryHasUnavailablePublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
     #[error("a referenced publication is changing")]
     ReferenceConflict,
+    #[error("relation prebinding reconciliation fanout exceeds 500 eligible relations")]
+    RelationPrebindingFanoutExceeded,
     #[error("a stable V3 node identity changed")]
     StableNodeIdChanged,
     #[error("a V3 form operation would break an existing reference")]

@@ -496,6 +496,12 @@ pub struct WordRelationV2 {
     #[schema(nullable = false)]
     pub target_sense_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    pub prebound_target_word_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    pub prebinding_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -507,6 +513,9 @@ pub struct WordRelationV2 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(read_only)]
     pub target_gloss: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    pub target_status: Option<String>,
     pub score: String,
 }
 

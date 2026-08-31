@@ -264,6 +264,7 @@ pub async fn save_forms(
                 &mut response,
                 sentence_association_enabled(state.smart_lexicon_v3_flags),
                 sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
             );
             return Ok((StatusCode::OK, Json(response)));
         }
@@ -313,6 +314,17 @@ pub async fn save_meanings(
         Some(3) => {
             let input: SaveMeaningsStepInputV3 = v3_contract::decode_v3_meanings_request(input)?;
             v3_contract::require_positive_revision("base_revision", input.base_revision)?;
+            if !draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags)
+                && input
+                    .content
+                    .pos
+                    .iter()
+                    .flat_map(|pos| &pos.senses)
+                    .flat_map(|sense| &sense.relations)
+                    .any(|relation| relation.prebound_target_word_id.is_some())
+            {
+                return Err(v3_storage_unavailable());
+            }
             let issues = v3_contract::validate_meanings(&input.content);
             if !issues.is_empty() {
                 return Err(v3_contract::contract_validation_error(&issues));
@@ -321,7 +333,13 @@ pub async fn save_meanings(
                 return Err(v3_storage_unavailable());
             }
             let mut response = service(&state)
-                .save_meanings_v3(admin.id, request_id.as_uuid(), path.id, input)
+                .save_meanings_v3(
+                    admin.id,
+                    request_id.as_uuid(),
+                    path.id,
+                    input,
+                    draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
+                )
                 .await
                 .map_err(map_error)?;
             apply_legacy_bridge_read_flag(
@@ -332,6 +350,7 @@ pub async fn save_meanings(
                 &mut response,
                 sentence_association_enabled(state.smart_lexicon_v3_flags),
                 sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
             );
             return Ok((StatusCode::OK, Json(response)));
         }
@@ -466,6 +485,7 @@ pub async fn publish(
                 &mut response,
                 sentence_association_enabled(state.smart_lexicon_v3_flags),
                 sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
             );
             return Ok((StatusCode::CREATED, Json(response)));
         }
@@ -548,6 +568,7 @@ pub async fn replace_sentence_associations(
         &mut response,
         sentence_association_enabled(state.smart_lexicon_v3_flags),
         sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
     );
     Ok((StatusCode::OK, Json(response)))
 }
@@ -605,6 +626,7 @@ pub async fn claim_pending_sentence_association(
         &mut response,
         sentence_association_enabled(state.smart_lexicon_v3_flags),
         sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
     );
     Ok((StatusCode::OK, Json(response)))
 }
@@ -674,6 +696,7 @@ pub async fn activate_publication(
                 &mut response,
                 sentence_association_enabled(state.smart_lexicon_v3_flags),
                 sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
             );
             return Ok((StatusCode::OK, Json(response)));
         }

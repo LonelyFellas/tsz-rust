@@ -275,12 +275,15 @@ impl LexiconRepository {
             r#"
             SELECT sense.id
             FROM lexicon.senses sense
+            JOIN lexicon.entry_pos pos
+              ON pos.id = sense.entry_pos_id
+             AND pos.entry_id = sense.entry_id
             JOIN lexicon.nodes node
               ON node.id = sense.id
              AND node.entry_id = sense.entry_id
              AND node.removed_from_draft_at IS NULL
             WHERE sense.entry_id = $1
-            ORDER BY sense.entry_pos_id, sense.sort_order, sense.id
+            ORDER BY pos.sort_order, sense.sort_order, sense.id
             LIMIT 1
             "#,
         )

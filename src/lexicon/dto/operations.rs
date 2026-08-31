@@ -1267,6 +1267,7 @@ pub struct RelatedSearchQuery {
     pub kind: Option<EntryKind>,
     pub match_mode: Option<RelatedSearchMatchMode>,
     pub exclude_exact: Option<bool>,
+    pub include_drafts: Option<bool>,
     #[param(minimum = 1, maximum = 100)]
     pub page_size: Option<u32>,
     #[param(default = 20, minimum = 1, maximum = 100)]

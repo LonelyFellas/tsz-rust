@@ -196,6 +196,7 @@ mod tests {
             smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
             [false; 6]
         );
+        assert!(!state.smart_lexicon_v3_flags.draft_relation_prebinding);
     }
 
     #[tokio::test]
@@ -209,6 +210,7 @@ mod tests {
             smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
             [true; 6]
         );
+        assert!(state.smart_lexicon_v3_flags.draft_relation_prebinding);
     }
 
     #[tokio::test]

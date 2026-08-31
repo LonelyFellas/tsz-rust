@@ -627,6 +627,22 @@ impl LexiconService {
         // 只读投影不接受写入。放在最前面而不是临用前：后面每一道校验都不该看见
         // 客户端塞进来的值，否则将来有人在校验里读到它就成了可被伪造的输入。
         crate::lexicon::sentence_association::clear_sentence_associations(&mut content);
+        if content
+            .pos
+            .iter()
+            .flat_map(|pos| &pos.senses)
+            .flat_map(|sense| &sense.relations)
+            .any(|relation| {
+                relation.prebound_target_word_id.is_some()
+                    || relation.prebinding_state.is_some()
+                    || relation.target_status.is_some()
+            })
+        {
+            return Err(LexiconServiceError::UnprocessableField {
+                field: "prebound_target_word_id",
+                message: "draft relation prebinding is only available in the latest word model",
+            });
+        }
         if base_revision < 1 {
             return Err(LexiconServiceError::InvalidField {
                 field: "base_revision",

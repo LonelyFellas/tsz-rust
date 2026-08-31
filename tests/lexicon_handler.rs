@@ -4859,6 +4859,7 @@ async fn published_sense_references_are_resolved_snapshotted_and_protected(pool:
         .as_array_mut()
         .unwrap()
         .push(second_sense);
+
     let (status, response) = call(
         &state,
         Method::PUT,
@@ -13309,6 +13310,802 @@ async fn v3_pending_relation_gloss_round_trips_and_materializes(pool: PgPool) {
     assert_eq!(
         materialized["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"],
         pending_gloss
+    );
+}
+
+#[sqlx::test]
+async fn v3_draft_relation_prebinding_promotes_once_and_detaches_without_rebinding(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let target_id = target_forms["word"]["id"].as_str().unwrap();
+    let target_headword = target_forms["word"]["presentation"]["label"]
+        .as_str()
+        .unwrap();
+
+    let (status, default_search) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "默认搜索失败：{default_search}");
+    assert!(
+        default_search["results"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "未 opt-in 时不得暴露草稿：{default_search}"
+    );
+
+    let (status, draft_search) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20&include_drafts=true"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "草稿搜索失败：{draft_search}");
+    let target_result = draft_search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["entry_id"] == target_id)
+        .expect("include_drafts 应返回零词义目标草稿");
+    assert_eq!(target_result["status"], "draft");
+    assert_eq!(target_result["senses"], json!([]));
+
+    let source_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let source_id = source_forms["word"]["id"].as_str().unwrap();
+    let relation_id = Uuid::now_v7();
+    let mut source_meanings =
+        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "synonym",
+        "prebound_target_word_id": target_id,
+        "pending_target_headword": target_headword,
+        "pending_target_gloss": "管理员预先填写的释义",
+        "score": "88.00"
+    }]);
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_forms["word"]["revision"],
+            "intent": "complete",
+            "content": source_meanings.clone()
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "零词义预绑定保存失败：{source_saved}"
+    );
+    let source_revision = source_saved["word"]["revision"].as_i64().unwrap();
+    let waiting = &source_saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(waiting["prebound_target_word_id"], target_id);
+    assert_eq!(waiting["prebinding_state"], "waiting_first_sense");
+    assert_eq!(waiting["target_status"], "draft");
+    assert_eq!(waiting["pending_target_gloss"], "管理员预先填写的释义");
+
+    let disabled_redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let mut disabled_flags = SmartLexiconV3Flags::all_enabled();
+    disabled_flags.draft_relation_prebinding = false;
+    let disabled_state = AppState::for_test_with_redis(pool.clone(), disabled_redis)
+        .with_smart_lexicon_v3_flags_for_test(disabled_flags);
+    let disabled_bearer = token(&disabled_state, admin_id);
+    source_meanings["pos"][0]["senses"][0]["relations"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("prebound_target_word_id");
+    let (status, disabled_save) = call(
+        &disabled_state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &disabled_bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_revision,
+            "intent": "complete",
+            "content": source_meanings
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "capability 关闭时旧客户端不得清掉稳定预绑定：{disabled_save}"
+    );
+    assert_eq!(
+        disabled_save["code"],
+        "smart_lexicon_v3_storage_unavailable"
+    );
+
+    let (status, delete_blocked) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{target_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": target_forms["word"]["revision"],
+            "base_lifecycle_revision": target_forms["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "预绑定目标不得永久删除：{delete_blocked}"
+    );
+    assert_eq!(
+        delete_blocked["code"],
+        "entry_has_inbound_prebound_relations"
+    );
+
+    let (status, waiting_publish) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_id}/publications"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "waiting 来源发布必须阻断：{waiting_publish}"
+    );
+    assert!(has_issue(
+        &waiting_publish,
+        "relation_prebound_target_has_no_sense"
+    ));
+
+    let (status, archived_target) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": target_forms["word"]["revision"],
+            "base_lifecycle_revision": target_forms["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "预绑定目标归档失败：{archived_target}"
+    );
+    let (status, archived_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        archived_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_status"],
+        "archived"
+    );
+    let mut archived_publish_body = json!({
+        "schema_version": 3,
+        "base_revision": source_revision
+    });
+    let (mut status, mut archived_publish) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_id}/publications"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(archived_publish_body.clone()),
+    )
+    .await;
+    if status == StatusCode::CONFLICT
+        && archived_publish["code"] == "surface_match_acknowledgement_required"
+    {
+        archived_publish_body["confirmed_surface_match_token"] =
+            archived_publish["meta"]["surface_match_page"]["surface_confirmation_token"].clone();
+        (status, archived_publish) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/{source_id}/publications"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(archived_publish_body),
+        )
+        .await;
+    }
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "归档目标来源发布必须阻断：{archived_publish}"
+    );
+    assert!(has_issue(
+        &archived_publish,
+        "relation_prebound_target_archived"
+    ));
+    let mut restore_body = json!({
+        "base_revision": archived_target["word"]["revision"],
+        "base_lifecycle_revision": archived_target["word"]["lifecycle_revision"]
+    });
+    let (mut status, mut restored_target) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(restore_body.clone()),
+    )
+    .await;
+    if status == StatusCode::CONFLICT
+        && restored_target["code"] == "surface_match_acknowledgement_required"
+    {
+        restore_body["confirmed_surface_match_token"] =
+            restored_target["meta"]["surface_match_page"]["surface_confirmation_token"].clone();
+        (status, restored_target) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/{target_id}/restore"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(restore_body),
+        )
+        .await;
+    }
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "预绑定目标恢复失败：{restored_target}"
+    );
+
+    let mut target_meanings =
+        complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let first_sense_id = target_meanings["pos"][0]["senses"][0]["id"].clone();
+    let mut second_sense = target_meanings["pos"][0]["senses"][0].clone();
+    second_sense["id"] = json!(Uuid::now_v7());
+    second_sense["definitions"][0]["id"] = json!(Uuid::now_v7());
+    second_sense["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    second_sense["definitions"][0]["content"]["text"] = json!("第二条，不得优先绑定");
+    target_meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_sense);
+
+    let meanings_events_before: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM platform.outbox_events
+        WHERE aggregate_type = 'lexicon.entry'
+          AND aggregate_id = $1
+          AND event_type = 'lexicon.entry.draft_meanings_saved'
+        "#,
+    )
+    .bind(Uuid::parse_str(target_id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (status, target_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_forms["word"]["revision"],
+            "intent": "complete",
+            "content": target_meanings.clone()
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "目标第一词义保存失败：{target_saved}"
+    );
+    let meanings_events: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM platform.outbox_events
+        WHERE aggregate_type = 'lexicon.entry'
+          AND aggregate_id = $1
+          AND event_type = 'lexicon.entry.draft_meanings_saved'
+        "#,
+    )
+    .bind(Uuid::parse_str(target_id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        meanings_events,
+        meanings_events_before + 1,
+        "meanings 保存必须新增事件以失效草稿搜索游标"
+    );
+
+    let (status, promoted_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "转正后读取来源失败：{promoted_source}"
+    );
+    assert_eq!(promoted_source["word"]["revision"], source_revision + 1);
+    let promoted = &promoted_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(promoted["id"], relation_id.to_string());
+    assert_eq!(promoted["target_word_id"], target_id);
+    assert_eq!(promoted["target_sense_id"], first_sense_id);
+    assert!(promoted["prebound_target_word_id"].is_null());
+    assert!(promoted["pending_target_gloss"].is_null());
+
+    target_meanings["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
+        json!("港湾（更新文本但保留稳定词义 ID）");
+    let (status, target_resaved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_saved["word"]["revision"],
+            "intent": "complete",
+            "content": target_meanings.clone()
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "重复 reconciliation 保存失败：{target_resaved}"
+    );
+    let (status, source_after_repeat) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source_after_repeat["word"]["revision"], source_revision + 1);
+    assert_eq!(
+        source_after_repeat["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_sense_id"],
+        first_sense_id
+    );
+
+    let mut without_first = target_meanings;
+    without_first["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    let (status, target_without_sense) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_resaved["word"]["revision"],
+            "intent": "save",
+            "content": without_first
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "删除已绑定词义失败：{target_without_sense}"
+    );
+
+    let (status, detached_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "退回后读取来源失败：{detached_source}"
+    );
+    let detached = &detached_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(detached["prebound_target_word_id"], target_id);
+    assert_eq!(detached["prebinding_state"], "target_sense_deleted");
+    assert!(detached["target_sense_id"].is_null());
+    let (status, detached_validation) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_id}/validate"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": detached_source["word"]["revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "detached 校验失败：{detached_validation}"
+    );
+    assert_eq!(detached_validation["valid"], false);
+    assert!(
+        detached_validation["issues"]
+            .as_array()
+            .is_some_and(|issues| issues
+                .iter()
+                .any(|issue| issue["code"] == "relation_target_sense_deleted")),
+        "detached 必须返回稳定 issue，而不是把展示词面当 text pending：{detached_validation}"
+    );
+
+    let replacement = complete_v3_meanings_fixture(
+        target_without_sense["word"]["forms"]["pos"][0]["pos_id"].clone(),
+    );
+    let (status, recreated) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_without_sense["word"]["revision"],
+            "intent": "complete",
+            "content": replacement
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "目标重建词义失败：{recreated}");
+    let (status, still_detached_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let still_detached =
+        &still_detached_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(still_detached["prebinding_state"], "target_sense_deleted");
+    assert!(still_detached["target_sense_id"].is_null());
+
+    let replacement_sense_id = recreated["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let mut repaired_meanings = still_detached_source["word"]["meanings"].clone();
+    let repaired_relation = repaired_meanings["pos"][0]["senses"][0]["relations"][0]
+        .as_object_mut()
+        .unwrap();
+    repaired_relation.insert("target_word_id".to_owned(), json!(target_id));
+    repaired_relation.insert("target_sense_id".to_owned(), replacement_sense_id.clone());
+    for read_or_prebound in [
+        "prebound_target_word_id",
+        "prebinding_state",
+        "target_status",
+        "pending_target_headword",
+        "pending_target_gloss",
+        "target_headword",
+        "target_gloss",
+    ] {
+        repaired_relation.remove(read_or_prebound);
+    }
+    let (status, repaired_source) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": still_detached_source["word"]["revision"],
+            "intent": "complete",
+            "content": repaired_meanings
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "detached 显式重选失败：{repaired_source}"
+    );
+    let repaired = &repaired_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(repaired["id"], relation_id.to_string());
+    assert_eq!(repaired["target_word_id"], target_id);
+    assert_eq!(repaired["target_sense_id"], replacement_sense_id);
+    assert!(repaired["prebound_target_word_id"].is_null());
+}
+
+#[sqlx::test]
+async fn v3_relation_prebinding_reconciliation_is_atomic_at_500_and_501(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    for relation_count in [500usize, 501usize] {
+        let target_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+        let target_id = target_forms["word"]["id"].as_str().unwrap();
+        let target_headword = target_forms["word"]["presentation"]["label"]
+            .as_str()
+            .unwrap();
+        let source_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+        let source_id = source_forms["word"]["id"].as_str().unwrap();
+        let mut source_meanings =
+            complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+        source_meanings["pos"][0]["senses"][0]["relations"] = Value::Array(
+            (0..relation_count)
+                .map(|ordinal| {
+                    json!({
+                        "id": Uuid::now_v7(),
+                        "relation": "synonym",
+                        "prebound_target_word_id": target_id,
+                        "pending_target_headword": target_headword,
+                        "score": format!("{}", ordinal % 101)
+                    })
+                })
+                .collect(),
+        );
+        let (status, source_saved) = call(
+            &state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "base_revision": source_forms["word"]["revision"],
+                "intent": "complete",
+                "content": source_meanings
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{relation_count} 条预绑定保存失败：{source_saved}"
+        );
+        let source_revision = source_saved["word"]["revision"].as_i64().unwrap();
+        let target_revision = target_forms["word"]["revision"].as_i64().unwrap();
+        let target_meanings =
+            complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+        let (status, target_saved) = call(
+            &state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "base_revision": target_revision,
+                "intent": "complete",
+                "content": target_meanings
+            })),
+        )
+        .await;
+
+        let (read_status, source_after) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/{source_id}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(read_status, StatusCode::OK);
+        let relations = source_after["word"]["meanings"]["pos"][0]["senses"][0]["relations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(relations.len(), relation_count);
+        if relation_count == 500 {
+            assert_eq!(status, StatusCode::OK, "500 条应全部成功：{target_saved}");
+            assert_eq!(source_after["word"]["revision"], source_revision + 1);
+            assert!(relations.iter().all(|relation| {
+                relation["target_word_id"] == target_id
+                    && relation["prebound_target_word_id"].is_null()
+            }));
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::CONFLICT,
+                "501 条必须整体拒绝：{target_saved}"
+            );
+            assert_eq!(target_saved["code"], "relation_prebinding_fanout_exceeded");
+            assert_eq!(source_after["word"]["revision"], source_revision);
+            assert!(relations.iter().all(|relation| {
+                relation["prebound_target_word_id"] == target_id
+                    && relation["target_word_id"].is_null()
+            }));
+            let (target_read_status, target_after) = call(
+                &state,
+                Method::GET,
+                &format!("{ROOT}/entries/{target_id}"),
+                &bearer,
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(target_read_status, StatusCode::OK);
+            assert_eq!(target_after["word"]["revision"], target_revision);
+            assert!(
+                target_after["word"]["meanings"]["pos"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[sqlx::test]
+async fn v3_relation_prebinding_uses_nowait_and_retries_without_partial_writes(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let target_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let source_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let target_id = target_forms["word"]["id"].as_str().unwrap();
+    let source_id = source_forms["word"]["id"].as_str().unwrap();
+    let mut source_meanings =
+        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "prebound_target_word_id": target_id,
+        "pending_target_headword": target_forms["word"]["presentation"]["label"],
+        "score": "80"
+    }]);
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_forms["word"]["revision"],
+            "intent": "complete",
+            "content": source_meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{source_saved}");
+    let source_revision = source_saved["word"]["revision"].as_i64().unwrap();
+    let target_revision = target_forms["word"]["revision"].as_i64().unwrap();
+    let target_meanings =
+        complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let target_request = json!({
+        "schema_version": 3,
+        "base_revision": target_revision,
+        "intent": "complete",
+        "content": target_meanings
+    });
+
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM lexicon.entries WHERE id = $1 FOR UPDATE")
+        .bind(Uuid::parse_str(source_id).unwrap())
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let (status, conflict) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(target_request.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "NOWAIT 应快速返回 409：{conflict}"
+    );
+    assert_eq!(conflict["code"], "reference_conflict");
+    blocker.rollback().await.unwrap();
+
+    let (status, target_after_conflict) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{target_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(target_after_conflict["word"]["revision"], target_revision);
+    let (status, source_after_conflict) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source_after_conflict["word"]["revision"], source_revision);
+    assert_eq!(
+        source_after_conflict["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["prebinding_state"],
+        "waiting_first_sense"
+    );
+
+    let (status, retried) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(target_request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "释放锁后重试应收敛：{retried}");
+    let (status, source_after_retry) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source_after_retry["word"]["revision"], source_revision + 1);
+    assert_eq!(
+        source_after_retry["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"],
+        target_id
     );
 }
 

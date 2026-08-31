@@ -70,6 +70,7 @@ pub async fn get(
         &mut response,
         sentence_association_enabled(state.smart_lexicon_v3_flags),
         sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
     );
     Ok((StatusCode::OK, Json(response)))
 }
@@ -145,6 +146,7 @@ pub async fn list_publications(
             publication,
             sentence_association_enabled(state.smart_lexicon_v3_flags),
             sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+            draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
         );
     }
     Ok((StatusCode::OK, Json(response)))
@@ -190,6 +192,7 @@ pub async fn get_publication(
         &mut response.publication,
         sentence_association_enabled(state.smart_lexicon_v3_flags),
         sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
     );
     Ok((StatusCode::OK, Json(response)))
 }
@@ -331,6 +334,11 @@ pub async fn related_search(
     ApiQuery(query): ApiQuery<RelatedSearchQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
+    if query.include_drafts == Some(true)
+        && !draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags)
+    {
+        return Err(v3_storage_unavailable());
+    }
     let response = service(&state)
         .related_search(auth.subject, query, state.smart_lexicon_v3_flags.read)
         .await
