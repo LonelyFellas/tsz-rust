@@ -20018,12 +20018,42 @@ async fn clearing_v3_forms_cannot_create_duplicate_active_hidden_initial_headwor
     match (clear, create) {
         ((StatusCode::OK, _), (StatusCode::CONFLICT, duplicate))
         | ((StatusCode::CONFLICT, duplicate), (StatusCode::CREATED, _)) => {
-            assert_eq!(duplicate["code"], "duplicate_word");
+            assert!(
+                matches!(
+                    duplicate["code"].as_str(),
+                    Some("duplicate_word" | "downstream_confirmation_required")
+                ),
+                "并发 loser 必须被重复或下游影响确认安全阻断：{duplicate}"
+            );
         }
         (clear, create) => {
             panic!("clear/create should serialize to one hidden owner: {clear:?} {create:?}")
         }
     }
+    let hidden_owners: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM lexicon.v3_entry_state state
+        JOIN lexicon.entries entry ON entry.id = state.entry_id
+        WHERE entry.kind = 'word'
+          AND entry.archived_at IS NULL
+          AND state.initial_headword_keys && $1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM lexicon.surface_sources source
+              WHERE source.entry_id = state.entry_id
+                AND source.is_deleted = FALSE
+          )
+        "#,
+    )
+    .bind(vec![
+        format!("uk:{concurrent_surface}"),
+        format!("us:{concurrent_surface}"),
+    ])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(hidden_owners, 1);
 }
 
 #[sqlx::test]
