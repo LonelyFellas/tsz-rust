@@ -84,6 +84,7 @@ fn is_regional_spelling_relation(
 struct V3EntryStateRecord {
     origin: String,
     publication_canary_enabled: bool,
+    initial_headwords: Option<Value>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -552,6 +553,50 @@ fn confirmed_v3_headwords_presentation(headwords: &WordHeadwordsV2) -> EntryPres
     }
 }
 
+fn detection_basis_dialect_for_headwords(
+    normalized_surface: &str,
+    headwords: &WordHeadwordsV2,
+) -> Result<Option<SourceDialect>, LexiconServiceError> {
+    let WordHeadwordsV2::Distinguish { uk, us, .. } = headwords else {
+        return Ok(None);
+    };
+    let matches_uk = normalize_headword(uk).map_err(map_headword_error)?.key == normalized_surface;
+    let matches_us = normalize_headword(us).map_err(map_headword_error)?.key == normalized_surface;
+    Ok(match (matches_uk, matches_us) {
+        (true, false) => Some(SourceDialect::Uk),
+        (false, true) => Some(SourceDialect::Us),
+        _ => None,
+    })
+}
+
+fn stored_detection_basis_dialect(
+    detection_snapshot: &Value,
+    initial_headwords: Option<&Value>,
+) -> Result<Option<SourceDialect>, LexiconServiceError> {
+    let Some(initial_headwords) = initial_headwords else {
+        return Ok(None);
+    };
+    let headwords: WordHeadwordsV2 =
+        serde_json::from_value(initial_headwords.clone()).map_err(serialization_error)?;
+    if let Some(matched_dialect) = detection_snapshot
+        .get("matched_dialect")
+        .and_then(Value::as_str)
+    {
+        return Ok(match matched_dialect {
+            "uk" => Some(SourceDialect::Uk),
+            "us" => Some(SourceDialect::Us),
+            _ => None,
+        });
+    }
+    let Some(normalized_surface) = detection_snapshot
+        .get("normalized_surface")
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    detection_basis_dialect_for_headwords(normalized_surface, &headwords)
+}
+
 fn initial_v3_headword_keys(
     headwords: &WordHeadwordsV2,
 ) -> Result<Vec<String>, LexiconServiceError> {
@@ -772,7 +817,7 @@ impl LexiconService {
             .await?;
         let state = sqlx::query_as::<_, V3EntryStateRecord>(
             r#"
-            SELECT origin, publication_canary_enabled
+            SELECT origin, publication_canary_enabled, initial_headwords
             FROM lexicon.v3_entry_state
             WHERE entry_id = $1
             "#,
@@ -782,6 +827,10 @@ impl LexiconService {
         .await
         .map_err(database_error)?
         .ok_or_else(invariant_record)?;
+        let detection_basis_dialect = stored_detection_basis_dialect(
+            &record.detection_snapshot,
+            state.initial_headwords.as_ref(),
+        )?;
         let compatibility = if state.origin == "migrated_v2" {
             Some(AdminWordV3Compatibility {
                 legacy_headwords: legacy_headwords_from_record(&record)?,
@@ -837,6 +886,7 @@ impl LexiconService {
                 sentence_target_discovery: None,
                 draft_relation_prebinding: None,
             },
+            detection_basis_dialect,
             forms,
             meanings,
             compatibility,
@@ -1252,6 +1302,10 @@ impl LexiconService {
             );
             compatibility_v3_headwords(&detection, &forms)?
         };
+        let detection_basis_dialect = detection_basis_dialect_for_headwords(
+            &detection.normalized_surface,
+            &confirmed_headwords,
+        )?;
         let initial_headword_keys = initial_v3_headword_keys(&confirmed_headwords)?;
         let verified_surface = if write_projection {
             if explicit_headwords {
@@ -1379,6 +1433,7 @@ impl LexiconService {
                 sentence_target_discovery: None,
                 draft_relation_prebinding: None,
             },
+            detection_basis_dialect,
             forms,
             meanings,
             compatibility: None,
@@ -4417,6 +4472,28 @@ mod tests {
 
     fn fixed_id(value: u128) -> Uuid {
         Uuid::from_u128(value)
+    }
+
+    #[test]
+    fn detection_basis_uses_the_original_surface_instead_of_the_confirmed_source_side() {
+        let headwords = WordHeadwordsV2::Distinguish {
+            uk: "centre".to_owned(),
+            us: "center".to_owned(),
+            source_dialect: SourceDialect::Uk,
+        };
+
+        assert_eq!(
+            detection_basis_dialect_for_headwords("center", &headwords).unwrap(),
+            Some(SourceDialect::Us)
+        );
+        assert_eq!(
+            detection_basis_dialect_for_headwords("centre", &headwords).unwrap(),
+            Some(SourceDialect::Uk)
+        );
+        assert_eq!(
+            detection_basis_dialect_for_headwords("edited", &headwords).unwrap(),
+            None
+        );
     }
 
     fn common_form(form_id: Uuid, variant_id: Uuid, pronunciation_id: Uuid) -> WordConcreteFormV3 {

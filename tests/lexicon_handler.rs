@@ -21702,6 +21702,70 @@ async fn v3_create_persists_explicit_final_headwords_and_keeps_legacy_body_compa
 }
 
 #[sqlx::test]
+async fn v3_create_and_read_expose_the_original_detection_basis_dialect(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let us = format!("center{}", admin_id.simple());
+    let uk = format!("centre{}", admin_id.simple());
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": us
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "word",
+            "headwords": {
+                "mode": "distinguish",
+                "uk": uk,
+                "us": us,
+                "source_dialect": "uk"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["word"]["detection_basis_dialect"], "us");
+
+    let entry_id = created["word"]["id"].as_str().unwrap();
+    let (status, read_back) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read_back}");
+    assert_eq!(read_back["word"]["detection_basis_dialect"], "us");
+}
+
+#[sqlx::test]
 async fn concurrent_legacy_v3_empty_skeleton_creation_allows_only_one_entry(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
