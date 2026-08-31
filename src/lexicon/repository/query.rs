@@ -520,4 +520,111 @@ impl LexiconRepository {
         .await
         .map_err(LexiconRepositoryError::Database)
     }
+
+    /// 批量查询一页词条各自「被谁引用」。**一次往返查完整页**——逐行标量子查询在
+    /// 100 行 × 6 类下会退化成 600 次探查。
+    ///
+    /// 口径与 `delete_never_published_entry` 的入站引用拦截严格一致：
+    /// 按引用方词条去重、含草稿引用、排除自引用。两处若各写一套迟早漂移，
+    /// 就会出现「显示 0 引用却删不掉」——比不显示更糟。
+    pub(crate) async fn entry_reference_rows(
+        &self,
+        entry_ids: &[Uuid],
+    ) -> Result<Vec<EntryReferenceRow>, LexiconRepositoryError> {
+        if entry_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_as::<_, EntryReferenceRow>(
+            r#"
+            WITH refs AS (
+                -- 1 关联词已绑定：直接用 relations.target_entry_id，不要 JOIN nodes 取
+                -- entry_id——JOIN 写法会退化成 Seq Scan，直接用则走 target_idx。
+                SELECT relation.target_entry_id AS target_id,
+                       relation.entry_id AS source_id,
+                       'relation' AS kind
+                  FROM lexicon.relations relation
+                 WHERE relation.target_entry_id = ANY($1)
+                   AND relation.entry_id <> relation.target_entry_id
+                UNION ALL
+                -- 2 关联词预绑定待物化
+                SELECT relation.prebound_target_entry_id,
+                       relation.entry_id,
+                       'relation_prebound'
+                  FROM lexicon.relations relation
+                 WHERE relation.prebound_target_entry_id = ANY($1)
+                   AND relation.entry_id <> relation.prebound_target_entry_id
+                UNION ALL
+                -- 3 例句关联已生效
+                SELECT link.target_entry_id, link.entry_id, 'sentence_link'
+                  FROM lexicon.sentence_links link
+                 WHERE link.target_entry_id = ANY($1)
+                   AND link.entry_id <> link.target_entry_id
+                UNION ALL
+                -- 4 已发布内容的词义引用
+                SELECT sense_ref.target_entry_id, sense_ref.entry_id, 'publication_sense_ref'
+                  FROM lexicon.entry_publication_sense_refs sense_ref
+                 WHERE sense_ref.target_entry_id = ANY($1)
+                   AND sense_ref.entry_id <> sense_ref.target_entry_id
+                UNION ALL
+                -- 5 例句关联待认领
+                SELECT association.target_entry_id, association.entry_id, 'sentence_association'
+                  FROM lexicon.sentence_associations association
+                 WHERE association.target_entry_id = ANY($1)
+                   AND association.entry_id <> association.target_entry_id
+                UNION ALL
+                -- 6 V3 短语把本词条当作成分
+                SELECT usage.target_entry_id, usage.entry_id, 'phrase_component'
+                  FROM lexicon.v3_phrase_variant_component_usages usage
+                 WHERE usage.target_entry_id = ANY($1)
+                   AND usage.entry_id <> usage.target_entry_id
+            ),
+            deduped AS (
+                -- 同一引用方通过多条路径引用同一目标，只算一个依赖方；
+                -- kind 取字典序最小者，保证结果稳定可测。
+                SELECT target_id, source_id, min(kind) AS kind
+                  FROM refs
+                 WHERE target_id IS NOT NULL
+                 GROUP BY target_id, source_id
+            ),
+            enriched AS (
+                SELECT deduped.target_id,
+                       deduped.source_id,
+                       deduped.kind,
+                       COALESCE((
+                           SELECT string_agg(headword.headword, ' / ' ORDER BY CASE
+                               WHEN headword.dialect = 'common' THEN 0
+                               WHEN headword.dialect = source.source_dialect THEN 1
+                               WHEN headword.dialect = 'uk' THEN 2
+                               ELSE 3 END)
+                           FROM lexicon.entry_headwords headword
+                           WHERE headword.entry_id = source.id
+                       ), '') AS source_headword,
+                       CASE
+                           WHEN source.archived_at IS NOT NULL THEN 'archived'
+                           WHEN source.current_publication_id IS NOT NULL THEN 'published'
+                           ELSE 'draft'
+                       END AS source_status
+                  FROM deduped
+                  JOIN lexicon.entries source ON source.id = deduped.source_id
+            ),
+            ranked AS (
+                SELECT enriched.*,
+                       count(*) OVER (PARTITION BY target_id) AS total,
+                       row_number() OVER (
+                           PARTITION BY target_id
+                           ORDER BY source_headword, source_id
+                       ) AS position
+                  FROM enriched
+            )
+            SELECT target_id, source_id, kind, source_headword, source_status, total
+              FROM ranked
+             WHERE position <= 5
+             ORDER BY target_id, position
+            "#,
+        )
+        .bind(entry_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
 }

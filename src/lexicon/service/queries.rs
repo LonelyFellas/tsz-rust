@@ -598,6 +598,15 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?
         };
+        // 引用汇总单独一次批量查询：塞进列表主 SQL 会让本就复杂的查询更难维护，
+        // 而这一次往返的代价远低于逐行标量子查询。
+        let entry_ids = records.iter().map(|record| record.id).collect::<Vec<_>>();
+        let mut reference_summaries = entry_reference_summaries(
+            self.repository
+                .entry_reference_rows(&entry_ids)
+                .await
+                .map_err(repository_error)?,
+        );
         let words = records
             .into_iter()
             .map(|record| {
@@ -649,6 +658,9 @@ impl LexiconService {
                         max_reachable_step: max_reachable_step(&record.completed_steps),
                         created_by_name: record.created_by_name,
                         created_by: record.created_by,
+                        reference_summary: reference_summaries
+                            .remove(&record.id)
+                            .unwrap_or_default(),
                         created_at: record.created_at,
                         updated_at: record.updated_at,
                     }
@@ -701,6 +713,9 @@ impl LexiconService {
                             max_reachable_step: max_reachable_step(&record.completed_steps),
                             created_by_name: record.created_by_name,
                             created_by: record.created_by,
+                            reference_summary: reference_summaries
+                                .remove(&record.id)
+                                .unwrap_or_default(),
                             created_at: record.created_at,
                             updated_at: record.updated_at,
                         }))
@@ -957,6 +972,61 @@ fn family_matches_source_dialect(family: &str, dialect: SourceDialect) -> bool {
         (family_dialect(family), dialect),
         (Some(Dialect::Uk), SourceDialect::Uk) | (Some(Dialect::Us), SourceDialect::Us)
     )
+}
+
+/// 把展开的引用行折叠成按 target 分组的汇总。
+/// `total` 来自 SQL 窗口函数（去重后的引用方总数），不是 previews 的长度——
+/// previews 只保留前 5 条。
+fn entry_reference_summaries(
+    rows: Vec<EntryReferenceRow>,
+) -> std::collections::HashMap<Uuid, EntryReferenceSummary> {
+    let mut summaries: std::collections::HashMap<Uuid, EntryReferenceSummary> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let Some(source_kind) = parse_entry_reference_kind(&row.kind) else {
+            continue;
+        };
+        let Some(source_status) = parse_admin_word_status(&row.source_status) else {
+            continue;
+        };
+        let summary = summaries
+            .entry(row.target_id)
+            .or_insert_with(|| EntryReferenceSummary {
+                total: 0,
+                previews: Vec::new(),
+                truncated: false,
+            });
+        summary.total = u32::try_from(row.total).unwrap_or(u32::MAX);
+        summary.previews.push(EntryReferencePreview {
+            source_word_id: row.source_id,
+            source_headword: row.source_headword,
+            source_status,
+            source_kind,
+        });
+        summary.truncated = summary.total as usize > summary.previews.len();
+    }
+    summaries
+}
+
+fn parse_entry_reference_kind(value: &str) -> Option<EntryReferenceKind> {
+    match value {
+        "relation" => Some(EntryReferenceKind::Relation),
+        "relation_prebound" => Some(EntryReferenceKind::RelationPrebound),
+        "sentence_link" => Some(EntryReferenceKind::SentenceLink),
+        "publication_sense_ref" => Some(EntryReferenceKind::PublicationSenseRef),
+        "sentence_association" => Some(EntryReferenceKind::SentenceAssociation),
+        "phrase_component" => Some(EntryReferenceKind::PhraseComponent),
+        _ => None,
+    }
+}
+
+fn parse_admin_word_status(value: &str) -> Option<AdminWordStatus> {
+    match value {
+        "draft" => Some(AdminWordStatus::Draft),
+        "published" => Some(AdminWordStatus::Published),
+        "archived" => Some(AdminWordStatus::Archived),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

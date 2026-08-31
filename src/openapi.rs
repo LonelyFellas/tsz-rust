@@ -291,6 +291,9 @@ use utoipa::{
             crate::lexicon::dto::EntryLifecycleTarget,
             crate::lexicon::dto::EntryLifecycleBatchInput,
             crate::lexicon::dto::EntryDeleteBatchInput,
+            crate::lexicon::dto::EntryReferenceKind,
+            crate::lexicon::dto::EntryReferencePreview,
+            crate::lexicon::dto::EntryReferenceSummary,
             crate::lexicon::dto::EntryDeleteBatchResponse,
             crate::lexicon::dto::EntryLifecycleBatchResponse,
             // Smart Lexicon V3 Phase 1 contract (storage remains capability-gated)

@@ -384,6 +384,18 @@ pub(crate) struct ListEntryRecord {
     pub total: i64,
 }
 
+/// 一条「谁引用了谁」的展开行；同一 target 最多 5 行（预览上限），
+/// `total` 是该 target 去重后的引用方总数，由窗口函数在同一次查询里算出。
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct EntryReferenceRow {
+    pub target_id: Uuid,
+    pub source_id: Uuid,
+    pub kind: String,
+    pub source_headword: String,
+    pub source_status: String,
+    pub total: i64,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct StatsRecord {
     pub total: i64,

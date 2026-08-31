@@ -8902,6 +8902,205 @@ async fn related_search_orders_headword_spellings_like_the_list(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn entry_reference_summary_dedupes_sources_and_matches_the_delete_gate(pool: PgPool) {
+    // 本测试守的是整个功能最关键的不变量：**计数为 0 的词条一定能删，
+    // 计数大于 0 的一定删不掉**。计数与删除拦截若各写一套口径，就会出现
+    // 「显示 0 引用却删不掉」——比不显示引用数更糟。
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let referenced = create_ready_draft(&state, &pool, &bearer, "refcount-target").await;
+    let referring = create_ready_draft(&state, &pool, &bearer, "refcount-source").await;
+    let referenced_id = Uuid::parse_str(referenced["word"]["id"].as_str().unwrap()).unwrap();
+    let referenced_sense_id = Uuid::parse_str(
+        referenced["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let referring_id = Uuid::parse_str(referring["word"]["id"].as_str().unwrap()).unwrap();
+    let referring_sense_id = Uuid::parse_str(
+        referring["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+
+    let summary_of = |list: &Value| -> Value {
+        list["words"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|word| word["id"] == referenced_id.to_string())
+            .expect("列表应包含目标词条")["reference_summary"]
+            .clone()
+    };
+
+    // 无人引用：total = 0。
+    let (status, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?q=refcount-target"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let summary = summary_of(&list);
+    assert_eq!(summary["total"], 0, "无人引用时应为 0：{summary}");
+    assert_eq!(summary["previews"].as_array().unwrap().len(), 0);
+    assert_eq!(summary["truncated"], false);
+
+    // 挂上一条关联词引用（草稿态引用同样要计入）。
+    let relation_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.nodes (
+            id, entry_id, node_type, parent_node_id, node_role, stable_slot
+        ) VALUES ($1, $2, 'relation', $3, 'meanings.relation', false)
+        "#,
+    )
+    .bind(relation_id)
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.relations (
+            id, entry_id, source_sense_id, relation_type,
+            target_entry_id, target_sense_id, score,
+            target_headword_snapshot, target_gloss_snapshot, sort_order
+        ) VALUES ($1, $2, $3, 'synonym', $4, $5, 100, 'refcount-target', '', 0)
+        "#,
+    )
+    .bind(relation_id)
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .bind(referenced_id)
+    .bind(referenced_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (_, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?q=refcount-target"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let summary = summary_of(&list);
+    assert_eq!(summary["total"], 1, "被一个词条引用：{summary}");
+    let preview = &summary["previews"][0];
+    assert_eq!(preview["source_word_id"], referring_id.to_string());
+    assert_eq!(preview["source_headword"], "refcount-source");
+    assert_eq!(preview["source_kind"], "relation");
+    assert_eq!(preview["source_status"], "draft", "草稿引用也要计入");
+    assert_eq!(summary["truncated"], false);
+
+    // 同一个引用方再通过另一条路径引用：去重后仍是 1 个依赖方。
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.sentence_associations (
+            id, entry_id, sentence_id, source_dialect,
+            range_start, range_end, surface, origin, state,
+            target_entry_id, target_sense_id,
+            target_headword_snapshot, target_gloss_snapshot, resolved_pos
+        ) VALUES ($1, $2, $3, 'common', 0, 5, 'refcnt', 'manual', 'linked',
+                  $4, $5, 'refcount-target', '', 'noun')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .bind(referenced_id)
+    .bind(referenced_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (_, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?q=refcount-target"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let summary = summary_of(&list);
+    assert_eq!(
+        summary["total"], 1,
+        "同一引用方多路引用只算一个依赖方：{summary}"
+    );
+    assert_eq!(summary["previews"].as_array().unwrap().len(), 1);
+
+    // 不变量：total > 0 时删除必须被拒。
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{referenced_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": referenced["word"]["revision"],
+            "base_lifecycle_revision": referenced["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "计数大于 0 的词条必须删不掉：{response}"
+    );
+
+    // 反向不变量：无人引用的词条 total = 0 且确实能删。
+    let (_, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?q=refcount-source"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let free = list["words"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|word| word["id"] == referring_id.to_string())
+        .expect("列表应包含引用方词条")
+        .clone();
+    assert_eq!(free["reference_summary"]["total"], 0, "引用方自己无人引用");
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{referring_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": free["revision"],
+            "base_lifecycle_revision": free["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "计数为 0 的词条必须能删：{response}"
+    );
+}
+
+#[sqlx::test]
 async fn deleting_an_entry_referenced_by_a_sentence_association_conflicts(pool: PgPool) {
     // sentence_associations 的 target_shape_check 允许 state='linked' 且不带
     // target_publication_id——即例句关联可以指向一个尚未发布的词条。这条路径
