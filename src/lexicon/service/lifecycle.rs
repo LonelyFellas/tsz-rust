@@ -80,6 +80,7 @@ impl LexiconService {
             input.base_lifecycle_revision,
             allow_v3,
             is_super_admin,
+            &[],
         )
         .await?;
         transaction.commit().await.map_err(database_error)?;
@@ -144,6 +145,11 @@ impl LexiconService {
         LexiconRepository::lock_surface_policy_writer(&mut transaction)
             .await
             .map_err(repository_error)?;
+        // 批内成员之间的引用会随各自的删除一并消失，提前清掉，
+        // 否则先删的那条会撞上后一条的 RESTRICT 外键——结果取决于 id 排序。
+        LexiconRepository::clear_intra_batch_references(&mut transaction, &entry_ids)
+            .await
+            .map_err(repository_error)?;
         for target in &ordered {
             Self::delete_entry_in_transaction(
                 &mut transaction,
@@ -154,6 +160,7 @@ impl LexiconService {
                 target.base_lifecycle_revision,
                 allow_v3,
                 is_super_admin,
+                &entry_ids,
             )
             .await?;
         }
@@ -188,6 +195,7 @@ impl LexiconService {
         base_lifecycle_revision: i64,
         allow_v3: bool,
         is_super_admin: bool,
+        batch_members: &[Uuid],
     ) -> Result<(), LexiconServiceError> {
         LexiconRepository::lock_surface_contexts(transaction, &[entry_id])
             .await
@@ -284,6 +292,7 @@ impl LexiconService {
             request_id,
             entry_id,
             record.revision,
+            batch_members,
         )
         .await
         .map_err(repository_error)?

@@ -8901,6 +8901,131 @@ async fn related_search_orders_headword_spellings_like_the_list(pool: PgPool) {
     );
 }
 
+/// 批内互相引用的词条一起删除时，结果不得取决于 id 排序。
+/// 回归的是这样一个缺陷：批量按 target.id 排序后逐条「校验+删除」，
+/// 先删掉的那条会级联清除它的出站引用，从而改变后一条的入站引用检查结果——
+/// 于是同样的引用关系，A.id < B.id 时整批成功、B.id < A.id 时整批 409。
+#[sqlx::test]
+async fn delete_batch_ignores_references_between_members_regardless_of_id_order(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 两种创建顺序各跑一遍：唯一差别是引用方与被引用方谁的 id 更小。
+    for (slug, label, referrer_first) in [
+        ("srcfirst", "引用方 id 更小", true),
+        ("dstfirst", "被引用方 id 更小", false),
+    ] {
+        let (referrer, referenced) = if referrer_first {
+            let referrer =
+                create_ready_draft(&state, &pool, &bearer, &format!("member-src-{slug}")).await;
+            let referenced =
+                create_ready_draft(&state, &pool, &bearer, &format!("member-dst-{slug}")).await;
+            (referrer, referenced)
+        } else {
+            let referenced =
+                create_ready_draft(&state, &pool, &bearer, &format!("member-dst-{slug}")).await;
+            let referrer =
+                create_ready_draft(&state, &pool, &bearer, &format!("member-src-{slug}")).await;
+            (referrer, referenced)
+        };
+        let referrer_id = Uuid::parse_str(referrer["word"]["id"].as_str().unwrap()).unwrap();
+        let referenced_id = Uuid::parse_str(referenced["word"]["id"].as_str().unwrap()).unwrap();
+        let referrer_sense_id = Uuid::parse_str(
+            referrer["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let referenced_sense_id = Uuid::parse_str(
+            referenced["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            referrer_first,
+            referrer_id < referenced_id,
+            "{label}：构造出的 id 顺序与预期不符"
+        );
+
+        // referrer --近义词--> referenced
+        let relation_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.nodes (
+                id, entry_id, node_type, parent_node_id, node_role, stable_slot
+            ) VALUES ($1, $2, 'relation', $3, 'meanings.relation', false)
+            "#,
+        )
+        .bind(relation_id)
+        .bind(referrer_id)
+        .bind(referrer_sense_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.relations (
+                id, entry_id, source_sense_id, relation_type,
+                target_entry_id, target_sense_id, score,
+                target_headword_snapshot, target_gloss_snapshot, sort_order
+            ) VALUES ($1, $2, $3, 'synonym', $4, $5, 100, 'member', '', 0)
+            "#,
+        )
+        .bind(relation_id)
+        .bind(referrer_id)
+        .bind(referrer_sense_id)
+        .bind(referenced_id)
+        .bind(referenced_sense_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut entries = Vec::new();
+        for word in [&referrer, &referenced] {
+            let id = word["word"]["id"].as_str().unwrap().to_owned();
+            let (status, archived) = call(
+                &state,
+                Method::POST,
+                &format!("{ROOT}/entries/{id}/archive"),
+                &bearer,
+                Some(Uuid::now_v7()),
+                Some(json!({
+                    "base_revision": word["word"]["revision"],
+                    "base_lifecycle_revision": word["word"]["lifecycle_revision"]
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{label} 归档失败：{archived}");
+            entries.push(json!({
+                "id": id,
+                "base_revision": archived["word"]["revision"],
+                "base_lifecycle_revision": archived["word"]["lifecycle_revision"]
+            }));
+        }
+
+        let (status, response) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/delete-batch"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(json!({ "entries": entries })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{label}：批内互相引用不应阻塞整批删除——两条都要删掉，谁先谁后不该改变结果：{response}"
+        );
+        assert_eq!(response["affected"], 2, "{label}");
+    }
+}
+
 #[sqlx::test]
 async fn entry_reference_summary_dedupes_sources_and_matches_the_delete_gate(pool: PgPool) {
     // 本测试守的是整个功能最关键的不变量：**计数为 0 的词条一定能删，
