@@ -317,8 +317,12 @@ pub(crate) struct EntryRecord {
 
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct RelatedSearchRecord {
+    pub entry_id: Uuid,
+    pub kind: String,
     pub content_schema_version: i16,
     pub snapshot: Value,
+    pub status: String,
+    pub status_rank: i16,
     pub pos_labels: Vec<String>,
     pub sort_headword: String,
     pub total: i64,
@@ -328,11 +332,13 @@ pub(crate) struct RelatedSearchFilter<'a> {
     pub q: &'a str,
     pub kind: Option<crate::lexicon::dto::EntryKind>,
     pub include_v3: bool,
+    pub include_drafts: bool,
     pub exact: bool,
     pub exclude_exact: bool,
     pub limit: i64,
     pub last_kind: Option<crate::lexicon::dto::EntryKind>,
     pub last_headword: Option<&'a str>,
+    pub last_status_rank: Option<i16>,
     pub last_word_id: Option<Uuid>,
 }
 

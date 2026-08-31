@@ -1125,7 +1125,9 @@ impl LexiconService {
         for pos in &mut meanings.pos {
             for sense in &mut pos.senses {
                 for relation in &mut sense.relations {
-                    if relation.bound_target().is_some() {
+                    if relation.bound_target().is_some()
+                        || relation.prebound_target_word_id.is_some()
+                    {
                         continue;
                     }
                     // 词面在草稿保存时已经校验过；这里再拒一次不合法的，交给随后的
@@ -1354,7 +1356,9 @@ impl LexiconService {
         for pos in &mut meanings.pos {
             for sense in &mut pos.senses {
                 for relation in &mut sense.relations {
-                    if relation.bound_target().is_some() {
+                    if relation.bound_target().is_some()
+                        || relation.prebound_target_word_id.is_some()
+                    {
                         continue;
                     }
                     let Some(raw) = relation.pending_target_headword.as_deref() else {
@@ -1837,18 +1841,10 @@ pub(super) fn published_sense_snapshot(
 /// `materialized_expected` 只有真正的发布链路会传 true：它在复核之前已经物化过一遍，
 /// 走到这里还剩待物化形态就说明物化漏了，按引用不可用拦下而不是放行。草稿校验接口
 /// （同样是 Verify 模式）不物化，待物化在那里是合法的草稿状态。
-fn pending_relation_issue(
+pub(super) fn pending_relation_issue(
     relation: &WordRelationV2,
     materialized_expected: bool,
 ) -> Option<DraftValidationIssue> {
-    if materialized_expected {
-        return Some(reference_issue(
-            relation.id,
-            "target_sense_id",
-            "relation_target_unavailable",
-            "关联词目标必须是未归档词条当前草稿或当前发布中的有效词义",
-        ));
-    }
     if relation.pending_target_headword.is_none() && relation.pending_target_gloss.is_some() {
         return Some(reference_issue(
             relation.id,
@@ -1872,8 +1868,35 @@ fn pending_relation_issue(
             "预定义词义不能超过 5000 个字符",
         ));
     }
+    if relation.prebound_target_word_id.is_some() {
+        if relation.target_status.as_deref() == Some("archived") {
+            return Some(reference_issue(
+                relation.id,
+                "prebound_target_word_id",
+                "relation_prebound_target_archived",
+                "关联词目标已归档，请先恢复目标或重新选择",
+            ));
+        }
+        if materialized_expected {
+            return Some(match relation.prebinding_state.as_deref() {
+                Some("target_sense_deleted") => reference_issue(
+                    relation.id,
+                    "prebound_target_word_id",
+                    "relation_target_sense_deleted",
+                    "原关联词义已删除，请显式重选词义或删除关联",
+                ),
+                _ => reference_issue(
+                    relation.id,
+                    "prebound_target_word_id",
+                    "relation_prebound_target_has_no_sense",
+                    "关联词目标还没有可用词义，请先补充目标第一词义",
+                ),
+            });
+        }
+        return None;
+    }
     let headword = relation.pending_target_headword.as_deref().unwrap_or("");
-    crate::lexicon::normalization::NormalizedHeadword::parse(headword)
+    if let Some(issue) = crate::lexicon::normalization::NormalizedHeadword::parse(headword)
         .err()
         .map(|_| {
             reference_issue(
@@ -1883,6 +1906,17 @@ fn pending_relation_issue(
                 "待建关联词的词面必须是合法英文词条名",
             )
         })
+    {
+        return Some(issue);
+    }
+    materialized_expected.then(|| {
+        reference_issue(
+            relation.id,
+            "target_sense_id",
+            "relation_target_unavailable",
+            "关联词目标必须是未归档词条当前草稿或当前发布中的有效词义",
+        )
+    })
 }
 
 pub(super) fn published_word_headword(word: &AdminWordV2) -> String {

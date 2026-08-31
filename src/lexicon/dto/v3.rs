@@ -770,6 +770,9 @@ pub struct WordRelationV3 {
     pub target_sense_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub prebound_target_word_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, max_length = 5000)]
@@ -780,7 +783,20 @@ pub struct WordRelationV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, read_only)]
     pub target_gloss: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, read_only)]
+    pub prebinding_state: Option<RelationPrebindingStateV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, read_only)]
+    pub target_status: Option<AdminWordStatus>,
     pub score: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationPrebindingStateV3 {
+    WaitingFirstSense,
+    TargetSenseDeleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -862,6 +878,9 @@ pub struct WordRelationWritableV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub target_sense_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub prebound_target_word_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
@@ -985,6 +1004,10 @@ pub struct AdminWordV3Capabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sentence_target_discovery: Option<bool>,
+    /// 草稿关联词搜索、稳定预绑定和同步 reconciliation 能力。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub draft_relation_prebinding: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1388,6 +1411,10 @@ pub enum V3ValidationIssueCode {
     RelationPendingGlossInvalid,
     RelationPendingGlossConflict,
     RelationPendingGlossTargetExists,
+    RelationPreboundTargetNotFound,
+    RelationPreboundTargetArchived,
+    RelationPreboundTargetHasNoSense,
+    RelationTargetSenseDeleted,
     NodeIdReused,
     NodeBindingUnknown,
     NodeBindingChanged,
@@ -1452,6 +1479,10 @@ impl V3ValidationIssueCode {
             Self::RelationPendingGlossInvalid => "relation_pending_gloss_invalid",
             Self::RelationPendingGlossConflict => "relation_pending_gloss_conflict",
             Self::RelationPendingGlossTargetExists => "relation_pending_gloss_target_exists",
+            Self::RelationPreboundTargetNotFound => "relation_prebound_target_not_found",
+            Self::RelationPreboundTargetArchived => "relation_prebound_target_archived",
+            Self::RelationPreboundTargetHasNoSense => "relation_prebound_target_has_no_sense",
+            Self::RelationTargetSenseDeleted => "relation_target_sense_deleted",
             Self::NodeIdReused => "node_id_reused",
             Self::NodeBindingUnknown => "node_binding_unknown",
             Self::NodeBindingChanged => "node_binding_changed",
@@ -1516,6 +1547,10 @@ impl V3ValidationIssueCode {
             "relation_pending_gloss_invalid" => Self::RelationPendingGlossInvalid,
             "relation_pending_gloss_conflict" => Self::RelationPendingGlossConflict,
             "relation_pending_gloss_target_exists" => Self::RelationPendingGlossTargetExists,
+            "relation_prebound_target_not_found" => Self::RelationPreboundTargetNotFound,
+            "relation_prebound_target_archived" => Self::RelationPreboundTargetArchived,
+            "relation_prebound_target_has_no_sense" => Self::RelationPreboundTargetHasNoSense,
+            "relation_target_sense_deleted" => Self::RelationTargetSenseDeleted,
             "node_id_reused" => Self::NodeIdReused,
             "node_binding_unknown" => Self::NodeBindingUnknown,
             "node_binding_changed" => Self::NodeBindingChanged,
@@ -2112,6 +2147,13 @@ pub struct RelatedWordSenseV3 {
     pub gloss: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelatedWordStatusV3 {
+    Draft,
+    Published,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelatedWordResultV3 {
@@ -2119,6 +2161,9 @@ pub struct RelatedWordResultV3 {
     pub schema_version: u8,
     pub entry_id: Uuid,
     pub kind: WordEntryKindV3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub status: Option<RelatedWordStatusV3>,
     #[schema(read_only)]
     pub presentation: EntryPresentationV3,
     pub matches: Vec<RelatedWordMatchV3>,

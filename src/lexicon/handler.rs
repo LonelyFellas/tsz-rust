@@ -123,14 +123,20 @@ fn sentence_target_discovery_enabled(flags: SmartLexiconV3Flags) -> bool {
     sentence_association_enabled(flags) && flags.sentence_target_discovery
 }
 
+fn draft_relation_prebinding_enabled(flags: SmartLexiconV3Flags) -> bool {
+    flags.read && flags.edit && flags.projection && flags.draft_relation_prebinding
+}
+
 fn apply_sentence_association_flag(
     response: &mut AdminWordAnyEnvelope,
     associations_enabled: bool,
     discovery_enabled: bool,
+    relation_prebinding_enabled: bool,
 ) {
     if let AdminWordAny::V3(word) = &mut response.word {
         word.capabilities.sentence_associations = Some(associations_enabled);
         word.capabilities.sentence_target_discovery = Some(discovery_enabled);
+        word.capabilities.draft_relation_prebinding = Some(relation_prebinding_enabled);
     }
 }
 
@@ -158,10 +164,12 @@ fn apply_draft_sentence_association_flag(
     response: &mut AdminWordDraftAnyEnvelope,
     associations_enabled: bool,
     discovery_enabled: bool,
+    relation_prebinding_enabled: bool,
 ) {
     if let AdminWordDraftAnyEnvelope::V3(envelope) = response {
         envelope.word.capabilities.sentence_associations = Some(associations_enabled);
         envelope.word.capabilities.sentence_target_discovery = Some(discovery_enabled);
+        envelope.word.capabilities.draft_relation_prebinding = Some(relation_prebinding_enabled);
     }
 }
 
@@ -169,10 +177,12 @@ fn apply_publication_sentence_association_flag(
     publication: &mut AdminWordPublicationAny,
     associations_enabled: bool,
     discovery_enabled: bool,
+    relation_prebinding_enabled: bool,
 ) {
     if let AdminWordPublicationAny::V3(publication) = publication {
         publication.word.capabilities.sentence_associations = Some(associations_enabled);
         publication.word.capabilities.sentence_target_discovery = Some(discovery_enabled);
+        publication.word.capabilities.draft_relation_prebinding = Some(relation_prebinding_enabled);
     }
 }
 
@@ -388,6 +398,11 @@ fn map_error(error: LexiconServiceError) -> AppError {
             None,
             "only never-published entries without inbound references can be deleted",
         ),
+        LexiconServiceError::EntryHasInboundPreboundRelations => AppError::conflict(
+            ErrorCode::EntryHasInboundPreboundRelations,
+            None,
+            "entry is selected by another draft relation; remove that prebinding first",
+        ),
         LexiconServiceError::EntryHasInboundPublicationRefs(references) => AppError::conflict(
             ErrorCode::EntryHasInboundPublicationRefs,
             None,
@@ -432,6 +447,11 @@ fn map_error(error: LexiconServiceError) -> AppError {
             ErrorCode::ReferenceConflict,
             None,
             "a referenced target is changing; retry the command",
+        ),
+        LexiconServiceError::RelationPrebindingFanoutExceeded => AppError::conflict(
+            ErrorCode::RelationPrebindingFanoutExceeded,
+            None,
+            "relation prebinding reconciliation exceeds the 500 relation limit",
         ),
         LexiconServiceError::StableNodeIdChanged => AppError::conflict(
             ErrorCode::StableNodeIdChanged,

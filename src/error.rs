@@ -53,6 +53,7 @@ pub enum ErrorCode {
     SubPartOfSpeechConflict,
     RevisionConflict,
     ReferenceConflict,
+    RelationPrebindingFanoutExceeded,
     StableNodeIdChanged,
     FormReferenceConflict,
     DetectionMismatch,
@@ -73,6 +74,7 @@ pub enum ErrorCode {
     DownstreamConfirmationRequired,
     EntryArchived,
     EntryNotDeletable,
+    EntryHasInboundPreboundRelations,
     EntryHasInboundPublicationRefs,
     EntryHasUnavailablePublicationRefs,
     WordNotFound,
@@ -102,7 +104,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 79] = [
+    pub const ALL: [Self; 81] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -145,6 +147,7 @@ impl ErrorCode {
         Self::SubPartOfSpeechConflict,
         Self::RevisionConflict,
         Self::ReferenceConflict,
+        Self::RelationPrebindingFanoutExceeded,
         Self::StableNodeIdChanged,
         Self::FormReferenceConflict,
         Self::DetectionMismatch,
@@ -165,6 +168,7 @@ impl ErrorCode {
         Self::DownstreamConfirmationRequired,
         Self::EntryArchived,
         Self::EntryNotDeletable,
+        Self::EntryHasInboundPreboundRelations,
         Self::EntryHasInboundPublicationRefs,
         Self::EntryHasUnavailablePublicationRefs,
         Self::WordNotFound,
@@ -360,6 +364,11 @@ impl ErrorCode {
                 "Referenced target changed",
                 StatusCode::CONFLICT,
             ),
+            Self::RelationPrebindingFanoutExceeded => (
+                "relation_prebinding_fanout_exceeded",
+                "Relation prebinding fanout exceeded",
+                StatusCode::CONFLICT,
+            ),
             Self::StableNodeIdChanged => (
                 "stable_node_id_changed",
                 "Stable node identity changed",
@@ -450,6 +459,11 @@ impl ErrorCode {
             Self::EntryNotDeletable => (
                 "entry_not_deletable",
                 "Entry cannot be deleted",
+                StatusCode::CONFLICT,
+            ),
+            Self::EntryHasInboundPreboundRelations => (
+                "entry_has_inbound_prebound_relations",
+                "Entry has inbound prebound relations",
                 StatusCode::CONFLICT,
             ),
             Self::EntryHasInboundPublicationRefs => (

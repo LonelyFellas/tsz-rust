@@ -474,8 +474,12 @@ pub(super) async fn insert_meanings(
                         id, entry_id, source_sense_id, relation_type,
                         target_entry_id, target_sense_id, score,
                         target_headword_snapshot, target_gloss_snapshot,
+                        prebound_target_entry_id, prebinding_reason,
                         pending_target_headword, pending_target_gloss, sort_order
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, $8, $9, $10, $11, $12)
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7::numeric, $8, $9,
+                        $10, $11, $12, $13, $14
+                    )
                     "#,
                 )
                 .bind(relation.id)
@@ -503,6 +507,8 @@ pub(super) async fn insert_meanings(
                             .or_else(|| Some(String::new())),
                     ),
                 )
+                .bind(relation.prebound_target_word_id)
+                .bind(relation.prebinding_state.as_deref())
                 .bind(relation.pending_target_headword.as_deref())
                 .bind(relation.pending_target_gloss.as_deref())
                 .bind(relation_index as i32)

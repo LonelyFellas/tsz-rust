@@ -649,6 +649,131 @@ impl Modify for SmartLexiconV3SchemaAddon {
             );
         }
 
+        let build_relation_union =
+            |name: &str, branch_specs: Vec<(Vec<&str>, Vec<&str>, Option<&str>)>| {
+                let derived = component_schema_json(components, name);
+                let derived_properties = derived["properties"]
+                    .as_object()
+                    .expect("relation schema properties must be an object");
+                let one_of = branch_specs
+                    .into_iter()
+                    .map(|(allowed, required, prebinding_state)| {
+                        let mut properties = serde_json::Map::new();
+                        for field in ["id", "relation", "score"].into_iter().chain(allowed) {
+                            properties.insert(field.to_owned(), derived_properties[field].clone());
+                        }
+                        if let Some(state) = prebinding_state {
+                            properties.insert(
+                                "prebinding_state".to_owned(),
+                                serde_json::json!({
+                                    "type": "string",
+                                    "enum": [state],
+                                    "readOnly": true
+                                }),
+                            );
+                        }
+                        let required = ["id", "relation", "score"]
+                            .into_iter()
+                            .chain(required)
+                            .collect::<Vec<_>>();
+                        serde_json::json!({
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": required,
+                            "properties": properties
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::json!({"oneOf": one_of})
+            };
+        let relation_response = build_relation_union(
+            "WordRelationV3",
+            vec![
+                (
+                    vec![
+                        "target_word_id",
+                        "target_sense_id",
+                        "target_headword",
+                        "target_gloss",
+                        "target_status",
+                    ],
+                    vec![
+                        "target_word_id",
+                        "target_sense_id",
+                        "target_headword",
+                        "target_gloss",
+                    ],
+                    None,
+                ),
+                (
+                    vec!["pending_target_headword", "pending_target_gloss"],
+                    vec!["pending_target_headword"],
+                    None,
+                ),
+                (
+                    vec![
+                        "prebound_target_word_id",
+                        "pending_target_headword",
+                        "pending_target_gloss",
+                        "target_status",
+                    ],
+                    vec![
+                        "prebound_target_word_id",
+                        "pending_target_headword",
+                        "prebinding_state",
+                    ],
+                    Some("waiting_first_sense"),
+                ),
+                (
+                    vec![
+                        "prebound_target_word_id",
+                        "pending_target_headword",
+                        "pending_target_gloss",
+                        "target_status",
+                    ],
+                    vec![
+                        "prebound_target_word_id",
+                        "pending_target_headword",
+                        "prebinding_state",
+                    ],
+                    Some("target_sense_deleted"),
+                ),
+            ],
+        );
+        let relation_writable = build_relation_union(
+            "WordRelationWritableV3",
+            vec![
+                (
+                    vec!["target_word_id", "target_sense_id"],
+                    vec!["target_word_id", "target_sense_id"],
+                    None,
+                ),
+                (
+                    vec!["pending_target_headword", "pending_target_gloss"],
+                    vec!["pending_target_headword"],
+                    None,
+                ),
+                (
+                    vec![
+                        "prebound_target_word_id",
+                        "pending_target_headword",
+                        "pending_target_gloss",
+                    ],
+                    vec!["prebound_target_word_id", "pending_target_headword"],
+                    None,
+                ),
+            ],
+        );
+        for (name, schema) in [
+            ("WordRelationV3", relation_response),
+            ("WordRelationWritableV3", relation_writable),
+        ] {
+            components.schemas.insert(
+                name.to_owned(),
+                serde_json::from_value(schema)
+                    .unwrap_or_else(|_| panic!("strict schema {name} must deserialize")),
+            );
+        }
         let page_base = component_schema_json(components, "SurfaceMatchPageBaseV3");
         let mut complete_pages = Vec::new();
         for name in [
@@ -2181,7 +2306,6 @@ mod tests {
             "GrammarStructureV3",
             "WordSentenceLinkV3",
             "WordSentenceV3",
-            "WordRelationV3",
             "WordSenseV3",
             "SenseGroupV3",
             "WordPosMeaningsV3",
@@ -2259,20 +2383,45 @@ mod tests {
                 "{schema} must require component_usages for current clients"
             );
         }
+        let response_relations = schemas["WordRelationV3"]["oneOf"]
+            .as_array()
+            .expect("relation response must be a strict union");
+        let writable_relations = schemas["WordRelationWritableV3"]["oneOf"]
+            .as_array()
+            .expect("relation request must be a strict union");
         for field in ["target_headword", "target_gloss"] {
             assert!(
-                schemas["WordRelationWritableV3"]["properties"][field].is_null(),
-                "{field} must not exist in the strict meanings request shape"
+                writable_relations
+                    .iter()
+                    .all(|branch| branch["properties"][field].is_null()),
+                "{field} must not exist in strict meanings request branches"
             );
             assert!(
-                schemas["WordRelationV3"]["properties"][field].is_object(),
-                "{field} must remain available in relation responses"
+                response_relations
+                    .iter()
+                    .any(|branch| branch["properties"][field].is_object()),
+                "{field} must remain available in a bound relation response"
             );
         }
-        for schema in ["WordRelationV2", "WordRelationV3", "WordRelationWritableV3"] {
-            assert_eq!(
-                schemas[schema]["properties"]["pending_target_gloss"]["maxLength"], 5000,
-                "{schema} 必须声明可选的待建目标预定义词义"
+        assert_eq!(
+            schemas["WordRelationV2"]["properties"]["pending_target_gloss"]["maxLength"],
+            5000
+        );
+        for (name, branches) in [
+            ("WordRelationV3", response_relations),
+            ("WordRelationWritableV3", writable_relations),
+        ] {
+            assert!(
+                branches
+                    .iter()
+                    .all(|branch| branch["additionalProperties"] == false),
+                "{name} 的每个互斥分支都必须拒绝未声明字段"
+            );
+            assert!(
+                branches.iter().any(|branch| {
+                    branch["properties"]["pending_target_gloss"]["maxLength"] == 5000
+                }),
+                "{name} must retain the optional pending gloss contract"
             );
         }
         let association_input = &schemas["SentenceAssociationInputV2"];
