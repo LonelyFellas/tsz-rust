@@ -6,7 +6,11 @@ use sqlx::{Postgres, Transaction};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-use super::dictionary_suggestions::build_dictionary_suggestions;
+use super::dictionary_suggestions::{
+    allowed_explicit_spelling_tag, apply_base_dialect_pair, apply_content_base_dialect_pairs,
+    build_dictionary_suggestions, content_base_dialect_pairs, dictionary_alternative_terms,
+    hard_disallowed_regional_relation_tag, regional_spelling_pair,
+};
 use super::*;
 use crate::lexicon::dto::DraftMeaningsStepContent;
 use crate::lexicon::dto::{
@@ -23,14 +27,58 @@ use crate::lexicon::dto::{
     SaveMeaningsStepInputV3, SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin,
     UkDialectV3, UsDialectV3, V3PublicationBlockCode, V3PublicationCapability, V3RetiredNodeRole,
     ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3,
-    WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordPosFormsV3,
-    WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
+    WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordHeadwordsV2,
+    WordPosFormsV3, WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3,
+    WordUsFormVariantV3,
 };
-use crate::lexicon::model::NodeIdentityRecord;
+use crate::lexicon::model::{NodeIdentityRecord, RegionEvidenceRecord};
 
 const V3_CREATE_SCOPE: &str = "lexicon.entry.create.v3";
 const V3_DETECTION_TTL: StdDuration = StdDuration::from_secs(5 * 60);
 const V3_DETECTION_RETENTION_TTL: StdDuration = StdDuration::from_secs(65 * 60);
+
+fn is_regional_spelling_relation(
+    source: &RegionSurfaceRecord,
+    candidate: &RegionSurfaceRecord,
+    evidence: &RegionEvidenceRecord,
+) -> bool {
+    let evidence_target = if evidence.normalized_term == source.normalized_term {
+        &candidate.normalized_term
+    } else if evidence.normalized_term == candidate.normalized_term {
+        &source.normalized_term
+    } else {
+        return false;
+    };
+    let targets_counterpart = evidence.targets.iter().any(|target| {
+        normalize_headword(target).is_ok_and(|normalized| normalized.key == *evidence_target)
+    });
+    let same_part_of_speech =
+        source.pos.contains(&evidence.pos) && candidate.pos.contains(&evidence.pos);
+    let tags = evidence
+        .raw_tags
+        .iter()
+        .map(|tag| tag.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let general_region = tags.iter().any(|tag| {
+        matches!(
+            tag.as_str(),
+            "uk" | "british" | "received-pronunciation" | "us" | "american" | "general-american"
+        )
+    });
+    let spelling_family =
+        regional_spelling_pair(&source.normalized_term, &candidate.normalized_term).is_some();
+    let explicit_spelling = evidence.evidence_type == "spelling"
+        && general_region
+        && tags.iter().all(|tag| allowed_explicit_spelling_tag(tag));
+    let family_spelling = spelling_family
+        && !tags
+            .iter()
+            .any(|tag| hard_disallowed_regional_relation_tag(tag));
+    same_part_of_speech
+        && targets_counterpart
+        && (source.is_headword || candidate.is_headword)
+        && (explicit_spelling || family_spelling)
+}
 
 #[derive(Debug, sqlx::FromRow)]
 struct V3EntryStateRecord {
@@ -890,26 +938,169 @@ impl LexiconService {
             .collect()
     }
 
+    async fn v3_regional_spelling_surface(
+        &self,
+        mut source: Option<RegionSurfaceRecord>,
+    ) -> Result<Option<RegionSurfaceRecord>, LexiconServiceError> {
+        let Some(source_value) = source.as_mut() else {
+            return Ok(None);
+        };
+        let direct_keys = source_value
+            .targets
+            .iter()
+            .filter_map(|target| normalize_headword(target).ok().map(|value| value.key))
+            .collect::<Vec<_>>();
+        let mut candidates = self
+            .repository
+            .region_surfaces(&direct_keys)
+            .await
+            .map_err(repository_error)?;
+        candidates.extend(
+            self.repository
+                .region_surfaces_targeting(&source_value.normalized_term)
+                .await
+                .map_err(repository_error)?,
+        );
+        candidates.sort_by(|left, right| {
+            direct_keys
+                .iter()
+                .position(|key| key == &left.normalized_term)
+                .unwrap_or(usize::MAX)
+                .cmp(
+                    &direct_keys
+                        .iter()
+                        .position(|key| key == &right.normalized_term)
+                        .unwrap_or(usize::MAX),
+                )
+                .then_with(|| left.normalized_term.cmp(&right.normalized_term))
+        });
+        candidates.dedup_by(|left, right| left.normalized_term == right.normalized_term);
+        let mut evidence_keys = candidates
+            .iter()
+            .map(|candidate| candidate.normalized_term.clone())
+            .collect::<Vec<_>>();
+        evidence_keys.push(source_value.normalized_term.clone());
+        evidence_keys.sort();
+        evidence_keys.dedup();
+        let evidence = self
+            .repository
+            .region_evidence(&evidence_keys)
+            .await
+            .map_err(repository_error)?;
+        let targets = candidates
+            .into_iter()
+            .filter(|candidate| {
+                evidence
+                    .iter()
+                    .any(|item| is_regional_spelling_relation(source_value, candidate, item))
+            })
+            .map(|candidate| candidate.term)
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Ok(None);
+        }
+        source_value.targets = targets;
+        Ok(source)
+    }
+
     pub async fn detect_v3(
         &self,
         actor_id: Uuid,
         input: DetectLexiconSurfaceV3Input,
     ) -> Result<DetectLexiconSurfaceResponseV3, LexiconServiceError> {
         let normalized = NormalizedHeadword::parse(&input.surface).map_err(map_surface_error)?;
-        let term = self
+        let active_term = self
             .repository
             .dictionary_term(&normalized.key)
             .await
             .map_err(repository_error)?;
+        let direct_surface = self
+            .repository
+            .region_surface(&normalized.key)
+            .await
+            .map_err(repository_error)?;
+        let source_surface = direct_surface.or_else(|| {
+            active_term.as_ref().map(|term| RegionSurfaceRecord {
+                normalized_term: normalized.key.clone(),
+                term: term.term.clone(),
+                region_family: term.region_family.clone(),
+                pos: term.pos.clone(),
+                targets: Vec::new(),
+                is_headword: true,
+            })
+        });
+        let surface = self.v3_regional_spelling_surface(source_surface).await?;
+        let term = match active_term {
+            Some(term) => Some(term),
+            None if surface.is_some() => self
+                .repository
+                .dictionary_term_from_region_surface(&normalized.key)
+                .await
+                .map_err(repository_error)?,
+            None => None,
+        };
         let (builtin_dictionary, mut suggested_pos) = if let Some(term) = term {
             let builtin_suggested_pos = map_dictionary_pos(&term.pos);
-            let content = self
+            let mut base_content_keys = vec![normalized.key.clone()];
+            if let Some(surface) = &surface {
+                base_content_keys.extend(
+                    surface.targets.iter().filter_map(|target| {
+                        normalize_headword(target).ok().map(|value| value.key)
+                    }),
+                );
+            }
+            base_content_keys.sort();
+            base_content_keys.dedup();
+            let base_content = self
                 .repository
-                .dictionary_contents(&normalized.key)
+                .dictionary_contents_for_terms(&base_content_keys)
                 .await
                 .map_err(repository_error)?;
-            let suggestions =
+            let (headwords, _) = self
+                .detected_headwords_v3(&term.term, &term.region_family, surface)
+                .await?;
+            let regional_pair = match headwords {
+                WordHeadwordsV2::Distinguish { uk, us, .. } => Some((uk, us)),
+                WordHeadwordsV2::Unified { .. } => None,
+            };
+            let mut content_pairs = Vec::new();
+            let content = if regional_pair.is_some() {
+                base_content
+            } else {
+                let mut discovery_keys = base_content_keys.clone();
+                discovery_keys.extend(dictionary_alternative_terms(&normalized.key, &base_content));
+                discovery_keys.sort();
+                discovery_keys.dedup();
+                let discovery_content = self
+                    .repository
+                    .dictionary_contents_for_terms(&discovery_keys)
+                    .await
+                    .map_err(repository_error)?;
+                content_pairs = content_base_dialect_pairs(&normalized.key, &discovery_content);
+                discovery_content
+                    .into_iter()
+                    .filter(|record| {
+                        base_content_keys.contains(&record.normalized_term)
+                            || content_pairs.iter().any(|pair| {
+                                (record.normalized_term == pair.uk
+                                    || record.normalized_term == pair.us)
+                                    && map_dictionary_pos(std::slice::from_ref(&record.pos))
+                                        .contains(&pair.pos)
+                            })
+                    })
+                    .collect()
+            };
+            let mut suggestions =
                 build_dictionary_suggestions(&term.term, &builtin_suggested_pos, &content);
+            let has_dialect_pair = regional_pair.is_some() || !content_pairs.is_empty();
+            if let Some((uk, us)) = regional_pair {
+                apply_base_dialect_pair(&mut suggestions.forms, &uk, &us);
+            } else if !content_pairs.is_empty() {
+                apply_content_base_dialect_pairs(&mut suggestions.forms, &content_pairs);
+            }
+            if has_dialect_pair {
+                suggestions.retain_base_only(!content_pairs.is_empty());
+            }
             let provider = DictionaryProviderEvidenceV3 {
                 name: term.provider_name,
                 version: term.provider_version,

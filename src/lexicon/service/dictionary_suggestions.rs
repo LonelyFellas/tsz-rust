@@ -19,6 +19,15 @@ pub(super) struct DictionarySuggestionResult {
     pub has_pronunciations: bool,
 }
 
+impl DictionarySuggestionResult {
+    pub(super) fn retain_base_only(&mut self, content_pair_is_form_evidence: bool) {
+        self.forms
+            .retain(|form| form.form_type == WordFormTypeV3::Base);
+        self.has_form_evidence = content_pair_is_form_evidence;
+        self.has_pronunciations = self.forms.iter().any(suggestion_has_pronunciations);
+    }
+}
+
 pub(super) fn build_dictionary_suggestions(
     headword: &str,
     suggested_pos: &[String],
@@ -137,6 +146,304 @@ pub(super) fn build_dictionary_suggestions(
         has_form_evidence,
         has_pronunciations,
     }
+}
+
+pub(super) fn apply_base_dialect_pair(
+    forms: &mut [SuggestedConcreteFormV3],
+    uk_spelling: &str,
+    us_spelling: &str,
+) {
+    for form in forms
+        .iter_mut()
+        .filter(|form| form.form_type == WordFormTypeV3::Base)
+    {
+        set_base_dialect_pair(form, uk_spelling, us_spelling);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ContentDialectPair {
+    pub pos: String,
+    pub uk: String,
+    pub us: String,
+}
+
+pub(super) fn apply_content_base_dialect_pairs(
+    forms: &mut [SuggestedConcreteFormV3],
+    pairs: &[ContentDialectPair],
+) {
+    for pair in pairs {
+        for form in forms
+            .iter_mut()
+            .filter(|form| form.form_type == WordFormTypeV3::Base && form.pos == pair.pos)
+        {
+            set_base_dialect_pair(form, &pair.uk, &pair.us);
+        }
+    }
+}
+
+fn set_base_dialect_pair(form: &mut SuggestedConcreteFormV3, uk_spelling: &str, us_spelling: &str) {
+    let (uk_pronunciations, us_pronunciations) = match &form.regional_variants {
+        SuggestedRegionalVariantsV3::Common { common } => {
+            (common.pronunciations.clone(), common.pronunciations.clone())
+        }
+        SuggestedRegionalVariantsV3::UkUs { uk, us } => {
+            (uk.pronunciations.clone(), us.pronunciations.clone())
+        }
+    };
+    form.regional_variants = SuggestedRegionalVariantsV3::UkUs {
+        uk: SuggestedUkFormVariantV3 {
+            dialect: UkDialectV3::Uk,
+            spelling: uk_spelling.to_owned(),
+            pronunciations: uk_pronunciations,
+        },
+        us: SuggestedUsFormVariantV3 {
+            dialect: UsDialectV3::Us,
+            spelling: us_spelling.to_owned(),
+            pronunciations: us_pronunciations,
+        },
+    };
+}
+
+pub(super) fn dictionary_alternative_terms(
+    source: &str,
+    records: &[DictionaryContentRecord],
+) -> Vec<String> {
+    let mut alternatives = records
+        .iter()
+        .filter(|record| record.normalized_term == source)
+        .flat_map(alternative_relations)
+        .filter_map(|relation| normalize_relation(&relation.spelling))
+        .filter(|candidate| candidate != source)
+        .collect::<Vec<_>>();
+    alternatives.sort();
+    alternatives.dedup();
+    alternatives
+}
+
+pub(super) fn content_base_dialect_pairs(
+    source: &str,
+    records: &[DictionaryContentRecord],
+) -> Vec<ContentDialectPair> {
+    let mut pairs = records
+        .iter()
+        .flat_map(|record| {
+            alternative_relations(record)
+                .into_iter()
+                .map(move |relation| (record, relation))
+        })
+        .filter_map(|(record, relation)| {
+            let target = normalize_relation(&relation.spelling)?;
+            let counterpart = if record.normalized_term == source {
+                target.as_str()
+            } else if target == source {
+                record.normalized_term.as_str()
+            } else {
+                return None;
+            };
+            let counterpart_record = records.iter().find(|candidate| {
+                candidate.normalized_term == counterpart
+                    && candidate.pos.eq_ignore_ascii_case(&record.pos)
+            })?;
+            if counterpart == source || counterpart_record.normalized_term == source {
+                return None;
+            }
+            let spelling_family = regional_spelling_pair(source, counterpart);
+            let tags_allowed = if spelling_family.is_some() {
+                !relation
+                    .tags
+                    .iter()
+                    .any(|tag| hard_disallowed_regional_relation_tag(tag))
+            } else {
+                matches!(relation.dialect, SourceDialect::Uk | SourceDialect::Us)
+                    && relation
+                        .tags
+                        .iter()
+                        .all(|tag| allowed_explicit_spelling_tag(tag))
+            };
+            if !tags_allowed {
+                return None;
+            }
+            let (dialect_term, other_term) = match relation.dialect_owner {
+                AlternativeDialectOwner::Source => {
+                    (record.normalized_term.as_str(), target.as_str())
+                }
+                AlternativeDialectOwner::Target => {
+                    (target.as_str(), record.normalized_term.as_str())
+                }
+            };
+            let (uk, us) = match relation.dialect {
+                SourceDialect::Uk => (dialect_term.to_owned(), other_term.to_owned()),
+                SourceDialect::Us => (other_term.to_owned(), dialect_term.to_owned()),
+                SourceDialect::Common => spelling_family?,
+                SourceDialect::Conflict => return None,
+            };
+            let pos = map_dictionary_pos(std::slice::from_ref(&record.pos))
+                .into_iter()
+                .next()?;
+            Some(ContentDialectPair { pos, uk, us })
+        })
+        .collect::<Vec<_>>();
+    pairs.sort_by(|left, right| {
+        left.pos
+            .cmp(&right.pos)
+            .then_with(|| left.uk.cmp(&right.uk))
+            .then_with(|| left.us.cmp(&right.us))
+    });
+    pairs.dedup();
+    let counts = pairs.iter().fold(BTreeMap::new(), |mut counts, pair| {
+        *counts.entry(pair.pos.clone()).or_insert(0_usize) += 1;
+        counts
+    });
+    pairs.retain(|pair| counts.get(&pair.pos) == Some(&1));
+    pairs
+}
+
+#[derive(Clone, Copy)]
+enum AlternativeDialectOwner {
+    Source,
+    Target,
+}
+
+struct AlternativeRelation {
+    spelling: String,
+    dialect: SourceDialect,
+    dialect_owner: AlternativeDialectOwner,
+    tags: BTreeSet<String>,
+}
+
+fn alternative_relations(record: &DictionaryContentRecord) -> Vec<AlternativeRelation> {
+    let mut output = Vec::new();
+    if let Some(senses) = record.senses.as_array() {
+        for sense in senses {
+            let tags = string_tags(sense);
+            let dialect = source_dialect(&tags);
+            let Some(alt_of) = sense.get("alt_of").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            output.extend(alt_of.iter().filter_map(|item| {
+                item.get("word")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|word| AlternativeRelation {
+                        spelling: word.to_owned(),
+                        dialect,
+                        dialect_owner: AlternativeDialectOwner::Source,
+                        tags: tags.clone(),
+                    })
+            }));
+        }
+    }
+    if let Some(forms) = record.forms.as_array() {
+        for form in forms {
+            let tags = string_tags(form);
+            if !tags.contains("alternative") {
+                continue;
+            }
+            let Some(spelling) = form.get("form").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            output.push(AlternativeRelation {
+                spelling: spelling.to_owned(),
+                dialect: source_dialect(&tags),
+                dialect_owner: AlternativeDialectOwner::Target,
+                tags,
+            });
+        }
+    }
+    output
+}
+
+fn normalize_relation(value: &str) -> Option<String> {
+    crate::lexicon::normalization::normalize_headword(value)
+        .ok()
+        .map(|value| value.key)
+}
+
+pub(super) fn regional_spelling_pair(left: &str, right: &str) -> Option<(String, String)> {
+    const SPELLING_SUFFIXES: [(&str, &str); 7] = [
+        ("our", "or"),
+        ("re", "er"),
+        ("ise", "ize"),
+        ("yse", "yze"),
+        ("ogue", "og"),
+        ("ence", "ense"),
+        ("amme", "am"),
+    ];
+    SPELLING_SUFFIXES.iter().find_map(|(uk, us)| {
+        if left
+            .strip_suffix(uk)
+            .is_some_and(|stem| format!("{stem}{us}") == right)
+        {
+            Some((left.to_owned(), right.to_owned()))
+        } else if right
+            .strip_suffix(uk)
+            .is_some_and(|stem| format!("{stem}{us}") == left)
+        {
+            Some((right.to_owned(), left.to_owned()))
+        } else {
+            None
+        }
+    })
+}
+
+pub(super) fn hard_disallowed_regional_relation_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "abbreviation"
+            | "archaic"
+            | "childish"
+            | "colloquial"
+            | "dated"
+            | "derogatory"
+            | "dialectal"
+            | "ellipsis"
+            | "eye-dialect"
+            | "figurative"
+            | "historical"
+            | "idiomatic"
+            | "informal"
+            | "impolite"
+            | "misspelling"
+            | "nonstandard"
+            | "obsolete"
+            | "offensive"
+            | "participle"
+            | "past"
+            | "plural"
+            | "present"
+            | "pronunciation-spelling"
+            | "proscribed"
+            | "regional"
+            | "singular"
+            | "slang"
+            | "superlative"
+            | "comparative"
+            | "third-person"
+            | "vulgar"
+    )
+}
+
+pub(super) fn allowed_explicit_spelling_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "alt-of"
+            | "alternative"
+            | "american"
+            | "attributive"
+            | "british"
+            | "countable"
+            | "general-american"
+            | "including"
+            | "intransitive"
+            | "predicative"
+            | "received-pronunciation"
+            | "standard"
+            | "transitive"
+            | "uk"
+            | "uncountable"
+            | "us"
+            | "usually"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,12 +695,232 @@ mod tests {
 
     fn record(pos: &str, forms: Value, sounds: Value) -> DictionaryContentRecord {
         DictionaryContentRecord {
+            normalized_term: "test".to_owned(),
             pos: pos.to_owned(),
+            senses: json!([]),
             forms,
             sounds,
             provider_name: "Kaikki English Wiktionary".to_owned(),
             provider_version: "enwiktionary-test".to_owned(),
         }
+    }
+
+    fn relation_record(term: &str, senses: Value, forms: Value) -> DictionaryContentRecord {
+        relation_record_with_pos(term, "verb", senses, forms)
+    }
+
+    fn relation_record_with_pos(
+        term: &str,
+        pos: &str,
+        senses: Value,
+        forms: Value,
+    ) -> DictionaryContentRecord {
+        DictionaryContentRecord {
+            normalized_term: term.to_owned(),
+            pos: pos.to_owned(),
+            senses,
+            forms,
+            sounds: json!([]),
+            provider_name: "Kaikki English Wiktionary".to_owned(),
+            provider_version: "enwiktionary-test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn content_alternatives_infer_generic_regional_spelling_families() {
+        let records = [
+            relation_record(
+                "customise",
+                json!([]),
+                json!([{"form": "customize", "tags": ["alternative"]}]),
+            ),
+            relation_record("customize", json!([]), json!([])),
+        ];
+
+        assert_eq!(
+            dictionary_alternative_terms("customise", &records),
+            ["customize"]
+        );
+        assert_eq!(
+            content_base_dialect_pairs("customise", &records),
+            [ContentDialectPair {
+                pos: "verb".to_owned(),
+                uk: "customise".to_owned(),
+                us: "customize".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn content_alt_of_region_tags_are_authoritative_without_a_spelling_pattern() {
+        let records = [
+            relation_record(
+                "regional-source",
+                json!([{
+                    "tags": ["UK", "alt-of"],
+                    "alt_of": [{"word": "regional-target"}]
+                }]),
+                json!([]),
+            ),
+            relation_record("regional-target", json!([]), json!([])),
+        ];
+
+        assert_eq!(
+            content_base_dialect_pairs("regional-source", &records),
+            [ContentDialectPair {
+                pos: "verb".to_owned(),
+                uk: "regional-source".to_owned(),
+                us: "regional-target".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn unrelated_alternative_forms_do_not_become_regional_headwords() {
+        let records = [
+            relation_record(
+                "adviser",
+                json!([]),
+                json!([{"form": "advisor", "tags": ["alternative"]}]),
+            ),
+            relation_record("advisor", json!([]), json!([])),
+        ];
+
+        assert!(content_base_dialect_pairs("adviser", &records).is_empty());
+    }
+
+    #[test]
+    fn non_spelling_qualifiers_do_not_become_regional_pairs() {
+        for qualifier in [
+            "dialectal",
+            "slang",
+            "regional",
+            "idiomatic",
+            "vulgar",
+            "derogatory",
+            "childish",
+            "impolite",
+            "nonstandard",
+        ] {
+            let records = [
+                relation_record(
+                    "source-probe",
+                    json!([{
+                        "tags": ["US", "alt-of", "alternative", qualifier],
+                        "alt_of": [{"word": "target-probe"}]
+                    }]),
+                    json!([]),
+                ),
+                relation_record("target-probe", json!([]), json!([])),
+            ];
+
+            assert!(
+                content_base_dialect_pairs("source-probe", &records).is_empty(),
+                "{qualifier} 不得视为通用英美拼写证据"
+            );
+        }
+    }
+
+    #[test]
+    fn rare_relation_can_use_a_supported_spelling_family_after_candidate_discovery() {
+        let records = [
+            relation_record(
+                "diagramme",
+                json!([{
+                    "tags": ["UK", "alt-of", "alternative", "rare"],
+                    "alt_of": [{"word": "diagram"}]
+                }]),
+                json!([]),
+            ),
+            relation_record("diagram", json!([]), json!([])),
+        ];
+
+        assert_eq!(
+            dictionary_alternative_terms("diagramme", &records),
+            ["diagram"]
+        );
+        assert_eq!(
+            content_base_dialect_pairs("diagramme", &records),
+            [ContentDialectPair {
+                pos: "verb".to_owned(),
+                uk: "diagramme".to_owned(),
+                us: "diagram".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn nonstandard_cannot_use_a_supported_spelling_family() {
+        let records = [
+            relation_record(
+                "customise",
+                json!([]),
+                json!([{
+                    "form": "customize",
+                    "tags": ["alternative", "nonstandard"]
+                }]),
+            ),
+            relation_record("customize", json!([]), json!([])),
+        ];
+
+        assert!(content_base_dialect_pairs("customise", &records).is_empty());
+    }
+
+    #[test]
+    fn content_alternative_requires_the_same_raw_part_of_speech() {
+        let records = [
+            relation_record_with_pos(
+                "crumbler",
+                "noun",
+                json!([{
+                    "tags": ["UK", "alt-of", "alternative"],
+                    "alt_of": [{"word": "proper-crumbler"}]
+                }]),
+                json!([]),
+            ),
+            relation_record_with_pos("proper-crumbler", "name", json!([]), json!([])),
+        ];
+
+        assert!(content_base_dialect_pairs("crumbler", &records).is_empty());
+    }
+
+    #[test]
+    fn tagged_alternative_form_assigns_the_dialect_to_the_target_spelling() {
+        let records = [
+            relation_record(
+                "parameterize",
+                json!([]),
+                json!([{"form": "parameterise", "tags": ["alternative", "UK"]}]),
+            ),
+            relation_record("parameterise", json!([]), json!([])),
+        ];
+
+        assert_eq!(
+            content_base_dialect_pairs("parameterize", &records),
+            [ContentDialectPair {
+                pos: "verb".to_owned(),
+                uk: "parameterise".to_owned(),
+                us: "parameterize".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn conflicting_same_pos_alternatives_fail_closed() {
+        let records = [
+            relation_record(
+                "normalize",
+                json!([]),
+                json!([
+                    {"form": "normalise", "tags": ["alternative", "UK"]},
+                    {"form": "normalyze", "tags": ["alternative", "US"]}
+                ]),
+            ),
+            relation_record("normalise", json!([]), json!([])),
+            relation_record("normalyze", json!([]), json!([])),
+        ];
+
+        assert!(content_base_dialect_pairs("normalize", &records).is_empty());
     }
 
     #[test]

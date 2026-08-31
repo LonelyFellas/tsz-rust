@@ -12,11 +12,22 @@ pub(crate) struct DictionaryTermRecord {
     pub provider_version: String,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct RegionSurfaceRecord {
     pub normalized_term: String,
     pub term: String,
     pub region_family: String,
+    pub pos: Vec<String>,
+    pub targets: Vec<String>,
+    pub is_headword: bool,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct RegionEvidenceRecord {
+    pub normalized_term: String,
+    pub evidence_type: String,
+    pub raw_tags: Vec<String>,
+    pub pos: String,
     pub targets: Vec<String>,
 }
 
@@ -29,7 +40,9 @@ pub(crate) struct DictionaryCandidateRecord {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct DictionaryContentRecord {
+    pub normalized_term: String,
     pub pos: String,
+    pub senses: Value,
     pub forms: Value,
     pub sounds: Value,
     pub provider_name: String,
