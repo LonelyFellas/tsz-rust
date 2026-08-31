@@ -648,6 +648,7 @@ impl LexiconService {
                         has_unpublished_changes: record.has_unpublished_changes,
                         max_reachable_step: max_reachable_step(&record.completed_steps),
                         created_by_name: record.created_by_name,
+                        created_by: record.created_by,
                         created_at: record.created_at,
                         updated_at: record.updated_at,
                     }
@@ -699,6 +700,7 @@ impl LexiconService {
                             has_unpublished_changes: record.has_unpublished_changes,
                             max_reachable_step: max_reachable_step(&record.completed_steps),
                             created_by_name: record.created_by_name,
+                            created_by: record.created_by,
                             created_at: record.created_at,
                             updated_at: record.updated_at,
                         }))

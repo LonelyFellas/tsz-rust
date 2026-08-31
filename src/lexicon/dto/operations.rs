@@ -1241,6 +1241,20 @@ pub struct EntryLifecycleBatchResponse {
     pub affected: usize,
 }
 
+/// 批量永久删除入参；不带 confirmed_surface_match_token——
+/// 删除只撤除 surface 贡献、不新增占位，不存在需要确认的同表面冲突。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryDeleteBatchInput {
+    pub entries: Vec<EntryLifecycleTarget>,
+}
+
+/// 批量永久删除出参；词条已不存在，故不回实体，只回受影响条数。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EntryDeleteBatchResponse {
+    pub affected: usize,
+}
+
 // --- listing ---
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -1359,6 +1373,8 @@ pub struct AdminWordListItem {
     pub has_unpublished_changes: bool,
     pub max_reachable_step: WordCreationStep,
     pub created_by_name: String,
+    /// 创建人 admin id；前端按「仅本人可删」判定归属时使用。
+    pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

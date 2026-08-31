@@ -378,6 +378,7 @@ pub(crate) struct ListEntryRecord {
     pub is_archived: bool,
     pub completed_steps: Vec<String>,
     pub created_by_name: String,
+    pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub total: i64,

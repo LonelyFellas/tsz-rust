@@ -33,10 +33,10 @@ fn lifecycle_v3_capabilities_enabled(state: &AppState) -> bool {
     params(EntryPath),
     request_body = DeleteDraftInput,
     responses(
-        (status = 204, description = "从未发布的草稿已永久删除并释放词头"),
+        (status = 204, description = "从未发布的草稿（含已移入垃圾桶的）已永久删除并释放词头"),
         (status = 400, description = "路径非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用或必须先改密；或普通管理员删除他人创建的词条"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision 冲突，或词条已有发布历史/被其他草稿引用"),
         (status = 422, description = "base_revision 取值非法")
@@ -51,6 +51,7 @@ pub async fn delete_draft(
 ) -> Result<StatusCode, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
+    let is_super_admin = admin.is_super_admin();
     service(&state)
         .delete_draft(
             admin.id,
@@ -58,6 +59,7 @@ pub async fn delete_draft(
             path.id,
             input,
             lifecycle_v3_capabilities_enabled(&state),
+            is_super_admin,
         )
         .await
         .map_err(map_error)?;
@@ -155,6 +157,53 @@ pub async fn restore(
         &mut response,
         state.smart_lexicon_v3_flags.legacy_bridge_read,
     );
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/lexicon/entries/delete-batch",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(("Idempotency-Key" = Uuid, Header, description = "批量永久删除命令幂等键（UUID）")),
+    request_body = EntryDeleteBatchInput,
+    responses(
+        (status = 200, description = "原子批量永久删除结果", body = EntryDeleteBatchResponse),
+        (status = 400, description = "header 或 JSON 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密；或普通管理员删除他人创建的词条"),
+        (status = 404, description = "任一词条不存在"),
+        (status = 409, description = "任一 revision 冲突、幂等键冲突，或任一词条已有发布历史/被其他草稿引用"),
+        (status = 422, description = "批量为空、重复、超限或 revision 非法")
+    )
+)]
+pub async fn delete_batch(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    ApiJson(input): ApiJson<EntryDeleteBatchInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
+    let entry_ids = input
+        .entries
+        .iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+    require_lifecycle_v3_capabilities(&state, &entry_ids).await?;
+    let is_super_admin = admin.is_super_admin();
+    let response = service(&state)
+        .delete_draft_batch(
+            admin.id,
+            request_id.as_uuid(),
+            key,
+            input.entries,
+            lifecycle_v3_capabilities_enabled(&state),
+            is_super_admin,
+        )
+        .await
+        .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
 }
 

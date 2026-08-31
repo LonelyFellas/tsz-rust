@@ -1860,6 +1860,8 @@ pub struct AdminWordListItemV3 {
     pub has_unpublished_changes: bool,
     pub max_reachable_step: WordCreationStep,
     pub created_by_name: String,
+    /// 创建人 admin id；前端按「仅本人可删」判定归属时使用。
+    pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

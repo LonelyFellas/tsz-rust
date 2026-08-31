@@ -321,6 +321,7 @@ impl LexiconRepository {
                        WHERE progress.entry_id = entry.id
                    ), ARRAY[]::text[]) AS completed_steps,
                    creator.display_name AS created_by_name,
+                   entry.created_by_admin_id AS created_by,
                    entry.created_at,
                    entry.updated_at,
                    count(*) OVER() AS total

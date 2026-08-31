@@ -87,6 +87,7 @@ use utoipa::{
         crate::lexicon::handler::query::get_publication,
         crate::lexicon::handler::lifecycle::archive,
         crate::lexicon::handler::lifecycle::delete_draft,
+        crate::lexicon::handler::lifecycle::delete_batch,
         crate::lexicon::handler::lifecycle::restore,
         crate::lexicon::handler::commands::preview_forms_impact,
         crate::lexicon::handler::commands::save_forms,
@@ -289,6 +290,8 @@ use utoipa::{
             crate::lexicon::dto::EntryLifecycleInput,
             crate::lexicon::dto::EntryLifecycleTarget,
             crate::lexicon::dto::EntryLifecycleBatchInput,
+            crate::lexicon::dto::EntryDeleteBatchInput,
+            crate::lexicon::dto::EntryDeleteBatchResponse,
             crate::lexicon::dto::EntryLifecycleBatchResponse,
             // Smart Lexicon V3 Phase 1 contract (storage remains capability-gated)
             crate::lexicon::dto::EnglishLanguageV3,

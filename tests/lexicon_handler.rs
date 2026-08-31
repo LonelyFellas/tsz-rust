@@ -66,6 +66,10 @@ fn test_redis_url() -> String {
 }
 
 async fn seed_admin(pool: &PgPool) -> Uuid {
+    seed_admin_with_role(pool, AdminRole::Admin).await
+}
+
+async fn seed_admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
     let id = Uuid::now_v7();
     AdminRepository::new(pool.clone())
         .create(NewAdmin {
@@ -73,7 +77,7 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
             phone: format!("lexicon-{}", id.simple()),
             display_name: "词库测试管理员".to_owned(),
             password_hash: "hashed-password".to_owned(),
-            role: AdminRole::Admin,
+            role,
             must_change_password: false,
             created_by_admin_id: None,
         })
@@ -8898,6 +8902,201 @@ async fn related_search_orders_headword_spellings_like_the_list(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn deleting_an_entry_is_restricted_to_its_creator_unless_super_admin(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let owner_id = seed_admin(&pool).await;
+    let owner_bearer = token(&state, owner_id);
+    let other_id = seed_admin(&pool).await;
+    let other_bearer = token(&state, other_id);
+    let super_id = seed_admin_with_role(&pool, AdminRole::SuperAdmin).await;
+    let super_bearer = token(&state, super_id);
+
+    // 归属：他人创建的词条，普通管理员删不了。
+    let owned = create_ready_draft(&state, &pool, &owner_bearer, "owned-by-creator").await;
+    let owned_id = owned["word"]["id"].as_str().unwrap();
+    let owned_revision = owned["word"]["revision"].as_i64().unwrap();
+    let owned_lifecycle_revision = owned["word"]["lifecycle_revision"].as_i64().unwrap();
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{owned_id}"),
+        &other_bearer,
+        None,
+        Some(json!({
+            "base_revision": owned_revision,
+            "base_lifecycle_revision": owned_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "普通管理员不得删除他人创建的词条：{response}"
+    );
+    assert_eq!(response["code"], "entry_delete_forbidden");
+
+    // 归属放行：创建者本人可以删。
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{owned_id}"),
+        &owner_bearer,
+        None,
+        Some(json!({
+            "base_revision": owned_revision,
+            "base_lifecycle_revision": owned_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "创建者本人应能删除自己的词条：{response}"
+    );
+
+    // 超管不受创建人限制。
+    let foreign = create_ready_draft(&state, &pool, &owner_bearer, "owned-but-super-deletes").await;
+    let foreign_id = foreign["word"]["id"].as_str().unwrap();
+    let foreign_revision = foreign["word"]["revision"].as_i64().unwrap();
+    let foreign_lifecycle_revision = foreign["word"]["lifecycle_revision"].as_i64().unwrap();
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{foreign_id}"),
+        &super_bearer,
+        None,
+        Some(json!({
+            "base_revision": foreign_revision,
+            "base_lifecycle_revision": foreign_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "超管应能删除他人创建的词条：{response}"
+    );
+}
+
+#[sqlx::test]
+async fn delete_batch_is_atomic_and_idempotent(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 造三条草稿并全部移入垃圾桶。
+    let mut archived_targets = Vec::new();
+    for index in 0..3 {
+        let draft =
+            create_ready_draft(&state, &pool, &bearer, &format!("batch-delete-{index}")).await;
+        let id = draft["word"]["id"].as_str().unwrap().to_owned();
+        let revision = draft["word"]["revision"].as_i64().unwrap();
+        let lifecycle_revision = draft["word"]["lifecycle_revision"].as_i64().unwrap();
+        let (status, archived) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/{id}/archive"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(json!({
+                "base_revision": revision,
+                "base_lifecycle_revision": lifecycle_revision
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "归档失败：{archived}");
+        archived_targets.push(json!({
+            "id": id,
+            "base_revision": archived["word"]["revision"].as_i64().unwrap(),
+            "base_lifecycle_revision": archived["word"]["lifecycle_revision"].as_i64().unwrap(),
+        }));
+    }
+
+    // 原子性：批次里混入一条已发布词条，整批必须不生效。
+    let published = create_ready_draft(&state, &pool, &bearer, "batch-delete-published").await;
+    let (status, published) = publish_ready(&state, &bearer, &published).await;
+    assert_eq!(status, StatusCode::CREATED, "发布准备失败：{published}");
+    let mut poisoned = archived_targets.clone();
+    poisoned.push(json!({
+        "id": published["word"]["id"].as_str().unwrap(),
+        "base_revision": published["word"]["revision"].as_i64().unwrap(),
+        "base_lifecycle_revision": published["word"]["lifecycle_revision"].as_i64().unwrap(),
+    }));
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/delete-batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({ "entries": poisoned })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "批次含已发布词条时必须整批拒绝：{response}"
+    );
+    assert_eq!(response["code"], "entry_not_deletable");
+    for target in &archived_targets {
+        let id = target["id"].as_str().unwrap();
+        let (status, _) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/{id}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "整批拒绝后归档词条必须原样保留");
+    }
+
+    // 正常路径 + 幂等：同一幂等键重放返回同一结果，且不重复删除。
+    let key = Uuid::now_v7();
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/delete-batch"),
+        &bearer,
+        Some(key),
+        Some(json!({ "entries": archived_targets })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "批量永久删除应成功：{response}");
+    assert_eq!(response["affected"], 3);
+    for target in &archived_targets {
+        let id = target["id"].as_str().unwrap();
+        let (status, _) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/{id}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "批量删除后词条不应再可读");
+    }
+    let (status, replay) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/delete-batch"),
+        &bearer,
+        Some(key),
+        Some(json!({ "entries": archived_targets })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "幂等重放应成功：{replay}");
+    assert_eq!(replay["affected"], 3, "幂等重放必须返回首次结果");
+}
+
+#[sqlx::test]
 async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
@@ -9011,6 +9210,7 @@ async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(p
         archived_lifecycle_revision
     );
 
+    // 垃圾桶清理：归档只是软删除的中间站，从未发布过的归档草稿可以永久删除。
     let (status, response) = call(
         &state,
         Method::DELETE,
@@ -9025,10 +9225,23 @@ async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(p
     .await;
     assert_eq!(
         status,
-        StatusCode::CONFLICT,
-        "归档状态不是可永久删除的草稿：{response}"
+        StatusCode::NO_CONTENT,
+        "垃圾桶里从未发布的草稿应可永久删除：{response}"
     );
-    assert_eq!(response["code"], "entry_not_deletable");
+    let (status, response) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{archive_race_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "永久删除后词条不应再可读：{response}"
+    );
 
     let (status, response) = call(
         &state,

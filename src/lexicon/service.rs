@@ -23,10 +23,11 @@ use crate::lexicon::{
         DictionaryCoverageV2, DictionaryProvenanceV2, DictionaryProviderV2, DraftFormsStepContent,
         DraftFormsStepContentV3, DraftMeaningsStepContent, DraftReferenceLocation,
         DraftValidationIssue, DraftValidationResponse, DuplicateWordMatchV2, EnglishTextV2,
-        EntryKind, EntryLifecycleBatchInput, EntryLifecycleBatchResponseAny, EntryLifecycleInput,
-        EntryLifecycleTarget, EntryPresentationV3, ExistingSurfaceMatchV2, ExistingSurfaceSourceV2,
-        FormsImpactItemV2, FormsImpactNodeType, FormsImpactResponseV2, GrammarStructureV2,
-        GrammarVariantV2, HeadwordVariant, LegacyHeadwordsCompatibilityV3, LexiconSurfaceMatchV2,
+        EntryDeleteBatchResponse, EntryKind, EntryLifecycleBatchInput,
+        EntryLifecycleBatchResponseAny, EntryLifecycleInput, EntryLifecycleTarget,
+        EntryPresentationV3, ExistingSurfaceMatchV2, ExistingSurfaceSourceV2, FormsImpactItemV2,
+        FormsImpactNodeType, FormsImpactResponseV2, GrammarStructureV2, GrammarVariantV2,
+        HeadwordVariant, LegacyHeadwordsCompatibilityV3, LexiconSurfaceMatchV2,
         MatchedEntryContextV2, PendingSentenceAssociationItemV3,
         PendingSentenceAssociationListQuery, PendingSentenceAssociationListResponse,
         PersistedWordStep, PreviewFormsImpactInputV2, PronunciationStyle, PublishAdminWordV2Input,
@@ -155,6 +156,8 @@ pub enum LexiconServiceError {
     EntryArchived,
     #[error("entry has publication history or inbound references and cannot be deleted")]
     EntryNotDeletable,
+    #[error("entry can only be deleted by its creator")]
+    EntryDeleteForbidden,
     #[error("entry has inbound prebound relations and cannot be deleted")]
     EntryHasInboundPreboundRelations,
     #[error("entry has inbound publication references")]
