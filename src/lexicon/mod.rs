@@ -13,6 +13,7 @@ pub mod repository;
 pub mod rich_text;
 pub mod router;
 pub(crate) mod sentence_association;
+pub(crate) mod sentence_target_discovery;
 pub mod service;
 pub mod surface;
 pub mod surface_backfill;

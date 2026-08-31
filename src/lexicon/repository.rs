@@ -16,12 +16,13 @@ use crate::{
             FormsSurfaceAcknowledgementRecord, HeadwordKeyRecord, HistoricalPublicationRecord,
             IdempotencyRecord, InboundSenseReferenceRecord, ListEntryRecord, ListFilter,
             NewPublicationSenseReference, NewSentenceAssociation, NodeIdentityRecord,
-            PublicationReadRecord, PublishedEntrySnapshotRecord, PublishedFormSurfaceRecord,
-            RegionSurfaceRecord, RelatedSearchFilter, RelatedSearchRecord,
-            ResolvedRelationTargetRecord, ResolvedSenseTargetRecord, RetiredStableSlotRecord,
-            SenseTargetKey, SentenceAssociationRecord, SentenceAssociationScanRecord, StatsRecord,
-            SurfaceEntryContextRecord, SurfaceInboundRelationRecord, SurfaceLookupKey,
-            SurfaceSourceRecord,
+            PendingSentenceAssociationListRecord, PublicationReadRecord,
+            PublishedEntrySnapshotRecord, PublishedFormSurfaceRecord, RegionSurfaceRecord,
+            RelatedSearchFilter, RelatedSearchRecord, ResolvedRelationTargetRecord,
+            ResolvedSenseTargetRecord, RetiredStableSlotRecord, SenseTargetKey,
+            SentenceAssociationRecord, SentenceAssociationScanRecord, SentenceDiscoveryDraftRecord,
+            SentenceDiscoverySurfaceRecord, StatsRecord, SurfaceEntryContextRecord,
+            SurfaceInboundRelationRecord, SurfaceLookupKey, SurfaceSourceRecord,
         },
         node_identity::{
             BASE_FORM_ROLE, FORM_GROUP_ROLE, GRAMMAR_STRUCTURE_ROLE, POS_ROLE, PRONUNCIATION_ROLE,
@@ -45,6 +46,8 @@ mod projections;
 mod publications;
 mod query;
 mod sentence_associations;
+mod sentence_target_discovery;
+mod sentence_translations;
 mod surface_writes;
 mod surfaces;
 

@@ -29,7 +29,9 @@ pub(crate) struct DictionaryCandidateRecord {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct DictionaryContentRecord {
+    pub normalized_term: String,
     pub pos: String,
+    pub senses: Value,
     pub forms: Value,
     pub sounds: Value,
     pub provider_name: String,
@@ -239,6 +241,7 @@ pub(crate) struct ResolvedRelationTargetRecord {
 pub(crate) enum PublicationSenseReferenceKind {
     Relation,
     SentenceContext,
+    PhraseComponent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,6 +264,7 @@ impl PublicationSenseReferenceKind {
         match self {
             Self::Relation => "relation",
             Self::SentenceContext => "sentence_context",
+            Self::PhraseComponent => "phrase_component",
         }
     }
 }
@@ -315,8 +319,12 @@ pub(crate) struct EntryRecord {
 
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct RelatedSearchRecord {
+    pub entry_id: Uuid,
+    pub kind: String,
     pub content_schema_version: i16,
     pub snapshot: Value,
+    pub status: String,
+    pub status_rank: i16,
     pub pos_labels: Vec<String>,
     pub sort_headword: String,
     pub total: i64,
@@ -326,11 +334,13 @@ pub(crate) struct RelatedSearchFilter<'a> {
     pub q: &'a str,
     pub kind: Option<crate::lexicon::dto::EntryKind>,
     pub include_v3: bool,
+    pub include_drafts: bool,
     pub exact: bool,
     pub exclude_exact: bool,
     pub limit: i64,
     pub last_kind: Option<crate::lexicon::dto::EntryKind>,
     pub last_headword: Option<&'a str>,
+    pub last_status_rank: Option<i16>,
     pub last_word_id: Option<Uuid>,
 }
 
@@ -389,19 +399,51 @@ pub(crate) struct ListFilter {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct SentenceAssociationRecord {
     pub id: Uuid,
+    pub entry_id: Uuid,
     pub sentence_id: Uuid,
     pub source_dialect: String,
+    pub association_schema_version: i16,
+    pub segment_count: i16,
+    pub segments_fingerprint: Option<Vec<u8>>,
+    pub source_segments: Value,
     pub range_start: i32,
     pub range_end: i32,
     pub surface: String,
-    pub target_entry_id: Uuid,
-    pub target_sense_id: Uuid,
+    pub state: String,
+    pub target_entry_id: Option<Uuid>,
+    pub target_sense_id: Option<Uuid>,
     pub target_form_slot_id: Option<Uuid>,
+    pub target_publication_id: Option<Uuid>,
+    pub target_form_variant_id: Option<Uuid>,
+    pub target_component_usages_snapshot: Option<Value>,
     pub origin: String,
-    pub target_headword_snapshot: String,
-    pub target_gloss_snapshot: String,
-    pub resolved_pos: String,
+    pub target_headword_snapshot: Option<String>,
+    pub target_gloss_snapshot: Option<String>,
+    pub resolved_pos: Option<String>,
     pub resolved_form_type: Option<String>,
+    pub pending_target_kind: Option<String>,
+    pub pending_target_headword: Option<String>,
+    pub normalized_pending_target_headword: Option<String>,
+    pub pending_target_gloss: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct PendingSentenceAssociationListRecord {
+    pub id: Uuid,
+    pub entry_id: Uuid,
+    pub owner_revision: i64,
+    pub owner_lifecycle_revision: i64,
+    pub sentence_id: Uuid,
+    pub source_dialect: String,
+    pub association_schema_version: i16,
+    pub segment_count: i16,
+    pub source_segments: Value,
+    pub sentence_text: String,
+    pub pending_target_kind: String,
+    pub pending_target_headword: String,
+    pub pending_target_gloss: Option<String>,
+    pub scan_text_hash: Vec<u8>,
+    pub scan_resolver_version: i16,
 }
 
 /// 某条例句的某一侧正文解析到哪个版本了。
@@ -419,17 +461,35 @@ pub(crate) struct NewSentenceAssociation {
     pub id: Uuid,
     pub sentence_id: Uuid,
     pub source_dialect: String,
+    pub association_schema_version: i16,
+    pub source_segments: Vec<NewSentenceAssociationSegment>,
+    pub segments_fingerprint: Option<Vec<u8>>,
     pub range_start: i32,
     pub range_end: i32,
     pub surface: String,
-    pub target_entry_id: Uuid,
-    pub target_sense_id: Uuid,
+    pub state: String,
+    pub target_entry_id: Option<Uuid>,
+    pub target_sense_id: Option<Uuid>,
     pub target_form_slot_id: Option<Uuid>,
+    pub target_publication_id: Option<Uuid>,
+    pub target_form_variant_id: Option<Uuid>,
+    pub target_component_usages_snapshot: Option<Value>,
     pub origin: String,
-    pub target_headword_snapshot: String,
-    pub target_gloss_snapshot: String,
-    pub resolved_pos: String,
+    pub target_headword_snapshot: Option<String>,
+    pub target_gloss_snapshot: Option<String>,
+    pub resolved_pos: Option<String>,
     pub resolved_form_type: Option<String>,
+    pub pending_target_kind: Option<String>,
+    pub pending_target_headword: Option<String>,
+    pub normalized_pending_target_headword: Option<String>,
+    pub pending_target_gloss: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NewSentenceAssociationSegment {
+    pub range_start: i32,
+    pub range_end: i32,
+    pub surface: String,
 }
 
 /// `surface_sources` 里一条当前发布版本的词形行。自动关联的候选就从这里来。
@@ -447,5 +507,28 @@ pub(crate) struct PublishedFormSurfaceRecord {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct PublishedEntrySnapshotRecord {
     pub entry_id: Uuid,
+    pub publication_id: Uuid,
     pub snapshot: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, sqlx::FromRow)]
+pub(crate) struct SentenceDiscoverySurfaceRecord {
+    pub normalized_surface: String,
+    pub surface: String,
+    pub entry_kind: String,
+    pub entry_id: Uuid,
+    pub publication_id: Uuid,
+    pub pos_id: Uuid,
+    pub pos: String,
+    pub matched_form_id: Uuid,
+    pub matched_variant_id: Uuid,
+    pub dialect_scope: String,
+    pub event_offset: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct SentenceDiscoveryDraftRecord {
+    pub entry_id: Uuid,
+    pub entry_revision: i64,
+    pub headword: String,
 }

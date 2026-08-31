@@ -4,6 +4,11 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::lexicon::dto::{
+    DraftFormsStepContentV3, DraftMeaningsStepContentV3, EntryPresentationV3, RelatedWordStatusV3,
+    WordEntryKindV3,
+};
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RelatedSearchCursor {
     actor_id: Uuid,
@@ -12,11 +17,13 @@ struct RelatedSearchCursor {
     match_mode: RelatedSearchMatchMode,
     exclude_exact: bool,
     include_v3: bool,
+    include_drafts: bool,
     page_size: u32,
     total: u64,
     consumed: u64,
     last_kind: Option<EntryKind>,
     last_headword: Option<String>,
+    last_status_rank: Option<i16>,
     last_word_id: Option<Uuid>,
     dataset_version: i64,
 }
@@ -25,6 +32,15 @@ struct RelatedSearchCursor {
 struct RelatedSearchCursorEnvelope {
     payload: String,
     signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DraftRelatedSearchSnapshotV3 {
+    id: Uuid,
+    kind: WordEntryKindV3,
+    presentation: EntryPresentationV3,
+    forms: DraftFormsStepContentV3,
+    meanings: DraftMeaningsStepContentV3,
 }
 
 fn encode_related_search_cursor(cursor: &RelatedSearchCursor, key: &[u8]) -> String {
@@ -88,12 +104,12 @@ fn include_related_v3_match(
 }
 
 fn related_v3_matches(
-    word: &AdminWordV3,
+    forms: &DraftFormsStepContentV3,
     normalized_q: &str,
     match_mode: RelatedSearchMatchMode,
 ) -> Result<Vec<RelatedWordMatchV3>, LexiconServiceError> {
     let mut matches = Vec::new();
-    for pos in &word.forms.pos {
+    for pos in &forms.pos {
         for form in &pos.forms {
             match &form.regional_variants {
                 WordRegionalVariantsV3::Common { common } => include_related_v3_match(
@@ -237,6 +253,10 @@ impl LexiconService {
         query: RelatedSearchQuery,
         include_v3: bool,
     ) -> Result<RelatedSearchResponse, LexiconServiceError> {
+        let include_drafts = query.include_drafts.unwrap_or(false);
+        if include_drafts && !include_v3 {
+            return Err(LexiconServiceError::V3StorageUnavailable);
+        }
         if query.page_size.is_some() && query.limit.is_some() {
             return Err(LexiconServiceError::InvalidField {
                 field: "page_size",
@@ -257,6 +277,7 @@ impl LexiconService {
         }
         let v2 = query.match_mode.is_some()
             || query.exclude_exact.is_some()
+            || query.include_drafts.is_some()
             || query.page_size.is_some()
             || query.cursor.is_some();
         let q = query.q.unwrap_or_default();
@@ -291,6 +312,7 @@ impl LexiconService {
                 || cursor.match_mode != match_mode
                 || cursor.exclude_exact != exclude_exact
                 || cursor.include_v3 != include_v3
+                || cursor.include_drafts != include_drafts
                 || cursor.page_size != page_size
             {
                 return Err(LexiconServiceError::InvalidField {
@@ -307,11 +329,13 @@ impl LexiconService {
                 match_mode,
                 exclude_exact,
                 include_v3,
+                include_drafts,
                 page_size,
                 total: 0,
                 consumed: 0,
                 last_kind: None,
                 last_headword: None,
+                last_status_rank: None,
                 last_word_id: None,
                 dataset_version: 0,
             }
@@ -338,11 +362,13 @@ impl LexiconService {
                     q: &normalized_q,
                     kind: query.kind,
                     include_v3,
+                    include_drafts,
                     exact: match_mode == RelatedSearchMatchMode::Exact,
                     exclude_exact,
                     limit: i64::from(page_size),
                     last_kind: cursor.last_kind,
                     last_headword: cursor.last_headword.as_deref(),
+                    last_status_rank: cursor.last_status_rank,
                     last_word_id: cursor.last_word_id,
                 })
                 .await
@@ -377,6 +403,7 @@ impl LexiconService {
             cursor.total
         };
         let last_page_key = records.last().map(|record| record.sort_headword.clone());
+        let last_status_rank = records.last().map(|record| record.status_rank);
         let results = records
             .into_iter()
             .map(|record| match record.content_schema_version {
@@ -416,16 +443,43 @@ impl LexiconService {
                     }))
                 }
                 3 => {
-                    let word: AdminWordV3 =
-                        serde_json::from_value(record.snapshot).map_err(serialization_error)?;
-                    let matches = related_v3_matches(&word, &normalized_q, match_mode)?;
+                    let (entry_id, kind, presentation, forms, meanings, status) = if record.status
+                        == "draft"
+                    {
+                        let word: DraftRelatedSearchSnapshotV3 =
+                            serde_json::from_value(record.snapshot).map_err(serialization_error)?;
+                        (
+                            word.id,
+                            word.kind,
+                            word.presentation,
+                            word.forms,
+                            word.meanings,
+                            Some(RelatedWordStatusV3::Draft),
+                        )
+                    } else {
+                        let word: AdminWordV3 =
+                            serde_json::from_value(record.snapshot).map_err(serialization_error)?;
+                        (
+                            word.id,
+                            word.kind,
+                            word.presentation,
+                            word.forms,
+                            word.meanings,
+                            include_drafts.then_some(RelatedWordStatusV3::Published),
+                        )
+                    };
+                    if entry_id != record.entry_id || v3_kind_string(kind) != record.kind {
+                        return Err(repository_error(LexiconRepositoryError::Invariant(
+                            "related-search snapshot identity does not match its entry",
+                        )));
+                    }
+                    let matches = related_v3_matches(&forms, &normalized_q, match_mode)?;
                     if matches.is_empty() {
                         return Err(repository_error(LexiconRepositoryError::Invariant(
                             "related-search V3 surface does not exist in its publication snapshot",
                         )));
                     }
-                    let senses = word
-                        .meanings
+                    let senses = meanings
                         .pos
                         .iter()
                         .flat_map(|pos| &pos.senses)
@@ -436,9 +490,10 @@ impl LexiconService {
                         .collect();
                     Ok(RelatedWordResultAny::V3(RelatedWordResultV3 {
                         schema_version: 3,
-                        entry_id: word.id,
-                        kind: word.kind,
-                        presentation: word.presentation.clone(),
+                        entry_id,
+                        kind,
+                        status,
+                        presentation,
                         matches,
                         senses,
                     }))
@@ -460,6 +515,7 @@ impl LexiconService {
                 consumed,
                 last_kind: Some(last_kind),
                 last_headword: last_page_key,
+                last_status_rank,
                 last_word_id: Some(last_word_id),
                 ..cursor
             };
@@ -913,11 +969,13 @@ mod related_search_cursor_tests {
             match_mode: RelatedSearchMatchMode::Exact,
             exclude_exact: false,
             include_v3: true,
+            include_drafts: true,
             page_size: 20,
             total: 40,
             consumed: 20,
             last_kind: Some(EntryKind::Word),
             last_headword: Some("workspace".to_owned()),
+            last_status_rank: Some(1),
             last_word_id: Some(Uuid::nil()),
             dataset_version: 7,
         }

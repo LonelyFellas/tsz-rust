@@ -619,8 +619,12 @@ pub struct SentencePath {
     pub sentence_id: Uuid,
 }
 
-/// 事后修正例句关联的一项。只读投影（词形槽位、词头/释义快照、词性）不接受输入，
-/// 一律由服务端按目标词条的当前发布版本解析后落值。
+/// 事后修正例句关联的一项。目标必须是二选一的完整形状：
+///
+/// - linked：`target_word_id + target_sense_id`；
+/// - Pending：`pending_target_kind + pending_target_headword`，预填词义可选。
+///
+/// 只读投影（词形槽位、词头/释义快照、词性）不接受输入，一律由服务端解析。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SentenceAssociationInputV2 {
@@ -628,8 +632,52 @@ pub struct SentenceAssociationInputV2 {
     pub id: Uuid,
     pub source_dialect: Dialect,
     pub source_range: SentenceSourceRangeV1,
-    pub target_word_id: Uuid,
-    pub target_sense_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_word_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_sense_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub pending_target_kind: Option<EntryKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 200)]
+    pub pending_target_headword: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 5000)]
+    pub pending_target_gloss: Option<String>,
+}
+
+/// V3 例句关联只使用有序片段作为位置权威；连续命中同样提交一个片段。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceAssociationInputV3 {
+    pub id: Uuid,
+    pub source_dialect: Dialect,
+    #[schema(min_items = 1, max_items = 20)]
+    pub source_segments: Vec<SentenceSourceRangeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_word_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_sense_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_publication_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_form_variant_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub pending_target_kind: Option<EntryKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 200)]
+    pub pending_target_headword: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 5000)]
+    pub pending_target_gloss: Option<String>,
 }
 
 /// 按例句整组替换关联：改目标 = 改列表里那一项，删 = 去掉，补 = 加一项。
@@ -638,12 +686,283 @@ pub struct SentenceAssociationInputV2 {
 /// 覆盖它所有存在的方言侧，空列表即清空。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ReplaceSentenceAssociationsInput {
+pub struct ReplaceSentenceAssociationsInputV2 {
     #[schema(minimum = 1)]
     pub base_revision: i64,
     #[schema(minimum = 1)]
     pub base_lifecycle_revision: i64,
     pub associations: Vec<SentenceAssociationInputV2>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceSentenceAssociationsInputV3 {
+    #[schema(schema_with = schema_version_3_schema)]
+    #[serde(deserialize_with = "deserialize_schema_version_3")]
+    pub association_schema_version: u8,
+    #[schema(minimum = 1)]
+    pub base_revision: i64,
+    #[schema(minimum = 1)]
+    pub base_lifecycle_revision: i64,
+    pub associations: Vec<SentenceAssociationInputV3>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(untagged)]
+#[schema(discriminator(
+    property_name = "association_schema_version",
+    mapping(("3" = "#/components/schemas/ReplaceSentenceAssociationsInputV3"))
+))]
+pub enum ReplaceSentenceAssociationsInput {
+    V3(ReplaceSentenceAssociationsInputV3),
+    V2(ReplaceSentenceAssociationsInputV2),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResolveSentenceTargetsV3Input {
+    AllPublishedTargets {
+        #[schema(schema_with = schema_version_3_schema)]
+        #[serde(deserialize_with = "deserialize_schema_version_3")]
+        schema_version: u8,
+        #[schema(max_length = 1000)]
+        sentence_text: String,
+        source_dialect: Dialect,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false, minimum = 1, maximum = 100)]
+        page_size_per_range: Option<u32>,
+    },
+    SelectedSegments {
+        #[schema(schema_with = schema_version_3_schema)]
+        #[serde(deserialize_with = "deserialize_schema_version_3")]
+        schema_version: u8,
+        #[schema(max_length = 1000)]
+        sentence_text: String,
+        source_dialect: Dialect,
+        #[schema(min_items = 1, max_items = 20)]
+        selected_segments: Vec<SentenceSourceRangeV1>,
+        include_drafts: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false, minimum = 1, maximum = 100)]
+        page_size_per_range: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        cursor: Option<String>,
+    },
+}
+
+impl ResolveSentenceTargetsV3Input {
+    pub(crate) fn sentence_text(&self) -> &str {
+        match self {
+            Self::AllPublishedTargets { sentence_text, .. }
+            | Self::SelectedSegments { sentence_text, .. } => sentence_text,
+        }
+    }
+
+    pub(crate) const fn source_dialect(&self) -> Dialect {
+        match self {
+            Self::AllPublishedTargets { source_dialect, .. }
+            | Self::SelectedSegments { source_dialect, .. } => *source_dialect,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceTargetDiscoveryCompletenessV3 {
+    Complete,
+    Overloaded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceTargetMatchKindV3 {
+    Word,
+    ContiguousPhrase,
+    SeparablePhrase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceTargetMatchEvidenceV3 {
+    pub surface: String,
+    pub normalized_surface: String,
+    pub match_kind: SentenceTargetMatchKindV3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceTargetSenseV3 {
+    pub sense_id: Uuid,
+    pub publication_id: Uuid,
+    pub pos_id: Uuid,
+    pub base_form_id: Uuid,
+    pub level: String,
+    pub gloss: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PublishedSentenceTargetCandidateV3 {
+    pub entry_id: Uuid,
+    pub publication_id: Uuid,
+    pub pos_id: Uuid,
+    pub base_form_id: Uuid,
+    pub headword: String,
+    pub pos: String,
+    pub matched_form_id: Uuid,
+    pub matched_variant_id: Uuid,
+    pub matched_dialect: Dialect,
+    pub matched_form_type: WordFormTypeV3,
+    #[schema(max_items = 100)]
+    pub component_usages: Vec<PhraseComponentUsageV3>,
+    pub matches: Vec<SentenceTargetMatchEvidenceV3>,
+    pub senses: Vec<SentenceTargetSenseV3>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceTargetDraftStateV3 {
+    Draft,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceTargetDraftLinkabilityV3 {
+    PendingOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DraftSentenceTargetCandidateV3 {
+    pub entry_id: Uuid,
+    pub entry_revision: i64,
+    pub headword: String,
+    pub target_state: SentenceTargetDraftStateV3,
+    pub linkability: SentenceTargetDraftLinkabilityV3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceTargetRangeResultV3 {
+    #[schema(min_items = 1, max_items = 20)]
+    pub source_segments: Vec<SentenceSourceRangeV1>,
+    pub segments_fingerprint: String,
+    pub normalized_surface: String,
+    pub published_total: u64,
+    pub published_matches: Vec<PublishedSentenceTargetCandidateV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub next_cursor: Option<String>,
+    pub draft_matches: Vec<DraftSentenceTargetCandidateV3>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveSentenceTargetsV3Response {
+    #[schema(schema_with = schema_version_3_schema)]
+    #[serde(deserialize_with = "deserialize_schema_version_3")]
+    pub schema_version: u8,
+    pub sentence_hash: String,
+    pub discovery_generation: i64,
+    pub completeness: SentenceTargetDiscoveryCompletenessV3,
+    pub range_results: Vec<SentenceTargetRangeResultV3>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PendingSentenceAssociationItemV3 {
+    pub association_id: Uuid,
+    pub owner_entry_id: Uuid,
+    pub owner_entry_revision: i64,
+    pub owner_lifecycle_revision: i64,
+    pub sentence_id: Uuid,
+    pub source_dialect: Dialect,
+    #[schema(min_items = 1, max_items = 20)]
+    pub source_segments: Vec<SentenceSourceRangeV1>,
+    pub sentence_text: String,
+    pub pending_target_kind: EntryKind,
+    pub pending_target_headword: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub pending_target_gloss: Option<String>,
+}
+
+impl ReplaceSentenceAssociationsInput {
+    pub(crate) const fn base_revision(&self) -> i64 {
+        match self {
+            Self::V2(input) => input.base_revision,
+            Self::V3(input) => input.base_revision,
+        }
+    }
+
+    pub(crate) const fn base_lifecycle_revision(&self) -> i64 {
+        match self {
+            Self::V2(input) => input.base_lifecycle_revision,
+            Self::V3(input) => input.base_lifecycle_revision,
+        }
+    }
+
+    pub(crate) const fn is_v3(&self) -> bool {
+        matches!(self, Self::V3(_))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PendingSentenceAssociationListQuery {
+    pub cursor: Option<Uuid>,
+    pub page_size: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PendingSentenceAssociationItemV1 {
+    pub association_id: Uuid,
+    pub owner_entry_id: Uuid,
+    pub owner_entry_revision: i64,
+    pub owner_lifecycle_revision: i64,
+    pub sentence_id: Uuid,
+    pub source_dialect: Dialect,
+    pub source_range: SentenceSourceRangeV1,
+    pub sentence_text: String,
+    pub pending_target_kind: EntryKind,
+    pub pending_target_headword: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub pending_target_gloss: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PendingSentenceAssociationListResponse {
+    pub results: Vec<PendingSentenceAssociationItemV3>,
+    pub total: u64,
+    #[schema(required = true, nullable = true)]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[into_params(parameter_in = Path)]
+pub struct PendingSentenceAssociationPath {
+    pub association_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimPendingSentenceAssociationInput {
+    pub target_word_id: Uuid,
+    pub target_sense_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_publication_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_form_variant_id: Option<Uuid>,
+    #[schema(minimum = 1)]
+    pub base_owner_entry_revision: i64,
+    #[schema(minimum = 1)]
+    pub base_owner_lifecycle_revision: i64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -946,6 +1265,7 @@ pub struct RelatedSearchQuery {
     pub kind: Option<EntryKind>,
     pub match_mode: Option<RelatedSearchMatchMode>,
     pub exclude_exact: Option<bool>,
+    pub include_drafts: Option<bool>,
     #[param(minimum = 1, maximum = 100)]
     pub page_size: Option<u32>,
     #[param(default = 20, minimum = 1, maximum = 100)]

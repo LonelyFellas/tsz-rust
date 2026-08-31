@@ -364,6 +364,7 @@ mod tests {
                     spelling: spelling.to_owned(),
                     origin: TextOrigin::Manual,
                     pronunciations: Vec::new(),
+                    component_usages: Vec::new().into(),
                 },
             },
         }
@@ -386,6 +387,7 @@ mod tests {
                     spelling: uk.to_owned(),
                     origin: TextOrigin::Manual,
                     pronunciations: Vec::new(),
+                    component_usages: Vec::new().into(),
                 },
                 us: WordUsFormVariantV3 {
                     id: us_variant_id,
@@ -393,6 +395,7 @@ mod tests {
                     spelling: us.to_owned(),
                     origin: TextOrigin::Manual,
                     pronunciations: Vec::new(),
+                    component_usages: Vec::new().into(),
                 },
             },
         }

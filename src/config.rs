@@ -43,6 +43,24 @@ pub struct SmartLexiconV3Flags {
         deserialize_with = "deserialize_explicit_bool"
     )]
     pub legacy_bridge_read: bool,
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_sentence_associations",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub sentence_associations: bool,
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_sentence_target_discovery",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub sentence_target_discovery: bool,
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_draft_relation_prebinding",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub draft_relation_prebinding: bool,
 }
 
 fn deserialize_explicit_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -65,6 +83,24 @@ impl SmartLexiconV3Flags {
             publish: true,
             projection: true,
             legacy_bridge_read: true,
+            sentence_associations: true,
+            sentence_target_discovery: true,
+            draft_relation_prebinding: true,
+        }
+    }
+
+    #[doc(hidden)]
+    pub const fn all_disabled() -> Self {
+        Self {
+            read: false,
+            create: false,
+            edit: false,
+            publish: false,
+            projection: false,
+            legacy_bridge_read: false,
+            sentence_associations: false,
+            sentence_target_discovery: false,
+            draft_relation_prebinding: false,
         }
     }
 }
@@ -455,6 +491,15 @@ mod tests {
             [false; 6],
             "未配置时六项 V3 能力必须全部关闭"
         );
+        assert!(
+            !cfg.smart_lexicon_v3_flags.sentence_associations,
+            "Pending 例句关联是新增写能力，未显式配置时必须关闭"
+        );
+        assert!(
+            !cfg.smart_lexicon_v3_flags.sentence_target_discovery,
+            "一键发现会改变发布自动关联边界，未显式配置时必须关闭"
+        );
+        assert!(!cfg.smart_lexicon_v3_flags.draft_relation_prebinding);
     }
 
     #[test]
@@ -467,12 +512,18 @@ mod tests {
             ("SMART_LEXICON_V3_PUBLISH", "true"),
             ("SMART_LEXICON_V3_PROJECTION", "true"),
             ("SMART_LEXICON_V3_LEGACY_BRIDGE_READ", "true"),
+            ("SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS", "true"),
+            ("SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY", "true"),
+            ("SMART_LEXICON_V3_DRAFT_RELATION_PREBINDING", "true"),
         ]);
         let enabled = parse(&enabled).expect("显式 true 应能解析");
         assert_eq!(
             smart_lexicon_v3_flag_values(enabled.smart_lexicon_v3_flags),
             [true; 6]
         );
+        assert!(enabled.smart_lexicon_v3_flags.sentence_associations);
+        assert!(enabled.smart_lexicon_v3_flags.sentence_target_discovery);
+        assert!(enabled.smart_lexicon_v3_flags.draft_relation_prebinding);
 
         let mut disabled = valid_baseline();
         disabled.extend([
@@ -482,6 +533,9 @@ mod tests {
             ("SMART_LEXICON_V3_PUBLISH", "false"),
             ("SMART_LEXICON_V3_PROJECTION", "false"),
             ("SMART_LEXICON_V3_LEGACY_BRIDGE_READ", "false"),
+            ("SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS", "false"),
+            ("SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY", "false"),
+            ("SMART_LEXICON_V3_DRAFT_RELATION_PREBINDING", "false"),
         ]);
         let disabled = parse(&disabled).expect("显式 false 应能解析");
 
@@ -489,6 +543,9 @@ mod tests {
             smart_lexicon_v3_flag_values(disabled.smart_lexicon_v3_flags),
             [false; 6]
         );
+        assert!(!disabled.smart_lexicon_v3_flags.sentence_associations);
+        assert!(!disabled.smart_lexicon_v3_flags.sentence_target_discovery);
+        assert!(!disabled.smart_lexicon_v3_flags.draft_relation_prebinding);
     }
 
     #[test]

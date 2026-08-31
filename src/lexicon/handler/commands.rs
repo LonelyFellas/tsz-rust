@@ -260,6 +260,12 @@ pub async fn save_forms(
                 &mut response,
                 state.smart_lexicon_v3_flags.legacy_bridge_read,
             );
+            apply_sentence_association_flag(
+                &mut response,
+                sentence_association_enabled(state.smart_lexicon_v3_flags),
+                sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
+            );
             return Ok((StatusCode::OK, Json(response)));
         }
         Some(2) | None => {}
@@ -308,6 +314,17 @@ pub async fn save_meanings(
         Some(3) => {
             let input: SaveMeaningsStepInputV3 = v3_contract::decode_v3_meanings_request(input)?;
             v3_contract::require_positive_revision("base_revision", input.base_revision)?;
+            if !draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags)
+                && input
+                    .content
+                    .pos
+                    .iter()
+                    .flat_map(|pos| &pos.senses)
+                    .flat_map(|sense| &sense.relations)
+                    .any(|relation| relation.prebound_target_word_id.is_some())
+            {
+                return Err(v3_storage_unavailable());
+            }
             let issues = v3_contract::validate_meanings(&input.content);
             if !issues.is_empty() {
                 return Err(v3_contract::contract_validation_error(&issues));
@@ -316,12 +333,24 @@ pub async fn save_meanings(
                 return Err(v3_storage_unavailable());
             }
             let mut response = service(&state)
-                .save_meanings_v3(admin.id, request_id.as_uuid(), path.id, input)
+                .save_meanings_v3(
+                    admin.id,
+                    request_id.as_uuid(),
+                    path.id,
+                    input,
+                    draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
+                )
                 .await
                 .map_err(map_error)?;
             apply_legacy_bridge_read_flag(
                 &mut response,
                 state.smart_lexicon_v3_flags.legacy_bridge_read,
+            );
+            apply_sentence_association_flag(
+                &mut response,
+                sentence_association_enabled(state.smart_lexicon_v3_flags),
+                sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
             );
             return Ok((StatusCode::OK, Json(response)));
         }
@@ -444,12 +473,19 @@ pub async fn publish(
                     path.id,
                     idempotency_key,
                     input,
+                    !sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
                 )
                 .await
                 .map_err(map_error)?;
             apply_legacy_bridge_read_flag(
                 &mut response,
                 state.smart_lexicon_v3_flags.legacy_bridge_read,
+            );
+            apply_sentence_association_flag(
+                &mut response,
+                sentence_association_enabled(state.smart_lexicon_v3_flags),
+                sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
             );
             return Ok((StatusCode::CREATED, Json(response)));
         }
@@ -465,6 +501,7 @@ pub async fn publish(
             idempotency_key,
             input,
             state.smart_lexicon_v3_flags.read && state.smart_lexicon_v3_flags.projection,
+            !sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
         )
         .await
         .map_err(map_error)?;
@@ -492,7 +529,7 @@ pub async fn publish(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条或例句不存在"),
-        (status = 409, description = "revision、幂等键冲突，词条已归档，或当前正文尚未解析过"),
+        (status = 409, description = "revision、幂等键冲突、词条已归档或客户端必须升级"),
         (status = 422, description = "关联区间或目标非法"),
         (status = 503, description = "V3 读取、编辑或投影能力未开启")
     )
@@ -518,12 +555,78 @@ pub async fn replace_sentence_associations(
             state.smart_lexicon_v3_flags.read
                 && state.smart_lexicon_v3_flags.edit
                 && state.smart_lexicon_v3_flags.projection,
+            state.smart_lexicon_v3_flags.sentence_associations,
+            !sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
         )
         .await
         .map_err(map_error)?;
     apply_legacy_bridge_read_flag(
         &mut response,
         state.smart_lexicon_v3_flags.legacy_bridge_read,
+    );
+    apply_sentence_association_flag(
+        &mut response,
+        sentence_association_enabled(state.smart_lexicon_v3_flags),
+        sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
+    );
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/lexicon/pending-sentence-associations/{association_id}/claim",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(
+        PendingSentenceAssociationPath,
+        ("Idempotency-Key" = Uuid, Header, description = "Pending 认领命令幂等键（UUID）")
+    ),
+    request_body = ClaimPendingSentenceAssociationInput,
+    responses(
+        (status = 200, description = "Pending 已原地认领为正式例句关联", body = AdminWordAnyEnvelope),
+        (status = 400, description = "路径、header 或 JSON 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 404, description = "Pending 或来源词条不存在"),
+        (status = 409, description = "Pending 已认领、revision 或幂等键冲突"),
+        (status = 422, description = "目标词条种类、具体词义或关联位置非法"),
+        (status = 503, description = "V3 读取、编辑或投影能力未开启")
+    )
+)]
+pub async fn claim_pending_sentence_association(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    ApiPath(path): ApiPath<PendingSentenceAssociationPath>,
+    ApiJson(input): ApiJson<ClaimPendingSentenceAssociationInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    let idempotency_key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
+    let mut response = service(&state)
+        .claim_pending_sentence_association(
+            admin.id,
+            request_id.as_uuid(),
+            path.association_id,
+            idempotency_key,
+            input,
+            state.smart_lexicon_v3_flags.read
+                && state.smart_lexicon_v3_flags.edit
+                && state.smart_lexicon_v3_flags.projection
+                && state.smart_lexicon_v3_flags.sentence_associations,
+        )
+        .await
+        .map_err(map_error)?;
+    apply_legacy_bridge_read_flag(
+        &mut response,
+        state.smart_lexicon_v3_flags.legacy_bridge_read,
+    );
+    apply_sentence_association_flag(
+        &mut response,
+        sentence_association_enabled(state.smart_lexicon_v3_flags),
+        sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
     );
     Ok((StatusCode::OK, Json(response)))
 }
@@ -588,6 +691,12 @@ pub async fn activate_publication(
             apply_legacy_bridge_read_flag(
                 &mut response,
                 state.smart_lexicon_v3_flags.legacy_bridge_read,
+            );
+            apply_sentence_association_flag(
+                &mut response,
+                sentence_association_enabled(state.smart_lexicon_v3_flags),
+                sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
             );
             return Ok((StatusCode::OK, Json(response)));
         }

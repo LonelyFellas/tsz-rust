@@ -139,6 +139,159 @@ pub(super) fn build_dictionary_suggestions(
     }
 }
 
+pub(super) fn apply_base_dialect_pair(
+    forms: &mut [SuggestedConcreteFormV3],
+    uk_spelling: &str,
+    us_spelling: &str,
+) {
+    for form in forms
+        .iter_mut()
+        .filter(|form| form.form_type == WordFormTypeV3::Base)
+    {
+        let (uk_pronunciations, us_pronunciations) = match &form.regional_variants {
+            SuggestedRegionalVariantsV3::Common { common } => {
+                (common.pronunciations.clone(), common.pronunciations.clone())
+            }
+            SuggestedRegionalVariantsV3::UkUs { uk, us } => {
+                (uk.pronunciations.clone(), us.pronunciations.clone())
+            }
+        };
+        form.regional_variants = SuggestedRegionalVariantsV3::UkUs {
+            uk: SuggestedUkFormVariantV3 {
+                dialect: UkDialectV3::Uk,
+                spelling: uk_spelling.to_owned(),
+                pronunciations: uk_pronunciations,
+            },
+            us: SuggestedUsFormVariantV3 {
+                dialect: UsDialectV3::Us,
+                spelling: us_spelling.to_owned(),
+                pronunciations: us_pronunciations,
+            },
+        };
+    }
+}
+
+pub(super) fn dictionary_alternative_terms(
+    source: &str,
+    records: &[DictionaryContentRecord],
+) -> Vec<String> {
+    let mut alternatives = records
+        .iter()
+        .filter(|record| record.normalized_term == source)
+        .flat_map(alternative_relations)
+        .filter_map(|relation| normalize_relation(&relation.spelling))
+        .filter(|candidate| candidate != source)
+        .collect::<Vec<_>>();
+    alternatives.sort();
+    alternatives.dedup();
+    alternatives
+}
+
+pub(super) fn content_base_dialect_pair(
+    source: &str,
+    records: &[DictionaryContentRecord],
+) -> Option<(String, String)> {
+    let available = records
+        .iter()
+        .map(|record| record.normalized_term.as_str())
+        .collect::<HashSet<_>>();
+    records
+        .iter()
+        .flat_map(|record| {
+            alternative_relations(record)
+                .into_iter()
+                .map(move |relation| (record, relation))
+        })
+        .filter_map(|(record, relation)| {
+            let target = normalize_relation(&relation.spelling)?;
+            let counterpart = if record.normalized_term == source {
+                target.as_str()
+            } else if target == source {
+                record.normalized_term.as_str()
+            } else {
+                return None;
+            };
+            if counterpart == source || !available.contains(counterpart) {
+                return None;
+            }
+            match relation.dialect {
+                SourceDialect::Uk => Some((record.normalized_term.clone(), target)),
+                SourceDialect::Us => Some((target, record.normalized_term.clone())),
+                SourceDialect::Common => regional_spelling_pair(source, counterpart),
+                SourceDialect::Conflict => None,
+            }
+        })
+        .next()
+}
+
+struct AlternativeRelation {
+    spelling: String,
+    dialect: SourceDialect,
+}
+
+fn alternative_relations(record: &DictionaryContentRecord) -> Vec<AlternativeRelation> {
+    let mut output = Vec::new();
+    if let Some(senses) = record.senses.as_array() {
+        for sense in senses {
+            let dialect = source_dialect(&string_tags(sense));
+            let Some(alt_of) = sense.get("alt_of").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            output.extend(alt_of.iter().filter_map(|item| {
+                item.get("word")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|word| AlternativeRelation {
+                        spelling: word.to_owned(),
+                        dialect,
+                    })
+            }));
+        }
+    }
+    if let Some(forms) = record.forms.as_array() {
+        for form in forms {
+            let tags = string_tags(form);
+            if !tags.contains("alternative") {
+                continue;
+            }
+            let Some(spelling) = form.get("form").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            output.push(AlternativeRelation {
+                spelling: spelling.to_owned(),
+                dialect: source_dialect(&tags),
+            });
+        }
+    }
+    output
+}
+
+fn normalize_relation(value: &str) -> Option<String> {
+    crate::lexicon::normalization::normalize_headword(value)
+        .ok()
+        .map(|value| value.key)
+}
+
+fn regional_spelling_pair(left: &str, right: &str) -> Option<(String, String)> {
+    const SPELLING_MARKERS: [(&str, &str); 7] = [
+        ("our", "or"),
+        ("re", "er"),
+        ("ise", "ize"),
+        ("yse", "yze"),
+        ("ogue", "og"),
+        ("ence", "ense"),
+        ("amme", "am"),
+    ];
+    SPELLING_MARKERS.iter().find_map(|(uk, us)| {
+        if left.replacen(uk, us, 1) == right {
+            Some((left.to_owned(), right.to_owned()))
+        } else if right.replacen(uk, us, 1) == left {
+            Some((right.to_owned(), left.to_owned()))
+        } else {
+            None
+        }
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceDialect {
     Common,
@@ -388,12 +541,81 @@ mod tests {
 
     fn record(pos: &str, forms: Value, sounds: Value) -> DictionaryContentRecord {
         DictionaryContentRecord {
+            normalized_term: "test".to_owned(),
             pos: pos.to_owned(),
+            senses: json!([]),
             forms,
             sounds,
             provider_name: "Kaikki English Wiktionary".to_owned(),
             provider_version: "enwiktionary-test".to_owned(),
         }
+    }
+
+    fn relation_record(term: &str, senses: Value, forms: Value) -> DictionaryContentRecord {
+        DictionaryContentRecord {
+            normalized_term: term.to_owned(),
+            pos: "verb".to_owned(),
+            senses,
+            forms,
+            sounds: json!([]),
+            provider_name: "Kaikki English Wiktionary".to_owned(),
+            provider_version: "enwiktionary-test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn content_alternatives_infer_generic_regional_spelling_families() {
+        let records = [
+            relation_record(
+                "customise",
+                json!([]),
+                json!([{"form": "customize", "tags": ["alternative"]}]),
+            ),
+            relation_record("customize", json!([]), json!([])),
+        ];
+
+        assert_eq!(
+            dictionary_alternative_terms("customise", &records),
+            ["customize"]
+        );
+        assert_eq!(
+            content_base_dialect_pair("customise", &records),
+            Some(("customise".to_owned(), "customize".to_owned()))
+        );
+    }
+
+    #[test]
+    fn content_alt_of_region_tags_are_authoritative_without_a_spelling_pattern() {
+        let records = [
+            relation_record(
+                "regional-source",
+                json!([{
+                    "tags": ["UK", "alt-of"],
+                    "alt_of": [{"word": "regional-target"}]
+                }]),
+                json!([]),
+            ),
+            relation_record("regional-target", json!([]), json!([])),
+        ];
+
+        assert_eq!(
+            content_base_dialect_pair("regional-source", &records),
+            Some(("regional-source".to_owned(), "regional-target".to_owned()))
+        );
+    }
+
+    #[test]
+    fn unrelated_alternative_forms_do_not_become_regional_headwords() {
+        let records = [
+            relation_record(
+                "adviser",
+                json!([]),
+                json!([{"form": "advisor", "tags": ["alternative"]}]),
+            ),
+            relation_record("advisor", json!([]), json!([])),
+        ];
+
+        assert_eq!(content_base_dialect_pair("adviser", &records), None);
     }
 
     #[test]

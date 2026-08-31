@@ -7,12 +7,31 @@ impl LexiconRepository {
     ) -> Result<Option<DictionaryTermRecord>, LexiconRepositoryError> {
         sqlx::query_as::<_, DictionaryTermRecord>(
             r#"
-            SELECT terms.term, terms.kind, terms.pos, terms.region_family,
-                   datasets.source_name AS provider_name,
-                   datasets.source_version AS provider_version
-            FROM dictionary.active_terms terms
-            JOIN dictionary.datasets datasets ON datasets.id = terms.dataset_id
-            WHERE terms.normalized_term = $1
+            WITH candidates AS (
+                SELECT 0 AS priority, terms.term, terms.kind, terms.pos,
+                       terms.region_family, datasets.source_name AS provider_name,
+                       datasets.source_version AS provider_version
+                FROM dictionary.active_terms terms
+                JOIN dictionary.datasets datasets ON datasets.id = terms.dataset_id
+                WHERE terms.normalized_term = $1
+                UNION ALL
+                SELECT 1 AS priority, surfaces.term,
+                       CASE WHEN strpos(surfaces.term, ' ') > 0 THEN 'phrase' ELSE 'word' END,
+                       surfaces.pos, surfaces.region_family,
+                       datasets.source_name, datasets.source_version
+                FROM dictionary.active_region_surfaces surfaces
+                JOIN dictionary.datasets datasets ON datasets.id = surfaces.dataset_id
+                WHERE surfaces.normalized_term = $1
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM dictionary.active_terms terms
+                      WHERE terms.normalized_term = $1
+                  )
+            )
+            SELECT term, kind, pos, region_family, provider_name, provider_version
+            FROM candidates
+            ORDER BY priority
+            LIMIT 1
             "#,
         )
         .bind(normalized)
@@ -21,21 +40,25 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
-    pub(crate) async fn dictionary_contents(
+    pub(crate) async fn dictionary_contents_for_terms(
         &self,
-        normalized: &str,
+        normalized: &[String],
     ) -> Result<Vec<DictionaryContentRecord>, LexiconRepositoryError> {
+        if normalized.is_empty() {
+            return Ok(Vec::new());
+        }
         sqlx::query_as::<_, DictionaryContentRecord>(
             r#"
-            SELECT content.pos, content.forms, content.sounds,
+            SELECT content.normalized_term, content.pos, content.senses,
+                   content.forms, content.sounds,
                    datasets.source_name AS provider_name,
                    content_import.source_version AS provider_version
             FROM dictionary.entry_contents content
             JOIN dictionary.datasets datasets ON datasets.id = content.dataset_id
             JOIN dictionary.content_imports content_import
               ON content_import.dataset_id = content.dataset_id
-            WHERE datasets.status = 'active' AND content.normalized_term = $1
-            ORDER BY content.source_key
+            WHERE datasets.status = 'active' AND content.normalized_term = ANY($1)
+            ORDER BY content.normalized_term, content.source_key
             "#,
         )
         .bind(normalized)
@@ -82,6 +105,25 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
+    pub(crate) async fn region_surface_targeting(
+        &self,
+        normalized: &str,
+    ) -> Result<Option<RegionSurfaceRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, RegionSurfaceRecord>(
+            r#"
+            SELECT normalized_term, term, region_family, targets
+            FROM dictionary.active_region_surfaces
+            WHERE $1 = ANY(targets)
+            ORDER BY normalized_term
+            LIMIT 1
+            "#,
+        )
+        .bind(normalized)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     pub(crate) async fn dictionary_candidates(
         &self,
         normalized: &[String],
@@ -94,6 +136,15 @@ impl LexiconRepository {
             SELECT normalized_term, term, region_family
             FROM dictionary.active_terms
             WHERE normalized_term = ANY($1)
+            UNION ALL
+            SELECT surfaces.normalized_term, surfaces.term, surfaces.region_family
+            FROM dictionary.active_region_surfaces surfaces
+            WHERE surfaces.normalized_term = ANY($1)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM dictionary.active_terms terms
+                  WHERE terms.normalized_term = surfaces.normalized_term
+              )
             "#,
         )
         .bind(normalized)
@@ -275,12 +326,15 @@ impl LexiconRepository {
             r#"
             SELECT sense.id
             FROM lexicon.senses sense
+            JOIN lexicon.entry_pos pos
+              ON pos.id = sense.entry_pos_id
+             AND pos.entry_id = sense.entry_id
             JOIN lexicon.nodes node
               ON node.id = sense.id
              AND node.entry_id = sense.entry_id
              AND node.removed_from_draft_at IS NULL
             WHERE sense.entry_id = $1
-            ORDER BY sense.entry_pos_id, sense.sort_order, sense.id
+            ORDER BY pos.sort_order, sense.sort_order, sense.id
             LIMIT 1
             "#,
         )

@@ -432,7 +432,9 @@ pub fn validate_meanings(
                     );
                 }
                 if relation.bound_target().is_some()
-                    && (relation.pending_target_headword.is_some()
+                    && (relation.prebound_target_word_id.is_some()
+                        || relation.prebinding_state.is_some()
+                        || relation.pending_target_headword.is_some()
                         || relation.pending_target_gloss.is_some())
                 {
                     issue(
@@ -446,6 +448,35 @@ pub fn validate_meanings(
                         },
                         "relation_target_shape_invalid",
                         "已绑定关联词不能再携带待建词面或预定义词义",
+                    );
+                }
+                if relation.prebound_target_word_id.is_some()
+                    && (relation.target_word_id.is_some()
+                        || relation.target_sense_id.is_some()
+                        || relation.pending_target_headword.is_none()
+                        || !matches!(
+                            relation.prebinding_state.as_deref(),
+                            Some("waiting_first_sense" | "target_sense_deleted")
+                        ))
+                {
+                    issue(
+                        &mut issues,
+                        PersistedWordStep::Meanings,
+                        relation.id,
+                        "prebound_target_word_id",
+                        "relation_target_shape_invalid",
+                        "预绑定关联词必须保留稳定目标、待关联词面和服务端状态",
+                    );
+                }
+                if relation.prebound_target_word_id.is_none() && relation.prebinding_state.is_some()
+                {
+                    issue(
+                        &mut issues,
+                        PersistedWordStep::Meanings,
+                        relation.id,
+                        "prebound_target_word_id",
+                        "relation_target_shape_invalid",
+                        "预绑定状态缺少稳定目标词条",
                     );
                 }
             }

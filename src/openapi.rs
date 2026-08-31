@@ -95,6 +95,9 @@ use utoipa::{
         crate::lexicon::handler::commands::publish,
         crate::lexicon::handler::commands::activate_publication,
         crate::lexicon::handler::commands::replace_sentence_associations,
+        crate::lexicon::handler::query::list_pending_sentence_associations,
+        crate::lexicon::handler::query::resolve_sentence_targets,
+        crate::lexicon::handler::commands::claim_pending_sentence_association,
         crate::lexicon::content_completion::handler::create_content_completion_job,
         crate::lexicon::content_completion::handler::get_content_completion_job,
         crate::lexicon::content_completion::handler::retry_content_completion_job,
@@ -227,10 +230,18 @@ use utoipa::{
             crate::lexicon::dto::WordSentenceLinkV2,
             crate::lexicon::dto::SentenceSourceRangeV1,
             crate::lexicon::dto::SentenceAssociationOriginV2,
+            crate::lexicon::dto::SentenceAssociationStateV1,
             crate::lexicon::dto::SentenceAssociationsStateV2,
             crate::lexicon::dto::WordSentenceAssociationV2,
             crate::lexicon::dto::SentenceAssociationInputV2,
+            crate::lexicon::dto::SentenceAssociationInputV3,
+            crate::lexicon::dto::ReplaceSentenceAssociationsInputV2,
+            crate::lexicon::dto::ReplaceSentenceAssociationsInputV3,
             crate::lexicon::dto::ReplaceSentenceAssociationsInput,
+            crate::lexicon::dto::PendingSentenceAssociationItemV1,
+            crate::lexicon::dto::PendingSentenceAssociationItemV3,
+            crate::lexicon::dto::PendingSentenceAssociationListResponse,
+            crate::lexicon::dto::ClaimPendingSentenceAssociationInput,
             crate::lexicon::dto::WordSentenceV2,
             crate::lexicon::dto::WordRelationV2,
             crate::lexicon::dto::WordSenseV2,
@@ -311,6 +322,17 @@ use utoipa::{
             crate::lexicon::dto::WordDefinitionV3,
             crate::lexicon::dto::WordSentenceLinkV3,
             crate::lexicon::dto::WordSentenceAssociationV3,
+            crate::lexicon::dto::ResolveSentenceTargetsV3Input,
+            crate::lexicon::dto::ResolveSentenceTargetsV3Response,
+            crate::lexicon::dto::SentenceTargetDiscoveryCompletenessV3,
+            crate::lexicon::dto::SentenceTargetMatchKindV3,
+            crate::lexicon::dto::SentenceTargetMatchEvidenceV3,
+            crate::lexicon::dto::SentenceTargetSenseV3,
+            crate::lexicon::dto::PublishedSentenceTargetCandidateV3,
+            crate::lexicon::dto::SentenceTargetDraftStateV3,
+            crate::lexicon::dto::SentenceTargetDraftLinkabilityV3,
+            crate::lexicon::dto::DraftSentenceTargetCandidateV3,
+            crate::lexicon::dto::SentenceTargetRangeResultV3,
             crate::lexicon::dto::WordSentenceV3,
             crate::lexicon::dto::WordRelationV3,
             crate::lexicon::dto::WordSenseV3,
@@ -577,6 +599,7 @@ impl Modify for SmartLexiconV3SchemaAddon {
             .as_mut()
             .expect("derived OpenAPI must contain components");
         for (name, discriminator) in [
+            ("WordHeadwordsV2", "mode"),
             ("WordRegionalVariantsV3", "mode"),
             ("V3PublicationCapability", "mode"),
             ("DialectVariantRichTextSlotV3", "state"),
@@ -586,6 +609,10 @@ impl Modify for SmartLexiconV3SchemaAddon {
             ("LegacyHeadwordsCompatibilityV3", "mode"),
             ("SuggestedRegionalVariantsV3", "mode"),
             ("BuiltinDictionaryEvidenceV3", "status"),
+            ("ResolveSentenceTargetsV3Input", "mode"),
+            ("PhraseComponentUsageV3", "state"),
+            ("WordSentenceAssociationV2", "state"),
+            ("WordSentenceAssociationV3", "state"),
         ] {
             let mut union = component_schema_json(components, name);
             for branch in union["oneOf"]
@@ -922,6 +949,18 @@ mod tests {
             ),
             ("put", "/api/v1/admin/lexicon/entries/{id}/steps/forms"),
             ("put", "/api/v1/admin/lexicon/entries/{id}/steps/meanings"),
+            (
+                "put",
+                "/api/v1/admin/lexicon/entries/{id}/sentences/{sentence_id}/associations",
+            ),
+            (
+                "get",
+                "/api/v1/admin/lexicon/entries/{id}/pending-sentence-associations",
+            ),
+            (
+                "post",
+                "/api/v1/admin/lexicon/pending-sentence-associations/{association_id}/claim",
+            ),
             ("post", "/api/v1/admin/lexicon/entries/{id}/validate"),
             ("post", "/api/v1/admin/lexicon/entries/{id}/publications"),
         ] {
@@ -2141,7 +2180,6 @@ mod tests {
             "GrammarVariantV3",
             "GrammarStructureV3",
             "WordSentenceLinkV3",
-            "WordSentenceAssociationV3",
             "WordSentenceV3",
             "WordRelationV3",
             "WordSenseV3",
@@ -2194,15 +2232,31 @@ mod tests {
         let sentence_required = sentence["required"]
             .as_array()
             .expect("V3 sentence response fields must be required");
-        for field in ["associations", "associations_state"] {
+        for field in ["zh_translations", "associations", "associations_state"] {
             assert!(
                 sentence_required.iter().any(|required| required == field),
                 "{field} must remain required in sentence responses"
             );
             assert!(sentence["properties"][field].is_object());
+            if field != "zh_translations" {
+                assert!(
+                    schemas["WordSentenceWritableV3"]["properties"][field].is_null(),
+                    "{field} must not exist in the strict meanings request shape"
+                );
+            }
+        }
+        for schema in [
+            "WordCommonFormVariantV3",
+            "WordUkFormVariantV3",
+            "WordUsFormVariantV3",
+        ] {
             assert!(
-                schemas["WordSentenceWritableV3"]["properties"][field].is_null(),
-                "{field} must not exist in the strict meanings request shape"
+                schemas[schema]["required"]
+                    .as_array()
+                    .is_some_and(|required| required
+                        .iter()
+                        .any(|field| field == "component_usages")),
+                "{schema} must require component_usages for current clients"
             );
         }
         for field in ["target_headword", "target_gloss"] {
@@ -2221,6 +2275,110 @@ mod tests {
                 "{schema} 必须声明可选的待建目标预定义词义"
             );
         }
+        let association_input = &schemas["SentenceAssociationInputV2"];
+        let association_required = association_input["required"]
+            .as_array()
+            .expect("例句关联输入应声明公共必填字段");
+        for field in ["id", "source_dialect", "source_range"] {
+            assert!(association_required.iter().any(|value| value == field));
+        }
+        for field in ["target_word_id", "target_sense_id"] {
+            assert!(
+                !association_required.iter().any(|value| value == field),
+                "linked target 在 Pending 扩展后必须是互斥可选字段"
+            );
+        }
+        for field in [
+            "pending_target_kind",
+            "pending_target_headword",
+            "pending_target_gloss",
+        ] {
+            assert!(association_input["properties"][field].is_object());
+        }
+        assert_eq!(
+            schemas["WordSentenceAssociationV2"]["discriminator"]["propertyName"],
+            "state"
+        );
+        let association_v2_branches = schemas["WordSentenceAssociationV2"]["oneOf"]
+            .as_array()
+            .expect("V2 associations must be a strict linked/pending union");
+        for (state, required, forbidden) in [
+            (
+                "linked",
+                [
+                    "target_word_id",
+                    "target_sense_id",
+                    "target_headword",
+                    "target_gloss",
+                    "resolved_pos",
+                ]
+                .as_slice(),
+                ["pending_target_kind", "pending_target_headword"].as_slice(),
+            ),
+            (
+                "pending",
+                [
+                    "pending_target_kind",
+                    "pending_target_headword",
+                    "normalized_pending_target_headword",
+                ]
+                .as_slice(),
+                ["target_word_id", "target_sense_id"].as_slice(),
+            ),
+        ] {
+            let branch = association_v2_branches
+                .iter()
+                .find(|branch| branch["properties"]["state"]["enum"][0] == state)
+                .unwrap_or_else(|| panic!("missing V2 association {state} branch"));
+            let branch_required = branch["required"]
+                .as_array()
+                .expect("V2 association branch must declare required fields");
+            for field in required {
+                assert!(
+                    branch_required.iter().any(|value| value == field),
+                    "V2 association {state} branch must require {field}"
+                );
+            }
+            for field in forbidden {
+                assert!(
+                    branch["properties"][field].is_null(),
+                    "V2 association {state} branch must not expose {field}"
+                );
+            }
+        }
+        assert_eq!(
+            schemas["WordSentenceAssociationV3"]["discriminator"]["propertyName"],
+            "state"
+        );
+        let association_states = schemas["WordSentenceAssociationV3"]["oneOf"]
+            .as_array()
+            .expect("V3 associations must be a strict linked/pending union")
+            .iter()
+            .filter_map(|branch| branch["properties"]["state"]["enum"][0].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            association_states,
+            ["linked", "pending"].into_iter().collect()
+        );
+        assert_eq!(
+            schemas["PendingSentenceAssociationListResponse"]["properties"]["results"]["items"]["$ref"],
+            "#/components/schemas/PendingSentenceAssociationItemV3"
+        );
+        for schema in [
+            "SentenceAssociationInputV3",
+            "PendingSentenceAssociationItemV3",
+        ] {
+            assert!(schemas[schema]["properties"]["source_segments"].is_object());
+            assert!(schemas[schema]["properties"]["source_range"].is_null());
+        }
+        assert!(
+            schemas["WordSentenceAssociationV3"]["oneOf"]
+                .as_array()
+                .is_some_and(|branches| branches.iter().all(|branch| {
+                    branch["properties"]["source_segments"].is_object()
+                        && branch["properties"]["source_range"].is_null()
+                }))
+        );
         for schema in ["RichTextV1V3", "RichTextV2V3"] {
             assert_eq!(schemas[schema]["properties"]["text"]["maxLength"], 200);
         }

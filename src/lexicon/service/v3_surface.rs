@@ -15,7 +15,7 @@ use crate::lexicon::{
         SurfaceAttentionLevelV2, SurfaceCanContinueTrue, SurfaceConfirmationReasonV2,
         SurfaceContentScopeV2, SurfaceMatchCandidateV2, SurfaceMatchCategoryV2, SurfaceMatchItemV3,
         SurfaceMatchPageV3, SurfaceMatchSeverityV2, WordDefinitionV3, WordFormTypeV2,
-        WordFormTypeV3, WordSenseV3,
+        WordFormTypeV3, WordHeadwordsV2, WordSenseV3,
     },
     repository::SurfaceLockKey,
     surface_snapshot::{
@@ -752,44 +752,76 @@ impl LexiconService {
         Ok(suggested_pos.into_iter().collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn verify_v3_detection_surface_for_create(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
         detection_id: Uuid,
-        normalized_surface: &str,
+        entry_id: Uuid,
+        entry_kind: WordEntryKindV3,
+        forms: &DraftFormsStepContentV3,
+        headwords: &WordHeadwordsV2,
+        initial_headword_keys: &[String],
         token: Option<&str>,
     ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
-        let keys = detection_surface_keys(normalized_surface);
+        let mut keys = forms_surface_keys(entry_id, forms)?;
+        for key in initial_headword_keys {
+            let (dialect_scope, normalized_surface) =
+                key.split_once(':').ok_or_else(invariant_record)?;
+            keys.push(V3SurfaceQueryKey {
+                dialect_scope: dialect_scope.to_owned(),
+                normalized_surface: normalized_surface.to_owned(),
+            });
+        }
+        keys.sort();
+        keys.dedup();
         LexiconRepository::lock_surface_policy_writer(tx)
             .await
             .map_err(repository_error)?;
         LexiconRepository::lock_surface_keys(tx, &surface_lock_keys_v3(&keys))
             .await
             .map_err(repository_error)?;
+        let hidden_initial_headword_conflict = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM lexicon.v3_entry_state state
+                JOIN lexicon.entries entry ON entry.id = state.entry_id
+                WHERE state.initial_headword_keys && $1
+                  AND entry.archived_at IS NULL
+                  AND entry.kind = $2
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM lexicon.surface_sources source
+                      WHERE source.entry_id = state.entry_id
+                        AND source.is_deleted = FALSE
+                  )
+            )
+            "#,
+        )
+        .bind(initial_headword_keys)
+        .bind(v3_kind_string(entry_kind))
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        if hidden_initial_headword_conflict {
+            return Err(LexiconServiceError::DuplicateWord);
+        }
         let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
         if material.matches.is_empty() {
-            let Some(token) = token else {
-                return Ok(None);
-            };
-            self.verify_v3_surface_owner(
-                token,
-                actor_id,
-                SurfaceConsumptionCommand::CreateEntry,
-                detection_id.to_string(),
-            )
-            .await?;
-            return Err(LexiconServiceError::SurfaceMatchesChangedWithoutSnapshot);
+            return Ok(None);
         }
         let policy = self
             .surface_policies
             .policy(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
             .await
             .map_err(LexiconServiceError::SurfacePolicy)?;
-        let (binding, owner_bundle) = detection_surface_binding(
+        let (binding, owner_bundle) = final_create_surface_binding_v3(
             actor_id,
             detection_id,
-            normalized_surface,
+            headwords,
+            &keys,
             &material,
             policy,
         )?;
@@ -801,9 +833,32 @@ impl LexiconService {
                 Box::new(page),
             ));
         };
-        self.verify_v3_surface_token(token, binding, owner_bundle, &material, false, policy)
-            .await
-            .map(Some)
+        let confirmation = self
+            .verify_v3_surface_owner(
+                token,
+                actor_id,
+                SurfaceConsumptionCommand::CreateEntry,
+                detection_id.to_string(),
+            )
+            .await?;
+        let current_match_digest = crate::lexicon::surface_snapshot::surface_match_digest(
+            &material.synthetic_items()?,
+            &[SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches],
+        )
+        .map_err(LexiconServiceError::SurfaceSnapshot)?;
+        let current_context_digest = crate::lexicon::surface_snapshot::surface_context_digest(
+            &material.synthetic_contexts(),
+        )
+        .map_err(LexiconServiceError::SurfaceSnapshot)?;
+        if confirmation.match_digest == current_match_digest
+            && confirmation.context_digest == current_context_digest
+        {
+            return Ok(Some(confirmation));
+        }
+        let page = self
+            .create_v3_surface_snapshot(binding, owner_bundle, &material, false, policy)
+            .await?;
+        Err(LexiconServiceError::SurfaceMatchesChangedV3(Box::new(page)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2150,6 +2205,41 @@ fn detection_surface_binding(
             "owner_kind": "v3_detection",
             "detection_id": detection_id,
             "normalized_surface": normalized_surface,
+            V3_SURFACE_PAGE_DATA_KEY: material.page_data(),
+        }),
+        policy,
+    )
+}
+
+fn final_create_surface_binding_v3(
+    actor_id: Uuid,
+    detection_id: Uuid,
+    headwords: &WordHeadwordsV2,
+    keys: &[V3SurfaceQueryKey],
+    material: &V3SurfaceMaterial,
+    policy: SurfaceCreationPolicy,
+) -> Result<(SurfaceConfirmationBinding, Value), LexiconServiceError> {
+    let canonical_keys = keys
+        .iter()
+        .map(|key| (&key.dialect_scope, &key.normalized_surface))
+        .collect::<Vec<_>>();
+    let canonical_content_digest = hash_serializable(&(
+        "v3_create_final_headwords",
+        detection_id,
+        headwords,
+        &canonical_keys,
+    ))?;
+    owner_binding(
+        actor_id,
+        SurfaceConsumptionCommand::CreateEntry,
+        detection_id.to_string(),
+        None,
+        canonical_content_digest,
+        serde_json::json!({
+            "owner_kind": "v3_create_final_headwords",
+            "detection_id": detection_id,
+            "headwords": headwords,
+            "surface_keys": canonical_keys,
             V3_SURFACE_PAGE_DATA_KEY: material.page_data(),
         }),
         policy,

@@ -95,7 +95,7 @@ impl AppState {
             object_storage: StorageRegistry::empty(),
             speech_provider: None,
             lexicon_content_generator: None,
-            smart_lexicon_v3_flags: SmartLexiconV3Flags::default(),
+            smart_lexicon_v3_flags: SmartLexiconV3Flags::all_disabled(),
         }
     }
 
@@ -140,7 +140,7 @@ impl AppState {
             object_storage: StorageRegistry::empty(),
             speech_provider: None,
             lexicon_content_generator: None,
-            smart_lexicon_v3_flags: SmartLexiconV3Flags::default(),
+            smart_lexicon_v3_flags: SmartLexiconV3Flags::all_disabled(),
         };
         (state, store)
     }
@@ -196,6 +196,7 @@ mod tests {
             smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
             [false; 6]
         );
+        assert!(!state.smart_lexicon_v3_flags.draft_relation_prebinding);
     }
 
     #[tokio::test]
@@ -209,6 +210,7 @@ mod tests {
             smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
             [true; 6]
         );
+        assert!(state.smart_lexicon_v3_flags.draft_relation_prebinding);
     }
 
     #[tokio::test]
@@ -217,7 +219,7 @@ mod tests {
             read: true,
             edit: true,
             legacy_bridge_read: true,
-            ..SmartLexiconV3Flags::default()
+            ..SmartLexiconV3Flags::all_disabled()
         };
         let state = AppState::for_test(lazy_pool()).with_smart_lexicon_v3_flags_for_test(flags);
 

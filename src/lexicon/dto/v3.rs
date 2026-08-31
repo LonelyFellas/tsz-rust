@@ -1,6 +1,121 @@
 use super::*;
 
+use std::ops::{Deref, DerefMut};
+
+use serde::Serializer;
 use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceAwareVec<T> {
+    values: Vec<T>,
+    present: bool,
+}
+
+impl<T> PresenceAwareVec<T> {
+    pub(crate) const fn was_present(&self) -> bool {
+        self.present
+    }
+
+    pub(crate) fn preserve_missing_from(&mut self, values: &[T])
+    where
+        T: Clone,
+    {
+        if !self.present {
+            self.values = values.to_vec();
+            self.present = true;
+        }
+    }
+}
+
+impl<T> Default for PresenceAwareVec<T> {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            present: false,
+        }
+    }
+}
+
+impl<T> From<Vec<T>> for PresenceAwareVec<T> {
+    fn from(values: Vec<T>) -> Self {
+        Self {
+            values,
+            present: true,
+        }
+    }
+}
+
+impl<T> Deref for PresenceAwareVec<T> {
+    type Target = Vec<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl<T> DerefMut for PresenceAwareVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.present = true;
+        &mut self.values
+    }
+}
+
+impl<'a, T> IntoIterator for &'a PresenceAwareVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut PresenceAwareVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter_mut()
+    }
+}
+
+impl<T> IntoIterator for PresenceAwareVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.into_iter()
+    }
+}
+
+impl<T> FromIterator<T> for PresenceAwareVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        iter.into_iter().collect::<Vec<_>>().into()
+    }
+}
+
+impl<T> Serialize for PresenceAwareVec<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.values.serialize(serializer)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for PresenceAwareVec<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<T>::deserialize(deserializer).map(Into::into)
+    }
+}
 
 pub(super) fn schema_version_2_schema() -> Object {
     ObjectBuilder::new()
@@ -90,6 +205,34 @@ pub enum UsDialectV3 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PhraseComponentUsageV3 {
+    Unresolved {
+        id: Uuid,
+        #[schema(max_length = 200)]
+        literal: String,
+    },
+    Resolved {
+        id: Uuid,
+        #[schema(max_length = 200)]
+        literal: String,
+        target_word_id: Uuid,
+        target_publication_id: Uuid,
+        target_pos_id: Uuid,
+        target_base_form_id: Uuid,
+        target_sense_id: Uuid,
+        target_form_id: Uuid,
+        target_variant_id: Uuid,
+        target_dialect: Dialect,
+        target_form_type: WordFormTypeV3,
+        #[schema(max_length = 500)]
+        target_headword: String,
+        #[schema(max_length = 5000)]
+        target_gloss: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordPronunciationV3 {
     pub id: Uuid,
@@ -126,6 +269,9 @@ pub struct WordCommonFormVariantV3 {
     pub origin: TextOrigin,
     #[schema(max_items = 2000)]
     pub pronunciations: Vec<WordPronunciationV3>,
+    #[serde(default)]
+    #[schema(required = true, value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
+    pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -138,6 +284,9 @@ pub struct WordUkFormVariantV3 {
     pub origin: TextOrigin,
     #[schema(max_items = 2000)]
     pub pronunciations: Vec<WordPronunciationV3>,
+    #[serde(default)]
+    #[schema(required = true, value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
+    pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -150,6 +299,9 @@ pub struct WordUsFormVariantV3 {
     pub origin: TextOrigin,
     #[schema(max_items = 2000)]
     pub pronunciations: Vec<WordPronunciationV3>,
+    #[serde(default)]
+    #[schema(required = true, value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
+    pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
 }
 
 /// 地区形状严格为 common xor 完整 uk+us；draft 也不能缺整个 uk/us 节点。
@@ -480,26 +632,102 @@ pub struct WordSentenceLinkV3 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WordSentenceAssociationV3 {
+    Linked {
+        id: Uuid,
+        #[schema(schema_with = schema_version_3_schema)]
+        #[serde(deserialize_with = "deserialize_schema_version_3")]
+        association_schema_version: u8,
+        source_dialect: Dialect,
+        #[schema(min_items = 1, max_items = 20)]
+        source_segments: Vec<SentenceSourceRangeV1>,
+        target_word_id: Uuid,
+        target_sense_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        target_form_slot_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        target_publication_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        target_form_variant_id: Option<Uuid>,
+        #[serde(default)]
+        #[schema(required = true, read_only, max_items = 100)]
+        target_component_usages: Vec<PhraseComponentUsageV3>,
+        origin: SentenceAssociationOriginV2,
+        #[schema(read_only)]
+        target_headword: String,
+        #[schema(read_only)]
+        target_gloss: String,
+        #[schema(read_only)]
+        resolved_pos: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false, read_only)]
+        resolved_form_type: Option<String>,
+    },
+    Pending {
+        id: Uuid,
+        #[schema(schema_with = schema_version_3_schema)]
+        #[serde(deserialize_with = "deserialize_schema_version_3")]
+        association_schema_version: u8,
+        source_dialect: Dialect,
+        #[schema(min_items = 1, max_items = 20)]
+        source_segments: Vec<SentenceSourceRangeV1>,
+        origin: SentenceAssociationOriginV2,
+        pending_target_kind: EntryKind,
+        #[schema(max_length = 200)]
+        pending_target_headword: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false, read_only, max_length = 200)]
+        normalized_pending_target_headword: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false, max_length = 5000)]
+        pending_target_gloss: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceTranslationBandV3 {
+    A1A2,
+    B1B2,
+    C1C2,
+}
+
+impl SentenceTranslationBandV3 {
+    pub(crate) fn from_sentence_level(level: &str) -> Self {
+        match level {
+            "C1" | "C2" => Self::C1C2,
+            "A1" | "A2" => Self::A1A2,
+            _ => Self::B1B2,
+        }
+    }
+
+    pub(crate) const fn display_order(self) -> u8 {
+        match self {
+            Self::C1C2 => 0,
+            Self::B1B2 => 1,
+            Self::A1A2 => 2,
+        }
+    }
+
+    pub(crate) const fn field_role(self) -> &'static str {
+        match self {
+            Self::A1A2 => "zh_translation_a1_a2",
+            Self::B1B2 => "zh_translation_b1_b2",
+            Self::C1C2 => "zh_translation_c1_c2",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct WordSentenceAssociationV3 {
+pub struct WordSentenceTranslationV3 {
     pub id: Uuid,
-    pub source_dialect: Dialect,
-    pub source_range: SentenceSourceRangeV1,
-    pub target_word_id: Uuid,
-    pub target_sense_id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub target_form_slot_id: Option<Uuid>,
-    pub origin: SentenceAssociationOriginV2,
-    #[schema(read_only)]
-    pub target_headword: String,
-    #[schema(read_only)]
-    pub target_gloss: String,
-    #[schema(read_only)]
-    pub resolved_pos: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false, read_only)]
-    pub resolved_form_type: Option<String>,
+    pub band: SentenceTranslationBandV3,
+    pub content: RichTextV3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -510,6 +738,11 @@ pub struct WordSentenceV3 {
     pub en_text: EnglishTextV3,
     pub zh_text_id: Uuid,
     pub zh_text: RichTextV3,
+    /// Canonical V3 translations. Empty is accepted only as a compatibility
+    /// read/write shape and is promoted from `zh_text` before persistence.
+    #[serde(default)]
+    #[schema(required = true, value_type = Vec<WordSentenceTranslationV3>, max_items = 3)]
+    pub zh_translations: PresenceAwareVec<WordSentenceTranslationV3>,
     #[schema(max_items = 2000)]
     pub links: Vec<WordSentenceLinkV3>,
     /// Server-owned read-only projection. Meanings writes use
@@ -537,6 +770,9 @@ pub struct WordRelationV3 {
     pub target_sense_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub prebound_target_word_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, max_length = 5000)]
@@ -547,7 +783,20 @@ pub struct WordRelationV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, read_only)]
     pub target_gloss: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, read_only)]
+    pub prebinding_state: Option<RelationPrebindingStateV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, read_only)]
+    pub target_status: Option<AdminWordStatus>,
     pub score: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationPrebindingStateV3 {
+    WaitingFirstSense,
+    TargetSenseDeleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -610,6 +859,8 @@ pub struct WordSentenceWritableV3 {
     pub en_text: EnglishTextV3,
     pub zh_text_id: Uuid,
     pub zh_text: RichTextV3,
+    #[schema(max_items = 3)]
+    pub zh_translations: Vec<WordSentenceTranslationV3>,
     #[schema(max_items = 2000)]
     pub links: Vec<WordSentenceLinkV3>,
 }
@@ -627,6 +878,9 @@ pub struct WordRelationWritableV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub target_sense_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub prebound_target_word_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
@@ -742,6 +996,18 @@ pub struct AdminWordV3Capabilities {
     pub publication: V3PublicationCapability,
     /// Phase 1 发音三元组规范化算法版本。
     pub pronunciation_normalization_version: PronunciationNormalizationVersionV3,
+    /// Pending/claim/人工整组保存的独立发布闸；旧后端响应可能尚无此字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sentence_associations: Option<bool>,
+    /// 句内单词/短语发现的独立运行时能力；旧后端响应可能尚无此字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sentence_target_discovery: Option<bool>,
+    /// 草稿关联词搜索、稳定预绑定和同步 reconciliation 能力。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub draft_relation_prebinding: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -770,7 +1036,9 @@ pub struct AdminWordV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, read_only)]
     pub compatibility: Option<AdminWordV3Compatibility>,
+    /// 通过服务端完整性校验并标记完成的步骤；不表达页面访问权限。
     pub completed_steps: Vec<PersistedWordStep>,
+    /// 列表继续创建时的续做落点；V3 draft 的页面导航不得把它当作访问门禁。
     pub max_reachable_step: WordCreationStep,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
@@ -831,6 +1099,7 @@ pub enum V3RetiredNodeRole {
     UkVariant,
     UsVariant,
     Pronunciation,
+    PhraseComponentUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -866,6 +1135,8 @@ pub struct CreateAdminWordV3Input {
     pub schema_version: u8,
     pub detection_id: Uuid,
     pub kind: WordEntryKindV3,
+    /// 管理员在 Step 1 最终确认的主词；检测结果只提供初始建议。
+    pub headwords: WordHeadwordsV2,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub confirmed_surface_match_token: Option<String>,
@@ -1034,6 +1305,7 @@ pub enum FormsImpactNodeTypeV3 {
     Form,
     Variant,
     Pronunciation,
+    PhraseComponentUsage,
     Surface,
     Publication,
     GrammarStructure,
@@ -1119,6 +1391,9 @@ pub enum V3ValidationIssueCode {
     NativeDefinitionRequired,
     SentenceLevelInvalid,
     SentenceIncomplete,
+    SentenceTranslationRequired,
+    SentenceTranslationInvalid,
+    DuplicateSentenceTranslationBand,
     SentenceLinkRoleInvalid,
     DuplicateSentenceLink,
     RelationScoreInvalid,
@@ -1135,6 +1410,10 @@ pub enum V3ValidationIssueCode {
     RelationPendingGlossInvalid,
     RelationPendingGlossConflict,
     RelationPendingGlossTargetExists,
+    RelationPreboundTargetNotFound,
+    RelationPreboundTargetArchived,
+    RelationPreboundTargetHasNoSense,
+    RelationTargetSenseDeleted,
     NodeIdReused,
     NodeBindingUnknown,
     NodeBindingChanged,
@@ -1180,6 +1459,9 @@ impl V3ValidationIssueCode {
             Self::NativeDefinitionRequired => "native_definition_required",
             Self::SentenceLevelInvalid => "sentence_level_invalid",
             Self::SentenceIncomplete => "sentence_incomplete",
+            Self::SentenceTranslationRequired => "sentence_translation_required",
+            Self::SentenceTranslationInvalid => "sentence_translation_invalid",
+            Self::DuplicateSentenceTranslationBand => "duplicate_sentence_translation_band",
             Self::SentenceLinkRoleInvalid => "sentence_link_role_invalid",
             Self::DuplicateSentenceLink => "duplicate_sentence_link",
             Self::RelationScoreInvalid => "relation_score_invalid",
@@ -1196,6 +1478,10 @@ impl V3ValidationIssueCode {
             Self::RelationPendingGlossInvalid => "relation_pending_gloss_invalid",
             Self::RelationPendingGlossConflict => "relation_pending_gloss_conflict",
             Self::RelationPendingGlossTargetExists => "relation_pending_gloss_target_exists",
+            Self::RelationPreboundTargetNotFound => "relation_prebound_target_not_found",
+            Self::RelationPreboundTargetArchived => "relation_prebound_target_archived",
+            Self::RelationPreboundTargetHasNoSense => "relation_prebound_target_has_no_sense",
+            Self::RelationTargetSenseDeleted => "relation_target_sense_deleted",
             Self::NodeIdReused => "node_id_reused",
             Self::NodeBindingUnknown => "node_binding_unknown",
             Self::NodeBindingChanged => "node_binding_changed",
@@ -1241,6 +1527,9 @@ impl V3ValidationIssueCode {
             "native_definition_required" => Self::NativeDefinitionRequired,
             "sentence_level_invalid" => Self::SentenceLevelInvalid,
             "sentence_incomplete" => Self::SentenceIncomplete,
+            "sentence_translation_required" => Self::SentenceTranslationRequired,
+            "sentence_translation_invalid" => Self::SentenceTranslationInvalid,
+            "duplicate_sentence_translation_band" => Self::DuplicateSentenceTranslationBand,
             "sentence_link_role_invalid" => Self::SentenceLinkRoleInvalid,
             "duplicate_sentence_link" => Self::DuplicateSentenceLink,
             "relation_score_invalid" => Self::RelationScoreInvalid,
@@ -1257,6 +1546,10 @@ impl V3ValidationIssueCode {
             "relation_pending_gloss_invalid" => Self::RelationPendingGlossInvalid,
             "relation_pending_gloss_conflict" => Self::RelationPendingGlossConflict,
             "relation_pending_gloss_target_exists" => Self::RelationPendingGlossTargetExists,
+            "relation_prebound_target_not_found" => Self::RelationPreboundTargetNotFound,
+            "relation_prebound_target_archived" => Self::RelationPreboundTargetArchived,
+            "relation_prebound_target_has_no_sense" => Self::RelationPreboundTargetHasNoSense,
+            "relation_target_sense_deleted" => Self::RelationTargetSenseDeleted,
             "node_id_reused" => Self::NodeIdReused,
             "node_binding_unknown" => Self::NodeBindingUnknown,
             "node_binding_changed" => Self::NodeBindingChanged,
@@ -1564,6 +1857,7 @@ pub struct AdminWordListItemV3 {
     #[schema(nullable = false)]
     pub published_revision: Option<i64>,
     pub has_unpublished_changes: bool,
+    /// 列表继续创建时的续做落点；V3 draft 的页面导航不得把它当作访问门禁。
     pub max_reachable_step: WordCreationStep,
     pub created_by_name: String,
     pub created_at: DateTime<Utc>,
@@ -1853,6 +2147,13 @@ pub struct RelatedWordSenseV3 {
     pub gloss: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelatedWordStatusV3 {
+    Draft,
+    Published,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelatedWordResultV3 {
@@ -1860,6 +2161,9 @@ pub struct RelatedWordResultV3 {
     pub schema_version: u8,
     pub entry_id: Uuid,
     pub kind: WordEntryKindV3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub status: Option<RelatedWordStatusV3>,
     #[schema(read_only)]
     pub presentation: EntryPresentationV3,
     pub matches: Vec<RelatedWordMatchV3>,

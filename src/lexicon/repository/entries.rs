@@ -765,6 +765,11 @@ impl LexiconRepository {
                 WHERE target.entry_id = $1 AND relation.entry_id <> $1
                 UNION ALL
                 SELECT 1
+                FROM lexicon.relations relation
+                WHERE relation.prebound_target_entry_id = $1
+                  AND relation.entry_id <> $1
+                UNION ALL
+                SELECT 1
                 FROM lexicon.sentence_links link
                 JOIN lexicon.nodes target ON target.id = link.target_sense_id
                 WHERE target.entry_id = $1 AND link.entry_id <> $1
@@ -813,6 +818,26 @@ impl LexiconRepository {
             .await?;
         }
         Ok(deleted.is_some())
+    }
+
+    pub(crate) async fn has_inbound_prebound_relations(
+        tx: &mut Transaction<'_, Postgres>,
+        id: Uuid,
+    ) -> Result<bool, LexiconRepositoryError> {
+        sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM lexicon.relations
+                WHERE prebound_target_entry_id = $1
+                  AND entry_id <> $1
+            )
+            "#,
+        )
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
     }
 }
 

@@ -118,6 +118,12 @@ impl LexiconService {
         if record.archived_at.is_some() || record.current_publication_id.is_some() {
             return Err(LexiconServiceError::EntryNotDeletable);
         }
+        if LexiconRepository::has_inbound_prebound_relations(&mut transaction, entry_id)
+            .await
+            .map_err(repository_error)?
+        {
+            return Err(LexiconServiceError::EntryHasInboundPreboundRelations);
+        }
         if record.content_schema_version == 2 {
             LexiconRepository::replace_surface_projection(
                 &mut transaction,

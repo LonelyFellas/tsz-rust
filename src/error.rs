@@ -53,6 +53,7 @@ pub enum ErrorCode {
     SubPartOfSpeechConflict,
     RevisionConflict,
     ReferenceConflict,
+    RelationPrebindingFanoutExceeded,
     StableNodeIdChanged,
     FormReferenceConflict,
     DetectionMismatch,
@@ -73,11 +74,15 @@ pub enum ErrorCode {
     DownstreamConfirmationRequired,
     EntryArchived,
     EntryNotDeletable,
+    EntryHasInboundPreboundRelations,
     EntryHasInboundPublicationRefs,
     EntryHasUnavailablePublicationRefs,
     WordNotFound,
     SentenceNotFound,
     SentenceAssociationsUnresolved,
+    SentenceAssociationClientUpgradeRequired,
+    PendingSentenceAssociationNotFound,
+    PendingSentenceAssociationClaimed,
     PublicationNotFound,
     PartOfSpeechInUse,
     SubPartOfSpeechInUse,
@@ -99,7 +104,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 76] = [
+    pub const ALL: [Self; 81] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -142,6 +147,7 @@ impl ErrorCode {
         Self::SubPartOfSpeechConflict,
         Self::RevisionConflict,
         Self::ReferenceConflict,
+        Self::RelationPrebindingFanoutExceeded,
         Self::StableNodeIdChanged,
         Self::FormReferenceConflict,
         Self::DetectionMismatch,
@@ -162,9 +168,13 @@ impl ErrorCode {
         Self::DownstreamConfirmationRequired,
         Self::EntryArchived,
         Self::EntryNotDeletable,
+        Self::EntryHasInboundPreboundRelations,
         Self::EntryHasInboundPublicationRefs,
         Self::EntryHasUnavailablePublicationRefs,
         Self::WordNotFound,
+        Self::SentenceAssociationClientUpgradeRequired,
+        Self::PendingSentenceAssociationNotFound,
+        Self::PendingSentenceAssociationClaimed,
         Self::PublicationNotFound,
         Self::PartOfSpeechInUse,
         Self::SubPartOfSpeechInUse,
@@ -354,6 +364,11 @@ impl ErrorCode {
                 "Referenced target changed",
                 StatusCode::CONFLICT,
             ),
+            Self::RelationPrebindingFanoutExceeded => (
+                "relation_prebinding_fanout_exceeded",
+                "Relation prebinding fanout exceeded",
+                StatusCode::CONFLICT,
+            ),
             Self::StableNodeIdChanged => (
                 "stable_node_id_changed",
                 "Stable node identity changed",
@@ -446,6 +461,11 @@ impl ErrorCode {
                 "Entry cannot be deleted",
                 StatusCode::CONFLICT,
             ),
+            Self::EntryHasInboundPreboundRelations => (
+                "entry_has_inbound_prebound_relations",
+                "Entry has inbound prebound relations",
+                StatusCode::CONFLICT,
+            ),
             Self::EntryHasInboundPublicationRefs => (
                 "entry_has_inbound_publication_refs",
                 "Entry has inbound publication references",
@@ -465,6 +485,21 @@ impl ErrorCode {
             Self::SentenceAssociationsUnresolved => (
                 "sentence_associations_unresolved",
                 "Sentence associations are not resolved for the current text",
+                StatusCode::CONFLICT,
+            ),
+            Self::SentenceAssociationClientUpgradeRequired => (
+                "sentence_association_client_upgrade_required",
+                "Sentence association client upgrade required",
+                StatusCode::CONFLICT,
+            ),
+            Self::PendingSentenceAssociationNotFound => (
+                "pending_sentence_association_not_found",
+                "Pending sentence association not found",
+                StatusCode::NOT_FOUND,
+            ),
+            Self::PendingSentenceAssociationClaimed => (
+                "pending_sentence_association_claimed",
+                "Pending sentence association already claimed",
                 StatusCode::CONFLICT,
             ),
             Self::PublicationNotFound => (

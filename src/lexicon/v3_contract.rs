@@ -10,9 +10,10 @@ use crate::{
     lexicon::dto::{
         Dialect, DialectModeV3, DialectRulesV3, DialectVariantRichTextSlotV3,
         DraftFormsStepContentV3, DraftMeaningsStepContentV3, DraftNodeLocation,
-        DraftValidationIssue, EnglishTextV3, PersistedWordStep, RichTextV3, StepSaveIntent,
-        V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode, WordConcreteFormV3,
-        WordDefinitionV3, WordFormTypeV2, WordFormTypeV3, WordRegionalVariantsV3,
+        DraftValidationIssue, EnglishTextV3, PersistedWordStep, RichText, RichTextV3,
+        SentenceTranslationBandV3, StepSaveIntent, V3DraftNodeLocation, V3DraftValidationIssue,
+        V3ValidationIssueCode, WordConcreteFormV3, WordDefinitionV3, WordFormTypeV2,
+        WordFormTypeV3, WordRegionalVariantsV3, WordSentenceTranslationV3,
     },
     lexicon::form_types::allowed_form_types,
     lexicon::normalization::MAX_HEADWORD_CODEPOINTS,
@@ -82,6 +83,8 @@ pub(crate) fn decode_v3_meanings_request<T: DeserializeOwned>(value: Value) -> R
             "associations_state",
             "target_headword",
             "target_gloss",
+            "prebinding_state",
+            "target_status",
             "resolved_pos",
             "resolved_form_type",
         ],
@@ -441,6 +444,54 @@ pub(crate) fn validate_meanings(content: &DraftMeaningsStepContentV3) -> Vec<Dra
             }
             for sentence in &sense.sentences {
                 validate_english_text_limits(&sentence.en_text, &mut issues);
+                if sentence.zh_translations.len() > 3 {
+                    issues.push(meanings_issue(
+                        V3ValidationIssueCode::SentenceTranslationInvalid,
+                        "zh_translations",
+                        sentence.id,
+                        "a sentence supports at most three Chinese translation bands",
+                    ));
+                }
+                let mut bands = HashSet::new();
+                for translation in &sentence.zh_translations {
+                    if !bands.insert(translation.band) {
+                        issues.push(meanings_issue(
+                            V3ValidationIssueCode::DuplicateSentenceTranslationBand,
+                            "zh_translations",
+                            translation.id,
+                            "each Chinese translation band may appear only once",
+                        ));
+                    }
+                    if translation.content.text().trim().is_empty() {
+                        issues.push(meanings_issue(
+                            V3ValidationIssueCode::SentenceTranslationRequired,
+                            "content",
+                            translation.id,
+                            "Chinese translation content is required",
+                        ));
+                    }
+                    let rich_text: Result<RichText, _> = serde_json::from_value(
+                        serde_json::to_value(&translation.content).unwrap_or(Value::Null),
+                    );
+                    if rich_text
+                        .as_ref()
+                        .map(|content| !crate::lexicon::rich_text::is_valid(content))
+                        .unwrap_or(true)
+                    {
+                        issues.push(meanings_issue(
+                            V3ValidationIssueCode::SentenceTranslationInvalid,
+                            "content",
+                            translation.id,
+                            "Chinese translation RichText is invalid",
+                        ));
+                    }
+                    validate_rich_text_limits(
+                        &translation.content,
+                        translation.id,
+                        "content",
+                        &mut issues,
+                    );
+                }
                 validate_rich_text_limits(
                     &sentence.zh_text,
                     sentence.zh_text_id,
@@ -451,6 +502,75 @@ pub(crate) fn validate_meanings(content: &DraftMeaningsStepContentV3) -> Vec<Dra
         }
     }
     issues
+}
+
+pub(crate) fn normalize_sentence_translations(content: &mut DraftMeaningsStepContentV3) {
+    for pos in &mut content.pos {
+        for sense in &mut pos.senses {
+            for sentence in &mut sense.sentences {
+                if sentence.zh_translations.is_empty() {
+                    sentence.zh_translations.push(WordSentenceTranslationV3 {
+                        id: sentence.zh_text_id,
+                        band: SentenceTranslationBandV3::from_sentence_level(&sentence.level),
+                        content: sentence.zh_text.clone(),
+                    });
+                }
+                sentence
+                    .zh_translations
+                    .sort_by_key(|translation| translation.band.display_order());
+                let preferred = SentenceTranslationBandV3::from_sentence_level(&sentence.level);
+                let alias = sentence
+                    .zh_translations
+                    .iter()
+                    .find(|translation| translation.band == preferred)
+                    .or_else(|| {
+                        [
+                            SentenceTranslationBandV3::B1B2,
+                            SentenceTranslationBandV3::C1C2,
+                            SentenceTranslationBandV3::A1A2,
+                        ]
+                        .into_iter()
+                        .find_map(|band| {
+                            sentence
+                                .zh_translations
+                                .iter()
+                                .find(|translation| translation.band == band)
+                        })
+                    });
+                if let Some(alias) = alias {
+                    sentence.zh_text_id = alias.id;
+                    sentence.zh_text = alias.content.clone();
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn canonicalize_sentence_translations(content: &mut DraftMeaningsStepContentV3) -> bool {
+    let mut valid = true;
+    for translation in content
+        .pos
+        .iter_mut()
+        .flat_map(|pos| &mut pos.senses)
+        .flat_map(|sense| &mut sense.sentences)
+        .flat_map(|sentence| &mut sentence.zh_translations)
+    {
+        let Ok(mut rich_text) = serde_json::from_value::<RichText>(
+            serde_json::to_value(&translation.content).unwrap_or(Value::Null),
+        ) else {
+            valid = false;
+            continue;
+        };
+        if crate::lexicon::rich_text::canonicalize(&mut rich_text).is_err() {
+            valid = false;
+            continue;
+        }
+        match serde_json::from_value(serde_json::to_value(rich_text).unwrap_or(Value::Null)) {
+            Ok(canonical) => translation.content = canonical,
+            Err(_) => valid = false,
+        }
+    }
+    valid
 }
 
 pub(crate) fn validate_complete_definition_grammar(
@@ -560,10 +680,13 @@ fn forms_node_count(content: &DraftFormsStepContentV3) -> usize {
                     .iter()
                     .map(|form| match &form.regional_variants {
                         WordRegionalVariantsV3::Common { common } => {
-                            1 + common.pronunciations.len()
+                            1 + common.pronunciations.len() + common.component_usages.len()
                         }
                         WordRegionalVariantsV3::UkUs { uk, us } => {
-                            2 + uk.pronunciations.len() + us.pronunciations.len()
+                            2 + uk.pronunciations.len()
+                                + us.pronunciations.len()
+                                + uk.component_usages.len()
+                                + us.component_usages.len()
                         }
                     })
                     .sum::<usize>()
@@ -600,7 +723,9 @@ fn meanings_node_count(content: &DraftMeaningsStepContentV3) -> usize {
                                     .sentences
                                     .iter()
                                     .map(|sentence| {
-                                        sentence.links.len() + sentence.associations.len()
+                                        sentence.links.len()
+                                            + sentence.associations.len()
+                                            + sentence.zh_translations.len()
                                     })
                                     .sum::<usize>()
                                 + sense.relations.len()
@@ -648,13 +773,25 @@ fn validate_rich_text_limits(
 }
 
 fn meanings_limit_issue(node_id: Uuid, field: &str, message: &str) -> DraftValidationIssue {
+    meanings_issue(
+        V3ValidationIssueCode::ContentLimitExceeded,
+        field,
+        node_id,
+        message,
+    )
+}
+
+fn meanings_issue(
+    code: V3ValidationIssueCode,
+    field: &str,
+    node_id: Uuid,
+    message: &str,
+) -> DraftValidationIssue {
     DraftValidationIssue {
         step: PersistedWordStep::Meanings,
         node_id,
         field: field.to_owned(),
-        code: V3ValidationIssueCode::ContentLimitExceeded
-            .as_str()
-            .to_owned(),
+        code: code.as_str().to_owned(),
         message: message.to_owned(),
         reference_location: None,
         node_location: Some(DraftNodeLocation {
@@ -1164,7 +1301,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::lexicon::dto::SaveFormsStepInputV3;
+    use crate::lexicon::dto::{PhraseComponentUsageV3, SaveFormsStepInputV3};
 
     // C1 selection from the approved matrix:
     // V3-U01/02/03/04/06/06a/06b/06c/07/07b/08/10b/11a/11b/11c.
@@ -1796,6 +1933,26 @@ mod tests {
             &validate_forms(&oversized.content, StepSaveIntent::Save),
             V3ValidationIssueCode::ContentLimitExceeded
         ));
+
+        let mut component_oversized = decode_valid(valid_request()).content;
+        let WordRegionalVariantsV3::Common { common } =
+            &mut component_oversized.pos[0].forms[0].regional_variants
+        else {
+            unreachable!()
+        };
+        common.component_usages = (0..MAX_ENTRY_NODES)
+            .map(|index| PhraseComponentUsageV3::Unresolved {
+                id: Uuid::now_v7(),
+                literal: format!("component-{index}"),
+            })
+            .collect();
+        assert!(has_code(
+            &validate_aggregate_node_limit(
+                &component_oversized,
+                &DraftMeaningsStepContentV3::default(),
+            ),
+            V3ValidationIssueCode::ContentLimitExceeded
+        ));
     }
 
     #[test]
@@ -1842,6 +1999,108 @@ mod tests {
         assert!(has_code(
             &validate_meanings(&oversized.content),
             V3ValidationIssueCode::ContentLimitExceeded
+        ));
+    }
+
+    #[test]
+    fn sentence_translations_promote_legacy_alias_and_validate_three_unique_bands() {
+        let sentence_id = Uuid::now_v7();
+        let legacy_id = Uuid::now_v7();
+        let base = json!({
+            "sense_groups": [],
+            "pos": [{
+                "pos_id": Uuid::now_v7(),
+                "grammar_structures": [],
+                "senses": [{
+                    "id": Uuid::now_v7(),
+                    "sub_pos": "",
+                    "level": "A1",
+                    "depends_on_context": false,
+                    "definitions": [],
+                    "sentences": [{
+                        "id": sentence_id,
+                        "level": "A1",
+                        "en_text": {
+                            "mode": "unified",
+                            "common": {
+                                "id": Uuid::now_v7(),
+                                "origin": "manual",
+                                "value": {"version": 2, "text": "Example.", "annotations": []}
+                            }
+                        },
+                        "zh_text_id": legacy_id,
+                        "zh_text": {"version": 2, "text": "旧译文", "annotations": []},
+                        "links": []
+                    }],
+                    "relations": []
+                }]
+            }]
+        });
+        let mut legacy: DraftMeaningsStepContentV3 = serde_json::from_value(base).unwrap();
+        normalize_sentence_translations(&mut legacy);
+        let sentence = &legacy.pos[0].senses[0].sentences[0];
+        assert_eq!(sentence.zh_translations.len(), 1);
+        assert_eq!(sentence.zh_translations[0].id, legacy_id);
+        assert_eq!(
+            sentence.zh_translations[0].band,
+            SentenceTranslationBandV3::A1A2
+        );
+
+        let sentence = &mut legacy.pos[0].senses[0].sentences[0];
+        sentence.zh_translations = vec![
+            WordSentenceTranslationV3 {
+                id: Uuid::now_v7(),
+                band: SentenceTranslationBandV3::A1A2,
+                content: serde_json::from_value(json!({
+                    "version": 2, "text": "高", "annotations": []
+                }))
+                .unwrap(),
+            },
+            WordSentenceTranslationV3 {
+                id: Uuid::now_v7(),
+                band: SentenceTranslationBandV3::C1C2,
+                content: serde_json::from_value(json!({
+                    "version": 2, "text": "初", "annotations": []
+                }))
+                .unwrap(),
+            },
+            WordSentenceTranslationV3 {
+                id: Uuid::now_v7(),
+                band: SentenceTranslationBandV3::B1B2,
+                content: serde_json::from_value(json!({
+                    "version": 2, "text": "中", "annotations": []
+                }))
+                .unwrap(),
+            },
+        ]
+        .into();
+        normalize_sentence_translations(&mut legacy);
+        let sentence = &legacy.pos[0].senses[0].sentences[0];
+        assert_eq!(
+            sentence
+                .zh_translations
+                .iter()
+                .map(|translation| translation.band)
+                .collect::<Vec<_>>(),
+            vec![
+                SentenceTranslationBandV3::C1C2,
+                SentenceTranslationBandV3::B1B2,
+                SentenceTranslationBandV3::A1A2,
+            ]
+        );
+        assert_eq!(sentence.zh_text.text(), "高");
+        assert!(!has_code(
+            &validate_meanings(&legacy),
+            V3ValidationIssueCode::SentenceTranslationInvalid
+        ));
+
+        let duplicate = sentence.zh_translations[0].clone();
+        legacy.pos[0].senses[0].sentences[0]
+            .zh_translations
+            .push(duplicate);
+        assert!(has_code(
+            &validate_meanings(&legacy),
+            V3ValidationIssueCode::DuplicateSentenceTranslationBand
         ));
     }
 

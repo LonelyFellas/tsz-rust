@@ -442,7 +442,8 @@ async fn create_v3_with_complete_forms(state: &AppState, pool: &PgPool, bearer: 
     let mut create_input = json!({
         "schema_version": 3,
         "detection_id": detection["detection_id"],
-        "kind": "word"
+        "kind": "word",
+        "headwords": v3_confirmed_headwords(&detection)
     });
     if let Some(token) = detection["surface_match_page"]["surface_confirmation_token"].as_str() {
         create_input["confirmed_surface_match_token"] = json!(token);
@@ -513,6 +514,150 @@ async fn create_v3_with_complete_forms(state: &AppState, pool: &PgPool, bearer: 
     }
     assert_eq!(status, StatusCode::OK, "{saved}");
     saved
+}
+
+async fn create_ready_v3_draft_with_sentences(
+    state: &AppState,
+    pool: &PgPool,
+    bearer: &str,
+    texts: &[&str],
+) -> Value {
+    let forms_saved = create_v3_with_complete_forms(state, pool, bearer).await;
+    let entry_id = forms_saved["word"]["id"].as_str().unwrap();
+    let mut meanings =
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let sense_id = meanings["pos"][0]["senses"][0]["id"].clone();
+    meanings["pos"][0]["senses"][0]["sentences"] = Value::Array(
+        texts
+            .iter()
+            .map(|text| {
+                json!({
+                    "id": Uuid::now_v7(),
+                    "level": "B1",
+                    "en_text": {
+                        "mode": "unified",
+                        "common": {
+                            "id": Uuid::now_v7(),
+                            "origin": "manual",
+                            "value": rich_text(text)
+                        }
+                    },
+                    "zh_text_id": Uuid::now_v7(),
+                    "zh_text": rich_text("测试译文。"),
+                    "links": [{
+                        "word_id": entry_id,
+                        "sense_id": sense_id,
+                        "role": "focus"
+                    }]
+                })
+            })
+            .collect(),
+    );
+    let (status, saved) = call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": forms_saved["word"]["revision"],
+            "intent": "complete",
+            "content": meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    saved
+}
+
+async fn save_v3_meanings(
+    state: &AppState,
+    bearer: &str,
+    word: &Value,
+    mut meanings: Value,
+) -> Value {
+    let entry_id = word["word"]["id"].as_str().unwrap();
+    for sentence in meanings["pos"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .flat_map(|pos| pos["senses"].as_array_mut().into_iter().flatten())
+        .flat_map(|sense| sense["sentences"].as_array_mut().into_iter().flatten())
+    {
+        sentence.as_object_mut().unwrap().remove("associations");
+        sentence
+            .as_object_mut()
+            .unwrap()
+            .remove("associations_state");
+    }
+    let (status, saved) = call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": word["word"]["revision"],
+            "intent": "complete",
+            "content": meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    saved
+}
+
+async fn save_v3_example_sentence(
+    state: &AppState,
+    bearer: &str,
+    word: &Value,
+    text: &str,
+) -> Value {
+    let mut meanings = word["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["value"] = rich_text(text);
+    save_v3_meanings(state, bearer, word, meanings).await
+}
+
+async fn publish_ready_v3(state: &AppState, bearer: &str, word: &Value) -> (StatusCode, Value) {
+    call(
+        state,
+        Method::POST,
+        &format!(
+            "{ROOT}/entries/{}/publications",
+            word["word"]["id"].as_str().unwrap()
+        ),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": word["word"]["revision"]
+        })),
+    )
+    .await
+}
+
+fn v3_confirmed_headwords(detection: &Value) -> Value {
+    let base = detection["builtin_dictionary"]["suggested_forms"]
+        .as_array()
+        .and_then(|forms| forms.iter().find(|form| form["form_type"] == "base"));
+    match base.map(|form| &form["regional_variants"]) {
+        Some(regional) if regional["mode"] == "uk_us" => json!({
+            "mode": "distinguish",
+            "uk": regional["uk"]["spelling"],
+            "us": regional["us"]["spelling"],
+            "source_dialect": "us"
+        }),
+        Some(regional) if regional["mode"] == "common" => json!({
+            "mode": "unified",
+            "common": regional["common"]["spelling"]
+        }),
+        _ => json!({
+            "mode": "unified",
+            "common": detection["normalized_surface"]
+        }),
+    }
 }
 
 async fn save_v3_forms_after_impact(
@@ -1160,7 +1305,8 @@ async fn visibility_gate_off_allows_zero_to_one_and_same_entry_revision_but_bloc
     pool: PgPool,
 ) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let policies = state.surface_policy_store_for_test();
     prepare_duplicate_headword_test(&pool, &policies).await;
     let admin_id = seed_admin(&pool).await;
@@ -6581,6 +6727,36 @@ async fn detection_distinguishes_center_and_centre_in_both_directions(pool: PgPo
         );
     }
 
+    let v3_state = state
+        .clone()
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    for input in ["center", "centre"] {
+        let (status, response) = call(
+            &v3_state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": input
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{input} V3 检测失败：{response}");
+        assert_eq!(
+            response["builtin_dictionary"]["suggested_forms"][0]["regional_variants"],
+            json!({
+                "mode": "uk_us",
+                "uk": {"dialect": "uk", "spelling": "centre", "pronunciations": []},
+                "us": {"dialect": "us", "spelling": "center", "pronunciations": []}
+            })
+        );
+    }
+
     seed_dictionary_term(&pool, "priority-source", "word", "british_core").await;
     seed_dictionary_term(&pool, "priority-ambiguous", "word", "british_american").await;
     seed_dictionary_term(&pool, "priority-us", "word", "american_core").await;
@@ -6620,6 +6796,145 @@ async fn detection_distinguishes_center_and_centre_in_both_directions(pool: PgPo
         }),
         "明确反方言候选必须优先于排列在前的混合候选"
     );
+}
+
+#[sqlx::test]
+async fn v3_detection_recovers_an_asymmetric_region_index_in_both_directions(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_term(&pool, "metreprobe", "word", "british_core").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES
+            ($1, 'meterprobe', 'meterprobe', 'american_core', ARRAY['american_core'],
+             ARRAY['US'], ARRAY['spelling'], ARRAY['noun'], ARRAY['metreprobe'], true),
+            ($1, 'metreprobe', 'metreprobe', 'british_core', ARRAY['british_core'],
+             ARRAY['GB'], ARRAY['usage'], ARRAY['noun'], ARRAY[]::TEXT[], true)
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for input in ["meterprobe", "metreprobe"] {
+        let (status, response) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": input
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{input} V3 检测失败：{response}");
+        assert_eq!(response["builtin_dictionary"]["status"], "matched");
+        assert_eq!(
+            response["builtin_dictionary"]["suggested_forms"][0]["regional_variants"],
+            json!({
+                "mode": "uk_us",
+                "uk": {"dialect": "uk", "spelling": "metreprobe", "pronunciations": []},
+                "us": {"dialect": "us", "spelling": "meterprobe", "pronunciations": []}
+            })
+        );
+    }
+}
+
+#[sqlx::test]
+async fn v3_detection_uses_generic_content_alternative_spelling_evidence(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_term(&pool, "formalise", "word", "common_unmarked").await;
+    seed_dictionary_term(&pool, "formalize", "word", "common_unmarked").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.content_imports (
+            dataset_id, input_sha256, source_locator, source_version,
+            record_count, parser_version
+        ) VALUES (
+            $1, repeat('b', 64), 'https://kaikki.org/test-source',
+            'enwiktionary-content-test', 2, 'forms-sounds-v1'
+        )
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.entry_contents (
+            dataset_id, source_key, normalized_term, pos, senses,
+            forms, sounds, source_locator
+        ) VALUES
+            ($1, 'kaikki:formalise:verb:test', 'formalise', 'verb', '[]'::jsonb,
+             '[{"form":"formalize","tags":["alternative"]}]'::jsonb,
+             '[]'::jsonb, 'https://kaikki.org/test-source'),
+            ($1, 'kaikki:formalize:verb:test', 'formalize', 'verb', '[]'::jsonb,
+             '[{"form":"formalise","tags":["alternative"]}]'::jsonb,
+             '[]'::jsonb, 'https://kaikki.org/test-source')
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for input in ["formalise", "formalize"] {
+        let (status, response) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": input
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{input} V3 检测失败：{response}");
+        assert_eq!(
+            response["builtin_dictionary"]["suggested_forms"][0]["regional_variants"],
+            json!({
+                "mode": "uk_us",
+                "uk": {"dialect": "uk", "spelling": "formalise", "pronunciations": []},
+                "us": {"dialect": "us", "spelling": "formalize", "pronunciations": []}
+            })
+        );
+    }
 }
 
 #[sqlx::test]
@@ -11043,6 +11358,7 @@ async fn non_english_headwords_are_rejected_by_detection_and_creation(pool: PgPo
             "schema_version": 3,
             "detection_id": tampered_v3_detection.detection_id,
             "kind": "word",
+            "headwords": {"mode": "unified", "common": "tampered-v3"}
         })),
     )
     .await;
@@ -11351,6 +11667,31 @@ async fn replace_associations(
     .await
 }
 
+async fn replace_associations_v3(
+    state: &AppState,
+    bearer: &str,
+    word: &Value,
+    sentence_id: &str,
+    idempotency_key: Uuid,
+    associations: Value,
+) -> (StatusCode, Value) {
+    let entry_id = word["word"]["id"].as_str().unwrap();
+    call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/sentences/{sentence_id}/associations"),
+        bearer,
+        Some(idempotency_key),
+        Some(json!({
+            "association_schema_version": 3,
+            "base_revision": word["word"]["revision"],
+            "base_lifecycle_revision": word["word"]["lifecycle_revision"],
+            "associations": associations,
+        })),
+    )
+    .await
+}
+
 #[sqlx::test]
 async fn ambiguous_targets_are_skipped_without_failing_the_publish(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
@@ -11497,6 +11838,23 @@ async fn published_sentence_associations_can_be_retargeted_removed_and_added(poo
         edited["word"]["lifecycle_revision"].as_i64().unwrap(),
         published["word"]["lifecycle_revision"].as_i64().unwrap() + 1
     );
+    let v2_variant_identity: Vec<(Option<Uuid>, Option<Uuid>, Option<Value>)> = sqlx::query_as(
+        r#"
+        SELECT target_publication_id, target_form_variant_id,
+               target_component_usages_snapshot
+        FROM lexicon.sentence_associations
+        WHERE sentence_id = $1::uuid
+        ORDER BY range_start
+        "#,
+    )
+    .bind(&sentence_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        v2_variant_identity,
+        vec![(None, None, None), (None, None, None)]
+    );
 
     // 乐观锁：拿旧的 lifecycle_revision 再改一次要 409。
     let (status, conflict) = replace_associations(
@@ -11535,6 +11893,923 @@ async fn published_sentence_associations_can_be_retargeted_removed_and_added(poo
         1,
         "列表就是完整目标状态，没列出来的那条应被删掉"
     );
+}
+
+#[sqlx::test]
+async fn legacy_sentence_association_replace_cannot_overwrite_segmented_v3_data(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let mut flags = SmartLexiconV3Flags::all_enabled();
+    flags.sentence_target_discovery = false;
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(flags);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    create_and_publish(&state, &pool, &bearer, "wall").await;
+    let saved = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &["A wall waits near the wall."],
+    )
+    .await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let sentence_id = first_sentence(&published)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let association_id = first_sentence(&published)["associations"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    sqlx::query(
+        r#"
+        UPDATE lexicon.sentence_associations
+        SET association_schema_version = 3,
+            segment_count = 2
+        WHERE id = $1::uuid
+        "#,
+    )
+    .bind(&association_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let before: (i16, i16) = sqlx::query_as(
+        "SELECT association_schema_version, segment_count FROM lexicon.sentence_associations WHERE id = $1::uuid",
+    )
+    .bind(&association_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (replace_status, problem) = replace_associations(
+        &state,
+        &bearer,
+        &published,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([]),
+    )
+    .await;
+    assert_eq!(replace_status, StatusCode::CONFLICT, "{problem}");
+    assert_eq!(
+        problem["code"],
+        "sentence_association_client_upgrade_required"
+    );
+
+    let after: (i16, i16) = sqlx::query_as(
+        "SELECT association_schema_version, segment_count FROM lexicon.sentence_associations WHERE id = $1::uuid",
+    )
+    .bind(&association_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, before, "旧客户端失败时不能删除或压平多段关联");
+}
+
+#[sqlx::test]
+async fn v3_sentence_associations_store_non_contiguous_source_segments(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let saved = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &["Please turn the light off now."],
+    )
+    .await;
+    let sentence_id = first_sentence(&saved)["id"].as_str().unwrap().to_owned();
+    let association_id = Uuid::now_v7().to_string();
+
+    let (status, edited) = replace_associations_v3(
+        &state,
+        &bearer,
+        &saved,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([{
+            "id": association_id,
+            "source_dialect": "common",
+            "source_segments": [
+                { "start": 7, "end": 11, "surface": "turn" },
+                { "start": 22, "end": 25, "surface": "off" }
+            ],
+            "pending_target_kind": "phrase",
+            "pending_target_headword": "turn off",
+            "pending_target_gloss": "关闭"
+        }]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let association = &first_sentence(&edited)["associations"][0];
+    assert_eq!(association["association_schema_version"], 3);
+    assert_eq!(association["source_segments"].as_array().unwrap().len(), 2);
+    assert!(
+        association.get("source_range").is_none(),
+        "V3 不能同时暴露两个位置权威：{association}"
+    );
+
+    let stored: Vec<(i16, i32, i32, String)> = sqlx::query_as(
+        r#"
+        SELECT ordinal, range_start, range_end, surface
+        FROM lexicon.sentence_association_segments
+        WHERE association_id = $1::uuid
+        ORDER BY ordinal
+        "#,
+    )
+    .bind(&association_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        vec![(0, 7, 11, "turn".to_owned()), (1, 22, 25, "off".to_owned())]
+    );
+}
+
+#[sqlx::test]
+async fn sentence_target_discovery_returns_published_forms_with_base_and_sense_identity(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let location = create_and_publish(&state, &pool, &bearer, "location").await;
+    let location_id = location["word"]["id"].clone();
+    let location_sense_id = location["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let location_base_id = location["word"]["forms"]["pos"][0]["base_form"]["id"].clone();
+
+    let (status, discovered) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "sentence_text": "The locations mark a central location.",
+            "source_dialect": "common",
+            "mode": "all_published_targets",
+            "page_size_per_range": 20
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{discovered}");
+    assert_eq!(discovered["schema_version"], 3);
+    assert_eq!(discovered["completeness"], "complete");
+    assert!(discovered["discovery_generation"].as_i64().unwrap() > 0);
+    let ranges = discovered["range_results"].as_array().unwrap();
+    assert_eq!(ranges.len(), 2, "复数与原形两个位置都应保留：{ranges:?}");
+    for range in ranges {
+        assert_eq!(range["published_total"], 1);
+        let candidate = &range["published_matches"][0];
+        assert_eq!(candidate["entry_id"], location_id);
+        assert_eq!(candidate["base_form_id"], location_base_id);
+        assert_eq!(candidate["senses"][0]["sense_id"], location_sense_id);
+        assert_eq!(candidate["senses"][0]["base_form_id"], location_base_id);
+        assert!(range.get("source_range").is_none());
+    }
+}
+
+#[sqlx::test]
+async fn discovery_capability_replaces_new_publish_time_implicit_associations(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    create_and_publish(&state, &pool, &bearer, "wall").await;
+    let saved =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["A wall waits here."]).await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    assert_eq!(
+        first_sentence(&published)["associations"],
+        json!([]),
+        "发现能力开启后发布不能再静默建立新关联"
+    );
+    assert_eq!(
+        first_sentence(&published)["associations_state"],
+        "resolved",
+        "已扫描但尚未人工确认应是 resolved 空列表"
+    );
+
+    let (status, discovered) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "sentence_text": "A wall waits here.",
+            "source_dialect": "common",
+            "mode": "all_published_targets"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{discovered}");
+    assert!(
+        discovered["range_results"]
+            .as_array()
+            .is_some_and(|ranges| ranges.iter().any(|range| {
+                range["normalized_surface"] == "wall" && range["published_total"] == 1
+            })),
+        "一键发现仍必须返回 wall 候选：{discovered}"
+    );
+}
+
+#[sqlx::test]
+async fn v3_forms_resave_preserves_sentence_translation_node_roles(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let saved = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &["The same forms save must preserve this translation."],
+    )
+    .await;
+    let entry_id = saved["word"]["id"].as_str().unwrap();
+    let sentence_before = first_sentence(&saved).clone();
+
+    let (status, repeated) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": saved["word"]["revision"],
+            "intent": "complete",
+            "content": saved["word"]["forms"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "词形重存不得破坏 V3 分层译文节点：{repeated}"
+    );
+
+    assert_eq!(
+        first_sentence(&repeated)["id"],
+        sentence_before["id"],
+        "重复保存不得替换 sentence 节点身份"
+    );
+    assert_eq!(
+        first_sentence(&repeated)["zh_text_id"],
+        sentence_before["zh_text_id"],
+        "重复保存不得替换中文译文别名节点身份"
+    );
+    assert_eq!(
+        first_sentence(&repeated)["zh_translations"],
+        sentence_before["zh_translations"]
+    );
+    let translation_id =
+        Uuid::parse_str(first_sentence(&repeated)["zh_text_id"].as_str().unwrap()).unwrap();
+    let stored_roles: (String, String) = sqlx::query_as(
+        r#"
+        SELECT node.node_role, translation.field_role
+        FROM lexicon.nodes node
+        JOIN lexicon.text_variants translation ON translation.id = node.id
+        WHERE node.entry_id = $1::uuid AND node.id = $2::uuid
+        "#,
+    )
+    .bind(entry_id)
+    .bind(translation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored_roles,
+        (
+            "meanings.zh_translation_b1_b2:zh:common".to_owned(),
+            "zh_translation_b1_b2".to_owned()
+        )
+    );
+}
+
+#[sqlx::test]
+async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let word = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &["A sentence with three translations."],
+    )
+    .await;
+    let entry_id = word["word"]["id"].as_str().unwrap();
+    let sentence_id = first_sentence(&word)["id"].as_str().unwrap();
+    let initial = &first_sentence(&word)["zh_translations"];
+    assert_eq!(initial.as_array().unwrap().len(), 1);
+    assert_eq!(initial[0]["band"], "b1_b2");
+
+    let c_id = Uuid::now_v7();
+    let b_id = initial[0]["id"].as_str().unwrap().to_owned();
+    let a_id = Uuid::now_v7();
+    let mut meanings = word["word"]["meanings"].clone();
+    let sentence = &mut meanings["pos"][0]["senses"][0]["sentences"][0];
+    sentence["zh_translations"] = json!([
+        {"id": a_id, "band": "a1_a2", "content": rich_text("高阶译文")},
+        {"id": c_id, "band": "c1_c2", "content": rich_text("初阶译文")},
+        {"id": b_id, "band": "b1_b2", "content": rich_text("中阶译文")}
+    ]);
+    let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
+    let translations = first_sentence(&saved)["zh_translations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        translations
+            .iter()
+            .map(|translation| translation["band"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["c1_c2", "b1_b2", "a1_a2"]
+    );
+    assert_eq!(first_sentence(&saved)["zh_text_id"], b_id);
+    assert_eq!(first_sentence(&saved)["zh_text"]["text"], "中阶译文");
+
+    let stored: Vec<(Uuid, String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, field_role, plain_text
+        FROM lexicon.text_variants
+        WHERE entry_id = $1::uuid
+          AND owner_node_id = $2::uuid
+          AND field_role LIKE 'zh_translation_%'
+        ORDER BY sort_order
+        "#,
+    )
+    .bind(entry_id)
+    .bind(sentence_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_eq!(
+        stored
+            .iter()
+            .map(|(_, role, text)| (role.as_str(), text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("zh_translation_c1_c2", "初阶译文"),
+            ("zh_translation_b1_b2", "中阶译文"),
+            ("zh_translation_a1_a2", "高阶译文"),
+        ]
+    );
+    let duplicate_band = sqlx::query(
+        r#"
+        UPDATE lexicon.text_variants
+        SET field_role = 'zh_translation_b1_b2'
+        WHERE id = $1
+        "#,
+    )
+    .bind(c_id)
+    .execute(&pool)
+    .await;
+    assert!(
+        duplicate_band.is_err(),
+        "数据库 slot 唯一约束必须拒绝同一句重复 translation band"
+    );
+
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(
+        first_sentence(&reloaded)["zh_translations"],
+        first_sentence(&saved)["zh_translations"]
+    );
+
+    let mut changed_level_meanings = reloaded["word"]["meanings"].clone();
+    changed_level_meanings["pos"][0]["senses"][0]["sentences"][0]["level"] = json!("A1");
+    let changed_level = save_v3_meanings(&state, &bearer, &reloaded, changed_level_meanings).await;
+    assert_eq!(
+        first_sentence(&changed_level)["zh_text_id"],
+        a_id.to_string()
+    );
+    assert_eq!(
+        first_sentence(&changed_level)["zh_translations"],
+        first_sentence(&saved)["zh_translations"]
+    );
+
+    let mut compatibility_meanings = changed_level["word"]["meanings"].clone();
+    compatibility_meanings["pos"][0]["senses"][0]["sentences"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("zh_translations");
+    let compatibility_saved =
+        save_v3_meanings(&state, &bearer, &changed_level, compatibility_meanings).await;
+    assert_eq!(
+        first_sentence(&compatibility_saved)["zh_translations"],
+        first_sentence(&changed_level)["zh_translations"],
+        "旧客户端缺少 zh_translations 时必须保留已有三档译文"
+    );
+
+    let mut explicit_clear = compatibility_saved["word"]["meanings"].clone();
+    explicit_clear["pos"][0]["senses"][0]["sentences"][0]["zh_translations"] = json!([]);
+    let explicitly_cleared =
+        save_v3_meanings(&state, &bearer, &compatibility_saved, explicit_clear).await;
+    let cleared_translations = first_sentence(&explicitly_cleared)["zh_translations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(cleared_translations.len(), 1);
+    assert_eq!(cleared_translations[0]["id"], a_id.to_string());
+    assert_eq!(cleared_translations[0]["content"]["text"], "高阶译文");
+}
+
+#[sqlx::test]
+async fn published_sentence_associations_accept_pending_phrase_with_prefilled_gloss(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let mut flags = SmartLexiconV3Flags::all_enabled();
+    flags.sentence_target_discovery = false;
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(flags);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let picture = create_and_publish(&state, &pool, &bearer, "picture").await;
+
+    let saved = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &[
+            "A picture marks the center of the wall.",
+            "Another picture waits.",
+        ],
+    )
+    .await;
+    let sentence_id = first_sentence(&saved)["id"].as_str().unwrap().to_owned();
+    assert_eq!(first_sentence(&saved)["associations_state"], "unresolved");
+
+    let association_id = Uuid::now_v7().to_string();
+    let pending_input = json!([{
+        "id": association_id,
+        "source_dialect": "common",
+        "source_range": {
+            "start": 20,
+            "end": 38,
+            "surface": "center of the wall"
+        },
+        "pending_target_kind": "phrase",
+        "pending_target_headword": "center of the wall",
+        "pending_target_gloss": "墙的中心位置"
+    }]);
+    let mut disabled_flags = SmartLexiconV3Flags::all_enabled();
+    disabled_flags.sentence_associations = false;
+    let disabled_state = state
+        .clone()
+        .with_smart_lexicon_v3_flags_for_test(disabled_flags);
+    let (disabled_status, disabled) = replace_associations(
+        &disabled_state,
+        &bearer,
+        &saved,
+        &sentence_id,
+        Uuid::now_v7(),
+        pending_input.clone(),
+    )
+    .await;
+    assert_eq!(
+        disabled_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{disabled}"
+    );
+
+    let (status, edited) = replace_associations(
+        &state,
+        &bearer,
+        &saved,
+        &sentence_id,
+        Uuid::now_v7(),
+        pending_input,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(first_sentence(&edited)["associations_state"], "resolved");
+    assert_eq!(
+        edited["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][1]["associations_state"],
+        "unresolved",
+        "单句 PUT 不得顺带解析或审计其他 unresolved 例句"
+    );
+    assert!(
+        first_sentence(&edited)["associations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["origin"] == "auto"
+                    && item["source_segments"][0]["surface"] == "picture"
+                    && item["target_word_id"] == picture["word"]["id"]
+            }),
+        "unresolved 新句人工保存时仍应合并不重叠的自动关联"
+    );
+
+    let (status, published) = publish_ready_v3(&state, &bearer, &edited).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+
+    let association = first_sentence(&published)["associations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == association_id)
+        .unwrap();
+    assert_eq!(association["id"], association_id);
+    assert_eq!(association["state"], "pending");
+    assert_eq!(association["origin"], "manual");
+    assert_eq!(association["pending_target_kind"], "phrase");
+    assert_eq!(association["pending_target_headword"], "center of the wall");
+    assert_eq!(
+        association["normalized_pending_target_headword"],
+        "center of the wall"
+    );
+    assert_eq!(association["pending_target_gloss"], "墙的中心位置");
+    assert!(association.get("target_word_id").is_none());
+    assert!(association.get("target_sense_id").is_none());
+    assert!(association.get("resolved_pos").is_none());
+
+    let stored: (String, Option<Uuid>, Option<String>, Option<String>) = sqlx::query_as(
+        r#"
+        SELECT state, target_entry_id, normalized_pending_target_headword, pending_target_gloss
+        FROM lexicon.sentence_associations
+        WHERE id = $1::uuid
+        "#,
+    )
+    .bind(&association_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "pending");
+    assert_eq!(stored.1, None);
+    assert_eq!(stored.2.as_deref(), Some("center of the wall"));
+    assert_eq!(stored.3.as_deref(), Some("墙的中心位置"));
+
+    let invalid_mixed_shape = sqlx::query(
+        "UPDATE lexicon.sentence_associations SET target_entry_id = entry_id WHERE id = $1::uuid",
+    )
+    .bind(&association_id)
+    .execute(&pool)
+    .await;
+    assert!(
+        invalid_mixed_shape.is_err(),
+        "数据库 CHECK 必须最终拒绝同时带 Pending 与 target UUID 的混合形状"
+    );
+
+    sqlx::query(
+        "UPDATE lexicon.sentence_association_scans SET resolver_version = 2 WHERE sentence_id = $1::uuid",
+    )
+    .bind(&sentence_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut meanings = published["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["sentences"][0]["zh_text"] = rich_text("只改中文译文。");
+    let translation_saved = save_v3_meanings(&state, &bearer, &published, meanings).await;
+    let (status, translation_published) =
+        publish_ready_v3(&state, &bearer, &translation_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{translation_published}");
+    assert!(
+        first_sentence(&translation_published)["associations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == association_id && item["state"] == "pending"),
+        "只改译文或 resolver 升级时必须保留人工 Pending"
+    );
+
+    let changed = save_v3_example_sentence(
+        &state,
+        &bearer,
+        &translation_published,
+        "The entire sentence changed.",
+    )
+    .await;
+    let (status, changed_published) = publish_ready_v3(&state, &bearer, &changed).await;
+    assert_eq!(status, StatusCode::CREATED, "{changed_published}");
+    assert!(
+        first_sentence(&changed_published)["associations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["id"] != association_id),
+        "英文正文变化后旧 Pending range 不能被静默平移"
+    );
+}
+
+#[sqlx::test]
+async fn pending_sentence_association_lists_for_target_and_claims_once(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let saved = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &[
+            "It is centered on the center of the wall.",
+            "Keep the center of the wall visible.",
+        ],
+    )
+    .await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let sentence_id = first_sentence(&published)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let association_id = Uuid::now_v7();
+    let (status, pending_owner) = replace_associations(
+        &state,
+        &bearer,
+        &published,
+        &sentence_id,
+        Uuid::now_v7(),
+        json!([{
+            "id": association_id,
+            "source_dialect": "common",
+            "source_range": {
+                "start": 22,
+                "end": 40,
+                "surface": "center of the wall"
+            },
+            "pending_target_kind": "phrase",
+            "pending_target_headword": "center of the wall",
+            "pending_target_gloss": "墙的中心位置"
+        }]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pending_owner}");
+
+    let second_sentence_id =
+        published["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][1]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    let second_association_id = Uuid::now_v7();
+    let (status, second_pending_owner) = replace_associations(
+        &state,
+        &bearer,
+        &pending_owner,
+        &second_sentence_id,
+        Uuid::now_v7(),
+        json!([{
+            "id": second_association_id,
+            "source_dialect": "common",
+            "source_range": {
+                "start": 9,
+                "end": 27,
+                "surface": "center of the wall"
+            },
+            "pending_target_kind": "phrase",
+            "pending_target_headword": "center of the wall"
+        }]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second_pending_owner}");
+
+    let (target_entry_id, target_sense_id) = seed_related_search_entry(
+        &pool,
+        admin_id,
+        "center of the wall",
+        "phrase",
+        "墙的中心位置",
+        true,
+        false,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO lexicon.nodes (id, entry_id, node_type) VALUES ($1, $2, 'sense') ON CONFLICT DO NOTHING",
+    )
+    .bind(target_sense_id)
+    .bind(target_entry_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, page) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{target_entry_id}/pending-sentence-associations?page_size=1"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["total"], 2);
+    let next_cursor = page["next_cursor"].as_str().expect("第一页必须有游标");
+    assert_eq!(
+        page["results"][0]["association_id"],
+        association_id.to_string()
+    );
+    assert_eq!(
+        page["results"][0]["pending_target_headword"],
+        "center of the wall"
+    );
+    assert_eq!(page["results"][0]["pending_target_gloss"], "墙的中心位置");
+
+    let (status, second_page) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/{target_entry_id}/pending-sentence-associations?page_size=1&cursor={next_cursor}"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second_page}");
+    assert_eq!(second_page["total"], 2);
+    assert_eq!(second_page["next_cursor"], Value::Null);
+    assert_eq!(
+        second_page["results"][0]["association_id"],
+        second_association_id.to_string()
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE lexicon.text_variants
+        SET plain_text = 'Changed after the association scan.'
+        WHERE owner_node_id = $1::uuid
+          AND field_role = 'en_text'
+          AND dialect = 'common'
+        "#,
+    )
+    .bind(&second_sentence_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, active_page) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{target_entry_id}/pending-sentence-associations?page_size=20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{active_page}");
+    assert_eq!(active_page["total"], 1);
+    assert_eq!(
+        active_page["results"][0]["association_id"],
+        association_id.to_string()
+    );
+
+    let (stale_status, stale_claim) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/pending-sentence-associations/{second_association_id}/claim"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "target_word_id": target_entry_id,
+            "target_sense_id": target_sense_id,
+            "base_owner_entry_revision": second_pending_owner["word"]["revision"],
+            "base_owner_lifecycle_revision": second_pending_owner["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::NOT_FOUND, "{stale_claim}");
+    assert_eq!(
+        stale_claim["code"],
+        "pending_sentence_association_not_found"
+    );
+
+    let (wrong_target_id, wrong_sense_id) = seed_related_search_entry(
+        &pool,
+        admin_id,
+        "edge of the roof",
+        "phrase",
+        "屋顶边缘",
+        true,
+        false,
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO lexicon.nodes (id, entry_id, node_type) VALUES ($1, $2, 'sense') ON CONFLICT DO NOTHING",
+    )
+    .bind(wrong_sense_id)
+    .bind(wrong_target_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (wrong_status, wrong_claim) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/pending-sentence-associations/{association_id}/claim"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "target_word_id": wrong_target_id,
+            "target_sense_id": wrong_sense_id,
+            "base_owner_entry_revision": second_pending_owner["word"]["revision"],
+            "base_owner_lifecycle_revision": second_pending_owner["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        wrong_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{wrong_claim}"
+    );
+    assert!(
+        has_issue(&wrong_claim, "sentence_association_target_surface_mismatch"),
+        "认领不得绑定到词面完全不同的同类目标：{wrong_claim}"
+    );
+
+    let claim_path = format!("{ROOT}/pending-sentence-associations/{association_id}/claim");
+    let claim_body = json!({
+        "target_word_id": target_entry_id,
+        "target_sense_id": target_sense_id,
+        "base_owner_entry_revision": second_pending_owner["word"]["revision"],
+        "base_owner_lifecycle_revision": second_pending_owner["word"]["lifecycle_revision"]
+    });
+    let first_key = Uuid::now_v7();
+    let second_key = Uuid::now_v7();
+    let first_claim = call(
+        &state,
+        Method::POST,
+        &claim_path,
+        &bearer,
+        Some(first_key),
+        Some(claim_body.clone()),
+    );
+    let second_claim = call(
+        &state,
+        Method::POST,
+        &claim_path,
+        &bearer,
+        Some(second_key),
+        Some(claim_body.clone()),
+    );
+    let (first_result, second_result) = tokio::join!(first_claim, second_claim);
+    let (claimed, winning_key, conflict) = match (first_result, second_result) {
+        ((StatusCode::OK, claimed), (StatusCode::CONFLICT, conflict)) => {
+            (claimed, first_key, conflict)
+        }
+        ((StatusCode::CONFLICT, conflict), (StatusCode::OK, claimed)) => {
+            (claimed, second_key, conflict)
+        }
+        (first, second) => panic!("并发认领应一成一败，实际 first={first:?}, second={second:?}"),
+    };
+    assert_eq!(conflict["code"], "pending_sentence_association_claimed");
+    let association = &first_sentence(&claimed)["associations"][0];
+    assert_eq!(association["id"], association_id.to_string());
+    assert_eq!(association["state"], "linked");
+    assert_eq!(association["target_word_id"], target_entry_id.to_string());
+    assert_eq!(association["target_sense_id"], target_sense_id.to_string());
+    assert!(association.get("pending_target_headword").is_none());
+
+    let (status, replayed) = call(
+        &state,
+        Method::POST,
+        &claim_path,
+        &bearer,
+        Some(winning_key),
+        Some(claim_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(replayed, claimed);
 }
 
 #[sqlx::test]
@@ -11599,23 +12874,33 @@ async fn changing_sentence_text_defers_reparsing_to_the_next_publish(pool: PgPoo
     assert_eq!(kept[0]["target_sense_id"], table_sense_id.as_str());
     assert_eq!(kept[0]["origin"], "manual");
 
-    // 改正文：当前发布版本还是旧正文，关联要等下一次发布才重新解析。
+    // 改正文后，人工整组保存直接以当前正文/range 建立新 scan，供新增例句两阶段保存使用。
     let changed = save_example_sentence(&state, &bearer, &republished, "A table here.").await;
     assert_eq!(first_sentence(&changed)["associations_state"], "unresolved");
     assert_eq!(first_sentence(&changed)["associations"], json!([]));
-    let (status, blocked) = replace_associations(
+    let replacement_id = Uuid::now_v7().to_string();
+    let (status, manually_resolved) = replace_associations(
         &state,
         &bearer,
         &changed,
         &sentence_id,
         Uuid::now_v7(),
-        json!([]),
+        json!([{
+            "id": replacement_id,
+            "source_dialect": "common",
+            "source_range": { "start": 2, "end": 7, "surface": "table" },
+            "target_word_id": table_entry_id,
+            "target_sense_id": table_sense_id,
+        }]),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
-    assert_eq!(blocked["code"], "sentence_associations_unresolved");
+    assert_eq!(status, StatusCode::OK, "{manually_resolved}");
+    assert_eq!(
+        first_sentence(&manually_resolved)["associations_state"],
+        "resolved"
+    );
 
-    let (status, republished) = publish_ready(&state, &bearer, &changed).await;
+    let (status, republished) = publish_ready(&state, &bearer, &manually_resolved).await;
     assert_eq!(status, StatusCode::CREATED, "{republished}");
     let reparsed = first_sentence(&republished)["associations"]
         .as_array()
@@ -11623,10 +12908,8 @@ async fn changing_sentence_text_defers_reparsing_to_the_next_publish(pool: PgPoo
         .clone();
     assert_eq!(reparsed.len(), 1, "{reparsed:?}");
     assert_eq!(reparsed[0]["source_range"]["surface"], "table");
-    assert_eq!(
-        reparsed[0]["origin"], "auto",
-        "整侧重算，人工痕迹随旧正文一起走"
-    );
+    assert_eq!(reparsed[0]["id"], replacement_id);
+    assert_eq!(reparsed[0]["origin"], "manual");
 }
 
 #[sqlx::test]
@@ -11649,19 +12932,6 @@ async fn sentence_association_edits_reject_bad_ranges_and_unavailable_targets(po
     let source = create_ready_draft(&state, &pool, &bearer, "picture").await;
     let saved = save_example_sentence(&state, &bearer, &source, "A wall near a table.").await;
     let sentence_id = first_sentence(&saved)["id"].as_str().unwrap().to_owned();
-
-    // 从未发布的草稿：当前正文没解析过，编辑入口不开放。
-    let (status, unresolved) = replace_associations(
-        &state,
-        &bearer,
-        &saved,
-        &sentence_id,
-        Uuid::now_v7(),
-        json!([]),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{unresolved}");
-    assert_eq!(unresolved["code"], "sentence_associations_unresolved");
 
     let (status, published) = publish_ready(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
@@ -12125,7 +13395,8 @@ async fn v3_persists_all_three_pos_dialect_rule_combinations(pool: PgPool) {
         Some(json!({
             "schema_version": 3,
             "detection_id": detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&detection)
         })),
     )
     .await;
@@ -12333,7 +13604,8 @@ async fn v3_pronoun_saves_a_fixed_non_base_form_and_round_trips_it(pool: PgPool)
         Some(json!({
             "schema_version": 3,
             "detection_id": detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&detection)
         })),
     )
     .await;
@@ -12469,7 +13741,8 @@ async fn v3_meanings_draft_saves_before_forms_complete_but_complete_is_blocked(p
         Some(json!({
             "schema_version": 3,
             "detection_id": detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&detection)
         })),
     )
     .await;
@@ -12536,6 +13809,58 @@ async fn v3_meanings_draft_saves_before_forms_complete_but_complete_is_blocked(p
             .iter()
             .any(|step| step == "meanings")
     );
+
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(reloaded["word"]["revision"], 3);
+    assert_eq!(
+        reloaded["word"]["meanings"],
+        meanings_saved["word"]["meanings"]
+    );
+    assert_eq!(reloaded["word"]["completed_steps"], json!(["basics"]));
+    assert_eq!(reloaded["word"]["max_reachable_step"], "forms");
+
+    let (status, validation) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/validate"),
+        &bearer,
+        None,
+        Some(json!({"schema_version": 3, "base_revision": 3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{validation}");
+    assert_eq!(validation["valid"], false, "{validation}");
+    assert!(
+        validation["issues"]
+            .as_array()
+            .is_some_and(|issues| issues.iter().any(|issue| issue["step"] == "forms")),
+        "预览边界必须继续报告未完成词形：{validation}"
+    );
+
+    let (status, _, publish_blocked) = call_problem(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        json!({"schema_version": 3, "base_revision": 3}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{publish_blocked}"
+    );
+    assert_eq!(publish_blocked["code"], "validation_failed");
 
     let (status, _, blocked) = call_problem(
         &state,
@@ -13021,7 +14346,8 @@ async fn v3_form_storage_uses_the_authoritative_surface_normalization(pool: PgPo
         Some(json!({
             "schema_version": 3,
             "detection_id": detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&detection)
         })),
     )
     .await;
@@ -13285,6 +14611,770 @@ async fn v3_pending_relation_gloss_round_trips_and_materializes(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn v3_draft_relation_prebinding_promotes_once_and_detaches_without_rebinding(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let target_id = target_forms["word"]["id"].as_str().unwrap();
+    let target_headword = target_forms["word"]["presentation"]["label"]
+        .as_str()
+        .unwrap();
+
+    let (status, default_search) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "默认搜索失败：{default_search}");
+    assert!(
+        default_search["results"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "未 opt-in 时不得暴露草稿：{default_search}"
+    );
+
+    let (status, draft_search) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20&include_drafts=true"
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "草稿搜索失败：{draft_search}");
+    let target_result = draft_search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["entry_id"] == target_id)
+        .expect("include_drafts 应返回零词义目标草稿");
+    assert_eq!(target_result["status"], "draft");
+    assert_eq!(target_result["senses"], json!([]));
+
+    let source_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let source_id = source_forms["word"]["id"].as_str().unwrap();
+    let relation_id = Uuid::now_v7();
+    let mut source_meanings =
+        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "synonym",
+        "prebound_target_word_id": target_id,
+        "pending_target_headword": target_headword,
+        "pending_target_gloss": "管理员预先填写的释义",
+        "score": "88.00"
+    }]);
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_forms["word"]["revision"],
+            "intent": "complete",
+            "content": source_meanings.clone()
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "零词义预绑定保存失败：{source_saved}"
+    );
+    let source_revision = source_saved["word"]["revision"].as_i64().unwrap();
+    let waiting = &source_saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(waiting["prebound_target_word_id"], target_id);
+    assert_eq!(waiting["prebinding_state"], "waiting_first_sense");
+    assert_eq!(waiting["target_status"], "draft");
+    assert_eq!(waiting["pending_target_gloss"], "管理员预先填写的释义");
+
+    let disabled_redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let mut disabled_flags = SmartLexiconV3Flags::all_enabled();
+    disabled_flags.draft_relation_prebinding = false;
+    let disabled_state = AppState::for_test_with_redis(pool.clone(), disabled_redis)
+        .with_smart_lexicon_v3_flags_for_test(disabled_flags);
+    let disabled_bearer = token(&disabled_state, admin_id);
+    source_meanings["pos"][0]["senses"][0]["relations"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("prebound_target_word_id");
+    let (status, disabled_save) = call(
+        &disabled_state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &disabled_bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_revision,
+            "intent": "complete",
+            "content": source_meanings
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "capability 关闭时旧客户端不得清掉稳定预绑定：{disabled_save}"
+    );
+    assert_eq!(
+        disabled_save["code"],
+        "smart_lexicon_v3_storage_unavailable"
+    );
+
+    let (status, delete_blocked) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{target_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": target_forms["word"]["revision"],
+            "base_lifecycle_revision": target_forms["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "预绑定目标不得永久删除：{delete_blocked}"
+    );
+    assert_eq!(
+        delete_blocked["code"],
+        "entry_has_inbound_prebound_relations"
+    );
+
+    let (status, waiting_publish) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_id}/publications"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "waiting 来源发布必须阻断：{waiting_publish}"
+    );
+    assert!(has_issue(
+        &waiting_publish,
+        "relation_prebound_target_has_no_sense"
+    ));
+
+    let (status, archived_target) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": target_forms["word"]["revision"],
+            "base_lifecycle_revision": target_forms["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "预绑定目标归档失败：{archived_target}"
+    );
+    let (status, archived_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        archived_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_status"],
+        "archived"
+    );
+    let mut archived_publish_body = json!({
+        "schema_version": 3,
+        "base_revision": source_revision
+    });
+    let (mut status, mut archived_publish) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_id}/publications"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(archived_publish_body.clone()),
+    )
+    .await;
+    if status == StatusCode::CONFLICT
+        && archived_publish["code"] == "surface_match_acknowledgement_required"
+    {
+        archived_publish_body["confirmed_surface_match_token"] =
+            archived_publish["meta"]["surface_match_page"]["surface_confirmation_token"].clone();
+        (status, archived_publish) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/{source_id}/publications"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(archived_publish_body),
+        )
+        .await;
+    }
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "归档目标来源发布必须阻断：{archived_publish}"
+    );
+    assert!(has_issue(
+        &archived_publish,
+        "relation_prebound_target_archived"
+    ));
+    let mut restore_body = json!({
+        "base_revision": archived_target["word"]["revision"],
+        "base_lifecycle_revision": archived_target["word"]["lifecycle_revision"]
+    });
+    let (mut status, mut restored_target) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(restore_body.clone()),
+    )
+    .await;
+    if status == StatusCode::CONFLICT
+        && restored_target["code"] == "surface_match_acknowledgement_required"
+    {
+        restore_body["confirmed_surface_match_token"] =
+            restored_target["meta"]["surface_match_page"]["surface_confirmation_token"].clone();
+        (status, restored_target) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/{target_id}/restore"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(restore_body),
+        )
+        .await;
+    }
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "预绑定目标恢复失败：{restored_target}"
+    );
+
+    let mut target_meanings =
+        complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let first_sense_id = target_meanings["pos"][0]["senses"][0]["id"].clone();
+    let mut second_sense = target_meanings["pos"][0]["senses"][0].clone();
+    second_sense["id"] = json!(Uuid::now_v7());
+    second_sense["definitions"][0]["id"] = json!(Uuid::now_v7());
+    second_sense["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    second_sense["definitions"][0]["content"]["text"] = json!("第二条，不得优先绑定");
+    target_meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_sense);
+
+    let (status, target_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_forms["word"]["revision"],
+            "intent": "complete",
+            "content": target_meanings.clone()
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "目标第一词义保存失败：{target_saved}"
+    );
+
+    let (status, promoted_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "转正后读取来源失败：{promoted_source}"
+    );
+    assert_eq!(promoted_source["word"]["revision"], source_revision + 1);
+    let promoted = &promoted_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(promoted["id"], relation_id.to_string());
+    assert_eq!(promoted["target_word_id"], target_id);
+    assert_eq!(promoted["target_sense_id"], first_sense_id);
+    assert!(promoted["prebound_target_word_id"].is_null());
+    assert!(promoted["pending_target_gloss"].is_null());
+
+    target_meanings["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
+        json!("港湾（更新文本但保留稳定词义 ID）");
+    let (status, target_resaved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_saved["word"]["revision"],
+            "intent": "complete",
+            "content": target_meanings.clone()
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "重复 reconciliation 保存失败：{target_resaved}"
+    );
+    let (status, source_after_repeat) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source_after_repeat["word"]["revision"], source_revision + 1);
+    assert_eq!(
+        source_after_repeat["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_sense_id"],
+        first_sense_id
+    );
+
+    let mut without_first = target_meanings;
+    without_first["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    let (status, target_without_sense) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_resaved["word"]["revision"],
+            "intent": "save",
+            "content": without_first
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "删除已绑定词义失败：{target_without_sense}"
+    );
+
+    let (status, detached_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "退回后读取来源失败：{detached_source}"
+    );
+    let detached = &detached_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(detached["prebound_target_word_id"], target_id);
+    assert_eq!(detached["prebinding_state"], "target_sense_deleted");
+    assert!(detached["target_sense_id"].is_null());
+    let (status, detached_validation) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_id}/validate"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": detached_source["word"]["revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "detached 校验失败：{detached_validation}"
+    );
+    assert_eq!(detached_validation["valid"], false);
+    assert!(
+        detached_validation["issues"]
+            .as_array()
+            .is_some_and(|issues| issues
+                .iter()
+                .any(|issue| issue["code"] == "relation_target_sense_deleted")),
+        "detached 必须返回稳定 issue，而不是把展示词面当 text pending：{detached_validation}"
+    );
+
+    let replacement = complete_v3_meanings_fixture(
+        target_without_sense["word"]["forms"]["pos"][0]["pos_id"].clone(),
+    );
+    let (status, recreated) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_without_sense["word"]["revision"],
+            "intent": "complete",
+            "content": replacement
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "目标重建词义失败：{recreated}");
+    let (status, still_detached_source) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let still_detached =
+        &still_detached_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(still_detached["prebinding_state"], "target_sense_deleted");
+    assert!(still_detached["target_sense_id"].is_null());
+
+    let replacement_sense_id = recreated["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let mut repaired_meanings = still_detached_source["word"]["meanings"].clone();
+    let repaired_relation = repaired_meanings["pos"][0]["senses"][0]["relations"][0]
+        .as_object_mut()
+        .unwrap();
+    repaired_relation.insert("target_word_id".to_owned(), json!(target_id));
+    repaired_relation.insert("target_sense_id".to_owned(), replacement_sense_id.clone());
+    for read_or_prebound in [
+        "prebound_target_word_id",
+        "prebinding_state",
+        "target_status",
+        "pending_target_headword",
+        "pending_target_gloss",
+        "target_headword",
+        "target_gloss",
+    ] {
+        repaired_relation.remove(read_or_prebound);
+    }
+    let (status, repaired_source) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": still_detached_source["word"]["revision"],
+            "intent": "complete",
+            "content": repaired_meanings
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "detached 显式重选失败：{repaired_source}"
+    );
+    let repaired = &repaired_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(repaired["id"], relation_id.to_string());
+    assert_eq!(repaired["target_word_id"], target_id);
+    assert_eq!(repaired["target_sense_id"], replacement_sense_id);
+    assert!(repaired["prebound_target_word_id"].is_null());
+}
+
+#[sqlx::test]
+async fn v3_relation_prebinding_reconciliation_is_atomic_at_500_and_501(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    for relation_count in [500usize, 501usize] {
+        let target_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+        let target_id = target_forms["word"]["id"].as_str().unwrap();
+        let target_headword = target_forms["word"]["presentation"]["label"]
+            .as_str()
+            .unwrap();
+        let source_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+        let source_id = source_forms["word"]["id"].as_str().unwrap();
+        let mut source_meanings =
+            complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+        source_meanings["pos"][0]["senses"][0]["relations"] = Value::Array(
+            (0..relation_count)
+                .map(|ordinal| {
+                    json!({
+                        "id": Uuid::now_v7(),
+                        "relation": "synonym",
+                        "prebound_target_word_id": target_id,
+                        "pending_target_headword": target_headword,
+                        "score": format!("{}", ordinal % 101)
+                    })
+                })
+                .collect(),
+        );
+        let (status, source_saved) = call(
+            &state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "base_revision": source_forms["word"]["revision"],
+                "intent": "complete",
+                "content": source_meanings
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{relation_count} 条预绑定保存失败：{source_saved}"
+        );
+        let source_revision = source_saved["word"]["revision"].as_i64().unwrap();
+        let target_revision = target_forms["word"]["revision"].as_i64().unwrap();
+        let target_meanings =
+            complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+        let (status, target_saved) = call(
+            &state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "base_revision": target_revision,
+                "intent": "complete",
+                "content": target_meanings
+            })),
+        )
+        .await;
+
+        let (read_status, source_after) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/{source_id}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(read_status, StatusCode::OK);
+        let relations = source_after["word"]["meanings"]["pos"][0]["senses"][0]["relations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(relations.len(), relation_count);
+        if relation_count == 500 {
+            assert_eq!(status, StatusCode::OK, "500 条应全部成功：{target_saved}");
+            assert_eq!(source_after["word"]["revision"], source_revision + 1);
+            assert!(relations.iter().all(|relation| {
+                relation["target_word_id"] == target_id
+                    && relation["prebound_target_word_id"].is_null()
+            }));
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::CONFLICT,
+                "501 条必须整体拒绝：{target_saved}"
+            );
+            assert_eq!(target_saved["code"], "relation_prebinding_fanout_exceeded");
+            assert_eq!(source_after["word"]["revision"], source_revision);
+            assert!(relations.iter().all(|relation| {
+                relation["prebound_target_word_id"] == target_id
+                    && relation["target_word_id"].is_null()
+            }));
+            let (target_read_status, target_after) = call(
+                &state,
+                Method::GET,
+                &format!("{ROOT}/entries/{target_id}"),
+                &bearer,
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(target_read_status, StatusCode::OK);
+            assert_eq!(target_after["word"]["revision"], target_revision);
+            assert!(
+                target_after["word"]["meanings"]["pos"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[sqlx::test]
+async fn v3_relation_prebinding_uses_nowait_and_retries_without_partial_writes(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let target_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let source_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let target_id = target_forms["word"]["id"].as_str().unwrap();
+    let source_id = source_forms["word"]["id"].as_str().unwrap();
+    let mut source_meanings =
+        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "prebound_target_word_id": target_id,
+        "pending_target_headword": target_forms["word"]["presentation"]["label"],
+        "score": "80"
+    }]);
+    let (status, source_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_forms["word"]["revision"],
+            "intent": "complete",
+            "content": source_meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{source_saved}");
+    let source_revision = source_saved["word"]["revision"].as_i64().unwrap();
+    let target_revision = target_forms["word"]["revision"].as_i64().unwrap();
+    let target_meanings =
+        complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let target_request = json!({
+        "schema_version": 3,
+        "base_revision": target_revision,
+        "intent": "complete",
+        "content": target_meanings
+    });
+
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM lexicon.entries WHERE id = $1 FOR UPDATE")
+        .bind(Uuid::parse_str(source_id).unwrap())
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let (status, conflict) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(target_request.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "NOWAIT 应快速返回 409：{conflict}"
+    );
+    assert_eq!(conflict["code"], "reference_conflict");
+    blocker.rollback().await.unwrap();
+
+    let (status, target_after_conflict) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{target_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(target_after_conflict["word"]["revision"], target_revision);
+    let (status, source_after_conflict) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source_after_conflict["word"]["revision"], source_revision);
+    assert_eq!(
+        source_after_conflict["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["prebinding_state"],
+        "waiting_first_sense"
+    );
+
+    let (status, retried) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(target_request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "释放锁后重试应收敛：{retried}");
+    let (status, source_after_retry) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source_after_retry["word"]["revision"], source_revision + 1);
+    assert_eq!(
+        source_after_retry["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"],
+        target_id
+    );
+}
+
+#[sqlx::test]
 async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
@@ -13317,7 +15407,8 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
     let create_body = json!({
         "schema_version": 3,
         "detection_id": detection["detection_id"],
-        "kind": "word"
+        "kind": "word",
+        "headwords": v3_confirmed_headwords(&detection)
     });
     let create_key = Uuid::now_v7();
     let (status, created) = call(
@@ -13471,7 +15562,7 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
 
     let read_disabled_state = state
         .clone()
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::default());
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_disabled());
     let (status, v2_only_list) = call(
         &read_disabled_state,
         Method::GET,
@@ -13872,7 +15963,8 @@ async fn v3_projection_flag_blocks_every_projection_dependent_write_without_muta
     let mut create_body = json!({
         "schema_version": 3,
         "detection_id": detection["detection_id"],
-        "kind": "word"
+        "kind": "word",
+        "headwords": v3_confirmed_headwords(&detection)
     });
     if let Some(token) = detection["surface_match_page"]["surface_confirmation_token"].as_str() {
         create_body["confirmed_surface_match_token"] = json!(token);
@@ -14731,6 +16823,7 @@ async fn v2_and_v3_relations_resolve_native_v3_draft_presentation_and_staleness(
             "schema_version": 3,
             "detection_id": detection["detection_id"],
             "kind": "word",
+            "headwords": v3_confirmed_headwords(&detection),
             "confirmed_surface_match_token": stale_create_token
         })),
     )
@@ -14763,6 +16856,7 @@ async fn v2_and_v3_relations_resolve_native_v3_draft_presentation_and_staleness(
             "schema_version": 3,
             "detection_id": detection["detection_id"],
             "kind": "word",
+            "headwords": v3_confirmed_headwords(&detection),
             "confirmed_surface_match_token": refreshed_create_token
         })),
     )
@@ -15072,7 +17166,7 @@ async fn migrated_verified_v3_canary_publish_and_dual_version_activation(pool: P
     assert_eq!(v3_publication_schema, 3);
     let read_disabled_state = state
         .clone()
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::default());
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_disabled());
     let (status, hidden_v3_history) = call(
         &read_disabled_state,
         Method::GET,
@@ -15717,7 +17811,8 @@ async fn v3_detection_and_create_use_kaikki_forms_and_ipa_evidence(pool: PgPool)
         Some(json!({
             "schema_version": 3,
             "detection_id": detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&detection)
         })),
     )
     .await;
@@ -15782,7 +17877,8 @@ async fn v3_create_materializes_builtin_and_existing_pos_suggestions(pool: PgPoo
         Some(json!({
             "schema_version": 3,
             "detection_id": first_detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&first_detection)
         })),
     )
     .await;
@@ -15882,7 +17978,8 @@ async fn v3_create_materializes_builtin_and_existing_pos_suggestions(pool: PgPoo
     let duplicate_create = json!({
         "schema_version": 3,
         "detection_id": duplicate_detection["detection_id"],
-        "kind": "word"
+        "kind": "word",
+        "headwords": v3_confirmed_headwords(&duplicate_detection)
     });
     let (status, _, required) = call_problem(
         &state,
@@ -16003,7 +18100,8 @@ async fn v3_create_not_found_without_existing_pos_stays_blank(pool: PgPool) {
         Some(json!({
             "schema_version": 3,
             "detection_id": detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&detection)
         })),
     )
     .await;
@@ -16059,6 +18157,673 @@ async fn v3_create_not_found_without_existing_pos_stays_blank(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn v3_create_persists_confirmed_headwords_and_is_idempotent(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_word(&pool, "center").await;
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "center"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let key = Uuid::now_v7();
+    let create = json!({
+        "schema_version": 3,
+        "detection_id": detection["detection_id"],
+        "kind": "word",
+        "headwords": {
+            "mode": "distinguish",
+            "uk": "centre-final",
+            "us": "center",
+            "source_dialect": "us"
+        }
+    });
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(key),
+        Some(create.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let entry_id = Uuid::parse_str(created["word"]["id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["spelling"],
+        "centre-final"
+    );
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["us"]["spelling"],
+        "center"
+    );
+    assert_eq!(
+        created["word"]["presentation"]["matched_surfaces"],
+        json!(["center", "centre-final"])
+    );
+
+    let persisted_mode: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT headword_mode, source_dialect FROM lexicon.entries WHERE id = $1")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted_mode, (None, None));
+    let legacy_headword_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_headwords WHERE entry_id = $1")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(legacy_headword_count, 0, "native V3 不得写 legacy headword");
+    let persisted_headwords: Value = sqlx::query_scalar(
+        "SELECT initial_headwords FROM lexicon.v3_entry_state WHERE entry_id = $1",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted_headwords,
+        json!({
+            "mode": "distinguish",
+            "uk": "centre-final",
+            "us": "center",
+            "source_dialect": "us"
+        })
+    );
+    let persisted_editor_forms: Value =
+        sqlx::query_scalar("SELECT forms FROM lexicon.entry_editor_projection WHERE entry_id = $1")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted_editor_forms, created["word"]["forms"]);
+    let persisted_variants: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT dialect, spelling
+        FROM lexicon.v3_form_variants
+        WHERE entry_id = $1
+          AND form_id = (SELECT id FROM lexicon.v3_concrete_forms
+                         WHERE entry_id = $1 AND form_type = 'base'
+                         ORDER BY ordinal LIMIT 1)
+        ORDER BY dialect
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted_variants,
+        vec![
+            ("uk".to_owned(), "centre-final".to_owned()),
+            ("us".to_owned(), "center".to_owned())
+        ]
+    );
+    let persisted_presentation: (String, Vec<String>) = sqlx::query_as(
+        "SELECT label, matched_surfaces FROM lexicon.entry_presentation_projection WHERE entry_id = $1 AND source_revision = 1",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted_presentation,
+        (
+            "center / centre-final".to_owned(),
+            vec!["center".to_owned(), "centre-final".to_owned()]
+        )
+    );
+    let persisted_detection: Value =
+        sqlx::query_scalar("SELECT detection_snapshot FROM lexicon.entries WHERE id = $1")
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        persisted_detection["builtin_dictionary"], detection["builtin_dictionary"],
+        "管理员最终值不得覆盖原始检测建议"
+    );
+
+    let (status, replayed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(key),
+        Some(create.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["word"]["id"], created["word"]["id"]);
+
+    let mut changed = create;
+    changed["headwords"]["uk"] = json!("centre-other");
+    let (status, changed_response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(key),
+        Some(changed),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{changed_response}");
+    assert_eq!(changed_response["code"], "idempotency_conflict");
+}
+
+#[sqlx::test]
+async fn v3_create_uses_unified_and_not_found_final_headwords(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_term(&pool, "center", "word", "british_american").await;
+    seed_dictionary_term(&pool, "centre", "word", "british_core").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES
+            ($1, 'center', 'center', 'british_american', ARRAY['british_core', 'american_core'],
+             ARRAY['GB', 'US'], ARRAY['spelling'], ARRAY['noun'], ARRAY['centre'], true),
+            ($1, 'centre', 'centre', 'british_core', ARRAY['british_core'],
+             ARRAY['GB'], ARRAY['spelling'], ARRAY['noun'], ARRAY['center'], true)
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, matched) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "center"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{matched}");
+    assert_eq!(
+        matched["builtin_dictionary"]["suggested_forms"][0]["regional_variants"]["mode"],
+        "uk_us"
+    );
+    let (status, unified) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": matched["detection_id"],
+            "kind": "word",
+            "headwords": {"mode": "unified", "common": "central-final"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{unified}");
+    assert_eq!(
+        unified["word"]["presentation"]["matched_surfaces"],
+        json!(["central-final"])
+    );
+    let unified_variants = &unified["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"];
+    assert_eq!(
+        unified["word"]["forms"]["pos"][0]["dialect_rules"],
+        json!({"spelling_mode": "unified", "phonetic_mode": "distinguish"})
+    );
+    assert_eq!(unified_variants["uk"]["spelling"], "central-final");
+    assert_eq!(unified_variants["us"]["spelling"], "central-final");
+    let unified_entry = Uuid::parse_str(unified["word"]["id"].as_str().unwrap()).unwrap();
+    let persisted_unified: Value = sqlx::query_scalar(
+        "SELECT initial_headwords FROM lexicon.v3_entry_state WHERE entry_id = $1",
+    )
+    .bind(unified_entry)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted_unified,
+        json!({"mode": "unified", "common": "central-final"})
+    );
+
+    let (status, not_found) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "initial-not-found"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{not_found}");
+    assert_eq!(not_found["builtin_dictionary"]["status"], "not_found");
+    let (status, edited) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": not_found["detection_id"],
+            "kind": "word",
+            "headwords": {"mode": "unified", "common": "edited-not-found"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{edited}");
+    assert_eq!(edited["word"]["forms"], json!({"pos": []}));
+    assert_eq!(
+        edited["word"]["presentation"]["matched_surfaces"],
+        json!(["edited-not-found"])
+    );
+}
+
+#[sqlx::test]
+async fn v3_create_rejects_invalid_headwords_and_consumes_detection_once(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    for headwords in [
+        json!({"mode": "unified", "common": "   "}),
+        json!({
+            "mode": "distinguish",
+            "uk": "合法",
+            "us": "valid",
+            "source_dialect": "us"
+        }),
+    ] {
+        let surface = format!("invalid-headword-{}", Uuid::now_v7());
+        let (status, detection) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": surface
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detection}");
+        let (status, rejected) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(json!({
+                "schema_version": 3,
+                "detection_id": detection["detection_id"],
+                "kind": "word",
+                "headwords": headwords
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["code"], "invalid_headword");
+    }
+
+    let surface = format!("concurrent-headword-{}", Uuid::now_v7());
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let body = json!({
+        "schema_version": 3,
+        "detection_id": detection["detection_id"],
+        "kind": "word",
+        "headwords": {"mode": "unified", "common": surface}
+    });
+    let entries_url = format!("{ROOT}/entries");
+    let left = call(
+        &state,
+        Method::POST,
+        &entries_url,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(body.clone()),
+    );
+    let right = call(
+        &state,
+        Method::POST,
+        &entries_url,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(body),
+    );
+    let ((left_status, left_body), (right_status, right_body)) = tokio::join!(left, right);
+    let statuses = [left_status, right_status];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CREATED)
+            .count(),
+        1,
+        "同一 detection 并发必须只有一个成功：{left_status} {left_body} / {right_status} {right_body}"
+    );
+    let entry_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.entries WHERE detection_snapshot ->> 'normalized_surface' = $1",
+    )
+    .bind(&surface)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(entry_count, 1);
+}
+
+#[sqlx::test]
+async fn v3_create_rechecks_final_headwords_under_the_surface_lock(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_word(&pool, "surface-source-alpha").await;
+    seed_dictionary_word(&pool, "surface-source-beta").await;
+
+    let mut detections = Vec::new();
+    for surface in ["surface-source-alpha", "surface-source-beta"] {
+        let (status, detection) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": surface
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detection}");
+        detections.push(detection);
+    }
+
+    let bodies = detections
+        .iter()
+        .map(|detection| {
+            json!({
+                "schema_version": 3,
+                "detection_id": detection["detection_id"],
+                "kind": "word",
+                "headwords": {"mode": "unified", "common": "shared-final-surface"}
+            })
+        })
+        .collect::<Vec<_>>();
+    let entries_url = format!("{ROOT}/entries");
+    let left = call(
+        &state,
+        Method::POST,
+        &entries_url,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(bodies[0].clone()),
+    );
+    let right = call(
+        &state,
+        Method::POST,
+        &entries_url,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(bodies[1].clone()),
+    );
+    let ((left_status, left_body), (right_status, right_body)) = tokio::join!(left, right);
+    assert_eq!(
+        [left_status, right_status]
+            .iter()
+            .filter(|status| **status == StatusCode::CREATED)
+            .count(),
+        1,
+        "不同 detection 编辑成同一最终主词时只能一个无确认成功：{left_status} {left_body} / {right_status} {right_body}"
+    );
+    let rejected = if left_status == StatusCode::CREATED {
+        (&right_status, &right_body)
+    } else {
+        (&left_status, &left_body)
+    };
+    assert_eq!(*rejected.0, StatusCode::CONFLICT, "{}", rejected.1);
+    assert_eq!(rejected.1["code"], "surface_match_acknowledgement_required");
+    assert!(rejected.1["meta"]["surface_match_page"]["surface_confirmation_token"].is_string());
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.v3_entry_state WHERE initial_headword_keys @> ARRAY['uk:shared-final-surface', 'us:shared-final-surface']::TEXT[]",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn v3_create_empty_headword_fallback_is_kind_scoped_and_locked(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let mut detections = Vec::new();
+    for surface in ["empty-source-alpha", "empty-source-beta"] {
+        let (status, detection) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": surface
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detection}");
+        assert_eq!(detection["suggested_pos"], json!([]));
+        detections.push(detection);
+    }
+    let bodies = detections
+        .iter()
+        .map(|detection| {
+            json!({
+                "schema_version": 3,
+                "detection_id": detection["detection_id"],
+                "kind": "word",
+                "headwords": {"mode": "unified", "common": "empty-shared-final"}
+            })
+        })
+        .collect::<Vec<_>>();
+    let entries_url = format!("{ROOT}/entries");
+    let left = call(
+        &state,
+        Method::POST,
+        &entries_url,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(bodies[0].clone()),
+    );
+    let right = call(
+        &state,
+        Method::POST,
+        &entries_url,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(bodies[1].clone()),
+    );
+    let ((left_status, left_body), (right_status, right_body)) = tokio::join!(left, right);
+    assert_eq!(
+        [left_status, right_status]
+            .iter()
+            .filter(|status| **status == StatusCode::CREATED)
+            .count(),
+        1,
+        "无 forms 空骨架也必须按最终主词串行：{left_status} {left_body} / {right_status} {right_body}"
+    );
+    let rejected = if left_status == StatusCode::CREATED {
+        right_body
+    } else {
+        left_body
+    };
+    assert_eq!(rejected["code"], "duplicate_word");
+
+    let (status, phrase_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "phrase",
+            "surface": "empty phrase source"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{phrase_detection}");
+    let (status, phrase_created) = call(
+        &state,
+        Method::POST,
+        &entries_url,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": phrase_detection["detection_id"],
+            "kind": "phrase",
+            "headwords": {"mode": "unified", "common": "empty-shared-final"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase_created}");
+}
+
+#[sqlx::test]
+async fn v3_create_same_idempotency_key_concurrently_replays_one_entry(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "idempotent-concurrent-source"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let body = json!({
+        "schema_version": 3,
+        "detection_id": detection["detection_id"],
+        "kind": "word",
+        "headwords": {"mode": "unified", "common": "idempotent-concurrent-final"}
+    });
+    let key = Uuid::now_v7();
+    let entries_url = format!("{ROOT}/entries");
+    let left = call(
+        &state,
+        Method::POST,
+        &entries_url,
+        &bearer,
+        Some(key),
+        Some(body.clone()),
+    );
+    let right = call(
+        &state,
+        Method::POST,
+        &entries_url,
+        &bearer,
+        Some(key),
+        Some(body),
+    );
+    let ((left_status, left_body), (right_status, right_body)) = tokio::join!(left, right);
+    assert_eq!(left_status, StatusCode::CREATED, "{left_body}");
+    assert_eq!(right_status, StatusCode::CREATED, "{right_body}");
+    assert_eq!(left_body["word"]["id"], right_body["word"]["id"]);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.v3_entry_state WHERE initial_headword_keys @> ARRAY['uk:idempotent-concurrent-final', 'us:idempotent-concurrent-final']::TEXT[]",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
 async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
@@ -16067,6 +18832,30 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
+
+    let target_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_entry_id = target_published["word"]["id"].as_str().unwrap();
+    let target_entry_uuid = Uuid::parse_str(target_entry_id).unwrap();
+    let target_publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(target_entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let target_pos_id = target_published["word"]["forms"]["pos"][0]["pos_id"].clone();
+    let target_form = &target_published["word"]["forms"]["pos"][0]["forms"][0];
+    let target_form_id = target_form["id"].clone();
+    let target_uk_variant_id = target_form["regional_variants"]["uk"]["id"].clone();
+    let target_us_variant_id = target_form["regional_variants"]["us"]["id"].clone();
+    let target_sense_id = target_published["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let target_headword = target_published["word"]["presentation"]["label"].clone();
+    let target_gloss = target_published["word"]["meanings"]["pos"][0]["senses"][0]["definitions"]
+        [0]["content"]["text"]
+        .clone();
 
     let (status, detection) = call(
         &state,
@@ -16096,7 +18885,8 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         Some(json!({
             "schema_version": 3,
             "detection_id": detection["detection_id"],
-            "kind": "phrase"
+            "kind": "phrase",
+            "headwords": v3_confirmed_headwords(&detection)
         })),
     )
     .await;
@@ -16125,12 +18915,146 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         form["regional_variants"]["uk"]["spelling"] = json!("native phrase");
         form["regional_variants"]["us"]["spelling"] = json!("native phrase");
     }
+    let uk_component_id = Uuid::now_v7();
+    let us_component_id = Uuid::now_v7();
+    forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] = json!([{
+        "id": uk_component_id,
+        "state": "resolved",
+        "literal": "native",
+        "target_word_id": target_entry_id,
+        "target_publication_id": target_publication_id,
+        "target_pos_id": target_pos_id,
+        "target_base_form_id": target_form_id,
+        "target_sense_id": target_sense_id,
+        "target_form_id": target_form_id,
+        "target_variant_id": target_uk_variant_id,
+        "target_dialect": "uk",
+        "target_form_type": "base",
+        "target_headword": target_headword,
+        "target_gloss": target_gloss
+    }]);
+    forms["pos"][0]["forms"][0]["regional_variants"]["us"]["component_usages"] = json!([{
+        "id": us_component_id,
+        "state": "resolved",
+        "literal": "phrase",
+        "target_word_id": target_entry_id,
+        "target_publication_id": target_publication_id,
+        "target_pos_id": target_pos_id,
+        "target_base_form_id": target_form_id,
+        "target_sense_id": target_sense_id,
+        "target_form_id": target_form_id,
+        "target_variant_id": target_us_variant_id,
+        "target_dialect": "us",
+        "target_form_type": "base",
+        "target_headword": target_headword,
+        "target_gloss": target_gloss
+    }]);
     let (_, forms_saved) =
         save_v3_forms_after_impact(&state, &bearer, entry_id, 1, "complete", forms).await;
     assert_eq!(forms_saved["word"]["kind"], "phrase");
     assert_eq!(
         forms_saved["word"]["presentation"]["matched_surfaces"],
         json!(["native phrase"])
+    );
+    assert_eq!(
+        forms_saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"]
+            [0]["literal"],
+        "native"
+    );
+    assert_eq!(
+        forms_saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["us"]["component_usages"]
+            [0]["literal"],
+        "phrase"
+    );
+
+    let original_forms = forms_saved["word"]["forms"].clone();
+    let mut compatibility_forms = original_forms.clone();
+    for form in compatibility_forms["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+    {
+        for dialect in ["uk", "us"] {
+            form["regional_variants"][dialect]
+                .as_object_mut()
+                .unwrap()
+                .remove("component_usages");
+        }
+    }
+    let (_, compatibility_saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        entry_id,
+        forms_saved["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        compatibility_forms,
+    )
+    .await;
+    assert_eq!(
+        compatibility_saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"]
+            [0]["id"],
+        uk_component_id.to_string(),
+        "旧客户端缺少 component_usages 时必须保留具体方言侧配置"
+    );
+    assert_eq!(
+        compatibility_saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["us"]["component_usages"]
+            [0]["id"],
+        us_component_id.to_string()
+    );
+
+    let mut explicit_clear = compatibility_saved["word"]["forms"].clone();
+    for dialect in ["uk", "us"] {
+        explicit_clear["pos"][0]["forms"][0]["regional_variants"][dialect]["component_usages"] =
+            json!([]);
+    }
+    let (_, explicitly_cleared) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        entry_id,
+        compatibility_saved["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        explicit_clear,
+    )
+    .await;
+    for dialect in ["uk", "us"] {
+        assert_eq!(
+            explicitly_cleared["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"][dialect]
+                ["component_usages"],
+            json!([]),
+            "显式空数组必须主动清空成分用词"
+        );
+    }
+
+    let (_, forms_saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        entry_id,
+        explicitly_cleared["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        original_forms,
+    )
+    .await;
+
+    let stored_components: Vec<(String, Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT variant.dialect, component.id, component.literal
+        FROM lexicon.v3_phrase_variant_component_usages component
+        JOIN lexicon.v3_form_variants variant
+          ON variant.id = component.form_variant_id
+         AND variant.entry_id = component.entry_id
+        WHERE component.entry_id = $1
+        ORDER BY variant.dialect, component.ordinal
+        "#,
+    )
+    .bind(entry_uuid)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored_components,
+        vec![
+            ("uk".to_owned(), uk_component_id, "native".to_owned()),
+            ("us".to_owned(), us_component_id, "phrase".to_owned())
+        ]
     );
 
     let projected_kinds: Vec<String> = sqlx::query_scalar(
@@ -16184,7 +19108,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         None,
         Some(json!({
             "schema_version": 3,
-            "base_revision": 2,
+            "base_revision": forms_saved["word"]["revision"],
             "intent": "complete",
             "content": complete_v3_meanings_fixture(pos_id)
         })),
@@ -16193,18 +19117,129 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "{meanings_saved}");
     assert_eq!(meanings_saved["word"]["kind"], "phrase");
 
+    let mut target_meanings = target_published["word"]["meanings"].clone();
+    target_meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("新港口");
+    let target_saved = save_v3_meanings(&state, &bearer, &target_published, target_meanings).await;
+    let (status, target_republished) = publish_ready_v3(&state, &bearer, &target_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_republished}");
+    let current_target_publication: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(target_entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_ne!(current_target_publication, target_publication_id);
+
+    let mut target_lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM lexicon.entries WHERE id = $1 FOR UPDATE")
+        .bind(target_entry_uuid)
+        .execute(&mut *target_lock)
+        .await
+        .unwrap();
+    let (locked_status, locked_publish) = publish_ready_v3(&state, &bearer, &meanings_saved).await;
+    assert_eq!(locked_status, StatusCode::CONFLICT, "{locked_publish}");
+    assert_eq!(locked_publish["code"], "reference_conflict");
+    target_lock.rollback().await.unwrap();
+
+    sqlx::query(
+        "UPDATE lexicon.entries SET archived_at = now(), archived_by_admin_id = $2 WHERE id = $1",
+    )
+    .bind(target_entry_uuid)
+    .bind(admin_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (archived_status, archived_publish) =
+        publish_ready_v3(&state, &bearer, &meanings_saved).await;
+    assert_eq!(archived_status, StatusCode::CONFLICT, "{archived_publish}");
+    assert_eq!(archived_publish["code"], "reference_conflict");
+    sqlx::query(
+        "UPDATE lexicon.entries SET archived_at = NULL, archived_by_admin_id = NULL WHERE id = $1",
+    )
+    .bind(target_entry_uuid)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let (status, published) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries/{entry_id}/publications"),
         &bearer,
         Some(Uuid::now_v7()),
-        Some(json!({"schema_version": 3, "base_revision": 3})),
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": meanings_saved["word"]["revision"]
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     assert_eq!(published["word"]["kind"], "phrase");
     assert_eq!(published["word"]["status"], "published");
+
+    assert_eq!(
+        published["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"]
+            [0]["literal"],
+        "native"
+    );
+    assert_eq!(
+        published["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["us"]["component_usages"]
+            [0]["literal"],
+        "phrase"
+    );
+    assert_eq!(
+        published["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"]
+            [0]["target_publication_id"],
+        target_publication_id.to_string()
+    );
+    assert_eq!(
+        published["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"]
+            [0]["target_variant_id"],
+        target_uk_variant_id
+    );
+    assert_eq!(
+        published["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["us"]["component_usages"]
+            [0]["target_variant_id"],
+        target_us_variant_id
+    );
+    let publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let published_component_nodes: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM lexicon.entry_publication_nodes
+        WHERE publication_id = $1
+          AND entry_id = $2
+          AND node_type = 'phrase_component_usage'
+        "#,
+    )
+    .bind(publication_id)
+    .bind(entry_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(published_component_nodes, 2);
+    let referenced_target_publications: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT target_publication_id
+        FROM lexicon.entry_publication_sense_refs
+        WHERE publication_id = $1
+          AND reference_kind = 'phrase_component'
+        ORDER BY source_node_id
+        "#,
+    )
+    .bind(publication_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        referenced_target_publications,
+        vec![target_publication_id, target_publication_id]
+    );
 
     let published_surface_kinds: Vec<String> = sqlx::query_scalar(
         r#"
@@ -16223,6 +19258,120 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     .unwrap();
     assert!(!published_surface_kinds.is_empty());
     assert!(published_surface_kinds.iter().all(|kind| kind == "phrase"));
+
+    let source =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["A native phrase appears."])
+            .await;
+    let source_entry_id = source["word"]["id"].as_str().unwrap();
+    let source_sentence_id = first_sentence(&source)["id"].as_str().unwrap();
+    let (status, discovered) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "sentence_text": "A native phrase appears.",
+            "source_dialect": "common",
+            "mode": "all_published_targets",
+            "page_size_per_range": 20
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{discovered}");
+    let phrase_candidate = discovered["range_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|range| range["published_matches"].as_array().unwrap())
+        .find(|candidate| candidate["entry_id"] == entry_id)
+        .expect("discovery must return the published phrase");
+    let association_id = Uuid::now_v7();
+    let (status, edited) = replace_associations_v3(
+        &state,
+        &bearer,
+        &source,
+        source_sentence_id,
+        Uuid::now_v7(),
+        json!([{
+            "id": association_id,
+            "source_dialect": "common",
+            "source_segments": [{
+                "start": 2,
+                "end": 15,
+                "surface": "native phrase"
+            }],
+            "target_word_id": phrase_candidate["entry_id"],
+            "target_sense_id": phrase_candidate["senses"][0]["sense_id"],
+            "target_publication_id": phrase_candidate["publication_id"],
+            "target_form_variant_id": phrase_candidate["matched_variant_id"]
+        }]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    let reloaded_association = &first_sentence(&reloaded)["associations"][0];
+
+    let mut phrase_meanings = published["word"]["meanings"].clone();
+    phrase_meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("短语新义");
+    let phrase_saved = save_v3_meanings(&state, &bearer, &published, phrase_meanings).await;
+    let (status, phrase_republished) = publish_ready_v3(&state, &bearer, &phrase_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase_republished}");
+    let current_phrase_publication: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_ne!(current_phrase_publication, publication_id);
+
+    let (status, source_resaved) = replace_associations_v3(
+        &state,
+        &bearer,
+        &reloaded,
+        source_sentence_id,
+        Uuid::now_v7(),
+        json!([{
+            "id": association_id,
+            "source_dialect": "common",
+            "source_segments": [{
+                "start": 2,
+                "end": 15,
+                "surface": "native phrase"
+            }],
+            "target_word_id": entry_id,
+            "target_sense_id": reloaded_association["target_sense_id"],
+            "target_publication_id": publication_id,
+            "target_form_variant_id": reloaded_association["target_form_variant_id"]
+        }]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{source_resaved}");
+    let persisted_publication: Uuid = sqlx::query_scalar(
+        "SELECT target_publication_id FROM lexicon.sentence_associations WHERE id = $1",
+    )
+    .bind(association_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_publication, publication_id);
+    assert_eq!(
+        first_sentence(&source_resaved)["associations"][0]["target_publication_id"],
+        publication_id.to_string(),
+        "目标发布 B 后 whole-group resave 必须继续锚定 A"
+    );
+
+    let published = phrase_republished;
 
     let (status, archived) = call(
         &state,
@@ -16311,7 +19460,8 @@ async fn legacy_surface_backfill_ignores_native_v3_entries(pool: PgPool) {
         Some(json!({
             "schema_version": 3,
             "detection_id": empty_detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&empty_detection)
         })),
     )
     .await;
@@ -16404,7 +19554,8 @@ async fn v3_detection_and_create_acknowledge_legacy_v2_surface_matches(pool: PgP
     let create = json!({
         "schema_version": 3,
         "detection_id": detection["detection_id"],
-        "kind": "word"
+        "kind": "word",
+        "headwords": v3_confirmed_headwords(&detection)
     });
     let (status, _, required) = call_problem(
         &state,
@@ -16550,6 +19701,7 @@ async fn v3_detection_and_create_acknowledge_legacy_v2_surface_matches(pool: PgP
             "schema_version": 3,
             "detection_id": mixed_detection["detection_id"],
             "kind": "word",
+            "headwords": v3_confirmed_headwords(&mixed_detection),
             "confirmed_surface_match_token": mixed_detection["surface_match_page"]
                 ["surface_confirmation_token"]
         })),
@@ -16597,7 +19749,8 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
         Some(json!({
             "schema_version": 3,
             "detection_id": first_detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&first_detection)
         })),
     )
     .await;
@@ -16690,7 +19843,8 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
     let duplicate_create = json!({
         "schema_version": 3,
         "detection_id": duplicate_detection["detection_id"],
-        "kind": "word"
+        "kind": "word",
+        "headwords": v3_confirmed_headwords(&duplicate_detection)
     });
     let duplicate_key = Uuid::now_v7();
     let (status, _, required) = call_problem(
@@ -16773,6 +19927,7 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
             "schema_version": 3,
             "detection_id": policy_detection["detection_id"],
             "kind": "word",
+            "headwords": v3_confirmed_headwords(&policy_detection),
             "confirmed_surface_match_token": policy_token
         }),
     )
@@ -16812,7 +19967,8 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
         Some(json!({
             "schema_version": 3,
             "detection_id": editing_detection["detection_id"],
-            "kind": "word"
+            "kind": "word",
+            "headwords": v3_confirmed_headwords(&editing_detection)
         })),
     )
     .await;
@@ -17353,7 +20509,8 @@ async fn v3_create_unknown_version_and_publication_paths_fail_closed(pool: PgPoo
         json!({
             "schema_version": 3,
             "detection_id": Uuid::now_v7(),
-            "kind": "word"
+            "kind": "word",
+            "headwords": {"mode": "unified", "common": "flags-disabled-word"}
         }),
     )
     .await;
@@ -17376,7 +20533,8 @@ async fn v3_create_unknown_version_and_publication_paths_fail_closed(pool: PgPoo
         json!({
             "schema_version": 3,
             "detection_id": Uuid::now_v7(),
-            "kind": "phrase"
+            "kind": "phrase",
+            "headwords": {"mode": "unified", "common": "flags disabled phrase"}
         }),
     )
     .await;

@@ -43,8 +43,9 @@ pub(super) fn relation_target_entry_ids(meanings: &DraftMeaningsStepContent) -> 
         .iter()
         .flat_map(|pos| pos.senses.iter())
         .flat_map(|sense| sense.relations.iter())
-        // 待物化的关联词还没有目标词条，自然也没有需要一起锁的上下文。
-        .filter_map(|relation| relation.target_word_id)
+        // 文本 pending 没有目标；identity prebinding 必须与正式 target 一样进入
+        // surface-context 锁，避免目标 0→1 与来源新增预绑定互相漏过。
+        .filter_map(|relation| relation.target_word_id.or(relation.prebound_target_word_id))
         .collect::<Vec<_>>();
     entry_ids.sort_unstable();
     entry_ids.dedup();

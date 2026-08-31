@@ -15,45 +15,48 @@ use crate::lexicon::{
         AdminWordListPage, AdminWordListQuery, AdminWordListResponse, AdminWordPublicationAny,
         AdminWordPublicationEnvelope, AdminWordPublicationListResponse, AdminWordPublicationV2,
         AdminWordPublicationV3, AdminWordStats, AdminWordStatus, AdminWordV2, AdminWordV2Envelope,
-        AdminWordV3, BuiltinDictionaryResultV2, CreateAdminWordV2Input, DeleteDraftInput,
-        DetectWordInputV2, DetectWordResponseV2, DetectionRequestEcho,
-        DetectionSurfaceMatchPreviewV2, DetectionSurfaceWarningAuditV2, Dialect, DialectRulesV2,
-        DialectSuggestionFieldKind, DialectSuggestionProviderV2, DialectVariantSlotV2,
-        DialectVariantSuggestionItemV2, DictionaryCoverageStateV2, DictionaryCoverageV2,
-        DictionaryProvenanceV2, DictionaryProviderV2, DraftFormsStepContent,
+        AdminWordV3, BuiltinDictionaryResultV2, ClaimPendingSentenceAssociationInput,
+        CreateAdminWordV2Input, DeleteDraftInput, DetectWordInputV2, DetectWordResponseV2,
+        DetectionRequestEcho, DetectionSurfaceMatchPreviewV2, DetectionSurfaceWarningAuditV2,
+        Dialect, DialectRulesV2, DialectSuggestionFieldKind, DialectSuggestionProviderV2,
+        DialectVariantSlotV2, DialectVariantSuggestionItemV2, DictionaryCoverageStateV2,
+        DictionaryCoverageV2, DictionaryProvenanceV2, DictionaryProviderV2, DraftFormsStepContent,
         DraftFormsStepContentV3, DraftMeaningsStepContent, DraftReferenceLocation,
         DraftValidationIssue, DraftValidationResponse, DuplicateWordMatchV2, EnglishTextV2,
         EntryKind, EntryLifecycleBatchInput, EntryLifecycleBatchResponseAny, EntryLifecycleInput,
         EntryLifecycleTarget, EntryPresentationV3, ExistingSurfaceMatchV2, ExistingSurfaceSourceV2,
         FormsImpactItemV2, FormsImpactNodeType, FormsImpactResponseV2, GrammarStructureV2,
         GrammarVariantV2, HeadwordVariant, LegacyHeadwordsCompatibilityV3, LexiconSurfaceMatchV2,
-        MatchedEntryContextV2, PersistedWordStep, PreviewFormsImpactInputV2, PronunciationStyle,
-        PublishAdminWordV2Input, RelatedSearchLegacyResponse, RelatedSearchMatchMode,
-        RelatedSearchQuery, RelatedSearchResponse, RelatedSearchV2Response, RelatedWordMatchV3,
-        RelatedWordResult, RelatedWordResultAny, RelatedWordResultV3, RelatedWordSense,
-        RelatedWordSenseV3, RelationReferenceCountsV2, RelationReferencePreviewV2,
-        RelationReferenceSummaryV2, RelationTypeV2, ReplaceSentenceAssociationsInput,
-        RetiredStableSlotV2, RichText, SaveFormsStepInput, SaveMeaningsStepInput, SenseGroupV2,
-        SentenceAssociationInputV2, SentenceAssociationOriginV2, SentenceAssociationsStateV2,
-        SentenceSourceRangeV1, SmartDictionaryResultV2, SourceDialect, StepSaveIntent,
-        SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2, SurfaceAttentionLevelV2,
-        SurfaceCanContinueTrue, SurfaceConfirmationReasonV2, SurfaceContentScopeV2,
-        SurfaceMatchCandidateV2, SurfaceMatchCategoryV2, SurfaceMatchPageV2, SurfaceMatchPageV3,
-        SurfaceMatchSeverityV2, SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, TextOrigin,
-        TextVariantV2, ValidateAdminWordV2Input, WordBaseFormSlotV2, WordCreationStep,
-        WordDefinitionV2, WordDetectionSnapshotSmartDictionaryV2, WordDetectionSnapshotV2,
-        WordEntryKindV3, WordFormGroupV2, WordFormTypeV2, WordFormVariantV2, WordHeadwordsV2,
-        WordPosFormsV2, WordPosMeaningsV2, WordPronunciationV2, WordRegionalVariantsV3,
-        WordRelationV2, WordSenseV2, WordSenseV3, WordSentenceAssociationV2, WordSentenceLinkV2,
-        WordSentenceV2,
+        MatchedEntryContextV2, PendingSentenceAssociationItemV3,
+        PendingSentenceAssociationListQuery, PendingSentenceAssociationListResponse,
+        PersistedWordStep, PreviewFormsImpactInputV2, PronunciationStyle, PublishAdminWordV2Input,
+        RelatedSearchLegacyResponse, RelatedSearchMatchMode, RelatedSearchQuery,
+        RelatedSearchResponse, RelatedSearchV2Response, RelatedWordMatchV3, RelatedWordResult,
+        RelatedWordResultAny, RelatedWordResultV3, RelatedWordSense, RelatedWordSenseV3,
+        RelationReferenceCountsV2, RelationReferencePreviewV2, RelationReferenceSummaryV2,
+        RelationTypeV2, ReplaceSentenceAssociationsInput, ResolveSentenceTargetsV3Input,
+        ResolveSentenceTargetsV3Response, RetiredStableSlotV2, RichText, SaveFormsStepInput,
+        SaveMeaningsStepInput, SenseGroupV2, SentenceAssociationOriginV2,
+        SentenceAssociationStateV1, SentenceAssociationsStateV2, SentenceSourceRangeV1,
+        SmartDictionaryResultV2, SourceDialect, StepSaveIntent, SuggestDialectVariantsInputV2,
+        SuggestDialectVariantsResponseV2, SurfaceAttentionLevelV2, SurfaceCanContinueTrue,
+        SurfaceConfirmationReasonV2, SurfaceContentScopeV2, SurfaceMatchCandidateV2,
+        SurfaceMatchCategoryV2, SurfaceMatchPageV2, SurfaceMatchPageV3, SurfaceMatchSeverityV2,
+        SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, TextOrigin, TextVariantV2,
+        ValidateAdminWordV2Input, WordBaseFormSlotV2, WordCreationStep, WordDefinitionV2,
+        WordDetectionSnapshotSmartDictionaryV2, WordDetectionSnapshotV2, WordEntryKindV3,
+        WordFormGroupV2, WordFormTypeV2, WordFormVariantV2, WordHeadwordsV2, WordPosFormsV2,
+        WordPosMeaningsV2, WordPronunciationV2, WordRegionalVariantsV3, WordRelationV2,
+        WordSenseV2, WordSenseV3, WordSentenceAssociationV2, WordSentenceLinkV2, WordSentenceV2,
     },
     impact_store::{ImpactConfirmation, ImpactStore, ImpactStoreError},
     model::{
         CatalogPartRecord, DictionaryCandidateRecord, EntryRecord,
         FormsSurfaceAcknowledgementRecord, HeadwordSurfaceAcknowledgementRecord, ListFilter,
-        NewPublicationSenseReference, PublicationReadRecord, PublicationSenseReferenceKind,
-        PublicationTargetContentScope, RegionSurfaceRecord, RelatedSearchFilter,
-        ResolvedRelationTargetRecord, ResolvedSenseTargetRecord, SenseTargetKey,
+        NewPublicationSenseReference, PendingSentenceAssociationListRecord, PublicationReadRecord,
+        PublicationSenseReferenceKind, PublicationTargetContentScope, RegionSurfaceRecord,
+        RelatedSearchFilter, ResolvedRelationTargetRecord, ResolvedSenseTargetRecord,
+        SenseTargetKey, SentenceDiscoveryDraftRecord, SentenceDiscoverySurfaceRecord,
     },
     normalization::{
         HeadwordNormalizationError, NormalizedHeadword, normalize_headword, sha256_json,
@@ -82,6 +85,7 @@ mod lifecycle;
 mod publishing;
 mod queries;
 mod sentence_association;
+mod sentence_target_discovery;
 mod v3;
 mod v3_publication;
 mod v3_surface;
@@ -133,6 +137,12 @@ pub enum LexiconServiceError {
     SentenceNotFound,
     #[error("sentence associations are not resolved for the current text")]
     SentenceAssociationsUnresolved,
+    #[error("sentence associations require a segmented V3 capable client")]
+    SentenceAssociationClientUpgradeRequired,
+    #[error("pending sentence association not found")]
+    PendingSentenceAssociationNotFound,
+    #[error("pending sentence association was already claimed")]
+    PendingSentenceAssociationClaimed,
     #[error("publication not found")]
     PublicationNotFound,
     #[error("configured part of speech disappeared")]
@@ -145,12 +155,16 @@ pub enum LexiconServiceError {
     EntryArchived,
     #[error("entry has publication history or inbound references and cannot be deleted")]
     EntryNotDeletable,
+    #[error("entry has inbound prebound relations and cannot be deleted")]
+    EntryHasInboundPreboundRelations,
     #[error("entry has inbound publication references")]
     EntryHasInboundPublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
     #[error("entry has unavailable outbound publication references")]
     EntryHasUnavailablePublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
     #[error("a referenced publication is changing")]
     ReferenceConflict,
+    #[error("relation prebinding reconciliation fanout exceeds 500 eligible relations")]
+    RelationPrebindingFanoutExceeded,
     #[error("a stable V3 node identity changed")]
     StableNodeIdChanged,
     #[error("a V3 form operation would break an existing reference")]

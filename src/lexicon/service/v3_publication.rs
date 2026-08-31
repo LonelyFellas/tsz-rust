@@ -7,10 +7,12 @@ use super::*;
 use crate::lexicon::dto::{
     ActivatePublicationV3Input, AdminWordAny, AdminWordAnyEnvelope, AdminWordStatus, AdminWordV2,
     AdminWordV3, DraftFormsStepContentV3, DraftMeaningsStepContent, DraftMeaningsStepContentV3,
-    PersistedWordStep, PublishAdminWordV3Input, SentenceAssociationsStateV2, StepSaveIntent,
-    WordFormTypeV3,
+    PersistedWordStep, PhraseComponentUsageV3, PublishAdminWordV3Input,
+    SentenceAssociationsStateV2, StepSaveIntent, WordFormTypeV3, WordRegionalVariantsV3,
 };
-use crate::lexicon::model::NewPublicationSenseReference;
+use crate::lexicon::model::{
+    NewPublicationSenseReference, PublicationSenseReferenceKind, PublicationTargetContentScope,
+};
 
 const V3_PUBLISH_SCOPE: &str = "lexicon.entry.publish.v3";
 const V3_ACTIVATE_SCOPE: &str = "lexicon.publication.activate.v3";
@@ -42,6 +44,7 @@ impl LexiconService {
         entry_id: Uuid,
         idempotency_key: Uuid,
         input: PublishAdminWordV3Input,
+        allow_automatic_associations: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         let request_hash = sha256_json(&serde_json::json!({
             "entry_id": entry_id,
@@ -161,6 +164,9 @@ impl LexiconService {
         if !reference_resolution.issues.is_empty() {
             return Err(v3_validation_failed(reference_resolution.issues));
         }
+        let mut publication_references = reference_resolution.publication_references;
+        publication_references
+            .extend(phrase_component_publication_references(&mut tx, &word.forms).await?);
         if !newly_bound.is_empty() {
             let canonical_v3_meanings = v2_meanings_to_v3(relational_meanings.clone())?;
             let editor_meanings =
@@ -254,7 +260,15 @@ impl LexiconService {
             return Ok(response);
         }
 
-        Self::refresh_sentence_associations(&mut tx, entry_id, &relational_meanings, true).await?;
+        Self::refresh_sentence_associations(
+            &mut tx,
+            entry_id,
+            &relational_meanings,
+            true,
+            allow_automatic_associations,
+            None,
+        )
+        .await?;
         word.meanings = v2_meanings_to_v3(relational_meanings)?;
         Self::hydrate_v3_sentence_associations_in(&mut tx, entry_id, &mut word.meanings).await?;
         word.status = AdminWordStatus::Published;
@@ -264,13 +278,8 @@ impl LexiconService {
         word.lifecycle_revision = record.lifecycle_revision + 1;
         word.updated_at = Utc::now();
 
-        let publication = insert_v3_publication(
-            &mut tx,
-            actor_id,
-            &word,
-            &reference_resolution.publication_references,
-        )
-        .await?;
+        let publication =
+            insert_v3_publication(&mut tx, actor_id, &word, &publication_references).await?;
         replace_current_publication_surfaces_v3(
             &mut tx,
             publication.id,
@@ -788,6 +797,9 @@ async fn versioned_publication(
 fn v3_meanings_to_v2(
     meanings: &DraftMeaningsStepContentV3,
 ) -> Result<DraftMeaningsStepContent, LexiconServiceError> {
+    let mut meanings = meanings.clone();
+    crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
+    clear_v3_sentence_associations(&mut meanings);
     serde_json::from_value(serde_json::to_value(meanings).map_err(serialization_error)?)
         .map_err(serialization_error)
 }
@@ -795,8 +807,11 @@ fn v3_meanings_to_v2(
 fn v2_meanings_to_v3(
     meanings: DraftMeaningsStepContent,
 ) -> Result<DraftMeaningsStepContentV3, LexiconServiceError> {
-    serde_json::from_value(serde_json::to_value(meanings).map_err(serialization_error)?)
-        .map_err(serialization_error)
+    let mut meanings =
+        serde_json::from_value(serde_json::to_value(meanings).map_err(serialization_error)?)
+            .map_err(serialization_error)?;
+    crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
+    Ok(meanings)
 }
 
 fn publication_meanings_for_reference_validation(
@@ -823,6 +838,94 @@ fn publication_forms_for_activation(
             .map_err(serialization_error),
         version => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
     }
+}
+
+async fn phrase_component_publication_references(
+    tx: &mut Transaction<'_, Postgres>,
+    forms: &DraftFormsStepContentV3,
+) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
+    let components = forms
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.forms)
+        .flat_map(|form| match &form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => common.component_usages.clone(),
+            WordRegionalVariantsV3::UkUs { uk, us } => uk
+                .component_usages
+                .iter()
+                .chain(&us.component_usages)
+                .cloned()
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    let mut requested = components
+        .iter()
+        .filter_map(|component| match component {
+            PhraseComponentUsageV3::Resolved {
+                target_word_id,
+                target_publication_id,
+                target_sense_id,
+                ..
+            } => Some((*target_word_id, *target_publication_id, *target_sense_id)),
+            PhraseComponentUsageV3::Unresolved { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    requested.sort_unstable();
+    requested.dedup();
+    let target_entry_ids = requested
+        .iter()
+        .map(|(entry_id, _, _)| *entry_id)
+        .collect::<Vec<_>>();
+    let target_publication_ids = requested
+        .iter()
+        .map(|(_, publication_id, _)| *publication_id)
+        .collect::<Vec<_>>();
+    let target_sense_ids = requested
+        .iter()
+        .map(|(_, _, sense_id)| *sense_id)
+        .collect::<Vec<_>>();
+    let target_revisions = LexiconRepository::phrase_component_publication_targets_for_publish(
+        tx,
+        &target_entry_ids,
+        &target_publication_ids,
+        &target_sense_ids,
+    )
+    .await
+    .map_err(repository_error)?
+    .into_iter()
+    .map(|(entry_id, publication_id, sense_id, revision)| {
+        ((entry_id, publication_id, sense_id), revision)
+    })
+    .collect::<HashMap<_, _>>();
+    if target_revisions.len() != requested.len() {
+        return Err(LexiconServiceError::ReferenceConflict);
+    }
+    let mut references = Vec::new();
+    for component in components {
+        let PhraseComponentUsageV3::Resolved {
+            id,
+            target_word_id,
+            target_publication_id,
+            target_sense_id,
+            ..
+        } = component
+        else {
+            continue;
+        };
+        let target_revision = *target_revisions
+            .get(&(target_word_id, target_publication_id, target_sense_id))
+            .ok_or(LexiconServiceError::ReferenceConflict)?;
+        references.push(NewPublicationSenseReference {
+            source_node_id: id,
+            reference_kind: PublicationSenseReferenceKind::PhraseComponent,
+            target_entry_id: target_word_id,
+            target_sense_id,
+            target_publication_id: Some(target_publication_id),
+            target_content_scope: PublicationTargetContentScope::Publication,
+            target_revision,
+        });
+    }
+    Ok(references)
 }
 
 async fn ensure_no_removed_inbound_senses(

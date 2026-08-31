@@ -25,6 +25,132 @@ fn assert_db_error<T: std::fmt::Debug>(
     }
 }
 
+#[sqlx::test]
+async fn relation_prebinding_shape_has_stable_target_identity(pool: PgPool) {
+    let admin_id = insert_admin(&pool).await;
+    let source_entry = insert_v3_entry(&pool, admin_id).await;
+    let target_entry = insert_v3_entry(&pool, admin_id).await;
+    let noun_id = catalog_pos_id(&pool, "noun").await;
+    let mut tx = pool.begin().await.unwrap();
+    let source_pos = insert_v3_pos(&mut tx, source_entry, noun_id, 0).await;
+    let source_sense = Uuid::now_v7();
+    insert_node(
+        &mut tx,
+        source_sense,
+        source_entry,
+        "sense",
+        Some(source_pos),
+        "meanings.sense",
+        false,
+    )
+    .await;
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.senses (
+            id, entry_id, entry_pos_id, level, depends_on_context, sort_order
+        ) VALUES ($1, $2, $3, 'A1', FALSE, 0)
+        "#,
+    )
+    .bind(source_sense)
+    .bind(source_entry)
+    .bind(source_pos)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    for (ordinal, reason) in ["waiting_first_sense", "target_sense_deleted"]
+        .into_iter()
+        .enumerate()
+    {
+        let relation_id = Uuid::now_v7();
+        insert_node(
+            &mut tx,
+            relation_id,
+            source_entry,
+            "relation",
+            Some(source_sense),
+            "meanings.relation",
+            false,
+        )
+        .await;
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.relations (
+                id, entry_id, source_sense_id, relation_type, score,
+                prebound_target_entry_id, prebinding_reason,
+                pending_target_headword, pending_target_gloss, sort_order
+            ) VALUES ($1, $2, $3, 'synonym', 80, $4, $5, 'reliability', '可靠性', $6)
+            "#,
+        )
+        .bind(relation_id)
+        .bind(source_entry)
+        .bind(source_sense)
+        .bind(target_entry)
+        .bind(reason)
+        .bind(ordinal as i32)
+        .execute(&mut *tx)
+        .await
+        .expect("waiting/detached prebinding shape should be accepted");
+    }
+    tx.commit().await.unwrap();
+
+    let invalid_relation_id = Uuid::now_v7();
+    let mut invalid_node_tx = pool.begin().await.unwrap();
+    insert_node(
+        &mut invalid_node_tx,
+        invalid_relation_id,
+        source_entry,
+        "relation",
+        Some(source_sense),
+        "meanings.relation",
+        false,
+    )
+    .await;
+    invalid_node_tx.commit().await.unwrap();
+    let missing_headword = sqlx::query(
+        r#"
+        INSERT INTO lexicon.relations (
+            id, entry_id, source_sense_id, relation_type, score,
+            prebound_target_entry_id, prebinding_reason, sort_order
+        ) VALUES ($1, $2, $3, 'synonym', 80, $4, 'waiting_first_sense', 2)
+        "#,
+    )
+    .bind(invalid_relation_id)
+    .bind(source_entry)
+    .bind(source_sense)
+    .bind(target_entry)
+    .execute(&pool)
+    .await;
+    assert_db_error(
+        missing_headword,
+        CHECK_VIOLATION,
+        "lexicon_relations_target_shape_check",
+    );
+    let hard_delete = sqlx::query("DELETE FROM lexicon.entries WHERE id = $1")
+        .bind(target_entry)
+        .execute(&pool)
+        .await;
+    assert_db_error(
+        hard_delete,
+        FOREIGN_KEY_VIOLATION,
+        "lexicon_relations_prebound_target_fkey",
+    );
+    let down = sqlx::raw_sql(include_str!(
+        "../migrations/20260830080000_add_draft_relation_prebinding.down.sql"
+    ))
+    .execute(&pool)
+    .await;
+    assert!(
+        down.as_ref()
+            .is_err_and(
+                |error| error.as_database_error().is_some_and(|database| database
+                    .message()
+                    .contains("cannot remove draft relation prebinding"))
+            ),
+        "存在预绑定时 down migration 必须 fail closed：{down:?}"
+    );
+}
+
 async fn insert_admin(pool: &PgPool) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
@@ -118,6 +244,95 @@ async fn insert_v3_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
     .await
     .unwrap();
     entry_id
+}
+
+#[sqlx::test]
+async fn v3_initial_headwords_shape_is_strict(pool: PgPool) {
+    let admin_id = insert_admin(&pool).await;
+    let valid_entry = insert_entry(&pool, admin_id, 3, "word", None, None)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.v3_entry_state (
+            entry_id, content_schema_version, origin,
+            initial_headwords, initial_headword_keys
+        ) VALUES ($1, 3, 'native', $2, $3)
+        "#,
+    )
+    .bind(valid_entry)
+    .bind(json!({"mode": "unified", "common": "center"}))
+    .bind(vec!["uk:center", "us:center"])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for invalid in [
+        json!("center"),
+        json!({"common": "center"}),
+        json!({"mode": "unified", "common": "center", "extra": true}),
+        json!({"mode": "distinguish", "uk": "centre", "us": "center"}),
+    ] {
+        let entry_id = insert_entry(&pool, admin_id, 3, "word", None, None)
+            .await
+            .unwrap();
+        let result = sqlx::query(
+            r#"
+            INSERT INTO lexicon.v3_entry_state (
+                entry_id, content_schema_version, origin,
+                initial_headwords, initial_headword_keys
+            ) VALUES ($1, 3, 'native', $2, $3)
+            "#,
+        )
+        .bind(entry_id)
+        .bind(invalid)
+        .bind(vec!["uk:center", "us:center"])
+        .execute(&pool)
+        .await;
+        assert_db_error(
+            result,
+            CHECK_VIOLATION,
+            "lexicon_v3_entry_state_initial_headwords_shape_check",
+        );
+    }
+
+    for (headwords, keys) in [
+        (Some(json!({"mode": "unified", "common": "center"})), None),
+        (None, Some(vec!["uk:center", "us:center"])),
+        (
+            Some(json!({"mode": "unified", "common": "center"})),
+            Some(vec!["common:center"]),
+        ),
+        (
+            Some(
+                json!({"mode": "distinguish", "uk": "centre", "us": "center", "source_dialect": "uk"}),
+            ),
+            Some(vec!["us:center", "uk:centre"]),
+        ),
+    ] {
+        let entry_id = insert_entry(&pool, admin_id, 3, "word", None, None)
+            .await
+            .unwrap();
+        let keys = keys.map(|values| values.into_iter().map(str::to_owned).collect::<Vec<_>>());
+        let result = sqlx::query(
+            r#"
+            INSERT INTO lexicon.v3_entry_state (
+                entry_id, content_schema_version, origin,
+                initial_headwords, initial_headword_keys
+            ) VALUES ($1, 3, 'native', $2, $3)
+            "#,
+        )
+        .bind(entry_id)
+        .bind(headwords)
+        .bind(keys)
+        .execute(&pool)
+        .await;
+        assert_db_error(
+            result,
+            CHECK_VIOLATION,
+            "lexicon_v3_entry_state_initial_headwords_shape_check",
+        );
+    }
 }
 
 async fn insert_v3_pos(

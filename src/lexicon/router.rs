@@ -74,6 +74,18 @@ pub fn router() -> Router<AppState> {
             axum::routing::put(handler::replace_sentence_associations),
         )
         .route(
+            "/entries/sentence-targets/resolve",
+            axum::routing::post(handler::resolve_sentence_targets),
+        )
+        .route(
+            "/entries/{id}/pending-sentence-associations",
+            get(handler::list_pending_sentence_associations),
+        )
+        .route(
+            "/pending-sentence-associations/{association_id}/claim",
+            axum::routing::post(handler::claim_pending_sentence_association),
+        )
+        .route(
             "/entries/{id}/content-completion-jobs",
             axum::routing::post(
                 crate::lexicon::content_completion::handler::create_content_completion_job,
