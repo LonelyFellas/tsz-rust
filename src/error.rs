@@ -74,6 +74,7 @@ pub enum ErrorCode {
     DownstreamConfirmationRequired,
     EntryArchived,
     EntryNotDeletable,
+    EntryDeleteForbidden,
     EntryHasInboundPreboundRelations,
     EntryHasInboundPublicationRefs,
     EntryHasUnavailablePublicationRefs,
@@ -104,7 +105,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 81] = [
+    pub const ALL: [Self; 82] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -168,6 +169,7 @@ impl ErrorCode {
         Self::DownstreamConfirmationRequired,
         Self::EntryArchived,
         Self::EntryNotDeletable,
+        Self::EntryDeleteForbidden,
         Self::EntryHasInboundPreboundRelations,
         Self::EntryHasInboundPublicationRefs,
         Self::EntryHasUnavailablePublicationRefs,
@@ -460,6 +462,11 @@ impl ErrorCode {
                 "entry_not_deletable",
                 "Entry cannot be deleted",
                 StatusCode::CONFLICT,
+            ),
+            Self::EntryDeleteForbidden => (
+                "entry_delete_forbidden",
+                "Entry can only be deleted by its creator",
+                StatusCode::FORBIDDEN,
             ),
             Self::EntryHasInboundPreboundRelations => (
                 "entry_has_inbound_prebound_relations",

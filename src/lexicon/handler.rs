@@ -21,13 +21,13 @@ use crate::{
             CreateAdminWordAnyInput, CreateAdminWordV2Input, CreateAdminWordV3Input,
             DeleteDraftInput, DetectLexiconInputAny, DetectLexiconResponseAny,
             DetectLexiconSurfaceV3Input, DetectWordInputV2, DraftValidationResponseAny,
-            EntryLifecycleBatchInput, EntryLifecycleBatchResponseAny, EntryLifecycleInput,
-            EntryPath, FormsImpactResponseAny, PendingSentenceAssociationListQuery,
-            PendingSentenceAssociationListResponse, PendingSentenceAssociationPath,
-            PreviewFormsImpactInputAny, PreviewFormsImpactInputV2, PreviewFormsImpactInputV3,
-            PublicationPath, PublishAdminWordAnyInput, PublishAdminWordV2Input,
-            PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
-            ReplaceSentenceAssociationsInput, ResolveSentenceTargetsV3Input,
+            EntryDeleteBatchInput, EntryDeleteBatchResponse, EntryLifecycleBatchInput,
+            EntryLifecycleBatchResponseAny, EntryLifecycleInput, EntryPath, FormsImpactResponseAny,
+            PendingSentenceAssociationListQuery, PendingSentenceAssociationListResponse,
+            PendingSentenceAssociationPath, PreviewFormsImpactInputAny, PreviewFormsImpactInputV2,
+            PreviewFormsImpactInputV3, PublicationPath, PublishAdminWordAnyInput,
+            PublishAdminWordV2Input, PublishAdminWordV3Input, RelatedSearchQuery,
+            RelatedSearchResponse, ReplaceSentenceAssociationsInput, ResolveSentenceTargetsV3Input,
             ResolveSentenceTargetsV3Response, SaveFormsStepInput, SaveFormsStepInputAny,
             SaveFormsStepInputV3, SaveMeaningsStepInput, SaveMeaningsStepInputAny,
             SaveMeaningsStepInputV3, SentencePath, StepSaveIntent, SuggestDialectVariantsInputV2,
@@ -55,7 +55,7 @@ pub use commands::{
     publish, replace_sentence_associations, save_forms, save_meanings, suggest_dialect_variants,
     validate,
 };
-pub use lifecycle::{archive, archive_batch, delete_draft, restore, restore_batch};
+pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
 pub use query::{
     get, get_publication, list, list_pending_sentence_associations, list_publications,
     related_search, resolve_sentence_targets, stats, surface_match_snapshot_page,
@@ -397,6 +397,10 @@ fn map_error(error: LexiconServiceError) -> AppError {
             ErrorCode::EntryNotDeletable,
             None,
             "only never-published entries without inbound references can be deleted",
+        ),
+        LexiconServiceError::EntryDeleteForbidden => AppError::forbidden(
+            ErrorCode::EntryDeleteForbidden,
+            "entry can only be deleted by its creator",
         ),
         LexiconServiceError::EntryHasInboundPreboundRelations => AppError::conflict(
             ErrorCode::EntryHasInboundPreboundRelations,

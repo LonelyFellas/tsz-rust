@@ -5,6 +5,7 @@ const ARCHIVE_SCOPE: &str = "lexicon.entry.archive";
 const RESTORE_SCOPE: &str = "lexicon.entry.restore";
 const ARCHIVE_BATCH_SCOPE: &str = "lexicon.entry.archive_batch";
 const RESTORE_BATCH_SCOPE: &str = "lexicon.entry.restore_batch";
+const DELETE_BATCH_SCOPE: &str = "lexicon.entry.delete_batch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetState {
@@ -44,6 +45,7 @@ impl LexiconService {
         entry_id: Uuid,
         input: DeleteDraftInput,
         allow_v3: bool,
+        is_super_admin: bool,
     ) -> Result<(), LexiconServiceError> {
         if input.base_revision < 1 {
             return Err(LexiconServiceError::UnprocessableField {
@@ -69,16 +71,145 @@ impl LexiconService {
         LexiconRepository::lock_surface_policy_writer(&mut transaction)
             .await
             .map_err(repository_error)?;
-        let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
+        Self::delete_entry_in_transaction(
+            &mut transaction,
+            actor_id,
+            request_id,
+            entry_id,
+            input.base_revision,
+            input.base_lifecycle_revision,
+            allow_v3,
+            is_super_admin,
+            &[],
+        )
+        .await?;
+        transaction.commit().await.map_err(database_error)?;
+        Ok(())
+    }
+
+    /// 批量永久删除（原子）：任意一条不满足条件则整批回滚，语义与
+    /// archive-batch / restore-batch 的「要么全成、要么全不动」保持一致。
+    /// 永久删除不可逆，部分成功是最坏的失败模式，因此这里不做「跳过失败项」。
+    pub async fn delete_draft_batch(
+        &self,
+        actor_id: Uuid,
+        request_id: Uuid,
+        idempotency_key: Uuid,
+        targets: Vec<EntryLifecycleTarget>,
+        allow_v3: bool,
+        is_super_admin: bool,
+    ) -> Result<EntryDeleteBatchResponse, LexiconServiceError> {
+        validate_targets(&targets)?;
+        let request_hash = sha256_json(&serde_json::json!({
+            "operation": "delete_batch",
+            "entries": &targets,
+        }))
+        .map_err(serialization_error)?;
+        // 加锁顺序按 id 排序固定下来，避免两个并发批量以相反顺序持锁形成 ABBA。
+        let mut ordered = targets.clone();
+        ordered.sort_by_key(|target| target.id);
+        let entry_ids = ordered.iter().map(|target| target.id).collect::<Vec<_>>();
+
+        let mut transaction = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("{DELETE_BATCH_SCOPE}:{actor_id}:{idempotency_key}"))
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+        if let Some(existing) = LexiconRepository::idempotency(
+            &mut transaction,
+            DELETE_BATCH_SCOPE,
+            actor_id,
+            idempotency_key,
+        )
+        .await
+        .map_err(repository_error)?
+        {
+            if existing.request_hash != request_hash {
+                return Err(LexiconServiceError::IdempotencyConflict);
+            }
+            transaction.commit().await.map_err(database_error)?;
+            return serde_json::from_value(existing.response_body).map_err(serialization_error);
+        }
+
+        // 先一次性取全部 surface-context 锁（内部按 BTreeSet 排序），
+        // 后续逐条再取同一把锁是 no-op。
+        LexiconRepository::lock_surface_contexts(&mut transaction, &entry_ids)
+            .await
+            .map_err(repository_error)?;
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
+        // 批内成员之间的引用会随各自的删除一并消失，提前清掉，
+        // 否则先删的那条会撞上后一条的 RESTRICT 外键——结果取决于 id 排序。
+        LexiconRepository::clear_intra_batch_references(&mut transaction, &entry_ids)
+            .await
+            .map_err(repository_error)?;
+        for target in &ordered {
+            Self::delete_entry_in_transaction(
+                &mut transaction,
+                actor_id,
+                request_id,
+                target.id,
+                target.base_revision,
+                target.base_lifecycle_revision,
+                allow_v3,
+                is_super_admin,
+                &entry_ids,
+            )
+            .await?;
+        }
+        let response = EntryDeleteBatchResponse {
+            affected: ordered.len(),
+        };
+        LexiconRepository::insert_idempotent_response(
+            &mut transaction,
+            DELETE_BATCH_SCOPE,
+            actor_id,
+            idempotency_key,
+            &request_hash,
+            (ordered.len() == 1).then_some(ordered[0].id),
+            &response,
+            200,
+        )
+        .await
+        .map_err(repository_error)?;
+        transaction.commit().await.map_err(database_error)?;
+        Ok(response)
+    }
+
+    /// 单条永久删除的事务内实现。调用方负责开事务、取 surface-context 锁与提交，
+    /// 批量入口据此复用同一套判定，避免两条路径的规则漂移。
+    #[allow(clippy::too_many_arguments)]
+    async fn delete_entry_in_transaction(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        actor_id: Uuid,
+        request_id: Uuid,
+        entry_id: Uuid,
+        base_revision: i64,
+        base_lifecycle_revision: i64,
+        allow_v3: bool,
+        is_super_admin: bool,
+        batch_members: &[Uuid],
+    ) -> Result<(), LexiconServiceError> {
+        LexiconRepository::lock_surface_contexts(transaction, &[entry_id])
+            .await
+            .map_err(repository_error)?;
+        let record = LexiconRepository::entry_by_id_for_update(transaction, entry_id)
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        if record.revision != input.base_revision {
+        if record.revision != base_revision {
             return Err(LexiconServiceError::RevisionConflict {
                 current_revision: record.revision,
             });
         }
-        if record.lifecycle_revision != input.base_lifecycle_revision {
+        if record.lifecycle_revision != base_lifecycle_revision {
             return Err(LexiconServiceError::LifecycleRevisionConflict {
                 current_lifecycle_revision: record.lifecycle_revision,
             });
@@ -92,7 +223,7 @@ impl LexiconService {
         let relational_meanings: DraftMeaningsStepContent =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
         let relation_targets = relation_target_entry_ids(&relational_meanings);
-        LexiconRepository::lock_surface_contexts(&mut transaction, &relation_targets)
+        LexiconRepository::lock_surface_contexts(transaction, &relation_targets)
             .await
             .map_err(repository_error)?;
         let surface_sources = if record.content_schema_version == 2 {
@@ -106,22 +237,29 @@ impl LexiconService {
             crate::lexicon::repository::surface_lock_keys([surface_sources.as_slice()]);
         if surface_sources.is_empty() {
             surface_keys.extend(
-                LexiconRepository::lifecycle_surface_lock_keys(&mut transaction, &[entry_id])
+                LexiconRepository::lifecycle_surface_lock_keys(transaction, &[entry_id])
                     .await
                     .map_err(repository_error)?,
             );
         }
-        LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)
+        LexiconRepository::lock_surface_keys(transaction, &surface_keys)
             .await
             .map_err(repository_error)?;
-        let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
+        let record = LexiconRepository::entry_by_id_for_update(transaction, entry_id)
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        if record.archived_at.is_some() || record.current_publication_id.is_some() {
+        // 普通管理员只能删自己创建的词条；超管不受限。归属先于可删性判定，
+        // 避免把「这条能不能删」的信息泄露给无权处置它的管理员。
+        if !is_super_admin && record.created_by_admin_id != actor_id {
+            return Err(LexiconServiceError::EntryDeleteForbidden);
+        }
+        // 归档态可删：垃圾桶是软删除的中间站，不是终点。真正不可删的是「发布过」——
+        // publication 历史必须保留（delete_never_published_entry 里还有一层 NOT EXISTS 兜底）。
+        if record.current_publication_id.is_some() {
             return Err(LexiconServiceError::EntryNotDeletable);
         }
-        if LexiconRepository::has_inbound_prebound_relations(&mut transaction, entry_id)
+        if LexiconRepository::has_inbound_prebound_relations(transaction, entry_id)
             .await
             .map_err(repository_error)?
         {
@@ -129,7 +267,7 @@ impl LexiconService {
         }
         if record.content_schema_version == 2 {
             LexiconRepository::replace_surface_projection(
-                &mut transaction,
+                transaction,
                 entry_id,
                 record.revision + 1,
                 crate::lexicon::repository::SurfaceContentScope::Draft,
@@ -141,7 +279,7 @@ impl LexiconService {
             .map_err(repository_error)?;
         } else {
             LexiconRepository::retire_v3_draft_surface_projection(
-                &mut transaction,
+                transaction,
                 entry_id,
                 record.revision + 1,
             )
@@ -149,18 +287,18 @@ impl LexiconService {
             .map_err(repository_error)?;
         }
         if !LexiconRepository::delete_never_published_entry(
-            &mut transaction,
+            transaction,
             actor_id,
             request_id,
             entry_id,
             record.revision,
+            batch_members,
         )
         .await
         .map_err(repository_error)?
         {
             return Err(LexiconServiceError::EntryNotDeletable);
         }
-        transaction.commit().await.map_err(database_error)?;
         Ok(())
     }
 

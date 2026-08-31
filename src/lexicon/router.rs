@@ -22,6 +22,10 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(handler::archive_batch),
         )
         .route(
+            "/entries/delete-batch",
+            axum::routing::post(handler::delete_batch),
+        )
+        .route(
             "/entries/restore-batch",
             axum::routing::post(handler::restore_batch),
         )

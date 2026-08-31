@@ -66,6 +66,10 @@ fn test_redis_url() -> String {
 }
 
 async fn seed_admin(pool: &PgPool) -> Uuid {
+    seed_admin_with_role(pool, AdminRole::Admin).await
+}
+
+async fn seed_admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
     let id = Uuid::now_v7();
     AdminRepository::new(pool.clone())
         .create(NewAdmin {
@@ -73,7 +77,7 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
             phone: format!("lexicon-{}", id.simple()),
             display_name: "词库测试管理员".to_owned(),
             password_hash: "hashed-password".to_owned(),
-            role: AdminRole::Admin,
+            role,
             must_change_password: false,
             created_by_admin_id: None,
         })
@@ -8897,6 +8901,611 @@ async fn related_search_orders_headword_spellings_like_the_list(pool: PgPool) {
     );
 }
 
+/// 批内互相引用的词条一起删除时，结果不得取决于 id 排序。
+/// 回归的是这样一个缺陷：批量按 target.id 排序后逐条「校验+删除」，
+/// 先删掉的那条会级联清除它的出站引用，从而改变后一条的入站引用检查结果——
+/// 于是同样的引用关系，A.id < B.id 时整批成功、B.id < A.id 时整批 409。
+#[sqlx::test]
+async fn delete_batch_ignores_references_between_members_regardless_of_id_order(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 两种创建顺序各跑一遍：唯一差别是引用方与被引用方谁的 id 更小。
+    for (slug, label, referrer_first) in [
+        ("srcfirst", "引用方 id 更小", true),
+        ("dstfirst", "被引用方 id 更小", false),
+    ] {
+        let (referrer, referenced) = if referrer_first {
+            let referrer =
+                create_ready_draft(&state, &pool, &bearer, &format!("member-src-{slug}")).await;
+            let referenced =
+                create_ready_draft(&state, &pool, &bearer, &format!("member-dst-{slug}")).await;
+            (referrer, referenced)
+        } else {
+            let referenced =
+                create_ready_draft(&state, &pool, &bearer, &format!("member-dst-{slug}")).await;
+            let referrer =
+                create_ready_draft(&state, &pool, &bearer, &format!("member-src-{slug}")).await;
+            (referrer, referenced)
+        };
+        let referrer_id = Uuid::parse_str(referrer["word"]["id"].as_str().unwrap()).unwrap();
+        let referenced_id = Uuid::parse_str(referenced["word"]["id"].as_str().unwrap()).unwrap();
+        let referrer_sense_id = Uuid::parse_str(
+            referrer["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let referenced_sense_id = Uuid::parse_str(
+            referenced["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            referrer_first,
+            referrer_id < referenced_id,
+            "{label}：构造出的 id 顺序与预期不符"
+        );
+
+        // referrer --近义词--> referenced
+        let relation_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.nodes (
+                id, entry_id, node_type, parent_node_id, node_role, stable_slot
+            ) VALUES ($1, $2, 'relation', $3, 'meanings.relation', false)
+            "#,
+        )
+        .bind(relation_id)
+        .bind(referrer_id)
+        .bind(referrer_sense_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.relations (
+                id, entry_id, source_sense_id, relation_type,
+                target_entry_id, target_sense_id, score,
+                target_headword_snapshot, target_gloss_snapshot, sort_order
+            ) VALUES ($1, $2, $3, 'synonym', $4, $5, 100, 'member', '', 0)
+            "#,
+        )
+        .bind(relation_id)
+        .bind(referrer_id)
+        .bind(referrer_sense_id)
+        .bind(referenced_id)
+        .bind(referenced_sense_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut entries = Vec::new();
+        for word in [&referrer, &referenced] {
+            let id = word["word"]["id"].as_str().unwrap().to_owned();
+            let (status, archived) = call(
+                &state,
+                Method::POST,
+                &format!("{ROOT}/entries/{id}/archive"),
+                &bearer,
+                Some(Uuid::now_v7()),
+                Some(json!({
+                    "base_revision": word["word"]["revision"],
+                    "base_lifecycle_revision": word["word"]["lifecycle_revision"]
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{label} 归档失败：{archived}");
+            entries.push(json!({
+                "id": id,
+                "base_revision": archived["word"]["revision"],
+                "base_lifecycle_revision": archived["word"]["lifecycle_revision"]
+            }));
+        }
+
+        let (status, response) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/delete-batch"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(json!({ "entries": entries })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{label}：批内互相引用不应阻塞整批删除——两条都要删掉，谁先谁后不该改变结果：{response}"
+        );
+        assert_eq!(response["affected"], 2, "{label}");
+    }
+}
+
+#[sqlx::test]
+async fn entry_reference_summary_dedupes_sources_and_matches_the_delete_gate(pool: PgPool) {
+    // 本测试守的是整个功能最关键的不变量：**计数为 0 的词条一定能删，
+    // 计数大于 0 的一定删不掉**。计数与删除拦截若各写一套口径，就会出现
+    // 「显示 0 引用却删不掉」——比不显示引用数更糟。
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let referenced = create_ready_draft(&state, &pool, &bearer, "refcount-target").await;
+    let referring = create_ready_draft(&state, &pool, &bearer, "refcount-source").await;
+    let referenced_id = Uuid::parse_str(referenced["word"]["id"].as_str().unwrap()).unwrap();
+    let referenced_sense_id = Uuid::parse_str(
+        referenced["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let referring_id = Uuid::parse_str(referring["word"]["id"].as_str().unwrap()).unwrap();
+    let referring_sense_id = Uuid::parse_str(
+        referring["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+
+    let summary_of = |list: &Value| -> Value {
+        list["words"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|word| word["id"] == referenced_id.to_string())
+            .expect("列表应包含目标词条")["reference_summary"]
+            .clone()
+    };
+
+    // 无人引用：total = 0。
+    let (status, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?q=refcount-target"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let summary = summary_of(&list);
+    assert_eq!(summary["total"], 0, "无人引用时应为 0：{summary}");
+    assert_eq!(summary["previews"].as_array().unwrap().len(), 0);
+    assert_eq!(summary["truncated"], false);
+
+    // 挂上一条关联词引用（草稿态引用同样要计入）。
+    let relation_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.nodes (
+            id, entry_id, node_type, parent_node_id, node_role, stable_slot
+        ) VALUES ($1, $2, 'relation', $3, 'meanings.relation', false)
+        "#,
+    )
+    .bind(relation_id)
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.relations (
+            id, entry_id, source_sense_id, relation_type,
+            target_entry_id, target_sense_id, score,
+            target_headword_snapshot, target_gloss_snapshot, sort_order
+        ) VALUES ($1, $2, $3, 'synonym', $4, $5, 100, 'refcount-target', '', 0)
+        "#,
+    )
+    .bind(relation_id)
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .bind(referenced_id)
+    .bind(referenced_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (_, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?q=refcount-target"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let summary = summary_of(&list);
+    assert_eq!(summary["total"], 1, "被一个词条引用：{summary}");
+    let preview = &summary["previews"][0];
+    assert_eq!(preview["source_word_id"], referring_id.to_string());
+    assert_eq!(preview["source_headword"], "refcount-source");
+    assert_eq!(preview["source_kind"], "relation");
+    assert_eq!(preview["source_status"], "draft", "草稿引用也要计入");
+    assert_eq!(summary["truncated"], false);
+
+    // 同一个引用方再通过另一条路径引用：去重后仍是 1 个依赖方。
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.sentence_associations (
+            id, entry_id, sentence_id, source_dialect,
+            range_start, range_end, surface, origin, state,
+            target_entry_id, target_sense_id,
+            target_headword_snapshot, target_gloss_snapshot, resolved_pos
+        ) VALUES ($1, $2, $3, 'common', 0, 5, 'refcnt', 'manual', 'linked',
+                  $4, $5, 'refcount-target', '', 'noun')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .bind(referenced_id)
+    .bind(referenced_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (_, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?q=refcount-target"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let summary = summary_of(&list);
+    assert_eq!(
+        summary["total"], 1,
+        "同一引用方多路引用只算一个依赖方：{summary}"
+    );
+    assert_eq!(summary["previews"].as_array().unwrap().len(), 1);
+
+    // 不变量：total > 0 时删除必须被拒。
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{referenced_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": referenced["word"]["revision"],
+            "base_lifecycle_revision": referenced["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "计数大于 0 的词条必须删不掉：{response}"
+    );
+
+    // 反向不变量：无人引用的词条 total = 0 且确实能删。
+    let (_, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?q=refcount-source"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let free = list["words"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|word| word["id"] == referring_id.to_string())
+        .expect("列表应包含引用方词条")
+        .clone();
+    assert_eq!(free["reference_summary"]["total"], 0, "引用方自己无人引用");
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{referring_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": free["revision"],
+            "base_lifecycle_revision": free["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "计数为 0 的词条必须能删：{response}"
+    );
+}
+
+#[sqlx::test]
+async fn deleting_an_entry_referenced_by_a_sentence_association_conflicts(pool: PgPool) {
+    // sentence_associations 的 target_shape_check 允许 state='linked' 且不带
+    // target_publication_id——即例句关联可以指向一个尚未发布的词条。这条路径
+    // 不在删除时的入站引用检查里就会撞上 DB 外键，冒出 500 而不是 409。
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let referenced = create_ready_draft(&state, &pool, &bearer, "assoc-target").await;
+    let referring = create_ready_draft(&state, &pool, &bearer, "assoc-source").await;
+    let referenced_id = Uuid::parse_str(referenced["word"]["id"].as_str().unwrap()).unwrap();
+    let referenced_sense_id = Uuid::parse_str(
+        referenced["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let referring_id = Uuid::parse_str(referring["word"]["id"].as_str().unwrap()).unwrap();
+    let referring_sense_id = Uuid::parse_str(
+        referring["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+
+    // 先归档目标，模拟「垃圾桶里的词条被别处例句引用」。
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{referenced_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": referenced["word"]["revision"],
+            "base_lifecycle_revision": referenced["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "归档失败：{archived}");
+    let archived_revision = archived["word"]["revision"].as_i64().unwrap();
+    let archived_lifecycle_revision = archived["word"]["lifecycle_revision"].as_i64().unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.sentence_associations (
+            id, entry_id, sentence_id, source_dialect,
+            range_start, range_end, surface, origin, state,
+            target_entry_id, target_sense_id,
+            target_headword_snapshot, target_gloss_snapshot, resolved_pos
+        ) VALUES ($1, $2, $3, 'common', 0, 5, 'assoc', 'manual', 'linked',
+                  $4, $5, 'assoc-target', '', 'noun')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .bind(referenced_id)
+    .bind(referenced_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{referenced_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": archived_revision,
+            "base_lifecycle_revision": archived_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "被例句关联引用的词条必须以 409 拒绝，而不是撞外键冒 500：{response}"
+    );
+    assert_eq!(response["code"], "entry_not_deletable");
+}
+
+#[sqlx::test]
+async fn deleting_an_entry_is_restricted_to_its_creator_unless_super_admin(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let owner_id = seed_admin(&pool).await;
+    let owner_bearer = token(&state, owner_id);
+    let other_id = seed_admin(&pool).await;
+    let other_bearer = token(&state, other_id);
+    let super_id = seed_admin_with_role(&pool, AdminRole::SuperAdmin).await;
+    let super_bearer = token(&state, super_id);
+
+    // 归属：他人创建的词条，普通管理员删不了。
+    let owned = create_ready_draft(&state, &pool, &owner_bearer, "owned-by-creator").await;
+    let owned_id = owned["word"]["id"].as_str().unwrap();
+    let owned_revision = owned["word"]["revision"].as_i64().unwrap();
+    let owned_lifecycle_revision = owned["word"]["lifecycle_revision"].as_i64().unwrap();
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{owned_id}"),
+        &other_bearer,
+        None,
+        Some(json!({
+            "base_revision": owned_revision,
+            "base_lifecycle_revision": owned_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "普通管理员不得删除他人创建的词条：{response}"
+    );
+    assert_eq!(response["code"], "entry_delete_forbidden");
+
+    // 归属放行：创建者本人可以删。
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{owned_id}"),
+        &owner_bearer,
+        None,
+        Some(json!({
+            "base_revision": owned_revision,
+            "base_lifecycle_revision": owned_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "创建者本人应能删除自己的词条：{response}"
+    );
+
+    // 超管不受创建人限制。
+    let foreign = create_ready_draft(&state, &pool, &owner_bearer, "owned-but-super-deletes").await;
+    let foreign_id = foreign["word"]["id"].as_str().unwrap();
+    let foreign_revision = foreign["word"]["revision"].as_i64().unwrap();
+    let foreign_lifecycle_revision = foreign["word"]["lifecycle_revision"].as_i64().unwrap();
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{foreign_id}"),
+        &super_bearer,
+        None,
+        Some(json!({
+            "base_revision": foreign_revision,
+            "base_lifecycle_revision": foreign_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "超管应能删除他人创建的词条：{response}"
+    );
+}
+
+#[sqlx::test]
+async fn delete_batch_is_atomic_and_idempotent(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 造三条草稿并全部移入垃圾桶。
+    let mut archived_targets = Vec::new();
+    for index in 0..3 {
+        let draft =
+            create_ready_draft(&state, &pool, &bearer, &format!("batch-delete-{index}")).await;
+        let id = draft["word"]["id"].as_str().unwrap().to_owned();
+        let revision = draft["word"]["revision"].as_i64().unwrap();
+        let lifecycle_revision = draft["word"]["lifecycle_revision"].as_i64().unwrap();
+        let (status, archived) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/{id}/archive"),
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(json!({
+                "base_revision": revision,
+                "base_lifecycle_revision": lifecycle_revision
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "归档失败：{archived}");
+        archived_targets.push(json!({
+            "id": id,
+            "base_revision": archived["word"]["revision"].as_i64().unwrap(),
+            "base_lifecycle_revision": archived["word"]["lifecycle_revision"].as_i64().unwrap(),
+        }));
+    }
+
+    // 原子性：批次里混入一条已发布词条，整批必须不生效。
+    let published = create_ready_draft(&state, &pool, &bearer, "batch-delete-published").await;
+    let (status, published) = publish_ready(&state, &bearer, &published).await;
+    assert_eq!(status, StatusCode::CREATED, "发布准备失败：{published}");
+    let mut poisoned = archived_targets.clone();
+    poisoned.push(json!({
+        "id": published["word"]["id"].as_str().unwrap(),
+        "base_revision": published["word"]["revision"].as_i64().unwrap(),
+        "base_lifecycle_revision": published["word"]["lifecycle_revision"].as_i64().unwrap(),
+    }));
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/delete-batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({ "entries": poisoned })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "批次含已发布词条时必须整批拒绝：{response}"
+    );
+    assert_eq!(response["code"], "entry_not_deletable");
+    for target in &archived_targets {
+        let id = target["id"].as_str().unwrap();
+        let (status, _) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/{id}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "整批拒绝后归档词条必须原样保留");
+    }
+
+    // 正常路径 + 幂等：同一幂等键重放返回同一结果，且不重复删除。
+    let key = Uuid::now_v7();
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/delete-batch"),
+        &bearer,
+        Some(key),
+        Some(json!({ "entries": archived_targets })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "批量永久删除应成功：{response}");
+    assert_eq!(response["affected"], 3);
+    for target in &archived_targets {
+        let id = target["id"].as_str().unwrap();
+        let (status, _) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/{id}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "批量删除后词条不应再可读");
+    }
+    let (status, replay) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/delete-batch"),
+        &bearer,
+        Some(key),
+        Some(json!({ "entries": archived_targets })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "幂等重放应成功：{replay}");
+    assert_eq!(replay["affected"], 3, "幂等重放必须返回首次结果");
+}
+
 #[sqlx::test]
 async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
@@ -9011,6 +9620,7 @@ async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(p
         archived_lifecycle_revision
     );
 
+    // 垃圾桶清理：归档只是软删除的中间站，从未发布过的归档草稿可以永久删除。
     let (status, response) = call(
         &state,
         Method::DELETE,
@@ -9025,10 +9635,23 @@ async fn never_published_draft_can_be_deleted_but_published_entry_is_protected(p
     .await;
     assert_eq!(
         status,
-        StatusCode::CONFLICT,
-        "归档状态不是可永久删除的草稿：{response}"
+        StatusCode::NO_CONTENT,
+        "垃圾桶里从未发布的草稿应可永久删除：{response}"
     );
-    assert_eq!(response["code"], "entry_not_deletable");
+    let (status, response) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{archive_race_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "永久删除后词条不应再可读：{response}"
+    );
 
     let (status, response) = call(
         &state,

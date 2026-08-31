@@ -1241,6 +1241,60 @@ pub struct EntryLifecycleBatchResponse {
     pub affected: usize,
 }
 
+/// 一条词条被谁引用的预览项。`source_kind` 说明引用来自哪一类内容，
+/// 让管理员看到「被短语 X 当成分」与「被词条 Y 设为近义词」的区别。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EntryReferencePreview {
+    pub source_word_id: Uuid,
+    pub source_headword: String,
+    pub source_status: AdminWordStatus,
+    pub source_kind: EntryReferenceKind,
+}
+
+/// 引用来源分类。计数本身不按类型拆分（管理员的下一个问题是「谁」而非「哪类」），
+/// 但预览项里标明来源类型几乎零成本且信息量高。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryReferenceKind {
+    /// 关联词（近义/反义/派生）已绑定到本词条的词义。
+    Relation,
+    /// 关联词预绑定：填写时目标还没建条，本词条建出来后被绑上。
+    RelationPrebound,
+    /// 别的词条的例句把本词条标为 focus / context。
+    SentenceLink,
+    /// 已发布内容引用本词条的词义。
+    PublicationSenseRef,
+    /// 例句关联待认领。
+    SentenceAssociation,
+    /// V3 短语把本词条当作成分。
+    PhraseComponent,
+}
+
+/// 词条被引用汇总。`total` 按**引用方词条去重**计数（同一词条多处引用只算 1），
+/// 口径与删除时的入站引用拦截完全一致——否则会出现「显示 0 却删不掉」。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct EntryReferenceSummary {
+    pub total: u32,
+    #[schema(max_items = 5)]
+    pub previews: Vec<EntryReferencePreview>,
+    /// total 超过 previews 长度时为 true。
+    pub truncated: bool,
+}
+
+/// 批量永久删除入参；不带 confirmed_surface_match_token——
+/// 删除只撤除 surface 贡献、不新增占位，不存在需要确认的同表面冲突。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryDeleteBatchInput {
+    pub entries: Vec<EntryLifecycleTarget>,
+}
+
+/// 批量永久删除出参；词条已不存在，故不回实体，只回受影响条数。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EntryDeleteBatchResponse {
+    pub affected: usize,
+}
+
 // --- listing ---
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -1359,6 +1413,10 @@ pub struct AdminWordListItem {
     pub has_unpublished_changes: bool,
     pub max_reachable_step: WordCreationStep,
     pub created_by_name: String,
+    /// 创建人 admin id；前端按「仅本人可删」判定归属时使用。
+    pub created_by: Uuid,
+    /// 被引用汇总；`total = 0` 即无人引用，可安全清理。
+    pub reference_summary: EntryReferenceSummary,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

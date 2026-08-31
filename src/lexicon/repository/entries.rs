@@ -9,9 +9,16 @@ pub(super) fn map_entry_write_error(error: sqlx::Error) -> LexiconRepositoryErro
     }
     if [
         "lexicon_relations_target_fkey",
+        "lexicon_relations_prebound_target_fkey",
         "lexicon_sentence_links_target_fkey",
         "lexicon_publication_sense_refs_target_fkey",
         "lexicon_publication_sense_refs_target_node_fkey",
+        "lexicon_sentence_associations_target_fkey",
+        "lexicon_sentence_associations_target_slot_fkey",
+        "lexicon_v3_phrase_components_base_fkey",
+        "lexicon_v3_phrase_components_form_fkey",
+        "lexicon_v3_phrase_components_pos_fkey",
+        "lexicon_v3_phrase_components_node_fkey",
     ]
     .iter()
     .any(|constraint| is_foreign_key_violation(&error, constraint))
@@ -749,12 +756,60 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
+    /// 清除**批内成员之间**的引用行（只动这些行，不碰其余内容）。
+    ///
+    /// 批量删除逐条执行「校验 + 删除」，先删掉的那条若仍被批内另一条引用，
+    /// 会撞上 relations / sentence_links 等的 ON DELETE RESTRICT 外键——
+    /// 于是能否删除取决于 id 排序而非业务规则。这些引用行本就会随引用方一起
+    /// 被删掉，提前清掉它们即可让结果与顺序无关。
+    ///
+    /// 不含 entry_publication_sense_refs：那要求引用方已发布，
+    /// 而已发布词条在更早的 publication 判定处就被拒绝了。
+    pub(crate) async fn clear_intra_batch_references(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_ids: &[Uuid],
+    ) -> Result<(), LexiconRepositoryError> {
+        if entry_ids.len() < 2 {
+            return Ok(());
+        }
+        for statement in [
+            r#"
+            DELETE FROM lexicon.relations
+             WHERE entry_id = ANY($1)
+               AND (target_entry_id = ANY($1) OR prebound_target_entry_id = ANY($1))
+            "#,
+            r#"
+            DELETE FROM lexicon.sentence_links
+             WHERE entry_id = ANY($1) AND target_entry_id = ANY($1)
+            "#,
+            r#"
+            DELETE FROM lexicon.sentence_associations
+             WHERE entry_id = ANY($1) AND target_entry_id = ANY($1)
+            "#,
+            r#"
+            DELETE FROM lexicon.v3_phrase_variant_component_usages
+             WHERE entry_id = ANY($1) AND target_entry_id = ANY($1)
+            "#,
+        ] {
+            sqlx::query(statement)
+                .bind(entry_ids)
+                .execute(&mut **tx)
+                .await
+                .map_err(map_entry_write_error)?;
+        }
+        Ok(())
+    }
+
+    /// `batch_members` 是与本条同批次、将在同一事务内一并删除的词条。
+    /// 它们之间的互相引用不应互相阻塞——都要删掉，谁先谁后不该改变结果。
+    /// 不排除的话，批内互引能否删除就取决于执行顺序（即 id 排序），而非业务规则。
     pub(crate) async fn delete_never_published_entry(
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
         request_id: Uuid,
         id: Uuid,
         revision: i64,
+        batch_members: &[Uuid],
     ) -> Result<bool, LexiconRepositoryError> {
         let has_inbound_references = sqlx::query_scalar::<_, bool>(
             r#"
@@ -763,25 +818,44 @@ impl LexiconRepository {
                 FROM lexicon.relations relation
                 JOIN lexicon.nodes target ON target.id = relation.target_sense_id
                 WHERE target.entry_id = $1 AND relation.entry_id <> $1
+                  AND relation.entry_id <> ALL($2)
                 UNION ALL
                 SELECT 1
                 FROM lexicon.relations relation
                 WHERE relation.prebound_target_entry_id = $1
                   AND relation.entry_id <> $1
+                  AND relation.entry_id <> ALL($2)
                 UNION ALL
                 SELECT 1
                 FROM lexicon.sentence_links link
                 JOIN lexicon.nodes target ON target.id = link.target_sense_id
                 WHERE target.entry_id = $1 AND link.entry_id <> $1
+                  AND link.entry_id <> ALL($2)
                 UNION ALL
                 SELECT 1
                 FROM lexicon.entry_publication_sense_refs sense_ref
                 WHERE sense_ref.target_entry_id = $1
                   AND sense_ref.entry_id <> $1
+                  AND sense_ref.entry_id <> ALL($2)
+                UNION ALL
+                -- 待认领的例句关联：目标已指向本词条，只是尚未物化成 sentence_links。
+                SELECT 1
+                FROM lexicon.sentence_associations association
+                WHERE association.target_entry_id = $1
+                  AND association.entry_id <> $1
+                  AND association.entry_id <> ALL($2)
+                UNION ALL
+                -- V3 短语把本词条当作成分（短语 ↔ 单词）。
+                SELECT 1
+                FROM lexicon.v3_phrase_variant_component_usages usage
+                WHERE usage.target_entry_id = $1
+                  AND usage.entry_id <> $1
+                  AND usage.entry_id <> ALL($2)
             )
             "#,
         )
         .bind(id)
+        .bind(batch_members)
         .fetch_one(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)?;
