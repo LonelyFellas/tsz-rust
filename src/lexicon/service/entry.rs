@@ -2084,6 +2084,27 @@ impl LexiconService {
         term_family: &str,
         surface: Option<RegionSurfaceRecord>,
     ) -> Result<(WordHeadwordsV2, Dialect), LexiconServiceError> {
+        self.detected_headwords_with_candidates(term, term_family, surface, false)
+            .await
+    }
+
+    pub(super) async fn detected_headwords_v3(
+        &self,
+        term: &str,
+        term_family: &str,
+        surface: Option<RegionSurfaceRecord>,
+    ) -> Result<(WordHeadwordsV2, Dialect), LexiconServiceError> {
+        self.detected_headwords_with_candidates(term, term_family, surface, true)
+            .await
+    }
+
+    async fn detected_headwords_with_candidates(
+        &self,
+        term: &str,
+        term_family: &str,
+        surface: Option<RegionSurfaceRecord>,
+        include_region_surfaces: bool,
+    ) -> Result<(WordHeadwordsV2, Dialect), LexiconServiceError> {
         let Some(surface) = surface else {
             return Ok((
                 WordHeadwordsV2::Unified {
@@ -2098,11 +2119,12 @@ impl LexiconService {
             .iter()
             .filter_map(|target| normalize_headword(target).ok().map(|value| value.key))
             .collect::<Vec<_>>();
-        let mut candidates = self
-            .repository
-            .dictionary_candidates(&target_keys)
-            .await
-            .map_err(repository_error)?;
+        let mut candidates = if include_region_surfaces {
+            self.repository.dictionary_candidates_v3(&target_keys).await
+        } else {
+            self.repository.dictionary_candidates(&target_keys).await
+        }
+        .map_err(repository_error)?;
         let source_dialect = family_dialect(effective_family).or_else(|| {
             let mut target_dialects = candidates
                 .iter()

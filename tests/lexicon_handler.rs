@@ -6592,6 +6592,23 @@ async fn detection_distinguishes_center_and_centre_in_both_directions(pool: PgPo
     .await
     .unwrap();
 
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_evidence (
+            dataset_id, normalized_term, evidence_type,
+            original_region_tags, raw_tags, pos, targets
+        ) VALUES
+            ($1, 'center', 'spelling', ARRAY['US'], ARRAY['US', 'alternative'],
+             'noun', ARRAY['centre']),
+            ($1, 'centre', 'spelling', ARRAY['UK'], ARRAY['UK', 'alternative'],
+             'noun', ARRAY['center'])
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     for (input, source_dialect) in [("center", "us"), ("centre", "uk")] {
         let (status, response) = call(
             &state,
@@ -6615,6 +6632,36 @@ async fn detection_distinguishes_center_and_centre_in_both_directions(pool: PgPo
         );
     }
 
+    let v3_state = state
+        .clone()
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    for input in ["center", "centre"] {
+        let (status, response) = call(
+            &v3_state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": input
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{input} V3 检测失败：{response}");
+        assert_eq!(
+            response["builtin_dictionary"]["suggested_forms"][0]["regional_variants"],
+            json!({
+                "mode": "uk_us",
+                "uk": {"dialect": "uk", "spelling": "centre", "pronunciations": []},
+                "us": {"dialect": "us", "spelling": "center", "pronunciations": []}
+            })
+        );
+    }
+
     seed_dictionary_term(&pool, "priority-source", "word", "british_core").await;
     seed_dictionary_term(&pool, "priority-ambiguous", "word", "british_american").await;
     seed_dictionary_term(&pool, "priority-us", "word", "american_core").await;
@@ -6623,10 +6670,29 @@ async fn detection_distinguishes_center_and_centre_in_both_directions(pool: PgPo
         INSERT INTO dictionary.region_surfaces (
             dataset_id, normalized_term, term, region_family, families,
             source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES
+            ($1, 'priority-source', 'priority-source', 'british_core', ARRAY['british_core'],
+             ARRAY['GB'], ARRAY['spelling'], ARRAY['noun'],
+             ARRAY['priority-ambiguous', 'priority-us'], true),
+            ($1, 'priority-ambiguous', 'priority-ambiguous', 'british_american',
+             ARRAY['british_core', 'american_core'], ARRAY['GB', 'US'], ARRAY['usage'],
+             ARRAY['noun'], ARRAY[]::TEXT[], true),
+            ($1, 'priority-us', 'priority-us', 'american_core', ARRAY['american_core'],
+             ARRAY['US'], ARRAY['usage'], ARRAY['noun'], ARRAY[]::TEXT[], true)
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_evidence (
+            dataset_id, normalized_term, evidence_type,
+            original_region_tags, raw_tags, pos, targets
         ) VALUES (
-            $1, 'priority-source', 'priority-source', 'british_core', ARRAY['british_core'],
-            ARRAY['GB'], ARRAY['spelling'], ARRAY['noun'],
-            ARRAY['priority-ambiguous', 'priority-us'], true
+            $1, 'priority-source', 'spelling', ARRAY['UK'], ARRAY['UK', 'alternative'],
+            'noun', ARRAY['priority-ambiguous', 'priority-us']
         )
         "#,
     )
@@ -6653,6 +6719,383 @@ async fn detection_distinguishes_center_and_centre_in_both_directions(pool: PgPo
             "source_dialect": "uk"
         }),
         "明确反方言候选必须优先于排列在前的混合候选"
+    );
+    let (status, v3_priority) = call(
+        &v3_state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "priority-source"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v3_priority}");
+    assert_eq!(
+        v3_priority["builtin_dictionary"]["suggested_forms"][0]["regional_variants"],
+        json!({
+            "mode": "uk_us",
+            "uk": {"dialect": "uk", "spelling": "priority-source", "pronunciations": []},
+            "us": {"dialect": "us", "spelling": "priority-us", "pronunciations": []}
+        })
+    );
+}
+
+#[sqlx::test]
+async fn v3_detection_recovers_an_asymmetric_region_index_in_both_directions(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_term(&pool, "metreprobe", "word", "british_core").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES
+            ($1, 'a-metreprobe-inflected', 'a-metreprobe-inflected', 'american_core',
+             ARRAY['american_core'], ARRAY['US'], ARRAY['spelling'], ARRAY['noun'],
+             ARRAY['metreprobe'], false),
+            ($1, 'meterprobe', 'meterprobe', 'american_core', ARRAY['american_core'],
+             ARRAY['US'], ARRAY['spelling'], ARRAY['noun'], ARRAY['metreprobe'], true),
+            ($1, 'metreprobe', 'metreprobe', 'british_core', ARRAY['british_core'],
+             ARRAY['GB'], ARRAY['usage'], ARRAY['noun'], ARRAY[]::TEXT[], true)
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_evidence (
+            dataset_id, normalized_term, evidence_type,
+            original_region_tags, raw_tags, pos, targets
+        ) VALUES
+            ($1, 'a-metreprobe-inflected', 'spelling', ARRAY['US'],
+             ARRAY['US', 'past', 'participle'], 'noun', ARRAY['metreprobe']),
+            ($1, 'meterprobe', 'spelling', ARRAY['US'], ARRAY['US', 'alternative'],
+             'noun', ARRAY['metreprobe'])
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for input in ["meterprobe", "metreprobe"] {
+        let (status, response) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": input
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{input} V3 检测失败：{response}");
+        assert_eq!(response["builtin_dictionary"]["status"], "matched");
+        assert_eq!(
+            response["builtin_dictionary"]["suggested_forms"][0]["regional_variants"],
+            json!({
+                "mode": "uk_us",
+                "uk": {"dialect": "uk", "spelling": "metreprobe", "pronunciations": []},
+                "us": {"dialect": "us", "spelling": "meterprobe", "pronunciations": []}
+            })
+        );
+    }
+
+    seed_dictionary_term(&pool, "plural-probe", "word", "american_core").await;
+    seed_dictionary_term(&pool, "singular-probe", "word", "common_unmarked").await;
+    seed_dictionary_term(&pool, "unrelated-spelling-probe", "word", "british_core").await;
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES
+            ($1, 'plural-probe', 'plural-probe', 'american_core', ARRAY['american_core'],
+             ARRAY['US'], ARRAY['alias', 'spelling', 'usage'], ARRAY['noun'],
+             ARRAY['singular-probe', 'unrelated-spelling-probe'], true),
+            ($1, 'singular-probe', 'singular-probe', 'british_core', ARRAY['british_core'],
+             ARRAY['UK'], ARRAY['usage'], ARRAY['noun'], ARRAY[]::TEXT[], true),
+            ($1, 'unrelated-spelling-probe', 'unrelated-spelling-probe', 'british_core',
+             ARRAY['british_core'], ARRAY['UK'], ARRAY['usage'], ARRAY['noun'],
+             ARRAY[]::TEXT[], true)
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_evidence (
+            dataset_id, normalized_term, evidence_type,
+            original_region_tags, raw_tags, pos, targets
+        ) VALUES
+        (
+            $1, 'plural-probe', 'alias', ARRAY['US'], ARRAY['US', 'alt-of'],
+            'noun', ARRAY['singular-probe']
+        ),
+        (
+            $1, 'plural-probe', 'spelling', ARRAY['US'],
+            ARRAY['US', 'abbreviation', 'alternative'], 'noun',
+            ARRAY['unrelated-spelling-probe']
+        )
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, unrelated_alias) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "plural-probe"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{unrelated_alias}");
+    assert_eq!(
+        unrelated_alias["builtin_dictionary"]["suggested_forms"][0]["regional_variants"],
+        json!({
+            "mode": "common",
+            "common": {
+                "dialect": "common",
+                "spelling": "plural-probe",
+                "pronunciations": []
+            }
+        })
+    );
+
+    seed_dictionary_term(&pool, "local-probe", "word", "british_core").await;
+    seed_dictionary_term(&pool, "local-variant-probe", "word", "american_core").await;
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_surfaces (
+            dataset_id, normalized_term, term, region_family, families,
+            source_regions, evidence_types, pos, targets, is_headword
+        ) VALUES
+            ($1, 'local-probe', 'local-probe', 'british_core', ARRAY['british_core'],
+             ARRAY['UK'], ARRAY['spelling'], ARRAY['noun'], ARRAY['local-variant-probe'], true),
+            ($1, 'local-variant-probe', 'local-variant-probe', 'american_core',
+             ARRAY['american_core'], ARRAY['US'], ARRAY['usage'], ARRAY['noun'],
+             ARRAY[]::TEXT[], true)
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.region_evidence (
+            dataset_id, normalized_term, evidence_type,
+            original_region_tags, raw_tags, pos, targets
+        ) VALUES (
+            $1, 'local-probe', 'spelling', ARRAY['UK'],
+            ARRAY['UK', 'alternative', 'slang'], 'noun', ARRAY['local-variant-probe']
+        )
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, local_variant) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "local-probe"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{local_variant}");
+    assert_eq!(
+        local_variant["builtin_dictionary"]["suggested_forms"][0]["regional_variants"]["mode"],
+        "common"
+    );
+}
+
+#[sqlx::test]
+async fn v3_detection_uses_generic_content_alternative_spelling_evidence(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_term(&pool, "formalise", "word", "common_unmarked").await;
+    seed_dictionary_term(&pool, "formalize", "word", "common_unmarked").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "UPDATE dictionary.terms SET pos = ARRAY['verb'] WHERE dataset_id = $1 AND normalized_term = ANY($2)",
+    )
+    .bind(dataset_id)
+    .bind(["formalise", "formalize"])
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.content_imports (
+            dataset_id, input_sha256, source_locator, source_version,
+            record_count, parser_version
+        ) VALUES (
+            $1, repeat('b', 64), 'https://kaikki.org/test-source',
+            'enwiktionary-content-test', 2, 'forms-sounds-v1'
+        )
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.entry_contents (
+            dataset_id, source_key, normalized_term, pos, senses,
+            forms, sounds, source_locator
+        ) VALUES
+            ($1, 'kaikki:formalise:verb:test', 'formalise', 'verb', '[]'::jsonb,
+             '[{"form":"formalize","tags":["alternative"]},
+               {"form":"formalises","tags":["present","singular","third-person"]}]'::jsonb,
+             '[{"form":"formalises","ipa":"/formalises/"}]'::jsonb,
+             'https://kaikki.org/test-source'),
+            ($1, 'kaikki:formalize:verb:test', 'formalize', 'verb', '[]'::jsonb,
+             '[{"form":"formalise","tags":["alternative"]},
+               {"form":"formalizes","tags":["present","singular","third-person"]}]'::jsonb,
+             '[]'::jsonb, 'https://kaikki.org/test-source')
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for input in ["formalise", "formalize"] {
+        let (status, response) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": input
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{input} V3 检测失败：{response}");
+        assert_eq!(
+            response["builtin_dictionary"]["coverage"]["pronunciations"], "missing",
+            "被删除派生词形上的唯一发音不得继续计入覆盖率"
+        );
+        assert_eq!(
+            response["builtin_dictionary"]["suggested_forms"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "未可靠配对的派生词形不得跨英美侧复制"
+        );
+        assert_eq!(
+            response["builtin_dictionary"]["provenance"]["forms"],
+            json!({"name": "test", "version": "enwiktionary-content-test"})
+        );
+        assert_eq!(
+            response["builtin_dictionary"]["suggested_forms"][0]["regional_variants"],
+            json!({
+                "mode": "uk_us",
+                "uk": {"dialect": "uk", "spelling": "formalise", "pronunciations": []},
+                "us": {"dialect": "us", "spelling": "formalize", "pronunciations": []}
+            })
+        );
+    }
+
+    seed_dictionary_term(&pool, "abbrev-probe", "word", "common_unmarked").await;
+    seed_dictionary_term(&pool, "expanded-probe", "word", "common_unmarked").await;
+    sqlx::query(
+        r#"
+        INSERT INTO dictionary.entry_contents (
+            dataset_id, source_key, normalized_term, pos, senses,
+            forms, sounds, source_locator
+        ) VALUES
+            ($1, 'kaikki:abbrev-probe:noun:test', 'abbrev-probe', 'noun', '[]'::jsonb,
+             '[{"form":"expanded-probe","tags":["alternative","abbreviation"]}]'::jsonb,
+             '[]'::jsonb, 'https://kaikki.org/test-source'),
+            ($1, 'kaikki:expanded-probe:noun:test', 'expanded-probe', 'noun', '[]'::jsonb,
+             '[{"form":"expanded-probes","tags":["plural"]}]'::jsonb,
+             '[]'::jsonb, 'https://kaikki.org/test-source')
+        "#,
+    )
+    .bind(dataset_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, rejected_candidate) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "abbrev-probe"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected_candidate}");
+    assert_eq!(
+        rejected_candidate["builtin_dictionary"]["suggested_forms"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "被拒绝 candidate 的复数词形不得污染源词建议"
     );
 }
 
