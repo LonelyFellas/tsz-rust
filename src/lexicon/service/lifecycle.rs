@@ -66,6 +66,9 @@ impl LexiconService {
         LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
             .await
             .map_err(repository_error)?;
+        LexiconRepository::lock_surface_policy_writer(&mut transaction)
+            .await
+            .map_err(repository_error)?;
         let record = LexiconRepository::entry_by_id_for_update(&mut transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -429,6 +432,12 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?,
         );
+        for entry_id in &v3_entry_ids {
+            surface_keys.extend(
+                self.v3_initial_headword_surface_lock_keys(&mut transaction, *entry_id)
+                    .await?,
+            );
+        }
         surface_keys.sort();
         surface_keys.dedup();
         LexiconRepository::lock_surface_keys(&mut transaction, &surface_keys)

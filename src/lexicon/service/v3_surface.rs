@@ -333,6 +333,63 @@ pub(super) struct V3FormsSurfaceConfirmation {
 }
 
 impl LexiconService {
+    async fn v3_initial_headword_query_keys(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+    ) -> Result<Vec<V3SurfaceQueryKey>, LexiconServiceError> {
+        let state = sqlx::query_as::<_, (Option<Vec<String>>, Option<String>)>(
+            r#"
+            SELECT
+                state.initial_headword_keys,
+                entry.detection_snapshot ->> 'normalized_surface'
+            FROM lexicon.v3_entry_state state
+            JOIN lexicon.entries entry ON entry.id = state.entry_id
+            WHERE state.entry_id = $1
+              AND state.origin = 'native'
+            "#,
+        )
+        .bind(entry_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        let Some((initial_keys, legacy_normalized_surface)) = state else {
+            return Ok(Vec::new());
+        };
+        let mut keys = if let Some(initial_keys) = initial_keys {
+            initial_keys
+                .into_iter()
+                .map(|key| {
+                    let (dialect_scope, normalized_surface) =
+                        key.split_once(':').ok_or_else(invariant_record)?;
+                    Ok(V3SurfaceQueryKey {
+                        dialect_scope: dialect_scope.to_owned(),
+                        normalized_surface: normalized_surface.to_owned(),
+                    })
+                })
+                .collect::<Result<Vec<_>, LexiconServiceError>>()?
+        } else if let Some(normalized_surface) =
+            legacy_normalized_surface.filter(|surface| !surface.is_empty())
+        {
+            detection_surface_keys(&normalized_surface)
+        } else {
+            Vec::new()
+        };
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
+    pub(super) async fn v3_initial_headword_surface_lock_keys(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+    ) -> Result<Vec<SurfaceLockKey>, LexiconServiceError> {
+        Ok(surface_lock_keys_v3(
+            &self.v3_initial_headword_query_keys(tx, entry_id).await?,
+        ))
+    }
+
     /// Build the V3 half of one restore command without issuing a second
     /// snapshot. The lifecycle service merges this contribution with its V2
     /// visibility items, then signs exactly one batch-level token.
@@ -342,6 +399,7 @@ impl LexiconService {
         pending: &[(EntryLifecycleTarget, AdminWordAny, bool)],
     ) -> Result<V3RestoreSurfaceContribution, LexiconServiceError> {
         let mut contribution = V3RestoreSurfaceContribution::default();
+        let mut hidden_initial_owners = BTreeMap::<(String, String, String), Uuid>::new();
         for (target, word, already_active) in pending {
             let AdminWordAny::V3(word) = word else {
                 continue;
@@ -359,6 +417,31 @@ impl LexiconService {
                         normalized_surface: key.normalized_surface.clone(),
                     }),
             );
+            let initial_keys = self.v3_initial_headword_query_keys(tx, word.id).await?;
+            if keys.is_empty() && !initial_keys.is_empty() {
+                let encoded_initial_keys = initial_keys
+                    .iter()
+                    .map(|key| format!("{}:{}", key.dialect_scope, key.normalized_surface))
+                    .collect::<Vec<_>>();
+                self.reject_hidden_v3_initial_headword_conflict(
+                    tx,
+                    word.kind,
+                    &encoded_initial_keys,
+                    None,
+                )
+                .await?;
+                for key in &initial_keys {
+                    let identity = (
+                        v3_kind_string(word.kind).to_owned(),
+                        key.dialect_scope.clone(),
+                        key.normalized_surface.clone(),
+                    );
+                    if hidden_initial_owners.insert(identity, word.id).is_some() {
+                        return Err(LexiconServiceError::DuplicateWord);
+                    }
+                }
+            }
+            keys.extend(initial_keys);
             keys.sort();
             keys.dedup();
             let material = self
@@ -752,21 +835,41 @@ impl LexiconService {
         Ok(suggested_pos.into_iter().collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn verify_v3_detection_surface_for_create(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
         detection_id: Uuid,
+        entry_kind: WordEntryKindV3,
         normalized_surface: &str,
+        initial_headword_keys: &[String],
         token: Option<&str>,
     ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
-        let keys = detection_surface_keys(normalized_surface);
+        let mut keys = detection_surface_keys(normalized_surface);
+        for key in initial_headword_keys {
+            let (dialect_scope, normalized_surface) =
+                key.split_once(':').ok_or_else(invariant_record)?;
+            keys.push(V3SurfaceQueryKey {
+                dialect_scope: dialect_scope.to_owned(),
+                normalized_surface: normalized_surface.to_owned(),
+            });
+        }
+        keys.sort();
+        keys.dedup();
         LexiconRepository::lock_surface_policy_writer(tx)
             .await
             .map_err(repository_error)?;
         LexiconRepository::lock_surface_keys(tx, &surface_lock_keys_v3(&keys))
             .await
             .map_err(repository_error)?;
+        self.reject_hidden_v3_initial_headword_conflict(
+            tx,
+            entry_kind,
+            initial_headword_keys,
+            None,
+        )
+        .await?;
         let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
         if material.matches.is_empty() {
             let Some(token) = token else {
@@ -804,6 +907,137 @@ impl LexiconService {
         self.verify_v3_surface_token(token, binding, owner_bundle, &material, false, policy)
             .await
             .map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn verify_v3_final_surface_for_create(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        actor_id: Uuid,
+        detection_id: Uuid,
+        entry_id: Uuid,
+        entry_kind: WordEntryKindV3,
+        forms: &DraftFormsStepContentV3,
+        headwords: &WordHeadwordsV2,
+        initial_headword_keys: &[String],
+        token: Option<&str>,
+    ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
+        let mut keys = forms_surface_keys(entry_id, forms)?;
+        for key in initial_headword_keys {
+            let (dialect_scope, normalized_surface) =
+                key.split_once(':').ok_or_else(invariant_record)?;
+            keys.push(V3SurfaceQueryKey {
+                dialect_scope: dialect_scope.to_owned(),
+                normalized_surface: normalized_surface.to_owned(),
+            });
+        }
+        keys.sort();
+        keys.dedup();
+        LexiconRepository::lock_surface_policy_writer(tx)
+            .await
+            .map_err(repository_error)?;
+        LexiconRepository::lock_surface_keys(tx, &surface_lock_keys_v3(&keys))
+            .await
+            .map_err(repository_error)?;
+        self.reject_hidden_v3_initial_headword_conflict(
+            tx,
+            entry_kind,
+            initial_headword_keys,
+            None,
+        )
+        .await?;
+        let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
+        if material.matches.is_empty() {
+            let Some(token) = token else {
+                return Ok(None);
+            };
+            self.verify_v3_surface_owner(
+                token,
+                actor_id,
+                SurfaceConsumptionCommand::CreateEntry,
+                detection_id.to_string(),
+            )
+            .await?;
+            return Err(LexiconServiceError::SurfaceMatchesChangedWithoutSnapshot);
+        }
+        let policy = self
+            .surface_policies
+            .policy(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
+            .await
+            .map_err(LexiconServiceError::SurfacePolicy)?;
+        let (binding, owner_bundle) = v3_creation_surface_binding(
+            actor_id,
+            detection_id,
+            headwords,
+            &keys,
+            &material,
+            policy,
+        )?;
+        let Some(token) = token else {
+            let page = self
+                .create_v3_surface_snapshot(binding, owner_bundle, &material, false, policy)
+                .await?;
+            return Err(LexiconServiceError::SurfaceMatchAcknowledgementRequiredV3(
+                Box::new(page),
+            ));
+        };
+        self.verify_v3_surface_token(token, binding, owner_bundle, &material, false, policy)
+            .await
+            .map(Some)
+    }
+
+    async fn reject_hidden_v3_initial_headword_conflict(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        entry_kind: WordEntryKindV3,
+        initial_headword_keys: &[String],
+        excluded_entry_id: Option<Uuid>,
+    ) -> Result<(), LexiconServiceError> {
+        let normalized_surfaces = initial_headword_keys
+            .iter()
+            .map(|key| {
+                key.split_once(':')
+                    .map(|(_, normalized_surface)| normalized_surface.to_owned())
+                    .ok_or_else(invariant_record)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let hidden_initial_headword_conflict = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM lexicon.v3_entry_state state
+                JOIN lexicon.entries entry ON entry.id = state.entry_id
+                WHERE (
+                        state.initial_headword_keys && $1
+                        OR (
+                            state.initial_headwords IS NULL
+                            AND state.initial_headword_keys IS NULL
+                            AND entry.detection_snapshot ->> 'normalized_surface' = ANY($3)
+                        )
+                    )
+                  AND entry.archived_at IS NULL
+                  AND entry.kind = $2
+                  AND ($4::uuid IS NULL OR state.entry_id <> $4)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM lexicon.surface_sources source
+                      WHERE source.entry_id = state.entry_id
+                        AND source.is_deleted = FALSE
+                  )
+            )
+            "#,
+        )
+        .bind(initial_headword_keys)
+        .bind(v3_kind_string(entry_kind))
+        .bind(&normalized_surfaces)
+        .bind(excluded_entry_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        if hidden_initial_headword_conflict {
+            return Err(LexiconServiceError::DuplicateWord);
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -875,6 +1109,7 @@ impl LexiconService {
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
         entry_id: Uuid,
+        entry_kind: WordEntryKindV3,
         base_revision: i64,
         next_revision: i64,
         previous: &DraftFormsStepContentV3,
@@ -885,19 +1120,38 @@ impl LexiconService {
     ) -> Result<V3FormsSurfaceConfirmation, LexiconServiceError> {
         let previous_keys = forms_surface_keys(entry_id, previous)?;
         let keys = forms_surface_keys(entry_id, content)?;
+        LexiconRepository::lock_surface_policy_writer(tx)
+            .await
+            .map_err(repository_error)?;
+        let initial_keys = if keys.is_empty() {
+            self.v3_initial_headword_query_keys(tx, entry_id).await?
+        } else {
+            Vec::new()
+        };
         let lock_keys = previous_keys
             .iter()
             .chain(keys.iter())
+            .chain(initial_keys.iter())
             .cloned()
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        LexiconRepository::lock_surface_policy_writer(tx)
-            .await
-            .map_err(repository_error)?;
         LexiconRepository::lock_surface_keys(tx, &surface_lock_keys_v3(&lock_keys))
             .await
             .map_err(repository_error)?;
+        if !initial_keys.is_empty() {
+            let encoded_initial_keys = initial_keys
+                .iter()
+                .map(|key| format!("{}:{}", key.dialect_scope, key.normalized_surface))
+                .collect::<Vec<_>>();
+            self.reject_hidden_v3_initial_headword_conflict(
+                tx,
+                entry_kind,
+                &encoded_initial_keys,
+                Some(entry_id),
+            )
+            .await?;
+        }
         let material = self
             .v3_surface_material_in(tx, &keys, Some(entry_id), true)
             .await?;
@@ -2150,6 +2404,41 @@ fn detection_surface_binding(
             "owner_kind": "v3_detection",
             "detection_id": detection_id,
             "normalized_surface": normalized_surface,
+            V3_SURFACE_PAGE_DATA_KEY: material.page_data(),
+        }),
+        policy,
+    )
+}
+
+fn v3_creation_surface_binding(
+    actor_id: Uuid,
+    detection_id: Uuid,
+    headwords: &WordHeadwordsV2,
+    keys: &[V3SurfaceQueryKey],
+    material: &V3SurfaceMaterial,
+    policy: SurfaceCreationPolicy,
+) -> Result<(SurfaceConfirmationBinding, Value), LexiconServiceError> {
+    let canonical_keys = keys
+        .iter()
+        .map(|key| (&key.dialect_scope, &key.normalized_surface))
+        .collect::<Vec<_>>();
+    let canonical_content_digest = hash_serializable(&(
+        "v3_create_final_headwords",
+        detection_id,
+        headwords,
+        &canonical_keys,
+    ))?;
+    owner_binding(
+        actor_id,
+        SurfaceConsumptionCommand::CreateEntry,
+        detection_id.to_string(),
+        None,
+        canonical_content_digest,
+        serde_json::json!({
+            "owner_kind": "v3_create_final_headwords",
+            "detection_id": detection_id,
+            "headwords": headwords,
+            "surface_keys": canonical_keys,
             V3_SURFACE_PAGE_DATA_KEY: material.page_data(),
         }),
         policy,

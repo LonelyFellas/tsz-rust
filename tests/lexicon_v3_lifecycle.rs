@@ -242,6 +242,85 @@ async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid, migrated: bool) -> Uuid {
     entry_id
 }
 
+async fn seed_v3_empty_skeleton(pool: &PgPool, admin_id: Uuid, surface: &str) -> Uuid {
+    let entry_id = seed_v3_entry(pool, admin_id, false).await;
+    let detection = json!({
+        "schema_version": 3,
+        "normalized_surface": surface,
+        "request": {"language": "en", "kind": "word", "surface": surface}
+    });
+    sqlx::query(
+        r#"
+        UPDATE lexicon.entries
+        SET detection_snapshot = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(entry_id)
+    .bind(detection)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE lexicon.v3_entry_state
+        SET initial_headwords = $2,
+            initial_headword_keys = $3
+        WHERE entry_id = $1
+        "#,
+    )
+    .bind(entry_id)
+    .bind(json!({"mode": "unified", "common": surface}))
+    .bind(vec![format!("uk:{surface}"), format!("us:{surface}")])
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE lexicon.entry_editor_projection
+        SET forms = '{"pos":[]}'::jsonb
+        WHERE entry_id = $1
+        "#,
+    )
+    .bind(entry_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE lexicon.entry_presentation_projection
+        SET label = $2,
+            matched_surfaces = ARRAY[$2]::text[]
+        WHERE entry_id = $1
+        "#,
+    )
+    .bind(entry_id)
+    .bind(surface)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE lexicon.surface_sources SET is_deleted = TRUE WHERE entry_id = $1")
+        .bind(entry_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    entry_id
+}
+
+async fn archive_v3_entry(state: &AppState, bearer: &str, entry_id: Uuid) -> Value {
+    let (status, archived) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"base_revision": 1, "base_lifecycle_revision": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    archived
+}
+
 async fn seed_v2_entry(pool: &PgPool, admin_id: Uuid, headword: &str) -> Uuid {
     let entry_id = Uuid::now_v7();
     let now = Utc::now();
@@ -693,6 +772,108 @@ async fn v3_single_lifecycle_delete_and_legacy_bridge_are_versioned(pool: PgPool
             .await
             .unwrap();
     assert!(still_present);
+}
+
+#[sqlx::test]
+async fn empty_v3_restore_uses_initial_headword_conflicts_for_single_batch_and_locks(pool: PgPool) {
+    let state = AppState::for_test_with_smart_lexicon_v3_flags(
+        pool.clone(),
+        SmartLexiconV3Flags::all_enabled(),
+    );
+    let admin_id = seed_admin(&pool).await;
+    let bearer = bearer(&state, admin_id);
+
+    let surface = format!("restore-hidden-{}", admin_id.simple());
+    let restoring = seed_v3_empty_skeleton(&pool, admin_id, &surface).await;
+    archive_v3_entry(&state, &bearer, restoring).await;
+    let _incumbent = seed_v3_empty_skeleton(&pool, admin_id, &surface).await;
+    let restore_body = json!({"base_revision": 1, "base_lifecycle_revision": 2});
+    let (status, duplicate) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{restoring}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(restore_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+    assert_eq!(duplicate["code"], "duplicate_word");
+
+    let mut key_lock = pool.begin().await.unwrap();
+    sqlx::query(
+        r#"
+        WITH requested AS MATERIALIZED (
+            SELECT language, dialect_scope, normalized_surface
+            FROM unnest($1::text[], $2::text[], $3::text[])
+                AS value(language, dialect_scope, normalized_surface)
+            ORDER BY language, dialect_scope, normalized_surface
+        )
+        SELECT pg_advisory_xact_lock(hashtextextended(
+            'lexicon.surface:' || requested.language || ':' ||
+            requested.dialect_scope || ':' || requested.normalized_surface,
+            0
+        ))
+        FROM requested
+        "#,
+    )
+    .bind(vec!["en", "en"])
+    .bind(vec!["uk", "us"])
+    .bind(vec![surface.clone(), surface.clone()])
+    .execute(&mut *key_lock)
+    .await
+    .unwrap();
+    let concurrent_state = state.clone();
+    let concurrent_bearer = bearer.clone();
+    let concurrent_restore = tokio::spawn(async move {
+        call(
+            &concurrent_state,
+            Method::POST,
+            &format!("{ROOT}/entries/{restoring}/restore"),
+            &concurrent_bearer,
+            Some(Uuid::now_v7()),
+            Some(restore_body),
+        )
+        .await
+    });
+    wait_for_surface_context_lock_waiter(&pool).await;
+    key_lock.commit().await.unwrap();
+    let (status, duplicate) = tokio::time::timeout(Duration::from_secs(5), concurrent_restore)
+        .await
+        .expect("restore should resume after the initial-headword key lock")
+        .unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+    assert_eq!(duplicate["code"], "duplicate_word");
+
+    let batch_surface = format!("restore-hidden-batch-{}", admin_id.simple());
+    let first = seed_v3_empty_skeleton(&pool, admin_id, &batch_surface).await;
+    let second = seed_v3_empty_skeleton(&pool, admin_id, &batch_surface).await;
+    archive_v3_entry(&state, &bearer, first).await;
+    archive_v3_entry(&state, &bearer, second).await;
+    let (status, batch_duplicate) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/restore-batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "entries": [
+                {"id": first, "base_revision": 1, "base_lifecycle_revision": 2},
+                {"id": second, "base_revision": 1, "base_lifecycle_revision": 2}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{batch_duplicate}");
+    assert_eq!(batch_duplicate["code"], "duplicate_word");
+    let still_archived: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM lexicon.entries WHERE id = ANY($1) AND archived_at IS NOT NULL",
+    )
+    .bind(vec![first, second])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(still_archived, 2);
 }
 
 #[sqlx::test]

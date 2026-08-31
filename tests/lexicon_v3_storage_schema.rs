@@ -120,6 +120,97 @@ async fn insert_v3_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
     entry_id
 }
 
+#[sqlx::test]
+async fn v3_initial_headwords_shape_is_strict(pool: PgPool) {
+    let admin_id = insert_admin(&pool).await;
+    let valid_entry = insert_entry(&pool, admin_id, 3, "word", None, None)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.v3_entry_state (
+            entry_id, content_schema_version, origin,
+            initial_headwords, initial_headword_keys
+        ) VALUES ($1, 3, 'native', $2, $3)
+        "#,
+    )
+    .bind(valid_entry)
+    .bind(json!({"mode": "unified", "common": "center"}))
+    .bind(vec!["uk:center", "us:center"])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for invalid in [
+        json!("center"),
+        json!({"common": "center"}),
+        json!({"mode": null, "common": "center"}),
+        json!({"mode": "unified", "common": "center", "extra": true}),
+        json!({"mode": "distinguish", "uk": "centre", "us": "center"}),
+        json!({"mode": "distinguish", "uk": "centre", "us": "center", "source_dialect": null}),
+    ] {
+        let entry_id = insert_entry(&pool, admin_id, 3, "word", None, None)
+            .await
+            .unwrap();
+        let result = sqlx::query(
+            r#"
+            INSERT INTO lexicon.v3_entry_state (
+                entry_id, content_schema_version, origin,
+                initial_headwords, initial_headword_keys
+            ) VALUES ($1, 3, 'native', $2, $3)
+            "#,
+        )
+        .bind(entry_id)
+        .bind(invalid)
+        .bind(vec!["uk:center", "us:center"])
+        .execute(&pool)
+        .await;
+        assert_db_error(
+            result,
+            CHECK_VIOLATION,
+            "lexicon_v3_entry_state_initial_headwords_shape_check",
+        );
+    }
+
+    for (headwords, keys) in [
+        (Some(json!({"mode": "unified", "common": "center"})), None),
+        (None, Some(vec!["uk:center", "us:center"])),
+        (
+            Some(json!({"mode": "unified", "common": "center"})),
+            Some(vec!["common:center"]),
+        ),
+        (
+            Some(
+                json!({"mode": "distinguish", "uk": "centre", "us": "center", "source_dialect": "uk"}),
+            ),
+            Some(vec!["us:center", "uk:centre"]),
+        ),
+    ] {
+        let entry_id = insert_entry(&pool, admin_id, 3, "word", None, None)
+            .await
+            .unwrap();
+        let keys = keys.map(|values| values.into_iter().map(str::to_owned).collect::<Vec<_>>());
+        let result = sqlx::query(
+            r#"
+            INSERT INTO lexicon.v3_entry_state (
+                entry_id, content_schema_version, origin,
+                initial_headwords, initial_headword_keys
+            ) VALUES ($1, 3, 'native', $2, $3)
+            "#,
+        )
+        .bind(entry_id)
+        .bind(headwords)
+        .bind(keys)
+        .execute(&pool)
+        .await;
+        assert_db_error(
+            result,
+            CHECK_VIOLATION,
+            "lexicon_v3_entry_state_initial_headwords_shape_check",
+        );
+    }
+}
+
 async fn insert_v3_pos(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,

@@ -726,6 +726,39 @@ async fn create_ready_draft(
     create_ready_draft_with_headwords(state, pool, bearer, headword, None).await
 }
 
+async fn create_legacy_v3_empty_skeleton(state: &AppState, bearer: &str, surface: &str) -> Uuid {
+    let (status, detection) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let (status, created) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "word"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    Uuid::parse_str(created["word"]["id"].as_str().unwrap()).unwrap()
+}
+
 /// 与 `create_ready_draft` 相同的建稿链路，但可以覆盖词头以构造 distinguish 词条。
 async fn create_ready_draft_with_headwords(
     state: &AppState,
@@ -19457,4 +19490,823 @@ async fn pending_sentence_association_lists_for_target_and_claims_once(pool: PgP
     .await;
     assert_eq!(status, StatusCode::OK, "{replayed}");
     assert_eq!(replayed, claimed);
+}
+
+#[sqlx::test]
+async fn v3_create_persists_explicit_final_headwords_and_keeps_legacy_body_compatible(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let detected_surface = format!("v3final{}", admin_id.simple());
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": detected_surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    assert_eq!(detection["builtin_dictionary"]["status"], "not_found");
+
+    let explicit_final = format!("edited{}", admin_id.simple());
+    let explicit_key = Uuid::now_v7();
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(explicit_key),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "word",
+            "headwords": {"mode": "unified", "common": explicit_final}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["word"]["presentation"]["matched_surfaces"],
+        json!([explicit_final])
+    );
+    let explicit_entry = Uuid::parse_str(created["word"]["id"].as_str().unwrap()).unwrap();
+    let persisted: (Value, Vec<String>) = sqlx::query_as(
+        "SELECT initial_headwords, initial_headword_keys FROM lexicon.v3_entry_state WHERE entry_id = $1",
+    )
+    .bind(explicit_entry)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted.0,
+        json!({"mode": "unified", "common": explicit_final})
+    );
+    assert_eq!(
+        persisted.1,
+        vec![
+            format!("uk:{explicit_final}"),
+            format!("us:{explicit_final}")
+        ]
+    );
+    let (status, changed_replay) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(explicit_key),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "word",
+            "headwords": {"mode": "unified", "common": format!("changed{admin_id}")}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{changed_replay}");
+    assert_eq!(changed_replay["code"], "idempotency_conflict");
+
+    let duplicate_detection_surface = format!("v3duplicate{}", admin_id.simple());
+    let (status, duplicate_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": duplicate_detection_surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{duplicate_detection}");
+    let (status, duplicate) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": duplicate_detection["detection_id"],
+            "kind": "word",
+            "headwords": {"mode": "unified", "common": explicit_final}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+    assert_eq!(duplicate["code"], "duplicate_word");
+
+    let legacy_surface = format!("v3legacy{}", admin_id.simple());
+    let (status, legacy_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": legacy_surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{legacy_detection}");
+    let (status, legacy_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": legacy_detection["detection_id"],
+            "kind": "word"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{legacy_created}");
+    let legacy_entry = Uuid::parse_str(legacy_created["word"]["id"].as_str().unwrap()).unwrap();
+    let legacy_persisted: (Value, Vec<String>) = sqlx::query_as(
+        "SELECT initial_headwords, initial_headword_keys FROM lexicon.v3_entry_state WHERE entry_id = $1",
+    )
+    .bind(legacy_entry)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy_persisted.0,
+        json!({"mode": "unified", "common": legacy_surface})
+    );
+    assert_eq!(
+        legacy_persisted.1,
+        vec![
+            format!("uk:{legacy_surface}"),
+            format!("us:{legacy_surface}")
+        ]
+    );
+
+    let (status, sequential_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": legacy_surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sequential_detection}");
+    let (status, sequential_duplicate) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": sequential_detection["detection_id"],
+            "kind": "word"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{sequential_duplicate}");
+    assert_eq!(sequential_duplicate["code"], "duplicate_word");
+
+    sqlx::query(
+        "UPDATE lexicon.v3_entry_state SET initial_headwords = NULL, initial_headword_keys = NULL WHERE entry_id = $1",
+    )
+    .bind(legacy_entry)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, null_fallback_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": legacy_surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{null_fallback_detection}");
+    let (status, null_fallback_duplicate) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": null_fallback_detection["detection_id"],
+            "kind": "word"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{null_fallback_duplicate}");
+    assert_eq!(null_fallback_duplicate["code"], "duplicate_word");
+
+    let second_legacy_surface = format!("v3legacysecond{}", admin_id.simple());
+    let (status, second_legacy_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": second_legacy_surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second_legacy_detection}");
+    let (status, second_legacy_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": second_legacy_detection["detection_id"],
+            "kind": "word"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{second_legacy_created}");
+    let second_legacy_entry =
+        Uuid::parse_str(second_legacy_created["word"]["id"].as_str().unwrap()).unwrap();
+    let second_legacy_persisted: (Value, Vec<String>) = sqlx::query_as(
+        "SELECT initial_headwords, initial_headword_keys FROM lexicon.v3_entry_state WHERE entry_id = $1",
+    )
+    .bind(second_legacy_entry)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let dry_run = tsz_rust::lexicon::v3_initial_headword_backfill::dry_run(&pool)
+        .await
+        .unwrap();
+    assert_eq!(dry_run.scanned, 1);
+    assert_eq!(dry_run.ready, 1);
+    assert_eq!(dry_run.applied, 0);
+    assert!(dry_run.blockers.is_empty());
+
+    let mut legacy_writer = pool.begin().await.unwrap();
+    LexiconRepository::lock_surface_policy_writer(&mut legacy_writer)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE lexicon.v3_entry_state SET initial_headwords = NULL, initial_headword_keys = NULL WHERE entry_id = $1",
+    )
+    .bind(second_legacy_entry)
+    .execute(&mut *legacy_writer)
+    .await
+    .unwrap();
+    let apply_pool = pool.clone();
+    let stale_digest = dry_run.manifest_digest.clone();
+    let apply_task = tokio::spawn(async move {
+        tsz_rust::lexicon::v3_initial_headword_backfill::apply(&apply_pool, &stale_digest).await
+    });
+    await_database_lock_waiters(&pool, 1).await;
+    legacy_writer.commit().await.unwrap();
+    let stale_manifest = tokio::time::timeout(CONCURRENCY_TIMEOUT, apply_task)
+        .await
+        .expect("backfill should resume after the old writer commits")
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        stale_manifest
+            .to_string()
+            .contains("v3_initial_headword_backfill_manifest_mismatch")
+    );
+    let refreshed_dry_run = tsz_rust::lexicon::v3_initial_headword_backfill::dry_run(&pool)
+        .await
+        .unwrap();
+    assert_eq!(refreshed_dry_run.scanned, 2);
+    let applied = tsz_rust::lexicon::v3_initial_headword_backfill::apply(
+        &pool,
+        &refreshed_dry_run.manifest_digest,
+    )
+    .await
+    .unwrap();
+    assert_eq!(applied.applied, 2);
+    assert_eq!(applied.manifest_digest, refreshed_dry_run.manifest_digest);
+    let backfilled: (Value, Vec<String>) = sqlx::query_as(
+        "SELECT initial_headwords, initial_headword_keys FROM lexicon.v3_entry_state WHERE entry_id = $1",
+    )
+    .bind(legacy_entry)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(backfilled, legacy_persisted);
+    let second_backfilled: (Value, Vec<String>) = sqlx::query_as(
+        "SELECT initial_headwords, initial_headword_keys FROM lexicon.v3_entry_state WHERE entry_id = $1",
+    )
+    .bind(second_legacy_entry)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(second_backfilled, second_legacy_persisted);
+}
+
+#[sqlx::test]
+async fn concurrent_legacy_v3_empty_skeleton_creation_allows_only_one_entry(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let surface = format!("v3legacyrace{}", admin_id.simple());
+    let mut detections = Vec::new();
+    for _ in 0..2 {
+        let (status, detection) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "language": "en",
+                "kind": "word",
+                "surface": surface
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detection}");
+        detections.push(detection);
+    }
+    let create_path = format!("{ROOT}/entries");
+    let first = call(
+        &state,
+        Method::POST,
+        &create_path,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detections[0]["detection_id"],
+            "kind": "word"
+        })),
+    );
+    let second = call(
+        &state,
+        Method::POST,
+        &create_path,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detections[1]["detection_id"],
+            "kind": "word"
+        })),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let (created, duplicate) = match (first, second) {
+        ((StatusCode::CREATED, created), (StatusCode::CONFLICT, duplicate))
+        | ((StatusCode::CONFLICT, duplicate), (StatusCode::CREATED, created)) => {
+            (created, duplicate)
+        }
+        (first, second) => {
+            panic!("concurrent legacy creates should produce one entry: {first:?} {second:?}")
+        }
+    };
+    assert!(created["word"]["id"].is_string());
+    assert_eq!(duplicate["code"], "duplicate_word");
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM lexicon.v3_entry_state state
+        JOIN lexicon.entries entry ON entry.id = state.entry_id
+        WHERE entry.detection_snapshot ->> 'normalized_surface' = $1
+        "#,
+    )
+    .bind(surface)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn clearing_v3_forms_cannot_create_duplicate_active_hidden_initial_headwords(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let sequential_surface = format!("v3clearhidden{}", admin_id.simple());
+    let first = create_legacy_v3_empty_skeleton(&state, &bearer, &sequential_surface).await;
+    let forms = complete_v3_forms_fixture();
+    let (_impact, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &first.to_string(),
+        1,
+        "save",
+        forms.clone(),
+    )
+    .await;
+    assert_eq!(saved["word"]["revision"], 2);
+    let _second = create_legacy_v3_empty_skeleton(&state, &bearer, &sequential_surface).await;
+    let (status, rejected_clear) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{first}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": 2,
+            "intent": "save",
+            "content": {"pos": []}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected_clear}");
+    assert_eq!(rejected_clear["code"], "duplicate_word");
+
+    let concurrent_surface = format!("v3clearhiddenrace{}", admin_id.simple());
+    let editing = create_legacy_v3_empty_skeleton(&state, &bearer, &concurrent_surface).await;
+    let (_impact, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &editing.to_string(),
+        1,
+        "save",
+        complete_v3_forms_fixture(),
+    )
+    .await;
+    assert_eq!(saved["word"]["revision"], 2);
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": concurrent_surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let clear_path = format!("{ROOT}/entries/{editing}/steps/forms");
+    let create_path = format!("{ROOT}/entries");
+    let clear = call(
+        &state,
+        Method::PUT,
+        &clear_path,
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": 2,
+            "intent": "save",
+            "content": {"pos": []}
+        })),
+    );
+    let create = call(
+        &state,
+        Method::POST,
+        &create_path,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "word"
+        })),
+    );
+    let (clear, create) = tokio::join!(clear, create);
+    match (clear, create) {
+        ((StatusCode::OK, _), (StatusCode::CONFLICT, duplicate))
+        | ((StatusCode::CONFLICT, duplicate), (StatusCode::CREATED, _)) => {
+            assert!(
+                matches!(
+                    duplicate["code"].as_str(),
+                    Some("duplicate_word" | "downstream_confirmation_required")
+                ),
+                "并发 loser 必须被重复或下游影响确认安全阻断：{duplicate}"
+            );
+        }
+        (clear, create) => {
+            panic!("clear/create should serialize to one hidden owner: {clear:?} {create:?}")
+        }
+    }
+    let hidden_owners: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM lexicon.v3_entry_state state
+        JOIN lexicon.entries entry ON entry.id = state.entry_id
+        WHERE entry.kind = 'word'
+          AND entry.archived_at IS NULL
+          AND state.initial_headword_keys && $1
+          AND NOT EXISTS (
+              SELECT 1
+              FROM lexicon.surface_sources source
+              WHERE source.entry_id = state.entry_id
+                AND source.is_deleted = FALSE
+          )
+        "#,
+    )
+    .bind(vec![
+        format!("uk:{concurrent_surface}"),
+        format!("us:{concurrent_surface}"),
+    ])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(hidden_owners, 1);
+}
+
+#[sqlx::test]
+async fn initial_headword_backfill_blocks_historical_duplicate_empty_skeletons(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let first = create_legacy_v3_empty_skeleton(
+        &state,
+        &bearer,
+        &format!("v3backfillduplicatea{}", admin_id.simple()),
+    )
+    .await;
+    let second = create_legacy_v3_empty_skeleton(
+        &state,
+        &bearer,
+        &format!("v3backfillduplicateb{}", admin_id.simple()),
+    )
+    .await;
+    sqlx::query(
+        r#"
+        UPDATE lexicon.entries target
+        SET detection_snapshot = source.detection_snapshot
+        FROM lexicon.entries source
+        WHERE target.id = $1
+          AND source.id = $2
+        "#,
+    )
+    .bind(second)
+    .bind(first)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE lexicon.v3_entry_state
+        SET initial_headwords = NULL,
+            initial_headword_keys = NULL
+        WHERE entry_id = ANY($1)
+        "#,
+    )
+    .bind(vec![first, second])
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let dry_run = tsz_rust::lexicon::v3_initial_headword_backfill::dry_run(&pool)
+        .await
+        .unwrap();
+    assert_eq!(dry_run.scanned, 2);
+    assert_eq!(dry_run.ready, 0);
+    assert_eq!(dry_run.blockers.len(), 2);
+    assert!(
+        dry_run
+            .blockers
+            .iter()
+            .all(|blocker| blocker.reason == "duplicate_active_empty_skeleton")
+    );
+    let error =
+        tsz_rust::lexicon::v3_initial_headword_backfill::apply(&pool, &dry_run.manifest_digest)
+            .await
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("v3_initial_headword_backfill_blocked")
+    );
+    let remaining: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM lexicon.v3_entry_state
+        WHERE entry_id = ANY($1)
+          AND initial_headword_keys IS NULL
+        "#,
+    )
+    .bind(vec![first, second])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 2);
+
+    let duplicate_surface: String = sqlx::query_scalar(
+        "SELECT detection_snapshot ->> 'normalized_surface' FROM lexicon.entries WHERE id = $1",
+    )
+    .bind(first)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE lexicon.v3_entry_state
+        SET initial_headwords = $2,
+            initial_headword_keys = $3
+        WHERE entry_id = ANY($1)
+        "#,
+    )
+    .bind(vec![first, second])
+    .bind(json!({"mode": "unified", "common": duplicate_surface}))
+    .bind(vec![
+        format!("uk:{duplicate_surface}"),
+        format!("us:{duplicate_surface}"),
+    ])
+    .execute(&pool)
+    .await
+    .unwrap();
+    let non_null_dry_run = tsz_rust::lexicon::v3_initial_headword_backfill::dry_run(&pool)
+        .await
+        .unwrap();
+    assert_eq!(non_null_dry_run.ready, 0);
+    assert_eq!(non_null_dry_run.blockers.len(), 2);
+    let error = tsz_rust::lexicon::v3_initial_headword_backfill::apply(
+        &pool,
+        &non_null_dry_run.manifest_digest,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("v3_initial_headword_backfill_blocked")
+    );
+}
+
+#[sqlx::test]
+async fn v3_create_rebinds_dictionary_base_forms_to_explicit_regional_headwords(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let surface = format!("v3regional{}", admin_id.simple());
+    seed_dictionary_word(&pool, &surface).await;
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    assert_eq!(detection["builtin_dictionary"]["status"], "matched");
+
+    let uk = format!("uk{}", admin_id.simple());
+    let us = format!("us{}", admin_id.simple());
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "word",
+            "headwords": {
+                "mode": "distinguish",
+                "uk": uk.clone(),
+                "us": us.clone(),
+                "source_dialect": "uk"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["word"]["presentation"]["matched_surfaces"],
+        json!([uk, us])
+    );
+    let base = created["word"]["forms"]["pos"][0]["forms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|form| form["form_type"] == "base")
+        .expect("dictionary create should contain a base form");
+    assert_eq!(base["regional_variants"]["mode"], "uk_us");
+    assert_eq!(base["regional_variants"]["uk"]["spelling"], uk);
+    assert_eq!(base["regional_variants"]["us"]["spelling"], us);
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["dialect_rules"],
+        json!({"spelling_mode": "distinguish", "phonetic_mode": "distinguish"})
+    );
+}
+
+#[sqlx::test]
+async fn v3_create_rejects_invalid_explicit_headwords_without_consuming_detection(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let surface = format!("v3invalid{}", admin_id.simple());
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let key = Uuid::now_v7();
+    let (status, invalid) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(key),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "word",
+            "headwords": {"mode": "unified", "common": "苹果"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+    assert_eq!(invalid["code"], "invalid_headword");
+
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(key),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "word",
+            "headwords": {"mode": "unified", "common": surface}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
 }

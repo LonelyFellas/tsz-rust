@@ -1110,6 +1110,10 @@ pub struct CreateAdminWordV3Input {
     pub schema_version: u8,
     pub detection_id: Uuid,
     pub kind: WordEntryKindV3,
+    /// Step 1 最终确认值；兼容窗口内旧客户端可省略，由服务端按旧检测规则补齐。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub headwords: Option<WordHeadwordsV2>,
     /// 检测阶段 surface warning 的服务端签名确认 token；用于确认匹配集合没有漂移。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]

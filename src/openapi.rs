@@ -599,6 +599,7 @@ impl Modify for SmartLexiconV3SchemaAddon {
             .as_mut()
             .expect("derived OpenAPI must contain components");
         for (name, discriminator) in [
+            ("WordHeadwordsV2", "mode"),
             ("WordRegionalVariantsV3", "mode"),
             ("V3PublicationCapability", "mode"),
             ("DialectVariantRichTextSlotV3", "state"),
