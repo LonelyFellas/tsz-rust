@@ -9,9 +9,16 @@ pub(super) fn map_entry_write_error(error: sqlx::Error) -> LexiconRepositoryErro
     }
     if [
         "lexicon_relations_target_fkey",
+        "lexicon_relations_prebound_target_fkey",
         "lexicon_sentence_links_target_fkey",
         "lexicon_publication_sense_refs_target_fkey",
         "lexicon_publication_sense_refs_target_node_fkey",
+        "lexicon_sentence_associations_target_fkey",
+        "lexicon_sentence_associations_target_slot_fkey",
+        "lexicon_v3_phrase_components_base_fkey",
+        "lexicon_v3_phrase_components_form_fkey",
+        "lexicon_v3_phrase_components_pos_fkey",
+        "lexicon_v3_phrase_components_node_fkey",
     ]
     .iter()
     .any(|constraint| is_foreign_key_violation(&error, constraint))
@@ -778,6 +785,18 @@ impl LexiconRepository {
                 FROM lexicon.entry_publication_sense_refs sense_ref
                 WHERE sense_ref.target_entry_id = $1
                   AND sense_ref.entry_id <> $1
+                UNION ALL
+                -- 待认领的例句关联：目标已指向本词条，只是尚未物化成 sentence_links。
+                SELECT 1
+                FROM lexicon.sentence_associations association
+                WHERE association.target_entry_id = $1
+                  AND association.entry_id <> $1
+                UNION ALL
+                -- V3 短语把本词条当作成分（短语 ↔ 单词）。
+                SELECT 1
+                FROM lexicon.v3_phrase_variant_component_usages usage
+                WHERE usage.target_entry_id = $1
+                  AND usage.entry_id <> $1
             )
             "#,
         )

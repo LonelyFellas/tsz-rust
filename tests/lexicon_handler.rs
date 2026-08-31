@@ -8902,6 +8902,92 @@ async fn related_search_orders_headword_spellings_like_the_list(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn deleting_an_entry_referenced_by_a_sentence_association_conflicts(pool: PgPool) {
+    // sentence_associations 的 target_shape_check 允许 state='linked' 且不带
+    // target_publication_id——即例句关联可以指向一个尚未发布的词条。这条路径
+    // 不在删除时的入站引用检查里就会撞上 DB 外键，冒出 500 而不是 409。
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let referenced = create_ready_draft(&state, &pool, &bearer, "assoc-target").await;
+    let referring = create_ready_draft(&state, &pool, &bearer, "assoc-source").await;
+    let referenced_id = Uuid::parse_str(referenced["word"]["id"].as_str().unwrap()).unwrap();
+    let referenced_sense_id = Uuid::parse_str(
+        referenced["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let referring_id = Uuid::parse_str(referring["word"]["id"].as_str().unwrap()).unwrap();
+    let referring_sense_id = Uuid::parse_str(
+        referring["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+
+    // 先归档目标，模拟「垃圾桶里的词条被别处例句引用」。
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{referenced_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": referenced["word"]["revision"],
+            "base_lifecycle_revision": referenced["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "归档失败：{archived}");
+    let archived_revision = archived["word"]["revision"].as_i64().unwrap();
+    let archived_lifecycle_revision = archived["word"]["lifecycle_revision"].as_i64().unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.sentence_associations (
+            id, entry_id, sentence_id, source_dialect,
+            range_start, range_end, surface, origin, state,
+            target_entry_id, target_sense_id,
+            target_headword_snapshot, target_gloss_snapshot, resolved_pos
+        ) VALUES ($1, $2, $3, 'common', 0, 5, 'assoc', 'manual', 'linked',
+                  $4, $5, 'assoc-target', '', 'noun')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(referring_id)
+    .bind(referring_sense_id)
+    .bind(referenced_id)
+    .bind(referenced_sense_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, response) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{referenced_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": archived_revision,
+            "base_lifecycle_revision": archived_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "被例句关联引用的词条必须以 409 拒绝，而不是撞外键冒 500：{response}"
+    );
+    assert_eq!(response["code"], "entry_not_deletable");
+}
+
+#[sqlx::test]
 async fn deleting_an_entry_is_restricted_to_its_creator_unless_super_admin(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
