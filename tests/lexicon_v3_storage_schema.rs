@@ -78,8 +78,8 @@ async fn relation_prebinding_shape_has_stable_target_identity(pool: PgPool) {
             INSERT INTO lexicon.relations (
                 id, entry_id, source_sense_id, relation_type, score,
                 prebound_target_entry_id, prebinding_reason,
-                pending_target_headword, pending_target_gloss, sort_order
-            ) VALUES ($1, $2, $3, 'synonym', 80, $4, $5, 'reliability', '可靠性', $6)
+                pending_target_gloss, sort_order
+            ) VALUES ($1, $2, $3, 'synonym', 80, $4, $5, '可靠性', $6)
             "#,
         )
         .bind(relation_id)
@@ -107,12 +107,13 @@ async fn relation_prebinding_shape_has_stable_target_identity(pool: PgPool) {
     )
     .await;
     invalid_node_tx.commit().await.unwrap();
-    let missing_headword = sqlx::query(
+    let stray_headword = sqlx::query(
         r#"
         INSERT INTO lexicon.relations (
             id, entry_id, source_sense_id, relation_type, score,
-            prebound_target_entry_id, prebinding_reason, sort_order
-        ) VALUES ($1, $2, $3, 'synonym', 80, $4, 'waiting_first_sense', 2)
+            prebound_target_entry_id, prebinding_reason,
+            pending_target_headword, sort_order
+        ) VALUES ($1, $2, $3, 'synonym', 80, $4, 'waiting_first_sense', 'reliability', 2)
         "#,
     )
     .bind(invalid_relation_id)
@@ -122,7 +123,7 @@ async fn relation_prebinding_shape_has_stable_target_identity(pool: PgPool) {
     .execute(&pool)
     .await;
     assert_db_error(
-        missing_headword,
+        stray_headword,
         CHECK_VIOLATION,
         "lexicon_relations_target_shape_check",
     );
@@ -148,6 +149,21 @@ async fn relation_prebinding_shape_has_stable_target_identity(pool: PgPool) {
                     .contains("cannot remove draft relation prebinding"))
             ),
         "存在预绑定时 down migration 必须 fail closed：{down:?}"
+    );
+    let narrow_down = sqlx::raw_sql(include_str!(
+        "../migrations/20260901100000_narrow_prebound_relation_shape.down.sql"
+    ))
+    .execute(&pool)
+    .await;
+    assert!(
+        narrow_down
+            .as_ref()
+            .is_err_and(
+                |error| error.as_database_error().is_some_and(|database| database
+                    .message()
+                    .contains("cannot restore the wide prebound relation shape"))
+            ),
+        "存在预绑定时收窄迁移的 down 必须 fail closed：{narrow_down:?}"
     );
 }
 

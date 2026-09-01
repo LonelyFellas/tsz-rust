@@ -716,16 +716,17 @@ impl Modify for SmartLexiconV3SchemaAddon {
                     vec!["pending_target_headword"],
                     None,
                 ),
+                // 预绑定不携带待建词面：词条身份在 prebound id 上，词面回显走只读 target_headword。
                 (
                     vec![
                         "prebound_target_word_id",
-                        "pending_target_headword",
                         "pending_target_gloss",
+                        "target_headword",
                         "target_status",
                     ],
                     vec![
                         "prebound_target_word_id",
-                        "pending_target_headword",
+                        "target_headword",
                         "prebinding_state",
                     ],
                     Some("waiting_first_sense"),
@@ -733,13 +734,13 @@ impl Modify for SmartLexiconV3SchemaAddon {
                 (
                     vec![
                         "prebound_target_word_id",
-                        "pending_target_headword",
                         "pending_target_gloss",
+                        "target_headword",
                         "target_status",
                     ],
                     vec![
                         "prebound_target_word_id",
-                        "pending_target_headword",
+                        "target_headword",
                         "prebinding_state",
                     ],
                     Some("target_sense_deleted"),
@@ -759,13 +760,10 @@ impl Modify for SmartLexiconV3SchemaAddon {
                     vec!["pending_target_headword"],
                     None,
                 ),
+                // 预绑定写入只带稳定 id 与可选预定义词义。
                 (
-                    vec![
-                        "prebound_target_word_id",
-                        "pending_target_headword",
-                        "pending_target_gloss",
-                    ],
-                    vec!["prebound_target_word_id", "pending_target_headword"],
+                    vec!["prebound_target_word_id", "pending_target_gloss"],
+                    vec!["prebound_target_word_id"],
                     None,
                 ),
             ],

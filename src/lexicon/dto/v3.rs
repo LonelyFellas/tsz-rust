@@ -771,9 +771,12 @@ pub struct WordRelationV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub prebound_target_word_id: Option<Uuid>,
+    /// 纯待建关联词的词面；预绑定（`prebound_target_word_id` 非空）不携带，
+    /// 其词面回显走只读 `target_headword`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
+    /// 预定义词义：跟随待建词面或预绑定草稿。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, max_length = 5000)]
     pub pending_target_gloss: Option<String>,
@@ -881,9 +884,11 @@ pub struct WordRelationWritableV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub prebound_target_word_id: Option<Uuid>,
+    /// 纯待建关联词的词面；预绑定（`prebound_target_word_id` 非空）不得携带。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub pending_target_headword: Option<String>,
+    /// 预定义词义：跟随待建词面或预绑定草稿。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, max_length = 5000)]
     pub pending_target_gloss: Option<String>,

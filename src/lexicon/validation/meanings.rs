@@ -453,7 +453,7 @@ pub fn validate_meanings(
                 if relation.prebound_target_word_id.is_some()
                     && (relation.target_word_id.is_some()
                         || relation.target_sense_id.is_some()
-                        || relation.pending_target_headword.is_none()
+                        || relation.pending_target_headword.is_some()
                         || !matches!(
                             relation.prebinding_state.as_deref(),
                             Some("waiting_first_sense" | "target_sense_deleted")
@@ -465,7 +465,7 @@ pub fn validate_meanings(
                         relation.id,
                         "prebound_target_word_id",
                         "relation_target_shape_invalid",
-                        "预绑定关联词必须保留稳定目标、待关联词面和服务端状态",
+                        "预绑定关联词不携带待建词面，且必须保留稳定目标与服务端状态",
                     );
                 }
                 if relation.prebound_target_word_id.is_none() && relation.prebinding_state.is_some()

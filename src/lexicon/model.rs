@@ -346,6 +346,10 @@ pub(crate) struct RelatedSearchFilter<'a> {
     pub kind: Option<crate::lexicon::dto::EntryKind>,
     pub include_v3: bool,
     pub include_drafts: bool,
+    /// 草稿候选只对创建者可见（含超管，从严）；本分支只含未发布词条，
+    /// 已发布词条经发布面分支全员可见。这是候选卫生规则而非保密边界——
+    /// 管理列表/详情按既定协作模型仍全员可见。
+    pub draft_created_by: Uuid,
     pub exact: bool,
     pub exclude_exact: bool,
     pub limit: i64,

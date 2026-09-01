@@ -109,6 +109,7 @@ struct V3RelationTargetStatusRecord {
     id: Uuid,
     is_archived: bool,
     is_published: bool,
+    presentation_label: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -778,11 +779,16 @@ impl LexiconService {
         }
         let statuses = sqlx::query_as::<_, V3RelationTargetStatusRecord>(
             r#"
-            SELECT id,
-                   archived_at IS NOT NULL AS is_archived,
-                   current_publication_id IS NOT NULL AS is_published
-            FROM lexicon.entries
-            WHERE id = ANY($1)
+            SELECT entry.id,
+                   entry.archived_at IS NOT NULL AS is_archived,
+                   entry.current_publication_id IS NOT NULL AS is_published,
+                   presentation.label AS presentation_label
+            FROM lexicon.entries entry
+            LEFT JOIN lexicon.entry_presentation_projection presentation
+              ON presentation.entry_id = entry.id
+             AND presentation.content_schema_version = 3
+             AND presentation.source_revision = entry.revision
+            WHERE entry.id = ANY($1)
             "#,
         )
         .bind(&target_ids)
@@ -811,6 +817,14 @@ impl LexiconService {
             } else {
                 AdminWordStatus::Draft
             });
+            // 预绑定的词面回显按目标当前 presentation 现取，目标改名即时生效；
+            // 同时在读路径剥掉旧宽形态的待建词面，使迁移前投影自愈到新契约。
+            if relation.prebound_target_word_id.is_some() {
+                relation.pending_target_headword = None;
+                if let Some(label) = &status.presentation_label {
+                    relation.target_headword = Some(label.clone());
+                }
+            }
         }
         Ok(())
     }
@@ -2448,18 +2462,32 @@ async fn merge_v3_relation_prebindings(
             }
             .to_owned(),
         );
-        relation.pending_target_headword = relation
-            .pending_target_headword
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
+        // 预绑定关系不携带待建词面：词条身份在 prebound_target_word_id 上，
+        // 词面回显由下方 target_headword 只读快照提供。
+        relation.pending_target_headword = None;
         relation.pending_target_gloss = relation
             .pending_target_gloss
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
+        // 与待建路径同款的 gloss 校验：否则超长/含 NUL 会穿透到 DB 约束变 500。
+        if relation
+            .pending_target_gloss
+            .as_deref()
+            .is_some_and(|value| {
+                value.contains('\0')
+                    || value.chars().count() > crate::lexicon::rich_text::MAX_RICH_TEXT_CODEPOINTS
+            })
+        {
+            issues.push(reference_issue(
+                relation.id,
+                "pending_target_gloss",
+                "relation_pending_gloss_invalid",
+                "预定义词义不能超过 5000 个字符",
+            ));
+            continue;
+        }
 
         if let std::collections::hash_map::Entry::Vacant(entry) = targets.entry(target_entry_id) {
             let target = sqlx::query_as::<_, V3PreboundTargetRecord>(
@@ -2540,6 +2568,9 @@ async fn merge_v3_relation_prebindings(
             }
             .to_owned(),
         );
+        // 等待态的词面回显：进 editor projection 供前端展示，不落 snapshot 列
+        // （insert 侧以 target_word_id 为快照写入前提，预绑定天然不写）。
+        relation.target_headword = Some(target.presentation_label.clone());
         if target.is_archived
             && !current_states
                 .get(&relation.id)
@@ -2558,7 +2589,6 @@ async fn merge_v3_relation_prebindings(
         {
             relation.target_word_id = Some(target_entry_id);
             relation.target_sense_id = Some(first_sense_id);
-            relation.target_headword = Some(target.presentation_label.clone());
             relation.target_gloss = Some(target.first_sense_gloss.clone().unwrap_or_default());
             relation.prebound_target_word_id = None;
             relation.prebinding_state = None;
@@ -2570,7 +2600,6 @@ async fn merge_v3_relation_prebindings(
                 }
                 .to_owned(),
             );
-            relation.pending_target_headword = None;
             relation.pending_target_gloss = None;
         }
     }
@@ -2733,19 +2762,20 @@ async fn apply_v3_relation_reconciliation(
                     relation.target_sense_id = None;
                     relation.prebound_target_word_id = Some(target_entry_id);
                     relation.prebinding_state = Some(RelationPrebindingStateV3::TargetSenseDeleted);
-                    relation.pending_target_headword = Some(
-                        record
-                            .target_headword_snapshot
-                            .clone()
-                            .unwrap_or_else(|| target_headword.to_owned()),
-                    );
+                    // 预绑定不携带待建词面：词面回显留在只读 target_headword 上。
+                    relation.pending_target_headword = None;
                     relation.pending_target_gloss = record
                         .target_gloss_snapshot
                         .as_deref()
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                         .map(str::to_owned);
-                    relation.target_headword = None;
+                    relation.target_headword = Some(
+                        record
+                            .target_headword_snapshot
+                            .clone()
+                            .unwrap_or_else(|| target_headword.to_owned()),
+                    );
                     relation.target_gloss = None;
                     relation.target_status = Some(target_status);
                     detached = true;

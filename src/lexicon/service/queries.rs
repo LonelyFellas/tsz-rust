@@ -363,6 +363,7 @@ impl LexiconService {
                     kind: query.kind,
                     include_v3,
                     include_drafts,
+                    draft_created_by: actor_id,
                     exact: match_mode == RelatedSearchMatchMode::Exact,
                     exclude_exact,
                     limit: i64::from(page_size),

@@ -14442,7 +14442,6 @@ async fn v3_draft_relation_prebinding_promotes_once_and_detaches_without_rebindi
         "id": relation_id,
         "relation": "synonym",
         "prebound_target_word_id": target_id,
-        "pending_target_headword": target_headword,
         "pending_target_gloss": "管理员预先填写的释义",
         "score": "88.00"
     }]);
@@ -14471,6 +14470,14 @@ async fn v3_draft_relation_prebinding_promotes_once_and_detaches_without_rebindi
     assert_eq!(waiting["prebinding_state"], "waiting_first_sense");
     assert_eq!(waiting["target_status"], "draft");
     assert_eq!(waiting["pending_target_gloss"], "管理员预先填写的释义");
+    assert!(
+        waiting["pending_target_headword"].is_null(),
+        "预绑定不携带待建词面：{waiting}"
+    );
+    assert_eq!(
+        waiting["target_headword"], target_headword,
+        "预绑定词面回显走只读 target_headword：{waiting}"
+    );
 
     let disabled_redis = platform::connect_redis(&test_redis_url())
         .await
@@ -14480,10 +14487,12 @@ async fn v3_draft_relation_prebinding_promotes_once_and_detaches_without_rebindi
     let disabled_state = AppState::for_test_with_redis(pool.clone(), disabled_redis)
         .with_smart_lexicon_v3_flags_for_test(disabled_flags);
     let disabled_bearer = token(&disabled_state, admin_id);
-    source_meanings["pos"][0]["senses"][0]["relations"][0]
+    let downgraded_relation = source_meanings["pos"][0]["senses"][0]["relations"][0]
         .as_object_mut()
-        .unwrap()
-        .remove("prebound_target_word_id");
+        .unwrap();
+    downgraded_relation.remove("prebound_target_word_id");
+    // 旧客户端不认识预绑定，会按纯待建形态回发词面。
+    downgraded_relation.insert("pending_target_headword".to_owned(), json!(target_headword));
     let (status, disabled_save) = call(
         &disabled_state,
         Method::PUT,
@@ -14821,6 +14830,14 @@ async fn v3_draft_relation_prebinding_promotes_once_and_detaches_without_rebindi
     assert_eq!(detached["prebound_target_word_id"], target_id);
     assert_eq!(detached["prebinding_state"], "target_sense_deleted");
     assert!(detached["target_sense_id"].is_null());
+    assert!(
+        detached["pending_target_headword"].is_null(),
+        "退回预绑定后不得回填待建词面：{detached}"
+    );
+    assert_eq!(
+        detached["target_headword"], target_headword,
+        "退回预绑定后词面回显保留在只读 target_headword：{detached}"
+    );
     let (status, detached_validation) = call(
         &state,
         Method::POST,
@@ -14926,6 +14943,219 @@ async fn v3_draft_relation_prebinding_promotes_once_and_detaches_without_rebindi
 }
 
 #[sqlx::test]
+async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner_id = seed_admin(&pool).await;
+    let owner = token(&state, owner_id);
+    let outsider_id = seed_admin(&pool).await;
+    let outsider = token(&state, outsider_id);
+
+    let owner_forms = create_v3_with_complete_forms(&state, &pool, &owner).await;
+    let owner_entry_id = owner_forms["word"]["id"].as_str().unwrap();
+
+    let search_path = format!(
+        "{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20&include_drafts=true"
+    );
+    let (status, outsider_search) =
+        call(&state, Method::GET, &search_path, &outsider, None, None).await;
+    assert_eq!(status, StatusCode::OK, "{outsider_search}");
+    assert!(
+        outsider_search["results"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "别人的未发布草稿不得进入关联词候选：{outsider_search}"
+    );
+
+    let (status, owner_search) = call(&state, Method::GET, &search_path, &owner, None, None).await;
+    assert_eq!(status, StatusCode::OK, "{owner_search}");
+    let owner_results = owner_search["results"].as_array().unwrap();
+    assert_eq!(
+        owner_results.len(),
+        1,
+        "创建者应看到自己的草稿：{owner_search}"
+    );
+    assert_eq!(owner_results[0]["entry_id"], owner_entry_id);
+
+    // 例句发现的草稿候选走同一条边界：别人的未发布草稿不可见。
+    let discovery_body = json!({
+        "schema_version": 3,
+        "sentence_text": "The harbour is calm.",
+        "source_dialect": "common",
+        "mode": "selected_segments",
+        "selected_segments": [{ "start": 4, "end": 11, "surface": "harbour" }],
+        "include_drafts": true,
+        "page_size_per_range": 20
+    });
+    let (status, outsider_discovery) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &outsider,
+        None,
+        Some(discovery_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{outsider_discovery}");
+    assert!(
+        outsider_discovery["range_results"][0]["draft_matches"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "别人的未发布草稿不得进入发现候选：{outsider_discovery}"
+    );
+
+    let (status, owner_discovery) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &owner,
+        None,
+        Some(discovery_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_discovery}");
+    let owner_matches = owner_discovery["range_results"][0]["draft_matches"]
+        .as_array()
+        .unwrap();
+    assert!(
+        owner_matches
+            .iter()
+            .any(|candidate| candidate["entry_id"] == owner_entry_id),
+        "创建者应在发现候选中看到自己的草稿：{owner_discovery}"
+    );
+}
+
+#[sqlx::test]
+async fn prebound_gloss_is_field_validated_on_save(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let target_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let target_id = target_forms["word"]["id"].as_str().unwrap();
+    let source_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let source_id = source_forms["word"]["id"].as_str().unwrap();
+    let mut source_meanings =
+        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "prebound_target_word_id": target_id,
+        "pending_target_gloss": "超".repeat(5001),
+        "score": "10"
+    }]);
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_forms["word"]["revision"],
+            "intent": "save",
+            "content": source_meanings
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "预绑定超长 gloss 必须是字段级 422 而非撞库约束：{saved}"
+    );
+    assert!(
+        has_issue(&saved, "relation_pending_gloss_invalid"),
+        "{saved}"
+    );
+}
+
+#[sqlx::test]
+async fn stale_wide_prebound_projection_heals_on_read(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let target_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let target_id = target_forms["word"]["id"].as_str().unwrap();
+    let target_headword = target_forms["word"]["presentation"]["label"]
+        .as_str()
+        .unwrap();
+    let source_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let source_id = source_forms["word"]["id"].as_str().unwrap();
+    let mut source_meanings =
+        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "prebound_target_word_id": target_id,
+        "score": "10"
+    }]);
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": source_forms["word"]["revision"],
+            "intent": "save",
+            "content": source_meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    // 把投影 JSONB 手术回迁移前的旧宽形态：带待建词面、缺只读词面回显。
+    sqlx::query(
+        r#"
+        UPDATE lexicon.entry_editor_projection
+        SET meanings = jsonb_set(
+            meanings,
+            '{pos,0,senses,0,relations,0}',
+            (meanings #> '{pos,0,senses,0,relations,0}') - 'target_headword'
+                || jsonb_build_object('pending_target_headword', $2::text)
+        )
+        WHERE entry_id = $1
+        "#,
+    )
+    .bind(Uuid::parse_str(source_id).unwrap())
+    .bind(target_headword)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, reread) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reread}");
+    let relation = &reread["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert!(
+        relation["pending_target_headword"].is_null(),
+        "读路径必须剥掉旧宽形态的待建词面：{relation}"
+    );
+    assert_eq!(
+        relation["target_headword"], target_headword,
+        "读路径必须按目标当前 presentation 回填词面回显：{relation}"
+    );
+}
+
+#[sqlx::test]
 async fn v3_relation_prebinding_reconciliation_is_atomic_at_500_and_501(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
@@ -14938,9 +15168,6 @@ async fn v3_relation_prebinding_reconciliation_is_atomic_at_500_and_501(pool: Pg
     for relation_count in [500usize, 501usize] {
         let target_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
         let target_id = target_forms["word"]["id"].as_str().unwrap();
-        let target_headword = target_forms["word"]["presentation"]["label"]
-            .as_str()
-            .unwrap();
         let source_forms = create_v3_with_complete_forms(&state, &pool, &bearer).await;
         let source_id = source_forms["word"]["id"].as_str().unwrap();
         let mut source_meanings =
@@ -14952,7 +15179,6 @@ async fn v3_relation_prebinding_reconciliation_is_atomic_at_500_and_501(pool: Pg
                         "id": Uuid::now_v7(),
                         "relation": "synonym",
                         "prebound_target_word_id": target_id,
-                        "pending_target_headword": target_headword,
                         "score": format!("{}", ordinal % 101)
                     })
                 })
@@ -15069,7 +15295,6 @@ async fn v3_relation_prebinding_uses_nowait_and_retries_without_partial_writes(p
         "id": Uuid::now_v7(),
         "relation": "synonym",
         "prebound_target_word_id": target_id,
-        "pending_target_headword": target_forms["word"]["presentation"]["label"],
         "score": "80"
     }]);
     let (status, source_saved) = call(
