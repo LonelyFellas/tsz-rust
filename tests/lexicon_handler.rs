@@ -15029,6 +15029,556 @@ async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn surface_machinery_hides_other_admins_drafts(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner_id = seed_admin(&pool).await;
+    let owner = token(&state, owner_id);
+    let outsider_id = seed_admin(&pool).await;
+    let outsider = token(&state, outsider_id);
+
+    let owner_forms = create_v3_with_complete_forms(&state, &pool, &owner).await;
+    let owner_entry_id = owner_forms["word"]["id"].as_str().unwrap();
+
+    // 检测：别人的未发布草稿不得亮进 surface warning。
+    let detect_body = json!({
+        "schema_version": 3,
+        "language": "en",
+        "kind": "word",
+        "surface": "harbour"
+    });
+    let (status, outsider_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &outsider,
+        None,
+        Some(detect_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{outsider_detection}");
+    assert_eq!(
+        outsider_detection["requires_acknowledgement"], false,
+        "别人的草稿不构成检测确认前提：{outsider_detection}"
+    );
+    assert!(
+        outsider_detection["surface_match_page"].is_null(),
+        "别人的草稿命中与内容不得进检测页：{outsider_detection}"
+    );
+
+    // 正向对照：创建者自己检测必须仍能看到自己的草稿（防空实现全绿）。
+    let (status, owner_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &owner,
+        None,
+        Some(detect_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_detection}");
+    assert_eq!(owner_detection["requires_acknowledgement"], true);
+    assert!(
+        owner_detection["surface_match_page"]["items"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "创建者应看到自己草稿的命中：{owner_detection}"
+    );
+
+    // 建档：同名草稿共存，无需 acknowledge 一个自己看不见的冲突。
+    let (status, outsider_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &outsider,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": outsider_detection["detection_id"],
+            "kind": "word"
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "撞别人隐形草稿的建档应直接放行：{outsider_created}"
+    );
+    let outsider_entry_id = outsider_created["word"]["id"].as_str().unwrap();
+
+    // 词形步：impact 预览与保存都不得被别人的草稿词形拦下。
+    let forms_content = complete_v3_forms_fixture();
+    let (status, impact) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{outsider_entry_id}/steps/forms/impact"),
+        &outsider,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": 1,
+            "content": forms_content.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert!(
+        impact["surface_match_page"].is_null(),
+        "词形步不得亮出别人的草稿词形：{impact}"
+    );
+    let mut forms_input = json!({
+        "schema_version": 3,
+        "base_revision": 1,
+        "intent": "complete",
+        "content": forms_content
+    });
+    // 词义连带影响确认是与 surface 无关的既有机制，照常携带。
+    if let Some(impact_token) = impact["confirmation_token"].as_str() {
+        forms_input["confirmed_impact_token"] = json!(impact_token);
+    }
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{outsider_entry_id}/steps/forms"),
+        &outsider,
+        None,
+        Some(forms_input),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "词形保存不得要求确认别人的草稿：{saved}"
+    );
+
+    // 过滤是双向的：owner 检测同样看不到 outsider 的草稿。
+    let (status, owner_redetection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &owner,
+        None,
+        Some(detect_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_redetection}");
+    let owner_items = owner_redetection["surface_match_page"]["items"]
+        .as_array()
+        .expect("创建者应仍能看到自己草稿的命中");
+    assert!(
+        owner_items
+            .iter()
+            .all(|item| item["match"]["entry_id"] == owner_entry_id),
+        "对方草稿对创建者同样隐形：{owner_redetection}"
+    );
+}
+
+#[sqlx::test]
+async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner_id = seed_admin(&pool).await;
+    let owner = token(&state, owner_id);
+    let outsider_id = seed_admin(&pool).await;
+    let outsider = token(&state, outsider_id);
+
+    let owner_forms = create_v3_with_complete_forms(&state, &pool, &owner).await;
+    let owner_entry_id = owner_forms["word"]["id"].as_str().unwrap();
+
+    // outsider 全链手动走且不带任何 surface token（刻意不用会自动 acknowledge 的
+    // create_v3_with_complete_forms——否则词形步证据会覆盖 publish 期重算的集合，
+    // 过滤被整体移除时本测试照样绿，失去判别力）。
+    let (status, outsider_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &outsider,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "harbour"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{outsider_detection}");
+    assert!(
+        outsider_detection["surface_match_page"].is_null(),
+        "{outsider_detection}"
+    );
+    let (status, outsider_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &outsider,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": outsider_detection["detection_id"],
+            "kind": "word"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{outsider_created}");
+    let outsider_entry_id = outsider_created["word"]["id"].as_str().unwrap();
+    let forms_content = complete_v3_forms_fixture();
+    let (status, impact) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{outsider_entry_id}/steps/forms/impact"),
+        &outsider,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": 1,
+            "content": forms_content.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert!(
+        impact["surface_match_page"].is_null(),
+        "词形步不得亮出别人的草稿词形：{impact}"
+    );
+    let mut forms_input = json!({
+        "schema_version": 3,
+        "base_revision": 1,
+        "intent": "complete",
+        "content": forms_content
+    });
+    if let Some(impact_token) = impact["confirmation_token"].as_str() {
+        forms_input["confirmed_impact_token"] = json!(impact_token);
+    }
+    let (status, outsider_forms) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{outsider_entry_id}/steps/forms"),
+        &outsider,
+        None,
+        Some(forms_input),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "词形保存不得要求确认别人的草稿：{outsider_forms}"
+    );
+    let outsider_meanings =
+        complete_v3_meanings_fixture(outsider_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let (status, outsider_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{outsider_entry_id}/steps/meanings"),
+        &outsider,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": outsider_forms["word"]["revision"],
+            "intent": "complete",
+            "content": outsider_meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{outsider_saved}");
+    let (status, outsider_published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{outsider_entry_id}/publications"),
+        &outsider,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": outsider_saved["word"]["revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "别人的草稿不构成发布约束，发布不得要求 surface 确认：{outsider_published}"
+    );
+
+    // owner 随后发布：对 outsider 已发布词面的警告照常（已发布内容全员可见）。
+    let owner_meanings =
+        complete_v3_meanings_fixture(owner_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let (status, owner_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{owner_entry_id}/steps/meanings"),
+        &owner,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": owner_forms["word"]["revision"],
+            "intent": "complete",
+            "content": owner_meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_saved}");
+    let owner_publish_body = json!({
+        "schema_version": 3,
+        "base_revision": owner_saved["word"]["revision"]
+    });
+    let publish_key = Uuid::now_v7();
+    let (status, owner_warning) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{owner_entry_id}/publications"),
+        &owner,
+        Some(publish_key),
+        Some(owner_publish_body.clone()),
+    )
+    .await;
+    // 对方已发布 → 词面全员可见，发布警告照常；亮出的必须只有已发布内容。
+    assert_eq!(status, StatusCode::CONFLICT, "{owner_warning}");
+    assert_eq!(
+        owner_warning["code"], "surface_match_acknowledgement_required",
+        "{owner_warning}"
+    );
+    // content_scope 是行级判别：status 是词条级 lifecycle，outsider 词条发布后其
+    // 工作区 draft 行也会报 published，只有 content_scope 能钉住「无草稿行泄露」。
+    assert!(
+        owner_warning["meta"]["surface_match_page"]["items"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()
+                && items.iter().all(|item| {
+                    item["match"]["status"] == "published"
+                        && item["match"]["content_scope"] == "current_publication"
+                })),
+        "发布警告只得亮出已发布内容：{owner_warning}"
+    );
+    // V3 不写 entry_headword_keys，同名多 active 发布由 surface policy 治理：
+    // acknowledge 已发布词面后照常共存，过滤不改变这条既有语义。
+    let mut confirmed_publish = owner_publish_body;
+    confirmed_publish["confirmed_surface_match_token"] =
+        owner_warning["meta"]["surface_match_page"]["surface_confirmation_token"].clone();
+    let (status, owner_publish) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{owner_entry_id}/publications"),
+        &owner,
+        Some(publish_key),
+        Some(confirmed_publish),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{owner_publish}");
+}
+
+#[sqlx::test]
+async fn inbound_relation_previews_hide_other_admins_draft_sources(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let publisher_id = seed_admin(&pool).await;
+    let publisher = token(&state, publisher_id);
+    let referrer_id = seed_admin(&pool).await;
+    let referrer = token(&state, referrer_id);
+    let outsider_id = seed_admin(&pool).await;
+    let outsider = token(&state, outsider_id);
+
+    // publisher 发布目标词条 P（harbour）。
+    let target_forms = create_v3_with_complete_forms(&state, &pool, &publisher).await;
+    let target_id = target_forms["word"]["id"].as_str().unwrap();
+    let target_meanings =
+        complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let (status, target_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &publisher,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_forms["word"]["revision"],
+            "intent": "complete",
+            "content": target_meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{target_saved}");
+    let (status, target_published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{target_id}/publications"),
+        &publisher,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target_saved["word"]["revision"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_sense_id = target_published["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+
+    // referrer 的未发布草稿引用 P。
+    let (status, referrer_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &referrer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "dockyard"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{referrer_detection}");
+    let (status, referrer_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &referrer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": referrer_detection["detection_id"],
+            "kind": "word"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{referrer_created}");
+    let referrer_entry_id = referrer_created["word"]["id"].as_str().unwrap();
+    let (_, referrer_forms) = save_v3_forms_after_impact(
+        &state,
+        &referrer,
+        referrer_entry_id,
+        1,
+        "complete",
+        complete_v3_forms_fixture(),
+    )
+    .await;
+    let mut referrer_meanings =
+        complete_v3_meanings_fixture(referrer_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    referrer_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "target_word_id": target_id,
+        "target_sense_id": target_sense_id,
+        "score": "88.00"
+    }]);
+    let (status, referrer_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{referrer_entry_id}/steps/meanings"),
+        &referrer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": referrer_forms["word"]["revision"],
+            "intent": "complete",
+            "content": referrer_meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{referrer_saved}");
+
+    let detect_body = json!({
+        "schema_version": 3,
+        "language": "en",
+        "kind": "word",
+        "surface": "harbour"
+    });
+    let context_for = |detection: &Value, entry_id: &str| -> Value {
+        detection["surface_match_page"]["matched_entry_contexts"]
+            .as_array()
+            .unwrap_or_else(|| panic!("检测应携带命中上下文：{detection}"))
+            .iter()
+            .find(|context| context["entry_id"] == entry_id)
+            .unwrap_or_else(|| panic!("检测应命中目标词条：{detection}"))
+            .clone()
+    };
+
+    // 外人检测命中 P：入站预览不得亮出 referrer 的未发布草稿。
+    let (status, outsider_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &outsider,
+        None,
+        Some(detect_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{outsider_detection}");
+    let outsider_context = context_for(&outsider_detection, target_id);
+    assert_eq!(
+        outsider_context["inbound_relations"]["total"], 0,
+        "别人的草稿引用不得进入站预览：{outsider_context}"
+    );
+
+    // 创建者自己检测：能看到自己草稿的引用。
+    let (status, referrer_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &referrer,
+        None,
+        Some(detect_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{referrer_detection}");
+    let referrer_context = context_for(&referrer_detection, target_id);
+    assert!(
+        referrer_context["inbound_relations"]["previews"]
+            .as_array()
+            .is_some_and(|previews| previews.iter().any(|preview| {
+                preview["source_entry_id"] == referrer_entry_id
+                    && preview["source_status"] == "draft"
+            })),
+        "创建者应看到自己草稿的引用：{referrer_context}"
+    );
+
+    // referrer 发布引用词条后：外人经发布分支看到引用（钉死去重条件不双失明），
+    // 创建者经草稿分支看到，两边各恰一条。
+    let (status, referrer_published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{referrer_entry_id}/publications"),
+        &referrer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": referrer_saved["word"]["revision"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{referrer_published}");
+    for (label, bearer) in [("外人", &outsider), ("创建者", &referrer)] {
+        let (status, detection) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            bearer,
+            None,
+            Some(detect_body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detection}");
+        let context = context_for(&detection, target_id);
+        let previews = context["inbound_relations"]["previews"]
+            .as_array()
+            .unwrap_or_else(|| panic!("发布后的引用对{label}应可见：{context}"))
+            .iter()
+            .filter(|preview| preview["source_entry_id"] == referrer_entry_id)
+            .count();
+        assert_eq!(previews, 1, "{label}应恰好看到一条已发布引用：{context}");
+    }
+}
+
+#[sqlx::test]
 async fn prebound_gloss_is_field_validated_on_save(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

@@ -732,6 +732,7 @@ impl LexiconService {
                 &word.headwords,
                 word.kind,
                 Some(word.id),
+                actor_id,
             )
             .await?;
         for item in &mut headword_matches {
@@ -743,7 +744,7 @@ impl LexiconService {
             }
         }
         let (form_matches, form_contexts) = self
-            .form_surface_matches_in_transaction(transaction, word)
+            .form_surface_matches_in_transaction(transaction, word, actor_id)
             .await?;
 
         let headword_evidence =
