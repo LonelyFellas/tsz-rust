@@ -2472,10 +2472,14 @@ async fn merge_v3_relation_prebindings(
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         // 与待建路径同款的 gloss 校验：否则超长/含 NUL 会穿透到 DB 约束变 500。
-        if relation.pending_target_gloss.as_deref().is_some_and(|value| {
-            value.contains('\0')
-                || value.chars().count() > crate::lexicon::rich_text::MAX_RICH_TEXT_CODEPOINTS
-        }) {
+        if relation
+            .pending_target_gloss
+            .as_deref()
+            .is_some_and(|value| {
+                value.contains('\0')
+                    || value.chars().count() > crate::lexicon::rich_text::MAX_RICH_TEXT_CODEPOINTS
+            })
+        {
             issues.push(reference_issue(
                 relation.id,
                 "pending_target_gloss",

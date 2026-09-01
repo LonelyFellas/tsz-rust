@@ -156,11 +156,13 @@ async fn relation_prebinding_shape_has_stable_target_identity(pool: PgPool) {
     .execute(&pool)
     .await;
     assert!(
-        narrow_down.as_ref().is_err_and(|error| error
-            .as_database_error()
-            .is_some_and(|database| database
-                .message()
-                .contains("cannot restore the wide prebound relation shape"))),
+        narrow_down
+            .as_ref()
+            .is_err_and(
+                |error| error.as_database_error().is_some_and(|database| database
+                    .message()
+                    .contains("cannot restore the wide prebound relation shape"))
+            ),
         "存在预绑定时收窄迁移的 down 必须 fail closed：{narrow_down:?}"
     );
 }

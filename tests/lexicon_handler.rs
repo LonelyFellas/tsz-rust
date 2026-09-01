@@ -14492,10 +14492,7 @@ async fn v3_draft_relation_prebinding_promotes_once_and_detaches_without_rebindi
         .unwrap();
     downgraded_relation.remove("prebound_target_word_id");
     // 旧客户端不认识预绑定，会按纯待建形态回发词面。
-    downgraded_relation.insert(
-        "pending_target_headword".to_owned(),
-        json!(target_headword),
-    );
+    downgraded_relation.insert("pending_target_headword".to_owned(), json!(target_headword));
     let (status, disabled_save) = call(
         &disabled_state,
         Method::PUT,
@@ -15072,7 +15069,10 @@ async fn prebound_gloss_is_field_validated_on_save(pool: PgPool) {
         StatusCode::UNPROCESSABLE_ENTITY,
         "预绑定超长 gloss 必须是字段级 422 而非撞库约束：{saved}"
     );
-    assert!(has_issue(&saved, "relation_pending_gloss_invalid"), "{saved}");
+    assert!(
+        has_issue(&saved, "relation_pending_gloss_invalid"),
+        "{saved}"
+    );
 }
 
 #[sqlx::test]
