@@ -123,6 +123,9 @@ const SURFACE_INBOUND_RELATIONS_QUERY: &str = r#"
           ON source_presentation.entry_id = source_entry.id
          AND source_presentation.content_schema_version = 3
         WHERE relation.target_entry_id = ANY($1)
+          -- 草稿态关系（未发布词条、或已发布词条工作区里未发布的修订）只对源词条
+          -- 创建者可见；外人经下方发布分支看该源词条的已发布状态。
+          AND source_entry.created_by_admin_id = $2
 
         UNION ALL
 
@@ -158,13 +161,18 @@ const SURFACE_INBOUND_RELATIONS_QUERY: &str = r#"
          AND publication.entry_id = reference.entry_id
         WHERE reference.target_entry_id = ANY($1)
           AND reference.reference_kind = 'relation'
-          AND NOT EXISTS (
-              SELECT 1
-              FROM lexicon.relations draft_relation
-              WHERE draft_relation.id = reference.source_node_id
-                AND draft_relation.entry_id = reference.entry_id
-                AND draft_relation.target_entry_id = reference.target_entry_id
-                AND draft_relation.target_sense_id = reference.target_sense_id
+          -- 草稿行让位（去重）只在草稿行真的会展示给该 actor 时成立，否则外人会
+          -- 「草稿行被滤掉、发布行又被吞」两头落空。
+          AND (
+              source_entry.created_by_admin_id <> $2
+              OR NOT EXISTS (
+                  SELECT 1
+                  FROM lexicon.relations draft_relation
+                  WHERE draft_relation.id = reference.source_node_id
+                    AND draft_relation.entry_id = reference.entry_id
+                    AND draft_relation.target_entry_id = reference.target_entry_id
+                    AND draft_relation.target_sense_id = reference.target_sense_id
+              )
           )
     )
     SELECT target_entry_id,
@@ -268,6 +276,11 @@ impl LexiconRepository {
     /// migration/catch-up safety. This reader deliberately filters both and
     /// only exposes draft plus the entry's current publication. Archived
     /// entries remain visible and are identified by `lifecycle_status`.
+    ///
+    /// 注意：draft-scope 行在这里**不**按创建者过滤——这是「V2 入口不做草稿可见性
+    /// 收口」的既定拍板（生产无 V2 数据，随 legacy 退役消亡）。V3 入口一律走
+    /// `v3_surface_material_in`（按 `visible_to` 过滤他人未发布草稿），新调用方不要
+    /// 因为本方法自称 authoritative 就拿它喂 V3 流程。
     pub async fn surface_sources(
         &self,
         language: &str,
@@ -357,12 +370,14 @@ impl LexiconRepository {
     pub(crate) async fn surface_inbound_relations(
         &self,
         target_entry_ids: &[Uuid],
+        visible_to: Uuid,
     ) -> Result<Vec<SurfaceInboundRelationRecord>, LexiconRepositoryError> {
         if target_entry_ids.is_empty() {
             return Ok(Vec::new());
         }
         sqlx::query_as::<_, SurfaceInboundRelationRecord>(SURFACE_INBOUND_RELATIONS_QUERY)
             .bind(target_entry_ids)
+            .bind(visible_to)
             .fetch_all(&self.pool)
             .await
             .map_err(LexiconRepositoryError::Database)
@@ -371,12 +386,14 @@ impl LexiconRepository {
     pub(crate) async fn surface_inbound_relations_in_transaction(
         tx: &mut Transaction<'_, Postgres>,
         target_entry_ids: &[Uuid],
+        visible_to: Uuid,
     ) -> Result<Vec<SurfaceInboundRelationRecord>, LexiconRepositoryError> {
         if target_entry_ids.is_empty() {
             return Ok(Vec::new());
         }
         sqlx::query_as::<_, SurfaceInboundRelationRecord>(SURFACE_INBOUND_RELATIONS_QUERY)
             .bind(target_entry_ids)
+            .bind(visible_to)
             .fetch_all(&mut **tx)
             .await
             .map_err(LexiconRepositoryError::Database)

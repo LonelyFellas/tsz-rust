@@ -397,6 +397,7 @@ impl LexiconService {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         pending: &[(EntryLifecycleTarget, AdminWordAny, bool)],
+        visible_to: Uuid,
     ) -> Result<V3RestoreSurfaceContribution, LexiconServiceError> {
         let mut contribution = V3RestoreSurfaceContribution::default();
         let mut hidden_initial_owners = BTreeMap::<(String, String, String), Uuid>::new();
@@ -445,7 +446,7 @@ impl LexiconService {
             keys.sort();
             keys.dedup();
             let material = self
-                .v3_surface_material_in(tx, &keys, Some(word.id), true)
+                .v3_surface_material_in(tx, &keys, Some(word.id), true, visible_to)
                 .await?;
             let synthetic_items = material.synthetic_items()?;
             if synthetic_items.len() != material.matches.len() {
@@ -515,6 +516,7 @@ impl LexiconService {
         tx: &mut Transaction<'_, Postgres>,
         pending: &[(EntryLifecycleTarget, AdminWordAny, bool)],
         publication_sources: &[crate::lexicon::repository::SurfaceProjectionSource],
+        visible_to: Uuid,
     ) -> Result<V2RestorePublicationSurfaceContribution, LexiconServiceError> {
         let restoring_ids = pending
             .iter()
@@ -530,7 +532,9 @@ impl LexiconService {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
+        let material = self
+            .v3_surface_material_in(tx, &keys, None, true, visible_to)
+            .await?;
         let synthetic = material.synthetic_items()?;
         if synthetic.len() != material.matches.len() {
             return Err(invariant_record());
@@ -600,6 +604,7 @@ impl LexiconService {
         tx: &mut Transaction<'_, Postgres>,
         items: &[LexiconSurfaceMatchV2],
         contributed: &[V3SurfaceSnapshotItem],
+        visible_to: Uuid,
     ) -> Result<V3SurfaceSnapshotPageData, LexiconServiceError> {
         let contributed = contributed
             .iter()
@@ -624,7 +629,9 @@ impl LexiconService {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let matched_entry_contexts = self.v3_surface_contexts_in(tx, &entry_ids).await?;
+        let matched_entry_contexts = self
+            .v3_surface_contexts_in(tx, &entry_ids, visible_to)
+            .await?;
         Ok(V3SurfaceSnapshotPageData {
             items: page_items,
             matched_entry_contexts,
@@ -754,7 +761,7 @@ impl LexiconService {
             .await
             .map_err(database_error)?;
         let material = self
-            .v3_surface_material_in(&mut transaction, &keys, None, false)
+            .v3_surface_material_in(&mut transaction, &keys, None, false, actor_id)
             .await?;
         let suggested_pos = self
             .v3_surface_suggested_pos_in(&mut transaction, &material)
@@ -870,7 +877,9 @@ impl LexiconService {
             None,
         )
         .await?;
-        let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
+        let material = self
+            .v3_surface_material_in(tx, &keys, None, true, actor_id)
+            .await?;
         if material.matches.is_empty() {
             let Some(token) = token else {
                 return Ok(None);
@@ -946,7 +955,9 @@ impl LexiconService {
             None,
         )
         .await?;
-        let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
+        let material = self
+            .v3_surface_material_in(tx, &keys, None, true, actor_id)
+            .await?;
         if material.matches.is_empty() {
             let Some(token) = token else {
                 return Ok(None);
@@ -1057,7 +1068,7 @@ impl LexiconService {
             .await
             .map_err(database_error)?;
         let material = self
-            .v3_surface_material_in(&mut transaction, &keys, Some(entry_id), false)
+            .v3_surface_material_in(&mut transaction, &keys, Some(entry_id), false, actor_id)
             .await?;
         transaction.commit().await.map_err(database_error)?;
         if material.matches.is_empty() {
@@ -1153,7 +1164,7 @@ impl LexiconService {
             .await?;
         }
         let material = self
-            .v3_surface_material_in(tx, &keys, Some(entry_id), true)
+            .v3_surface_material_in(tx, &keys, Some(entry_id), true, actor_id)
             .await?;
         let content_digest = canonical_v3_forms_digest(content)?;
         let previous_evidence = LexiconRepository::forms_surface_acknowledgement(tx, entry_id)
@@ -1313,7 +1324,7 @@ impl LexiconService {
         self.lock_v3_publication_surface_set(tx, entry_id, &keys)
             .await?;
         let material = self
-            .v3_surface_material_in(tx, &keys, Some(entry_id), true)
+            .v3_surface_material_in(tx, &keys, Some(entry_id), true, actor_id)
             .await?;
         if material.matches.is_empty() {
             let Some(token) = token else {
@@ -1429,7 +1440,7 @@ impl LexiconService {
         self.lock_v3_publication_surface_set(tx, entry_id, &keys)
             .await?;
         let material = self
-            .v3_surface_material_in(tx, &keys, Some(entry_id), true)
+            .v3_surface_material_in(tx, &keys, Some(entry_id), true, actor_id)
             .await?;
         let owner_context = serde_json::to_string(&serde_json::json!({
             "entry_id": entry_id,
@@ -1754,6 +1765,7 @@ impl LexiconService {
         keys: &[V3SurfaceQueryKey],
         excluding_entry_id: Option<Uuid>,
         lock_contexts: bool,
+        visible_to: Uuid,
     ) -> Result<V3SurfaceMaterial, LexiconServiceError> {
         if keys.is_empty() {
             return Ok(V3SurfaceMaterial {
@@ -1827,6 +1839,12 @@ impl LexiconService {
                       AND source.publication_id = entry.current_publication_id
                   )
               )
+              -- 未发布内容只对词条创建者可见（超管不豁免）：过滤作用于一切
+              -- draft-scope 行，含已发布词条草稿工作区里尚未发布的新词形。
+              AND NOT (
+                  source.content_scope = 'draft'
+                  AND entry.created_by_admin_id <> $4
+              )
             ORDER BY source.entry_id, source.content_schema_version,
                      source.source_id, source.dialect
             "#,
@@ -1834,6 +1852,7 @@ impl LexiconService {
         .bind(dialect_scopes)
         .bind(normalized_surfaces)
         .bind(excluding_entry_id)
+        .bind(visible_to)
         .fetch_all(&mut **tx)
         .await
         .map_err(database_error)?;
@@ -1960,7 +1979,9 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?;
         }
-        let contexts = self.v3_surface_contexts_in(tx, &entry_ids).await?;
+        let contexts = self
+            .v3_surface_contexts_in(tx, &entry_ids, visible_to)
+            .await?;
         Ok(V3SurfaceMaterial { matches, contexts })
     }
 
@@ -1968,6 +1989,7 @@ impl LexiconService {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         entry_ids: &[Uuid],
+        visible_to: Uuid,
     ) -> Result<Vec<MatchedEntryContextV3>, LexiconServiceError> {
         if entry_ids.is_empty() {
             return Ok(Vec::new());
@@ -2020,7 +2042,9 @@ impl LexiconService {
         if records.len() != entry_ids.len() {
             return Err(invariant_record());
         }
-        let mut relation_summaries = self.v3_inbound_relation_summaries_in(tx, entry_ids).await?;
+        let mut relation_summaries = self
+            .v3_inbound_relation_summaries_in(tx, entry_ids, visible_to)
+            .await?;
         records
             .into_iter()
             .map(|record| {
@@ -2089,11 +2113,15 @@ impl LexiconService {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         target_entry_ids: &[Uuid],
+        visible_to: Uuid,
     ) -> Result<HashMap<Uuid, RelationReferenceSummaryV3>, LexiconServiceError> {
-        let records =
-            LexiconRepository::surface_inbound_relations_in_transaction(tx, target_entry_ids)
-                .await
-                .map_err(repository_error)?;
+        let records = LexiconRepository::surface_inbound_relations_in_transaction(
+            tx,
+            target_entry_ids,
+            visible_to,
+        )
+        .await
+        .map_err(repository_error)?;
         let references = inbound_relation_previews(&records)?;
         let source_entry_ids = references
             .iter()
