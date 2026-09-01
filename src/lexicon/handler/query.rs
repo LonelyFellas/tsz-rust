@@ -25,6 +25,7 @@ pub async fn resolve_sentence_targets(
     require_active_admin(&state, &auth).await?;
     let response = service(&state)
         .resolve_sentence_targets_v3(
+            auth.subject,
             input,
             sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
         )

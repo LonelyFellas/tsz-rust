@@ -1845,12 +1845,15 @@ pub(super) fn pending_relation_issue(
     relation: &WordRelationV2,
     materialized_expected: bool,
 ) -> Option<DraftValidationIssue> {
-    if relation.pending_target_headword.is_none() && relation.pending_target_gloss.is_some() {
+    if relation.pending_target_headword.is_none()
+        && relation.prebound_target_word_id.is_none()
+        && relation.pending_target_gloss.is_some()
+    {
         return Some(reference_issue(
             relation.id,
             "pending_target_gloss",
             "relation_pending_gloss_without_headword",
-            "预定义词义只能用于待建关联词",
+            "预定义词义只能跟随待建词面或预绑定草稿",
         ));
     }
     if relation

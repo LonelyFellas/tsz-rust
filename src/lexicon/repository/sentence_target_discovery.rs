@@ -64,6 +64,7 @@ impl LexiconRepository {
         tx: &mut Transaction<'_, Postgres>,
         dialect_scopes: &[String],
         normalized_surface: &str,
+        draft_created_by: Uuid,
     ) -> Result<Vec<SentenceDiscoveryDraftRecord>, LexiconRepositoryError> {
         sqlx::query_as::<_, SentenceDiscoveryDraftRecord>(
             r#"
@@ -76,6 +77,9 @@ impl LexiconRepository {
               ON entry.id = source.entry_id
              AND entry.archived_at IS NULL
              AND entry.content_schema_version = 3
+             -- 未发布内容只对词条创建者可见：过滤作用于一切 draft-scope surface，
+             -- 含已发布词条草稿里尚未发布的新词形（从严口径）。
+             AND entry.created_by_admin_id = $4
             LEFT JOIN lexicon.entry_presentation_projection presentation
               ON presentation.entry_id = entry.id
             WHERE source.is_deleted = FALSE
@@ -90,6 +94,7 @@ impl LexiconRepository {
         .bind(HEADWORD_NORMALIZATION_VERSION)
         .bind(dialect_scopes)
         .bind(normalized_surface)
+        .bind(draft_created_by)
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)

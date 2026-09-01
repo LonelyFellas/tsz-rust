@@ -104,6 +104,8 @@ impl LexiconRepository {
                   AND entry.content_schema_version = 3
                   AND entry.current_publication_id IS NULL
                   AND entry.archived_at IS NULL
+                  -- 未发布草稿只对创建者可见：别人的草稿不进关联词候选。
+                  AND entry.created_by_admin_id = $13
             )
             SELECT id AS entry_id,
                    kind,
@@ -244,6 +246,7 @@ impl LexiconRepository {
         .bind(filter.limit)
         .bind(filter.include_v3)
         .bind(filter.include_drafts)
+        .bind(filter.draft_created_by)
         .fetch_all(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)

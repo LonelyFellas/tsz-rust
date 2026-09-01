@@ -28,6 +28,7 @@ impl LexiconService {
     /// 句子专用发现入口：HTTP 只暴露例句语义，匹配事实由内部中性 core 提供。
     pub async fn resolve_sentence_targets_v3(
         &self,
+        actor_id: Uuid,
         input: ResolveSentenceTargetsV3Input,
         allow_v3: bool,
     ) -> Result<ResolveSentenceTargetsV3Response, LexiconServiceError> {
@@ -122,6 +123,7 @@ impl LexiconService {
                     &mut transaction,
                     &dialect_scopes,
                     normalized,
+                    actor_id,
                 )
                 .await
                 .map_err(repository_error)?
