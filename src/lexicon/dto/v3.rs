@@ -1030,6 +1030,10 @@ pub struct AdminWordV3 {
     pub presentation: EntryPresentationV3,
     #[schema(read_only)]
     pub capabilities: AdminWordV3Capabilities,
+    /// 原始检测 surface 唯一命中的英美侧；与管理员偏好和最终主词侧无关。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, read_only)]
+    pub detection_basis_dialect: Option<SourceDialect>,
     pub forms: DraftFormsStepContentV3,
     /// Phase 1 sense 仍只按 `pos_id` 归属，不含 group/form 可选字段。
     pub meanings: DraftMeaningsStepContentV3,
@@ -1369,6 +1373,7 @@ pub enum V3ValidationIssueCode {
     OrphanForm,
     FormGroupRequired,
     EmptyFormGroup,
+    BaseFormRequiredInGroup,
     VariantSpellingRequired,
     PronunciationRequired,
     DuplicatePronunciation,
@@ -1437,6 +1442,7 @@ impl V3ValidationIssueCode {
             Self::OrphanForm => "orphan_form",
             Self::FormGroupRequired => "form_group_required",
             Self::EmptyFormGroup => "empty_form_group",
+            Self::BaseFormRequiredInGroup => "base_form_required_in_group",
             Self::VariantSpellingRequired => "variant_spelling_required",
             Self::PronunciationRequired => "pronunciation_required",
             Self::DuplicatePronunciation => "duplicate_pronunciation",
@@ -1505,6 +1511,7 @@ impl V3ValidationIssueCode {
             "orphan_form" => Self::OrphanForm,
             "form_group_required" => Self::FormGroupRequired,
             "empty_form_group" => Self::EmptyFormGroup,
+            "base_form_required_in_group" => Self::BaseFormRequiredInGroup,
             "variant_spelling_required" => Self::VariantSpellingRequired,
             "pronunciation_required" => Self::PronunciationRequired,
             "duplicate_pronunciation" => Self::DuplicatePronunciation,

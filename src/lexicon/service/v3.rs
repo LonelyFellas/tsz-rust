@@ -84,6 +84,7 @@ fn is_regional_spelling_relation(
 struct V3EntryStateRecord {
     origin: String,
     publication_canary_enabled: bool,
+    initial_headwords: Option<Value>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -552,6 +553,72 @@ fn confirmed_v3_headwords_presentation(headwords: &WordHeadwordsV2) -> EntryPres
     }
 }
 
+fn detection_basis_dialect_for_headwords(
+    normalized_surface: &str,
+    headwords: &WordHeadwordsV2,
+) -> Result<Option<SourceDialect>, LexiconServiceError> {
+    let WordHeadwordsV2::Distinguish { uk, us, .. } = headwords else {
+        return Ok(None);
+    };
+    let matches_uk = normalize_headword(uk).map_err(map_headword_error)?.key == normalized_surface;
+    let matches_us = normalize_headword(us).map_err(map_headword_error)?.key == normalized_surface;
+    Ok(match (matches_uk, matches_us) {
+        (true, false) => Some(SourceDialect::Uk),
+        (false, true) => Some(SourceDialect::Us),
+        _ => None,
+    })
+}
+
+/// 拿归一化后的检测 surface 与当时的主词逐侧比对。
+///
+/// 外层 `None` 表示材料不全、算不出来，和内层「算过了但没有唯一命中侧」是两回事——
+/// 前者才允许退回近似值，后者是明确结论，不该被近似值盖掉。
+fn surface_detection_basis(
+    normalized_surface: Option<&Value>,
+    headwords: Option<&Value>,
+) -> Option<Option<SourceDialect>> {
+    let normalized_surface = normalized_surface?.as_str()?;
+    let headwords: WordHeadwordsV2 = serde_json::from_value(headwords?.clone()).ok()?;
+    detection_basis_dialect_for_headwords(normalized_surface, &headwords).ok()
+}
+
+/// 按词条来源分派 detection_snapshot 的两种形状，而不是嗅探 JSON 键：`migrated_v2` 存的是
+/// `WordDetectionSnapshotV2`（`normalized_headword` + `headwords`，另有词典命中方言
+/// `matched_dialect`），原生 v3 存的是 `DetectLexiconSurfaceResponseV3`（`normalized_surface`，
+/// 主词另存在 `v3_entry_state.initial_headwords`）。
+///
+/// 两条路径都优先做逐侧比对，口径与建条时一致；只有 v2 快照缺了比对材料，才退回
+/// `matched_dialect` 这个近似值——它是词典主条的方言，与「原始 surface 命中哪一侧」并不等价。
+///
+/// 这个字段纯属展示，取不到就不显示——任何一步都不得让读词条本身失败。
+fn stored_detection_basis_dialect(
+    origin: &str,
+    detection_snapshot: &Value,
+    initial_headwords: Option<&Value>,
+) -> Option<SourceDialect> {
+    if origin == "migrated_v2" {
+        if let Some(basis) = surface_detection_basis(
+            detection_snapshot.get("normalized_headword"),
+            detection_snapshot.get("headwords"),
+        ) {
+            return basis;
+        }
+        return match detection_snapshot
+            .get("matched_dialect")
+            .and_then(Value::as_str)
+        {
+            Some("uk") => Some(SourceDialect::Uk),
+            Some("us") => Some(SourceDialect::Us),
+            _ => None,
+        };
+    }
+    surface_detection_basis(
+        detection_snapshot.get("normalized_surface"),
+        initial_headwords,
+    )
+    .flatten()
+}
+
 fn initial_v3_headword_keys(
     headwords: &WordHeadwordsV2,
 ) -> Result<Vec<String>, LexiconServiceError> {
@@ -772,7 +839,7 @@ impl LexiconService {
             .await?;
         let state = sqlx::query_as::<_, V3EntryStateRecord>(
             r#"
-            SELECT origin, publication_canary_enabled
+            SELECT origin, publication_canary_enabled, initial_headwords
             FROM lexicon.v3_entry_state
             WHERE entry_id = $1
             "#,
@@ -782,6 +849,11 @@ impl LexiconService {
         .await
         .map_err(database_error)?
         .ok_or_else(invariant_record)?;
+        let detection_basis_dialect = stored_detection_basis_dialect(
+            &state.origin,
+            &record.detection_snapshot,
+            state.initial_headwords.as_ref(),
+        );
         let compatibility = if state.origin == "migrated_v2" {
             Some(AdminWordV3Compatibility {
                 legacy_headwords: legacy_headwords_from_record(&record)?,
@@ -837,6 +909,7 @@ impl LexiconService {
                 sentence_target_discovery: None,
                 draft_relation_prebinding: None,
             },
+            detection_basis_dialect,
             forms,
             meanings,
             compatibility,
@@ -1252,6 +1325,10 @@ impl LexiconService {
             );
             compatibility_v3_headwords(&detection, &forms)?
         };
+        let detection_basis_dialect = detection_basis_dialect_for_headwords(
+            &detection.normalized_surface,
+            &confirmed_headwords,
+        )?;
         let initial_headword_keys = initial_v3_headword_keys(&confirmed_headwords)?;
         let verified_surface = if write_projection {
             if explicit_headwords {
@@ -1379,6 +1456,7 @@ impl LexiconService {
                 sentence_target_discovery: None,
                 draft_relation_prebinding: None,
             },
+            detection_basis_dialect,
             forms,
             meanings,
             compatibility: None,
@@ -4417,6 +4495,228 @@ mod tests {
 
     fn fixed_id(value: u128) -> Uuid {
         Uuid::from_u128(value)
+    }
+
+    #[test]
+    fn detection_basis_uses_the_original_surface_instead_of_the_confirmed_source_side() {
+        let headwords = WordHeadwordsV2::Distinguish {
+            uk: "centre".to_owned(),
+            us: "center".to_owned(),
+            source_dialect: SourceDialect::Uk,
+        };
+
+        assert_eq!(
+            detection_basis_dialect_for_headwords("center", &headwords).unwrap(),
+            Some(SourceDialect::Us)
+        );
+        assert_eq!(
+            detection_basis_dialect_for_headwords("centre", &headwords).unwrap(),
+            Some(SourceDialect::Uk)
+        );
+        assert_eq!(
+            detection_basis_dialect_for_headwords("edited", &headwords).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn detection_basis_from_v2_snapshot_prefers_the_original_surface_over_the_dictionary_side() {
+        // 词典以英式主条命中，但管理员当初输入的是美式拼写：基准要跟着 surface 走，
+        // 不能被 matched_dialect 这个词典主条方言带偏。
+        let snapshot = json!({
+            "matched_dialect": "uk",
+            "normalized_headword": "center",
+            "headwords": {
+                "mode": "distinguish",
+                "uk": "centre",
+                "us": "center",
+                "source_dialect": "uk"
+            }
+        });
+        assert_eq!(
+            stored_detection_basis_dialect("migrated_v2", &snapshot, None),
+            Some(SourceDialect::Us)
+        );
+    }
+
+    #[test]
+    fn detection_basis_from_v2_snapshot_falls_back_to_matched_dialect_only_without_materials() {
+        // 迁移词条的快照可能只剩词典命中方言，这时才允许用这个近似值。
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "migrated_v2",
+                &json!({ "matched_dialect": "uk" }),
+                None
+            ),
+            Some(SourceDialect::Uk)
+        );
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "migrated_v2",
+                &json!({ "matched_dialect": "us" }),
+                None
+            ),
+            Some(SourceDialect::Us)
+        );
+        // common 命中不指向任何一侧。
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "migrated_v2",
+                &json!({ "matched_dialect": "common" }),
+                None
+            ),
+            None
+        );
+        // 比对材料齐全却没有唯一命中侧，是明确结论，不该被近似值盖掉。
+        let same_spelling = json!({
+            "matched_dialect": "uk",
+            "normalized_headword": "sport",
+            "headwords": {
+                "mode": "distinguish",
+                "uk": "sport",
+                "us": "sport",
+                "source_dialect": "uk"
+            }
+        });
+        assert_eq!(
+            stored_detection_basis_dialect("migrated_v2", &same_spelling, None),
+            None
+        );
+    }
+
+    #[test]
+    fn detection_basis_from_v3_snapshot_compares_the_original_surface() {
+        let initial = json!({
+            "mode": "distinguish",
+            "uk": "centre",
+            "us": "center",
+            "source_dialect": "uk"
+        });
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "native",
+                &json!({ "normalized_surface": "center" }),
+                Some(&initial)
+            ),
+            Some(SourceDialect::Us)
+        );
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "native",
+                &json!({ "normalized_surface": "centre" }),
+                Some(&initial)
+            ),
+            Some(SourceDialect::Uk)
+        );
+        // 两侧都没命中（拼写后来被改过）就没有基准可言。
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "native",
+                &json!({ "normalized_surface": "edited" }),
+                Some(&initial)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn detection_basis_dispatches_on_entry_origin_not_on_snapshot_keys() {
+        let initial = json!({
+            "mode": "distinguish",
+            "uk": "centre",
+            "us": "center",
+            "source_dialect": "uk"
+        });
+        // 原生词条即便将来快照里也多出 matched_dialect，仍按 surface 精确比对，
+        // 不会静默降级成 v2 的近似口径。
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "native",
+                &json!({ "matched_dialect": "uk", "normalized_surface": "center" }),
+                Some(&initial)
+            ),
+            Some(SourceDialect::Us)
+        );
+    }
+
+    #[test]
+    fn detection_basis_degrades_instead_of_failing_the_entry_read() {
+        let initial = json!({
+            "mode": "distinguish",
+            "uk": "centre",
+            "us": "center",
+            "source_dialect": "uk"
+        });
+        // v3 路径缺初始主词：算不出来，但不该报错。
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "native",
+                &json!({ "normalized_surface": "center" }),
+                None
+            ),
+            None
+        );
+        // 两种形状的线索都没有。
+        assert_eq!(
+            stored_detection_basis_dialect("native", &json!({}), Some(&initial)),
+            None
+        );
+        assert_eq!(
+            stored_detection_basis_dialect("migrated_v2", &json!({}), Some(&initial)),
+            None
+        );
+        // 存量主词结构漂移（WordHeadwordsV2 带 deny_unknown_fields）：这个字段只是展示
+        // 信息，解析不了就不显示，绝不能把整条词条读挂。
+        let drifted = json!({
+            "mode": "distinguish",
+            "uk": "centre",
+            "us": "center",
+            "source_dialect": "uk",
+            "legacy_extra": true
+        });
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "native",
+                &json!({ "normalized_surface": "center" }),
+                Some(&drifted)
+            ),
+            None
+        );
+        // v2 快照里的主词漂移时退回近似值，仍然不报错。
+        assert_eq!(
+            stored_detection_basis_dialect(
+                "migrated_v2",
+                &json!({
+                    "matched_dialect": "uk",
+                    "normalized_headword": "center",
+                    "headwords": drifted
+                }),
+                None
+            ),
+            Some(SourceDialect::Uk)
+        );
+    }
+
+    #[test]
+    fn detection_basis_needs_a_single_side_to_win() {
+        // 英美同形：两侧都命中，谁也不算基准。
+        let same_spelling = WordHeadwordsV2::Distinguish {
+            uk: "sport".to_owned(),
+            us: "sport".to_owned(),
+            source_dialect: SourceDialect::Uk,
+        };
+        assert_eq!(
+            detection_basis_dialect_for_headwords("sport", &same_spelling).unwrap(),
+            None
+        );
+        // unified 主词没有英美之分。
+        let unified = WordHeadwordsV2::Unified {
+            common: "sport".to_owned(),
+        };
+        assert_eq!(
+            detection_basis_dialect_for_headwords("sport", &unified).unwrap(),
+            None
+        );
     }
 
     fn common_form(form_id: Uuid, variant_id: Uuid, pronunciation_id: Uuid) -> WordConcreteFormV3 {

@@ -19892,9 +19892,29 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
         group_id.to_string()
     );
 
+    // pronoun 这类 allowed_form_types=[] 的 POS 也能挂非 base 词形；原形留在组里，
+    // 否则会先撞上「每组至少一个原形」这条规则，测不到 catalog 放行。
     let mut shared_form_type = valid_body.clone();
     shared_form_type["content"]["pos"][0]["pos"] = json!("pronoun");
-    shared_form_type["content"]["pos"][0]["forms"][0]["form_type"] = json!("comparative");
+    let comparative_form_id = Uuid::now_v7();
+    let comparative_membership_id = Uuid::now_v7();
+    let mut comparative_form = shared_form_type["content"]["pos"][0]["forms"][0].clone();
+    comparative_form["id"] = json!(comparative_form_id);
+    comparative_form["form_type"] = json!("comparative");
+    comparative_form["regional_variants"]["common"]["id"] = json!(Uuid::now_v7());
+    comparative_form["regional_variants"]["common"]["pronunciations"][0]["id"] =
+        json!(Uuid::now_v7());
+    shared_form_type["content"]["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .push(comparative_form);
+    shared_form_type["content"]["pos"][0]["form_groups"][0]["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": comparative_membership_id,
+            "form_id": comparative_form_id
+        }));
     let (status, _, response) = call_problem(
         &state,
         Method::PUT,
@@ -21699,6 +21719,70 @@ async fn v3_create_persists_explicit_final_headwords_and_keeps_legacy_body_compa
     .await
     .unwrap();
     assert_eq!(second_backfilled, second_legacy_persisted);
+}
+
+#[sqlx::test]
+async fn v3_create_and_read_expose_the_original_detection_basis_dialect(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let us = format!("center{}", admin_id.simple());
+    let uk = format!("centre{}", admin_id.simple());
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": us
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "word",
+            "headwords": {
+                "mode": "distinguish",
+                "uk": uk,
+                "us": us,
+                "source_dialect": "uk"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["word"]["detection_basis_dialect"], "us");
+
+    let entry_id = created["word"]["id"].as_str().unwrap();
+    let (status, read_back) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read_back}");
+    assert_eq!(read_back["word"]["detection_basis_dialect"], "us");
 }
 
 #[sqlx::test]
