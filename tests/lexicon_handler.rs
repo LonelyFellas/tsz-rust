@@ -19892,9 +19892,29 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
         group_id.to_string()
     );
 
+    // pronoun 这类 allowed_form_types=[] 的 POS 也能挂非 base 词形；原形留在组里，
+    // 否则会先撞上「每组至少一个原形」这条规则，测不到 catalog 放行。
     let mut shared_form_type = valid_body.clone();
     shared_form_type["content"]["pos"][0]["pos"] = json!("pronoun");
-    shared_form_type["content"]["pos"][0]["forms"][0]["form_type"] = json!("comparative");
+    let comparative_form_id = Uuid::now_v7();
+    let comparative_membership_id = Uuid::now_v7();
+    let mut comparative_form = shared_form_type["content"]["pos"][0]["forms"][0].clone();
+    comparative_form["id"] = json!(comparative_form_id);
+    comparative_form["form_type"] = json!("comparative");
+    comparative_form["regional_variants"]["common"]["id"] = json!(Uuid::now_v7());
+    comparative_form["regional_variants"]["common"]["pronunciations"][0]["id"] =
+        json!(Uuid::now_v7());
+    shared_form_type["content"]["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .push(comparative_form);
+    shared_form_type["content"]["pos"][0]["form_groups"][0]["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": comparative_membership_id,
+            "form_id": comparative_form_id
+        }));
     let (status, _, response) = call_problem(
         &state,
         Method::PUT,

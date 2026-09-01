@@ -252,12 +252,25 @@ pub(crate) fn validate_forms(
                 &mut issues,
                 group_location.clone(),
             );
+            // 一组词形变化描述的是同一个词的一套变化范式，没有原形就无从谈起。
+            // 与空组同样只在 complete 时拦：草稿允许边录边补，发布前必须补齐。
+            let group_has_base = group.members.iter().any(|membership| {
+                form_types.get(&membership.form_id) == Some(&WordFormTypeV3::Base)
+            });
             if complete && group.members.is_empty() {
                 issues.push(issue(
                     V3ValidationIssueCode::EmptyFormGroup,
                     "members",
                     group.id,
                     "a complete entry cannot retain an empty form group",
+                    group_location,
+                ));
+            } else if complete && !group_has_base {
+                issues.push(issue(
+                    V3ValidationIssueCode::BaseFormRequiredInGroup,
+                    "members",
+                    group.id,
+                    "a complete form group requires at least one base form",
                     group_location,
                 ));
             }
@@ -1465,25 +1478,41 @@ mod tests {
             validate_forms(&repeated_type.content, repeated_type.intent).is_empty(),
             "同 POS/同 group 内多个 base 和同拼写 form 都应合法"
         );
+        // 原形留在组里（每组至少一个原形），另加两条同为 plural 的派生词形。
         let mut repeated_non_base = valid_request();
-        repeated_non_base["content"]["pos"][0]["forms"][0]["form_type"] = json!("plural");
-        let mut second_form = repeated_non_base["content"]["pos"][0]["forms"][0].clone();
-        second_form["id"] = json!("019d2a80-0000-7000-8000-000000000015");
-        second_form["regional_variants"]["common"]["id"] =
+        let mut first_plural = repeated_non_base["content"]["pos"][0]["forms"][0].clone();
+        first_plural["id"] = json!("019d2a80-0000-7000-8000-000000000015");
+        first_plural["form_type"] = json!("plural");
+        first_plural["regional_variants"]["common"]["id"] =
             json!("019d2a80-0000-7000-8000-000000000016");
-        second_form["regional_variants"]["common"]["pronunciations"][0]["id"] =
+        first_plural["regional_variants"]["common"]["pronunciations"][0]["id"] =
             json!("019d2a80-0000-7000-8000-000000000017");
-        repeated_non_base["content"]["pos"][0]["forms"]
-            .as_array_mut()
-            .unwrap()
-            .push(second_form);
-        repeated_non_base["content"]["pos"][0]["form_groups"][0]["members"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
+        let mut second_plural = first_plural.clone();
+        second_plural["id"] = json!("019d2a80-0000-7000-8000-000000000019");
+        second_plural["regional_variants"]["common"]["id"] =
+            json!("019d2a80-0000-7000-8000-00000000001a");
+        second_plural["regional_variants"]["common"]["pronunciations"][0]["id"] =
+            json!("019d2a80-0000-7000-8000-00000000001b");
+        {
+            let forms = repeated_non_base["content"]["pos"][0]["forms"]
+                .as_array_mut()
+                .unwrap();
+            forms.push(first_plural);
+            forms.push(second_plural);
+        }
+        {
+            let members = repeated_non_base["content"]["pos"][0]["form_groups"][0]["members"]
+                .as_array_mut()
+                .unwrap();
+            members.push(json!({
                 "id": "019d2a80-0000-7000-8000-000000000018",
                 "form_id": "019d2a80-0000-7000-8000-000000000015"
             }));
+            members.push(json!({
+                "id": "019d2a80-0000-7000-8000-00000000001c",
+                "form_id": "019d2a80-0000-7000-8000-000000000019"
+            }));
+        }
         let repeated_non_base = decode_valid(repeated_non_base);
         assert!(
             validate_forms(&repeated_non_base.content, repeated_non_base.intent).is_empty(),
@@ -1774,6 +1803,56 @@ mod tests {
         let issues = validate_forms(&orphan.content, orphan.intent);
         assert!(has_code(&issues, V3ValidationIssueCode::EmptyFormGroup));
         assert!(has_code(&issues, V3ValidationIssueCode::OrphanForm));
+    }
+
+    #[test]
+    fn complete_requires_every_form_group_to_keep_a_base_form() {
+        // 一组词形变化描述同一个词的一套变化范式，缺了原形这组就没有落脚点。
+        let mut without_base = valid_request();
+        without_base["content"]["pos"][0]["forms"][0]["form_type"] = json!("plural");
+
+        let mut draft = without_base.clone();
+        draft["intent"] = json!("save");
+        let draft = decode_valid(draft);
+        assert!(!has_code(
+            &validate_forms(&draft.content, draft.intent),
+            V3ValidationIssueCode::BaseFormRequiredInGroup
+        ));
+
+        let complete = decode_valid(without_base);
+        let issues = validate_forms(&complete.content, complete.intent);
+        assert!(has_code(
+            &issues,
+            V3ValidationIssueCode::BaseFormRequiredInGroup
+        ));
+        // 两个组共享同一个词形，两组都要各自报出来。
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|item| {
+                    item.code == V3ValidationIssueCode::BaseFormRequiredInGroup.as_str()
+                })
+                .count(),
+            2
+        );
+
+        // 原封不动的请求里每组都挂着原形，不该被这条规则误伤。
+        let intact = decode_valid(valid_request());
+        assert!(!has_code(
+            &validate_forms(&intact.content, intact.intent),
+            V3ValidationIssueCode::BaseFormRequiredInGroup
+        ));
+
+        // 空组已经由 empty_form_group 说明白了，不再叠一条缺原形。
+        let mut empty_group = valid_request();
+        empty_group["content"]["pos"][0]["form_groups"][1]["members"] = json!([]);
+        let empty_group = decode_valid(empty_group);
+        let issues = validate_forms(&empty_group.content, empty_group.intent);
+        assert!(has_code(&issues, V3ValidationIssueCode::EmptyFormGroup));
+        assert!(!has_code(
+            &issues,
+            V3ValidationIssueCode::BaseFormRequiredInGroup
+        ));
     }
 
     #[test]
