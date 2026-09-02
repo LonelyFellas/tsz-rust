@@ -687,6 +687,9 @@ impl PublishedAssociationTarget {
         let Some(form_type) = parse_v3_form_type_name(&form.form_type) else {
             return Vec::new();
         };
+        // 短语成分只接受 V3 发布的目标（validate_phrase_components 只查 content_schema_version = 3），
+        // V2 目标的词形一律给空列表：调用方按「为空不可选」处理即可，不必另辨版本。
+        let component_targetable = self.schema_version == 3;
         let mut candidate_forms =
             pos.forms
                 .iter()
@@ -702,7 +705,11 @@ impl PublishedAssociationTarget {
                             form_type,
                             spelling: variant.spelling.clone(),
                             dialect: variant.dialect,
-                            base_form_ids: candidate_form.base_form_ids.clone(),
+                            base_form_ids: if component_targetable {
+                                candidate_form.base_form_ids.clone()
+                            } else {
+                                Vec::new()
+                            },
                         }
                     })
                 })

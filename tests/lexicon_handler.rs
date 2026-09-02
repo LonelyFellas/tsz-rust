@@ -22032,6 +22032,15 @@ async fn sentence_target_discovery_returns_published_forms_with_base_and_sense_i
         assert_eq!(candidate["base_form_id"], location_base_id);
         assert_eq!(candidate["senses"][0]["sense_id"], location_sense_id);
         assert_eq!(candidate["senses"][0]["base_form_id"], location_base_id);
+        // V2 发布的目标做不了短语成分，词形一律不带可搭配的原形。
+        assert!(
+            candidate["forms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|form| form["base_form_ids"] == json!([])),
+            "V2 候选的 base_form_ids 应为空：{candidate}"
+        );
         assert!(range.get("source_range").is_none());
     }
 }

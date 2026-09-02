@@ -511,10 +511,85 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
 }
 
 #[test]
+fn v2_target_candidate_forms_carry_no_base_form_ids() {
+    // 短语成分只接受 V3 发布的目标，V2 目标的词形一律不给可搭配的原形：调用方按「为空不可选」
+    // 一条规则处理即可。候选行自身的 base_form_id 仍要有值——它是候选的身份（发现结果按它分组），
+    // 只是不表示可用作成分。
+    let publication_id = Uuid::now_v7();
+    let pos_id = Uuid::now_v7();
+    let base_form_id = Uuid::now_v7();
+    let variant_id = Uuid::now_v7();
+    let target = PublishedAssociationTarget {
+        schema_version: 2,
+        id: Uuid::now_v7(),
+        publication_id,
+        kind: EntryKind::Word,
+        headword: "location".to_owned(),
+        pos: vec![PublishedAssociationPos {
+            id: pos_id,
+            pos: "noun".to_owned(),
+            forms: vec![PublishedAssociationForm {
+                id: base_form_id,
+                form_type: "base".to_owned(),
+                base_form_ids: vec![base_form_id],
+                variants: vec![PublishedAssociationVariant {
+                    id: variant_id,
+                    dialect: Dialect::Common,
+                    spelling: "location".to_owned(),
+                    normalized_surface: Some("location".to_owned()),
+                    component_usages: Vec::new(),
+                }],
+                normalized_surfaces: vec!["location".to_owned()],
+            }],
+            senses: vec![PublishedAssociationSense {
+                id: Uuid::now_v7(),
+                level: "A1".to_owned(),
+                gloss: "位置".to_owned(),
+            }],
+        }],
+    };
+
+    let candidates = target.sentence_discovery_candidates(
+        publication_id,
+        pos_id,
+        base_form_id,
+        variant_id,
+        SentenceTargetMatchEvidenceV3 {
+            surface: "location".to_owned(),
+            normalized_surface: "location".to_owned(),
+            match_kind: SentenceTargetMatchKindV3::Word,
+        },
+    );
+
+    let [candidate] = candidates.as_slice() else {
+        panic!("V2 目标应展开成一条候选，实际 {}", candidates.len());
+    };
+    assert_eq!(
+        candidate.base_form_id, base_form_id,
+        "候选行身份仍取自 V2 的唯一原形"
+    );
+    assert_eq!(
+        candidate.forms.len(),
+        1,
+        "词形清单本身照常给出，空的只是 base_form_ids：{:?}",
+        candidate.forms
+    );
+    assert!(
+        candidate
+            .forms
+            .iter()
+            .all(|form| form.base_form_ids.is_empty()),
+        "V2 目标的词形不给可搭配的原形：{:?}",
+        candidate.forms
+    );
+}
+
+#[test]
 fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
-    // 三个原形 A、B、C 与一条过去式 P：G1 = {A, P}、G2 = {B, P}、G3 = {A}，C 不入任何组。
-    // 分别钉住跨组并集与排序（P）、同一原形出现在两组时的去重（A）、无组原形的兜底（C），
-    // 任何一条被"简化"掉，这里都会红——这份推导现在直接暴露在 base_form_ids 上。
+    // 三个原形 A、B、C 与一条过去式 P：G1 = {hi, P}、G2 = {lo, P}、G3 = {A}，C 不入任何组
+    // （hi/lo 是 A、B 里 id 较大/较小的那个，id 大的组排前面，推导的原始顺序才是 [hi, lo]，
+    // 排序断言才真的压在 sort 上）。分别钉住跨组并集与排序（P）、同一原形出现在两组时的
+    // 去重（A）、无组原形的兜底（C），任何一条被"简化"掉，这里都会红。
     let mut fixture = v3_fixture(3);
     let publication_id = Uuid::now_v7();
     let [base_a, base_b, base_c] = fixture.form_ids[..] else {
@@ -549,9 +624,10 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
                 .collect::<Vec<_>>()
         })
     };
+    let (lo, hi) = (base_a.min(base_b), base_a.max(base_b));
     fixture.snapshot["forms"]["pos"][0]["form_groups"] = json!([
-        group(true, &[base_a, past_id]),
-        group(false, &[base_b, past_id]),
+        group(true, &[hi, past_id]),
+        group(false, &[lo, past_id]),
         group(true, &[base_a]),
     ]);
 
@@ -569,8 +645,7 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
         },
     );
 
-    let mut expected_past_bases = vec![base_a, base_b];
-    expected_past_bases.sort_unstable();
+    let expected_past_bases = vec![lo, hi];
     let mut candidate_bases = candidates
         .iter()
         .map(|candidate| candidate.base_form_id)
@@ -590,12 +665,12 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(
         inventory[&past_id], expected_past_bases,
-        "跨组并集且按 id 排序"
+        "跨组并集且按 id 排序：分组给出的原始顺序是 [hi, lo]"
     );
     assert_eq!(
         inventory[&base_a],
         vec![base_a],
-        "A 同时在 G1 与 G3，去重后只留一条"
+        "A 同时挂在两个组下（自己那组与 G3），去重后只留一条"
     );
     assert_eq!(inventory[&base_b], vec![base_b]);
     assert_eq!(inventory[&base_c], vec![base_c], "无组原形兜底指向自己");
