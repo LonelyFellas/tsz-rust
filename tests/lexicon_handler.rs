@@ -24,6 +24,7 @@ use tsz_rust::{
         SURFACE_WRITER_VERSION, execute_surface_cutover, run_surface_backfill,
         run_surface_cutover_preflight, run_surface_parity, surface_cutover_artifact_sha256,
     },
+    lexicon::surface_snapshot,
     lexicon::v3_migration::{apply, approve, dry_run, enable_publication_canary, verify},
     lexicon::validation::MAX_STEP_CONTENT_BODY_BYTES,
     platform,
@@ -10433,7 +10434,9 @@ async fn forms_surface_and_downstream_impact_require_both_terminal_tokens(pool: 
     let snapshot_id = page["snapshot_id"].as_str().expect("snapshot id 缺失");
     let mut redis_connection = redis.get().await.expect("应能取得测试 Redis 连接");
     deadpool_redis::redis::cmd("DEL")
-        .arg(format!("lexicon:surface-snapshot:{snapshot_id}"))
+        .arg(surface_snapshot::snapshot_key_for_test(
+            Uuid::parse_str(snapshot_id).unwrap(),
+        ))
         .query_async::<i64>(&mut redis_connection)
         .await
         .expect("应能使 Forms snapshot 过期");
@@ -10536,7 +10539,9 @@ async fn forms_surface_and_downstream_impact_require_both_terminal_tokens(pool: 
     assert_eq!(saved["word"]["revision"], base_revision + 1);
     assert_eq!(saved["word"]["forms"]["pos"][0]["pos"], "adjective");
     let refreshed_snapshot_exists: i64 = deadpool_redis::redis::cmd("EXISTS")
-        .arg(format!("lexicon:surface-snapshot:{refreshed_snapshot_id}"))
+        .arg(surface_snapshot::snapshot_key_for_test(
+            Uuid::parse_str(&refreshed_snapshot_id).unwrap(),
+        ))
         .query_async(&mut redis_connection)
         .await
         .expect("应能检查成功消费后的 snapshot");

@@ -23,7 +23,27 @@ use crate::{
     platform::{generate_token_plaintext, hash_token},
 };
 
-const SNAPSHOT_PREFIX: &str = "lexicon:surface-snapshot:";
+// v2 后缀是存储布局版本，不是 schema_version：快照从「一个 String 存整个 bundle」改成
+// 「一个 Hash 存两半」，两种布局对同名 key 会 WRONGTYPE 互撞。换前缀让灰度期间新旧进程各写各的，
+// 旧 key 自带 TTL 会自行消失；代价只是部署瞬间在途的确认令牌要重新确认一次。
+const SNAPSHOT_PREFIX: &str = "lexicon:surface-snapshot:v2:";
+/// 快照 Hash 的两个字段：不可变半（items/contexts/owner_bundle…）与游标半。
+///
+/// Redis 内置的 cjson **把空数组编码成 `{}`**（且这个版本没有 `encode_empty_table_as_object`
+/// 可关），所以 Lua 一旦 re-encode 整个 bundle，`inbound_relations.previews` 这类常年为空的
+/// 数组就会被写成对象，下一次反序列化直接失败、快照当场报废。分成两半之后，Lua 只 encode
+/// 游标半——那半全是标量，往返无损——不可变半只做 `HGET` 原样搬运，永不经过 cjson 的编码器。
+const SNAPSHOT_IMMUTABLE_FIELD: &str = "immutable";
+const SNAPSHOT_CURSOR_FIELD: &str = "cursor";
+/// 游标半持有的字段，也就是 `page()` 推进时唯一会改写的那些。
+const CURSOR_FIELDS: [&str; 6] = [
+    "next_offset",
+    "next_cursor_digest",
+    "terminal_token_digest",
+    "terminal_impact_token_digest",
+    "terminal_token_expires_at_ms",
+    "lease_expires_at_ms",
+];
 const ACTIVE_PREFIX: &str = "lexicon:surface-snapshot-active:";
 const TOKEN_PREFIX: &str = "lexicon:surface-confirmation-token:";
 const IMPACT_TOKEN_PREFIX: &str = "lexicon:surface-impact-confirmation-token:";
@@ -204,6 +224,11 @@ impl SurfaceSnapshotStore {
         }
     }
 
+    #[doc(hidden)]
+    pub fn with_policy_prefix_for_test(redis: Pool, policy_prefix: String) -> Self {
+        Self::with_policy_prefix(redis, policy_prefix)
+    }
+
     pub async fn create(
         &self,
         input: CreateSurfaceSnapshot,
@@ -256,7 +281,7 @@ impl SurfaceSnapshotStore {
             .terminal_token_expires_at_ms
             .map(|expires| expires.saturating_sub(now_ms).max(1))
             .unwrap_or(1);
-        let payload = serde_json::to_string(&initialized.bundle)?;
+        let (payload, cursor_payload) = split_bundle(&initialized.bundle)?;
 
         let mut connection = self.redis.get().await?;
         let result: Vec<String> = deadpool_redis::redis::Script::new(
@@ -273,9 +298,9 @@ impl SurfaceSnapshotStore {
             local old_snapshot_id = redis.call('GET', KEYS[2])
             if old_snapshot_id then
                 local old_key = ARGV[6] .. old_snapshot_id
-                local old_payload = redis.call('GET', old_key)
-                if old_payload then
-                    local old = cjson.decode(old_payload)
+                local old_cursor = redis.call('HGET', old_key, ARGV[12])
+                if old_cursor then
+                    local old = cjson.decode(old_cursor)
                     if old.terminal_token_digest
                        and old.terminal_token_digest ~= cjson.null then
                         redis.call('DEL', ARGV[7] .. old.terminal_token_digest)
@@ -287,7 +312,8 @@ impl SurfaceSnapshotStore {
                 end
                 redis.call('DEL', old_key)
             end
-            redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+            redis.call('HSET', KEYS[1], ARGV[11], ARGV[1], ARGV[12], ARGV[13])
+            redis.call('PEXPIRE', KEYS[1], ARGV[2])
             redis.call('SET', KEYS[2], ARGV[3], 'PX', ARGV[2])
             if ARGV[4] == '1' then
                 redis.call('SET', KEYS[3], ARGV[3], 'PX', ARGV[9])
@@ -320,6 +346,9 @@ impl SurfaceSnapshotStore {
         .arg(IMPACT_TOKEN_PREFIX)
         .arg(token_ttl_ms)
         .arg(&self.policy_prefix)
+        .arg(SNAPSHOT_IMMUTABLE_FIELD)
+        .arg(SNAPSHOT_CURSOR_FIELD)
+        .arg(cursor_payload)
         .invoke_async(&mut connection)
         .await?;
 
@@ -365,9 +394,11 @@ impl SurfaceSnapshotStore {
         let mut connection = self.redis.get().await?;
         let result: Vec<String> = deadpool_redis::redis::Script::new(
             r#"
-            local payload = redis.call('GET', KEYS[1])
-            if not payload then return {'expired'} end
+            local payload = redis.call('HGET', KEYS[1], ARGV[11])
+            local cursor_payload = redis.call('HGET', KEYS[1], ARGV[12])
+            if not payload or not cursor_payload then return {'expired'} end
             local bundle = cjson.decode(payload)
+            local cursor = cjson.decode(cursor_payload)
             local policy_payload = redis.call('GET', ARGV[10] .. bundle.binding.policy_name)
             if not policy_payload then return {'policy', bundle.binding.policy_name} end
             local policy = cjson.decode(policy_payload)
@@ -379,43 +410,45 @@ impl SurfaceSnapshotStore {
             local clock = redis.call('TIME')
             local now_ms = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
             if bundle.binding.actor_id ~= ARGV[1] then return {'expired'} end
-            if tonumber(bundle.lease_expires_at_ms) <= now_ms then
+            if tonumber(cursor.lease_expires_at_ms) <= now_ms then
                 redis.call('DEL', KEYS[1])
                 return {'expired'}
             end
-            if bundle.next_cursor_digest ~= ARGV[2] then return {'cursor'} end
+            if cursor.next_cursor_digest ~= ARGV[2] then return {'cursor'} end
 
-            local start_offset = tonumber(bundle.next_offset)
+            local start_offset = tonumber(cursor.next_offset)
             local end_offset = math.min(start_offset + tonumber(bundle.page_size), #bundle.items)
-            bundle.next_offset = end_offset
+            cursor.next_offset = end_offset
             local is_terminal = end_offset >= #bundle.items
             local ttl_ms
             if is_terminal and bundle.policy_enabled then
-                bundle.next_cursor_digest = nil
-                bundle.terminal_token_digest = ARGV[4]
+                cursor.next_cursor_digest = cjson.null
+                cursor.terminal_token_digest = ARGV[4]
                 if bundle.issue_impact_confirmation_token then
-                    bundle.terminal_impact_token_digest = ARGV[5]
+                    cursor.terminal_impact_token_digest = ARGV[5]
                 end
-                bundle.terminal_token_expires_at_ms = now_ms + tonumber(ARGV[7])
-                bundle.lease_expires_at_ms = bundle.terminal_token_expires_at_ms
+                cursor.terminal_token_expires_at_ms = now_ms + tonumber(ARGV[7])
+                cursor.lease_expires_at_ms = cursor.terminal_token_expires_at_ms
                 ttl_ms = tonumber(ARGV[7])
                 redis.call('SET', KEYS[2], ARGV[8], 'PX', ttl_ms)
                 if bundle.issue_impact_confirmation_token then
                     redis.call('SET', KEYS[3], ARGV[8], 'PX', ttl_ms)
                 end
             elseif is_terminal then
-                bundle.next_cursor_digest = nil
-                bundle.lease_expires_at_ms = now_ms + tonumber(ARGV[6])
+                cursor.next_cursor_digest = cjson.null
+                cursor.lease_expires_at_ms = now_ms + tonumber(ARGV[6])
                 ttl_ms = tonumber(ARGV[6])
             else
-                bundle.next_cursor_digest = ARGV[3]
-                bundle.lease_expires_at_ms = now_ms + tonumber(ARGV[6])
+                cursor.next_cursor_digest = ARGV[3]
+                cursor.lease_expires_at_ms = now_ms + tonumber(ARGV[6])
                 ttl_ms = tonumber(ARGV[6])
             end
-            local updated = cjson.encode(bundle)
-            redis.call('SET', KEYS[1], updated, 'PX', ttl_ms)
+            -- 只回写游标半：不可变半原样留在 Hash 里，从不经过 cjson 的编码器。
+            local updated_cursor = cjson.encode(cursor)
+            redis.call('HSET', KEYS[1], ARGV[12], updated_cursor)
+            redis.call('PEXPIRE', KEYS[1], ttl_ms)
             redis.call('PEXPIRE', ARGV[9] .. bundle.active_context_digest, ttl_ms)
-            return {'ok', updated, tostring(start_offset), tostring(end_offset), is_terminal and '1' or '0'}
+            return {'ok', payload, updated_cursor, tostring(start_offset), tostring(end_offset), is_terminal and '1' or '0'}
             "#,
         )
         .key(snapshot_key)
@@ -431,6 +464,8 @@ impl SurfaceSnapshotStore {
         .arg(snapshot_id.to_string())
         .arg(ACTIVE_PREFIX)
         .arg(&self.policy_prefix)
+        .arg(SNAPSHOT_IMMUTABLE_FIELD)
+        .arg(SNAPSHOT_CURSOR_FIELD)
         .invoke_async(&mut connection)
         .await?;
 
@@ -440,15 +475,15 @@ impl SurfaceSnapshotStore {
             Some("policy") if result.len() == 2 => Err(SurfaceSnapshotError::PolicyChanged(
                 parse_policy_name(&result[1])?,
             )),
-            Some("ok") if result.len() == 5 => {
-                let bundle: SurfaceSnapshotBundle = serde_json::from_str(&result[1])?;
-                let start = result[2]
+            Some("ok") if result.len() == 6 => {
+                let bundle = merge_bundle(&result[1], &result[2])?;
+                let start = result[3]
                     .parse::<usize>()
                     .map_err(|_| SurfaceSnapshotError::InvalidInput("invalid Redis page start"))?;
-                let end = result[3]
+                let end = result[4]
                     .parse::<usize>()
                     .map_err(|_| SurfaceSnapshotError::InvalidInput("invalid Redis page end"))?;
-                let terminal = result[4] == "1";
+                let terminal = result[5] == "1";
                 let page = render_page(
                     &bundle,
                     start,
@@ -477,9 +512,12 @@ impl SurfaceSnapshotStore {
             r#"
             local snapshot_id = redis.call('GET', KEYS[1])
             if not snapshot_id then return {'expired'} end
-            local payload = redis.call('GET', ARGV[3] .. snapshot_id)
-            if not payload then return {'expired'} end
+            local snapshot = ARGV[3] .. snapshot_id
+            local payload = redis.call('HGET', snapshot, ARGV[5])
+            local cursor_payload = redis.call('HGET', snapshot, ARGV[6])
+            if not payload or not cursor_payload then return {'expired'} end
             local bundle = cjson.decode(payload)
+            local cursor = cjson.decode(cursor_payload)
             local policy_payload = redis.call('GET', ARGV[4] .. bundle.binding.policy_name)
             if not policy_payload then return {'policy', bundle.binding.policy_name} end
             local policy = cjson.decode(policy_payload)
@@ -491,12 +529,13 @@ impl SurfaceSnapshotStore {
             local clock = redis.call('TIME')
             local now_ms = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
             if bundle.binding.actor_id ~= ARGV[1] then return {'expired'} end
-            if bundle.terminal_token_digest ~= ARGV[2] then return {'expired'} end
-            if not bundle.terminal_token_expires_at_ms
-               or tonumber(bundle.terminal_token_expires_at_ms) <= now_ms then
+            if cursor.terminal_token_digest ~= ARGV[2] then return {'expired'} end
+            if not cursor.terminal_token_expires_at_ms
+               or cursor.terminal_token_expires_at_ms == cjson.null
+               or tonumber(cursor.terminal_token_expires_at_ms) <= now_ms then
                 return {'expired'}
             end
-            return {'ok', payload, tostring(now_ms)}
+            return {'ok', payload, cursor_payload, tostring(now_ms)}
             "#,
         )
         .key(token_key(&token_digest))
@@ -504,6 +543,8 @@ impl SurfaceSnapshotStore {
         .arg(&token_digest)
         .arg(SNAPSHOT_PREFIX)
         .arg(&self.policy_prefix)
+        .arg(SNAPSHOT_IMMUTABLE_FIELD)
+        .arg(SNAPSHOT_CURSOR_FIELD)
         .invoke_async(&mut connection)
         .await?;
 
@@ -512,9 +553,9 @@ impl SurfaceSnapshotStore {
             Some("policy") if result.len() == 2 => Err(SurfaceSnapshotError::PolicyChanged(
                 parse_policy_name(&result[1])?,
             )),
-            Some("ok") if result.len() == 3 => {
-                let bundle: SurfaceSnapshotBundle = serde_json::from_str(&result[1])?;
-                let now_ms = result[2]
+            Some("ok") if result.len() == 4 => {
+                let bundle = merge_bundle(&result[1], &result[2])?;
+                let now_ms = result[3]
                     .parse::<i64>()
                     .map_err(|_| SurfaceSnapshotError::InvalidInput("invalid Redis clock"))?;
                 verify_bundle(&bundle, &token_digest, expected, now_ms)
@@ -539,9 +580,12 @@ impl SurfaceSnapshotStore {
             r#"
             local snapshot_id = redis.call('GET', KEYS[1])
             if not snapshot_id then return {'expired'} end
-            local payload = redis.call('GET', ARGV[3] .. snapshot_id)
-            if not payload then return {'expired'} end
+            local snapshot = ARGV[3] .. snapshot_id
+            local payload = redis.call('HGET', snapshot, ARGV[5])
+            local cursor_payload = redis.call('HGET', snapshot, ARGV[6])
+            if not payload or not cursor_payload then return {'expired'} end
             local bundle = cjson.decode(payload)
+            local cursor = cjson.decode(cursor_payload)
             local policy_payload = redis.call('GET', ARGV[4] .. bundle.binding.policy_name)
             if not policy_payload then return {'policy', bundle.binding.policy_name} end
             local policy = cjson.decode(policy_payload)
@@ -554,14 +598,15 @@ impl SurfaceSnapshotStore {
             local now_ms = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
             if bundle.binding.actor_id ~= ARGV[1] then return {'expired'} end
             if not bundle.issue_impact_confirmation_token
-               or bundle.terminal_impact_token_digest ~= ARGV[2] then
+               or cursor.terminal_impact_token_digest ~= ARGV[2] then
                 return {'expired'}
             end
-            if not bundle.terminal_token_expires_at_ms
-               or tonumber(bundle.terminal_token_expires_at_ms) <= now_ms then
+            if not cursor.terminal_token_expires_at_ms
+               or cursor.terminal_token_expires_at_ms == cjson.null
+               or tonumber(cursor.terminal_token_expires_at_ms) <= now_ms then
                 return {'expired'}
             end
-            return {'ok', payload, tostring(now_ms)}
+            return {'ok', payload, cursor_payload, tostring(now_ms)}
             "#,
         )
         .key(impact_token_key(&token_digest))
@@ -569,6 +614,8 @@ impl SurfaceSnapshotStore {
         .arg(&token_digest)
         .arg(SNAPSHOT_PREFIX)
         .arg(&self.policy_prefix)
+        .arg(SNAPSHOT_IMMUTABLE_FIELD)
+        .arg(SNAPSHOT_CURSOR_FIELD)
         .invoke_async(&mut connection)
         .await?;
 
@@ -577,9 +624,9 @@ impl SurfaceSnapshotStore {
             Some("policy") if result.len() == 2 => Err(SurfaceSnapshotError::PolicyChanged(
                 parse_policy_name(&result[1])?,
             )),
-            Some("ok") if result.len() == 3 => {
-                let bundle: SurfaceSnapshotBundle = serde_json::from_str(&result[1])?;
-                let now_ms = result[2]
+            Some("ok") if result.len() == 4 => {
+                let bundle = merge_bundle(&result[1], &result[2])?;
+                let now_ms = result[3]
                     .parse::<i64>()
                     .map_err(|_| SurfaceSnapshotError::InvalidInput("invalid Redis clock"))?;
                 verify_impact_owner_bundle(&bundle, &token_digest, expected, now_ms)
@@ -604,9 +651,12 @@ impl SurfaceSnapshotStore {
             r#"
             local snapshot_id = redis.call('GET', KEYS[1])
             if not snapshot_id then return {'expired'} end
-            local payload = redis.call('GET', ARGV[3] .. snapshot_id)
-            if not payload then return {'expired'} end
+            local snapshot = ARGV[3] .. snapshot_id
+            local payload = redis.call('HGET', snapshot, ARGV[5])
+            local cursor_payload = redis.call('HGET', snapshot, ARGV[6])
+            if not payload or not cursor_payload then return {'expired'} end
             local bundle = cjson.decode(payload)
+            local cursor = cjson.decode(cursor_payload)
             local policy_payload = redis.call('GET', ARGV[4] .. bundle.binding.policy_name)
             if not policy_payload then return {'policy', bundle.binding.policy_name} end
             local policy = cjson.decode(policy_payload)
@@ -618,12 +668,13 @@ impl SurfaceSnapshotStore {
             local clock = redis.call('TIME')
             local now_ms = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
             if bundle.binding.actor_id ~= ARGV[1] then return {'expired'} end
-            if bundle.terminal_token_digest ~= ARGV[2] then return {'expired'} end
-            if not bundle.terminal_token_expires_at_ms
-               or tonumber(bundle.terminal_token_expires_at_ms) <= now_ms then
+            if cursor.terminal_token_digest ~= ARGV[2] then return {'expired'} end
+            if not cursor.terminal_token_expires_at_ms
+               or cursor.terminal_token_expires_at_ms == cjson.null
+               or tonumber(cursor.terminal_token_expires_at_ms) <= now_ms then
                 return {'expired'}
             end
-            return {'ok', payload, tostring(now_ms)}
+            return {'ok', payload, cursor_payload, tostring(now_ms)}
             "#,
         )
         .key(token_key(&token_digest))
@@ -631,6 +682,8 @@ impl SurfaceSnapshotStore {
         .arg(&token_digest)
         .arg(SNAPSHOT_PREFIX)
         .arg(&self.policy_prefix)
+        .arg(SNAPSHOT_IMMUTABLE_FIELD)
+        .arg(SNAPSHOT_CURSOR_FIELD)
         .invoke_async(&mut connection)
         .await?;
 
@@ -639,9 +692,9 @@ impl SurfaceSnapshotStore {
             Some("policy") if result.len() == 2 => Err(SurfaceSnapshotError::PolicyChanged(
                 parse_policy_name(&result[1])?,
             )),
-            Some("ok") if result.len() == 3 => {
-                let bundle: SurfaceSnapshotBundle = serde_json::from_str(&result[1])?;
-                let now_ms = result[2]
+            Some("ok") if result.len() == 4 => {
+                let bundle = merge_bundle(&result[1], &result[2])?;
+                let now_ms = result[3]
                     .parse::<i64>()
                     .map_err(|_| SurfaceSnapshotError::InvalidInput("invalid Redis clock"))?;
                 verify_owner_bundle(&bundle, &token_digest, expected, now_ms)
@@ -662,9 +715,11 @@ impl SurfaceSnapshotStore {
         let mut connection = self.redis.get().await?;
         deadpool_redis::redis::Script::new(
             r#"
-            local payload = redis.call('GET', KEYS[1])
-            if not payload then return 0 end
+            local payload = redis.call('HGET', KEYS[1], ARGV[7])
+            local cursor_payload = redis.call('HGET', KEYS[1], ARGV[8])
+            if not payload or not cursor_payload then return 0 end
             local bundle = cjson.decode(payload)
+            local cursor = cjson.decode(cursor_payload)
             if bundle.binding.actor_id ~= ARGV[1]
                or bundle.active_context_digest ~= ARGV[2] then
                 return 0
@@ -673,13 +728,13 @@ impl SurfaceSnapshotStore {
             if redis.call('GET', active_key) == ARGV[4] then
                 redis.call('DEL', active_key)
             end
-            if bundle.terminal_token_digest
-               and bundle.terminal_token_digest ~= cjson.null then
-                redis.call('DEL', ARGV[5] .. bundle.terminal_token_digest)
+            if cursor.terminal_token_digest
+               and cursor.terminal_token_digest ~= cjson.null then
+                redis.call('DEL', ARGV[5] .. cursor.terminal_token_digest)
             end
-            if bundle.terminal_impact_token_digest
-               and bundle.terminal_impact_token_digest ~= cjson.null then
-                redis.call('DEL', ARGV[6] .. bundle.terminal_impact_token_digest)
+            if cursor.terminal_impact_token_digest
+               and cursor.terminal_impact_token_digest ~= cjson.null then
+                redis.call('DEL', ARGV[6] .. cursor.terminal_impact_token_digest)
             end
             redis.call('DEL', KEYS[1])
             return 1
@@ -692,6 +747,8 @@ impl SurfaceSnapshotStore {
         .arg(confirmation.snapshot_id.to_string())
         .arg(TOKEN_PREFIX)
         .arg(IMPACT_TOKEN_PREFIX)
+        .arg(SNAPSHOT_IMMUTABLE_FIELD)
+        .arg(SNAPSHOT_CURSOR_FIELD)
         .invoke_async::<i64>(&mut connection)
         .await?;
         Ok(())
@@ -1278,8 +1335,41 @@ fn remaining_bundle_ttl_ms(
     Ok(ttl)
 }
 
+/// 拆出快照 Hash 的两个字段值：不可变半与游标半。
+fn split_bundle(bundle: &SurfaceSnapshotBundle) -> Result<(String, String), serde_json::Error> {
+    let Value::Object(mut immutable) = serde_json::to_value(bundle)? else {
+        unreachable!("bundle 序列化后必然是 JSON 对象")
+    };
+    let cursor = CURSOR_FIELDS
+        .iter()
+        .filter_map(|field| {
+            immutable
+                .remove(*field)
+                .map(|value| ((*field).to_owned(), value))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Ok((
+        serde_json::to_string(&Value::Object(immutable))?,
+        serde_json::to_string(&Value::Object(cursor))?,
+    ))
+}
+
+/// 把两半拼回完整 bundle：游标半覆盖同名字段，其余原样。
+fn merge_bundle(immutable: &str, cursor: &str) -> Result<SurfaceSnapshotBundle, serde_json::Error> {
+    let mut merged: serde_json::Map<String, Value> = serde_json::from_str(immutable)?;
+    let cursor: serde_json::Map<String, Value> = serde_json::from_str(cursor)?;
+    merged.extend(cursor);
+    serde_json::from_value(Value::Object(merged))
+}
+
 fn snapshot_key(snapshot_id: Uuid) -> String {
     format!("{SNAPSHOT_PREFIX}{snapshot_id}")
+}
+
+/// 给集成测试模拟「快照过期」用：key 名带存储布局版本，测试自己拼会在换版本时静默失准。
+#[doc(hidden)]
+pub fn snapshot_key_for_test(snapshot_id: Uuid) -> String {
+    snapshot_key(snapshot_id)
 }
 
 fn token_key(token_digest: &str) -> String {

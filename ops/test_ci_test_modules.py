@@ -69,6 +69,7 @@ EXPECTED_TARGETS = {
         "lexicon_handler",
         "lexicon_schema",
         "lexicon_surface_projection",
+        "lexicon_surface_snapshot",
         "lexicon_v3_lifecycle",
         "lexicon_v3_migration",
         "lexicon_v3_relation_consumers",
@@ -105,7 +106,7 @@ class CiTestModulesTests(unittest.TestCase):
         )
         flattened = [target for targets in actual.values() for target in targets]
         self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertEqual(len(flattened), 64)
+        self.assertEqual(len(flattened), 65)
 
     def test_ci02_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(
