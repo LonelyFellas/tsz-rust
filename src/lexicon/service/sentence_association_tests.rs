@@ -2,7 +2,9 @@ use super::*;
 
 use serde_json::{Value, json};
 
-use crate::lexicon::dto::{ReplaceSentenceAssociationsInputV2, SentenceAssociationInputV2};
+use crate::lexicon::dto::{
+    ReplaceSentenceAssociationsInputV2, SentenceAssociationInputV2, SentenceTargetMatchKindV3,
+};
 
 fn normalized_v2(input: SentenceAssociationInputV2) -> Vec<ManualAssociationInput> {
     normalize_manual_association_inputs(&ReplaceSentenceAssociationsInput::V2(
@@ -368,6 +370,139 @@ fn v2_manual_slot_selection_keeps_legacy_first_match_behavior() {
         .expect("legacy V2 automatic target should resolve");
     assert_eq!(automatic.target_form_slot_id, Some(second_form_id));
     assert_eq!(automatic.resolved_form_type.as_deref(), Some("past_tense"));
+}
+
+#[test]
+fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() {
+    // 一个词形挂在两个 base form 下时会展开成两个候选。词形清单对最后一个候选是直接
+    // move 过去的，前面的才克隆——顺序写反的话最后一个会拿到空清单。
+    let pos_id = Uuid::now_v7();
+    let publication_id = Uuid::now_v7();
+    let first_base_id = Uuid::now_v7();
+    let second_base_id = Uuid::now_v7();
+    let matched_form_id = Uuid::now_v7();
+    let matched_variant_id = Uuid::now_v7();
+    let first_base_variant_id = Uuid::now_v7();
+    let second_base_variant_id = Uuid::now_v7();
+
+    let form = |id: Uuid, form_type: &str, variant_id: Uuid, spelling: &str, bases: Vec<Uuid>| {
+        PublishedAssociationForm {
+            id,
+            form_type: form_type.to_owned(),
+            base_form_ids: bases,
+            variants: vec![PublishedAssociationVariant {
+                id: variant_id,
+                dialect: Dialect::Common,
+                spelling: spelling.to_owned(),
+                normalized_surface: Some(spelling.to_owned()),
+                component_usages: Vec::new(),
+            }],
+            normalized_surfaces: vec![spelling.to_owned()],
+        }
+    };
+
+    let target = PublishedAssociationTarget {
+        schema_version: 3,
+        id: Uuid::now_v7(),
+        publication_id,
+        kind: EntryKind::Word,
+        headword: "hang".to_owned(),
+        pos: vec![PublishedAssociationPos {
+            id: pos_id,
+            pos: "verb".to_owned(),
+            forms: vec![
+                form(
+                    first_base_id,
+                    "base",
+                    first_base_variant_id,
+                    "hang",
+                    vec![first_base_id],
+                ),
+                form(
+                    second_base_id,
+                    "base",
+                    second_base_variant_id,
+                    "hang",
+                    vec![second_base_id],
+                ),
+                form(
+                    matched_form_id,
+                    "past_tense",
+                    matched_variant_id,
+                    "hung",
+                    vec![first_base_id, second_base_id],
+                ),
+            ],
+            senses: vec![PublishedAssociationSense {
+                id: Uuid::now_v7(),
+                level: "B1".to_owned(),
+                gloss: "悬挂".to_owned(),
+            }],
+        }],
+    };
+
+    let candidates = target.sentence_discovery_candidates(
+        publication_id,
+        pos_id,
+        matched_form_id,
+        matched_variant_id,
+        SentenceTargetMatchEvidenceV3 {
+            surface: "hung".to_owned(),
+            normalized_surface: "hung".to_owned(),
+            match_kind: SentenceTargetMatchKindV3::Word,
+        },
+    );
+
+    let [first, second] = candidates.as_slice() else {
+        panic!("两个 base form 应展开成两个候选，实际 {}", candidates.len());
+    };
+    assert_eq!(first.base_form_id, first_base_id);
+    assert_eq!(second.base_form_id, second_base_id);
+
+    fn inventory(
+        candidate: &PublishedSentenceTargetCandidateV3,
+    ) -> Vec<(Uuid, Uuid, WordFormTypeV3, Dialect, &str)> {
+        candidate
+            .forms
+            .iter()
+            .map(|form| {
+                (
+                    form.form_id,
+                    form.variant_id,
+                    form.form_type,
+                    form.dialect,
+                    form.spelling.as_str(),
+                )
+            })
+            .collect()
+    }
+    // 每个候选都要拿到完整的三条词形，最后一个不能因为被 move 走而空掉；
+    // 逐字段比对，避免只看拼写时词形与变体错配也能蒙混过关。
+    let expected = vec![
+        (
+            first_base_id,
+            first_base_variant_id,
+            WordFormTypeV3::Base,
+            Dialect::Common,
+            "hang",
+        ),
+        (
+            second_base_id,
+            second_base_variant_id,
+            WordFormTypeV3::Base,
+            Dialect::Common,
+            "hang",
+        ),
+        (
+            matched_form_id,
+            matched_variant_id,
+            WordFormTypeV3::PastTense,
+            Dialect::Common,
+            "hung",
+        ),
+    ];
+    assert_eq!(inventory(first), expected);
+    assert_eq!(inventory(second), expected);
 }
 
 #[test]

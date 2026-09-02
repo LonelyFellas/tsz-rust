@@ -827,6 +827,10 @@ pub struct PublishedSentenceTargetCandidateV3 {
     pub matched_dialect: Dialect,
     pub matched_form_type: WordFormTypeV3,
     /// 该词性下全部词形变体的清单，供改选屈折形之外的词形。
+    /// 上限取词条的共享节点上限 2000：每个词形与每个地区变体各占一个节点，
+    /// V2（validate_node_limit）与 V3（forms_node_count）保存时都按这个预算卡，
+    /// 所以一个词性下的 (词形, 变体) 组合数必然不超过它。
+    #[schema(max_items = 2000)]
     pub forms: Vec<SentenceTargetCandidateFormV3>,
     #[schema(max_items = 100)]
     pub component_usages: Vec<PhraseComponentUsageV3>,

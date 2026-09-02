@@ -687,7 +687,7 @@ impl PublishedAssociationTarget {
         let Some(form_type) = parse_v3_form_type_name(&form.form_type) else {
             return Vec::new();
         };
-        let candidate_forms =
+        let mut candidate_forms =
             pos.forms
                 .iter()
                 .filter_map(|candidate_form| {
@@ -706,9 +706,16 @@ impl PublishedAssociationTarget {
                     })
                 })
                 .collect::<Vec<_>>();
-        form.base_form_ids
-            .iter()
-            .map(|base_form_id| PublishedSentenceTargetCandidateV3 {
+        let mut candidates = Vec::with_capacity(form.base_form_ids.len());
+        let mut base_form_ids = form.base_form_ids.iter().peekable();
+        while let Some(base_form_id) = base_form_ids.next() {
+            // 词形清单在同一词性下对每个 base form 都一样，最后一个候选直接接手，不再复制。
+            let forms = if base_form_ids.peek().is_some() {
+                candidate_forms.clone()
+            } else {
+                std::mem::take(&mut candidate_forms)
+            };
+            candidates.push(PublishedSentenceTargetCandidateV3 {
                 entry_id: self.id,
                 publication_id,
                 pos_id,
@@ -720,7 +727,7 @@ impl PublishedAssociationTarget {
                 matched_variant_id: variant.id,
                 matched_dialect: variant.dialect,
                 matched_form_type: form_type,
-                forms: candidate_forms.clone(),
+                forms,
                 component_usages: variant.component_usages.clone(),
                 matches: vec![evidence.clone()],
                 senses: pos
@@ -735,8 +742,9 @@ impl PublishedAssociationTarget {
                         gloss: sense.gloss.clone(),
                     })
                     .collect(),
-            })
-            .collect()
+            });
+        }
+        candidates
     }
 
     fn automatic_target(&self, pos_id: Uuid, variant_ids: &[Uuid]) -> Option<ResolvedTarget> {
