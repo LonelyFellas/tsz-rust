@@ -1026,6 +1026,45 @@ activate 同口径），`entry_publications` 不会多出一条。
 detection 快照缺该字段，反序列化退化成空摘要（`total = 0`、无 preview），
 部署空窗内不会 500。
 
+## 17. 句子目标候选词形带上所属变化组的原形 id（后端已实现）
+
+> **状态（2026-09-02）**：后端已实现并重新导出 `docs/openapi.json`；**部署顺序与以往相反，前端先。**
+
+### 17.1 背景
+
+短语 step3「成分用词」卡片用 `POST /entries/sentence-targets/resolve` 的候选列词形。候选按
+`(entry, pos, base_form_id)` 展开，`forms` 却是整个词性的清单；目标词条有多个变化组时，
+改选另一组的屈折形只能沿用候选行的 `base_form_id`，保存校验 `phrase_component_matches_target`
+要求 form 与 base 同组，于是 400 `invalid_request_body`（`field=component_usages`；
+前端 PR 里说的 422 就是它）。前端手上没有任何数据能算出配套的 base，只能后端给。
+
+### 17.2 后端改动
+
+`SentenceTargetCandidateFormV3` 新增**必填**字段 `base_form_ids: Uuid[]`（`maxItems 2000`）：
+该词形所在变化组的原形 id，按 id 排序去重，顺序不表示优先级。空数组表示该词形没挂进任何
+变化组，选它做成分必然被拒。候选行的 `base_form_id` 与 `senses[].base_form_id` 补了说明：
+它们只对命中词形有效，改选其他词形时以该词形自带的 `base_form_ids` 为准。
+
+### 17.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 跑 `sync:openapi`——`docs/openapi.json` 已重导，`base_form_ids` 是必填字段，不同步会挂契约测试 |
+| 2 | 改选词形时：候选行自己的 `base_form_id` 若在所选词形的 `base_form_ids` 里就沿用，否则任取一个（每一项都能过校验，后端不区分同组内的多个原形）；更省事的做法是词形选择器直接按当前组过滤 |
+| 3 | `base_form_ids` 为空的词形置灰；来自 V2 发布的候选不能做短语成分（同组只是必要条件，成分只接受 V3 发布的目标） |
+| 4 | 错误处理对准 **400** `invalid_request_body` / `field=component_usages`，不是 422 |
+
+### 17.4 兼容性
+
+**这不是「纯新增字段、后端可单独部署」。** admin 前端把 resolve 响应灌进 fail-closed 的
+runtime contract（`admin-word-v3.runtime-schema.json` 里 `SentenceTargetCandidateFormV3` 是
+`additionalProperties: false`，`assertRuntimeContract` 对多余 key 抛
+`InvalidAdminWordResponseError`）。后端先带上 `base_form_ids` 上线，短语成分查询与句子目标
+发现会在 UI 上整体显示「词库查询失败」，直到前端重新同步。**部署顺序：前端先（或同时），后端后。**
+
+后端侧纯增量：候选只产出不回读（不进 Redis/DB），无迁移、无 SQLx 缓存变化，revert 即可回退；
+前端若已同步带 `base_form_ids` 的快照，回退后端后需同步回退快照。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_

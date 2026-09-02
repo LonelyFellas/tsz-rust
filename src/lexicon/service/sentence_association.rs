@@ -702,6 +702,7 @@ impl PublishedAssociationTarget {
                             form_type,
                             spelling: variant.spelling.clone(),
                             dialect: variant.dialect,
+                            base_form_ids: candidate_form.base_form_ids.clone(),
                         }
                     })
                 })

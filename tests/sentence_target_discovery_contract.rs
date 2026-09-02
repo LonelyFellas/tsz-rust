@@ -262,7 +262,45 @@ fn resolve_candidates_preserve_base_and_sense_identity_and_draft_safety() {
     assert_required(
         &spec,
         candidate_form,
-        &["form_id", "variant_id", "form_type", "spelling", "dialect"],
+        &[
+            "form_id",
+            "variant_id",
+            "form_type",
+            "spelling",
+            "dialect",
+            "base_form_ids",
+        ],
+    );
+    // 前端 runtime contract 对这两层对象都是 fail-closed，后端加字段必须前端先同步；
+    // 这里把封闭性和数组上限钉死，免得 deny_unknown_fields 或 max_items 被悄悄拿掉。
+    for closed in [base_candidate, candidate_form] {
+        assert_eq!(
+            closed.get("additionalProperties"),
+            Some(&Value::Bool(false)),
+            "resolve candidates must stay closed objects"
+        );
+    }
+    let forms = schema_property(&spec, base_candidate, "forms");
+    assert_eq!(forms.get("type").and_then(Value::as_str), Some("array"));
+    assert_eq!(forms.get("maxItems").and_then(Value::as_u64), Some(2000));
+    let base_form_ids = schema_property(&spec, candidate_form, "base_form_ids");
+    assert_eq!(
+        base_form_ids.get("type").and_then(Value::as_str),
+        Some("array")
+    );
+    assert_eq!(
+        base_form_ids.get("maxItems").and_then(Value::as_u64),
+        Some(2000)
+    );
+    assert_eq!(
+        base_form_ids.pointer("/items/type").and_then(Value::as_str),
+        Some("string")
+    );
+    assert_eq!(
+        base_form_ids
+            .pointer("/items/format")
+            .and_then(Value::as_str),
+        Some("uuid")
     );
     let sense = schema_property(&spec, base_candidate, "senses")
         .get("items")

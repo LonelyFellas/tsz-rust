@@ -797,6 +797,8 @@ pub struct SentenceTargetSenseV3 {
     pub sense_id: Uuid,
     pub publication_id: Uuid,
     pub pos_id: Uuid,
+    /// 与候选行的 base_form_id 相同：词义挂在词性下而不挂在变化组下，这里只是原样带出，
+    /// 改选词形时同样以词形自带的 base_form_ids 为准。
     pub base_form_id: Uuid,
     pub level: String,
     pub gloss: String,
@@ -810,6 +812,15 @@ pub struct SentenceTargetCandidateFormV3 {
     pub form_type: WordFormTypeV3,
     pub spelling: String,
     pub dialect: Dialect,
+    /// 该词形所在变化组的原形 id，按 id 排序去重，顺序不表示优先级。短语成分保存时
+    /// 要求 form 与 base form 同组：改选词形时，候选行自己的 base_form_id 若在此列表内
+    /// 就沿用，否则任取一个，列表里每一项都能通过校验，后端不区分同组内的多个原形。
+    /// 为空表示这条词形没有挂进任何变化组，选它做成分必然被保存校验拒绝。
+    /// 同组只是必要条件：短语成分只接受 V3 发布的目标，来自 V2 发布的候选无论选哪个
+    /// 原形都会被拒。
+    // 上限同样取共享节点上限 2000：原形是词形的子集，不可能比词形还多。
+    #[schema(max_items = 2000)]
+    pub base_form_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -818,6 +829,9 @@ pub struct PublishedSentenceTargetCandidateV3 {
     pub entry_id: Uuid,
     pub publication_id: Uuid,
     pub pos_id: Uuid,
+    /// 命中词形（matched_form_id）所在变化组的原形；命中词形挂在多个变化组下时，
+    /// 每个变化组各出一条候选。改选 forms 里的其他词形时，配套的原形以该词形自带的
+    /// base_form_ids 为准，不要沿用这里的值。
     pub base_form_id: Uuid,
     pub kind: EntryKind,
     pub headword: String,
@@ -827,9 +841,9 @@ pub struct PublishedSentenceTargetCandidateV3 {
     pub matched_dialect: Dialect,
     pub matched_form_type: WordFormTypeV3,
     /// 该词性下全部词形变体的清单，供改选屈折形之外的词形。
-    /// 上限取词条的共享节点上限 2000：每个词形与每个地区变体各占一个节点，
-    /// V2（validate_node_limit）与 V3（forms_node_count）保存时都按这个预算卡，
-    /// 所以一个词性下的 (词形, 变体) 组合数必然不超过它。
+    // 上限取词条的共享节点上限 2000：每个词形与每个地区变体各占一个节点，
+    // V2（validate_node_limit）与 V3（forms_node_count）保存时都按这个预算卡，
+    // 所以一个词性下的 (词形, 变体) 组合数必然不超过它。
     #[schema(max_items = 2000)]
     pub forms: Vec<SentenceTargetCandidateFormV3>,
     #[schema(max_items = 100)]
