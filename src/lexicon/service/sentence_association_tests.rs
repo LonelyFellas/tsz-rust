@@ -511,6 +511,103 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
 }
 
 #[test]
+fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
+    // 三个原形 A、B、C 与一条过去式 P：G1 = {A, P}、G2 = {B, P}、G3 = {A}，C 不入任何组。
+    // 分别钉住跨组并集与排序（P）、同一原形出现在两组时的去重（A）、无组原形的兜底（C），
+    // 任何一条被"简化"掉，这里都会红——这份推导现在直接暴露在 base_form_ids 上。
+    let mut fixture = v3_fixture(3);
+    let publication_id = Uuid::now_v7();
+    let [base_a, base_b, base_c] = fixture.form_ids[..] else {
+        panic!("fixture should provide three base forms");
+    };
+    let past_id = Uuid::now_v7();
+    let past_variant_id = Uuid::now_v7();
+    fixture.snapshot["forms"]["pos"][0]["forms"]
+        .as_array_mut()
+        .expect("fixture forms should be an array")
+        .push(json!({
+            "id": past_id,
+            "form_type": "past_tense",
+            "regional_variants": {
+                "mode": "common",
+                "common": {
+                    "id": past_variant_id,
+                    "dialect": "common",
+                    "spelling": "harboured",
+                    "origin": "manual",
+                    "pronunciations": []
+                }
+            }
+        }));
+    let group = |is_regular: bool, members: &[Uuid]| {
+        json!({
+            "id": Uuid::now_v7(),
+            "is_regular": is_regular,
+            "members": members
+                .iter()
+                .map(|form_id| json!({"id": Uuid::now_v7(), "form_id": form_id}))
+                .collect::<Vec<_>>()
+        })
+    };
+    fixture.snapshot["forms"]["pos"][0]["form_groups"] = json!([
+        group(true, &[base_a, past_id]),
+        group(false, &[base_b, past_id]),
+        group(true, &[base_a]),
+    ]);
+
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true, publication_id)
+        .expect("V3 snapshot with form groups should convert");
+    let candidates = target.sentence_discovery_candidates(
+        publication_id,
+        fixture.pos_id,
+        past_id,
+        past_variant_id,
+        SentenceTargetMatchEvidenceV3 {
+            surface: "harboured".to_owned(),
+            normalized_surface: "harboured".to_owned(),
+            match_kind: SentenceTargetMatchKindV3::Word,
+        },
+    );
+
+    let mut expected_past_bases = vec![base_a, base_b];
+    expected_past_bases.sort_unstable();
+    let mut candidate_bases = candidates
+        .iter()
+        .map(|candidate| candidate.base_form_id)
+        .collect::<Vec<_>>();
+    candidate_bases.sort_unstable();
+    assert_eq!(
+        candidate_bases, expected_past_bases,
+        "过去式挂在两个变化组下，应按原形各出一条候选"
+    );
+
+    let inventory = candidates
+        .first()
+        .expect("at least one candidate")
+        .forms
+        .iter()
+        .map(|form| (form.form_id, form.base_form_ids.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(
+        inventory[&past_id], expected_past_bases,
+        "跨组并集且按 id 排序"
+    );
+    assert_eq!(
+        inventory[&base_a],
+        vec![base_a],
+        "A 同时在 G1 与 G3，去重后只留一条"
+    );
+    assert_eq!(inventory[&base_b], vec![base_b]);
+    assert_eq!(inventory[&base_c], vec![base_c], "无组原形兜底指向自己");
+    // 每条候选自己的 base 都在命中词形的 base_form_ids 里，「在列表内就沿用」才总能成立。
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| inventory[&past_id].contains(&candidate.base_form_id))
+    );
+}
+
+#[test]
 fn manual_pending_phrase_keeps_surface_and_prefilled_gloss_without_target() {
     let sentence_id = Uuid::now_v7();
     let association_id = Uuid::now_v7();

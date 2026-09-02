@@ -19407,13 +19407,9 @@ fn resolved_component_json(
     })
 }
 
-async fn create_published_v3_phrase(
-    state: &AppState,
-    pool: &PgPool,
-    bearer: &str,
-    surface: &str,
-    uk_component_usages: Value,
-) -> (Value, Uuid) {
+/// 造一条短语草稿：探测、创建，再把完整词形 fixture 的拼写改成短语本身。
+/// 返回 entry_id 与尚未保存的词形内容，成分与保存意图由调用方决定。
+async fn create_v3_phrase_draft(state: &AppState, bearer: &str, surface: &str) -> (String, Value) {
     let (status, detection) = call(
         state,
         Method::POST,
@@ -19453,6 +19449,17 @@ async fn create_published_v3_phrase(
         form["regional_variants"]["uk"]["spelling"] = json!(surface);
         form["regional_variants"]["us"]["spelling"] = json!(surface);
     }
+    (entry_id, forms)
+}
+
+async fn create_published_v3_phrase(
+    state: &AppState,
+    pool: &PgPool,
+    bearer: &str,
+    surface: &str,
+    uk_component_usages: Value,
+) -> (Value, Uuid) {
+    let (entry_id, mut forms) = create_v3_phrase_draft(state, bearer, surface).await;
     forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
         uk_component_usages;
     let (_, forms_saved) =
@@ -19867,22 +19874,13 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
         forms,
     )
     .await;
-    let (status, meanings_saved) = call(
+    let meanings_saved = save_v3_meanings(
         &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{word_entry_id}/steps/meanings"),
         &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": forms_saved["word"]["revision"],
-            "intent": "complete",
-            "content":
-                complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone())
-        })),
+        &forms_saved,
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone()),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{meanings_saved}");
     let (status, word_published) = publish_ready_v3(&state, &bearer, &meanings_saved).await;
     assert_eq!(status, StatusCode::CREATED, "{word_published}");
 
@@ -19924,45 +19922,8 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
         "跨组词形要指回自己那组的原形：{candidate}"
     );
 
-    let (status, detection) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/detections"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "language": "en",
-            "kind": "phrase",
-            "surface": "harbour club"
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{detection}");
-    let mut create_input = json!({
-        "schema_version": 3,
-        "detection_id": detection["detection_id"],
-        "kind": "phrase"
-    });
-    if let Some(token) = detection["surface_match_page"]["surface_confirmation_token"].as_str() {
-        create_input["confirmed_surface_match_token"] = json!(token);
-    }
-    let (status, phrase_created) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(create_input),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{phrase_created}");
-    let phrase_entry_id = phrase_created["word"]["id"].as_str().unwrap().to_owned();
-    let mut phrase_forms = complete_v3_forms_fixture();
-    for form in phrase_forms["pos"][0]["forms"].as_array_mut().unwrap() {
-        form["regional_variants"]["uk"]["spelling"] = json!("harbour club");
-        form["regional_variants"]["us"]["spelling"] = json!("harbour club");
-    }
+    let (phrase_entry_id, mut phrase_forms) =
+        create_v3_phrase_draft(&state, &bearer, "harbour club").await;
     // 成分完全由 resolve 的候选载荷拼出，正是前端级联选择那一步手上的数据。
     let component = |base_form_id: &Value| {
         json!([{
@@ -20006,6 +19967,8 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
     );
     assert_eq!(rejected["field"], "component_usages");
 
+    // 换成词形自带的 base_form_ids 后保存必须通过（helper 内断言 200），再回读一次
+    // 确认跨组成分原样落库。
     phrase_forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
         component(&cross_group_form["base_form_ids"][0]);
     let (_, phrase_saved) = save_v3_forms_after_impact(
@@ -20021,7 +19984,7 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
         phrase_saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"]
             [0]["target_base_form_id"],
         second_base_id,
-        "换成词形自带的 base_form_ids 后应能保存：{phrase_saved}"
+        "跨组成分的 base 应原样回读：{phrase_saved}"
     );
 }
 
