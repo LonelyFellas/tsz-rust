@@ -1393,6 +1393,8 @@ fn active_key(active_context_digest: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use chrono::{TimeZone, Utc};
     use serde_json::json;
 
@@ -2293,5 +2295,63 @@ mod tests {
             SurfaceMatchItemV3::FormVariantV3(_)
         ));
         assert_eq!(terminal.surface_confirmation_token, "terminal-token");
+    }
+
+    /// `SurfaceSnapshotBundle` 里**不**由 `page()` 改写的字段。新增字段时必须归到这里或
+    /// `CURSOR_FIELDS`：可变字段漏配进 `CURSOR_FIELDS` 的话，它会留在不可变半，Lua 写进
+    /// 游标半的更新又被 `merge_bundle` 的覆盖顺序丢掉，游标静默停在初值——编译能过、别的
+    /// 测试也全绿，只有线上翻页表现异常。下面那条断言就是为了在那时候先炸。
+    const EXPECTED_IMMUTABLE_FIELDS: [&str; 13] = [
+        "snapshot_id",
+        "binding",
+        "policy_enabled",
+        "policy_block_code",
+        "items",
+        "contexts",
+        "confirmation_reasons",
+        "owner_bundle",
+        "page_size",
+        "issue_impact_confirmation_token",
+        "match_digest",
+        "context_digest",
+        "active_context_digest",
+    ];
+
+    #[test]
+    fn split_bundle_partitions_every_field_into_its_declared_half() {
+        let initialized = initialize_snapshot(
+            input(Uuid::now_v7(), 3, 1, true),
+            0,
+            IDLE_TTL,
+            TOKEN_TTL,
+            "cursor-1".to_owned(),
+            "unused-token".to_owned(),
+            None,
+        )
+        .unwrap();
+        let (immutable, cursor) = split_bundle(&initialized.bundle).unwrap();
+
+        let field_names = |payload: &str| {
+            serde_json::from_str::<serde_json::Map<String, Value>>(payload)
+                .unwrap()
+                .into_iter()
+                .map(|(field, _)| field)
+                .collect::<BTreeSet<_>>()
+        };
+        let expected = |fields: &[&str]| {
+            fields
+                .iter()
+                .map(|field| (*field).to_owned())
+                .collect::<BTreeSet<_>>()
+        };
+
+        // 游标半恰好是 CURSOR_FIELDS：少一个说明某个字段被改名/删掉而 CURSOR_FIELDS 没跟上，
+        // 那个字段会被留在不可变半。
+        assert_eq!(field_names(&cursor), expected(&CURSOR_FIELDS));
+        // 不可变半恰好是其余字段：多出来的名字就是漏配进 CURSOR_FIELDS 的新可变字段。
+        assert_eq!(
+            field_names(&immutable),
+            expected(&EXPECTED_IMMUTABLE_FIELDS)
+        );
     }
 }
