@@ -804,17 +804,30 @@ pub struct SentenceTargetSenseV3 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct SentenceTargetCandidateFormV3 {
+    pub form_id: Uuid,
+    pub variant_id: Uuid,
+    pub form_type: WordFormTypeV3,
+    pub spelling: String,
+    pub dialect: Dialect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PublishedSentenceTargetCandidateV3 {
     pub entry_id: Uuid,
     pub publication_id: Uuid,
     pub pos_id: Uuid,
     pub base_form_id: Uuid,
+    pub kind: EntryKind,
     pub headword: String,
     pub pos: String,
     pub matched_form_id: Uuid,
     pub matched_variant_id: Uuid,
     pub matched_dialect: Dialect,
     pub matched_form_type: WordFormTypeV3,
+    /// 该词性下全部词形变体的清单，供改选屈折形之外的词形。
+    pub forms: Vec<SentenceTargetCandidateFormV3>,
     #[schema(max_items = 100)]
     pub component_usages: Vec<PhraseComponentUsageV3>,
     pub matches: Vec<SentenceTargetMatchEvidenceV3>,

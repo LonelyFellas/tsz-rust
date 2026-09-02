@@ -250,6 +250,20 @@ fn resolve_candidates_preserve_base_and_sense_identity_and_draft_safety() {
             "senses",
         ],
     );
+    assert_required(&spec, base_candidate, &["kind", "forms"]);
+    assert_eq!(
+        schema_property(&spec, base_candidate, "kind").get("enum"),
+        Some(&serde_json::json!(["word", "phrase"]))
+    );
+    let candidate_form = schema_property(&spec, base_candidate, "forms")
+        .get("items")
+        .map(|schema| dereference(&spec, schema))
+        .expect("candidate forms should expose item schema");
+    assert_required(
+        &spec,
+        candidate_form,
+        &["form_id", "variant_id", "form_type", "spelling", "dialect"],
+    );
     let sense = schema_property(&spec, base_candidate, "senses")
         .get("items")
         .map(|schema| dereference(&spec, schema))
