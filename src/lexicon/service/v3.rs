@@ -1539,7 +1539,8 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
-        validate_phrase_components(&mut validation_tx, current.kind, &input.content).await?;
+        validate_phrase_components(&mut validation_tx, entry_id, current.kind, &input.content)
+            .await?;
         validation_tx.commit().await.map_err(database_error)?;
         let issues =
             crate::lexicon::v3_contract::validate_forms(&input.content, StepSaveIntent::Save);
@@ -1636,7 +1637,7 @@ impl LexiconService {
         ensure_v3_record_active(&record)?;
         let entry_kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
         ensure_phrase_component_ownership(entry_kind, &input.content)?;
-        validate_phrase_components(&mut transaction, entry_kind, &input.content).await?;
+        validate_phrase_components(&mut transaction, entry_id, entry_kind, &input.content).await?;
         if record.revision != input.base_revision {
             return Err(LexiconServiceError::RevisionConflict {
                 current_revision: record.revision,
@@ -2998,6 +2999,7 @@ fn ensure_phrase_component_ownership(
 
 async fn validate_phrase_components(
     tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
     kind: WordEntryKindV3,
     content: &DraftFormsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
@@ -3049,6 +3051,12 @@ async fn validate_phrase_components(
         else {
             continue;
         };
+        if *target_word_id == entry_id {
+            return Err(LexiconServiceError::InvalidField {
+                field: "component_usages",
+                message: "phrase component must not target the phrase itself",
+            });
+        }
         if targets.contains_key(&(*target_word_id, *target_publication_id)) {
             continue;
         }
@@ -3061,7 +3069,7 @@ async fn validate_phrase_components(
              AND publication.entry_id = entry.id
             WHERE entry.id = $1
               AND publication.content_schema_version = 3
-              AND entry.kind = 'word'
+              AND entry.kind IN ('word', 'phrase')
               AND entry.archived_at IS NULL
             "#,
         )
@@ -3074,6 +3082,31 @@ async fn validate_phrase_components(
         let word = serde_json::from_value::<AdminWordV3>(snapshot)
             .map_err(|_| invalid_phrase_component())?;
         targets.insert((*target_word_id, *target_publication_id), word);
+    }
+
+    // 短语套短语只放一层：目标短语的发布快照里不得再出现短语目标。发布快照不可变，
+    // 所以这条不变式一旦在保存时成立就永久成立，任何成分链最深是 短语→短语→单词。
+    let mut nested_target_ids = targets
+        .values()
+        .filter(|target| target.kind == WordEntryKindV3::Phrase)
+        .flat_map(|target| phrase_component_resolved_target_ids(&target.forms))
+        .collect::<Vec<_>>();
+    nested_target_ids.sort_unstable();
+    nested_target_ids.dedup();
+    if !nested_target_ids.is_empty() {
+        let nested_phrase_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id = ANY($1) AND kind = 'phrase')",
+        )
+        .bind(&nested_target_ids)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        if nested_phrase_exists {
+            return Err(LexiconServiceError::InvalidField {
+                field: "component_usages",
+                message: "phrase component target must not itself reference another phrase",
+            });
+        }
     }
 
     for component in &components {
@@ -3115,6 +3148,28 @@ async fn validate_phrase_components(
     Ok(())
 }
 
+fn phrase_component_resolved_target_ids(forms: &DraftFormsStepContentV3) -> Vec<Uuid> {
+    forms
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.forms)
+        .flat_map(|form| match &form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => {
+                common.component_usages.iter().collect::<Vec<_>>()
+            }
+            WordRegionalVariantsV3::UkUs { uk, us } => uk
+                .component_usages
+                .iter()
+                .chain(&us.component_usages)
+                .collect(),
+        })
+        .filter_map(|component| match component {
+            PhraseComponentUsageV3::Resolved { target_word_id, .. } => Some(*target_word_id),
+            PhraseComponentUsageV3::Unresolved { .. } => None,
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn phrase_component_matches_target(
     target: &AdminWordV3,
@@ -3128,7 +3183,7 @@ fn phrase_component_matches_target(
     target_headword: &str,
     target_gloss: &str,
 ) -> bool {
-    if target.kind != WordEntryKindV3::Word || target.presentation.label != target_headword {
+    if target.presentation.label != target_headword {
         return false;
     }
     let Some(pos) = target
@@ -3199,7 +3254,7 @@ fn phrase_component_matches_target(
 fn invalid_phrase_component() -> LexiconServiceError {
     LexiconServiceError::InvalidField {
         field: "component_usages",
-        message: "resolved component must match a published word form and sense",
+        message: "resolved component must match a published word or phrase form and sense",
     }
 }
 

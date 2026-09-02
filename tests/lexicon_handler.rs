@@ -24,6 +24,7 @@ use tsz_rust::{
         SURFACE_WRITER_VERSION, execute_surface_cutover, run_surface_backfill,
         run_surface_cutover_preflight, run_surface_parity, surface_cutover_artifact_sha256,
     },
+    lexicon::surface_snapshot,
     lexicon::v3_migration::{apply, approve, dry_run, enable_publication_canary, verify},
     lexicon::validation::MAX_STEP_CONTENT_BODY_BYTES,
     platform,
@@ -10433,7 +10434,9 @@ async fn forms_surface_and_downstream_impact_require_both_terminal_tokens(pool: 
     let snapshot_id = page["snapshot_id"].as_str().expect("snapshot id 缺失");
     let mut redis_connection = redis.get().await.expect("应能取得测试 Redis 连接");
     deadpool_redis::redis::cmd("DEL")
-        .arg(format!("lexicon:surface-snapshot:{snapshot_id}"))
+        .arg(surface_snapshot::snapshot_key_for_test(
+            Uuid::parse_str(snapshot_id).unwrap(),
+        ))
         .query_async::<i64>(&mut redis_connection)
         .await
         .expect("应能使 Forms snapshot 过期");
@@ -10536,7 +10539,9 @@ async fn forms_surface_and_downstream_impact_require_both_terminal_tokens(pool: 
     assert_eq!(saved["word"]["revision"], base_revision + 1);
     assert_eq!(saved["word"]["forms"]["pos"][0]["pos"], "adjective");
     let refreshed_snapshot_exists: i64 = deadpool_redis::redis::cmd("EXISTS")
-        .arg(format!("lexicon:surface-snapshot:{refreshed_snapshot_id}"))
+        .arg(surface_snapshot::snapshot_key_for_test(
+            Uuid::parse_str(&refreshed_snapshot_id).unwrap(),
+        ))
         .query_async(&mut redis_connection)
         .await
         .expect("应能检查成功消费后的 snapshot");
@@ -19203,6 +19208,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         .flat_map(|range| range["published_matches"].as_array().unwrap())
         .find(|candidate| candidate["entry_id"] == entry_id)
         .expect("discovery must return the published phrase");
+    assert_eq!(phrase_candidate["kind"], "phrase");
     let association_id = Uuid::now_v7();
     let (status, edited) = replace_associations_v3(
         &state,
@@ -19371,6 +19377,412 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     assert_eq!(
         list["words"][0]["presentation"]["matched_surfaces"],
         json!(["native phrase"])
+    );
+}
+
+fn resolved_component_json(
+    target: &Value,
+    target_publication_id: Uuid,
+    dialect: &str,
+    literal: &str,
+) -> Value {
+    let pos = &target["word"]["forms"]["pos"][0];
+    let form = &pos["forms"][0];
+    json!({
+        "id": Uuid::now_v7(),
+        "state": "resolved",
+        "literal": literal,
+        "target_word_id": target["word"]["id"],
+        "target_publication_id": target_publication_id,
+        "target_pos_id": pos["pos_id"],
+        "target_base_form_id": form["id"],
+        "target_sense_id": target["word"]["meanings"]["pos"][0]["senses"][0]["id"],
+        "target_form_id": form["id"],
+        "target_variant_id": form["regional_variants"][dialect]["id"],
+        "target_dialect": dialect,
+        "target_form_type": "base",
+        "target_headword": target["word"]["presentation"]["label"],
+        "target_gloss": target["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][0]
+            ["content"]["text"]
+    })
+}
+
+async fn create_published_v3_phrase(
+    state: &AppState,
+    pool: &PgPool,
+    bearer: &str,
+    surface: &str,
+    uk_component_usages: Value,
+) -> (Value, Uuid) {
+    let (status, detection) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "phrase",
+            "surface": surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let mut create_input = json!({
+        "schema_version": 3,
+        "detection_id": detection["detection_id"],
+        "kind": "phrase"
+    });
+    if let Some(token) = detection["surface_match_page"]["surface_confirmation_token"].as_str() {
+        create_input["confirmed_surface_match_token"] = json!(token);
+    }
+    let (status, created) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(create_input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let entry_id = created["word"]["id"].as_str().unwrap().to_owned();
+    let mut forms = complete_v3_forms_fixture();
+    for form in forms["pos"][0]["forms"].as_array_mut().unwrap() {
+        form["regional_variants"]["uk"]["spelling"] = json!(surface);
+        form["regional_variants"]["us"]["spelling"] = json!(surface);
+    }
+    forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
+        uk_component_usages;
+    let (_, forms_saved) =
+        save_v3_forms_after_impact(state, bearer, &entry_id, 1, "complete", forms).await;
+    let (status, meanings_saved) = call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": forms_saved["word"]["revision"],
+            "intent": "complete",
+            "content":
+                complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone())
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{meanings_saved}");
+    let (status, published) = publish_ready_v3(state, bearer, &meanings_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(&entry_id).unwrap())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    (published, publication_id)
+}
+
+#[sqlx::test]
+async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let word_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{word_published}");
+    let word_entry_id = word_published["word"]["id"].as_str().unwrap();
+    let word_publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(word_entry_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let (inner_phrase, inner_publication_id) = create_published_v3_phrase(
+        &state,
+        &pool,
+        &bearer,
+        "guard phrase",
+        json!([resolved_component_json(
+            &word_published,
+            word_publication_id,
+            "uk",
+            "harbour"
+        )]),
+    )
+    .await;
+    let inner_entry_id = inner_phrase["word"]["id"].as_str().unwrap();
+
+    let (status, resolved) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "sentence_text": "guard phrase",
+            "source_dialect": "common",
+            "mode": "selected_segments",
+            "selected_segments": [{"start": 0, "end": 12, "surface": "guard phrase"}],
+            "include_drafts": false
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    let phrase_candidate = resolved["range_results"][0]["published_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["entry_id"] == inner_entry_id)
+        .expect("selected-segments resolve must surface the published phrase");
+    assert_eq!(phrase_candidate["kind"], "phrase");
+    let candidate_forms = phrase_candidate["forms"].as_array().unwrap();
+    assert_eq!(
+        candidate_forms.len(),
+        4,
+        "词形清单应覆盖该词性下全部词形变体：{phrase_candidate}"
+    );
+    assert!(
+        candidate_forms
+            .iter()
+            .all(|form| form["spelling"] == "guard phrase" && form["form_type"] == "base")
+    );
+    assert!(
+        candidate_forms
+            .iter()
+            .any(|form| form["variant_id"] == phrase_candidate["matched_variant_id"])
+    );
+
+    let (status, word_resolved) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "sentence_text": "harbour",
+            "source_dialect": "common",
+            "mode": "selected_segments",
+            "selected_segments": [{"start": 0, "end": 7, "surface": "harbour"}],
+            "include_drafts": false
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{word_resolved}");
+    let word_candidate = word_resolved["range_results"][0]["published_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["entry_id"] == word_entry_id)
+        .expect("selected-segments resolve must surface the published word");
+    assert_eq!(word_candidate["kind"], "word");
+    assert_eq!(word_candidate["forms"].as_array().unwrap().len(), 4);
+    assert!(
+        word_candidate["forms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|form| form["spelling"] == "harbor" && form["dialect"] == "us")
+    );
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "phrase",
+            "surface": "double phrase"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let (status, outer_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "phrase"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{outer_created}");
+    let outer_entry_id = outer_created["word"]["id"].as_str().unwrap();
+
+    let mut cycle_forms = complete_v3_forms_fixture();
+    for form in cycle_forms["pos"][0]["forms"].as_array_mut().unwrap() {
+        form["regional_variants"]["uk"]["spelling"] = json!("double phrase");
+        form["regional_variants"]["us"]["spelling"] = json!("double phrase");
+    }
+    cycle_forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] = json!([{
+        "id": Uuid::now_v7(),
+        "state": "resolved",
+        "literal": "double",
+        "target_word_id": outer_entry_id,
+        "target_publication_id": Uuid::now_v7(),
+        "target_pos_id": Uuid::now_v7(),
+        "target_base_form_id": Uuid::now_v7(),
+        "target_sense_id": Uuid::now_v7(),
+        "target_form_id": Uuid::now_v7(),
+        "target_variant_id": Uuid::now_v7(),
+        "target_dialect": "uk",
+        "target_form_type": "base",
+        "target_headword": "double phrase",
+        "target_gloss": "自环"
+    }]);
+    let (status, cycle_rejected) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{outer_entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": 1,
+            "intent": "complete",
+            "content": cycle_forms
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{cycle_rejected}");
+    assert_eq!(cycle_rejected["field"], "component_usages");
+    assert!(
+        cycle_rejected["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("phrase itself"),
+        "{cycle_rejected}"
+    );
+
+    let mut outer_forms = complete_v3_forms_fixture();
+    for form in outer_forms["pos"][0]["forms"].as_array_mut().unwrap() {
+        form["regional_variants"]["uk"]["spelling"] = json!("double phrase");
+        form["regional_variants"]["us"]["spelling"] = json!("double phrase");
+    }
+    outer_forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
+        json!([resolved_component_json(
+            &inner_phrase,
+            inner_publication_id,
+            "uk",
+            "guard phrase"
+        )]);
+    let (_, outer_forms_saved) =
+        save_v3_forms_after_impact(&state, &bearer, outer_entry_id, 1, "complete", outer_forms)
+            .await;
+    assert_eq!(
+        outer_forms_saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"]
+            [0]["target_word_id"],
+        json!(inner_entry_id),
+        "短语成分应能锚定已发布短语目标"
+    );
+    let (status, outer_meanings) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{outer_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": outer_forms_saved["word"]["revision"],
+            "intent": "complete",
+            "content": complete_v3_meanings_fixture(
+                outer_forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone()
+            )
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{outer_meanings}");
+    let (status, outer_published) = publish_ready_v3(&state, &bearer, &outer_meanings).await;
+    assert_eq!(status, StatusCode::CREATED, "{outer_published}");
+    let outer_publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(outer_entry_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let (status, third_detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "phrase",
+            "surface": "third phrase"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{third_detection}");
+    let (status, third_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": third_detection["detection_id"],
+            "kind": "phrase"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{third_created}");
+    let third_entry_id = third_created["word"]["id"].as_str().unwrap();
+    let mut third_forms = complete_v3_forms_fixture();
+    for form in third_forms["pos"][0]["forms"].as_array_mut().unwrap() {
+        form["regional_variants"]["uk"]["spelling"] = json!("third phrase");
+        form["regional_variants"]["us"]["spelling"] = json!("third phrase");
+    }
+    third_forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
+        json!([resolved_component_json(
+            &outer_published,
+            outer_publication_id,
+            "uk",
+            "double phrase"
+        )]);
+    let (status, depth_rejected) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{third_entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": 1,
+            "intent": "complete",
+            "content": third_forms
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{depth_rejected}");
+    assert_eq!(depth_rejected["field"], "component_usages");
+    assert!(
+        depth_rejected["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("another phrase"),
+        "{depth_rejected}"
     );
 }
 

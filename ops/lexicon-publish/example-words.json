@@ -1,0 +1,74 @@
+{
+  "words": [
+    {
+      "surface": "harbour",
+      "pos": [
+        {
+          "pos": "noun",
+          "spelling": {
+            "uk": "harbour",
+            "us": "harbor"
+          },
+          "pronunciation": {
+            "uk": "/ˈhɑːbə/",
+            "us": "/ˈhɑrbər/"
+          },
+          "extra_forms": [
+            {
+              "form_type": "plural",
+              "spelling": {
+                "uk": "harbours",
+                "us": "harbors"
+              }
+            }
+          ],
+          "senses": [
+            {
+              "gloss": "港口",
+              "sub_pos": "N-COUNT",
+              "level": "A2",
+              "frequency": "80",
+              "grammar": "countable noun"
+            },
+            {
+              "gloss": "避风港；庇护所",
+              "sub_pos": "N-COUNT",
+              "level": "B2",
+              "frequency": "20",
+              "group": {
+                "zh": "引申义",
+                "en": "figurative"
+              }
+            }
+          ]
+        },
+        {
+          "pos": "verb",
+          "spelling": "harbour",
+          "extra_forms": [
+            {
+              "form_type": "past_tense",
+              "spelling": "harboured"
+            },
+            {
+              "form_type": "present_participle",
+              "spelling": "harbouring"
+            }
+          ],
+          "senses": [
+            {
+              "gloss": "心怀（情绪、想法）",
+              "sub_pos": "V-T",
+              "level": "B2",
+              "grammar": "transitive verb"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "surface": "apple",
+      "gloss": "苹果"
+    }
+  ]
+}

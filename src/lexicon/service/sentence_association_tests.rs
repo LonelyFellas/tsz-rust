@@ -330,6 +330,7 @@ fn v2_manual_slot_selection_keeps_legacy_first_match_behavior() {
                     variants: vec![PublishedAssociationVariant {
                         id: Uuid::now_v7(),
                         dialect: Dialect::Common,
+                        spelling: "cut".to_owned(),
                         normalized_surface: Some("cut".to_owned()),
                         component_usages: Vec::new(),
                     }],
@@ -342,6 +343,7 @@ fn v2_manual_slot_selection_keeps_legacy_first_match_behavior() {
                     variants: vec![PublishedAssociationVariant {
                         id: second_variant_id,
                         dialect: Dialect::Common,
+                        spelling: "cut".to_owned(),
                         normalized_surface: Some("cut".to_owned()),
                         component_usages: Vec::new(),
                     }],

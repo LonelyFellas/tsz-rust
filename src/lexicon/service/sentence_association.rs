@@ -3,8 +3,9 @@ use super::*;
 use crate::lexicon::{
     dto::{
         DialectVariantRichTextSlotV3, DraftMeaningsStepContentV3, EnglishTextV3,
-        PhraseComponentUsageV3, PublishedSentenceTargetCandidateV3, SentenceTargetMatchEvidenceV3,
-        SentenceTargetSenseV3, WordFormTypeV3, WordSentenceAssociationV3,
+        PhraseComponentUsageV3, PublishedSentenceTargetCandidateV3, SentenceTargetCandidateFormV3,
+        SentenceTargetMatchEvidenceV3, SentenceTargetSenseV3, WordFormTypeV3,
+        WordSentenceAssociationV3,
     },
     model::{
         NewSentenceAssociation, NewSentenceAssociationSegment, PublishedFormSurfaceRecord,
@@ -439,6 +440,7 @@ struct PublishedAssociationForm {
 struct PublishedAssociationVariant {
     id: Uuid,
     dialect: Dialect,
+    spelling: String,
     normalized_surface: Option<String>,
     component_usages: Vec<PhraseComponentUsageV3>,
 }
@@ -489,6 +491,7 @@ impl PublishedAssociationTarget {
                             .map(|variant| PublishedAssociationVariant {
                                 id: variant.id,
                                 dialect: variant.dialect,
+                                spelling: variant.spelling.clone(),
                                 normalized_surface: normalized_surface(&variant.spelling),
                                 component_usages: Vec::new(),
                             })
@@ -507,6 +510,7 @@ impl PublishedAssociationTarget {
                                     .map(|variant| PublishedAssociationVariant {
                                         id: variant.id,
                                         dialect: variant.dialect,
+                                        spelling: variant.spelling.clone(),
                                         normalized_surface: normalized_surface(&variant.spelling),
                                         component_usages: Vec::new(),
                                     })
@@ -601,6 +605,7 @@ impl PublishedAssociationTarget {
                                     PublishedAssociationVariant {
                                         id: *id,
                                         dialect: *dialect,
+                                        spelling: (*spelling).to_owned(),
                                         normalized_surface: normalized_surface(spelling),
                                         component_usages: component_usages.to_vec(),
                                     }
@@ -682,6 +687,25 @@ impl PublishedAssociationTarget {
         let Some(form_type) = parse_v3_form_type_name(&form.form_type) else {
             return Vec::new();
         };
+        let candidate_forms =
+            pos.forms
+                .iter()
+                .filter_map(|candidate_form| {
+                    let form_type = parse_v3_form_type_name(&candidate_form.form_type)?;
+                    Some((candidate_form, form_type))
+                })
+                .flat_map(|(candidate_form, form_type)| {
+                    candidate_form.variants.iter().map(move |variant| {
+                        SentenceTargetCandidateFormV3 {
+                            form_id: candidate_form.id,
+                            variant_id: variant.id,
+                            form_type,
+                            spelling: variant.spelling.clone(),
+                            dialect: variant.dialect,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
         form.base_form_ids
             .iter()
             .map(|base_form_id| PublishedSentenceTargetCandidateV3 {
@@ -689,12 +713,14 @@ impl PublishedAssociationTarget {
                 publication_id,
                 pos_id,
                 base_form_id: *base_form_id,
+                kind: self.kind,
                 headword: self.headword.clone(),
                 pos: pos.pos.clone(),
                 matched_form_id: form.id,
                 matched_variant_id: variant.id,
                 matched_dialect: variant.dialect,
                 matched_form_type: form_type,
+                forms: candidate_forms.clone(),
                 component_usages: variant.component_usages.clone(),
                 matches: vec![evidence.clone()],
                 senses: pos

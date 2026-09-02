@@ -334,6 +334,7 @@ use utoipa::{
             crate::lexicon::dto::SentenceTargetMatchKindV3,
             crate::lexicon::dto::SentenceTargetMatchEvidenceV3,
             crate::lexicon::dto::SentenceTargetSenseV3,
+            crate::lexicon::dto::SentenceTargetCandidateFormV3,
             crate::lexicon::dto::PublishedSentenceTargetCandidateV3,
             crate::lexicon::dto::SentenceTargetDraftStateV3,
             crate::lexicon::dto::SentenceTargetDraftLinkabilityV3,
