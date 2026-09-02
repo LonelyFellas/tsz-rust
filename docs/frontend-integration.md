@@ -1033,7 +1033,8 @@ detection 快照缺该字段，反序列化退化成空摘要（`total = 0`、�
 ### 17.1 背景
 
 短语 step3「成分用词」卡片用 `POST /entries/sentence-targets/resolve` 的候选列词形。候选按
-`(entry, pos, base_form_id)` 展开，`forms` 却是整个词性的清单；目标词条有多个变化组时，
+`(entry, publication, pos, base_form_id, matched_variant_id)` 展开（命中词形能搭配几个原形就出
+几条，跨组去重），`forms` 却是整个词性的清单；目标词条有多个变化组时，
 改选另一组的屈折形只能沿用候选行的 `base_form_id`，保存校验 `phrase_component_matches_target`
 要求 form 与 base 同组，于是 400 `invalid_request_body`（`field=component_usages`；
 前端 PR 里说的 422 就是它）。前端手上没有任何数据能算出配套的 base，只能后端给。
@@ -1041,8 +1042,10 @@ detection 快照缺该字段，反序列化退化成空摘要（`total = 0`、�
 ### 17.2 后端改动
 
 `SentenceTargetCandidateFormV3` 新增**必填**字段 `base_form_ids: Uuid[]`（`maxItems 2000`）：
-该词形所在变化组的原形 id，按 id 排序去重，顺序不表示优先级。空数组表示该词形没挂进任何
-变化组，选它做成分必然被拒。候选行的 `base_form_id` 与 `senses[].base_form_id` 补了说明：
+该词形可搭配的原形 id：成分保存要求 form 与 base 同组（或 form 自身就是那个 base），这里给出
+满足该条件的全部 base，按 id 排序去重，顺序不表示优先级。空数组即不可选：目标来自 V2 发布
+（成分只接受 V3 发布的目标），或词形没挂进任何带原形的变化组。非空只表示同组这一条满足，
+成分保存另有不得自指、目标短语不得再套短语等限制，仍可能被拒。候选行的 `base_form_id` 与 `senses[].base_form_id` 补了说明：
 它们只对命中词形有效，改选其他词形时以该词形自带的 `base_form_ids` 为准。
 
 ### 17.3 前端要怎么改
@@ -1050,9 +1053,9 @@ detection 快照缺该字段，反序列化退化成空摘要（`total = 0`、�
 | 步骤 | 动作 |
 | --- | --- |
 | 1 | 跑 `sync:openapi`——`docs/openapi.json` 已重导，`base_form_ids` 是必填字段，不同步会挂契约测试 |
-| 2 | 改选词形时：候选行自己的 `base_form_id` 若在所选词形的 `base_form_ids` 里就沿用，否则任取一个（每一项都能过校验，后端不区分同组内的多个原形）；更省事的做法是词形选择器直接按当前组过滤 |
-| 3 | `base_form_ids` 为空的词形置灰；来自 V2 发布的候选不能做短语成分（同组只是必要条件，成分只接受 V3 发布的目标） |
-| 4 | 错误处理对准 **400** `invalid_request_body` / `field=component_usages`，不是 422 |
+| 2 | 改选词形时：候选行自己的 `base_form_id` 若在所选词形的 `base_form_ids` 里就沿用，否则任取一个（后端不区分同组内的多个原形）；更省事的做法是词形选择器直接按当前组过滤 |
+| 3 | `base_form_ids` 为空的词形置灰——V2 发布的目标全部如此（成分只接受 V3 发布的目标），前端不必另辨版本 |
+| 4 | 错误处理对准 **400** `invalid_request_body` / `field=component_usages`，不是 422。非空的 `base_form_ids` 只保证同组这一条，成分保存另有不得自指、目标短语不得再套短语等限制，这条错误路径不能省 |
 
 ### 17.4 兼容性
 

@@ -812,12 +812,13 @@ pub struct SentenceTargetCandidateFormV3 {
     pub form_type: WordFormTypeV3,
     pub spelling: String,
     pub dialect: Dialect,
-    /// 该词形所在变化组的原形 id，按 id 排序去重，顺序不表示优先级。短语成分保存时
-    /// 要求 form 与 base form 同组：改选词形时，候选行自己的 base_form_id 若在此列表内
-    /// 就沿用，否则任取一个，列表里每一项都能通过校验，后端不区分同组内的多个原形。
-    /// 为空表示这条词形没有挂进任何变化组，选它做成分必然被保存校验拒绝。
-    /// 同组只是必要条件：短语成分只接受 V3 发布的目标，来自 V2 发布的候选无论选哪个
-    /// 原形都会被拒。
+    /// 该词形可搭配的原形 id：短语成分保存要求 form 与 base 同组（或 form 自身就是那个 base），
+    /// 这里给出满足该条件的全部
+    /// base，按 id 排序去重，顺序不表示优先级。改选词形时，候选行自己的 base_form_id 若在
+    /// 此列表内就沿用，否则任取一个，后端不区分同组内的多个原形。
+    /// 为空即不可选：目标来自 V2 发布（成分只接受 V3 发布的目标），或词形没挂进任何带原形
+    /// 的变化组。非空只表示同组这一条满足，成分保存另有不得自指、目标短语不得再套短语等
+    /// 限制，仍可能被拒。
     // 上限同样取共享节点上限 2000：原形是词形的子集，不可能比词形还多。
     #[schema(max_items = 2000)]
     pub base_form_ids: Vec<Uuid>,
@@ -829,9 +830,9 @@ pub struct PublishedSentenceTargetCandidateV3 {
     pub entry_id: Uuid,
     pub publication_id: Uuid,
     pub pos_id: Uuid,
-    /// 命中词形（matched_form_id）所在变化组的原形；命中词形挂在多个变化组下时，
-    /// 每个变化组各出一条候选。改选 forms 里的其他词形时，配套的原形以该词形自带的
-    /// base_form_ids 为准，不要沿用这里的值。
+    /// 命中词形（matched_form_id）所属的原形，标明这条候选的身份：命中词形挂在几个原形下就
+    /// 出几条候选，跨组去重。它不表示可用作短语成分——能不能选、配哪个 base，一律以
+    /// forms[].base_form_ids 为准（V2 发布的目标该列表恒为空，这里却仍有值）。
     pub base_form_id: Uuid,
     pub kind: EntryKind,
     pub headword: String,
