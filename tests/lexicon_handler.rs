@@ -19787,6 +19787,245 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
 }
 
 #[sqlx::test]
+async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 目标词条改成两个同拼写原形各自成组、各带一条复数。候选按原形展开，所以「另一组的复数」
+    // 落进候选清单时，配套的 base form 只能从词形自带的 base_form_ids 里取。
+    let word_created = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let word_entry_id = word_created["word"]["id"].as_str().unwrap().to_owned();
+    let mut forms = word_created["word"]["forms"].clone();
+    let first_base_id = forms["pos"][0]["forms"][0]["id"].clone();
+    let second_base_id = forms["pos"][0]["forms"][1]["id"].clone();
+    let first_plural_id = Uuid::now_v7();
+    let second_plural_id = Uuid::now_v7();
+    let plural = |id: Uuid| {
+        json!({
+            "id": id,
+            "form_type": "plural",
+            "regional_variants": {
+                "mode": "uk_us",
+                "uk": {
+                    "id": Uuid::now_v7(),
+                    "dialect": "uk",
+                    "spelling": "harbours",
+                    "origin": "manual",
+                    "pronunciations": [{
+                        "id": Uuid::now_v7(),
+                        "dict_phonetic": "/ˈhɑːbəz/",
+                        "actual_pron": "hɑːbəz",
+                        "style": "normal"
+                    }]
+                },
+                "us": {
+                    "id": Uuid::now_v7(),
+                    "dialect": "us",
+                    "spelling": "harbors",
+                    "origin": "manual",
+                    "pronunciations": [{
+                        "id": Uuid::now_v7(),
+                        "dict_phonetic": "/ˈhɑrbərz/",
+                        "actual_pron": "hɑrbərz",
+                        "style": "normal"
+                    }]
+                }
+            }
+        })
+    };
+    {
+        let pos_forms = forms["pos"][0]["forms"].as_array_mut().unwrap();
+        pos_forms.push(plural(first_plural_id));
+        pos_forms.push(plural(second_plural_id));
+    }
+    forms["pos"][0]["form_groups"] = json!([{
+        "id": Uuid::now_v7(),
+        "is_regular": true,
+        "members": [
+            {"id": Uuid::now_v7(), "form_id": first_base_id},
+            {"id": Uuid::now_v7(), "form_id": first_plural_id}
+        ]
+    }, {
+        "id": Uuid::now_v7(),
+        "is_regular": false,
+        "members": [
+            {"id": Uuid::now_v7(), "form_id": second_base_id},
+            {"id": Uuid::now_v7(), "form_id": second_plural_id}
+        ]
+    }]);
+    let (_, forms_saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &word_entry_id,
+        word_created["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    let (status, meanings_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{word_entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": forms_saved["word"]["revision"],
+            "intent": "complete",
+            "content":
+                complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone())
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{meanings_saved}");
+    let (status, word_published) = publish_ready_v3(&state, &bearer, &meanings_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{word_published}");
+
+    let (status, resolved) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "sentence_text": "harbour",
+            "source_dialect": "common",
+            "mode": "selected_segments",
+            "selected_segments": [{"start": 0, "end": 7, "surface": "harbour"}],
+            "include_drafts": false
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    let candidate = resolved["range_results"][0]["published_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| {
+            candidate["entry_id"] == json!(word_entry_id)
+                && candidate["base_form_id"] == first_base_id
+        })
+        .expect("第一个原形应有自己的候选行");
+    let cross_group_form = candidate["forms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|form| form["form_id"] == json!(second_plural_id) && form["dialect"] == "uk")
+        .expect("候选词形清单应覆盖另一变化组的复数");
+    assert_eq!(
+        cross_group_form["base_form_ids"],
+        json!([second_base_id]),
+        "跨组词形要指回自己那组的原形：{candidate}"
+    );
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "phrase",
+            "surface": "harbour club"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let mut create_input = json!({
+        "schema_version": 3,
+        "detection_id": detection["detection_id"],
+        "kind": "phrase"
+    });
+    if let Some(token) = detection["surface_match_page"]["surface_confirmation_token"].as_str() {
+        create_input["confirmed_surface_match_token"] = json!(token);
+    }
+    let (status, phrase_created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(create_input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase_created}");
+    let phrase_entry_id = phrase_created["word"]["id"].as_str().unwrap().to_owned();
+    let mut phrase_forms = complete_v3_forms_fixture();
+    for form in phrase_forms["pos"][0]["forms"].as_array_mut().unwrap() {
+        form["regional_variants"]["uk"]["spelling"] = json!("harbour club");
+        form["regional_variants"]["us"]["spelling"] = json!("harbour club");
+    }
+    // 成分完全由 resolve 的候选载荷拼出，正是前端级联选择那一步手上的数据。
+    let component = |base_form_id: &Value| {
+        json!([{
+            "id": Uuid::now_v7(),
+            "state": "resolved",
+            "literal": "harbours",
+            "target_word_id": candidate["entry_id"],
+            "target_publication_id": candidate["publication_id"],
+            "target_pos_id": candidate["pos_id"],
+            "target_base_form_id": base_form_id,
+            "target_sense_id": candidate["senses"][0]["sense_id"],
+            "target_form_id": cross_group_form["form_id"],
+            "target_variant_id": cross_group_form["variant_id"],
+            "target_dialect": cross_group_form["dialect"],
+            "target_form_type": cross_group_form["form_type"],
+            "target_headword": candidate["headword"],
+            "target_gloss": candidate["senses"][0]["gloss"]
+        }])
+    };
+
+    phrase_forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
+        component(&candidate["base_form_id"]);
+    let (status, rejected) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{phrase_entry_id}/steps/forms"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": 1,
+            "intent": "complete",
+            "content": phrase_forms.clone()
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "沿用候选行的 base_form_id 会让 form 与 base 跨组：{rejected}"
+    );
+    assert_eq!(rejected["field"], "component_usages");
+
+    phrase_forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
+        component(&cross_group_form["base_form_ids"][0]);
+    let (_, phrase_saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &phrase_entry_id,
+        1,
+        "complete",
+        phrase_forms,
+    )
+    .await;
+    assert_eq!(
+        phrase_saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"]
+            [0]["target_base_form_id"],
+        second_base_id,
+        "换成词形自带的 base_form_ids 后应能保存：{phrase_saved}"
+    );
+}
+
+#[sqlx::test]
 async fn legacy_surface_backfill_ignores_native_v3_entries(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

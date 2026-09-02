@@ -810,6 +810,12 @@ pub struct SentenceTargetCandidateFormV3 {
     pub form_type: WordFormTypeV3,
     pub spelling: String,
     pub dialect: Dialect,
+    /// 该词形所在变化组的原形 id。短语成分保存时要求 form 与 base form 同组，
+    /// 调用方据此在改选词形时挑出配套的 base_form_id；为空表示这条词形没有挂进
+    /// 任何变化组，选它做成分必然被保存校验拒绝。
+    /// 上限同样取共享节点上限 2000：原形是词形的子集，不可能比词形还多。
+    #[schema(max_items = 2000)]
+    pub base_form_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

@@ -262,7 +262,14 @@ fn resolve_candidates_preserve_base_and_sense_identity_and_draft_safety() {
     assert_required(
         &spec,
         candidate_form,
-        &["form_id", "variant_id", "form_type", "spelling", "dialect"],
+        &[
+            "form_id",
+            "variant_id",
+            "form_type",
+            "spelling",
+            "dialect",
+            "base_form_ids",
+        ],
     );
     let sense = schema_property(&spec, base_candidate, "senses")
         .get("items")

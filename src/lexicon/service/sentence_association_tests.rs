@@ -459,9 +459,8 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
     assert_eq!(first.base_form_id, first_base_id);
     assert_eq!(second.base_form_id, second_base_id);
 
-    fn inventory(
-        candidate: &PublishedSentenceTargetCandidateV3,
-    ) -> Vec<(Uuid, Uuid, WordFormTypeV3, Dialect, &str)> {
+    type CandidateFormRow<'a> = (Uuid, Uuid, WordFormTypeV3, Dialect, &'a str, Vec<Uuid>);
+    fn inventory(candidate: &PublishedSentenceTargetCandidateV3) -> Vec<CandidateFormRow<'_>> {
         candidate
             .forms
             .iter()
@@ -472,12 +471,15 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
                     form.form_type,
                     form.dialect,
                     form.spelling.as_str(),
+                    form.base_form_ids.clone(),
                 )
             })
             .collect()
     }
     // 每个候选都要拿到完整的三条词形，最后一个不能因为被 move 走而空掉；
     // 逐字段比对，避免只看拼写时词形与变体错配也能蒙混过关。
+    // base_form_ids 逐条声明所属变化组：两个原形各自成组，屈折形跨两组，
+    // 调用方跨组改选词形时才有配套的 base form 可送。
     let expected = vec![
         (
             first_base_id,
@@ -485,6 +487,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
             WordFormTypeV3::Base,
             Dialect::Common,
             "hang",
+            vec![first_base_id],
         ),
         (
             second_base_id,
@@ -492,6 +495,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
             WordFormTypeV3::Base,
             Dialect::Common,
             "hang",
+            vec![second_base_id],
         ),
         (
             matched_form_id,
@@ -499,6 +503,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
             WordFormTypeV3::PastTense,
             Dialect::Common,
             "hung",
+            vec![first_base_id, second_base_id],
         ),
     ];
     assert_eq!(inventory(first), expected);
