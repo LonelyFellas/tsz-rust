@@ -1,10 +1,11 @@
 use super::*;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::lexicon::{
     dto::{
         DraftSentenceTargetCandidateV3, PublishedSentenceTargetCandidateV3,
+        SearchComponentTargetsV3Input, SearchComponentTargetsV3Response,
         SentenceTargetDiscoveryCompletenessV3, SentenceTargetDraftLinkabilityV3,
         SentenceTargetDraftStateV3, SentenceTargetMatchEvidenceV3, SentenceTargetMatchKindV3,
         SentenceTargetRangeResultV3,
@@ -19,6 +20,11 @@ use super::sentence_association::PublishedAssociationTarget;
 
 const MAX_DISCOVERY_TOKENS: usize = 100;
 const MAX_CONTIGUOUS_PHRASE_TOKENS: usize = 40;
+const DEFAULT_COMPONENT_TARGET_PAGE_SIZE: u32 = 50;
+const MAX_COMPONENT_TARGET_PAGE_SIZE: u32 = 200;
+/// 关键字检索一次最多取回的词面行数。ILIKE 的前置通配符走不了索引，这个上限只框住返回负载
+/// 与组装成本，不减少扫描；命中触顶时响应的 `truncated` 为 true。
+const MAX_COMPONENT_TARGET_SURFACE_ROWS: i64 = 2000;
 
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -150,7 +156,7 @@ impl LexiconService {
                 sentence_text,
                 segments,
                 normalized,
-                published_candidates(&surfaces, &targets, evidence),
+                published_candidates(&surfaces, &targets, Some(evidence)),
                 draft_matches,
                 RangeResultPagination {
                     page_size,
@@ -184,6 +190,117 @@ impl LexiconService {
             range_results,
         })
     }
+
+    /// 短语成分目标的关键字检索：与 resolve 共用发布过滤与候选组装，只把「词面等值」换成
+    /// 「词面包含」。只回已发布且未归档的词条——成分关联要存 `target_publication_id`，
+    /// 草稿没有发布快照，保存时会被 `validate_phrase_components` 拒掉。
+    pub async fn search_component_targets_v3(
+        &self,
+        input: SearchComponentTargetsV3Input,
+        allow_v3: bool,
+    ) -> Result<SearchComponentTargetsV3Response, LexiconServiceError> {
+        if !allow_v3 {
+            return Err(LexiconServiceError::V3StorageUnavailable);
+        }
+        let keyword = component_target_keyword(&input.q)?;
+        let page_size = component_target_page_size(input.page_size)?;
+        // 关键字检索没有句子，也就没有 source dialect 可依；英美两个 scope 都查。
+        let dialect_scopes = discovery_scopes(Dialect::Common);
+        let mut transaction = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+        let surfaces = LexiconRepository::published_component_target_surfaces(
+            &mut transaction,
+            &dialect_scopes,
+            keyword,
+            input.kind,
+            MAX_COMPONENT_TARGET_SURFACE_ROWS,
+        )
+        .await
+        .map_err(repository_error)?;
+        let scan_capped = surfaces.len() as i64 >= MAX_COMPONENT_TARGET_SURFACE_ROWS;
+        // 快照是整份发布 JSONB（全部词形、词义、例句、关系）。词面行上限是 2000，直接照单
+        // 取快照就会为了回一页而拉回并解析上百份，绝大多数随后被 truncate 丢掉。一页最多
+        // MAX_COMPONENT_TARGET_PAGE_SIZE 条候选（去重键含 entry_id，200 个词条至少产出
+        // 200 条互不相同的候选），取回的词条数不必超过它。
+        // 去重按 surfaces 的首次出现顺序，而不是 entry_id 的 UUID 序：surfaces 已由 SQL 按
+        // normalized_surface 排好，与那 2000 行窗口同一口径；换成 UUID 序会让截断轴与展示
+        // 排序无关，搜 cat 反而可能丢掉 cat 本身。
+        let mut seen = HashSet::new();
+        let mut entry_ids = surfaces
+            .iter()
+            .map(|surface| surface.entry_id)
+            .filter(|entry_id| seen.insert(*entry_id))
+            .collect::<Vec<_>>();
+        let entries_capped = entry_ids.len() > MAX_COMPONENT_TARGET_PAGE_SIZE as usize;
+        entry_ids.truncate(MAX_COMPONENT_TARGET_PAGE_SIZE as usize);
+        let targets =
+            LexiconRepository::current_publication_snapshots(&mut transaction, &entry_ids)
+                .await
+                .map_err(repository_error)?
+                .into_iter()
+                .map(|record| {
+                    PublishedAssociationTarget::from_snapshot(
+                        record.snapshot,
+                        true,
+                        record.publication_id,
+                    )
+                    .map(|target| (record.entry_id, target))
+                })
+                .collect::<Result<HashMap<_, _>, _>>()?;
+        transaction.commit().await.map_err(database_error)?;
+
+        // 没有句子区间就没有「命中了哪一段」，候选的 matches 留空而不是编一条证据。
+        let mut matches = published_candidates(&surfaces, &targets, None);
+        // published_candidates 按 id 元组分组，顺序对人不可读；稳定排序换成按词面，
+        // 同词面内仍保持分组键的确定顺序。
+        matches.sort_by(|left, right| left.headword.cmp(&right.headword));
+        let total = matches.len() as u64;
+        let truncated = scan_capped || entries_capped || matches.len() > page_size;
+        matches.truncate(page_size);
+
+        Ok(SearchComponentTargetsV3Response {
+            schema_version: 3,
+            matches,
+            total,
+            truncated,
+        })
+    }
+}
+
+fn component_target_keyword(q: &str) -> Result<&str, LexiconServiceError> {
+    let invalid = |message| LexiconServiceError::UnprocessableField {
+        field: "q",
+        message,
+    };
+    if q.contains('\0') {
+        return Err(invalid("q must not contain NUL characters"));
+    }
+    if q.trim() != q {
+        return Err(invalid("q must not have leading or trailing whitespace"));
+    }
+    if !(1..=100).contains(&q.chars().count()) {
+        return Err(invalid("q must contain between 1 and 100 codepoints"));
+    }
+    Ok(q)
+}
+
+fn component_target_page_size(page_size: Option<u32>) -> Result<usize, LexiconServiceError> {
+    let value = page_size.unwrap_or(DEFAULT_COMPONENT_TARGET_PAGE_SIZE);
+    if !(1..=MAX_COMPONENT_TARGET_PAGE_SIZE).contains(&value) {
+        return Err(LexiconServiceError::InvalidField {
+            field: "page_size",
+            message: "page_size must be between 1 and 200",
+        });
+    }
+    Ok(value as usize)
 }
 
 fn page_size(input: &ResolveSentenceTargetsV3Input) -> Result<usize, LexiconServiceError> {
@@ -402,7 +519,7 @@ fn automatic_range_result(
         sentence_text,
         matched.source_segments,
         matched.normalized_surface,
-        published_candidates(&matched.candidates, targets, evidence),
+        published_candidates(&matched.candidates, targets, Some(evidence)),
         Vec::new(),
         RangeResultPagination {
             page_size,
@@ -432,7 +549,7 @@ fn match_evidence(
 fn published_candidates(
     surfaces: &[SentenceDiscoverySurfaceRecord],
     targets: &HashMap<Uuid, PublishedAssociationTarget>,
-    evidence: SentenceTargetMatchEvidenceV3,
+    evidence: Option<SentenceTargetMatchEvidenceV3>,
 ) -> Vec<PublishedSentenceTargetCandidateV3> {
     let mut grouped =
         BTreeMap::<(Uuid, Uuid, Uuid, Uuid, Uuid), PublishedSentenceTargetCandidateV3>::new();
@@ -618,5 +735,35 @@ mod tests {
                 .is_err(),
             "cursor from an older discovery generation must be stale"
         );
+    }
+
+    #[test]
+    fn component_target_keyword_rejects_untrimmed_empty_and_overlong_input() {
+        assert_eq!(component_target_keyword("give").unwrap(), "give");
+        // 通配符字面量本身是合法关键字；不当通配符用是 escape_like_literal 的职责。
+        assert_eq!(component_target_keyword("100%_off").unwrap(), "100%_off");
+        assert_eq!(
+            component_target_keyword(&"字".repeat(100))
+                .unwrap()
+                .chars()
+                .count(),
+            100
+        );
+        for rejected in ["", " give", "give ", "gi\0ve"] {
+            assert!(
+                component_target_keyword(rejected).is_err(),
+                "{rejected:?} 应被拒"
+            );
+        }
+        assert!(component_target_keyword(&"字".repeat(101)).is_err());
+    }
+
+    #[test]
+    fn component_target_page_size_defaults_to_fifty_and_caps_at_two_hundred() {
+        assert_eq!(component_target_page_size(None).unwrap(), 50);
+        assert_eq!(component_target_page_size(Some(1)).unwrap(), 1);
+        assert_eq!(component_target_page_size(Some(200)).unwrap(), 200);
+        assert!(component_target_page_size(Some(0)).is_err());
+        assert!(component_target_page_size(Some(201)).is_err());
     }
 }

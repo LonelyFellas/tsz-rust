@@ -1193,3 +1193,18 @@ pub(super) async fn insert_idempotency_value(
     .map(|_| ())
     .map_err(LexiconRepositoryError::Database)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::escape_like_literal;
+
+    #[test]
+    fn escape_like_literal_neutralizes_wildcards_and_the_escape_character() {
+        // 关键字里的 % 与 _ 必须当字面量：搜 "100%" 只该命中真的带百分号的词面。
+        assert_eq!(escape_like_literal("100%"), r"100\%");
+        assert_eq!(escape_like_literal("give_up"), r"give\_up");
+        // 反斜杠先自转义，否则用户输入的 "\%" 会重新变回通配符。
+        assert_eq!(escape_like_literal(r"a\%b"), r"a\\\%b");
+        assert_eq!(escape_like_literal("give"), "give");
+    }
+}

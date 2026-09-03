@@ -664,7 +664,8 @@ impl PublishedAssociationTarget {
         pos_id: Uuid,
         matched_form_id: Uuid,
         matched_variant_id: Uuid,
-        evidence: SentenceTargetMatchEvidenceV3,
+        // 关键字检索没有句子区间，传 None 即候选不带命中证据；后端不为此构造假证据。
+        evidence: Option<SentenceTargetMatchEvidenceV3>,
     ) -> Vec<PublishedSentenceTargetCandidateV3> {
         let Some(pos) = self.pos.iter().find(|pos| pos.id == pos_id) else {
             return Vec::new();
@@ -737,7 +738,7 @@ impl PublishedAssociationTarget {
                 matched_form_type: form_type,
                 forms,
                 component_usages: variant.component_usages.clone(),
-                matches: vec![evidence.clone()],
+                matches: evidence.iter().cloned().collect(),
                 senses: pos
                     .senses
                     .iter()
