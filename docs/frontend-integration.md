@@ -1191,6 +1191,52 @@ Execution Time: 3.743 ms       -- 全表 1242 行 / 60 buffer page
 最多取回 2000 条词面行」缓解。越过上面的阈值时，正确做法是单独排一次索引迁移
 （`CREATE EXTENSION pg_trgm` + `surface` 上的 GIN 索引），不在本 PR 里做。
 
+## 19. V3 列表行补方言摘要 `dialects`（后端已实现）
+
+> **状态（2026-09-02）**：后端已实现并重新导出 `docs/openapi.json`；**前后端必须同批部署**（见 §18.4）。
+
+### 19.1 背景
+
+智能词库列表的「方言」列在 V2 行读 `AdminWordListItem.dialects`（由 `entry_headwords` 按
+`headword_mode` 聚合：unified → `[common]`，distinguish → `[uk, us]`）。V3 行的
+`AdminWordListItemV3` 一直没有等价字段，admin 对 V3 行固定渲染 `-`；库里全是 V3 词条后整列失效。
+
+V3 的「方言」在数据上有两个来源：建条 step 1 的英美选择只是 `v3_entry_state.initial_headwords`
+里的**一次性快照**（建条后不再更新，仅用于 `detection_basis_dialect` 展示与 surface 校验）；
+真正决定词形结构与发布内容的是**各词性**的 `dialect_rules.spelling_mode`（`entry_pos.spelling_mode`），
+词形步可随时改，且只在建条那一刻按词典建议灌过一次。两者可分叉（例：建条选通用、后来在词性页
+改成英美的 `colour up`）。列表摘要以后者为准。
+
+### 19.2 后端改动
+
+`AdminWordListItemV3` 新增**必填**字段 `dialects: Dialect[]`，按词性**当前**设置聚合：
+
+| 词性 `spelling_mode` 集合 | `dialects` | 前端展示 |
+| --- | --- | --- |
+| 含任一 `distinguish` | `["uk", "us"]` | 英式英语 / 美式英语 |
+| 全为 `unified` | `["common"]` | 默认 |
+| 没有任何词性 | `[]` | `-`（未知，前端不落回默认） |
+
+只读 `entry_pos.spelling_mode`（V2/V3 行由约束保证非空；legacy 行为 NULL 已过滤），不看
+`initial_headwords`，也不看 `matched_surfaces`。V2 行的 `dialects` 语义与顺序不变。
+
+### 19.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 跑 `sync:openapi`——`dialects` 是必填字段；runtime schema 对 `AdminWordListItemV3` 既 `additionalProperties: false` 又校验 `required`，不同步会让整个列表接口解码失败 |
+| 2 | `wordListDialects` 两个 schema 都直接读 `record.dialects`；空数组维持 `-`，不要落回「默认」 |
+| 3 | mock / e2e 桩的 V3 列表行补 `dialects` |
+
+### 19.4 兼容性
+
+这不是「纯新增字段、可单独部署」，而且**哪一侧先上都会短暂打挂列表**：后端先带 `dialects` 上线，
+旧前端的 runtime schema 因 `additionalProperties: false` 拒收；前端先上，新 runtime schema 又因
+`required` 缺字段拒收（`missing_required_property`）。两种情况 admin 列表页都整体显示
+「词库查询失败」，直到另一侧跟上。**前后端同批部署，间隔压到最短。**
+
+后端侧纯增量：列表 SQL 多一个标量子查询，无迁移、无 SQLx 缓存变化，revert 即可回退。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_

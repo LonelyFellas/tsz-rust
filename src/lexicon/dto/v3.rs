@@ -1859,6 +1859,9 @@ pub struct AdminWordListItemV3 {
     pub kind: WordEntryKindV3,
     #[schema(read_only)]
     pub presentation: EntryPresentationV3,
+    /// 方言摘要，按词性**当前**设置聚合：任一词性区分英美拼写 → `[uk, us]`，否则 `[common]`；
+    /// 还没有词性的空白草稿为空数组。建条 step 1 的英美选择只是初始快照，不参与此处。
+    pub dialects: Vec<Dialect>,
     pub revision: i64,
     pub lifecycle_revision: i64,
     /// response-only list projection；不得由客户端从 canonical forms 推断。
