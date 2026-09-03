@@ -5,11 +5,11 @@ description: 审查并安全提交、推送 tsz-rust 后端改动：运行 Rust�
 
 # Ship tsz-rust 后端改动
 
-将当前后端工作区安全地送到 feature branch 和 PR。部署不属于本技能；合并并通过 `main` CI 后使用 `deploy`。
+将当前后端工作区安全地送到 feature branch 和对 `dev` 的 PR。分支模型是 feature → `dev` → `main`；部署不属于本技能，dev 合入 `main` 并通过 `main` CI 后使用 `deploy`。
 
 ## 红线
 
-- 不直接提交或推送 `main`。
+- 不直接提交或推送 `main` 或 `dev`。
 - 用户确认前不暂存、不提交、不推送。
 - 不绕过 `.githooks`，禁止 `--no-verify`、改写 `core.hooksPath` 或等效手段。
 - 精确 commit 未通过独立 pre-push code review 时不推送；实现者自查不算独立审查。
@@ -23,11 +23,11 @@ description: 审查并安全提交、推送 tsz-rust 后端改动：运行 Rust�
 ## 1. 建立安全基线
 
 1. 检查状态、完整 diff、当前分支、remotes 和近期提交，保留所有无关或用户已有改动。
-2. 先 `git fetch origin`，再比较本地与 `origin/main`。若历史分叉，停止并说明，不重写远程。
-3. 当前在 `main` 时，从正确的 `origin/main` 基线创建 `feat/<slug>` 或 `fix/<slug>` 分支，并携带工作区改动。
+2. 先 `git fetch origin`，再比较本地与 `origin/dev`。若历史分叉，停止并说明，不重写远程。
+3. 当前在 `main` 或 `dev` 时，从正确的 `origin/dev` 基线创建 `feat/<slug>` 或 `fix/<slug>` 分支，并携带工作区改动。
 4. 确认 `git config core.hooksPath` 为 `.githooks`；不正确时报告并恢复仓库约定，不能借此跳过钩子。
 5. GitHub `origin` 是 PR 与 CI 的权威源；`gitee` 是独立镜像，只有用户明确要求时才同步。
-6. 当前分支已有开着的 PR 时，先查它有没有在你不注意时被合并（`gh pr list --head <branch>` + `git fetch`）。已合并就先 rebase 到新 `origin/main`，**再**开始审查——审查的是最终 SHA，不是马上会变的那个。
+6. 当前分支已有开着的 PR 时，先查它有没有在你不注意时被合并（`gh pr list --head <branch>` + `git fetch`）。已合并就先 rebase 到新 `origin/dev`，**再**开始审查——审查的是最终 SHA，不是马上会变的那个。
 
 ## 2. 后端专项审查
 
@@ -83,7 +83,7 @@ Co-Authored-By: GPT-5 Codex <noreply@openai.com>
 
 ## 6. 独立 pre-push code review
 
-1. 记录 `review_base=origin/main`、`review_sha=$(git rev-parse HEAD)` 和已通过的门禁结果。
+1. 记录 `review_base=origin/dev`、`review_sha=$(git rev-parse HEAD)` 和已通过的门禁结果。
 2. 在新上下文运行只读独立 reviewer：优先使用可调用的 detached exact-commit review，否则创建独立 reviewer 子任务。传入原始目标、base、精确 SHA、仓库规则和测试结果，不传入实现者的审查结论。finder 全部并行启动，不要等一个再开一个；不要给每条 P3 候选各配一个核实 agent。
 3. reviewer 只检查 `review_base...review_sha`，不得编辑文件；报告有文件/行号证据的正确性、回归、安全、数据完整性、并发、性能、API/迁移契约和测试缺口。
 4. **核实预算**：只给 P0–P2、正确性、安全、数据完整性、并发、契约行为类候选配独立 verifier。P3 的清理/复用/文案/测试风格候选不核实，原样列进报告，处置为「留作后续」；例外只有一种——本 PR 自己新加的行上一条明显写错的契约文案，顺手改掉。
@@ -94,6 +94,6 @@ Co-Authored-By: GPT-5 Codex <noreply@openai.com>
 ## 7. 推送与 PR
 
 1. 正常运行 `git push -u origin <branch>`，让 pre-push 执行全 feature clippy 和快速单元测试；失败就修复并回到独立审查，不绕过钩子。代理掐 SSH 或 HTTPS 时按 `tsz-rust-repo-workflow` 记忆里的判据换传输方式，别猜。
-2. 使用 `gh pr create`（分支已有开着的 PR 时用 `gh pr edit` 更新标题正文），正文包含目标、迁移/契约影响、**部署顺序**、独立审查结论与留作后续的清单、质量门结果与回退注意事项。`gh` 走代理报 EOF 时用 `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy gh ...` 直连。
+2. 使用 `gh pr create --base dev`（分支已有开着的 PR 时用 `gh pr edit` 更新标题正文）。base 必须是 `dev`：直接对 `main` 开会让 dev 落后 main 一个 squash 提交，得再补一次同步。正文包含目标、迁移/契约影响、**部署顺序**、独立审查结论与留作后续的清单、质量门结果与回退注意事项。`gh` 走代理报 EOF 时用 `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy gh ...` 直连。
 3. PR 的 GitHub CI 会在 Postgres/Redis 服务下再次运行格式、全 feature clippy 和完整测试。CI 全绿才可合并；PR 自动审查是 push 后的第二层，不替代第 6 步。
 4. 返回 PR 链接；缺少 GitHub CLI/认证时止步于已推送分支并说明。
