@@ -194,6 +194,9 @@ impl LexiconService {
     /// 短语成分目标的关键字检索：与 resolve 共用发布过滤与候选组装，只把「词面等值」换成
     /// 「词面包含」。只回已发布且未归档的词条——成分关联要存 `target_publication_id`，
     /// 草稿没有发布快照，保存时会被 `validate_phrase_components` 拒掉。
+    ///
+    /// 顺序：词面等于 q 的词条最前、以 q 开头的其次、其余按 headword（SQL 与 Rust 两侧同一规则）。
+    /// 分页照 resolve 的游标：绑定 discovery generation 与 q/kind 摘要，词库变动或换关键字即失效。
     pub async fn search_component_targets_v3(
         &self,
         input: SearchComponentTargetsV3Input,
@@ -204,6 +207,7 @@ impl LexiconService {
         }
         let keyword = component_target_keyword(&input.q)?;
         let page_size = component_target_page_size(input.page_size)?;
+        let cursor_digest = component_target_cursor_digest(keyword, input.kind)?;
         // 关键字检索没有句子，也就没有 source dialect 可依；英美两个 scope 都查。
         let dialect_scopes = discovery_scopes(Dialect::Common);
         let mut transaction = self
@@ -216,6 +220,11 @@ impl LexiconService {
             .execute(&mut *transaction)
             .await
             .map_err(database_error)?;
+        let generation = LexiconRepository::sentence_discovery_generation(&mut transaction)
+            .await
+            .map_err(repository_error)?;
+        let offset =
+            component_target_cursor_offset(input.cursor.as_deref(), generation, &cursor_digest)?;
         let surfaces = LexiconRepository::published_component_target_surfaces(
             &mut transaction,
             &dialect_scopes,
@@ -227,12 +236,11 @@ impl LexiconService {
         .map_err(repository_error)?;
         let scan_capped = surfaces.len() as i64 >= MAX_COMPONENT_TARGET_SURFACE_ROWS;
         // 快照是整份发布 JSONB（全部词形、词义、例句、关系）。词面行上限是 2000，直接照单
-        // 取快照就会为了回一页而拉回并解析上百份，绝大多数随后被 truncate 丢掉。一页最多
+        // 取快照就会为了回一页而拉回并解析上百份，绝大多数随后被截掉。一页最多
         // MAX_COMPONENT_TARGET_PAGE_SIZE 条候选（去重键含 entry_id，200 个词条至少产出
         // 200 条互不相同的候选），取回的词条数不必超过它。
-        // 去重按 surfaces 的首次出现顺序，而不是 entry_id 的 UUID 序：surfaces 已由 SQL 按
-        // normalized_surface 排好，与那 2000 行窗口同一口径；换成 UUID 序会让截断轴与展示
-        // 排序无关，搜 cat 反而可能丢掉 cat 本身。
+        // 去重按 surfaces 的首次出现顺序：SQL 已按「等于 → 前缀 → 其余，再按词面」排好，
+        // 首次出现顺序就是词条的最佳档位顺序；换成 UUID 序会让截断轴与展示无关。
         let mut seen = HashSet::new();
         let mut entry_ids = surfaces
             .iter()
@@ -257,21 +265,89 @@ impl LexiconService {
                 .collect::<Result<HashMap<_, _>, _>>()?;
         transaction.commit().await.map_err(database_error)?;
 
+        // 词条档位取它全部命中词面里最好的一档：give 既命中 give（等于）也命中 gives（前缀），算等于。
+        let lowered = keyword.to_lowercase();
+        let mut entry_rank = HashMap::<Uuid, u8>::new();
+        for surface in &surfaces {
+            let rank = component_target_rank(&surface.normalized_surface, &lowered);
+            entry_rank
+                .entry(surface.entry_id)
+                .and_modify(|current| *current = (*current).min(rank))
+                .or_insert(rank);
+        }
         // 没有句子区间就没有「命中了哪一段」，候选的 matches 留空而不是编一条证据。
         let mut matches = published_candidates(&surfaces, &targets, None);
-        // published_candidates 按 id 元组分组，顺序对人不可读；稳定排序换成按词面，
-        // 同词面内仍保持分组键的确定顺序。
-        matches.sort_by(|left, right| left.headword.cmp(&right.headword));
-        let total = matches.len() as u64;
-        let truncated = scan_capped || entries_capped || matches.len() > page_size;
-        matches.truncate(page_size);
+        // 稳定排序：档位 → headword；同词条内保持分组键的确定顺序，前端按 entry_id 分组时相邻。
+        matches.sort_by(|left, right| {
+            let rank = |candidate: &PublishedSentenceTargetCandidateV3| {
+                entry_rank.get(&candidate.entry_id).copied().unwrap_or(2)
+            };
+            rank(left)
+                .cmp(&rank(right))
+                .then_with(|| left.headword.cmp(&right.headword))
+        });
+        let total = matches.len();
+        let has_more = offset.saturating_add(page_size) < total;
+        let page = matches
+            .into_iter()
+            .skip(offset)
+            .take(page_size)
+            .collect::<Vec<_>>();
+        let next_cursor =
+            has_more.then(|| format!("{generation}:{}:{cursor_digest}", offset + page_size));
 
         Ok(SearchComponentTargetsV3Response {
             schema_version: 3,
-            matches,
-            total,
-            truncated,
+            matches: page,
+            total: total as u64,
+            truncated: has_more || scan_capped || entries_capped,
+            next_cursor,
         })
+    }
+}
+
+/// 与 `published_component_target_surfaces` 的 `ORDER BY CASE` 同一规则，两处必须同步改。
+fn component_target_rank(normalized_surface: &str, lowered_keyword: &str) -> u8 {
+    if normalized_surface == lowered_keyword {
+        0
+    } else if normalized_surface.starts_with(lowered_keyword) {
+        1
+    } else {
+        2
+    }
+}
+
+fn component_target_cursor_digest(
+    q: &str,
+    kind: Option<EntryKind>,
+) -> Result<String, LexiconServiceError> {
+    Ok(hex_digest(
+        &sha256_json(&(q, kind)).map_err(serialization_error)?,
+    ))
+}
+
+fn component_target_cursor_offset(
+    cursor: Option<&str>,
+    generation: i64,
+    digest: &str,
+) -> Result<usize, LexiconServiceError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let mut parts = cursor.splitn(3, ':');
+    let cursor_generation = parts.next().and_then(|value| value.parse::<i64>().ok());
+    let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
+    let cursor_digest = parts.next();
+    match (cursor_generation, offset, cursor_digest) {
+        (Some(cursor_generation), Some(offset), Some(cursor_digest))
+            if cursor_generation == generation && cursor_digest == digest && offset <= 100_000 =>
+        {
+            Ok(offset)
+        }
+        _ => Err(LexiconServiceError::InvalidField {
+            field: "cursor",
+            message: "cursor is invalid or stale for this search",
+        }),
     }
 }
 
@@ -756,6 +832,48 @@ mod tests {
             );
         }
         assert!(component_target_keyword(&"字".repeat(101)).is_err());
+    }
+
+    #[test]
+    fn component_target_rank_orders_exact_then_prefix_then_contains() {
+        assert_eq!(component_target_rank("give", "give"), 0);
+        assert_eq!(component_target_rank("give up", "give"), 1);
+        assert_eq!(component_target_rank("forgive", "give"), 2);
+        // 点 me：acme 只是包含，me 本身必须是 0 档，不能被字典序压到后面。
+        assert_eq!(component_target_rank("acme", "me"), 2);
+        assert_eq!(component_target_rank("me", "me"), 0);
+    }
+
+    #[test]
+    fn component_target_cursor_binds_generation_query_and_kind() {
+        let digest = component_target_cursor_digest("give", None).unwrap();
+        assert_ne!(
+            digest,
+            component_target_cursor_digest("give", Some(EntryKind::Phrase)).unwrap(),
+            "kind 不同的搜索不能共用游标"
+        );
+        assert_ne!(
+            digest,
+            component_target_cursor_digest("gave", None).unwrap()
+        );
+        assert_eq!(component_target_cursor_offset(None, 7, &digest).unwrap(), 0);
+        let cursor = format!("7:50:{digest}");
+        assert_eq!(
+            component_target_cursor_offset(Some(&cursor), 7, &digest).unwrap(),
+            50
+        );
+        for (stale, generation) in [
+            (cursor.clone(), 8),                     // 词库变了
+            (format!("7:50:{}", "0".repeat(64)), 7), // 换了关键字/kind
+            (format!("7:100001:{digest}"), 7),       // offset 越界
+            ("garbage".to_owned(), 7),
+            (String::new(), 7),
+        ] {
+            assert!(
+                component_target_cursor_offset(Some(&stale), generation, &digest).is_err(),
+                "{stale:?} @ generation {generation} 应被拒"
+            );
+        }
     }
 
     #[test]
