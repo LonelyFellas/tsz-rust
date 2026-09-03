@@ -3,7 +3,10 @@ use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use super::v3::{replace_v3_sense_component_usages, restore_sense_component_usages};
+use super::v3::{
+    replace_v3_sense_component_usages, restore_sense_component_usages,
+    restore_sentence_zh_translations,
+};
 use super::*;
 use crate::lexicon::dto::{
     ActivatePublicationV3Input, AdminWordAny, AdminWordAnyEnvelope, AdminWordStatus, AdminWordV2,
@@ -169,12 +172,28 @@ impl LexiconService {
         publication_references.extend(
             phrase_component_publication_references(&mut tx, &word.forms, &word.meanings).await?,
         );
+        // V2 往返（下面两处 v2_meanings_to_v3）会丢掉 sense 级成分与多档 zh_translations；
+        // newly_bound 分支还会在中途覆盖 word.meanings，所以先抓一份往返前的原始 V3 作回填源。
+        let pristine_meanings = word.meanings.clone();
         if !newly_bound.is_empty() {
             let mut canonical_v3_meanings = v2_meanings_to_v3(relational_meanings.clone())?;
-            // V2 往返吞掉了释义级成分，回填后才能进投影与快照。
-            restore_sense_component_usages(&word.meanings, &mut canonical_v3_meanings);
+            // V2 往返吞掉了释义级成分与多档译文，回填后才能进投影与快照。
+            restore_sense_component_usages(&pristine_meanings, &mut canonical_v3_meanings);
+            restore_sentence_zh_translations(&pristine_meanings, &mut canonical_v3_meanings);
             let editor_meanings =
                 serde_json::to_value(&canonical_v3_meanings).map_err(serialization_error)?;
+            // sync_canonical_meanings 内部只做 replace_meanings_content（按 V2 relational 重建，
+            // 每句仅 1 档译文、无成分），所以必须复刻 save 路径的持久化顺序：
+            // prepare 别名 → replace_meanings_content → replace_v3_sentence_translations → 成分。
+            // 漏掉译文/成分的重建，投影里的多档/成分就会与节点表脱节，发布节点会漏行、
+            // sense_refs 外键失败。
+            LexiconRepository::prepare_v3_sentence_translation_aliases(
+                &mut tx,
+                entry_id,
+                &canonical_v3_meanings,
+            )
+            .await
+            .map_err(repository_error)?;
             LexiconRepository::sync_canonical_meanings(
                 &mut tx,
                 entry_id,
@@ -184,8 +203,13 @@ impl LexiconService {
             )
             .await
             .map_err(repository_error)?;
-            // sync_canonical_meanings 内部也走 replace_meanings_content，成分节点同样被退役，
-            // 漏了这一次重建就会在 insert_v3_publication_nodes 漏行、随后 sense_refs 外键失败。
+            LexiconRepository::replace_v3_sentence_translations(
+                &mut tx,
+                entry_id,
+                &canonical_v3_meanings,
+            )
+            .await
+            .map_err(repository_error)?;
             replace_v3_sense_component_usages(&mut tx, entry_id, &canonical_v3_meanings).await?;
             word.meanings = canonical_v3_meanings;
         }
@@ -277,7 +301,8 @@ impl LexiconService {
         )
         .await?;
         let mut canonical_v3_meanings = v2_meanings_to_v3(relational_meanings)?;
-        restore_sense_component_usages(&word.meanings, &mut canonical_v3_meanings);
+        restore_sense_component_usages(&pristine_meanings, &mut canonical_v3_meanings);
+        restore_sentence_zh_translations(&pristine_meanings, &mut canonical_v3_meanings);
         word.meanings = canonical_v3_meanings;
         Self::hydrate_v3_sentence_associations_in(&mut tx, entry_id, &mut word.meanings).await?;
         word.status = AdminWordStatus::Published;
