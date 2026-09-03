@@ -35,6 +35,37 @@ pub async fn resolve_sentence_targets(
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/v1/admin/lexicon/entries/component-targets/search",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    request_body = SearchComponentTargetsV3Input,
+    responses(
+        (status = 200, description = "按关键字检索可作短语成分目标的已发布词条", body = SearchComponentTargetsV3Response),
+        (status = 400, description = "JSON 非法或 page_size 越界"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 422, description = "q 为空、两端带空白或超过 100 码点"),
+        (status = 503, description = "V3 发现能力未开启")
+    )
+)]
+pub async fn search_component_targets(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiJson(input): ApiJson<SearchComponentTargetsV3Input>,
+) -> Result<(StatusCode, Json<SearchComponentTargetsV3Response>), AppError> {
+    require_active_admin(&state, &auth).await?;
+    let response = service(&state)
+        .search_component_targets_v3(
+            input,
+            sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+        )
+        .await
+        .map_err(map_error)?;
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
     get,
     path = "/api/v1/admin/lexicon/entries/{id}",
     tag = "admin-lexicon",

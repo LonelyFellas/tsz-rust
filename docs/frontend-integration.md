@@ -1068,6 +1068,129 @@ runtime contract（`admin-word-v3.runtime-schema.json` 里 `SentenceTargetCandid
 后端侧纯增量：候选只产出不回读（不进 Redis/DB），无迁移、无 SQLx 缓存变化，revert 即可回退；
 前端若已同步带 `base_form_ids` 的快照，回退后端后需同步回退快照。
 
+## 18. 短语成分目标支持关键字检索（后端已实现）
+
+> **状态（2026-09-03）**：后端已实现并重新导出 `docs/openapi.json`；**必须前后端同批部署**，见 §18.4。
+
+### 18.1 背景
+
+短语创建向导第 3 步「成分用词」把短语里的每个词关联到已发布词条，候选走
+`POST /entries/sentence-targets/resolve`。该端点按 `normalized_surface` **等值**匹配，所以在
+短语 `give me` 里点 `give`，只能选到词面正好是 `give` 的词条，选不到 `give up`——而后端本来
+就允许短语做成分目标（最多套一层）。
+
+前端自己接不了：智能词库列表的关键字端点只返回 `AdminWordListItemV3`（`id / presentation /
+gloss / pos_list / levels`），拿不到成分关联必需的 `pos_id / base_form_id / form_id /
+variant_id / sense_id`，也拿不到 §17 才下沉到后端的 `base_form_ids`。
+
+### 18.2 后端改动
+
+新增 `POST /api/v1/admin/lexicon/entries/component-targets/search`。能力门与 resolve 完全相同
+（`SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY`，关闭时同样 `503`
+`smart_lexicon_v3_storage_unavailable`）。
+
+请求 `SearchComponentTargetsV3Input`：
+
+```jsonc
+{
+  "schema_version": 3,
+  "q": "give",    // 必填，1..=100 码点，两端不留空白（带空白直接 422，前端自己 trim）
+  "kind": "word", // 可选，word | phrase；不传则两者都返回
+  "page_size": 50 // 可选，默认 50，上限 200
+}
+```
+
+响应 `SearchComponentTargetsV3Response`：
+
+```jsonc
+{
+  "schema_version": 3,
+  "matches": [
+    /* PublishedSentenceTargetCandidateV3[]，与 resolve 的 published_matches 完全同构 */
+  ],
+  "total": 12,
+  "truncated": false
+}
+```
+
+匹配语义与边界：
+
+- 对 `surface`（词面原拼写）做大小写不敏感的**包含**匹配。关键字里的 `%` `_` `\` 一律按
+  字面量转义，不是通配符。屈折词形也在索引里，搜 `harbours` 命中的是原形词条本身。
+- 只回**已发布且未归档**的词条（`content_scope = 'current_publication'` +
+  `entry.current_publication_id = source.publication_id` + `entry.archived_at IS NULL`）。草稿
+  不进结果——成分关联要存 `target_publication_id`，草稿没有发布快照，保存时 `validate_phrase_components`
+  会拒。
+- 候选按 `headword` 排序；同词面内保持 `(entry, publication, pos, base_form, matched_variant)`
+  的确定顺序。
+- **每条候选的 `matches` 恒为空数组**：关键字检索没有句子区间，「命中了哪一段」无从谈起，
+  后端不构造假证据。前端在关键字模式下别显示命中标识。
+- `total` 是本次扫描窗口内的候选总数；`truncated` 为 true 时它是下界，不是全库命中数。
+  `truncated` 有三种成因：命中数超过 `page_size`、触到后端一次取回 2000 条词面行的上限、
+  或命中词条数超过 200（发布快照是整份 JSONB，一次最多取回 200 份）。前端只需按
+  「结果已截断，请输入更具体的关键字」统一提示，不必区分。
+- **已知匹配边界**：命中的是 `surface`（词面原拼写）而不是 `normalized_surface`。二者的差别
+  只在排版字符上：`normalized_surface` 会把 `’ ‘ ʼ` 折成 `'`、各种连字符折成 `-` 再转小写。
+  所以若某个词条发布时拼写用了弯引号（`don’t`），用 ASCII 撇号搜 `don't` 不会命中。
+  当前库 214 条在线词面里没有一条存在这种差异，暂不影响使用；真出现了再评估是否改成
+  对 `normalized_surface` 匹配。
+- 词形自带的 `base_form_ids` 照旧下发（§17），改选词形仍以它为准。V2 发布的词条同样会
+  出现在结果里（与 resolve 行为一致，不另辨版本），它们每个词形的 `base_form_ids` 恒为
+  空数组，按 §17 的规则置灰即可。
+- 本端点不重复校验成分保存的其余限制（不得自指、短语套短语只一层、每变体 100 条），
+  那些仍由 `validate_phrase_components` 在保存时兜底，错误路径不能省。
+
+错误码：`q` 为空 / 两端带空白 / 超过 100 码点 / 含 NUL → `422 validation_failed`
+（`meta.code = "q"`）；`page_size` 越界 → `400 invalid_query`（`field = "page_size"`）。
+
+### 18.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 跑 `sync:openapi`——`docs/openapi.json` 已重导，新增 `SearchComponentTargetsV3Input` / `SearchComponentTargetsV3Response` 两个 schema，要进 `RUNTIME_SCHEMA_ROOTS` |
+| 2 | 成分用词弹层的关键字为空时维持现有 resolve 调用（按词面等值），非空时（防抖后）改调新端点；两条路产出的候选同构，级联转换与写回逻辑不用动 |
+| 3 | 发请求前 `trim()`；空串不发请求。带空白的 `q` 后端直接 422 |
+| 4 | 关键字模式下不渲染「命中」标识——候选的 `matches` 恒为空 |
+| 5 | `truncated` 为 true 时提示「结果已截断，请输入更具体的关键字」；`total` 别当成全库命中数展示 |
+
+### 18.4 兼容性
+
+**部署顺序：后端先，前端后**（与 §17 那次相反）。
+
+理由要和 §17 区分清楚：§17 是**给既有响应 DTO 加字段**，后端先上会让前端 fail-closed 的
+runtime contract（`additionalProperties: false`）在既有接口上整体报错，所以必须前端先。
+本次**没有改动任何既有响应 DTO**——`PublishedSentenceTargetCandidateV3` /
+`SentenceTargetCandidateFormV3` 等一个字段都没动，只新增了两个独立结构和一条新 path。
+所以：
+
+| 顺序 | 后果 |
+| --- | --- |
+| 后端先上 | 安全。前端不认识这条端点、不会调用；既有接口的响应形状逐字节未变，fail-closed 契约不触发 |
+| 前端先上 | 关键字搜索请求 404。关键字为空时走 resolve 的既有路径不受影响，弹层不会整体挂掉 |
+
+前端下次 `sync:openapi` 时 `docs/openapi.json` 的 `_source_sha256` 会变，契约快照测试要跟着更新——
+那是前端 CI 的事，不影响线上运行时。
+
+后端侧纯新增：无迁移、无数据变更、无 SQLx 缓存变化，revert 即可回退。
+
+**已知性能取舍（有实测，有阈值）**：`ILIKE '%q%'` 的前置通配符用不上
+`lexicon.surface_sources` 现有的四个 btree 索引，`SELECT DISTINCT + ORDER BY` 又强制全排序，
+所以 `LIMIT` 只框住返回负载、救不了扫描。本地开发库 `EXPLAIN ANALYZE` 实测：
+
+```
+Seq Scan on surface_sources  (actual time=0.029..0.570 rows=102)
+  Rows Removed by Filter: 1140
+Execution Time: 3.743 ms       -- 全表 1242 行 / 60 buffer page
+```
+
+按行数线性外推：10 万行约 46ms、100 万行约 460ms、1000 万行约 4.6s。当前 69 个已发布词条
+产出 1242 行（约 18 行/词条），也就是 **5 万词量级 ≈ 90 万行 ≈ 400ms/次**——配 300ms 防抖
+勉强可用，再往上必须换方案。
+
+本次**没有**装 `pg_trgm`、也没有加新索引，只靠「只扫 `current_publication` 分片」与「一次
+最多取回 2000 条词面行」缓解。越过上面的阈值时，正确做法是单独排一次索引迁移
+（`CREATE EXTENSION pg_trgm` + `surface` 上的 GIN 索引），不在本 PR 里做。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_

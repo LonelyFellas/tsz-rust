@@ -30,10 +30,11 @@ use crate::{
             RelatedSearchResponse, ReplaceSentenceAssociationsInput, ResolveSentenceTargetsV3Input,
             ResolveSentenceTargetsV3Response, SaveFormsStepInput, SaveFormsStepInputAny,
             SaveFormsStepInputV3, SaveMeaningsStepInput, SaveMeaningsStepInputAny,
-            SaveMeaningsStepInputV3, SentencePath, StepSaveIntent, SuggestDialectVariantsInputV2,
-            SuggestDialectVariantsResponseV2, SurfaceMatchPageAny, SurfaceMatchSnapshotPathV2,
-            SurfaceMatchSnapshotQueryV2, ValidateAdminWordAnyInput, ValidateAdminWordV2Input,
-            ValidateAdminWordV3Input,
+            SaveMeaningsStepInputV3, SearchComponentTargetsV3Input,
+            SearchComponentTargetsV3Response, SentencePath, StepSaveIntent,
+            SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2, SurfaceMatchPageAny,
+            SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2, ValidateAdminWordAnyInput,
+            ValidateAdminWordV2Input, ValidateAdminWordV3Input,
         },
         impact_store::ImpactStore,
         repository::LexiconRepository,
@@ -58,7 +59,8 @@ pub use commands::{
 pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
 pub use query::{
     get, get_publication, list, list_pending_sentence_associations, list_publications,
-    related_search, resolve_sentence_targets, stats, surface_match_snapshot_page,
+    related_search, resolve_sentence_targets, search_component_targets, stats,
+    surface_match_snapshot_page,
 };
 
 fn service(state: &AppState) -> LexiconService {

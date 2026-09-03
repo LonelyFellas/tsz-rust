@@ -23655,3 +23655,396 @@ async fn v3_create_rejects_invalid_explicit_headwords_without_consuming_detectio
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 }
+
+async fn search_component_targets(
+    state: &AppState,
+    bearer: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries/component-targets/search"),
+        bearer,
+        None,
+        Some(body),
+    )
+    .await
+}
+
+fn component_match_entry_ids(response: &Value) -> HashSet<String> {
+    response["matches"]
+        .as_array()
+        .expect("matches 必须是数组")
+        .iter()
+        .map(|candidate| candidate["entry_id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[sqlx::test]
+async fn component_target_search_matches_published_surfaces_and_hides_drafts_and_archived(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 已发布单词 harbour/harbor，另挂一条复数 harbours/harbors：屈折词形也进 surface_sources，
+    // 搜 "harbours" 应当命中同一个原形词条。
+    let word_created = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let word_entry_id = word_created["word"]["id"].as_str().unwrap().to_owned();
+    let mut forms = word_created["word"]["forms"].clone();
+    let base_form_id = forms["pos"][0]["forms"][0]["id"].clone();
+    let plural_id = Uuid::now_v7();
+    forms["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": plural_id,
+            "form_type": "plural",
+            "regional_variants": {
+                "mode": "uk_us",
+                "uk": {
+                    "id": Uuid::now_v7(),
+                    "dialect": "uk",
+                    "spelling": "harbours",
+                    "origin": "manual",
+                    "pronunciations": [{
+                        "id": Uuid::now_v7(),
+                        "dict_phonetic": "/ˈhɑːbəz/",
+                        "actual_pron": "hɑːbəz",
+                        "style": "normal"
+                    }]
+                },
+                "us": {
+                    "id": Uuid::now_v7(),
+                    "dialect": "us",
+                    "spelling": "harbors",
+                    "origin": "manual",
+                    "pronunciations": [{
+                        "id": Uuid::now_v7(),
+                        "dict_phonetic": "/ˈhɑrbərz/",
+                        "actual_pron": "hɑrbərz",
+                        "style": "normal"
+                    }]
+                }
+            }
+        }));
+    forms["pos"][0]["form_groups"][0]["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": Uuid::now_v7(), "form_id": plural_id}));
+    let (_, forms_saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &word_entry_id,
+        word_created["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    let meanings_saved = save_v3_meanings(
+        &state,
+        &bearer,
+        &forms_saved,
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone()),
+    )
+    .await;
+    let (status, word_published) = publish_ready_v3(&state, &bearer, &meanings_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{word_published}");
+
+    let (phrase_published, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "harbour club", json!([])).await;
+    let phrase_entry_id = phrase_published["word"]["id"].as_str().unwrap().to_owned();
+
+    // 草稿：只保存词形步，不发布。成分关联要存 target_publication_id，草稿没有发布快照。
+    let (draft_entry_id, draft_forms) =
+        create_v3_phrase_draft(&state, &bearer, "harbour sketch").await;
+    save_v3_forms_after_impact(&state, &bearer, &draft_entry_id, 1, "complete", draft_forms).await;
+
+    // 已发布后归档：surface 行还在，但 entry.archived_at 已非空。
+    let (archived_published, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "harbour attic", json!([])).await;
+    let archived_entry_id = archived_published["word"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{archived_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": archived_published["word"]["revision"],
+            "base_lifecycle_revision": archived_published["word"]["lifecycle_revision"],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "归档失败：{archived}");
+
+    let (status, found) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(found["schema_version"], 3);
+    assert_eq!(found["truncated"], false);
+    let entry_ids = component_match_entry_ids(&found);
+    assert_eq!(
+        found["total"].as_u64().unwrap(),
+        found["matches"].as_array().unwrap().len() as u64,
+        "未截断时 total 就是返回条数：{found}"
+    );
+    assert!(
+        entry_ids.contains(&word_entry_id) && entry_ids.contains(&phrase_entry_id),
+        "已发布的单词与短语都该命中：{found}"
+    );
+    assert!(
+        !entry_ids.contains(&draft_entry_id),
+        "草稿不得进成分目标候选：{found}"
+    );
+    assert!(
+        !entry_ids.contains(&archived_entry_id),
+        "归档词条不得进成分目标候选：{found}"
+    );
+
+    let word_candidate = found["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["entry_id"] == json!(word_entry_id))
+        .expect("单词候选应在结果里");
+    assert_eq!(word_candidate["kind"], "word");
+    assert_eq!(
+        word_candidate["matches"],
+        json!([]),
+        "关键字检索没有句子区间，候选不得带命中证据：{word_candidate}"
+    );
+    assert!(
+        !word_candidate["senses"].as_array().unwrap().is_empty(),
+        "候选必须带词义供级联第三层：{word_candidate}"
+    );
+    let candidate_forms = word_candidate["forms"].as_array().unwrap();
+    assert!(
+        candidate_forms
+            .iter()
+            .any(|form| form["form_id"] == json!(plural_id)),
+        "词形清单应覆盖该词性下全部词形：{word_candidate}"
+    );
+    assert!(
+        candidate_forms.iter().all(|form| form["base_form_ids"]
+            .as_array()
+            .is_some_and(|ids| !ids.is_empty())),
+        "V3 目标的每个词形都必须自带 base_form_ids：{word_candidate}"
+    );
+    assert!(
+        candidate_forms.iter().any(|form| form["base_form_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&base_form_id)),
+        "复数应指回同组原形：{word_candidate}"
+    );
+
+    // 屈折词形：搜 "harbours" 命中的仍是原形词条本身。
+    let (status, inflected) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbours"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{inflected}");
+    assert!(
+        component_match_entry_ids(&inflected).contains(&word_entry_id),
+        "屈折词形应命中原形词条：{inflected}"
+    );
+
+    for (kind, expected, unexpected) in [
+        ("word", &word_entry_id, &phrase_entry_id),
+        ("phrase", &phrase_entry_id, &word_entry_id),
+    ] {
+        let (status, filtered) = search_component_targets(
+            &state,
+            &bearer,
+            json!({"schema_version": 3, "q": "harbour", "kind": kind}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{filtered}");
+        let ids = component_match_entry_ids(&filtered);
+        assert!(ids.contains(expected), "kind={kind} 应保留：{filtered}");
+        assert!(
+            !ids.contains(unexpected),
+            "kind={kind} 应过滤掉：{filtered}"
+        );
+    }
+
+    // 通配符字面量：% 被转义，只会命中真的带百分号的词面，也就是没有。
+    let (status, wildcard) =
+        search_component_targets(&state, &bearer, json!({"schema_version": 3, "q": "%"})).await;
+    assert_eq!(status, StatusCode::OK, "{wildcard}");
+    assert_eq!(
+        wildcard["matches"],
+        json!([]),
+        "% 不得当通配符用：{wildcard}"
+    );
+    assert_eq!(wildcard["total"], 0);
+    assert_eq!(wildcard["truncated"], false);
+
+    let (status, paged) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "page_size": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{paged}");
+    assert_eq!(paged["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(paged["truncated"], true, "超出 page_size 必须标 truncated");
+    assert!(paged["total"].as_u64().unwrap() > 1, "{paged}");
+
+    for body in [
+        json!({"schema_version": 3, "q": " harbour"}),
+        json!({"schema_version": 3, "q": "harbour "}),
+        json!({"schema_version": 3, "q": ""}),
+        json!({"schema_version": 3, "q": "h".repeat(101)}),
+    ] {
+        let (status, rejected) = search_component_targets(&state, &bearer, body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body} 应被拒：{rejected}"
+        );
+        assert_eq!(rejected["code"], "validation_failed", "{rejected}");
+        assert_eq!(rejected["meta"]["code"], "q", "{rejected}");
+    }
+    for body in [
+        json!({"schema_version": 3, "q": "harbour", "page_size": 0}),
+        json!({"schema_version": 3, "q": "harbour", "page_size": 201}),
+    ] {
+        let (status, rejected) = search_component_targets(&state, &bearer, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body} 应被拒：{rejected}");
+        assert_eq!(rejected["code"], "invalid_query", "{rejected}");
+        assert_eq!(rejected["field"], "page_size", "{rejected}");
+    }
+}
+
+#[sqlx::test]
+async fn component_target_search_shares_the_discovery_capability_gate_with_resolve(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags {
+            sentence_target_discovery: false,
+            ..SmartLexiconV3Flags::all_enabled()
+        });
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let (status, gated) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{gated}");
+    assert_eq!(gated["code"], "smart_lexicon_v3_storage_unavailable");
+
+    let (status, resolve_gated) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "sentence_text": "harbour",
+            "source_dialect": "common",
+            "mode": "all_published_targets"
+        })),
+    )
+    .await;
+    assert_eq!(
+        (status, &resolve_gated["code"]),
+        (StatusCode::SERVICE_UNAVAILABLE, &gated["code"]),
+        "能力门关闭时两条端点必须给同一种拒绝：{resolve_gated}"
+    );
+}
+
+#[sqlx::test]
+async fn component_target_search_flags_truncated_when_the_scan_row_cap_is_hit(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let (published, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "harbour club", json!([])).await;
+    let entry_id = Uuid::parse_str(published["word"]["id"].as_str().unwrap()).unwrap();
+
+    // truncated 有两条独立成因，这里钉的是「一次取回的词面行触顶」那条：把同一条已发布词面
+    // 复制到 2000 行上限，候选去重后仍然只有几条，但结果必须标 truncated。
+    let cloned = sqlx::query(
+        r#"
+        INSERT INTO lexicon.surface_sources (
+            entry_id, source_id, source_kind, source_node_id, language, entry_kind, dialect,
+            dialect_scope, surface, normalized_surface, normalization_version, source_revision,
+            is_deleted, content_scope, publication_id, pos_id, pos, form_type,
+            content_schema_version, form_id, variant_id, group_ids, projection_version
+        )
+        SELECT base.entry_id, base.source_id || ':bulk:' || bulk.n, base.source_kind,
+               base.source_node_id, base.language, base.entry_kind, base.dialect,
+               base.dialect_scope, base.surface, base.normalized_surface,
+               base.normalization_version, base.source_revision, base.is_deleted,
+               base.content_scope, base.publication_id, base.pos_id, base.pos, base.form_type,
+               base.content_schema_version, base.form_id, base.variant_id, base.group_ids,
+               base.projection_version
+        FROM (
+            SELECT * FROM lexicon.surface_sources
+            WHERE entry_id = $1
+              AND content_scope = 'current_publication'
+              AND is_deleted = FALSE
+              AND pos_id IS NOT NULL
+              AND surface ILIKE '%harbour%'
+            ORDER BY source_id
+            LIMIT 1
+        ) base, generate_series(1, 2000) AS bulk(n)
+        "#,
+    )
+    .bind(entry_id)
+    .execute(&pool)
+    .await
+    .expect("应能把词面行复制到扫描上限");
+    assert_eq!(cloned.rows_affected(), 2000);
+
+    let (status, capped) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "page_size": 200}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{capped}");
+    assert_eq!(
+        capped["truncated"], true,
+        "取回行数触顶必须标 truncated：{capped}"
+    );
+    let matches = capped["matches"].as_array().unwrap();
+    assert!(
+        matches.len() < 200,
+        "触顶与「超出 page_size」是两条独立成因，去重后候选仍可能远少于一页：{capped}"
+    );
+    assert!(
+        matches
+            .iter()
+            .any(|candidate| candidate["entry_id"] == json!(entry_id)),
+        "触顶不该把命中的词条整个丢掉：{capped}"
+    );
+}

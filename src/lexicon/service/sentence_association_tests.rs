@@ -446,11 +446,11 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
         pos_id,
         matched_form_id,
         matched_variant_id,
-        SentenceTargetMatchEvidenceV3 {
+        Some(SentenceTargetMatchEvidenceV3 {
             surface: "hung".to_owned(),
             normalized_surface: "hung".to_owned(),
             match_kind: SentenceTargetMatchKindV3::Word,
-        },
+        }),
     );
 
     let [first, second] = candidates.as_slice() else {
@@ -554,11 +554,11 @@ fn v2_target_candidate_forms_carry_no_base_form_ids() {
         pos_id,
         base_form_id,
         variant_id,
-        SentenceTargetMatchEvidenceV3 {
+        Some(SentenceTargetMatchEvidenceV3 {
             surface: "location".to_owned(),
             normalized_surface: "location".to_owned(),
             match_kind: SentenceTargetMatchKindV3::Word,
-        },
+        }),
     );
 
     let [candidate] = candidates.as_slice() else {
@@ -638,11 +638,11 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
         fixture.pos_id,
         past_id,
         past_variant_id,
-        SentenceTargetMatchEvidenceV3 {
+        Some(SentenceTargetMatchEvidenceV3 {
             surface: "harboured".to_owned(),
             normalized_surface: "harboured".to_owned(),
             match_kind: SentenceTargetMatchKindV3::Word,
-        },
+        }),
     );
 
     let expected_past_bases = vec![lo, hi];

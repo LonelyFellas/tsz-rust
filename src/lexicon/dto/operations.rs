@@ -903,6 +903,39 @@ pub struct ResolveSentenceTargetsV3Response {
     pub range_results: Vec<SentenceTargetRangeResultV3>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SearchComponentTargetsV3Input {
+    #[schema(schema_with = schema_version_3_schema)]
+    #[serde(deserialize_with = "deserialize_schema_version_3")]
+    pub schema_version: u8,
+    /// 关键字：对已发布词面做大小写不敏感的包含匹配，1..=100 码点且两端不留空白。
+    #[schema(min_length = 1, max_length = 100)]
+    pub q: String,
+    /// 只要单词或只要短语；不传则两者都返回。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub kind: Option<EntryKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, minimum = 1, maximum = 200)]
+    pub page_size: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SearchComponentTargetsV3Response {
+    #[schema(schema_with = schema_version_3_schema)]
+    #[serde(deserialize_with = "deserialize_schema_version_3")]
+    pub schema_version: u8,
+    /// 与 resolve 的 `published_matches` 完全同构。关键字检索没有句子区间，所以每条候选的
+    /// `matches` 恒为空数组——没有「命中了句子里的哪一段」可言，后端不构造假证据。
+    pub matches: Vec<PublishedSentenceTargetCandidateV3>,
+    /// 本次扫描窗口内命中的候选总数；`truncated` 为 true 时它是下界，不是全库命中数。
+    pub total: u64,
+    /// 还有未返回的候选：命中数超过 `page_size`，或触到了后端的扫描行/词条数上限。
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PendingSentenceAssociationItemV3 {
