@@ -24048,3 +24048,139 @@ async fn component_target_search_flags_truncated_when_the_scan_row_cap_is_hit(po
         "触顶不该把命中的词条整个丢掉：{capped}"
     );
 }
+
+#[sqlx::test]
+async fn component_target_search_ranks_exact_before_prefix_before_contains_and_pages_with_a_cursor(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 字典序是 big harbour < harbour < harbour club，档位却是 harbour（等于）< harbour club
+    // （前缀）< big harbour（包含）。只按字典序排的话，点 harbour 先看到的是 big harbour。
+    let word_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{word_published}");
+    let exact_id = word_published["word"]["id"].as_str().unwrap().to_owned();
+    let (prefix_published, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "harbour club", json!([])).await;
+    let prefix_id = prefix_published["word"]["id"].as_str().unwrap().to_owned();
+    let (contains_published, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "big harbour", json!([])).await;
+    let contains_id = contains_published["word"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let entry_sequence = |response: &Value| -> Vec<String> {
+        response["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate["entry_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let distinct_in_order = |sequence: &[String]| -> Vec<String> {
+        let mut seen = HashSet::new();
+        sequence
+            .iter()
+            .filter(|id| seen.insert((*id).clone()))
+            .cloned()
+            .collect()
+    };
+
+    let (status, whole) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "page_size": 200}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{whole}");
+    let whole_sequence = entry_sequence(&whole);
+    assert_eq!(
+        distinct_in_order(&whole_sequence),
+        vec![exact_id.clone(), prefix_id.clone(), contains_id.clone()],
+        "等于 → 前缀 → 包含，而不是字典序：{whole}"
+    );
+    assert!(
+        whole.get("next_cursor").is_none(),
+        "一页装得下就不该有下一页：{whole}"
+    );
+    assert_eq!(whole["truncated"], false);
+    assert!(
+        whole_sequence.len() > 3,
+        "三个词条各自展开多条候选，才能让逐条翻页有意义：{whole}"
+    );
+
+    // 逐条翻页：每页 1 条，拼起来必须与整页的顺序逐条相同，total 全程不变。
+    let mut cursor: Option<String> = None;
+    let mut walked = Vec::new();
+    for _ in 0..200 {
+        let mut body = json!({"schema_version": 3, "q": "harbour", "page_size": 1});
+        if let Some(cursor) = &cursor {
+            body["cursor"] = json!(cursor);
+        }
+        let (status, page) = search_component_targets(&state, &bearer, body).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["total"], whole["total"], "{page}");
+        let mut ids = entry_sequence(&page);
+        assert_eq!(ids.len(), 1, "{page}");
+        walked.append(&mut ids);
+        match page["next_cursor"].as_str() {
+            Some(next) => {
+                assert_eq!(page["truncated"], true, "有下一页必须标 truncated：{page}");
+                cursor = Some(next.to_owned());
+            }
+            None => {
+                assert_eq!(page["truncated"], false, "最后一页不该标 truncated：{page}");
+                break;
+            }
+        }
+    }
+    assert_eq!(walked, whole_sequence, "翻页拼接必须与整页逐条一致");
+
+    // 游标绑定 q 与 kind；词库一变（generation 前进）旧游标即失效。
+    let (status, first) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "page_size": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+    for body in [
+        json!({"schema_version": 3, "q": "harbour club", "page_size": 1, "cursor": cursor}),
+        json!({"schema_version": 3, "q": "harbour", "kind": "phrase", "page_size": 1, "cursor": cursor}),
+        json!({"schema_version": 3, "q": "harbour", "page_size": 1, "cursor": "garbage"}),
+    ] {
+        let (status, rejected) = search_component_targets(&state, &bearer, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body} 应被拒：{rejected}");
+        assert_eq!(rejected["code"], "invalid_query", "{rejected}");
+        assert_eq!(rejected["field"], "cursor", "{rejected}");
+    }
+    sqlx::query(
+        "UPDATE lexicon.sentence_discovery_generation SET generation = generation + 1 WHERE singleton = TRUE",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, stale) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "page_size": 1, "cursor": cursor}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "词库变动后旧游标必须失效：{stale}"
+    );
+    assert_eq!(stale["field"], "cursor", "{stale}");
+}
