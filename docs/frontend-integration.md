@@ -1070,22 +1070,25 @@ runtime contract（`admin-word-v3.runtime-schema.json` 里 `SentenceTargetCandid
 
 ## 18. 短语成分目标支持关键字检索（后端已实现）
 
-> **状态（2026-09-03）**：后端已实现并重新导出 `docs/openapi.json`；**必须前后端同批部署**，见 §18.4。
+> **状态（2026-09-03）**：第一版（#89）已随 #91 进 main 并部署 tshb-test。本节描述的是**第二版**：
+> 加了「等于 → 前缀 → 其余」排序、游标分页与 `pg_trgm` 索引。第二版给既有响应加了可选字段
+> `next_cursor`，**部署顺序改回前端先**，见 §18.4。
 
 ### 18.1 背景
 
-短语创建向导第 3 步「成分用词」把短语里的每个词关联到已发布词条，候选走
-`POST /entries/sentence-targets/resolve`。该端点按 `normalized_surface` **等值**匹配，所以在
-短语 `give me` 里点 `give`，只能选到词面正好是 `give` 的词条，选不到 `give up`——而后端本来
-就允许短语做成分目标（最多套一层）。
+短语创建向导第 3 步「成分用词」把短语里的每个词关联到已发布词条，原来走
+`POST /entries/sentence-targets/resolve` 按 `normalized_surface` **等值**匹配：在 `give me` 里点
+`give` 只能选到词面正好是 `give` 的词条，选不到 `give up`。前端自己接不了——列表的关键字端点
+只返回 `AdminWordListItemV3`，拿不到成分关联必需的 `pos_id / base_form_id / form_id /
+variant_id / sense_id`，也拿不到 §17 才下沉的 `base_form_ids`。
 
-前端自己接不了：智能词库列表的关键字端点只返回 `AdminWordListItemV3`（`id / presentation /
-gloss / pos_list / levels`），拿不到成分关联必需的 `pos_id / base_form_id / form_id /
-variant_id / sense_id`，也拿不到 §17 才下沉到后端的 `base_form_ids`。
+**前端的实际用法**（`V3PhraseComponentUsagesCard`）：没有搜索框。点成分词就把**这个词整块当
+`q`** 调本端点（`page_size: 50`、不传 `kind`），候选按 `entry_id` 分组、顺序沿用后端返回顺序；
+resolve 在这张卡片里已不再使用。将来若嫌结果多要加搜索框，纯前端改动：`q` 换成输入值即可。
 
 ### 18.2 后端改动
 
-新增 `POST /api/v1/admin/lexicon/entries/component-targets/search`。能力门与 resolve 完全相同
+端点：`POST /api/v1/admin/lexicon/entries/component-targets/search`。能力门与 resolve 相同
 （`SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY`，关闭时同样 `503`
 `smart_lexicon_v3_storage_unavailable`）。
 
@@ -1094,9 +1097,10 @@ variant_id / sense_id`，也拿不到 §17 才下沉到后端的 `base_form_ids`
 ```jsonc
 {
   "schema_version": 3,
-  "q": "give",    // 必填，1..=100 码点，两端不留空白（带空白直接 422，前端自己 trim）
-  "kind": "word", // 可选，word | phrase；不传则两者都返回
-  "page_size": 50 // 可选，默认 50，上限 200
+  "q": "give",      // 必填，1..=100 码点，两端不留空白（带空白直接 422，前端自己 trim）
+  "kind": "word",   // 可选，word | phrase；不传则两者都返回
+  "page_size": 50,  // 可选，默认 50，上限 200
+  "cursor": "…"     // 可选，上一页返回的 next_cursor
 }
 ```
 
@@ -1105,91 +1109,133 @@ variant_id / sense_id`，也拿不到 §17 才下沉到后端的 `base_form_ids`
 ```jsonc
 {
   "schema_version": 3,
-  "matches": [
-    /* PublishedSentenceTargetCandidateV3[]，与 resolve 的 published_matches 完全同构 */
-  ],
-  "total": 12,
-  "truncated": false
+  "matches": [ /* PublishedSentenceTargetCandidateV3[]，与 resolve 的 published_matches 完全同构 */ ],
+  "total": 137,          // 扫描窗口内的候选总数（跨所有页）
+  "truncated": true,     // 还有下一页，或撞了窗口上限
+  "next_cursor": "…"     // 仅在还有下一页时出现
 }
 ```
 
-匹配语义与边界：
+匹配与排序：
 
-- 对 `surface`（词面原拼写）做大小写不敏感的**包含**匹配。关键字里的 `%` `_` `\` 一律按
-  字面量转义，不是通配符。屈折词形也在索引里，搜 `harbours` 命中的是原形词条本身。
-- 只回**已发布且未归档**的词条（`content_scope = 'current_publication'` +
-  `entry.current_publication_id = source.publication_id` + `entry.archived_at IS NULL`）。草稿
-  不进结果——成分关联要存 `target_publication_id`，草稿没有发布快照，保存时 `validate_phrase_components`
-  会拒。
-- 候选按 `headword` 排序；同词面内保持 `(entry, publication, pos, base_form, matched_variant)`
-  的确定顺序。
-- **每条候选的 `matches` 恒为空数组**：关键字检索没有句子区间，「命中了哪一段」无从谈起，
-  后端不构造假证据。前端在关键字模式下别显示命中标识。
-- `total` 是本次扫描窗口内的候选总数；`truncated` 为 true 时它是下界，不是全库命中数。
-  `truncated` 有三种成因：命中数超过 `page_size`、触到后端一次取回 2000 条词面行的上限、
-  或命中词条数超过 200（发布快照是整份 JSONB，一次最多取回 200 份）。前端只需按
-  「结果已截断，请输入更具体的关键字」统一提示，不必区分。
-- **已知匹配边界**：命中的是 `surface`（词面原拼写）而不是 `normalized_surface`。二者的差别
-  只在排版字符上：`normalized_surface` 会把 `’ ‘ ʼ` 折成 `'`、各种连字符折成 `-` 再转小写。
-  所以若某个词条发布时拼写用了弯引号（`don’t`），用 ASCII 撇号搜 `don't` 不会命中。
-  当前库 214 条在线词面里没有一条存在这种差异，暂不影响使用；真出现了再评估是否改成
-  对 `normalized_surface` 匹配。
-- 词形自带的 `base_form_ids` 照旧下发（§17），改选词形仍以它为准。V2 发布的词条同样会
-  出现在结果里（与 resolve 行为一致，不另辨版本），它们每个词形的 `base_form_ids` 恒为
-  空数组，按 §17 的规则置灰即可。
-- 本端点不重复校验成分保存的其余限制（不得自指、短语套短语只一层、每变体 100 条），
-  那些仍由 `validate_phrase_components` 在保存时兜底，错误路径不能省。
+- 对 `surface`（词面原拼写）做大小写不敏感的**包含**匹配；关键字里的 `%` `_` `\` 一律按字面量
+  转义。屈折词形也在索引里，搜 `harbours` 命中的是原形词条本身。
+- **顺序：词面等于 `q` 的词条最前 → 以 `q` 开头的其次 → 其余，同档按 headword，同一词条的候选
+  相邻。** 点 `give` 先看到 `give`，接着 `give up`、`give up on`，最后才是 `forgive`；点 `me` 第一条
+  就是 `me`，不会被 `acme / came / home` 按字典序挤到后面。排序下沉在 SQL 的 `ORDER BY` 里，所以
+  即使命中超过后端一次取回的 2000 行窗口，等于/前缀的词条也一定在窗口内。
+- 只回**已发布且未归档**的词条；草稿不进结果（成分关联要存 `target_publication_id`，草稿没有
+  发布快照，保存时 `validate_phrase_components` 会拒）。
+- **每条候选的 `matches` 恒为空数组**：关键字检索没有句子区间，后端不构造假证据；前端据此不
+  显示命中标识。
+- 词形自带的 `base_form_ids` 照旧下发（§17）。V2 发布的词条也会出现在结果里（与 resolve 一致），
+  它们每个词形的 `base_form_ids` 恒为空数组，按 §17 置灰即可。
+- 本端点不重复校验成分保存的其余限制（不得自指、短语套短语只一层、每变体 100 条），仍由
+  `validate_phrase_components` 在保存时兜底，错误路径不能省。
+- **已知匹配边界**：命中的是 `surface` 不是 `normalized_surface`，二者只在排版字符上有别
+  （弯引号 `’` 折成 `'`、各种连字符折成 `-`）。词条拼写用了弯引号时用 ASCII 撇号搜不到；当前库
+  没有这种词面，真出现了再评估。
+
+分页：
+
+- 游标照 resolve 的做法：绑定 `discovery generation` 与本次 `q` / `kind` 的摘要。凡是写
+  `surface_sources` 的变动（发布、词形步保存等都会推进 generation）、或换了 `q` / `kind`，旧游标即
+  `400 invalid_query`（`field = "cursor"`）——前端收到就从第一页重来。**归档不推进 generation**
+  （只写 `entries.archived_at`）：翻页期间有词条被归档，它只是从后续页消失，游标仍有效，后续页
+  会整体前移几条——与 resolve 的既有行为一致。
+- 每页重跑一次检索再切片，所以 `total` 跨页不变；`truncated` 为 true 且**没有** `next_cursor`
+  时，表示撞了后端窗口上限（一次最多取回 2000 条词面行 / 200 个词条的发布快照），只能换更具体
+  的关键字。
 
 错误码：`q` 为空 / 两端带空白 / 超过 100 码点 / 含 NUL → `422 validation_failed`
-（`meta.code = "q"`）；`page_size` 越界 → `400 invalid_query`（`field = "page_size"`）。
+（`meta.code = "q"`）；`page_size` 越界或 `cursor` 无效/过期 → `400 invalid_query`
+（`field = "page_size"` / `"cursor"`）。
 
 ### 18.3 前端要怎么改
 
 | 步骤 | 动作 |
 | --- | --- |
-| 1 | 跑 `sync:openapi`——`docs/openapi.json` 已重导，新增 `SearchComponentTargetsV3Input` / `SearchComponentTargetsV3Response` 两个 schema，要进 `RUNTIME_SCHEMA_ROOTS` |
-| 2 | 成分用词弹层的关键字为空时维持现有 resolve 调用（按词面等值），非空时（防抖后）改调新端点；两条路产出的候选同构，级联转换与写回逻辑不用动 |
-| 3 | 发请求前 `trim()`；空串不发请求。带空白的 `q` 后端直接 422 |
-| 4 | 关键字模式下不渲染「命中」标识——候选的 `matches` 恒为空 |
-| 5 | `truncated` 为 true 时提示「结果已截断，请输入更具体的关键字」；`total` 别当成全库命中数展示 |
+| 1 | 跑 `sync:openapi`——`SearchComponentTargetsV3Input` 加了可选 `cursor`，`SearchComponentTargetsV3Response` 加了可选 `next_cursor`；runtime schema 是 `additionalProperties: false`，不同步则有下一页的响应会被 fail-closed 契约拒掉 |
+| 2 | 排序不用前端做：后端已保证点中的词在第一条 |
+| 3 | 有 `next_cursor` 时在级联第一列底部给「加载更多」，把新一页的候选追加进分组（同一词条的候选跨页仍相邻，按 `entry_id` 合并即可），已勾选状态跨页保留 |
+| 4 | `truncated && !next_cursor` 才提示「匹配过多，请换更具体的关键字」；`truncated && next_cursor` 是正常的「还有下一页」 |
+| 5 | `cursor` 报 400 就丢掉游标从第一页重来，不用提示用户 |
 
 ### 18.4 兼容性
 
-**部署顺序：后端先，前端后**（与 §17 那次相反）。
+**部署顺序：前端先，后端后**（与 §17 那次相同，与第一版 #89 相反）。
 
-理由要和 §17 区分清楚：§17 是**给既有响应 DTO 加字段**，后端先上会让前端 fail-closed 的
-runtime contract（`additionalProperties: false`）在既有接口上整体报错，所以必须前端先。
-本次**没有改动任何既有响应 DTO**——`PublishedSentenceTargetCandidateV3` /
-`SentenceTargetCandidateFormV3` 等一个字段都没动，只新增了两个独立结构和一条新 path。
-所以：
+原因：第二版给**既有响应 DTO** `SearchComponentTargetsV3Response` 加了 `next_cursor`。它是可选
+字段、没有下一页时不出现，所以后端先上时只要结果装得下一页就没事；但一旦有下一页，响应里出现
+了前端 runtime schema 不认识的 key，fail-closed 契约会让整张成分用词卡片报「词库查询失败」。
+前端先同步 schema 再上后端，就不存在这个窗口。反过来前端先上而后端未部署：`cursor` 字段后端
+`deny_unknown_fields` 会 400——但前端只在拿到 `next_cursor` 后才会带 `cursor`，旧后端从不给
+`next_cursor`，所以实际不会触发。
 
-| 顺序 | 后果 |
+**迁移**：`20260903120000_add_surface_sources_trgm_index`——`CREATE EXTENSION IF NOT EXISTS pg_trgm`
++ `surface` 列上的部分 GIN 索引（`content_scope = 'current_publication' AND is_deleted = FALSE`）。
+`pg_trgm` 自 PG13 起是 trusted extension，数据库 CREATE 权限即可安装；tshb-test RDS（PG 18.3）
+上 `app` 用户已核对具备该权限、扩展在可用清单里。迁移在应用启动时自动执行；线上表当前只有
+30 行，建索引是瞬时的。回退：down 只撤索引不撤扩展。
+
+**性能（30 万行真实形状数据实测，本地 PG16）**：
+
+| 关键字 | 有索引 | 无索引 |
+| --- | --- | --- |
+| `abcd`（≥3 字符） | Bitmap Index Scan，**3.6ms** | Parallel Seq Scan，41ms |
+| `ab`（1–2 字符） | Parallel Seq Scan，43ms（三元组提取不出，索引用不上） | 同左 |
+
+顺序扫描随行数线性增长，索引基本不随；所以 `give` / `harbour` 这类词上量后是几十倍的差距。
+`a` / `me` / `to` / `up` 这类 1–2 字符成分词索引帮不上，靠 `LIMIT 2000` 与「等于/前缀优先」
+排序保证正确与可用，30 万行下约 40ms 仍可接受。
+
+后端侧：无既有数据变更、无 SQLx 缓存变化；revert 代码即可回退，索引留着无害。
+
+## 19. V3 列表行补方言摘要 `dialects`（后端已实现）
+
+> **状态（2026-09-02）**：后端已实现并重新导出 `docs/openapi.json`；**前后端必须同批部署**（见 §18.4）。
+
+### 19.1 背景
+
+智能词库列表的「方言」列在 V2 行读 `AdminWordListItem.dialects`（由 `entry_headwords` 按
+`headword_mode` 聚合：unified → `[common]`，distinguish → `[uk, us]`）。V3 行的
+`AdminWordListItemV3` 一直没有等价字段，admin 对 V3 行固定渲染 `-`；库里全是 V3 词条后整列失效。
+
+V3 的「方言」在数据上有两个来源：建条 step 1 的英美选择只是 `v3_entry_state.initial_headwords`
+里的**一次性快照**（建条后不再更新，仅用于 `detection_basis_dialect` 展示与 surface 校验）；
+真正决定词形结构与发布内容的是**各词性**的 `dialect_rules.spelling_mode`（`entry_pos.spelling_mode`），
+词形步可随时改，且只在建条那一刻按词典建议灌过一次。两者可分叉（例：建条选通用、后来在词性页
+改成英美的 `colour up`）。列表摘要以后者为准。
+
+### 19.2 后端改动
+
+`AdminWordListItemV3` 新增**必填**字段 `dialects: Dialect[]`，按词性**当前**设置聚合：
+
+| 词性 `spelling_mode` 集合 | `dialects` | 前端展示 |
+| --- | --- | --- |
+| 含任一 `distinguish` | `["uk", "us"]` | 英式英语 / 美式英语 |
+| 全为 `unified` | `["common"]` | 默认 |
+| 没有任何词性 | `[]` | `-`（未知，前端不落回默认） |
+
+只读 `entry_pos.spelling_mode`（V2/V3 行由约束保证非空；legacy 行为 NULL 已过滤），不看
+`initial_headwords`，也不看 `matched_surfaces`。V2 行的 `dialects` 语义与顺序不变。
+
+### 19.3 前端要怎么改
+
+| 步骤 | 动作 |
 | --- | --- |
-| 后端先上 | 安全。前端不认识这条端点、不会调用；既有接口的响应形状逐字节未变，fail-closed 契约不触发 |
-| 前端先上 | 关键字搜索请求 404。关键字为空时走 resolve 的既有路径不受影响，弹层不会整体挂掉 |
+| 1 | 跑 `sync:openapi`——`dialects` 是必填字段；runtime schema 对 `AdminWordListItemV3` 既 `additionalProperties: false` 又校验 `required`，不同步会让整个列表接口解码失败 |
+| 2 | `wordListDialects` 两个 schema 都直接读 `record.dialects`；空数组维持 `-`，不要落回「默认」 |
+| 3 | mock / e2e 桩的 V3 列表行补 `dialects` |
 
-前端下次 `sync:openapi` 时 `docs/openapi.json` 的 `_source_sha256` 会变，契约快照测试要跟着更新——
-那是前端 CI 的事，不影响线上运行时。
+### 19.4 兼容性
 
-后端侧纯新增：无迁移、无数据变更、无 SQLx 缓存变化，revert 即可回退。
+这不是「纯新增字段、可单独部署」，而且**哪一侧先上都会短暂打挂列表**：后端先带 `dialects` 上线，
+旧前端的 runtime schema 因 `additionalProperties: false` 拒收；前端先上，新 runtime schema 又因
+`required` 缺字段拒收（`missing_required_property`）。两种情况 admin 列表页都整体显示
+「词库查询失败」，直到另一侧跟上。**前后端同批部署，间隔压到最短。**
 
-**已知性能取舍（有实测，有阈值）**：`ILIKE '%q%'` 的前置通配符用不上
-`lexicon.surface_sources` 现有的四个 btree 索引，`SELECT DISTINCT + ORDER BY` 又强制全排序，
-所以 `LIMIT` 只框住返回负载、救不了扫描。本地开发库 `EXPLAIN ANALYZE` 实测：
-
-```
-Seq Scan on surface_sources  (actual time=0.029..0.570 rows=102)
-  Rows Removed by Filter: 1140
-Execution Time: 3.743 ms       -- 全表 1242 行 / 60 buffer page
-```
-
-按行数线性外推：10 万行约 46ms、100 万行约 460ms、1000 万行约 4.6s。当前 69 个已发布词条
-产出 1242 行（约 18 行/词条），也就是 **5 万词量级 ≈ 90 万行 ≈ 400ms/次**——配 300ms 防抖
-勉强可用，再往上必须换方案。
-
-本次**没有**装 `pg_trgm`、也没有加新索引，只靠「只扫 `current_publication` 分片」与「一次
-最多取回 2000 条词面行」缓解。越过上面的阈值时，正确做法是单独排一次索引迁移
-（`CREATE EXTENSION pg_trgm` + `surface` 上的 GIN 索引），不在本 PR 里做。
+后端侧纯增量：列表 SQL 多一个标量子查询，无迁移、无 SQLx 缓存变化，revert 即可回退。
 
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端

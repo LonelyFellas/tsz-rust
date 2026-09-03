@@ -376,6 +376,8 @@ pub(crate) struct ListEntryRecord {
     pub gloss: String,
     pub pos_list: Vec<String>,
     pub levels: Vec<String>,
+    /// 各词性 `spelling_mode` 去重集合；legacy 行为空。
+    pub pos_spelling_modes: Vec<String>,
     pub is_published: bool,
     pub published_revision: Option<i64>,
     pub has_unpublished_changes: bool,

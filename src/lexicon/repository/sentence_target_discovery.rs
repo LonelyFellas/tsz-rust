@@ -64,6 +64,10 @@ impl LexiconRepository {
     /// 「只看当前发布、未归档」的过滤，只把词面等值换成对 `surface` 的大小写不敏感包含匹配。
     /// 前置通配符用不上 `surface_sources` 上的 btree 索引，代价靠 `current_publication`
     /// 分片与 `limit` 框住。
+    ///
+    /// 排序下沉到 SQL：词面等于关键字的排最前、以关键字开头的其次、其余按词面。窗口只有
+    /// `limit` 行，排序若留在 Rust 侧，点 `me` 时 `acme / came / home …` 会先把窗口占满，
+    /// `me` 本身反而进不来。Rust 侧 `component_target_rank` 用同一规则给候选排序。
     pub(crate) async fn published_component_target_surfaces(
         tx: &mut Transaction<'_, Postgres>,
         dialect_scopes: &[String],
@@ -71,44 +75,55 @@ impl LexiconRepository {
         kind: Option<EntryKind>,
         limit: i64,
     ) -> Result<Vec<SentenceDiscoverySurfaceRecord>, LexiconRepositoryError> {
+        let lowered = keyword.to_lowercase();
         sqlx::query_as::<_, SentenceDiscoverySurfaceRecord>(
             r#"
-            SELECT DISTINCT
-                   source.normalized_surface,
-                   source.surface,
-                   source.entry_kind,
-                   source.entry_id,
-                   source.publication_id,
-                   source.pos_id,
-                   source.pos,
-                   COALESCE(source.form_id, source.source_node_id) AS matched_form_id,
-                   source.source_node_id AS matched_variant_id,
-                   source.dialect_scope,
-                   source.event_offset
-            FROM lexicon.surface_sources source
-            JOIN lexicon.entries entry
-              ON entry.id = source.entry_id
-             AND entry.archived_at IS NULL
-             AND entry.current_publication_id = source.publication_id
-            WHERE source.is_deleted = FALSE
-              AND source.content_scope = 'current_publication'
-              AND source.language = 'en'
-              AND source.normalization_version = $1
-              AND source.dialect_scope = ANY($2::text[])
-              AND source.surface ILIKE $3 ESCAPE '\'
-              AND ($4::text IS NULL OR source.entry_kind = $4::text)
-              AND source.pos_id IS NOT NULL
-              AND source.pos IS NOT NULL
-              AND COALESCE(source.form_id, source.source_node_id) IS NOT NULL
-            ORDER BY source.normalized_surface, source.entry_id,
-                     source.pos_id, matched_form_id, source.event_offset
-            LIMIT $5
+            SELECT matched.*
+            FROM (
+                SELECT DISTINCT
+                       source.normalized_surface,
+                       source.surface,
+                       source.entry_kind,
+                       source.entry_id,
+                       source.publication_id,
+                       source.pos_id,
+                       source.pos,
+                       COALESCE(source.form_id, source.source_node_id) AS matched_form_id,
+                       source.source_node_id AS matched_variant_id,
+                       source.dialect_scope,
+                       source.event_offset
+                FROM lexicon.surface_sources source
+                JOIN lexicon.entries entry
+                  ON entry.id = source.entry_id
+                 AND entry.archived_at IS NULL
+                 AND entry.current_publication_id = source.publication_id
+                WHERE source.is_deleted = FALSE
+                  AND source.content_scope = 'current_publication'
+                  AND source.language = 'en'
+                  AND source.normalization_version = $1
+                  AND source.dialect_scope = ANY($2::text[])
+                  AND source.surface ILIKE $3 ESCAPE '\'
+                  AND ($4::text IS NULL OR source.entry_kind = $4::text)
+                  AND source.pos_id IS NOT NULL
+                  AND source.pos IS NOT NULL
+                  AND COALESCE(source.form_id, source.source_node_id) IS NOT NULL
+            ) matched
+            ORDER BY CASE
+                         WHEN matched.normalized_surface = $5 THEN 0
+                         WHEN matched.normalized_surface LIKE $6 ESCAPE '\' THEN 1
+                         ELSE 2
+                     END,
+                     matched.normalized_surface, matched.entry_id,
+                     matched.pos_id, matched.matched_form_id, matched.event_offset
+            LIMIT $7
             "#,
         )
         .bind(HEADWORD_NORMALIZATION_VERSION)
         .bind(dialect_scopes)
         .bind(format!("%{}%", escape_like_literal(keyword)))
         .bind(kind.map(kind_string))
+        .bind(&lowered)
+        .bind(format!("{}%", escape_like_literal(&lowered)))
         .bind(limit)
         .fetch_all(&mut **tx)
         .await
