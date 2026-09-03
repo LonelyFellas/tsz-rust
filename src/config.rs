@@ -61,6 +61,12 @@ pub struct SmartLexiconV3Flags {
         deserialize_with = "deserialize_explicit_bool"
     )]
     pub draft_relation_prebinding: bool,
+    #[serde(
+        default,
+        rename = "smart_lexicon_v3_sense_component_usages",
+        deserialize_with = "deserialize_explicit_bool"
+    )]
+    pub sense_component_usages: bool,
 }
 
 fn deserialize_explicit_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -86,6 +92,7 @@ impl SmartLexiconV3Flags {
             sentence_associations: true,
             sentence_target_discovery: true,
             draft_relation_prebinding: true,
+            sense_component_usages: true,
         }
     }
 
@@ -101,6 +108,7 @@ impl SmartLexiconV3Flags {
             sentence_associations: false,
             sentence_target_discovery: false,
             draft_relation_prebinding: false,
+            sense_component_usages: false,
         }
     }
 }
@@ -500,6 +508,10 @@ mod tests {
             "一键发现会改变发布自动关联边界，未显式配置时必须关闭"
         );
         assert!(!cfg.smart_lexicon_v3_flags.draft_relation_prebinding);
+        assert!(
+            !cfg.smart_lexicon_v3_flags.sense_component_usages,
+            "释义级成分用词会往响应里塞新 capability 键，未显式配置时必须关闭"
+        );
     }
 
     #[test]
@@ -515,6 +527,7 @@ mod tests {
             ("SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS", "true"),
             ("SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY", "true"),
             ("SMART_LEXICON_V3_DRAFT_RELATION_PREBINDING", "true"),
+            ("SMART_LEXICON_V3_SENSE_COMPONENT_USAGES", "true"),
         ]);
         let enabled = parse(&enabled).expect("显式 true 应能解析");
         assert_eq!(
@@ -524,6 +537,7 @@ mod tests {
         assert!(enabled.smart_lexicon_v3_flags.sentence_associations);
         assert!(enabled.smart_lexicon_v3_flags.sentence_target_discovery);
         assert!(enabled.smart_lexicon_v3_flags.draft_relation_prebinding);
+        assert!(enabled.smart_lexicon_v3_flags.sense_component_usages);
 
         let mut disabled = valid_baseline();
         disabled.extend([
@@ -536,6 +550,7 @@ mod tests {
             ("SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS", "false"),
             ("SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY", "false"),
             ("SMART_LEXICON_V3_DRAFT_RELATION_PREBINDING", "false"),
+            ("SMART_LEXICON_V3_SENSE_COMPONENT_USAGES", "false"),
         ]);
         let disabled = parse(&disabled).expect("显式 false 应能解析");
 
@@ -546,6 +561,7 @@ mod tests {
         assert!(!disabled.smart_lexicon_v3_flags.sentence_associations);
         assert!(!disabled.smart_lexicon_v3_flags.sentence_target_discovery);
         assert!(!disabled.smart_lexicon_v3_flags.draft_relation_prebinding);
+        assert!(!disabled.smart_lexicon_v3_flags.sense_component_usages);
     }
 
     #[test]

@@ -19257,6 +19257,14 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         stored_exact.1.unwrap().to_string(),
         phrase_candidate["matched_variant_id"]
     );
+    // 这条短语的成分还挂在词形变体上（B1 保留的旧口径），被选中 sense 没有成分，
+    // 所以关联快照按回退规则取命中词形那份——与 B1 之前逐字节相同。
+    assert!(
+        phrase_candidate["component_usages"]
+            .as_array()
+            .is_some_and(|usages| !usages.is_empty()),
+        "候选级 component_usages 的语义不变，仍是命中词形的成分"
+    );
     assert_eq!(stored_exact.2, phrase_candidate["component_usages"]);
 
     let (status, reloaded) = call(
@@ -19279,8 +19287,8 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         phrase_candidate["matched_variant_id"]
     );
     assert_eq!(
-        reloaded_association["target_component_usages"],
-        phrase_candidate["component_usages"]
+        reloaded_association["target_component_usages"], phrase_candidate["component_usages"],
+        "回读同样走回退规则"
     );
 
     let mut phrase_meanings = published["word"]["meanings"].clone();
@@ -19996,6 +20004,1122 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
         second_base_id,
         "跨组成分的 base 应原样回读：{phrase_saved}"
     );
+}
+
+/// 造一条词形已完成、首个 sense 带释义级成分的短语草稿。
+async fn create_v3_phrase_with_sense_components(
+    state: &AppState,
+    bearer: &str,
+    surface: &str,
+    component_usages: Value,
+) -> Value {
+    let (entry_id, forms) = create_v3_phrase_draft(state, bearer, surface).await;
+    let (_, forms_saved) =
+        save_v3_forms_after_impact(state, bearer, &entry_id, 1, "complete", forms).await;
+    let mut meanings =
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+    meanings["pos"][0]["senses"][0]["component_usages"] = component_usages;
+    save_v3_meanings(state, bearer, &forms_saved, meanings).await
+}
+
+async fn current_publication_id(pool: &PgPool, entry_id: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+        .bind(entry_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn sense_component_rows(pool: &PgPool, entry_id: Uuid) -> Vec<(Uuid, Uuid, i16, String)> {
+    sqlx::query_as(
+        r#"
+        SELECT id, sense_id, ordinal, literal
+        FROM lexicon.v3_phrase_sense_component_usages
+        WHERE entry_id = $1
+        ORDER BY sense_id, ordinal
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn v3_sense_phrase_components_persist_publish_and_survive_forms_resave(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_entry_uuid =
+        Uuid::parse_str(target_published["word"]["id"].as_str().unwrap()).unwrap();
+    let target_publication_id = current_publication_id(&pool, target_entry_uuid).await;
+    let target_sense_uuid = Uuid::parse_str(
+        target_published["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+
+    let component =
+        resolved_component_json(&target_published, target_publication_id, "uk", "native");
+    let component_id = Uuid::parse_str(component["id"].as_str().unwrap()).unwrap();
+    let saved = create_v3_phrase_with_sense_components(
+        &state,
+        &bearer,
+        "native phrase",
+        json!([component.clone()]),
+    )
+    .await;
+    let entry_id = saved["word"]["id"].as_str().unwrap().to_owned();
+    let entry_uuid = Uuid::parse_str(&entry_id).unwrap();
+    let sense_uuid = Uuid::parse_str(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["literal"],
+        "native"
+    );
+    assert_eq!(
+        saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"],
+        json!([]),
+        "释义级成分不得回流到词形变体：{saved}"
+    );
+    assert_eq!(
+        sense_component_rows(&pool, entry_uuid).await,
+        vec![(component_id, sense_uuid, 0, "native".to_owned())],
+        "成分行必须以 sense 为 owner 落进释义级表"
+    );
+    let node: (String, String, Option<Uuid>, bool) = sqlx::query_as(
+        r#"
+        SELECT node_type, node_role, parent_node_id, removed_from_draft_at IS NULL
+        FROM lexicon.nodes WHERE id = $1 AND entry_id = $2
+        "#,
+    )
+    .bind(component_id)
+    .bind(entry_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        node,
+        (
+            "phrase_component_usage".to_owned(),
+            "meanings.phrase_component_usage".to_owned(),
+            Some(sense_uuid),
+            true
+        )
+    );
+
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(
+        reloaded["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["id"],
+        component["id"],
+        "GET 必须回显释义级成分"
+    );
+
+    let mut without_key = reloaded["word"]["meanings"].clone();
+    without_key["pos"][0]["senses"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("component_usages");
+    let preserved = save_v3_meanings(&state, &bearer, &reloaded, without_key).await;
+    assert_eq!(
+        preserved["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["id"],
+        component["id"],
+        "缺键的旧客户端不得清空释义级成分"
+    );
+
+    let mut cleared_content = preserved["word"]["meanings"].clone();
+    cleared_content["pos"][0]["senses"][0]["component_usages"] = json!([]);
+    let cleared = save_v3_meanings(&state, &bearer, &preserved, cleared_content).await;
+    assert!(
+        cleared["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"].is_null(),
+        "空成分列表序列化时省略：{cleared}"
+    );
+    assert!(
+        sense_component_rows(&pool, entry_uuid).await.is_empty(),
+        "显式空数组必须清空成分行"
+    );
+    let retired: bool = sqlx::query_scalar(
+        "SELECT removed_from_draft_at IS NOT NULL FROM lexicon.nodes WHERE id = $1",
+    )
+    .bind(component_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(retired, "清空后成分节点必须退役");
+
+    let mut restored_content = cleared["word"]["meanings"].clone();
+    restored_content["pos"][0]["senses"][0]["component_usages"] = json!([component.clone()]);
+    let restored = save_v3_meanings(&state, &bearer, &cleared, restored_content).await;
+    assert_eq!(
+        sense_component_rows(&pool, entry_uuid).await.len(),
+        1,
+        "同 id 重新勾选必须能复活成分节点"
+    );
+
+    let (_, forms_resaved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &entry_id,
+        restored["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        restored["word"]["forms"].clone(),
+    )
+    .await;
+    assert_eq!(
+        forms_resaved["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["id"],
+        component["id"],
+        "词形步重存不得丢掉释义级成分：{forms_resaved}"
+    );
+    assert_eq!(
+        sense_component_rows(&pool, entry_uuid).await.len(),
+        1,
+        "词形步重存后成分行必须原样重建"
+    );
+
+    let (status, published) = publish_ready_v3(&state, &bearer, &forms_resaved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    assert_eq!(
+        published["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["id"],
+        component["id"],
+        "发布响应必须仍带释义级成分：{published}"
+    );
+    let publication_id = current_publication_id(&pool, entry_uuid).await;
+    let snapshot_components: Value = sqlx::query_scalar(
+        "SELECT snapshot->'meanings'->'pos'->0->'senses'->0->'component_usages' FROM lexicon.entry_publications WHERE id = $1",
+    )
+    .bind(publication_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot_components[0]["id"], component["id"],
+        "发布快照必须固化释义级成分，否则下游只能读到空"
+    );
+    let refs: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT source_node_id, target_sense_id
+        FROM lexicon.entry_publication_sense_refs
+        WHERE publication_id = $1 AND reference_kind = 'phrase_component'
+        "#,
+    )
+    .bind(publication_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(refs, vec![(component_id, target_sense_uuid)]);
+    let published_component_nodes: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*) FROM lexicon.entry_publication_nodes
+        WHERE publication_id = $1 AND node_type = 'phrase_component_usage'
+        "#,
+    )
+    .bind(publication_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(published_component_nodes, 1);
+
+    let source =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["A native phrase appears."])
+            .await;
+    let source_sentence_id = first_sentence(&source)["id"].as_str().unwrap().to_owned();
+    let (status, discovered) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "sentence_text": "A native phrase appears.",
+            "source_dialect": "common",
+            "mode": "all_published_targets",
+            "page_size_per_range": 20
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{discovered}");
+    let phrase_candidate = discovered["range_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|range| range["published_matches"].as_array().unwrap())
+        .find(|candidate| candidate["entry_id"] == entry_id)
+        .expect("discovery must return the published phrase");
+    assert_eq!(
+        phrase_candidate["component_usages"],
+        json!([]),
+        "候选级语义不变：仍是命中词形的成分，本例词形没有成分"
+    );
+    assert_eq!(
+        phrase_candidate["senses"][0]["component_usages"][0]["id"], component["id"],
+        "候选的 sense 行必须带出释义级成分：{phrase_candidate}"
+    );
+
+    let association_id = Uuid::now_v7();
+    let (status, edited) = replace_associations_v3(
+        &state,
+        &bearer,
+        &source,
+        &source_sentence_id,
+        Uuid::now_v7(),
+        json!([{
+            "id": association_id,
+            "source_dialect": "common",
+            "source_segments": [{"start": 2, "end": 15, "surface": "native phrase"}],
+            "target_word_id": phrase_candidate["entry_id"],
+            "target_sense_id": phrase_candidate["senses"][0]["sense_id"],
+            "target_publication_id": phrase_candidate["publication_id"],
+            "target_form_variant_id": phrase_candidate["matched_variant_id"]
+        }]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let snapshot: Value = sqlx::query_scalar(
+        "SELECT target_component_usages_snapshot FROM lexicon.sentence_associations WHERE id = $1",
+    )
+    .bind(association_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot[0]["id"], component["id"],
+        "关联快照必须取被选中 sense 的成分"
+    );
+    assert_eq!(
+        first_sentence(&edited)["associations"][0]["target_component_usages"][0]["id"],
+        component["id"]
+    );
+}
+
+#[sqlx::test]
+async fn v3_publish_with_newly_bound_relations_keeps_sense_phrase_components(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_entry_uuid =
+        Uuid::parse_str(target_published["word"]["id"].as_str().unwrap()).unwrap();
+    let target_publication_id = current_publication_id(&pool, target_entry_uuid).await;
+
+    let component =
+        resolved_component_json(&target_published, target_publication_id, "uk", "bound");
+    let component_id = Uuid::parse_str(component["id"].as_str().unwrap()).unwrap();
+    let saved = create_v3_phrase_with_sense_components(
+        &state,
+        &bearer,
+        "bound phrase",
+        json!([component.clone()]),
+    )
+    .await;
+    let entry_uuid = Uuid::parse_str(saved["word"]["id"].as_str().unwrap()).unwrap();
+
+    // 待建关联词让发布走 newly_bound 分支：sync_canonical_meanings 会再退役一轮成分节点。
+    let pending_headword = format!("boundpending{}", admin_id.simple());
+    let mut meanings = saved["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "pending_target_headword": pending_headword,
+        "score": "88.00"
+    }]);
+    let with_pending = save_v3_meanings(&state, &bearer, &saved, meanings).await;
+
+    let (status, published) = publish_ready_v3(&state, &bearer, &with_pending).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "带 newly_bound 的发布必须成功：{published}"
+    );
+    assert_eq!(
+        published["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["id"],
+        component["id"],
+        "newly_bound 路径的 V2 往返不得吞掉释义级成分：{published}"
+    );
+    assert!(
+        published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
+            .is_string(),
+        "前置：这条发布必须真的物化了待建关联词"
+    );
+
+    let publication_id = current_publication_id(&pool, entry_uuid).await;
+    let published_component_nodes: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*) FROM lexicon.entry_publication_nodes
+        WHERE publication_id = $1 AND node_type = 'phrase_component_usage'
+        "#,
+    )
+    .bind(publication_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        published_component_nodes, 1,
+        "sync_canonical_meanings 之后必须重建成分节点，否则发布节点会漏行"
+    );
+    let refs: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT source_node_id FROM lexicon.entry_publication_sense_refs
+        WHERE publication_id = $1 AND reference_kind = 'phrase_component'
+        "#,
+    )
+    .bind(publication_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(refs, vec![component_id]);
+    assert_eq!(
+        sense_component_rows(&pool, entry_uuid).await.len(),
+        1,
+        "发布后草稿侧成分行必须还在"
+    );
+    let projected: Value = sqlx::query_scalar(
+        "SELECT meanings->'pos'->0->'senses'->0->'component_usages' FROM lexicon.entry_editor_projection WHERE entry_id = $1",
+    )
+    .bind(entry_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        projected[0]["id"], component["id"],
+        "sync_canonical_meanings 覆盖投影时必须回填释义级成分"
+    );
+}
+
+fn sense_component_issue<'a>(body: &'a Value, code: &str) -> &'a Value {
+    body["field_issues"]
+        .as_array()
+        .unwrap_or_else(|| panic!("必须返回 node 级 issue：{body}"))
+        .iter()
+        .find(|issue| issue["code"] == code)
+        .unwrap_or_else(|| panic!("缺少 {code}：{body}"))
+}
+
+#[sqlx::test]
+async fn v3_sense_phrase_component_issues_cover_the_closed_code_catalog(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let word_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{word_published}");
+    let word_entry_id = word_published["word"]["id"].as_str().unwrap().to_owned();
+    let word_publication_id =
+        current_publication_id(&pool, Uuid::parse_str(&word_entry_id).unwrap()).await;
+
+    // phrase_component_not_allowed：非短语词条不得携带成分。
+    let mut word_meanings = writable_v3_meanings(&word_published);
+    word_meanings["pos"][0]["senses"][0]["component_usages"] = json!([{
+        "id": Uuid::now_v7(),
+        "state": "unresolved",
+        "literal": "harbour"
+    }]);
+    let (status, not_allowed) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        &word_entry_id,
+        word_published["word"]["revision"].as_i64().unwrap(),
+        word_meanings,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{not_allowed}");
+    let issue = sense_component_issue(&not_allowed, "phrase_component_not_allowed");
+    assert_eq!(issue["step"], "meanings");
+    assert_eq!(issue["field"], "component_usages");
+    assert_eq!(
+        issue["node_id"],
+        word_published["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+    );
+    assert_eq!(issue["node_location"]["node_role"], "meanings.sense");
+    assert_eq!(
+        issue["node_location"]["ancestor_node_ids"],
+        json!([word_published["word"]["meanings"]["pos"][0]["pos_id"]])
+    );
+
+    // 套娃守卫的两个目标：成分挂在词形上的（存量口径）与挂在释义上的（新口径），
+    // 都要能被「目标短语自身含成分」查出来。
+    let (inner_phrase, inner_publication_id) = create_published_v3_phrase(
+        &state,
+        &pool,
+        &bearer,
+        "inner guard phrase",
+        json!([resolved_component_json(
+            &word_published,
+            word_publication_id,
+            "uk",
+            "inner"
+        )]),
+    )
+    .await;
+    let (forms_nested_phrase, forms_nested_publication_id) = create_published_v3_phrase(
+        &state,
+        &pool,
+        &bearer,
+        "forms nested phrase",
+        json!([resolved_component_json(
+            &inner_phrase,
+            inner_publication_id,
+            "uk",
+            "inner"
+        )]),
+    )
+    .await;
+    let sense_nested_draft = create_v3_phrase_with_sense_components(
+        &state,
+        &bearer,
+        "sense nested phrase",
+        json!([resolved_component_json(
+            &inner_phrase,
+            inner_publication_id,
+            "uk",
+            "inner"
+        )]),
+    )
+    .await;
+    let (status, sense_nested_phrase) =
+        publish_ready_v3(&state, &bearer, &sense_nested_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{sense_nested_phrase}");
+    let sense_nested_publication_id = current_publication_id(
+        &pool,
+        Uuid::parse_str(sense_nested_phrase["word"]["id"].as_str().unwrap()).unwrap(),
+    )
+    .await;
+
+    let (victim_entry_id, victim_forms) =
+        create_v3_phrase_draft(&state, &bearer, "issue phrase").await;
+    let (_, victim_forms_saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &victim_entry_id,
+        1,
+        "complete",
+        victim_forms,
+    )
+    .await;
+    let victim_revision = victim_forms_saved["word"]["revision"].as_i64().unwrap();
+    let victim_pos_id = victim_forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone();
+    let base_meanings = complete_v3_meanings_fixture(victim_pos_id.clone());
+    let victim_sense_id = base_meanings["pos"][0]["senses"][0]["id"].clone();
+    let with_components = |usages: Value| {
+        let mut meanings = base_meanings.clone();
+        meanings["pos"][0]["senses"][0]["component_usages"] = usages;
+        meanings
+    };
+    let reject = async |usages: Value| {
+        let (status, body) = save_v3_meanings_raw(
+            &state,
+            &bearer,
+            &victim_entry_id,
+            victim_revision,
+            with_components(usages),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        body
+    };
+
+    // phrase_component_limit_exceeded
+    let too_many = (0..101)
+        .map(|index| {
+            json!({
+                "id": Uuid::now_v7(),
+                "state": "unresolved",
+                "literal": format!("token{index}")
+            })
+        })
+        .collect::<Vec<_>>();
+    let limit = reject(json!(too_many)).await;
+    let issue = sense_component_issue(&limit, "phrase_component_limit_exceeded");
+    assert_eq!(issue["node_id"], victim_sense_id);
+    assert_eq!(issue["field"], "component_usages");
+
+    // phrase_component_literal_invalid
+    let bad_literal_id = Uuid::now_v7();
+    let literal_invalid = reject(json!([{
+        "id": bad_literal_id,
+        "state": "unresolved",
+        "literal": " issue"
+    }]))
+    .await;
+    let issue = sense_component_issue(&literal_invalid, "phrase_component_literal_invalid");
+    assert_eq!(issue["node_id"], bad_literal_id.to_string());
+    assert_eq!(issue["field"], "literal");
+    assert_eq!(
+        issue["node_location"]["node_role"],
+        "meanings.phrase_component_usage"
+    );
+    assert_eq!(
+        issue["node_location"]["ancestor_node_ids"],
+        json!([victim_pos_id, victim_sense_id])
+    );
+
+    // phrase_component_self_target
+    let mut self_target =
+        resolved_component_json(&word_published, word_publication_id, "uk", "issue");
+    self_target["target_word_id"] = json!(victim_entry_id);
+    let self_rejected = reject(json!([self_target])).await;
+    let issue = sense_component_issue(&self_rejected, "phrase_component_self_target");
+    assert_eq!(issue["field"], "target");
+
+    // phrase_component_target_unavailable
+    let mut unavailable =
+        resolved_component_json(&word_published, word_publication_id, "uk", "issue");
+    unavailable["target_publication_id"] = json!(Uuid::now_v7());
+    let unavailable_rejected = reject(json!([unavailable])).await;
+    assert!(has_issue(
+        &unavailable_rejected,
+        "phrase_component_target_unavailable"
+    ));
+
+    // phrase_component_target_stale
+    let mut stale = resolved_component_json(&word_published, word_publication_id, "uk", "issue");
+    stale["target_gloss"] = json!("对不上的词义");
+    let stale_rejected = reject(json!([stale])).await;
+    assert!(has_issue(&stale_rejected, "phrase_component_target_stale"));
+
+    // phrase_component_target_nested：目标短语的成分挂在词形侧
+    let forms_nested = reject(json!([resolved_component_json(
+        &forms_nested_phrase,
+        forms_nested_publication_id,
+        "uk",
+        "issue"
+    )]))
+    .await;
+    assert!(
+        has_issue(&forms_nested, "phrase_component_target_nested"),
+        "存量短语的成分还在 forms 上，套娃检测必须扫得到：{forms_nested}"
+    );
+
+    // phrase_component_target_nested：目标短语的成分挂在释义侧
+    let sense_nested = reject(json!([resolved_component_json(
+        &sense_nested_phrase,
+        sense_nested_publication_id,
+        "uk",
+        "issue"
+    )]))
+    .await;
+    assert!(
+        has_issue(&sense_nested, "phrase_component_target_nested"),
+        "释义级成分同样要参与套娃检测：{sense_nested}"
+    );
+
+    // 只套一层是允许的：目标短语的成分指向单词。
+    let (status, accepted) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        &victim_entry_id,
+        victim_revision,
+        with_components(json!([resolved_component_json(
+            &inner_phrase,
+            inner_publication_id,
+            "uk",
+            "issue"
+        )])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "短语→短语→单词必须放行：{accepted}");
+}
+
+#[sqlx::test]
+async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 目标词准备两条词义，才谈得上「删掉被引用的那条」。
+    let word_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let mut two_senses = writable_v3_meanings(&word_draft);
+    let spare_sense = json!({
+        "id": Uuid::now_v7(),
+        "sub_pos": "N-COUNT",
+        "level": "A1",
+        "sense_group_id": two_senses["sense_groups"][0]["id"],
+        "frequency": "100",
+        "depends_on_context": false,
+        "definitions": [{
+            "definition_mode": "zh_definition",
+            "id": Uuid::now_v7(),
+            "content_id": Uuid::now_v7(),
+            "level": "A1",
+            "grammar_structure_id": two_senses["pos"][0]["grammar_structures"][0]["id"],
+            "content": rich_text("备用词义")
+        }],
+        "sentences": [],
+        "relations": []
+    });
+    two_senses["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(spare_sense);
+    let word_saved = save_v3_meanings(&state, &bearer, &word_draft, two_senses).await;
+    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{word_published}");
+    let word_entry_id = word_published["word"]["id"].as_str().unwrap().to_owned();
+    let word_entry_uuid = Uuid::parse_str(&word_entry_id).unwrap();
+    let word_publication_id = current_publication_id(&pool, word_entry_uuid).await;
+    let referenced_sense_id =
+        word_published["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+
+    let component = resolved_component_json(&word_published, word_publication_id, "uk", "guarded");
+    let component_id = Uuid::parse_str(component["id"].as_str().unwrap()).unwrap();
+    let phrase_draft = create_v3_phrase_with_sense_components(
+        &state,
+        &bearer,
+        "guarded phrase",
+        json!([component]),
+    )
+    .await;
+    let (status, phrase_published) = publish_ready_v3(&state, &bearer, &phrase_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase_published}");
+    let phrase_entry_id = phrase_published["word"]["id"].as_str().unwrap().to_owned();
+
+    // 目标词草稿里删掉被引用的词义：草稿放行，发布时 fail closed。
+    let mut without_referenced_sense = writable_v3_meanings(&word_published);
+    let spare = without_referenced_sense["pos"][0]["senses"][1].clone();
+    without_referenced_sense["pos"][0]["senses"] = json!([spare]);
+    let word_pruned =
+        save_v3_meanings(&state, &bearer, &word_published, without_referenced_sense).await;
+    let (status, blocked) = publish_ready_v3(&state, &bearer, &word_pruned).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "释义级成分引用的词义不得被删掉后发布：{blocked}"
+    );
+    let issue = sense_component_issue(&blocked, "sense_has_inbound_publication_refs");
+    assert_eq!(issue["node_id"], referenced_sense_id);
+    // V3 的 issue 形状不带 reference_location，来源只能从发布引用表核对。
+    let blocking_refs: Vec<(Uuid, String)> = sqlx::query_as(
+        r#"
+        SELECT source_node_id, reference_kind
+        FROM lexicon.entry_publication_sense_refs
+        WHERE target_entry_id = $1 AND target_sense_id = $2
+        "#,
+    )
+    .bind(word_entry_uuid)
+    .bind(Uuid::parse_str(referenced_sense_id.as_str().unwrap()).unwrap())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        blocking_refs,
+        vec![(component_id, "phrase_component".to_owned())]
+    );
+
+    // 归档短语解除入站守卫，目标词才能把那条词义发布掉。
+    let (status, phrase_archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{phrase_entry_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": phrase_published["word"]["revision"],
+            "base_lifecycle_revision": phrase_published["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{phrase_archived}");
+    let (status, word_republished) = publish_ready_v3(&state, &bearer, &word_pruned).await;
+    assert_eq!(status, StatusCode::CREATED, "{word_republished}");
+
+    // 恢复短语时它的当前发布仍指着一条已消失的词义——出站守卫必须认得成分引用。
+    let (status, restore_blocked) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{phrase_entry_id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": phrase_archived["word"]["revision"],
+            "base_lifecycle_revision": phrase_archived["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "成分目标词义已消失时不得恢复：{restore_blocked}"
+    );
+    assert_eq!(
+        restore_blocked["code"],
+        "entry_has_unavailable_publication_refs"
+    );
+    assert!(
+        restore_blocked["meta"]["reference_locations"]
+            .as_array()
+            .is_some_and(|locations| locations
+                .iter()
+                .any(|location| location["reference_kind"] == "phrase_component"
+                    && location["source_node_id"] == component_id.to_string())),
+        "出站守卫必须点名那条成分引用：{restore_blocked}"
+    );
+}
+
+/// 释义级绑定的立身之本：同一短语的不同释义各带各的成分，互不串味，
+/// 而且例句关联固化的是**被选中的那一条** sense 的成分。
+#[sqlx::test]
+async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let target_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_publication_id = current_publication_id(
+        &pool,
+        Uuid::parse_str(target_published["word"]["id"].as_str().unwrap()).unwrap(),
+    )
+    .await;
+
+    let (entry_id, forms) = create_v3_phrase_draft(&state, &bearer, "split phrase").await;
+    let (_, forms_saved) =
+        save_v3_forms_after_impact(&state, &bearer, &entry_id, 1, "complete", forms).await;
+    let entry_uuid = Uuid::parse_str(&entry_id).unwrap();
+    let mut meanings =
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+
+    let first_component =
+        resolved_component_json(&target_published, target_publication_id, "uk", "split");
+    let second_component =
+        resolved_component_json(&target_published, target_publication_id, "uk", "phrase");
+    let first_component_id = Uuid::parse_str(first_component["id"].as_str().unwrap()).unwrap();
+    let second_component_id = Uuid::parse_str(second_component["id"].as_str().unwrap()).unwrap();
+    meanings["pos"][0]["senses"][0]["component_usages"] = json!([first_component]);
+
+    let second_sense_id = Uuid::now_v7();
+    let second_sense = json!({
+        "id": second_sense_id,
+        "sub_pos": "N-COUNT",
+        "level": "A1",
+        "sense_group_id": meanings["sense_groups"][0]["id"],
+        "frequency": "100",
+        "depends_on_context": false,
+        "definitions": [{
+            "definition_mode": "zh_definition",
+            "id": Uuid::now_v7(),
+            "content_id": Uuid::now_v7(),
+            "level": "A1",
+            "grammar_structure_id": meanings["pos"][0]["grammar_structures"][0]["id"],
+            "content": rich_text("第二个词义")
+        }],
+        "sentences": [],
+        "relations": [],
+        "component_usages": [second_component]
+    });
+    meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_sense);
+
+    let saved = save_v3_meanings(&state, &bearer, &forms_saved, meanings).await;
+    let first_sense_uuid = Uuid::parse_str(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["literal"],
+        "split"
+    );
+    assert_eq!(
+        saved["word"]["meanings"]["pos"][0]["senses"][1]["component_usages"][0]["literal"],
+        "phrase",
+        "第二条释义必须拿到自己的成分，而不是第一条的：{saved}"
+    );
+    // 两边按同一个键排序再比：SQL 侧是 ORDER BY sense_id, ordinal，期望值也照此排，
+    // 否则断言的通过与否会取决于 uuid 的生成顺序。
+    let mut expected_rows = vec![
+        (
+            first_component_id,
+            first_sense_uuid,
+            0i16,
+            "split".to_owned(),
+        ),
+        (
+            second_component_id,
+            second_sense_id,
+            0i16,
+            "phrase".to_owned(),
+        ),
+    ];
+    expected_rows.sort_by_key(|(_, sense_id, ordinal, _)| (*sense_id, *ordinal));
+    assert_eq!(
+        sense_component_rows(&pool, entry_uuid).await,
+        expected_rows,
+        "两条成分行必须各挂各的 sense"
+    );
+
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+
+    let source =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["A split phrase appears."])
+            .await;
+    let source_sentence_id = first_sentence(&source)["id"].as_str().unwrap().to_owned();
+    let (status, discovered) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "sentence_text": "A split phrase appears.",
+            "source_dialect": "common",
+            "mode": "all_published_targets",
+            "page_size_per_range": 20
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{discovered}");
+    let phrase_candidate = discovered["range_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|range| range["published_matches"].as_array().unwrap())
+        .find(|candidate| candidate["entry_id"] == entry_id)
+        .expect("discovery must return the published phrase");
+    let senses = phrase_candidate["senses"].as_array().unwrap();
+    assert_eq!(senses.len(), 2, "{phrase_candidate}");
+    assert_eq!(senses[0]["component_usages"][0]["literal"], "split");
+    assert_eq!(
+        senses[1]["component_usages"][0]["literal"], "phrase",
+        "候选的每条 sense 必须带自己的成分：{phrase_candidate}"
+    );
+
+    // 关联挑第二条 sense：快照必须是第二条的成分，不能退回第一条或命中词形。
+    let association_id = Uuid::now_v7();
+    let (status, edited) = replace_associations_v3(
+        &state,
+        &bearer,
+        &source,
+        &source_sentence_id,
+        Uuid::now_v7(),
+        json!([{
+            "id": association_id,
+            "source_dialect": "common",
+            "source_segments": [{"start": 2, "end": 14, "surface": "split phrase"}],
+            "target_word_id": phrase_candidate["entry_id"],
+            "target_sense_id": senses[1]["sense_id"],
+            "target_publication_id": phrase_candidate["publication_id"],
+            "target_form_variant_id": phrase_candidate["matched_variant_id"]
+        }]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let snapshot: Value = sqlx::query_scalar(
+        "SELECT target_component_usages_snapshot FROM lexicon.sentence_associations WHERE id = $1",
+    )
+    .bind(association_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot.as_array().map(Vec::len),
+        Some(1),
+        "被选中 sense 的成分只有一条：{snapshot}"
+    );
+    assert_eq!(
+        snapshot[0]["id"],
+        second_component_id.to_string(),
+        "关联快照必须取被选中的第二条 sense 的成分：{snapshot}"
+    );
+}
+
+#[sqlx::test]
+async fn v3_sense_component_capability_key_is_absent_while_the_flag_is_off(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let mut flags = SmartLexiconV3Flags::all_enabled();
+    flags.sense_component_usages = false;
+    let state = AppState::for_test_with_redis(pool.clone(), redis.clone())
+        .with_smart_lexicon_v3_flags_for_test(flags);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let (entry_id, forms) = create_v3_phrase_draft(&state, &bearer, "capability phrase").await;
+    let (_, forms_saved) =
+        save_v3_forms_after_impact(&state, &bearer, &entry_id, 1, "complete", forms).await;
+    let capabilities = &forms_saved["word"]["capabilities"];
+    assert!(
+        capabilities
+            .as_object()
+            .is_some_and(|capabilities| !capabilities.contains_key("sense_component_usages")),
+        "能力位关闭时该键必须缺席，否则未同步 spec 的旧前端每个 GET 都会挂：{capabilities}"
+    );
+    assert_eq!(
+        capabilities["draft_relation_prebinding"], true,
+        "既有能力位仍旧无条件输出"
+    );
+
+    let mut meanings =
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+    meanings["pos"][0]["senses"][0]["component_usages"] = json!([{
+        "id": Uuid::now_v7(),
+        "state": "unresolved",
+        "literal": "capability"
+    }]);
+    let (status, rejected) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        &entry_id,
+        forms_saved["word"]["revision"].as_i64().unwrap(),
+        meanings.clone(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "能力关闭时不得写入释义级成分：{rejected}"
+    );
+
+    meanings["pos"][0]["senses"][0]["component_usages"] = json!([]);
+    let (status, accepted) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        &entry_id,
+        forms_saved["word"]["revision"].as_i64().unwrap(),
+        meanings,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "显式清空不受能力位限制：{accepted}");
+
+    let enabled_state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let (status, enabled) = call(
+        &enabled_state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    assert_eq!(
+        enabled["word"]["capabilities"]["sense_component_usages"],
+        true
+    );
+}
+
+#[sqlx::test]
+async fn v3_phrase_with_sense_components_can_still_be_hard_deleted(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let word_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{word_published}");
+    let word_publication_id = current_publication_id(
+        &pool,
+        Uuid::parse_str(word_published["word"]["id"].as_str().unwrap()).unwrap(),
+    )
+    .await;
+
+    let phrase = create_v3_phrase_with_sense_components(
+        &state,
+        &bearer,
+        "deletable phrase",
+        json!([resolved_component_json(
+            &word_published,
+            word_publication_id,
+            "uk",
+            "deletable"
+        )]),
+    )
+    .await;
+    let phrase_entry_id = phrase["word"]["id"].as_str().unwrap().to_owned();
+    let phrase_uuid = Uuid::parse_str(&phrase_entry_id).unwrap();
+    assert_eq!(sense_component_rows(&pool, phrase_uuid).await.len(), 1);
+
+    // 成分行对 lexicon.nodes 是 ON DELETE RESTRICT，硬删词条时必须仍能整条清掉。
+    let (status, deleted) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/entries/{phrase_entry_id}"),
+        &bearer,
+        None,
+        Some(json!({
+            "base_revision": phrase["word"]["revision"],
+            "base_lifecycle_revision": phrase["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "未发布短语必须可硬删：{deleted}"
+    );
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.v3_phrase_sense_component_usages WHERE entry_id = $1",
+    )
+    .bind(phrase_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 0, "词条删除后不得残留成分行");
 }
 
 #[sqlx::test]
@@ -21767,13 +22891,12 @@ async fn create_ready_v3_draft_with_sentences(
     saved
 }
 
-async fn save_v3_meanings(
-    state: &AppState,
-    bearer: &str,
-    word: &Value,
-    mut meanings: Value,
-) -> Value {
-    let entry_id = word["word"]["id"].as_str().unwrap();
+/// 把响应体里的词义搬成可写形状：例句关联是服务端投影，写请求不接受。
+fn writable_v3_meanings(word: &Value) -> Value {
+    strip_response_only_sentence_fields(word["word"]["meanings"].clone())
+}
+
+fn strip_response_only_sentence_fields(mut meanings: Value) -> Value {
     for sentence in meanings["pos"]
         .as_array_mut()
         .into_iter()
@@ -21781,12 +22904,39 @@ async fn save_v3_meanings(
         .flat_map(|pos| pos["senses"].as_array_mut().into_iter().flatten())
         .flat_map(|sense| sense["sentences"].as_array_mut().into_iter().flatten())
     {
-        sentence.as_object_mut().unwrap().remove("associations");
-        sentence
-            .as_object_mut()
-            .unwrap()
-            .remove("associations_state");
+        let sentence = sentence.as_object_mut().unwrap();
+        sentence.remove("associations");
+        sentence.remove("associations_state");
     }
+    meanings
+}
+
+async fn save_v3_meanings_raw(
+    state: &AppState,
+    bearer: &str,
+    entry_id: &str,
+    base_revision: i64,
+    content: Value,
+) -> (StatusCode, Value) {
+    call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": base_revision,
+            "intent": "complete",
+            "content": content
+        })),
+    )
+    .await
+}
+
+async fn save_v3_meanings(state: &AppState, bearer: &str, word: &Value, meanings: Value) -> Value {
+    let entry_id = word["word"]["id"].as_str().unwrap();
+    let meanings = strip_response_only_sentence_fields(meanings);
     let (status, saved) = call(
         state,
         Method::PUT,

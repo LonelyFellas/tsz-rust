@@ -790,6 +790,10 @@ impl LexiconRepository {
             DELETE FROM lexicon.v3_phrase_variant_component_usages
              WHERE entry_id = ANY($1) AND target_entry_id = ANY($1)
             "#,
+            r#"
+            DELETE FROM lexicon.v3_phrase_sense_component_usages
+             WHERE entry_id = ANY($1) AND target_entry_id = ANY($1)
+            "#,
         ] {
             sqlx::query(statement)
                 .bind(entry_ids)
@@ -845,10 +849,17 @@ impl LexiconRepository {
                   AND association.entry_id <> $1
                   AND association.entry_id <> ALL($2)
                 UNION ALL
-                -- V3 短语把本词条当作成分（短语 ↔ 单词）。
+                -- V3 短语把本词条当作成分（短语 ↔ 单词）：B1 期间变体级与释义级双源并存。
                 SELECT 1
                 FROM lexicon.v3_phrase_variant_component_usages usage
                 WHERE usage.target_entry_id = $1
+                  AND usage.entry_id <> $1
+                  AND usage.entry_id <> ALL($2)
+                UNION ALL
+                SELECT 1
+                FROM lexicon.v3_phrase_sense_component_usages usage
+                WHERE usage.state = 'resolved'
+                  AND usage.target_entry_id = $1
                   AND usage.entry_id <> $1
                   AND usage.entry_id <> ALL($2)
             )
@@ -1072,13 +1083,16 @@ impl LexiconRepository {
         meanings: &DraftMeaningsStepContent,
         sub_parts: &HashMap<String, Uuid>,
     ) -> Result<(), LexiconRepositoryError> {
+        // 成分节点只能按 node_role 退役：`phrase_component_usage` 这个 node_type 在 B1
+        // 期间 forms 侧还在产出变体级节点，按 type 退役会连它们一起误退，
+        // 随后 insert_v3_publication_nodes 漏行、insert_publication_sense_refs 外键违约。
         sqlx::query(
             r#"
             UPDATE lexicon.nodes
             SET removed_from_draft_at = now()
             WHERE entry_id = $1
               AND removed_from_draft_at IS NULL
-              AND node_type = ANY($2)
+              AND (node_type = ANY($2) OR node_role = $3)
             "#,
         )
         .bind(entry_id)
@@ -1091,6 +1105,7 @@ impl LexiconRepository {
             "text_variant",
             "relation",
         ])
+        .bind(crate::lexicon::node_identity::PHRASE_COMPONENT_USAGE_ROLE)
         .execute(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)?;

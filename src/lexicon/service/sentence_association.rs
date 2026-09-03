@@ -450,6 +450,8 @@ struct PublishedAssociationSense {
     id: Uuid,
     level: String,
     gloss: String,
+    /// 释义级短语成分用词。V2 目标恒为空。
+    component_usages: Vec<PhraseComponentUsageV3>,
 }
 
 #[derive(Debug)]
@@ -543,6 +545,7 @@ impl PublishedAssociationTarget {
                             id: sense.id,
                             level: sense.level.clone(),
                             gloss: published_sense_gloss(sense),
+                            component_usages: Vec::new(),
                         })
                         .collect(),
                 })
@@ -618,7 +621,7 @@ impl PublishedAssociationTarget {
                         }
                     })
                     .collect(),
-                senses: association_senses(&meanings, forms.pos_id),
+                senses: association_senses_v3(&word.meanings, &meanings, forms.pos_id),
             })
             .collect();
         Ok(Self {
@@ -749,6 +752,7 @@ impl PublishedAssociationTarget {
                         base_form_id: *base_form_id,
                         level: sense.level.clone(),
                         gloss: sense.gloss.clone(),
+                        component_usages: sense.component_usages.clone(),
                     })
                     .collect(),
             });
@@ -865,10 +869,19 @@ impl PublishedAssociationTarget {
             } else {
                 None
             },
+            // 成分用词已改为释义级绑定：优先固化被选中 sense 的那一份。但 B1 期间存量短语的
+            // 成分还挂在词形上，sense 侧为空时必须回退到命中词形——否则这段窗口里新建的关联
+            // 会丢掉候选行上明明显示着的成分（前端也是同一套「sense 优先、缺失回退候选级」口径）。
+            // B2 停掉变体侧时这条回退一并删除。
             target_component_usages: if persist_exact_identity {
-                selected_variant
-                    .map(|(_, _, _, _, component_usages)| component_usages)
-                    .unwrap_or_default()
+                let sense_usages = sense.component_usages.clone();
+                if sense_usages.is_empty() {
+                    selected_variant
+                        .map(|(_, _, _, _, component_usages)| component_usages)
+                        .unwrap_or_default()
+                } else {
+                    sense_usages
+                }
             } else {
                 Vec::new()
             },
@@ -895,10 +908,36 @@ fn association_senses(
                     id: sense.id,
                     level: sense.level.clone(),
                     gloss: published_sense_gloss(sense),
+                    component_usages: Vec::new(),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// V3 目标的词义视图。gloss 沿用 V2 形状（`published_sense_gloss` 只认 V2 定义），
+/// 成分用词只有 V3 结构里才有，所以两份 meanings 都要。
+fn association_senses_v3(
+    meanings: &crate::lexicon::dto::DraftMeaningsStepContentV3,
+    relational: &DraftMeaningsStepContent,
+    pos_id: Uuid,
+) -> Vec<PublishedAssociationSense> {
+    let component_usages_by_sense = meanings
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.senses)
+        .map(|sense| (sense.id, sense.component_usages.to_vec()))
+        .collect::<HashMap<_, _>>();
+    association_senses(relational, pos_id)
+        .into_iter()
+        .map(|sense| PublishedAssociationSense {
+            component_usages: component_usages_by_sense
+                .get(&sense.id)
+                .cloned()
+                .unwrap_or_default(),
+            ..sense
+        })
+        .collect()
 }
 
 fn normalized_surface(spelling: &str) -> Option<String> {

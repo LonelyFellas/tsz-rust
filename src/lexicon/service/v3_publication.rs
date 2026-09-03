@@ -3,6 +3,7 @@ use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+use super::v3::{replace_v3_sense_component_usages, restore_sense_component_usages};
 use super::*;
 use crate::lexicon::dto::{
     ActivatePublicationV3Input, AdminWordAny, AdminWordAnyEnvelope, AdminWordStatus, AdminWordV2,
@@ -165,10 +166,13 @@ impl LexiconService {
             return Err(v3_validation_failed(reference_resolution.issues));
         }
         let mut publication_references = reference_resolution.publication_references;
-        publication_references
-            .extend(phrase_component_publication_references(&mut tx, &word.forms).await?);
+        publication_references.extend(
+            phrase_component_publication_references(&mut tx, &word.forms, &word.meanings).await?,
+        );
         if !newly_bound.is_empty() {
-            let canonical_v3_meanings = v2_meanings_to_v3(relational_meanings.clone())?;
+            let mut canonical_v3_meanings = v2_meanings_to_v3(relational_meanings.clone())?;
+            // V2 往返吞掉了释义级成分，回填后才能进投影与快照。
+            restore_sense_component_usages(&word.meanings, &mut canonical_v3_meanings);
             let editor_meanings =
                 serde_json::to_value(&canonical_v3_meanings).map_err(serialization_error)?;
             LexiconRepository::sync_canonical_meanings(
@@ -180,6 +184,9 @@ impl LexiconService {
             )
             .await
             .map_err(repository_error)?;
+            // sync_canonical_meanings 内部也走 replace_meanings_content，成分节点同样被退役，
+            // 漏了这一次重建就会在 insert_v3_publication_nodes 漏行、随后 sense_refs 外键失败。
+            replace_v3_sense_component_usages(&mut tx, entry_id, &canonical_v3_meanings).await?;
             word.meanings = canonical_v3_meanings;
         }
         ensure_no_removed_inbound_senses(&mut tx, entry_id, &relational_meanings).await?;
@@ -269,7 +276,9 @@ impl LexiconService {
             None,
         )
         .await?;
-        word.meanings = v2_meanings_to_v3(relational_meanings)?;
+        let mut canonical_v3_meanings = v2_meanings_to_v3(relational_meanings)?;
+        restore_sense_component_usages(&word.meanings, &mut canonical_v3_meanings);
+        word.meanings = canonical_v3_meanings;
         Self::hydrate_v3_sentence_associations_in(&mut tx, entry_id, &mut word.meanings).await?;
         word.status = AdminWordStatus::Published;
         word.published_revision = Some(word.revision);
@@ -840,9 +849,11 @@ fn publication_forms_for_activation(
     }
 }
 
+/// B1 期间成分双源并存（变体级尚未退场，释义级已上线），两侧都要产出发布引用。
 async fn phrase_component_publication_references(
     tx: &mut Transaction<'_, Postgres>,
     forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
 ) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
     let components = forms
         .pos
@@ -857,6 +868,13 @@ async fn phrase_component_publication_references(
                 .cloned()
                 .collect(),
         })
+        .chain(
+            meanings
+                .pos
+                .iter()
+                .flat_map(|pos| &pos.senses)
+                .flat_map(|sense| sense.component_usages.iter().cloned()),
+        )
         .collect::<Vec<_>>();
     let mut requested = components
         .iter()

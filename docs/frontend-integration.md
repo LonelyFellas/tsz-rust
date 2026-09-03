@@ -1237,6 +1237,109 @@ V3 的「方言」在数据上有两个来源：建条 step 1 的英美选择只
 
 后端侧纯增量：列表 SQL 多一个标量子查询，无迁移、无 SQLx 缓存变化，revert 即可回退。
 
+## 20. 短语「成分用词」改为释义级绑定（B1，后端已实现）
+
+> **状态（2026-09-03）**：后端 B1 已实现。能力位默认关闭，**关闭时 capability 键缺席**，
+> 所以后端可以先部署（对未同步 spec 的前端零变化）；前端 `sync:openapi` 并部署后再开 flag。
+> 前端 F1 已合入 `main`（`b93e72f`），能力位不为 `true` 时区块只读且请求整键剥除。
+
+### 20.1 背景
+
+成分用词原来挂在词形变体上（`forms.pos[].forms[].regional_variants.{common|uk|us}.component_usages`），
+同一短语的**所有释义共用一份**，表达不了「同一短语在不同释义下 `run` 指向不同词义」；而且它随
+**词形步**保存、错误是 400 `InvalidField` 而不是 node 级 issue，词义步定位不到。B1 把归属改成
+**释义级**（`meanings.pos[].senses[].component_usages`），随词义步保存 / 校验 / 发布。
+
+B1 只做「新增 + 放宽」：变体级字段仍照常读写与输出，旧数据不迁移。停输出与删表是后续的 B2。
+
+### 20.2 后端改动
+
+**新字段（响应 + 请求同形）**
+
+| Schema | 字段 | 说明 |
+| --- | --- | --- |
+| `WordSenseV3` / `WordSenseWritableV3` | `component_usages?: PhraseComponentUsageV3[]` | `maxItems: 100`；**空则省略**。缺键 = 保持不变，显式 `[]` = 清空 |
+| `SentenceTargetSenseV3` | `component_usages?: PhraseComponentUsageV3[]` | 候选的每条 sense 带出该词义的成分；空则省略 |
+| `AdminWordV3Capabilities` | `sense_component_usages?: true` | 见 20.4：**能力关闭时该键缺席**，不会输出 `false` |
+
+**放宽（值与序列化都不变，只是不再 `required`）**：三个变体的 `component_usages` 与
+`PublishedSentenceTargetCandidateV3.component_usages`。提前松开是为 B2 停输出做准备——B1 仍标
+`required` 的话，B2 那次上线前端会 `missing_required_property`。
+
+**候选级 `component_usages` 语义不变**：仍是**命中词形**的成分（不是词性级并集）。
+例句关联落库的 `target_component_usages` 则改成**优先取被选中 sense** 的那一份；B1 期间
+sense 侧为空时回退到命中词形（与前端「sense 优先、缺失回退候选级」同一口径），B2 停掉变体侧
+时这条回退一并删除。**这个口径变更不受能力位约束，B1 一上线即生效**，见 §20.4。
+
+**新增 7 个 `V3ValidationIssueCode`**（都是 `step = "meanings"`）：
+
+| code | `node_id` | `field` | `node_location.node_role` | `ancestor_node_ids` | 触发 |
+| --- | --- | --- | --- | --- | --- |
+| `phrase_component_not_allowed` | sense.id | `component_usages` | `meanings.sense` | `[pos_id]` | 非短语词条携带成分 |
+| `phrase_component_limit_exceeded` | sense.id | `component_usages` | `meanings.sense` | `[pos_id]` | 单条释义 > 100 |
+| `phrase_component_literal_invalid` | 成分 id | `literal` | `meanings.phrase_component_usage` | `[pos_id, sense_id]` | 未 trim / 空 / > 200 |
+| `phrase_component_self_target` | 成分 id | `target` | `meanings.phrase_component_usage` | `[pos_id, sense_id]` | 目标是本词条 |
+| `phrase_component_target_unavailable` | 成分 id | `target` | `meanings.phrase_component_usage` | `[pos_id, sense_id]` | 目标不存在 / 已归档 / 非 V3 发布 |
+| `phrase_component_target_nested` | 成分 id | `target` | `meanings.phrase_component_usage` | `[pos_id, sense_id]` | 目标短语自身的成分又指向短语（只放一层） |
+| `phrase_component_target_stale` | 成分 id | `target` | `meanings.phrase_component_usage` | `[pos_id, sense_id]` | 目标快照的词头/词义/词形八项任一对不上 |
+
+`node_location.pos_id` 一律是所属词性 id；`V3DraftNodeLocation` 没有扩字段，成分定位走
+`ancestor_node_ids`。注意 **V3 的 issue 形状不带 `reference_location`**（只有 V2 的
+`DraftValidationIssueV2` 有），所以 `sense_has_inbound_publication_refs` 在 V3 发布路径上不会
+告诉前端是哪条引用挡住的。
+
+**新能力开关**：`SMART_LEXICON_V3_SENSE_COMPONENT_USAGES`（默认 `false`）。派生条件与
+`draft_relation_prebinding` 同款：`read && edit && projection && flag`。它同时是**写入闸**——
+关闭时显式提交非空 `component_usages` 返回 `503`；缺键仍保留存量，显式 `[]` 仍可清空。
+
+**迁移**：`20260903130000_add_phrase_sense_component_usages` 建 `lexicon.v3_phrase_sense_component_usages`
+（owner 是 sense 的 `lexicon.nodes` 行）。**不迁移存量数据**，旧的变体级表原样保留。
+
+### 20.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 跑 `sync:openapi`，并更新契约测试里钉的 `_source_sha256` |
+| 2 | `V3_VALIDATION_ISSUE_CODES` 补上面 7 个 code，`presentationErrors.ts` 补对应文案（两者之间有 `satisfies` 强制同步） |
+| 3 | 其余 F1 代码已合入，无需再改；能力位为 `true` 后释义级卡片即可编辑 |
+
+### 20.4 兼容性
+
+**部署顺序：后端可以先上（flag 关闭），前端同步后再开 flag。**
+
+**响应形状**在 flag 关闭时对未同步 spec 的前端零变化：`sense_component_usages` 用
+`flag.then_some(true)` 输出，关闭时整个键**缺席**（不是 `false`），不会撞
+`AdminWordV3Capabilities` 的 `additionalProperties: false`；`WordSenseV3` /
+`SentenceTargetSenseV3` 的新字段空即省略，而「非空」只可能来自开着 flag 时的写入；变体级与
+候选级只是从 `required` 里移出，值仍照常输出，旧 runtime schema 照收。
+
+**但有两处行为与 flag 无关，B1 一上线即生效，别当成纯形状变更：**
+
+1. `target_component_usages` 的口径改成「被选中 sense 优先、缺失回退命中词形」。回退保证了
+   存量短语（成分挂在词形上）新建的关联不会丢成分，但 `replace_sentence_associations` 会把
+   一句话里**每条**手工关联重新解析一遍，所以口径本身是全量生效的，不只作用于被编辑的那条。
+2. 出引用守卫（`unavailable_outbound_sense_refs_*`）把 `phrase_component` 与 `relation` 同等
+   对待，对**存量的变体级成分引用**同样生效：成分目标的词义从目标当前发布里消失后，该短语
+   不再能从归档恢复 / 回滚到历史发布，得先由目标词把那条词义按原 node id 恢复并重新发布。
+
+**能力位是写闸，不是读闸。** 关掉它只能挡住新写入并让 capability 键缺席；已经写进
+`entry_editor_projection.meanings` / `entry_publications.snapshot` 的成分仍会照常序列化，也仍会
+参与每次词义保存的校验——所以若成分目标随后失效（归档 / 换发布），该短语会一直保存失败并返回
+`phrase_component_target_unavailable`，而能力位关闭时前端整键剥除、修不掉它。**这种情况要把
+flag 开回去，让管理员清掉成分**（显式发 `[]` 后端始终接受）。
+
+**回退旧二进制的代价远高于关 flag**：凡 sense 带非空 `component_usages` 的 JSON 都会让旧后端
+`deny_unknown_fields` 报 500，需要去键的地方有三处——`entry_editor_projection.meanings`、
+`entry_publications.snapshot`，以及 `platform.idempotency_records.response_body`（TTL 24 小时，
+V3 创建/发布/生命周期路径都会 typed 回放）。**所以 flag 要等到「确认不再回滚这个二进制」之后
+再开**；开之前回滚是干净的（没有任何 sense 带成分）。
+
+**窗口期提示**：前端新版上线后，浏览器里**没刷新的旧标签页**会在详情/保存/发布/发布历史遇到
+「响应格式异常，已安全停止」，而 PUT 其实已落库（假失败），刷新即恢复。部署时广播一次刷新。
+
+**存量**（本地 dev 库 2026-09-03）：草稿变体级成分 2 条 / 2 个词条，关系表 2 行，活节点 2，
+发布引用 0，发布节点 0，关联成分快照 0。测试服与生产的数字待部署窗口执行同一组 SQL 后回填。
+
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_

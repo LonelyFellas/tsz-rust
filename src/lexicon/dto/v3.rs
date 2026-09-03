@@ -16,6 +16,11 @@ impl<T> PresenceAwareVec<T> {
         self.present
     }
 
+    /// `skip_serializing_if` 只接受路径而不走 `Deref`，所以固有方法不能省。
+    pub(crate) fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
     pub(crate) fn preserve_missing_from(&mut self, values: &[T])
     where
         T: Clone,
@@ -270,7 +275,7 @@ pub struct WordCommonFormVariantV3 {
     #[schema(max_items = 2000)]
     pub pronunciations: Vec<WordPronunciationV3>,
     #[serde(default)]
-    #[schema(required = true, value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
+    #[schema(value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
     pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
 }
 
@@ -285,7 +290,7 @@ pub struct WordUkFormVariantV3 {
     #[schema(max_items = 2000)]
     pub pronunciations: Vec<WordPronunciationV3>,
     #[serde(default)]
-    #[schema(required = true, value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
+    #[schema(value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
     pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
 }
 
@@ -300,7 +305,7 @@ pub struct WordUsFormVariantV3 {
     #[schema(max_items = 2000)]
     pub pronunciations: Vec<WordPronunciationV3>,
     #[serde(default)]
-    #[schema(required = true, value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
+    #[schema(value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
     pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
 }
 
@@ -821,6 +826,11 @@ pub struct WordSenseV3 {
     pub sentences: Vec<WordSentenceV3>,
     #[schema(max_items = 2000)]
     pub relations: Vec<WordRelationV3>,
+    /// 短语成分用词：仅 `kind = phrase` 可携带，随词义步保存；缺键表示不改动，
+    /// 显式 `[]` 表示清空。
+    #[serde(default, skip_serializing_if = "PresenceAwareVec::is_empty")]
+    #[schema(value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
+    pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -914,6 +924,11 @@ pub struct WordSenseWritableV3 {
     pub sentences: Vec<WordSentenceWritableV3>,
     #[schema(max_items = 2000)]
     pub relations: Vec<WordRelationWritableV3>,
+    /// 短语成分用词：仅 `kind = phrase` 可携带，随词义步保存；缺键表示不改动，
+    /// 显式 `[]` 表示清空。
+    #[serde(default, skip_serializing_if = "PresenceAwareVec::is_empty")]
+    #[schema(value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
+    pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1013,6 +1028,11 @@ pub struct AdminWordV3Capabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub draft_relation_prebinding: Option<bool>,
+    /// 释义级短语成分用词的编辑能力；关闭时该键**缺席**（不是 `false`），
+    /// 好让未同步 spec 的旧前端不至于撞上 `additionalProperties: false`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sense_component_usages: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1431,6 +1451,13 @@ pub enum V3ValidationIssueCode {
     MeaningsStorageUnsafe,
     PosMeaningsRequired,
     SenseHasInboundPublicationRefs,
+    PhraseComponentNotAllowed,
+    PhraseComponentLimitExceeded,
+    PhraseComponentLiteralInvalid,
+    PhraseComponentSelfTarget,
+    PhraseComponentTargetUnavailable,
+    PhraseComponentTargetNested,
+    PhraseComponentTargetStale,
 }
 
 impl V3ValidationIssueCode {
@@ -1500,6 +1527,13 @@ impl V3ValidationIssueCode {
             Self::MeaningsStorageUnsafe => "meanings_storage_unsafe",
             Self::PosMeaningsRequired => "pos_meanings_required",
             Self::SenseHasInboundPublicationRefs => "sense_has_inbound_publication_refs",
+            Self::PhraseComponentNotAllowed => "phrase_component_not_allowed",
+            Self::PhraseComponentLimitExceeded => "phrase_component_limit_exceeded",
+            Self::PhraseComponentLiteralInvalid => "phrase_component_literal_invalid",
+            Self::PhraseComponentSelfTarget => "phrase_component_self_target",
+            Self::PhraseComponentTargetUnavailable => "phrase_component_target_unavailable",
+            Self::PhraseComponentTargetNested => "phrase_component_target_nested",
+            Self::PhraseComponentTargetStale => "phrase_component_target_stale",
         }
     }
 
@@ -1569,6 +1603,13 @@ impl V3ValidationIssueCode {
             "meanings_storage_unsafe" => Self::MeaningsStorageUnsafe,
             "pos_meanings_required" => Self::PosMeaningsRequired,
             "sense_has_inbound_publication_refs" => Self::SenseHasInboundPublicationRefs,
+            "phrase_component_not_allowed" => Self::PhraseComponentNotAllowed,
+            "phrase_component_limit_exceeded" => Self::PhraseComponentLimitExceeded,
+            "phrase_component_literal_invalid" => Self::PhraseComponentLiteralInvalid,
+            "phrase_component_self_target" => Self::PhraseComponentSelfTarget,
+            "phrase_component_target_unavailable" => Self::PhraseComponentTargetUnavailable,
+            "phrase_component_target_nested" => Self::PhraseComponentTargetNested,
+            "phrase_component_target_stale" => Self::PhraseComponentTargetStale,
             _ => return None,
         })
     }

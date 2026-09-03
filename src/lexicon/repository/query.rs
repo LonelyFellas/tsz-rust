@@ -584,10 +584,18 @@ impl LexiconRepository {
                  WHERE association.target_entry_id = ANY($1)
                    AND association.entry_id <> association.target_entry_id
                 UNION ALL
-                -- 6 V3 短语把本词条当作成分
+                -- 6 V3 短语把本词条当作成分（B1 期间变体级与释义级双源并存）
                 SELECT usage.target_entry_id, usage.entry_id, 'phrase_component'
                   FROM lexicon.v3_phrase_variant_component_usages usage
                  WHERE usage.target_entry_id = ANY($1)
+                   AND usage.entry_id <> usage.target_entry_id
+                UNION ALL
+                SELECT usage.target_entry_id, usage.entry_id, 'phrase_component'
+                  FROM lexicon.v3_phrase_sense_component_usages usage
+                 -- state 谓词是为了走 target_idx 那条部分索引；未解析行的 target_entry_id
+                 -- 恒为 NULL（形状 CHECK 保证），所以对结果集没有影响。
+                 WHERE usage.state = 'resolved'
+                   AND usage.target_entry_id = ANY($1)
                    AND usage.entry_id <> usage.target_entry_id
             ),
             deduped AS (
