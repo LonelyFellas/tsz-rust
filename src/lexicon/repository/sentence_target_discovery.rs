@@ -60,6 +60,61 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
+    /// 关键字检索短语成分目标：与 `published_sentence_discovery_surfaces` 共用同一套
+    /// 「只看当前发布、未归档」的过滤，只把词面等值换成对 `surface` 的大小写不敏感包含匹配。
+    /// 前置通配符用不上 `surface_sources` 上的 btree 索引，代价靠 `current_publication`
+    /// 分片与 `limit` 框住。
+    pub(crate) async fn published_component_target_surfaces(
+        tx: &mut Transaction<'_, Postgres>,
+        dialect_scopes: &[String],
+        keyword: &str,
+        kind: Option<EntryKind>,
+        limit: i64,
+    ) -> Result<Vec<SentenceDiscoverySurfaceRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, SentenceDiscoverySurfaceRecord>(
+            r#"
+            SELECT DISTINCT
+                   source.normalized_surface,
+                   source.surface,
+                   source.entry_kind,
+                   source.entry_id,
+                   source.publication_id,
+                   source.pos_id,
+                   source.pos,
+                   COALESCE(source.form_id, source.source_node_id) AS matched_form_id,
+                   source.source_node_id AS matched_variant_id,
+                   source.dialect_scope,
+                   source.event_offset
+            FROM lexicon.surface_sources source
+            JOIN lexicon.entries entry
+              ON entry.id = source.entry_id
+             AND entry.archived_at IS NULL
+             AND entry.current_publication_id = source.publication_id
+            WHERE source.is_deleted = FALSE
+              AND source.content_scope = 'current_publication'
+              AND source.language = 'en'
+              AND source.normalization_version = $1
+              AND source.dialect_scope = ANY($2::text[])
+              AND source.surface ILIKE $3 ESCAPE '\'
+              AND ($4::text IS NULL OR source.entry_kind = $4::text)
+              AND source.pos_id IS NOT NULL
+              AND source.pos IS NOT NULL
+              AND COALESCE(source.form_id, source.source_node_id) IS NOT NULL
+            ORDER BY source.normalized_surface, source.entry_id,
+                     source.pos_id, matched_form_id, source.event_offset
+            LIMIT $5
+            "#,
+        )
+        .bind(HEADWORD_NORMALIZATION_VERSION)
+        .bind(dialect_scopes)
+        .bind(format!("%{}%", escape_like_literal(keyword)))
+        .bind(kind.map(kind_string))
+        .bind(limit)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
     pub(crate) async fn draft_sentence_discovery_targets(
         tx: &mut Transaction<'_, Postgres>,
         dialect_scopes: &[String],

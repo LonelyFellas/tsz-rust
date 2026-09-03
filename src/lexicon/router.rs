@@ -82,6 +82,10 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(handler::resolve_sentence_targets),
         )
         .route(
+            "/entries/component-targets/search",
+            axum::routing::post(handler::search_component_targets),
+        )
+        .route(
             "/entries/{id}/pending-sentence-associations",
             get(handler::list_pending_sentence_associations),
         )
