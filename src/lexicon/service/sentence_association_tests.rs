@@ -256,6 +256,47 @@ fn v3_phrase_target_requires_exact_publication_variant_and_restores_components()
 }
 
 #[test]
+fn v3_phrase_association_prefers_the_sense_over_the_matched_variant() {
+    // 两侧都非空时优先级必须是 sense 赢；只测其中一侧非空的用例挡不住把条件写反。
+    let mut fixture = v3_fixture(1);
+    fixture.snapshot["kind"] = json!("phrase");
+    fixture.snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["component_usages"] = json!([{
+        "state": "unresolved",
+        "id": Uuid::now_v7(),
+        "literal": "变体级的那份"
+    }]);
+    fixture.snapshot["meanings"]["pos"][0]["senses"][0]["component_usages"] = json!([{
+        "state": "unresolved",
+        "id": Uuid::now_v7(),
+        "literal": "释义级的那份"
+    }]);
+    let publication_id = Uuid::now_v7();
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true, publication_id)
+        .expect("V3 phrase snapshot should be supported");
+
+    let resolved = target
+        .manual_target(
+            fixture.sense_id,
+            "harbour",
+            Some(publication_id),
+            Some(fixture.variant_ids[0]),
+        )
+        .expect("exact phrase variant should resolve");
+    let [PhraseComponentUsageV3::Unresolved { literal, .. }] =
+        resolved.target_component_usages.as_slice()
+    else {
+        panic!(
+            "期望恰好一条未解析成分：{:?}",
+            resolved.target_component_usages
+        );
+    };
+    assert_eq!(
+        literal, "释义级的那份",
+        "两侧都非空时必须取被选中 sense 的成分"
+    );
+}
+
+#[test]
 fn v3_phrase_association_falls_back_to_the_matched_variant_when_the_sense_has_none() {
     // B1 存量：成分还挂在词形上、sense 侧为空。关联快照必须回退到命中词形那份，
     // 否则这段窗口里新建的关联会丢掉候选行上显示着的成分。

@@ -20880,16 +20880,26 @@ async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool)
         "phrase",
         "第二条释义必须拿到自己的成分，而不是第一条的：{saved}"
     );
+    // 两边按同一个键排序再比：SQL 侧是 ORDER BY sense_id, ordinal，期望值也照此排，
+    // 否则断言的通过与否会取决于 uuid 的生成顺序。
+    let mut expected_rows = vec![
+        (
+            first_component_id,
+            first_sense_uuid,
+            0i16,
+            "split".to_owned(),
+        ),
+        (
+            second_component_id,
+            second_sense_id,
+            0i16,
+            "phrase".to_owned(),
+        ),
+    ];
+    expected_rows.sort_by_key(|(_, sense_id, ordinal, _)| (*sense_id, *ordinal));
     assert_eq!(
         sense_component_rows(&pool, entry_uuid).await,
-        vec![
-            (first_component_id, first_sense_uuid, 0, "split".to_owned()),
-            (second_component_id, second_sense_id, 0, "phrase".to_owned()),
-        ]
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>(),
+        expected_rows,
         "两条成分行必须各挂各的 sense"
     );
 
