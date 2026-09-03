@@ -802,6 +802,10 @@ pub struct SentenceTargetSenseV3 {
     pub base_form_id: Uuid,
     pub level: String,
     pub gloss: String,
+    /// 该词义（发布快照里）自带的短语成分用词；空则省略。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 100)]
+    pub component_usages: Vec<PhraseComponentUsageV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -847,6 +851,9 @@ pub struct PublishedSentenceTargetCandidateV3 {
     // 所以一个词性下的 (词形, 变体) 组合数必然不超过它。
     #[schema(max_items = 2000)]
     pub forms: Vec<SentenceTargetCandidateFormV3>,
+    /// 命中词形（`matched_variant_id`）自带的成分用词。B2 起恒为 `[]`，
+    /// 所以 spec 里已经标成可选，避免停输出时旧前端 `missing_required_property`。
+    #[serde(default)]
     #[schema(max_items = 100)]
     pub component_usages: Vec<PhraseComponentUsageV3>,
     pub matches: Vec<SentenceTargetMatchEvidenceV3>,

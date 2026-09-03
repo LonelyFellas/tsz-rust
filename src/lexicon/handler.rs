@@ -17,17 +17,18 @@ use crate::{
             ActivatePublicationAnyInput, ActivatePublicationInput, ActivatePublicationV3Input,
             AdminWordAny, AdminWordAnyEnvelope, AdminWordDraftAnyEnvelope, AdminWordListQuery,
             AdminWordListResponse, AdminWordPublicationAny, AdminWordPublicationEnvelope,
-            AdminWordPublicationListResponse, AdminWordStats, ClaimPendingSentenceAssociationInput,
-            CreateAdminWordAnyInput, CreateAdminWordV2Input, CreateAdminWordV3Input,
-            DeleteDraftInput, DetectLexiconInputAny, DetectLexiconResponseAny,
-            DetectLexiconSurfaceV3Input, DetectWordInputV2, DraftValidationResponseAny,
-            EntryDeleteBatchInput, EntryDeleteBatchResponse, EntryLifecycleBatchInput,
-            EntryLifecycleBatchResponseAny, EntryLifecycleInput, EntryPath, FormsImpactResponseAny,
-            PendingSentenceAssociationListQuery, PendingSentenceAssociationListResponse,
-            PendingSentenceAssociationPath, PreviewFormsImpactInputAny, PreviewFormsImpactInputV2,
-            PreviewFormsImpactInputV3, PublicationPath, PublishAdminWordAnyInput,
-            PublishAdminWordV2Input, PublishAdminWordV3Input, RelatedSearchQuery,
-            RelatedSearchResponse, ReplaceSentenceAssociationsInput, ResolveSentenceTargetsV3Input,
+            AdminWordPublicationListResponse, AdminWordStats, AdminWordV3Capabilities,
+            ClaimPendingSentenceAssociationInput, CreateAdminWordAnyInput, CreateAdminWordV2Input,
+            CreateAdminWordV3Input, DeleteDraftInput, DetectLexiconInputAny,
+            DetectLexiconResponseAny, DetectLexiconSurfaceV3Input, DetectWordInputV2,
+            DraftValidationResponseAny, EntryDeleteBatchInput, EntryDeleteBatchResponse,
+            EntryLifecycleBatchInput, EntryLifecycleBatchResponseAny, EntryLifecycleInput,
+            EntryPath, FormsImpactResponseAny, PendingSentenceAssociationListQuery,
+            PendingSentenceAssociationListResponse, PendingSentenceAssociationPath,
+            PreviewFormsImpactInputAny, PreviewFormsImpactInputV2, PreviewFormsImpactInputV3,
+            PublicationPath, PublishAdminWordAnyInput, PublishAdminWordV2Input,
+            PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
+            ReplaceSentenceAssociationsInput, ResolveSentenceTargetsV3Input,
             ResolveSentenceTargetsV3Response, SaveFormsStepInput, SaveFormsStepInputAny,
             SaveFormsStepInputV3, SaveMeaningsStepInput, SaveMeaningsStepInputAny,
             SaveMeaningsStepInputV3, SearchComponentTargetsV3Input,
@@ -129,16 +130,26 @@ fn draft_relation_prebinding_enabled(flags: SmartLexiconV3Flags) -> bool {
     flags.read && flags.edit && flags.projection && flags.draft_relation_prebinding
 }
 
+fn sense_component_usages_enabled(flags: SmartLexiconV3Flags) -> bool {
+    flags.read && flags.edit && flags.projection && flags.sense_component_usages
+}
+
+/// 运行时能力位统一从 flags 推导，避免每个调用点各传一串同序布尔。
+/// `sense_component_usages` 用 `then_some`：关闭时该键**缺席**而不是 `false`，
+/// 这样未同步 spec 的旧前端（`additionalProperties: false`）不会因为它整页失败。
+fn apply_capability_flags(capabilities: &mut AdminWordV3Capabilities, flags: SmartLexiconV3Flags) {
+    capabilities.sentence_associations = Some(sentence_association_enabled(flags));
+    capabilities.sentence_target_discovery = Some(sentence_target_discovery_enabled(flags));
+    capabilities.draft_relation_prebinding = Some(draft_relation_prebinding_enabled(flags));
+    capabilities.sense_component_usages = sense_component_usages_enabled(flags).then_some(true);
+}
+
 fn apply_sentence_association_flag(
     response: &mut AdminWordAnyEnvelope,
-    associations_enabled: bool,
-    discovery_enabled: bool,
-    relation_prebinding_enabled: bool,
+    flags: SmartLexiconV3Flags,
 ) {
     if let AdminWordAny::V3(word) = &mut response.word {
-        word.capabilities.sentence_associations = Some(associations_enabled);
-        word.capabilities.sentence_target_discovery = Some(discovery_enabled);
-        word.capabilities.draft_relation_prebinding = Some(relation_prebinding_enabled);
+        apply_capability_flags(&mut word.capabilities, flags);
     }
 }
 
@@ -164,27 +175,19 @@ fn apply_draft_legacy_bridge_read_flag(response: &mut AdminWordDraftAnyEnvelope,
 
 fn apply_draft_sentence_association_flag(
     response: &mut AdminWordDraftAnyEnvelope,
-    associations_enabled: bool,
-    discovery_enabled: bool,
-    relation_prebinding_enabled: bool,
+    flags: SmartLexiconV3Flags,
 ) {
     if let AdminWordDraftAnyEnvelope::V3(envelope) = response {
-        envelope.word.capabilities.sentence_associations = Some(associations_enabled);
-        envelope.word.capabilities.sentence_target_discovery = Some(discovery_enabled);
-        envelope.word.capabilities.draft_relation_prebinding = Some(relation_prebinding_enabled);
+        apply_capability_flags(&mut envelope.word.capabilities, flags);
     }
 }
 
 fn apply_publication_sentence_association_flag(
     publication: &mut AdminWordPublicationAny,
-    associations_enabled: bool,
-    discovery_enabled: bool,
-    relation_prebinding_enabled: bool,
+    flags: SmartLexiconV3Flags,
 ) {
     if let AdminWordPublicationAny::V3(publication) = publication {
-        publication.word.capabilities.sentence_associations = Some(associations_enabled);
-        publication.word.capabilities.sentence_target_discovery = Some(discovery_enabled);
-        publication.word.capabilities.draft_relation_prebinding = Some(relation_prebinding_enabled);
+        apply_capability_flags(&mut publication.word.capabilities, flags);
     }
 }
 

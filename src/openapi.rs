@@ -2377,20 +2377,58 @@ mod tests {
                 );
             }
         }
+        // 变体级与候选级成分用词 B2 起停输出 / 恒空，spec 里必须先松成可选，
+        // 否则前端 runtime schema 会在那次上线时集体 missing_required_property。
         for schema in [
             "WordCommonFormVariantV3",
             "WordUkFormVariantV3",
             "WordUsFormVariantV3",
+            "PublishedSentenceTargetCandidateV3",
         ] {
+            assert!(
+                schemas[schema]["properties"]["component_usages"].is_object(),
+                "{schema} must keep serialising component_usages during B1"
+            );
             assert!(
                 schemas[schema]["required"]
                     .as_array()
-                    .is_some_and(|required| required
+                    .is_none_or(|required| required
                         .iter()
-                        .any(|field| field == "component_usages")),
-                "{schema} must require component_usages for current clients"
+                        .all(|field| field != "component_usages")),
+                "{schema} must not require component_usages any more"
             );
         }
+        // 释义级成分用词：请求与响应两侧同形、可选、单 sense 上限 100。
+        for schema in [
+            "WordSenseV3",
+            "WordSenseWritableV3",
+            "SentenceTargetSenseV3",
+        ] {
+            assert_eq!(
+                schemas[schema]["properties"]["component_usages"]["maxItems"], 100,
+                "{schema}.component_usages must declare the per-sense limit"
+            );
+            assert!(
+                schemas[schema]["required"]
+                    .as_array()
+                    .is_none_or(|required| required
+                        .iter()
+                        .all(|field| field != "component_usages")),
+                "{schema}.component_usages must stay optional"
+            );
+        }
+        assert!(
+            schemas["AdminWordV3Capabilities"]["properties"]["sense_component_usages"].is_object(),
+            "释义级成分用词能力位必须出现在 capabilities schema 里"
+        );
+        assert!(
+            schemas["AdminWordV3Capabilities"]["required"]
+                .as_array()
+                .is_none_or(|required| required
+                    .iter()
+                    .all(|field| field != "sense_component_usages")),
+            "能力位关闭时该键缺席，因此不能是 required"
+        );
         let response_relations = schemas["WordRelationV3"]["oneOf"]
             .as_array()
             .expect("relation response must be a strict union");

@@ -20,16 +20,16 @@ use crate::lexicon::dto::{
     DetectLexiconSurfaceV3Input, DetectionSurfaceRequestEchoV3, DialectRulesV3,
     DictionaryCoverageV3, DictionaryPronunciationEvidenceV3, DictionaryProvenanceV3,
     DictionaryProviderEvidenceV3, DraftFormsStepContentV3, DraftMeaningsStepContentV3,
-    DraftValidationResponseV3, EnglishLanguageV3, EntryPresentationV3, FormsImpactItemV3,
-    FormsImpactNodeTypeV3, FormsImpactResponseV3, LegacyHeadwordsCompatibilityV3,
-    PhraseComponentUsageV3, PreviewFormsImpactInputV3, PronunciationNormalizationVersionV3,
-    PronunciationStyle, RelationPrebindingStateV3, RetiredStableNodeV3, SaveFormsStepInputV3,
-    SaveMeaningsStepInputV3, SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin,
-    UkDialectV3, UsDialectV3, V3PublicationBlockCode, V3PublicationCapability, V3RetiredNodeRole,
-    ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3,
-    WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordHeadwordsV2,
-    WordPosFormsV3, WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3,
-    WordUsFormVariantV3,
+    DraftNodeLocation, DraftValidationResponseV3, EnglishLanguageV3, EntryPresentationV3,
+    FormsImpactItemV3, FormsImpactNodeTypeV3, FormsImpactResponseV3,
+    LegacyHeadwordsCompatibilityV3, PhraseComponentUsageV3, PreviewFormsImpactInputV3,
+    PronunciationNormalizationVersionV3, PronunciationStyle, RelationPrebindingStateV3,
+    RetiredStableNodeV3, SaveFormsStepInputV3, SaveMeaningsStepInputV3, SuggestedConcreteFormV3,
+    SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3, UsDialectV3, V3PublicationBlockCode,
+    V3PublicationCapability, V3RetiredNodeRole, V3ValidationIssueCode, ValidateAdminWordV3Input,
+    WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3, WordEntryKindV3,
+    WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordHeadwordsV2, WordPosFormsV3,
+    WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
 };
 use crate::lexicon::model::{NodeIdentityRecord, RegionEvidenceRecord};
 
@@ -922,6 +922,7 @@ impl LexiconService {
                 sentence_associations: None,
                 sentence_target_discovery: None,
                 draft_relation_prebinding: None,
+                sense_component_usages: None,
             },
             detection_basis_dialect,
             forms,
@@ -1469,6 +1470,7 @@ impl LexiconService {
                 sentence_associations: None,
                 sentence_target_discovery: None,
                 draft_relation_prebinding: None,
+                sense_component_usages: None,
             },
             detection_basis_dialect,
             forms,
@@ -1763,6 +1765,7 @@ impl LexiconService {
         LexiconRepository::replace_v3_sentence_translations(&mut transaction, entry_id, &meanings)
             .await
             .map_err(repository_error)?;
+        replace_v3_sense_component_usages(&mut transaction, entry_id, &meanings).await?;
         replace_v3_forms(&mut transaction, entry_id, &input.content, &catalog_parts).await?;
         let now = Utc::now();
         let updated = sqlx::query(
@@ -1907,6 +1910,7 @@ impl LexiconService {
         entry_id: Uuid,
         input: SaveMeaningsStepInputV3,
         allow_relation_prebinding: bool,
+        allow_sense_component_usages: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         let SaveMeaningsStepInputV3 {
             base_revision,
@@ -1917,7 +1921,17 @@ impl LexiconService {
         let compatibility_source = self.get_v3(entry_id).await?;
         ensure_v3_active(&compatibility_source)?;
         ensure_v3_revision(&compatibility_source, base_revision)?;
+        // 能力关闭时不接受**新写入**的成分（前端此时整键剥除）；缺键仍走 preserve
+        // 保留存量，显式 `[]` 仍可清空，所以关 flag 就是一个真正的写入闸。
+        if !allow_sense_component_usages
+            && content.pos.iter().flat_map(|pos| &pos.senses).any(|sense| {
+                sense.component_usages.was_present() && !sense.component_usages.is_empty()
+            })
+        {
+            return Err(LexiconServiceError::V3StorageUnavailable);
+        }
         preserve_missing_sentence_translations(&mut content, &compatibility_source.meanings);
+        preserve_missing_sense_component_usages(&mut content, &compatibility_source.meanings);
         let mut issues = crate::lexicon::v3_contract::validate_meanings(&content);
         if intent == StepSaveIntent::Complete {
             issues.extend(
@@ -1964,6 +1978,16 @@ impl LexiconService {
         }
         let forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
+        let component_issues = validate_sense_phrase_components(
+            &mut transaction,
+            entry_id,
+            compatibility_source.kind,
+            &translation_content,
+        )
+        .await?;
+        if !component_issues.is_empty() {
+            return Err(v3_validation_failed(component_issues));
+        }
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
         let mut current_v3_meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
@@ -2072,6 +2096,7 @@ impl LexiconService {
         )
         .map_err(serialization_error)?;
         copy_sentence_translations(&translation_content, &mut canonical_content)?;
+        restore_sense_component_usages(&translation_content, &mut canonical_content);
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut canonical_content);
         let aggregate_issues =
             crate::lexicon::v3_contract::validate_aggregate_node_limit(&forms, &canonical_content);
@@ -2086,6 +2111,8 @@ impl LexiconService {
             .collect::<HashSet<_>>();
         proposed.retain(|node| !translation_ids.contains(&node.id));
         proposed.extend(translation_nodes);
+        // 成分节点不做 retain：V2 形状根本不产它们，撞 id 就该走 node_id_reused 报出来。
+        proposed.extend(v3_component_proposed_nodes(&canonical_content));
         let proposed_ids = sorted_unique_node_ids(proposed.iter().map(|node| node.id));
         LexiconRepository::lock_node_ids(&mut transaction, &proposed_ids)
             .await
@@ -2107,7 +2134,7 @@ impl LexiconService {
         }
         let audit_node_delta = v3_audit_node_delta(
             entry_id,
-            &v3_meaning_node_ids_with_translations(
+            &v3_meaning_node_ids_with_v3_only_nodes(
                 &current_relational_meanings,
                 &current_v3_meanings,
             ),
@@ -2161,6 +2188,7 @@ impl LexiconService {
         )
         .await
         .map_err(repository_error)?;
+        replace_v3_sense_component_usages(&mut transaction, entry_id, &canonical_content).await?;
         let first_sense = if created_first_sense {
             let first_sense_id = LexiconRepository::first_draft_sense(&mut transaction, entry_id)
                 .await
@@ -2802,6 +2830,7 @@ async fn apply_v3_relation_reconciliation(
         LexiconRepository::replace_v3_sentence_translations(tx, source_entry_id, &meanings)
             .await
             .map_err(repository_error)?;
+        replace_v3_sense_component_usages(tx, source_entry_id, &meanings).await?;
 
         let next_revision = source.revision + 1;
         let now = Utc::now();
@@ -3060,27 +3089,9 @@ async fn validate_phrase_components(
         if targets.contains_key(&(*target_word_id, *target_publication_id)) {
             continue;
         }
-        let snapshot = sqlx::query_scalar::<_, Value>(
-            r#"
-            SELECT publication.snapshot
-            FROM lexicon.entries entry
-            JOIN lexicon.entry_publications publication
-              ON publication.id = $2
-             AND publication.entry_id = entry.id
-            WHERE entry.id = $1
-              AND publication.content_schema_version = 3
-              AND entry.kind IN ('word', 'phrase')
-              AND entry.archived_at IS NULL
-            "#,
-        )
-        .bind(target_word_id)
-        .bind(target_publication_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(database_error)?
-        .ok_or_else(invalid_phrase_component)?;
-        let word = serde_json::from_value::<AdminWordV3>(snapshot)
-            .map_err(|_| invalid_phrase_component())?;
+        let word = load_phrase_component_target(tx, *target_word_id, *target_publication_id)
+            .await?
+            .ok_or_else(invalid_phrase_component)?;
         targets.insert((*target_word_id, *target_publication_id), word);
     }
 
@@ -3089,7 +3100,7 @@ async fn validate_phrase_components(
     let mut nested_target_ids = targets
         .values()
         .filter(|target| target.kind == WordEntryKindV3::Phrase)
-        .flat_map(|target| phrase_component_resolved_target_ids(&target.forms))
+        .flat_map(phrase_component_resolved_target_ids)
         .collect::<Vec<_>>();
     nested_target_ids.sort_unstable();
     nested_target_ids.dedup();
@@ -3148,8 +3159,11 @@ async fn validate_phrase_components(
     Ok(())
 }
 
-fn phrase_component_resolved_target_ids(forms: &DraftFormsStepContentV3) -> Vec<Uuid> {
-    forms
+/// 目标短语自己的成分指向了谁。**必须同时扫 forms 与 meanings**：
+/// 发布快照不可变，B1 之前存量短语的成分还挂在 forms 上，只看 meanings 会漏掉套娃检测。
+fn phrase_component_resolved_target_ids(word: &AdminWordV3) -> Vec<Uuid> {
+    let from_forms = word
+        .forms
         .pos
         .iter()
         .flat_map(|pos| &pos.forms)
@@ -3162,7 +3176,15 @@ fn phrase_component_resolved_target_ids(forms: &DraftFormsStepContentV3) -> Vec<
                 .iter()
                 .chain(&us.component_usages)
                 .collect(),
-        })
+        });
+    let from_meanings = word
+        .meanings
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.senses)
+        .flat_map(|sense| &sense.component_usages);
+    from_forms
+        .chain(from_meanings)
         .filter_map(|component| match component {
             PhraseComponentUsageV3::Resolved { target_word_id, .. } => Some(*target_word_id),
             PhraseComponentUsageV3::Unresolved { .. } => None,
@@ -3251,6 +3273,417 @@ fn phrase_component_matches_target(
     gloss == target_gloss
 }
 
+const fn phrase_component_id(component: &PhraseComponentUsageV3) -> Uuid {
+    match component {
+        PhraseComponentUsageV3::Unresolved { id, .. }
+        | PhraseComponentUsageV3::Resolved { id, .. } => *id,
+    }
+}
+
+fn phrase_component_literal(component: &PhraseComponentUsageV3) -> &str {
+    match component {
+        PhraseComponentUsageV3::Unresolved { literal, .. }
+        | PhraseComponentUsageV3::Resolved { literal, .. } => literal,
+    }
+}
+
+fn phrase_component_literal_is_valid(literal: &str) -> bool {
+    literal.trim() == literal && !literal.is_empty() && literal.chars().count() <= 200
+}
+
+/// 成分目标只接受「未归档 + V3 发布」的词条；行不存在或快照不是 V3 都返回 `None`。
+async fn load_phrase_component_target(
+    tx: &mut Transaction<'_, Postgres>,
+    target_word_id: Uuid,
+    target_publication_id: Uuid,
+) -> Result<Option<AdminWordV3>, LexiconServiceError> {
+    let snapshot = sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT publication.snapshot
+        FROM lexicon.entries entry
+        JOIN lexicon.entry_publications publication
+          ON publication.id = $2
+         AND publication.entry_id = entry.id
+        WHERE entry.id = $1
+          AND publication.content_schema_version = 3
+          AND entry.kind IN ('word', 'phrase')
+          AND entry.archived_at IS NULL
+        "#,
+    )
+    .bind(target_word_id)
+    .bind(target_publication_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(snapshot.and_then(|snapshot| serde_json::from_value::<AdminWordV3>(snapshot).ok()))
+}
+
+/// 短语套短语只放一层：目标短语自身的成分不得再指向另一个短语。
+async fn phrase_component_target_is_nested(
+    tx: &mut Transaction<'_, Postgres>,
+    target: &AdminWordV3,
+) -> Result<bool, LexiconServiceError> {
+    if target.kind != WordEntryKindV3::Phrase {
+        return Ok(false);
+    }
+    let mut nested_target_ids = phrase_component_resolved_target_ids(target);
+    nested_target_ids.sort_unstable();
+    nested_target_ids.dedup();
+    if nested_target_ids.is_empty() {
+        return Ok(false);
+    }
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id = ANY($1) AND kind = 'phrase')",
+    )
+    .bind(&nested_target_ids)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(database_error)
+}
+
+fn sense_component_issue(
+    code: V3ValidationIssueCode,
+    node_id: Uuid,
+    field: &str,
+    message: &str,
+    node_role: &str,
+    pos_id: Uuid,
+    ancestor_node_ids: Vec<Uuid>,
+) -> DraftValidationIssue {
+    DraftValidationIssue {
+        step: PersistedWordStep::Meanings,
+        node_id,
+        field: field.to_owned(),
+        code: code.as_str().to_owned(),
+        message: message.to_owned(),
+        reference_location: None,
+        node_location: Some(DraftNodeLocation {
+            node_role: node_role.to_owned(),
+            pos: None,
+            pos_id: Some(pos_id),
+            form_group_index: None,
+            form_group_id: None,
+            membership_id: None,
+            form_id: None,
+            variant_id: None,
+            pronunciation_id: None,
+            form_type: None,
+            dialect: None,
+            ancestor_node_ids,
+        }),
+    }
+}
+
+/// 释义级成分用词校验。与变体级的 400 `InvalidField` 不同，这里一律落成
+/// node 级 issue（`step = meanings`），词义步才能把错误定位到具体成分。
+async fn validate_sense_phrase_components(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    kind: WordEntryKindV3,
+    content: &DraftMeaningsStepContentV3,
+) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
+    let mut issues = Vec::new();
+    if kind != WordEntryKindV3::Phrase {
+        for pos in &content.pos {
+            for sense in &pos.senses {
+                if !sense.component_usages.is_empty() {
+                    issues.push(sense_component_issue(
+                        V3ValidationIssueCode::PhraseComponentNotAllowed,
+                        sense.id,
+                        "component_usages",
+                        "component usages are only available for phrase entries",
+                        crate::lexicon::node_identity::SENSE_ROLE,
+                        pos.pos_id,
+                        vec![pos.pos_id],
+                    ));
+                }
+            }
+        }
+        return Ok(issues);
+    }
+
+    // 目标快照先去重取回，让下面的 issue 收集是纯计算、不再穿插 await。
+    let mut requested = content
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.senses)
+        .flat_map(|sense| sense.component_usages.iter())
+        .filter_map(|component| match component {
+            PhraseComponentUsageV3::Resolved {
+                target_word_id,
+                target_publication_id,
+                ..
+            } if *target_word_id != entry_id => Some((*target_word_id, *target_publication_id)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    requested.sort_unstable();
+    requested.dedup();
+    let mut targets = HashMap::<(Uuid, Uuid), Option<AdminWordV3>>::new();
+    let mut nested = HashMap::<(Uuid, Uuid), bool>::new();
+    for key in requested {
+        let target = load_phrase_component_target(tx, key.0, key.1).await?;
+        if let Some(target) = target.as_ref() {
+            nested.insert(key, phrase_component_target_is_nested(tx, target).await?);
+        }
+        targets.insert(key, target);
+    }
+
+    for pos in &content.pos {
+        for sense in &pos.senses {
+            if sense.component_usages.len() > 100 {
+                issues.push(sense_component_issue(
+                    V3ValidationIssueCode::PhraseComponentLimitExceeded,
+                    sense.id,
+                    "component_usages",
+                    "a sense may carry at most 100 phrase component usages",
+                    crate::lexicon::node_identity::SENSE_ROLE,
+                    pos.pos_id,
+                    vec![pos.pos_id],
+                ));
+            }
+            for component in &sense.component_usages {
+                let component_id = phrase_component_id(component);
+                let ancestors = vec![pos.pos_id, sense.id];
+                let component_issue = |code, field, message| {
+                    sense_component_issue(
+                        code,
+                        component_id,
+                        field,
+                        message,
+                        crate::lexicon::node_identity::PHRASE_COMPONENT_USAGE_ROLE,
+                        pos.pos_id,
+                        ancestors.clone(),
+                    )
+                };
+                if !phrase_component_literal_is_valid(phrase_component_literal(component)) {
+                    issues.push(component_issue(
+                        V3ValidationIssueCode::PhraseComponentLiteralInvalid,
+                        "literal",
+                        "component literal must be trimmed and 1-200 characters long",
+                    ));
+                }
+                let PhraseComponentUsageV3::Resolved {
+                    target_word_id,
+                    target_publication_id,
+                    target_pos_id,
+                    target_base_form_id,
+                    target_sense_id,
+                    target_form_id,
+                    target_variant_id,
+                    target_dialect,
+                    target_form_type,
+                    target_headword,
+                    target_gloss,
+                    ..
+                } = component
+                else {
+                    continue;
+                };
+                if *target_word_id == entry_id {
+                    issues.push(component_issue(
+                        V3ValidationIssueCode::PhraseComponentSelfTarget,
+                        "target",
+                        "phrase component must not target the phrase itself",
+                    ));
+                    continue;
+                }
+                let key = (*target_word_id, *target_publication_id);
+                let Some(target) = targets.get(&key).and_then(Option::as_ref) else {
+                    issues.push(component_issue(
+                        V3ValidationIssueCode::PhraseComponentTargetUnavailable,
+                        "target",
+                        "phrase component target is missing, archived or not a V3 publication",
+                    ));
+                    continue;
+                };
+                if nested.get(&key).copied().unwrap_or_default() {
+                    issues.push(component_issue(
+                        V3ValidationIssueCode::PhraseComponentTargetNested,
+                        "target",
+                        "phrase component target must not itself reference another phrase",
+                    ));
+                    continue;
+                }
+                if !phrase_component_matches_target(
+                    target,
+                    *target_pos_id,
+                    *target_base_form_id,
+                    *target_sense_id,
+                    *target_form_id,
+                    *target_variant_id,
+                    *target_dialect,
+                    *target_form_type,
+                    target_headword,
+                    target_gloss,
+                ) {
+                    issues.push(component_issue(
+                        V3ValidationIssueCode::PhraseComponentTargetStale,
+                        "target",
+                        "resolved component must match a published word or phrase form and sense",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(issues)
+}
+
+/// 缺键 = 保持不变（旧客户端不发就别清空），显式 `[]` = 清空。按 sense id 对齐。
+fn preserve_missing_sense_component_usages(
+    proposed: &mut DraftMeaningsStepContentV3,
+    current: &DraftMeaningsStepContentV3,
+) {
+    let current_by_sense = current
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.senses)
+        .map(|sense| (sense.id, sense.component_usages.to_vec()))
+        .collect::<HashMap<_, _>>();
+    for sense in proposed.pos.iter_mut().flat_map(|pos| &mut pos.senses) {
+        sense
+            .component_usages
+            .preserve_missing_from(current_by_sense.get(&sense.id).map_or(&[], Vec::as_slice));
+    }
+}
+
+/// V3 → V2 → V3 往返会静默吞掉 `component_usages`（`WordSenseV2` 没这个字段且不 deny），
+/// 每个落库点都要从往返前的 V3 内容回填。
+pub(super) fn restore_sense_component_usages(
+    source: &DraftMeaningsStepContentV3,
+    target: &mut DraftMeaningsStepContentV3,
+) {
+    let by_sense = source
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.senses)
+        .map(|sense| (sense.id, sense.component_usages.to_vec()))
+        .collect::<HashMap<_, _>>();
+    for sense in target.pos.iter_mut().flat_map(|pos| &mut pos.senses) {
+        sense.component_usages = by_sense.get(&sense.id).cloned().unwrap_or_default().into();
+    }
+}
+
+fn v3_component_proposed_nodes(content: &DraftMeaningsStepContentV3) -> Vec<ProposedNode> {
+    content
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.senses)
+        .flat_map(|sense| {
+            sense
+                .component_usages
+                .iter()
+                .map(move |component| ProposedNode {
+                    id: phrase_component_id(component),
+                    node_type: "phrase_component_usage",
+                    step: PersistedWordStep::Meanings,
+                    parent_node_id: Some(sense.id),
+                    node_role: crate::lexicon::node_identity::PHRASE_COMPONENT_USAGE_ROLE
+                        .to_owned(),
+                    stable_slot: false,
+                })
+        })
+        .collect()
+}
+
+/// 释义级成分行整表 delete-then-insert：新表与 `lexicon.senses` 之间没有外键，
+/// `replace_meanings_content` 也不硬删 `lexicon.nodes`，清理只能由写入侧自己负责。
+/// **`replace_meanings_content` 的每个 V3 可达调用点都必须跟一次本函数**，
+/// 包括发布路径上 `sync_canonical_meanings` 内部那次。
+pub(super) async fn replace_v3_sense_component_usages(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    content: &DraftMeaningsStepContentV3,
+) -> Result<(), LexiconServiceError> {
+    sqlx::query("DELETE FROM lexicon.v3_phrase_sense_component_usages WHERE entry_id = $1")
+        .bind(entry_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    for sense in content.pos.iter().flat_map(|pos| &pos.senses) {
+        for (ordinal, component) in sense.component_usages.iter().enumerate() {
+            upsert_v3_node(
+                tx,
+                phrase_component_id(component),
+                entry_id,
+                "phrase_component_usage",
+                Some(sense.id),
+                crate::lexicon::node_identity::PHRASE_COMPONENT_USAGE_ROLE,
+            )
+            .await?;
+            match component {
+                PhraseComponentUsageV3::Unresolved { id, literal } => {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO lexicon.v3_phrase_sense_component_usages (
+                            id, entry_id, sense_id, ordinal, state, literal
+                        ) VALUES ($1, $2, $3, $4, 'unresolved', $5)
+                        "#,
+                    )
+                    .bind(id)
+                    .bind(entry_id)
+                    .bind(sense.id)
+                    .bind(ordinal as i16)
+                    .bind(literal)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(database_error)?;
+                }
+                PhraseComponentUsageV3::Resolved {
+                    id,
+                    literal,
+                    target_word_id,
+                    target_publication_id,
+                    target_pos_id,
+                    target_base_form_id,
+                    target_sense_id,
+                    target_form_id,
+                    target_variant_id,
+                    target_dialect,
+                    target_form_type,
+                    target_headword,
+                    target_gloss,
+                } => {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO lexicon.v3_phrase_sense_component_usages (
+                            id, entry_id, sense_id, ordinal, state, literal,
+                            target_entry_id, target_publication_id, target_pos_id,
+                            target_base_form_id, target_sense_id, target_form_id,
+                            target_variant_id, target_dialect, target_form_type,
+                            target_headword_snapshot, target_gloss_snapshot
+                        ) VALUES (
+                            $1, $2, $3, $4, 'resolved', $5, $6, $7, $8, $9,
+                            $10, $11, $12, $13, $14, $15, $16
+                        )
+                        "#,
+                    )
+                    .bind(id)
+                    .bind(entry_id)
+                    .bind(sense.id)
+                    .bind(ordinal as i16)
+                    .bind(literal)
+                    .bind(target_word_id)
+                    .bind(target_publication_id)
+                    .bind(target_pos_id)
+                    .bind(target_base_form_id)
+                    .bind(target_sense_id)
+                    .bind(target_form_id)
+                    .bind(target_variant_id)
+                    .bind(crate::lexicon::node_identity::dialect_name(*target_dialect))
+                    .bind(v3_form_type_name(*target_form_type))
+                    .bind(target_headword)
+                    .bind(target_gloss)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(database_error)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn invalid_phrase_component() -> LexiconServiceError {
     LexiconServiceError::InvalidField {
         field: "component_usages",
@@ -3327,26 +3760,31 @@ fn v3_meaning_node_types(
     let relational: DraftMeaningsStepContent =
         serde_json::from_value(serde_json::to_value(content).map_err(serialization_error)?)
             .map_err(serialization_error)?;
-    Ok(
-        proposed_nodes(&DraftFormsStepContent::default(), &relational)
+    let mut types = proposed_nodes(&DraftFormsStepContent::default(), &relational)
+        .into_iter()
+        .filter(|node| node.step == PersistedWordStep::Meanings)
+        .filter_map(|node| {
+            let node_type = match node.node_type {
+                "grammar_structure" => FormsImpactNodeTypeV3::GrammarStructure,
+                "text_variant" => FormsImpactNodeTypeV3::TextVariant,
+                "sense" => FormsImpactNodeTypeV3::Sense,
+                "definition" => FormsImpactNodeTypeV3::Definition,
+                "sentence" => FormsImpactNodeTypeV3::Sentence,
+                "relation" => FormsImpactNodeTypeV3::Relation,
+                // sense groups are top-level and are retained by forms saves.
+                "sense_group" => return None,
+                _ => return None,
+            };
+            Some((node.id, node_type))
+        })
+        .collect::<HashMap<_, _>>();
+    // 释义级成分在 V2 形状里不存在，词性被删时同样要出现在影响清单上。
+    types.extend(
+        v3_component_proposed_nodes(content)
             .into_iter()
-            .filter(|node| node.step == PersistedWordStep::Meanings)
-            .filter_map(|node| {
-                let node_type = match node.node_type {
-                    "grammar_structure" => FormsImpactNodeTypeV3::GrammarStructure,
-                    "text_variant" => FormsImpactNodeTypeV3::TextVariant,
-                    "sense" => FormsImpactNodeTypeV3::Sense,
-                    "definition" => FormsImpactNodeTypeV3::Definition,
-                    "sentence" => FormsImpactNodeTypeV3::Sentence,
-                    "relation" => FormsImpactNodeTypeV3::Relation,
-                    // sense groups are top-level and are retained by forms saves.
-                    "sense_group" => return None,
-                    _ => return None,
-                };
-                Some((node.id, node_type))
-            })
-            .collect(),
-    )
+            .map(|node| (node.id, FormsImpactNodeTypeV3::PhraseComponentUsage)),
+    );
+    Ok(types)
 }
 
 fn v3_form_node_ids(content: &DraftFormsStepContentV3) -> Vec<Uuid> {
@@ -3385,16 +3823,25 @@ fn v3_translation_proposed_nodes(content: &DraftMeaningsStepContentV3) -> Vec<Pr
         .collect()
 }
 
-fn v3_meaning_node_ids_with_translations(
+/// V2 形状看不见的 V3-only 节点（多档翻译、释义级成分）要一并算进节点增量，
+/// 否则审计会把它们当成凭空出现。
+fn v3_meaning_node_ids_with_v3_only_nodes(
     relational: &DraftMeaningsStepContent,
     v3: &DraftMeaningsStepContentV3,
 ) -> Vec<Uuid> {
     sorted_unique_node_ids(
-        v3_meaning_node_ids(relational).into_iter().chain(
-            v3_translation_proposed_nodes(v3)
-                .into_iter()
-                .map(|node| node.id),
-        ),
+        v3_meaning_node_ids(relational)
+            .into_iter()
+            .chain(
+                v3_translation_proposed_nodes(v3)
+                    .into_iter()
+                    .map(|node| node.id),
+            )
+            .chain(
+                v3_component_proposed_nodes(v3)
+                    .into_iter()
+                    .map(|node| node.id),
+            ),
     )
 }
 
@@ -4573,9 +5020,8 @@ mod tests {
 
     use super::*;
     use crate::lexicon::dto::{
-        CommonDialectV3, DialectRulesV3, V3ValidationIssueCode, WordCommonFormVariantV3,
-        WordConcreteFormV3, WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3,
-        WordPronunciationV3,
+        CommonDialectV3, DialectRulesV3, WordCommonFormVariantV3, WordConcreteFormV3,
+        WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3, WordPronunciationV3,
     };
 
     fn fixed_id(value: u128) -> Uuid {
@@ -4849,6 +5295,66 @@ mod tests {
         };
         assert!(ensure_phrase_component_ownership(WordEntryKindV3::Phrase, &content).is_ok());
         assert!(ensure_phrase_component_ownership(WordEntryKindV3::Word, &content).is_err());
+    }
+
+    fn sense_meanings(component_usages: Option<Value>) -> DraftMeaningsStepContentV3 {
+        let mut sense = json!({
+            "id": fixed_id(700),
+            "sub_pos": "N-COUNT",
+            "level": "A1",
+            "sense_group_id": fixed_id(701),
+            "frequency": "100",
+            "depends_on_context": false,
+            "definitions": [],
+            "sentences": [],
+            "relations": []
+        });
+        if let Some(component_usages) = component_usages {
+            sense["component_usages"] = component_usages;
+        }
+        serde_json::from_value(json!({
+            "sense_groups": [{
+                "id": fixed_id(701),
+                "name_zh": "核心义",
+                "name_en": "core"
+            }],
+            "pos": [{
+                "pos_id": fixed_id(702),
+                "grammar_structures": [],
+                "senses": [sense]
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn missing_sense_component_field_preserves_stock_while_explicit_empty_clears() {
+        let stock = json!([{
+            "id": fixed_id(703),
+            "state": "unresolved",
+            "literal": "component"
+        }]);
+        let current = sense_meanings(Some(stock));
+
+        let mut absent = sense_meanings(None);
+        preserve_missing_sense_component_usages(&mut absent, &current);
+        assert_eq!(
+            absent.pos[0].senses[0].component_usages.len(),
+            1,
+            "缺键的旧客户端不得清空存量成分"
+        );
+
+        let mut cleared = sense_meanings(Some(json!([])));
+        preserve_missing_sense_component_usages(&mut cleared, &current);
+        assert!(
+            cleared.pos[0].senses[0].component_usages.is_empty(),
+            "显式空数组必须清空"
+        );
+
+        // V2 往返把字段整个吞掉，落库前只能靠往返前的内容回填。
+        let mut round_tripped = sense_meanings(None);
+        restore_sense_component_usages(&current, &mut round_tripped);
+        assert_eq!(round_tripped.pos[0].senses[0].component_usages.len(), 1);
     }
 
     #[test]

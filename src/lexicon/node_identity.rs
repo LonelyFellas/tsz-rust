@@ -9,6 +9,9 @@ pub(crate) const GRAMMAR_STRUCTURE_ROLE: &str = "meanings.grammar_structure";
 pub(crate) const SENSE_ROLE: &str = "meanings.sense";
 pub(crate) const SENTENCE_ROLE: &str = "meanings.sentence";
 pub(crate) const RELATION_ROLE: &str = "meanings.relation";
+/// 释义级短语成分用词。变体级的 `forms.phrase_component_usage` B2 才退场，
+/// B1 期间两个角色共用同一个 `node_type`。
+pub(crate) const PHRASE_COMPONENT_USAGE_ROLE: &str = "meanings.phrase_component_usage";
 pub(crate) const LEGACY_NODE_ROLE: &str = "legacy";
 
 pub(crate) const FORM_SLOT_ROLE_PREFIX: &str = "forms.form_slot:";

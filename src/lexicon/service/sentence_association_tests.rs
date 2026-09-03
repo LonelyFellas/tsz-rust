@@ -212,7 +212,8 @@ fn v3_same_surface_across_forms_keeps_association_without_guessing_form() {
 fn v3_phrase_target_requires_exact_publication_variant_and_restores_components() {
     let mut fixture = v3_fixture(1);
     fixture.snapshot["kind"] = json!("phrase");
-    fixture.snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["component_usages"] = json!([{
+    // 成分用词已改为释义级绑定：挂在 sense 上，不再挂在词形变体上。
+    fixture.snapshot["meanings"]["pos"][0]["senses"][0]["component_usages"] = json!([{
         "state": "unresolved",
         "id": Uuid::now_v7(),
         "literal": "harbour"
@@ -252,6 +253,36 @@ fn v3_phrase_target_requires_exact_publication_variant_and_restores_components()
         Some(fixture.variant_ids[0])
     );
     assert_eq!(resolved.target_component_usages.len(), 1);
+}
+
+#[test]
+fn v3_phrase_association_falls_back_to_the_matched_variant_when_the_sense_has_none() {
+    // B1 存量：成分还挂在词形上、sense 侧为空。关联快照必须回退到命中词形那份，
+    // 否则这段窗口里新建的关联会丢掉候选行上显示着的成分。
+    let mut fixture = v3_fixture(1);
+    fixture.snapshot["kind"] = json!("phrase");
+    fixture.snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["component_usages"] = json!([{
+        "state": "unresolved",
+        "id": Uuid::now_v7(),
+        "literal": "harbour"
+    }]);
+    let publication_id = Uuid::now_v7();
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true, publication_id)
+        .expect("V3 phrase snapshot should be supported");
+
+    let resolved = target
+        .manual_target(
+            fixture.sense_id,
+            "harbour",
+            Some(publication_id),
+            Some(fixture.variant_ids[0]),
+        )
+        .expect("exact phrase variant should resolve");
+    assert_eq!(
+        resolved.target_component_usages.len(),
+        1,
+        "sense 没有成分时必须回退到命中词形的成分"
+    );
 }
 
 #[test]
@@ -356,6 +387,7 @@ fn v2_manual_slot_selection_keeps_legacy_first_match_behavior() {
                 id: sense_id,
                 level: "B1".to_owned(),
                 gloss: "切".to_owned(),
+                component_usages: Vec::new(),
             }],
         }],
     };
@@ -437,6 +469,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
                 id: Uuid::now_v7(),
                 level: "B1".to_owned(),
                 gloss: "悬挂".to_owned(),
+                component_usages: Vec::new(),
             }],
         }],
     };
@@ -545,6 +578,7 @@ fn v2_target_candidate_forms_carry_no_base_form_ids() {
                 id: Uuid::now_v7(),
                 level: "A1".to_owned(),
                 gloss: "位置".to_owned(),
+                component_usages: Vec::new(),
             }],
         }],
     };

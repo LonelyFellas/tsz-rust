@@ -260,12 +260,7 @@ pub async fn save_forms(
                 &mut response,
                 state.smart_lexicon_v3_flags.legacy_bridge_read,
             );
-            apply_sentence_association_flag(
-                &mut response,
-                sentence_association_enabled(state.smart_lexicon_v3_flags),
-                sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-            );
+            apply_sentence_association_flag(&mut response, state.smart_lexicon_v3_flags);
             return Ok((StatusCode::OK, Json(response)));
         }
         Some(2) | None => {}
@@ -339,6 +334,7 @@ pub async fn save_meanings(
                     path.id,
                     input,
                     draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
+                    sense_component_usages_enabled(state.smart_lexicon_v3_flags),
                 )
                 .await
                 .map_err(map_error)?;
@@ -346,12 +342,7 @@ pub async fn save_meanings(
                 &mut response,
                 state.smart_lexicon_v3_flags.legacy_bridge_read,
             );
-            apply_sentence_association_flag(
-                &mut response,
-                sentence_association_enabled(state.smart_lexicon_v3_flags),
-                sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-            );
+            apply_sentence_association_flag(&mut response, state.smart_lexicon_v3_flags);
             return Ok((StatusCode::OK, Json(response)));
         }
         Some(2) | None => {}
@@ -481,12 +472,7 @@ pub async fn publish(
                 &mut response,
                 state.smart_lexicon_v3_flags.legacy_bridge_read,
             );
-            apply_sentence_association_flag(
-                &mut response,
-                sentence_association_enabled(state.smart_lexicon_v3_flags),
-                sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-            );
+            apply_sentence_association_flag(&mut response, state.smart_lexicon_v3_flags);
             return Ok((StatusCode::CREATED, Json(response)));
         }
         Some(2) | None => {}
@@ -564,12 +550,7 @@ pub async fn replace_sentence_associations(
         &mut response,
         state.smart_lexicon_v3_flags.legacy_bridge_read,
     );
-    apply_sentence_association_flag(
-        &mut response,
-        sentence_association_enabled(state.smart_lexicon_v3_flags),
-        sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-    );
+    apply_sentence_association_flag(&mut response, state.smart_lexicon_v3_flags);
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -622,12 +603,7 @@ pub async fn claim_pending_sentence_association(
         &mut response,
         state.smart_lexicon_v3_flags.legacy_bridge_read,
     );
-    apply_sentence_association_flag(
-        &mut response,
-        sentence_association_enabled(state.smart_lexicon_v3_flags),
-        sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-    );
+    apply_sentence_association_flag(&mut response, state.smart_lexicon_v3_flags);
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -692,12 +668,7 @@ pub async fn activate_publication(
                 &mut response,
                 state.smart_lexicon_v3_flags.legacy_bridge_read,
             );
-            apply_sentence_association_flag(
-                &mut response,
-                sentence_association_enabled(state.smart_lexicon_v3_flags),
-                sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-                draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-            );
+            apply_sentence_association_flag(&mut response, state.smart_lexicon_v3_flags);
             return Ok((StatusCode::OK, Json(response)));
         }
         Some(2) | None => {}
