@@ -98,12 +98,7 @@ pub async fn get(
         &mut response,
         state.smart_lexicon_v3_flags.legacy_bridge_read,
     );
-    apply_draft_sentence_association_flag(
-        &mut response,
-        sentence_association_enabled(state.smart_lexicon_v3_flags),
-        sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-    );
+    apply_draft_sentence_association_flag(&mut response, state.smart_lexicon_v3_flags);
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -174,12 +169,7 @@ pub async fn list_publications(
             publication,
             state.smart_lexicon_v3_flags.legacy_bridge_read,
         );
-        apply_publication_sentence_association_flag(
-            publication,
-            sentence_association_enabled(state.smart_lexicon_v3_flags),
-            sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-            draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-        );
+        apply_publication_sentence_association_flag(publication, state.smart_lexicon_v3_flags);
     }
     Ok((StatusCode::OK, Json(response)))
 }
@@ -222,9 +212,7 @@ pub async fn get_publication(
     );
     apply_publication_sentence_association_flag(
         &mut response.publication,
-        sentence_association_enabled(state.smart_lexicon_v3_flags),
-        sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-        draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
+        state.smart_lexicon_v3_flags,
     );
     Ok((StatusCode::OK, Json(response)))
 }

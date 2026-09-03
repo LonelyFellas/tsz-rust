@@ -740,6 +740,7 @@ fn meanings_node_count(content: &DraftMeaningsStepContentV3) -> usize {
                                     })
                                     .sum::<usize>()
                                 + sense.relations.len()
+                                + sense.component_usages.len()
                         })
                         .sum::<usize>()
             })
@@ -1295,6 +1296,14 @@ fn collect_forbidden_object(
                 "field is not part of the V3 writable contract",
                 location_for(node_id, None, None, None, None, None, None),
             ));
+        }
+        // 成分用词自带 target_headword / target_gloss 目标快照，与关联词那两个
+        // 「响应专属」同名字段无关，不能被禁用字段扫描误伤。成分本身是
+        // deny_unknown_fields 的闭合 union，多余键交给 serde 拒。
+        // 注意本函数由 forms 与 meanings 两条解码路径共用：forms 的禁用名单里没有一项
+        // 会出现在成分对象内，所以那侧不受影响，只是错误形状从结构化 issue 退成通用 422。
+        if field == "component_usages" {
+            continue;
         }
         collect_forbidden_fields(nested, forbidden, issues, node_id);
     }
