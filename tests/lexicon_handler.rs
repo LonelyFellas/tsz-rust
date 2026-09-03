@@ -16139,6 +16139,11 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
         list["words"][0]["presentation"],
         saved["word"]["presentation"]
     );
+    assert_eq!(
+        list["words"][0]["dialects"],
+        json!(["uk", "us"]),
+        "noun 词性 distinguish → 列表方言摘要为英美：{list}"
+    );
 
     let read_disabled_state = state
         .clone()
@@ -19377,6 +19382,11 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     assert_eq!(
         list["words"][0]["presentation"]["matched_surfaces"],
         json!(["native phrase"])
+    );
+    assert_eq!(
+        list["words"][0]["dialects"],
+        json!(["uk", "us"]),
+        "短语行同样按词性 spelling_mode 聚合方言摘要：{list}"
     );
 }
 

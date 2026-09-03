@@ -311,6 +311,15 @@ impl LexiconRepository {
                        FROM lexicon.senses sense
                        WHERE sense.entry_id = entry.id
                    ), ARRAY[]::text[]) AS levels,
+                   -- V3 列表的方言摘要按词性当前设置聚合：step 1 的英美选择只是建条快照，
+                   -- 之后各词性在词形步各改各的。legacy 行的 spelling_mode 为 NULL，须滤掉，
+                   -- 否则 text[] 里的 NULL 会让整行解码失败。
+                   COALESCE((
+                       SELECT array_agg(DISTINCT pos.spelling_mode)
+                       FROM lexicon.entry_pos pos
+                       WHERE pos.entry_id = entry.id
+                         AND pos.spelling_mode IS NOT NULL
+                   ), ARRAY[]::text[]) AS pos_spelling_modes,
                    entry.current_publication_id IS NOT NULL AS is_published,
                    publication.source_revision AS published_revision,
                    publication.source_revision IS NOT NULL
