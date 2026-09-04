@@ -3564,6 +3564,33 @@ pub(super) fn restore_sense_component_usages(
     }
 }
 
+/// V3 → V2 → V3 往返会把每句的多档 `zh_translations` 塌成 1 档（`WordSentenceV2` 只有单条
+/// `zh_text`，回程 `normalize_sentence_translations` 只按别名补 1 档），发布路径的每个往返点都要
+/// 从往返前的 V3 内容按 sentence id 回填。源里没有的句子（正常不会发生）保留 normalize 的结果，
+/// 不塞空档——空 `zh_translations` 是非法态。
+pub(super) fn restore_sentence_zh_translations(
+    source: &DraftMeaningsStepContentV3,
+    target: &mut DraftMeaningsStepContentV3,
+) {
+    let by_sentence = source
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.senses)
+        .flat_map(|sense| &sense.sentences)
+        .map(|sentence| (sentence.id, sentence.zh_translations.to_vec()))
+        .collect::<HashMap<_, _>>();
+    for sentence in target
+        .pos
+        .iter_mut()
+        .flat_map(|pos| &mut pos.senses)
+        .flat_map(|sense| &mut sense.sentences)
+    {
+        if let Some(translations) = by_sentence.get(&sentence.id) {
+            sentence.zh_translations = translations.clone().into();
+        }
+    }
+}
+
 fn v3_component_proposed_nodes(content: &DraftMeaningsStepContentV3) -> Vec<ProposedNode> {
     content
         .pos

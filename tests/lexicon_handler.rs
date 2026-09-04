@@ -23332,6 +23332,158 @@ async fn v3_forms_resave_preserves_sentence_translation_node_roles(pool: PgPool)
     );
 }
 
+/// 发布路径的 V2 往返曾把每句多档 zh_translations 塌成 1 档（既有缺陷）。
+/// 钉住：发布响应与不可变快照都保留全部三档；带 newly_bound 关联的发布同样保留。
+#[sqlx::test]
+async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    let word = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &["A sentence with three bands."],
+    )
+    .await;
+    let b_id = first_sentence(&word)["zh_translations"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // 存三档译文（乱序给，落库后按 c1_c2 → b1_b2 → a1_a2 排）。
+    let mut meanings = word["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["sentences"][0]["zh_translations"] = json!([
+        {"id": Uuid::now_v7(), "band": "a1_a2", "content": rich_text("高阶译文")},
+        {"id": Uuid::now_v7(), "band": "c1_c2", "content": rich_text("初阶译文")},
+        {"id": b_id, "band": "b1_b2", "content": rich_text("中阶译文")}
+    ]);
+    let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
+    assert_eq!(
+        first_sentence(&saved)["zh_translations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+        "前置：保存后应有三档"
+    );
+
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+
+    // 1) 发布响应保留三档，顺序与别名不变
+    let bands: Vec<&str> = first_sentence(&published)["zh_translations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("发布响应缺 zh_translations：{published}"))
+        .iter()
+        .map(|t| t["band"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        bands,
+        ["c1_c2", "b1_b2", "a1_a2"],
+        "发布响应必须保留全部三档：{published}"
+    );
+    assert_eq!(first_sentence(&published)["zh_text_id"], b_id);
+
+    // 2) 不可变发布快照也保留三档
+    let publication_id = current_publication_id(
+        &pool,
+        Uuid::parse_str(published["word"]["id"].as_str().unwrap()).unwrap(),
+    )
+    .await;
+    let snapshot_bands: Value = sqlx::query_scalar(
+        "SELECT snapshot->'meanings'->'pos'->0->'senses'->0->'sentences'->0->'zh_translations' \
+         FROM lexicon.entry_publications WHERE id = $1",
+    )
+    .bind(publication_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let snapshot_bands: Vec<&str> = snapshot_bands
+        .as_array()
+        .unwrap_or_else(|| panic!("快照缺 zh_translations：{snapshot_bands}"))
+        .iter()
+        .map(|t| t["band"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        snapshot_bands,
+        ["c1_c2", "b1_b2", "a1_a2"],
+        "发布快照必须固化全部三档，否则下游只能读到 1 档"
+    );
+
+    // 3) newly_bound 分支（带待建关联词的发布）同样保留三档
+    let source = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &["Another three-band sentence."],
+    )
+    .await;
+    let src_sentence_b_id = first_sentence(&source)["zh_translations"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pending_headword = format!("bandpending{}", admin_id.simple());
+    let mut src_meanings = source["word"]["meanings"].clone();
+    src_meanings["pos"][0]["senses"][0]["sentences"][0]["zh_translations"] = json!([
+        {"id": Uuid::now_v7(), "band": "a1_a2", "content": rich_text("源高阶")},
+        {"id": src_sentence_b_id, "band": "b1_b2", "content": rich_text("源中阶")},
+        {"id": Uuid::now_v7(), "band": "c1_c2", "content": rich_text("源初阶")}
+    ]);
+    src_meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(),
+        "relation": "synonym",
+        "pending_target_headword": pending_headword,
+        "score": "88.00"
+    }]);
+    let src_saved = save_v3_meanings(&state, &bearer, &source, src_meanings).await;
+    let (status, src_published) = publish_ready_v3(&state, &bearer, &src_saved).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "带 newly_bound 的发布必须成功：{src_published}"
+    );
+    assert!(
+        first_sentence(&src_published)["zh_translations"][0]["band"].is_string(),
+        "前置：响应带 zh_translations"
+    );
+    let src_bands: Vec<&str> = first_sentence(&src_published)["zh_translations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["band"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        src_bands,
+        ["c1_c2", "b1_b2", "a1_a2"],
+        "newly_bound 路径也必须保留三档（sync_canonical_meanings 前回填）：{src_published}"
+    );
+    assert!(
+        src_published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
+            .is_string(),
+        "前置：这条发布确实走了 newly_bound（待建关联词已被物化）：{src_published}"
+    );
+    // 投影也回填了三档
+    let projected: Value = sqlx::query_scalar(
+        "SELECT meanings->'pos'->0->'senses'->0->'sentences'->0->'zh_translations' \
+         FROM lexicon.entry_editor_projection WHERE entry_id = $1",
+    )
+    .bind(Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        projected.as_array().map(Vec::len),
+        Some(3),
+        "newly_bound 的 sync_canonical_meanings 覆盖投影时必须回填三档"
+    );
+}
+
 #[sqlx::test]
 async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
