@@ -95,11 +95,8 @@ use utoipa::{
         crate::lexicon::handler::commands::validate,
         crate::lexicon::handler::commands::publish,
         crate::lexicon::handler::commands::activate_publication,
-        crate::lexicon::handler::commands::replace_sentence_associations,
-        crate::lexicon::handler::query::list_pending_sentence_associations,
         crate::lexicon::handler::query::resolve_sentence_targets,
         crate::lexicon::handler::query::search_component_targets,
-        crate::lexicon::handler::commands::claim_pending_sentence_association,
         crate::lexicon::content_completion::handler::create_content_completion_job,
         crate::lexicon::content_completion::handler::get_content_completion_job,
         crate::lexicon::content_completion::handler::retry_content_completion_job,
@@ -235,15 +232,6 @@ use utoipa::{
             crate::lexicon::dto::SentenceAssociationStateV1,
             crate::lexicon::dto::SentenceAssociationsStateV2,
             crate::lexicon::dto::WordSentenceAssociationV2,
-            crate::lexicon::dto::SentenceAssociationInputV2,
-            crate::lexicon::dto::SentenceAssociationInputV3,
-            crate::lexicon::dto::ReplaceSentenceAssociationsInputV2,
-            crate::lexicon::dto::ReplaceSentenceAssociationsInputV3,
-            crate::lexicon::dto::ReplaceSentenceAssociationsInput,
-            crate::lexicon::dto::PendingSentenceAssociationItemV1,
-            crate::lexicon::dto::PendingSentenceAssociationItemV3,
-            crate::lexicon::dto::PendingSentenceAssociationListResponse,
-            crate::lexicon::dto::ClaimPendingSentenceAssociationInput,
             crate::lexicon::dto::WordSentenceV2,
             crate::lexicon::dto::WordRelationV2,
             crate::lexicon::dto::WordSenseV2,
@@ -1083,18 +1071,6 @@ mod tests {
             ),
             ("put", "/api/v1/admin/lexicon/entries/{id}/steps/forms"),
             ("put", "/api/v1/admin/lexicon/entries/{id}/steps/meanings"),
-            (
-                "put",
-                "/api/v1/admin/lexicon/entries/{id}/sentences/{sentence_id}/associations",
-            ),
-            (
-                "get",
-                "/api/v1/admin/lexicon/entries/{id}/pending-sentence-associations",
-            ),
-            (
-                "post",
-                "/api/v1/admin/lexicon/pending-sentence-associations/{association_id}/claim",
-            ),
             ("post", "/api/v1/admin/lexicon/entries/{id}/validate"),
             ("post", "/api/v1/admin/lexicon/entries/{id}/publications"),
         ] {
@@ -2472,26 +2448,6 @@ mod tests {
                 "{name} must retain the optional pending gloss contract"
             );
         }
-        let association_input = &schemas["SentenceAssociationInputV2"];
-        let association_required = association_input["required"]
-            .as_array()
-            .expect("例句关联输入应声明公共必填字段");
-        for field in ["id", "source_dialect", "source_range"] {
-            assert!(association_required.iter().any(|value| value == field));
-        }
-        for field in ["target_word_id", "target_sense_id"] {
-            assert!(
-                !association_required.iter().any(|value| value == field),
-                "linked target 在 Pending 扩展后必须是互斥可选字段"
-            );
-        }
-        for field in [
-            "pending_target_kind",
-            "pending_target_headword",
-            "pending_target_gloss",
-        ] {
-            assert!(association_input["properties"][field].is_object());
-        }
         assert_eq!(
             schemas["WordSentenceAssociationV2"]["discriminator"]["propertyName"],
             "state"
@@ -2557,17 +2513,6 @@ mod tests {
             association_states,
             ["linked", "pending"].into_iter().collect()
         );
-        assert_eq!(
-            schemas["PendingSentenceAssociationListResponse"]["properties"]["results"]["items"]["$ref"],
-            "#/components/schemas/PendingSentenceAssociationItemV3"
-        );
-        for schema in [
-            "SentenceAssociationInputV3",
-            "PendingSentenceAssociationItemV3",
-        ] {
-            assert!(schemas[schema]["properties"]["source_segments"].is_object());
-            assert!(schemas[schema]["properties"]["source_range"].is_null());
-        }
         assert!(
             schemas["WordSentenceAssociationV3"]["oneOf"]
                 .as_array()

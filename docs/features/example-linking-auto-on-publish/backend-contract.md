@@ -358,6 +358,9 @@ PUT /api/v1/admin/lexicon/entries/{id}/sentences/{sentence_id}/associations
 Idempotency-Key: <uuid>
 ```
 
+> **状态（2026-09-05）**：该事后编辑端点连同 `pending-sentence-associations` 列表/认领端点已下线，
+> 草稿期不再人工编辑关联；例句创建流程将重新设计。发布时的自动关联不受影响。
+
 ```jsonc
 {
   "base_revision": 12,
@@ -541,7 +544,7 @@ sense 节点（节点行本身不会消失，`lexicon.nodes` 只标 `removed_fro
 | **1. 库层与 wire** | `migrations/20260824100000_create_lexicon_sentence_associations.*`；`dto/aggregate.rs` 的 `WordSentenceAssociationV2` / `SentenceSourceRangeV1` / 两个枚举 / `WordSentenceV2` 的两个新字段；`repository/sentence_associations.rs` |
 | **2. 解析器** | `lexicon/sentence_association.rs`（切词、停用词、词性闸、正文指纹、码点切片，纯函数带单测）+ `service/sentence_association.rs`（候选查询、三层歧义判定、快照回填） |
 | **3. 发布挂钩** | `service/publishing.rs` 的 `publish` 主路径；`repository/publications.rs` 里发布快照剥掉只读投影 |
-| **4. 事后编辑端点** | `PUT /entries/{id}/sentences/{sentence_id}/associations`：`dto/operations.rs` 输入、`service/sentence_association.rs` 服务、`handler/commands.rs` + `router.rs`、`error.rs` 两个新错误码 |
+| **4. 事后编辑端点**（已下线，2026-09-05） | `PUT /entries/{id}/sentences/{sentence_id}/associations`：`dto/operations.rs` 输入、`service/sentence_association.rs` 服务、`handler/commands.rs` + `router.rs`、`error.rs` 两个新错误码 |
 
 ### 测试
 

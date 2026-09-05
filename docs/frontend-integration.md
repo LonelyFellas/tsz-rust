@@ -1318,6 +1318,8 @@ sense 侧为空时回退到命中词形（与前端「sense 优先、缺失回�
 1. `target_component_usages` 的口径改成「被选中 sense 优先、缺失回退命中词形」。回退保证了
    存量短语（成分挂在词形上）新建的关联不会丢成分，但 `replace_sentence_associations` 会把
    一句话里**每条**手工关联重新解析一遍，所以口径本身是全量生效的，不只作用于被编辑的那条。
+   （2026-09-05 起草稿期人工关联端点连同 `replace_sentence_associations` 已下线，该口径现在只作用于
+   发布时自动关联写入的快照。）
 2. 出引用守卫（`unavailable_outbound_sense_refs_*`）把 `phrase_component` 与 `relation` 同等
    对待，对**存量的变体级成分引用**同样生效：成分目标的词义从目标当前发布里消失后，该短语
    不再能从归档恢复 / 回滚到历史发布，得先由目标词把那条词义按原 node id 恢复并重新发布。

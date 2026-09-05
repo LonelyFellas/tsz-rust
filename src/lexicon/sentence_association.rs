@@ -78,24 +78,6 @@ pub(crate) fn tokenize(text: &str) -> Vec<SentenceToken> {
     tokens
 }
 
-/// 人工 Pending 短语只允许多个单词以空白连续连接；逗号、斜杠等标点不能被框进
-/// 一个短语 range，避免把两个相邻成分误建成同一词条。
-pub(crate) fn is_contiguous_phrase_surface(text: &str) -> bool {
-    let tokens = tokenize(text);
-    if tokens.len() < 2
-        || tokens[0].start != 0
-        || tokens
-            .last()
-            .is_none_or(|token| token.end != text.chars().count())
-    {
-        return false;
-    }
-    tokens.windows(2).all(|pair| {
-        codepoint_slice(text, pair[0].end, pair[1].start)
-            .is_some_and(|gap| !gap.is_empty() && gap.chars().all(char::is_whitespace))
-    })
-}
-
 /// 词面能不能落进 `lexicon.sentence_associations.surface`。
 ///
 /// 库层的 `surface = btrim(surface)` 与 200 码点上限必须在服务层先挡一道：

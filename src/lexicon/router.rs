@@ -74,24 +74,12 @@ pub fn router() -> Router<AppState> {
                 .layer(DefaultBodyLimit::max(MAX_STEP_CONTENT_BODY_BYTES)),
         )
         .route(
-            "/entries/{id}/sentences/{sentence_id}/associations",
-            axum::routing::put(handler::replace_sentence_associations),
-        )
-        .route(
             "/entries/sentence-targets/resolve",
             axum::routing::post(handler::resolve_sentence_targets),
         )
         .route(
             "/entries/component-targets/search",
             axum::routing::post(handler::search_component_targets),
-        )
-        .route(
-            "/entries/{id}/pending-sentence-associations",
-            get(handler::list_pending_sentence_associations),
-        )
-        .route(
-            "/pending-sentence-associations/{association_id}/claim",
-            axum::routing::post(handler::claim_pending_sentence_association),
         )
         .route(
             "/entries/{id}/content-completion-jobs",

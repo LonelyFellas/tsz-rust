@@ -104,42 +104,6 @@ pub async fn get(
 
 #[utoipa::path(
     get,
-    path = "/api/v1/admin/lexicon/entries/{id}/pending-sentence-associations",
-    tag = "admin-lexicon",
-    security(("bearer_auth" = [])),
-    params(EntryPath, PendingSentenceAssociationListQuery),
-    responses(
-        (status = 200, description = "当前目标词条可认领的 Pending 例句关联", body = PendingSentenceAssociationListResponse),
-        (status = 400, description = "词条 ID、cursor 或 page_size 非法"),
-        (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
-        (status = 404, description = "目标词条不存在、已归档或尚未发布"),
-        (status = 503, description = "V3 读取、编辑或投影能力未开启")
-    )
-)]
-pub async fn list_pending_sentence_associations(
-    State(state): State<AppState>,
-    auth: AdminAuth,
-    ApiPath(path): ApiPath<EntryPath>,
-    ApiQuery(query): ApiQuery<PendingSentenceAssociationListQuery>,
-) -> Result<(StatusCode, Json<PendingSentenceAssociationListResponse>), AppError> {
-    require_active_admin(&state, &auth).await?;
-    let response = service(&state)
-        .pending_sentence_associations(
-            path.id,
-            query,
-            state.smart_lexicon_v3_flags.read
-                && state.smart_lexicon_v3_flags.edit
-                && state.smart_lexicon_v3_flags.projection
-                && state.smart_lexicon_v3_flags.sentence_associations,
-        )
-        .await
-        .map_err(map_error)?;
-    Ok((StatusCode::OK, Json(response)))
-}
-
-#[utoipa::path(
-    get,
     path = "/api/v1/admin/lexicon/entries/{id}/publications",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),

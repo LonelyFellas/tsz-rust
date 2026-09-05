@@ -7,7 +7,6 @@ use axum::{
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -1671,83 +1670,4 @@ async fn sentence_associations_resolve_v3_targets_and_edit_v3_sources(pool: PgPo
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{v3_saved}");
-    let sentence_id = Uuid::parse_str(
-        v3_saved["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["id"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.sentence_association_scans (
-            sentence_id, entry_id, source_dialect, text_hash, resolver_version, scanned_at
-        ) VALUES ($1, $2, 'common', $3, 1, now())
-        "#,
-    )
-    .bind(sentence_id)
-    .bind(v3_source_id)
-    .bind(Sha256::digest(sentence_text.as_bytes()).to_vec())
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let association_id = Uuid::now_v7();
-    let idempotency_key = Uuid::now_v7();
-    let replace_body = json!({
-        "base_revision": v3_saved["word"]["revision"],
-        "base_lifecycle_revision": v3_saved["word"]["lifecycle_revision"],
-        "associations": [{
-            "id": association_id,
-            "source_dialect": "common",
-            "source_range": {"start": 4, "end": 11, "surface": "harbour"},
-            "target_word_id": target.entry_id,
-            "target_sense_id": target.sense_id
-        }]
-    });
-    let replace_path =
-        format!("{ROOT}/entries/{v3_source_id}/sentences/{sentence_id}/associations");
-    let (status, edited) = call(
-        &state,
-        Method::PUT,
-        &replace_path,
-        &bearer,
-        Some(idempotency_key),
-        Some(replace_body.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{edited}");
-    assert_eq!(edited["word"]["schema_version"], 3);
-    let manual =
-        &edited["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["associations"][0];
-    assert_eq!(manual["id"], association_id.to_string());
-    assert_eq!(manual["target_form_slot_id"], target_form_id.to_string());
-    assert_eq!(manual["target_headword"], "harbour / harbor");
-    assert_eq!(manual["target_gloss"], "新释义");
-
-    let (status, replayed) = call(
-        &state,
-        Method::PUT,
-        &replace_path,
-        &bearer,
-        Some(idempotency_key),
-        Some(replace_body.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{replayed}");
-    assert_eq!(replayed, edited);
-
-    let (status, blocked_replay) = call(
-        &read_disabled,
-        Method::PUT,
-        &replace_path,
-        &bearer,
-        Some(idempotency_key),
-        Some(replace_body),
-    )
-    .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{blocked_replay}");
-    assert_eq!(
-        blocked_replay["code"],
-        "smart_lexicon_v3_storage_unavailable"
-    );
 }
