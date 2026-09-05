@@ -142,8 +142,25 @@ fn convert_rich_text(value: &RichText, replacements: &HashMap<String, String>) -
             let mut protected_ranges = Vec::new();
             for annotation in &document.annotations {
                 match annotation {
+                    RichTextAnnotation::Liaison {
+                        start,
+                        end,
+                        start_len,
+                        end_len,
+                    } => {
+                        protected_boundaries.insert(*start);
+                        protected_boundaries.insert(*end);
+                        // 锚点的内侧边界只在真的存了宽度时才保护。宽度为 1 的存量内容
+                        // 多护两个边界，只会白白挡掉替换——"colour" 上挂一条连读就再也
+                        // 换不成 "color"，而那两个边界本来就没有信息可保。
+                        if *start_len > 1 {
+                            protected_boundaries.insert(*start + *start_len);
+                        }
+                        if *end_len > 1 {
+                            protected_boundaries.insert(*end - *end_len);
+                        }
+                    }
                     RichTextAnnotation::Emphasis { start, end, .. }
-                    | RichTextAnnotation::Liaison { start, end }
                     | RichTextAnnotation::Highlight { start, end, .. } => {
                         protected_boundaries.insert(*start);
                         protected_boundaries.insert(*end);
@@ -280,9 +297,32 @@ fn remap_v1(document: &mut RichTextV1, map: &[usize]) {
 fn remap_v2(document: &mut RichTextV2, map: &[usize]) {
     for annotation in &mut document.annotations {
         match annotation {
+            RichTextAnnotation::Liaison {
+                start,
+                end,
+                start_len,
+                end_len,
+            } => {
+                let anchor_start_end = map[*start + *start_len];
+                let anchor_end_start = map[*end - *end_len];
+                let next_start = map[*start];
+                let next_end = map[*end];
+                let span = next_end.saturating_sub(next_start).max(1);
+                *start = next_start;
+                *end = next_end;
+                // 宽度为 1 的锚点没有信息可搬，原样留 1——比例映射会把单个码点撑成
+                // 两个（color→colour 时末字母 "r" 会变成 "ur"）。只有真存了宽度的
+                // 锚点才跟着重算，并夹在 [1, span] 内，免得建议接口产出 validate_v2
+                // 自己会以 invalid_liaison_anchor 拒掉的标注。
+                if *start_len > 1 {
+                    *start_len = anchor_start_end.saturating_sub(next_start).clamp(1, span);
+                }
+                if *end_len > 1 {
+                    *end_len = next_end.saturating_sub(anchor_end_start).clamp(1, span);
+                }
+            }
             RichTextAnnotation::Emphasis { start, end, .. }
             | RichTextAnnotation::Phoneme { start, end, .. }
-            | RichTextAnnotation::Liaison { start, end }
             | RichTextAnnotation::Highlight { start, end, .. } => {
                 *start = map[*start];
                 *end = map[*end];
@@ -358,6 +398,69 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn liaison_widths_survive_replacement_without_blocking_it() {
+        // 宽度全为默认的存量内容：不该因为挂了一条连读就换不成方言拼写。
+        let legacy = RichText::V2(RichTextV2 {
+            version: 2,
+            text: "color".to_owned(),
+            annotations: vec![RichTextAnnotation::Liaison {
+                start: 0,
+                end: 5,
+                start_len: 1,
+                end_len: 1,
+            }],
+        });
+        let converted = convert_rich_text(&legacy, &replacements());
+        assert_eq!(converted.text(), "colour");
+        let RichText::V2(converted) = converted else {
+            panic!("expected V2")
+        };
+        assert!(matches!(
+            converted.annotations[0],
+            RichTextAnnotation::Liaison {
+                start: 0,
+                end: 6,
+                start_len: 1,
+                end_len: 1,
+            }
+        ));
+
+        // 存了宽度的内容：锚点内侧边界受保护，落在锚点里的词不再被替换。
+        let anchored = RichText::V2(RichTextV2 {
+            version: 2,
+            text: "color center".to_owned(),
+            annotations: vec![RichTextAnnotation::Liaison {
+                start: 0,
+                end: 12,
+                start_len: 2,
+                end_len: 2,
+            }],
+        });
+        let converted = convert_rich_text(&anchored, &replacements());
+        assert_eq!(converted.text(), "color center");
+        let RichText::V2(converted) = converted else {
+            panic!("expected V2")
+        };
+        assert!(matches!(
+            converted.annotations[0],
+            RichTextAnnotation::Liaison {
+                start_len: 2,
+                end_len: 2,
+                ..
+            }
+        ));
+
+        // 无论怎么映射，产出的锚点都必须是 validate_v2 认的形状。
+        for value in [legacy, anchored] {
+            let converted = convert_rich_text(&value, &replacements());
+            assert!(
+                crate::lexicon::rich_text::is_valid(&converted),
+                "方言建议不能产出自己校验器拒绝的标注：{converted:?}"
+            );
+        }
     }
 
     #[test]

@@ -11,13 +11,15 @@ use crate::{
         Dialect, DialectModeV3, DialectRulesV3, DialectVariantRichTextSlotV3,
         DraftFormsStepContentV3, DraftMeaningsStepContentV3, DraftNodeLocation,
         DraftValidationIssue, EnglishTextV3, PersistedWordStep, RichText, RichTextV3,
-        SentenceTranslationBandV3, StepSaveIntent, V3DraftNodeLocation, V3DraftValidationIssue,
-        V3ValidationIssueCode, WordConcreteFormV3, WordDefinitionV3, WordFormTypeV2,
-        WordFormTypeV3, WordRegionalVariantsV3, WordSentenceTranslationV3,
+        RichTextVariantV3, SentenceTranslationBandV3, StepSaveIntent, V3DraftNodeLocation,
+        V3DraftValidationIssue, V3ValidationIssueCode, VoiceProfileV3, WordConcreteFormV3,
+        WordDefinitionV3, WordFormTypeV2, WordFormTypeV3, WordRegionalVariantsV3,
+        WordSentenceTranslationV3,
     },
     lexicon::form_types::allowed_form_types,
-    lexicon::normalization::MAX_HEADWORD_CODEPOINTS,
     lexicon::validation::MAX_ENTRY_NODES,
+    lexicon::{normalization::MAX_HEADWORD_CODEPOINTS, rich_text::MAX_RICH_TEXT_CODEPOINTS},
+    speech::{MAX_SPEECH_RATE_PERCENT, MIN_SPEECH_RATE_PERCENT},
 };
 
 pub(crate) fn request_schema_version(value: &Value) -> Result<Option<u8>, AppError> {
@@ -438,6 +440,7 @@ pub(crate) fn validate_meanings(content: &DraftMeaningsStepContentV3) -> Vec<Dra
         for grammar in &pos.grammar_structures {
             for variant in &grammar.variants {
                 validate_rich_text_limits(&variant.content, variant.id, "content", &mut issues);
+                validate_voice_profile(variant.voice_profile.as_ref(), variant.id, &mut issues);
             }
         }
         for sense in &pos.senses {
@@ -748,17 +751,60 @@ fn meanings_node_count(content: &DraftMeaningsStepContentV3) -> usize {
 }
 
 fn validate_english_text_limits(content: &EnglishTextV3, issues: &mut Vec<DraftValidationIssue>) {
+    for variant in english_text_variants(content) {
+        validate_rich_text_limits(&variant.value, variant.id, "value", issues);
+        validate_voice_profile(variant.voice_profile.as_ref(), variant.id, issues);
+    }
+}
+
+pub(crate) fn english_text_variants(content: &EnglishTextV3) -> Vec<&RichTextVariantV3> {
     match content {
-        EnglishTextV3::Unified { common } => {
-            validate_rich_text_limits(&common.value, common.id, "value", issues);
-        }
-        EnglishTextV3::Distinguish { uk, us, .. } => {
-            for slot in [uk, us] {
-                if let DialectVariantRichTextSlotV3::Ready { variant } = slot {
-                    validate_rich_text_limits(&variant.value, variant.id, "value", issues);
-                }
-            }
-        }
+        EnglishTextV3::Unified { common } => vec![common],
+        EnglishTextV3::Distinguish { uk, us, .. } => [uk, us]
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DialectVariantRichTextSlotV3::Ready { variant } => Some(variant),
+                DialectVariantRichTextSlotV3::Missing => None,
+            })
+            .collect(),
+    }
+}
+
+/// 一份配置最多启用这么多个发音人；纯存储上限，与发音人清单本身无关。
+const MAX_VOICE_PROFILE_VOICES: usize = 20;
+/// `speech.voices.alias` 的列约束上限。这里只卡长度不卡格式：alias 由我们自己发放，
+/// 但发音人清单来自外部供应商，硬编码字符集会让以后新增的 alias 存不进来。
+const MAX_VOICE_ID_CODEPOINTS: usize = 64;
+
+/// 只做存储安全校验：数量、alias 形状、语速全局区间、重复。
+///
+/// **刻意不校验 alias 是否还在 `speech.voices` 里**——发音人会随供应商下线，
+/// 拿存量配置去撞当下的清单只会把老词条卡成不可保存；失效由前端在界面上提示。
+fn validate_voice_profile(
+    profile: Option<&VoiceProfileV3>,
+    node_id: Uuid,
+    issues: &mut Vec<DraftValidationIssue>,
+) {
+    let Some(profile) = profile else {
+        return;
+    };
+    let mut seen = HashSet::new();
+    let voices_invalid = profile.voice_ids.len() > MAX_VOICE_PROFILE_VOICES
+        || profile.voice_ids.iter().any(|voice_id| {
+            voice_id.trim().is_empty()
+                || voice_id.chars().count() > MAX_VOICE_ID_CODEPOINTS
+                || voice_id.contains('\0')
+                || !seen.insert(voice_id.as_str())
+        });
+    if voices_invalid
+        || !(MIN_SPEECH_RATE_PERCENT..=MAX_SPEECH_RATE_PERCENT).contains(&profile.rate_percent)
+    {
+        issues.push(meanings_issue(
+            V3ValidationIssueCode::VoiceProfileInvalid,
+            "voice_profile",
+            node_id,
+            "voice profile must list at most 20 distinct non-empty voice ids and a rate within -50..=100",
+        ));
     }
 }
 
@@ -768,11 +814,11 @@ fn validate_rich_text_limits(
     field: &str,
     issues: &mut Vec<DraftValidationIssue>,
 ) {
-    if content.text().chars().count() > MAX_HEADWORD_CODEPOINTS {
+    if content.text().chars().count() > MAX_RICH_TEXT_CODEPOINTS {
         issues.push(meanings_limit_issue(
             node_id,
             field,
-            "rich text exceeds the shared 200-codepoint limit",
+            "rich text exceeds the shared 5000-codepoint limit",
         ));
     }
     if content.decoration_count() > MAX_ENTRY_NODES {
@@ -2084,6 +2130,45 @@ mod tests {
             .collect();
         assert!(has_code(
             &validate_meanings(&oversized.content),
+            V3ValidationIssueCode::ContentLimitExceeded
+        ));
+    }
+
+    #[test]
+    fn rich_text_bodies_use_the_5000_codepoint_limit_not_the_headword_one() {
+        let content = |codepoints: usize| -> DraftMeaningsStepContentV3 {
+            serde_json::from_value(json!({
+                "sense_groups": [],
+                "pos": [{
+                    "pos_id": Uuid::now_v7(),
+                    "grammar_structures": [{
+                        "id": Uuid::now_v7(),
+                        "variants": [{
+                            "id": Uuid::now_v7(),
+                            "dialect": "common",
+                            "content": {
+                                "version": 2,
+                                "text": "a".repeat(codepoints),
+                                "annotations": []
+                            }
+                        }]
+                    }],
+                    "senses": []
+                }]
+            }))
+            .unwrap()
+        };
+        // 上限跟 lexicon.text_variants.plain_text 的 CHECK 走，词头那条 200 不适用于正文。
+        assert!(!has_code(
+            &validate_meanings(&content(MAX_HEADWORD_CODEPOINTS + 1)),
+            V3ValidationIssueCode::ContentLimitExceeded
+        ));
+        assert!(!has_code(
+            &validate_meanings(&content(MAX_RICH_TEXT_CODEPOINTS)),
+            V3ValidationIssueCode::ContentLimitExceeded
+        ));
+        assert!(has_code(
+            &validate_meanings(&content(MAX_RICH_TEXT_CODEPOINTS + 1)),
             V3ValidationIssueCode::ContentLimitExceeded
         ));
     }

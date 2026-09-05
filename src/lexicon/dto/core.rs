@@ -68,10 +68,17 @@ pub enum RichTextSpanKind {
     Blue,
 }
 
+/// 语音编辑器的「语法结构」三分类。
+///
+/// `Strong` 是三分类落地之前的存量取值，读到时按「核心词」理解；新内容只写
+/// `Function` / `Core` / `Grammar`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RichTextEmphasisLevel {
     Strong,
+    Function,
+    Core,
+    Grammar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -88,6 +95,16 @@ pub enum RichTextHighlightColor {
     Pink,
     Blue,
     Orange,
+}
+
+/// 连读两端各自的宽度默认一个码点，也就是加宽度字段之前的形状。
+pub(crate) const fn liaison_anchor_len_default() -> usize {
+    1
+}
+
+/// 默认宽度不上 wire：存量内容重新序列化后逐字节不变，内容哈希才不会整体漂移。
+pub(crate) fn is_liaison_anchor_len_default(value: &usize) -> bool {
+    *value == liaison_anchor_len_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -107,6 +124,20 @@ pub enum RichTextAnnotation {
     Liaison {
         start: usize,
         end: usize,
+        /// 起点锚点的宽度：锚点占 `[start, start + start_len)`。
+        #[serde(
+            default = "liaison_anchor_len_default",
+            skip_serializing_if = "is_liaison_anchor_len_default"
+        )]
+        #[schema(default = 1, minimum = 1)]
+        start_len: usize,
+        /// 终点锚点的宽度：锚点占 `[end - end_len, end)`。
+        #[serde(
+            default = "liaison_anchor_len_default",
+            skip_serializing_if = "is_liaison_anchor_len_default"
+        )]
+        #[schema(default = 1, minimum = 1)]
+        end_len: usize,
     },
     Highlight {
         start: usize,

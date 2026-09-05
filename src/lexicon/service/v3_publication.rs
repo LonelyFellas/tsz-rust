@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::v3::{
     replace_v3_sense_component_usages, restore_sense_component_usages,
-    restore_sentence_zh_translations,
+    restore_sentence_zh_translations, restore_voice_profiles,
 };
 use super::*;
 use crate::lexicon::dto::{
@@ -180,6 +180,7 @@ impl LexiconService {
             // V2 往返吞掉了释义级成分与多档译文，回填后才能进投影与快照。
             restore_sense_component_usages(&pristine_meanings, &mut canonical_v3_meanings);
             restore_sentence_zh_translations(&pristine_meanings, &mut canonical_v3_meanings);
+            restore_voice_profiles(&pristine_meanings, &mut canonical_v3_meanings);
             let editor_meanings =
                 serde_json::to_value(&canonical_v3_meanings).map_err(serialization_error)?;
             // sync_canonical_meanings 内部只做 replace_meanings_content（按 V2 relational 重建，
@@ -303,6 +304,7 @@ impl LexiconService {
         let mut canonical_v3_meanings = v2_meanings_to_v3(relational_meanings)?;
         restore_sense_component_usages(&pristine_meanings, &mut canonical_v3_meanings);
         restore_sentence_zh_translations(&pristine_meanings, &mut canonical_v3_meanings);
+        restore_voice_profiles(&pristine_meanings, &mut canonical_v3_meanings);
         word.meanings = canonical_v3_meanings;
         Self::hydrate_v3_sentence_associations_in(&mut tx, entry_id, &mut word.meanings).await?;
         word.status = AdminWordStatus::Published;

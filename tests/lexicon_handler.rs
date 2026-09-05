@@ -13662,6 +13662,210 @@ async fn v3_meanings_draft_saves_before_forms_complete_but_complete_is_blocked(p
     assert_eq!(stored_revision, 3, "failed complete must not write");
 }
 
+/// 语音编辑器在 step 3 写的语法结构标注：三分类不能塌成一类，连读两端的宽度不能丢。
+#[sqlx::test]
+async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let forms_saved = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let entry_id = forms_saved["word"]["id"].as_str().unwrap();
+    let pos_id = forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone();
+    let mut meanings = complete_v3_meanings_fixture(pos_id);
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"] = json!({
+        "version": 2,
+        "text": "countable noun",
+        "annotations": [
+            {"type": "emphasis", "start": 10, "end": 14, "level": "grammar"},
+            // 起点锚点是 "le"、终点锚点是 "n"：两端宽度不同，退化成单字母就会被这条测出来。
+            {"type": "liaison", "start": 7, "end": 11, "start_len": 2, "end_len": 1},
+            {"type": "emphasis", "start": 0, "end": 9, "level": "function"}
+        ]
+    });
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": forms_saved["word"]["revision"],
+            "intent": "complete",
+            "content": meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    // 缺省宽度不上 wire：end_len 是 1，所以不出现。
+    let canonical = json!([
+        {"type": "emphasis", "start": 0, "end": 9, "level": "function"},
+        {"type": "liaison", "start": 7, "end": 11, "start_len": 2},
+        {"type": "emphasis", "start": 10, "end": 14, "level": "grammar"}
+    ]);
+    assert_eq!(
+        saved["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["content"]["annotations"],
+        canonical,
+        "保存响应应原样带回三分类与连读端点宽度"
+    );
+
+    let (status, refetched) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refetched}");
+    assert_eq!(
+        refetched["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["content"]
+            ["annotations"],
+        canonical,
+        "刷新页面读回的也必须是同一份标注"
+    );
+}
+
+/// 音色 / 语速是「这段文本将来怎么合成」的配置，必须跟着词条落库；
+/// V3 → V2 → V3 往返会吞掉它，所以这条一路走到 GET 才算数。
+#[sqlx::test]
+async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let word =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["A harbour sentence."])
+            .await;
+
+    // 没配过的节点不该带这个键，否则未同步 spec 的前端会把响应判为非法。
+    assert!(
+        !serde_json::to_string(&word["word"]["meanings"])
+            .unwrap()
+            .contains("voice_profile"),
+        "未配置时 voice_profile 不能出现在响应里"
+    );
+
+    let grammar_profile = json!({"voice_ids": ["sonia", "ryan"], "rate_percent": -25});
+    let sentence_profile = json!({"voice_ids": ["jenny"], "rate_percent": 0});
+    let mut meanings = word["word"]["meanings"].clone();
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
+        grammar_profile.clone();
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["voice_profile"] =
+        sentence_profile.clone();
+    let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
+
+    let assert_profiles = |body: &Value, label: &str| {
+        assert_eq!(
+            body["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"],
+            grammar_profile,
+            "{label}：语法结构变体的音色配置丢了"
+        );
+        assert_eq!(
+            body["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["voice_profile"],
+            sentence_profile,
+            "{label}：英文例句变体的音色配置丢了"
+        );
+    };
+    assert_profiles(&saved, "保存响应");
+
+    let (status, refetched) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", word["word"]["id"].as_str().unwrap()),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refetched}");
+    assert_profiles(&refetched, "刷新页面");
+
+    // 发布路径上还有两处 V2 往返，配置同样不能在这里蒸发。
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    assert_profiles(&published, "发布响应");
+}
+
+#[sqlx::test]
+async fn v3_voice_profile_rejects_out_of_range_rate_and_oversized_voice_list(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let forms_saved = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let entry_id = forms_saved["word"]["id"].as_str().unwrap();
+    let pos_id = forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone();
+
+    for profile in [
+        json!({"voice_ids": ["sonia"], "rate_percent": 101}),
+        json!({"voice_ids": ["sonia"], "rate_percent": -51}),
+        json!({"voice_ids": ["sonia", "sonia"], "rate_percent": 0}),
+        json!({"voice_ids": [""], "rate_percent": 0}),
+        json!({"voice_ids": (0..21).map(|index| format!("v{index}")).collect::<Vec<_>>(),
+               "rate_percent": 0}),
+    ] {
+        let mut meanings = complete_v3_meanings_fixture(pos_id.clone());
+        meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
+            profile.clone();
+        let (status, _, problem) = call_problem(
+            &state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+            &bearer,
+            None,
+            json!({
+                "schema_version": 3,
+                "base_revision": forms_saved["word"]["revision"],
+                "intent": "save",
+                "content": meanings
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{profile}: {problem}"
+        );
+        assert!(
+            has_issue(&problem, "voice_profile_invalid"),
+            "{profile}: {problem}"
+        );
+    }
+
+    // 已下线的发音人 alias 不做外键式校验：形状合法就存得进去。
+    let mut meanings = complete_v3_meanings_fixture(pos_id);
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
+        json!({"voice_ids": ["a-voice-that-no-longer-exists"], "rate_percent": 100});
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": forms_saved["word"]["revision"],
+            "intent": "save",
+            "content": meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+}
+
 #[sqlx::test]
 async fn v3_definition_grammar_is_optional_for_draft_but_required_for_complete_and_validate(
     pool: PgPool,
@@ -22694,7 +22898,7 @@ async fn v3_meanings_extra_fields_and_node_limits_fail_before_storage_gate(pool:
         &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
         &bearer,
         None,
-        meanings_with_rich_text("a".repeat(200), vec![0; 2000]),
+        meanings_with_rich_text("a".repeat(5000), vec![0; 2000]),
     )
     .await;
     assert_eq!(
@@ -22709,7 +22913,7 @@ async fn v3_meanings_extra_fields_and_node_limits_fail_before_storage_gate(pool:
         &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
         &bearer,
         None,
-        meanings_with_rich_text("a".repeat(201), Vec::new()),
+        meanings_with_rich_text("a".repeat(5001), Vec::new()),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");

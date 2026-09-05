@@ -83,6 +83,30 @@ fn ssml_is_escaped_nested_and_deterministic() {
 }
 
 #[test]
+fn grammar_levels_still_synthesize_as_strong_emphasis() {
+    for level in [
+        RichTextEmphasisLevel::Function,
+        RichTextEmphasisLevel::Core,
+        RichTextEmphasisLevel::Grammar,
+    ] {
+        let content = RichTextV2 {
+            version: 2,
+            text: "ab".to_owned(),
+            annotations: vec![RichTextAnnotation::Emphasis {
+                start: 0,
+                end: 2,
+                level,
+            }],
+        };
+        let ssml = build_ssml(&request(content)).unwrap();
+        assert!(
+            ssml.contains("<emphasis level=\"strong\">ab</emphasis>"),
+            "{level:?}: {ssml}"
+        );
+    }
+}
+
+#[test]
 fn rich_text_boundaries_are_reused_and_v1_or_invalid_v2_are_impossible() {
     let voice = voice();
     let options = SpeechOptions::new(&voice, None, 0, 0).unwrap();

@@ -108,6 +108,12 @@ impl AudioOutputFormat {
     }
 }
 
+/// 全局语速区间（对应前端 0.50x-2.00x）。单个音色的可用区间只会更窄
+/// （`VoiceCapabilities.min_rate_percent` / `max_rate_percent`），逐音色夹取发生在合成时；
+/// 词条上存的语速配置只按这个全局区间校验，因为一份配置可以同时启用多个音色。
+pub const MIN_SPEECH_RATE_PERCENT: i16 = -50;
+pub const MAX_SPEECH_RATE_PERCENT: i16 = 100;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeechOptions {
     style: Option<String>,
@@ -138,7 +144,7 @@ impl SpeechOptions {
         rate_percent: i16,
         pitch_semitones: i8,
     ) -> Result<(), SpeechModelError> {
-        if !(-50..=100).contains(&rate_percent) {
+        if !(MIN_SPEECH_RATE_PERCENT..=MAX_SPEECH_RATE_PERCENT).contains(&rate_percent) {
             return Err(SpeechModelError::InvalidRate);
         }
         if !(-12..=12).contains(&pitch_semitones) {
