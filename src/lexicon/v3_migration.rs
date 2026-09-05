@@ -1059,7 +1059,12 @@ async fn load_plan(
         Err(blocked) => return Ok(Err(blocked)),
     };
     let mut target_issues = v3_contract::validate_forms(&target_forms, StepSaveIntent::Save);
-    target_issues.extend(v3_contract::validate_meanings(&target_meanings));
+    // 迁移是一次性数据搬迁，口径保持与加 intent 之前一致（等价 Complete）：
+    // 存量数据里的空译文要在迁移期就拦下，而不是放进 V3 等发布时才炸。
+    target_issues.extend(v3_contract::validate_meanings(
+        &target_meanings,
+        StepSaveIntent::Complete,
+    ));
     target_issues.extend(v3_contract::validate_aggregate_node_limit(
         &target_forms,
         &target_meanings,

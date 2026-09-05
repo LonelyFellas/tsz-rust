@@ -1911,7 +1911,6 @@ impl LexiconService {
         entry_id: Uuid,
         input: SaveMeaningsStepInputV3,
         allow_relation_prebinding: bool,
-        allow_sense_component_usages: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         let SaveMeaningsStepInputV3 {
             base_revision,
@@ -1922,18 +1921,9 @@ impl LexiconService {
         let compatibility_source = self.get_v3(entry_id).await?;
         ensure_v3_active(&compatibility_source)?;
         ensure_v3_revision(&compatibility_source, base_revision)?;
-        // 能力关闭时不接受**新写入**的成分（前端此时整键剥除）；缺键仍走 preserve
-        // 保留存量，显式 `[]` 仍可清空，所以关 flag 就是一个真正的写入闸。
-        if !allow_sense_component_usages
-            && content.pos.iter().flat_map(|pos| &pos.senses).any(|sense| {
-                sense.component_usages.was_present() && !sense.component_usages.is_empty()
-            })
-        {
-            return Err(LexiconServiceError::V3StorageUnavailable);
-        }
         preserve_missing_sentence_translations(&mut content, &compatibility_source.meanings);
         preserve_missing_sense_component_usages(&mut content, &compatibility_source.meanings);
-        let mut issues = crate::lexicon::v3_contract::validate_meanings(&content);
+        let mut issues = crate::lexicon::v3_contract::validate_meanings(&content, intent);
         if intent == StepSaveIntent::Complete {
             issues.extend(
                 crate::lexicon::v3_contract::validate_complete_definition_grammar(&content),
@@ -1945,7 +1935,7 @@ impl LexiconService {
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut content);
         if !crate::lexicon::v3_contract::canonicalize_sentence_translations(&mut content) {
             return Err(v3_validation_failed(
-                crate::lexicon::v3_contract::validate_meanings(&content),
+                crate::lexicon::v3_contract::validate_meanings(&content, intent),
             ));
         }
         let translation_content = content.clone();
@@ -2369,6 +2359,7 @@ impl LexiconService {
             crate::lexicon::v3_contract::validate_forms(&word.forms, StepSaveIntent::Complete);
         issues.extend(crate::lexicon::v3_contract::validate_meanings(
             &word.meanings,
+            StepSaveIntent::Complete,
         ));
         issues.extend(
             crate::lexicon::v3_contract::validate_complete_definition_grammar(&word.meanings),

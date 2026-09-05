@@ -1288,9 +1288,9 @@ sense 侧为空时回退到命中词形（与前端「sense 优先、缺失回�
 `DraftValidationIssueV2` 有），所以 `sense_has_inbound_publication_refs` 在 V3 发布路径上不会
 告诉前端是哪条引用挡住的。
 
-**新能力开关**：`SMART_LEXICON_V3_SENSE_COMPONENT_USAGES`（默认 `false`）。派生条件与
-`draft_relation_prebinding` 同款：`read && edit && projection && flag`。它同时是**写入闸**——
-关闭时显式提交非空 `component_usages` 返回 `503`；缺键仍保留存量，显式 `[]` 仍可清空。
+**能力开关已移除**：释义级成分用词默认开启，不再有 `SMART_LEXICON_V3_SENSE_COMPONENT_USAGES`，
+原先关闭时的写入闸（显式提交非空 `component_usages` 返回 `503`）随之取消。
+`capabilities.sense_component_usages` 仍在响应里下发且恒为 `true`，客户端不必同批部署。
 
 **迁移**：`20260903130000_add_phrase_sense_component_usages` 建 `lexicon.v3_phrase_sense_component_usages`
 （owner 是 sense 的 `lexicon.nodes` 行）。**不迁移存量数据**，旧的变体级表原样保留。

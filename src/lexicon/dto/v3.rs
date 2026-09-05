@@ -1064,8 +1064,8 @@ pub struct AdminWordV3Capabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub draft_relation_prebinding: Option<bool>,
-    /// 释义级短语成分用词的编辑能力；关闭时该键**缺席**（不是 `false`），
-    /// 好让未同步 spec 的旧前端不至于撞上 `additionalProperties: false`。
+    /// 释义级短语成分用词的编辑能力，恒为 `true`（开关已移除）。键继续下发，
+    /// 好让按能力位判断的客户端不必与后端同批部署。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sense_component_usages: Option<bool>,
