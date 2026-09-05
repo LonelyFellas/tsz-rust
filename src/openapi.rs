@@ -322,6 +322,7 @@ use utoipa::{
             crate::lexicon::dto::RichTextV2V3,
             crate::lexicon::dto::RichTextV3,
             crate::lexicon::dto::RichTextVariantV3,
+            crate::lexicon::dto::VoiceProfileV3,
             crate::lexicon::dto::DialectVariantRichTextSlotV3,
             crate::lexicon::dto::EnglishTextV3,
             crate::lexicon::dto::GrammarVariantV3,
@@ -2311,6 +2312,7 @@ mod tests {
             "DraftFormsStepContentV3",
             "RichTextVariantV3",
             "GrammarVariantV3",
+            "VoiceProfileV3",
             "GrammarStructureV3",
             "WordSentenceLinkV3",
             "WordSentenceV3",
@@ -2574,8 +2576,31 @@ mod tests {
                         && branch["properties"]["source_range"].is_null()
                 }))
         );
+        // 富文本正文与 lexicon.text_variants.plain_text 的 CHECK 同为 5000 码点；
+        // 词头那条 200 码点的限制不适用于正文。
         for schema in ["RichTextV1V3", "RichTextV2V3"] {
-            assert_eq!(schemas[schema]["properties"]["text"]["maxLength"], 200);
+            assert_eq!(schemas[schema]["properties"]["text"]["maxLength"], 5000);
+        }
+        assert_eq!(
+            schemas["RichTextEmphasisLevel"]["enum"],
+            serde_json::json!(["strong", "function", "core", "grammar"]),
+            "语法结构三分类是 wire 契约，strong 仅为存量兼容值"
+        );
+        // 连读两端的宽度是可选新增字段：缺省即 1，缺省值不上 wire，
+        // 存量客户端的 additionalProperties: false 才不会把响应判为非法。
+        let liaison = schemas["RichTextAnnotationV3"]["oneOf"]
+            .as_array()
+            .expect("V3 注解必须是严格 union")
+            .iter()
+            .find(|branch| branch["properties"]["type"]["enum"][0] == "liaison")
+            .expect("V3 注解必须含 liaison 分支");
+        assert_eq!(
+            liaison["required"],
+            serde_json::json!(["start", "end", "type"])
+        );
+        for field in ["start_len", "end_len"] {
+            assert_eq!(liaison["properties"][field]["default"], 1);
+            assert_eq!(liaison["properties"][field]["minimum"], 1);
         }
         for (schema, field) in [
             ("RichTextV1V3", "spans"),
@@ -2591,6 +2616,44 @@ mod tests {
                     && branches
                         .iter()
                         .all(|branch| branch["additionalProperties"] == false))
+        );
+        // 音色 / 语速：挂在语法结构变体与英文文本变体上，两处都是可选字段，
+        // 未配置时不出现在响应里（`skip_serializing_if`）。
+        for schema in ["GrammarVariantV3", "RichTextVariantV3"] {
+            assert_eq!(
+                schemas[schema]["properties"]["voice_profile"]["$ref"],
+                "#/components/schemas/VoiceProfileV3"
+            );
+            assert!(
+                !schemas[schema]["required"]
+                    .as_array()
+                    .expect("V3 变体必须声明 required")
+                    .iter()
+                    .any(|field| field == "voice_profile"),
+                "{schema}.voice_profile 必须是可选字段"
+            );
+        }
+        assert_eq!(
+            schemas["VoiceProfileV3"]["required"],
+            serde_json::json!(["voice_ids", "rate_percent"])
+        );
+        assert_eq!(
+            schemas["VoiceProfileV3"]["properties"]["voice_ids"]["maxItems"],
+            20
+        );
+        assert_eq!(
+            schemas["VoiceProfileV3"]["properties"]["rate_percent"]["minimum"],
+            -50
+        );
+        assert_eq!(
+            schemas["VoiceProfileV3"]["properties"]["rate_percent"]["maximum"],
+            100
+        );
+        assert!(
+            schemas["V3ValidationIssueCode"]["enum"]
+                .as_array()
+                .is_some_and(|codes| codes.iter().any(|code| code == "voice_profile_invalid")),
+            "ErrorCode 目录应冻结 voice_profile_invalid"
         );
         assert_eq!(
             schemas["AdminWordV3Compatibility"]["properties"]["legacy_headwords"]["$ref"],

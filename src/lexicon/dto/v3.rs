@@ -480,6 +480,20 @@ pub enum RichTextAnnotationV3 {
     Liaison {
         start: usize,
         end: usize,
+        /// 起点锚点的宽度：锚点占 `[start, start + start_len)`。
+        #[serde(
+            default = "liaison_anchor_len_default",
+            skip_serializing_if = "is_liaison_anchor_len_default"
+        )]
+        #[schema(default = 1, minimum = 1)]
+        start_len: usize,
+        /// 终点锚点的宽度：锚点占 `[end - end_len, end)`。
+        #[serde(
+            default = "liaison_anchor_len_default",
+            skip_serializing_if = "is_liaison_anchor_len_default"
+        )]
+        #[schema(default = 1, minimum = 1)]
+        end_len: usize,
     },
     Highlight {
         start: usize,
@@ -498,7 +512,7 @@ pub struct RichTextV1V3 {
     #[serde(deserialize_with = "deserialize_rich_text_version_1")]
     #[schema(schema_with = rich_text_version_1_schema)]
     pub version: u8,
-    #[schema(max_length = 200)]
+    #[schema(max_length = 5000)]
     pub text: String,
     #[schema(max_items = 2000)]
     pub spans: Vec<RichTextSpanV3>,
@@ -512,7 +526,7 @@ pub struct RichTextV2V3 {
     #[serde(deserialize_with = "deserialize_rich_text_version_2")]
     #[schema(schema_with = rich_text_version_2_schema)]
     pub version: u8,
-    #[schema(max_length = 200)]
+    #[schema(max_length = 5000)]
     pub text: String,
     #[schema(max_items = 2000)]
     pub annotations: Vec<RichTextAnnotationV3>,
@@ -541,12 +555,30 @@ impl RichTextV3 {
     }
 }
 
+/// 这段文本将来合成语音时用的配置：启用哪几个发音人、语速多少。
+///
+/// `voice_ids` 存的是 `/speech/voices` 的 `alias`。发音人清单来自外部 TTS 供应商，
+/// alias 可能随供应商下线而失效，所以**不做外键式校验**——读到已下线的 alias 原样返回，
+/// 由前端标为失效。`rate_percent` 只按全局区间校验，逐音色的窄区间在合成时才夹取。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceProfileV3 {
+    #[schema(max_items = 20)]
+    pub voice_ids: Vec<String>,
+    #[schema(minimum = -50, maximum = 100)]
+    pub rate_percent: i16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RichTextVariantV3 {
     pub id: Uuid,
     pub value: RichTextV3,
     pub origin: TextOrigin,
+    /// 缺省即「没配过」。未配置时不上 wire，存量内容重新序列化后逐字节不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub voice_profile: Option<VoiceProfileV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -575,6 +607,10 @@ pub struct GrammarVariantV3 {
     pub id: Uuid,
     pub dialect: Dialect,
     pub content: RichTextV3,
+    /// 缺省即「没配过」。未配置时不上 wire，存量内容重新序列化后逐字节不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub voice_profile: Option<VoiceProfileV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1458,6 +1494,7 @@ pub enum V3ValidationIssueCode {
     PhraseComponentTargetUnavailable,
     PhraseComponentTargetNested,
     PhraseComponentTargetStale,
+    VoiceProfileInvalid,
 }
 
 impl V3ValidationIssueCode {
@@ -1534,6 +1571,7 @@ impl V3ValidationIssueCode {
             Self::PhraseComponentTargetUnavailable => "phrase_component_target_unavailable",
             Self::PhraseComponentTargetNested => "phrase_component_target_nested",
             Self::PhraseComponentTargetStale => "phrase_component_target_stale",
+            Self::VoiceProfileInvalid => "voice_profile_invalid",
         }
     }
 
@@ -1610,6 +1648,7 @@ impl V3ValidationIssueCode {
             "phrase_component_target_unavailable" => Self::PhraseComponentTargetUnavailable,
             "phrase_component_target_nested" => Self::PhraseComponentTargetNested,
             "phrase_component_target_stale" => Self::PhraseComponentTargetStale,
+            "voice_profile_invalid" => Self::VoiceProfileInvalid,
             _ => return None,
         })
     }

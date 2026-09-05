@@ -1346,3 +1346,137 @@ V3 创建/发布/生命周期路径都会 typed 回放）。**所以 flag 要等
 _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端契约任务进度看
 `frontend-contract-alignment.md`。词性配置契约变更同步本文档 §7 与前端
 `docs/features/refactor-word-creation/design.md`。_
+
+## 21. 语音编辑器 wire 契约：语法结构三分类、连读端点宽度、音色语速、正文长度（后端已实现）
+
+> **状态（2026-09-05）**：后端已实现并重新导出 `docs/openapi.json`；**前端先 `sync:openapi`
+> 并部署，后端随后部署**（见 §21.4）。对应前端仓库
+> `docs/features/voice-editor-wire-contract/requirements.md` 的变更 1、2、3、5；
+> 变更 4（上传音频持久化）单独立项，本次没做。
+
+### 21.1 背景
+
+语音编辑器接进 V3 词条编辑器 step 3 的「语法结构」字段后，三处标注落不进库或落得有损：
+
+- `RichTextEmphasisLevel` 只有 `strong` 一个取值，界面上的**功能词 / 核心词 / 语法词**三类
+  一律写成 `strong`、读回一律变核心词——这是语法结构这个功能的核心价值，此前完全丢失；
+- `liaison` 只有 `{start, end}`，界面允许连读两端各选多个连续字母，这两个宽度存不下，
+  保存后重载退化成两端各一个字母；
+- V3 的富文本正文被卡在 200 码点，前端按 5000 放行，超过 200 保存时 422；
+- 「启用哪几个音色」和「语速」全无落点，纯会话状态，关掉页面即丢。
+
+### 21.2 后端改动
+
+**（1）`RichTextEmphasisLevel` 放开为四值**
+
+```json
+{ "type": "string", "enum": ["strong", "function", "core", "grammar"] }
+```
+
+`function` / `core` / `grammar` 对应功能词 / 核心词 / 语法词。`strong` 保留，只为存量数据；
+后端自己从不产生 emphasis，读到什么写回什么，也不迁移存量数据。
+
+**试听（`POST /speech/previews`）四个取值都合成为 `<emphasis level="strong">`**，与三分类落地
+之前的音频完全一致。三分类是教学标注不是韵律指令，各类到底该怎么读是产品问题；定了之后再改
+`src/speech/ssml.rs` 一处映射，不涉及 wire。
+
+**（2）`liaison` 增加两个可选端点宽度**（需求文档里的方案 A）
+
+```json
+{ "type": "liaison", "start": int, "end": int,
+  "start_len": int = 1, "end_len": int = 1 }
+```
+
+- 起点锚点占 `[start, start + start_len)`，终点锚点占 `[end - end_len, end)`；
+- 两者都可省略，缺省为 1，语义与加字段之前逐字节等价；
+- **缺省值不会出现在响应里**：值为 1 时后端不序列化该字段。存量内容重新序列化后一个字节不变，
+  内容哈希不漂移，没同步 spec 的客户端也不会被 `additionalProperties: false` 判非法；
+- 校验：宽度必须为正，且两个锚点都要落在 `[start, end)` 内（`start + start_len <= end`、
+  `end - end_len >= start`）。越界报 RichText 内部的 `invalid_liaison_anchor`，
+  按既有口径并入所在字段的错误码（见 §13.1 末尾），前端仍应本地先拦；
+- 两条相接的连读被规范化合并时，合并后的弧线从前一条的起点锚点连到后一条的终点锚点，
+  `end_len` 会跟着换过去。
+
+**（3）富文本正文上限 200 → 5000 码点**
+
+200 是遗留值，不是业务上限：那是 `MAX_HEADWORD_CODEPOINTS`（词头 200 码点）在 V3 契约里被
+复用到了所有富文本字段。同一份内容在 V3 保存路径上本来就还要过 V2 校验器的 **5000** 码点这关，
+库表 `lexicon.text_variants.plain_text` 的 CHECK 也是 **5000**，§13.1 写的同样是 5000——
+只有 V3 契约层那一处是 200。现已统一到 5000，`RichTextV1V3.text` / `RichTextV2V3.text` 的
+`maxLength` 同步改为 5000，§13.1 那张表不用改。
+
+其余上限一律未动：标注数仍 500，IPA 音素仍 200 码点，停顿仍 1–5000ms，节点数仍 2000。
+
+**（4）音色 / 语速持久化：新增 `voice_profile`**
+
+产品决策：这两项的语义是「这段文本将来合成语音时的配置」，不是编辑时的试听参数，要落库。
+
+```json
+"VoiceProfileV3": {
+  "type": "object",
+  "required": ["voice_ids", "rate_percent"],
+  "properties": {
+    "voice_ids":    { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
+    "rate_percent": { "type": "integer", "minimum": -50, "maximum": 100 }
+  },
+  "additionalProperties": false
+}
+```
+
+**挂在两处**，都与该节点的富文本字段同级、都可选：
+
+| 挂载点 | 覆盖的界面位置 |
+| --- | --- |
+| `GrammarVariantV3.voice_profile`（与 `content` 同级） | **V3 编辑器 step 3 的语法结构**——`V3MeaningsAndExamplesStep` 里语音编辑器唯一的挂载点 |
+| `RichTextVariantV3.voice_profile`（与 `value` 同级） | 英文释义 / 英文例句的文本变体（`EnglishTextV3` 的 unified `common` 与 uk/us `Ready.variant`） |
+
+> ⚠️ 只挂 `RichTextVariantV3` 是不够的：V3 语法结构走的是 `GrammarVariantV3`，那条路径上根本没有
+> `RichTextVariantV3`。两处都挂才覆盖得到语音编辑器实际编辑的字段。
+
+口径（两条容易做错的）：
+
+- **`voice_ids` 存 `/speech/voices` 的 `alias`**，后端**不做外键式校验**：发音人清单来自外部
+  TTS 供应商，alias 会随供应商下线；拿存量配置去撞当下的清单只会把老词条卡成不可保存。
+  读到已下线的 alias 原样返回，失效由前端在界面上标注。后端只校验形状：至多 20 个、
+  互不重复、非空、单个不超过 64 码点。
+- **`rate_percent` 只按全局区间 `-50..=100` 校验**（对应 0.50×–2.00×），不按单个音色的
+  `VoiceCapabilities.min_rate_percent` / `max_rate_percent`——那是逐音色不同的，而一份配置可以
+  同时启用多个音色。逐音色夹取发生在合成时，前端试听已经是这么做的。
+
+未配置时**该字段不出现在响应里**（与连读宽度同一手法），所以存量词条一个字节都不会变。
+校验失败返回 422，`field_issues` 里是新增的 issue code **`voice_profile_invalid`**
+（`field: "voice_profile"`，`node_id` 是语法结构变体 / 文本变体的稳定 id）。
+
+落库路径已覆盖保存、刷新读回与发布三处：V3 内容在服务端要过一轮 V2 往返，`voice_profile` 会被
+往返吞掉，后端在每个落库点按节点 id 回填（与 `component_usages`、多档 `zh_translations` 同一机制）。
+
+### 21.3 前端要怎么改
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 跑 `pnpm --filter @tsz/api-client sync:openapi`，`admin-word-v3.runtime-schema.json` 会同步到四值枚举与两个可选宽度字段 |
+| 2 | `packages/voice-editor/src/editor/next/tokens.ts` 落盘处把硬编码的 `level: "strong"` 改成透传当前 level；读回那侧 `roles.ts` 的 `normalizeGrammarLevel` 已经前向兼容，不用动 |
+| 3 | 同文件 `liaisonRange` 一并写出 `start_len` / `end_len`；`annotationsToMarks` 读回时按宽度还原两端锚点，字段缺席按 1 处理 |
+| 4 | 音色勾选与语速从会话状态改为随 `voice_profile` 落盘：语法结构写 `GrammarVariantV3.voice_profile`，英文文本写 `RichTextVariantV3.voice_profile`；`voice_ids` 用 `VoiceOption.id`（即 `alias`），`rate_percent` 用现在送给试听的那个百分比 |
+| 5 | 读回时 `voice_profile` 缺席＝没配过，按现在的默认值渲染；`voice_ids` 里有不在 `/speech/voices` 清单中的 alias 时在界面上标为失效，不要静默丢弃 |
+| 6 | V3 路径的正文长度上限维持 5000，`MAX_RICH_TEXT_CODE_POINTS` 与提示文案都不用改 |
+| 7 | mock / e2e 桩若断言过 liaison 或变体的完整形状，注意 `start_len` / `end_len` / `voice_profile` 在缺省时不出现 |
+
+### 21.4 部署顺序与兼容性
+
+**前端先部署，后端随后。** 三条改动的兼容性不一样，取最严的那条：
+
+| 改动 | 后端先部署会怎样 |
+| --- | --- |
+| 枚举放开 | 安全。后端只是多认几个值，旧前端一直只送 `strong`，响应里也就不会出现新值 |
+| 连读宽度 | 安全。旧前端不送宽度 → 库里没有非 1 的宽度 → 响应里不出现这两个字段 |
+| `voice_profile` | 安全。同上，旧前端不送就不落库、不回传；新增的 `voice_profile_invalid` issue code 旧前端也够不着（它压根送不出这个字段） |
+| 正文 200 → 5000 | **不安全**。管理员一旦存下 201 码点以上的正文，旧前端 runtime schema 的 `maxLength: 200` 会把响应整个判非法，词条页打不开 |
+
+所以顺序是：**前端 `sync:openapi` + 部署 → 后端部署 → 前端开始写入新值**。中间任一时刻回退单侧
+都不会丢数据：新值只有前端写得出来，后端全程只做透传。
+
+后端侧无迁移、无 SQLx 缓存变化（`voice_profile` 跟着 `entry_editor_projection.meanings` 这个
+JSONB 走，不需要新表新列），revert 即可回退；但已经写进库的 `function` / `core` / `grammar`
+与 `voice_profile` 在 revert 后会被 V3 契约拒绝反序列化（两处 DTO 都是 `deny_unknown_fields`），
+所以后端回退前要先把前端停在不写新值的版本上。

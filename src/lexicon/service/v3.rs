@@ -18,18 +18,19 @@ use crate::lexicon::dto::{
     AdminWordV3, AdminWordV3Capabilities, AdminWordV3Compatibility, BuiltinDictionaryEvidenceV3,
     CommonDialectV3, CreateAdminWordV3Input, DetectLexiconSurfaceResponseV3,
     DetectLexiconSurfaceV3Input, DetectionSurfaceRequestEchoV3, DialectRulesV3,
-    DictionaryCoverageV3, DictionaryPronunciationEvidenceV3, DictionaryProvenanceV3,
-    DictionaryProviderEvidenceV3, DraftFormsStepContentV3, DraftMeaningsStepContentV3,
-    DraftNodeLocation, DraftValidationResponseV3, EnglishLanguageV3, EntryPresentationV3,
-    FormsImpactItemV3, FormsImpactNodeTypeV3, FormsImpactResponseV3,
-    LegacyHeadwordsCompatibilityV3, PhraseComponentUsageV3, PreviewFormsImpactInputV3,
-    PronunciationNormalizationVersionV3, PronunciationStyle, RelationPrebindingStateV3,
-    RetiredStableNodeV3, SaveFormsStepInputV3, SaveMeaningsStepInputV3, SuggestedConcreteFormV3,
-    SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3, UsDialectV3, V3PublicationBlockCode,
-    V3PublicationCapability, V3RetiredNodeRole, V3ValidationIssueCode, ValidateAdminWordV3Input,
-    WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3, WordEntryKindV3,
-    WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordHeadwordsV2, WordPosFormsV3,
-    WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
+    DialectVariantRichTextSlotV3, DictionaryCoverageV3, DictionaryPronunciationEvidenceV3,
+    DictionaryProvenanceV3, DictionaryProviderEvidenceV3, DraftFormsStepContentV3,
+    DraftMeaningsStepContentV3, DraftNodeLocation, DraftValidationResponseV3, EnglishLanguageV3,
+    EnglishTextV3, EntryPresentationV3, FormsImpactItemV3, FormsImpactNodeTypeV3,
+    FormsImpactResponseV3, LegacyHeadwordsCompatibilityV3, PhraseComponentUsageV3,
+    PreviewFormsImpactInputV3, PronunciationNormalizationVersionV3, PronunciationStyle,
+    RelationPrebindingStateV3, RetiredStableNodeV3, RichTextVariantV3, SaveFormsStepInputV3,
+    SaveMeaningsStepInputV3, SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin,
+    UkDialectV3, UsDialectV3, V3PublicationBlockCode, V3PublicationCapability, V3RetiredNodeRole,
+    V3ValidationIssueCode, ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3,
+    WordDefinitionV3, WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3,
+    WordHeadwordsV2, WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3,
+    WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
 };
 use crate::lexicon::model::{NodeIdentityRecord, RegionEvidenceRecord};
 
@@ -2097,6 +2098,7 @@ impl LexiconService {
         .map_err(serialization_error)?;
         copy_sentence_translations(&translation_content, &mut canonical_content)?;
         restore_sense_component_usages(&translation_content, &mut canonical_content);
+        restore_voice_profiles(&translation_content, &mut canonical_content);
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut canonical_content);
         let aggregate_issues =
             crate::lexicon::v3_contract::validate_aggregate_node_limit(&forms, &canonical_content);
@@ -3561,6 +3563,98 @@ pub(super) fn restore_sense_component_usages(
         .collect::<HashMap<_, _>>();
     for sense in target.pos.iter_mut().flat_map(|pos| &mut pos.senses) {
         sense.component_usages = by_sense.get(&sense.id).cloned().unwrap_or_default().into();
+    }
+}
+
+/// V3 → V2 → V3 往返会静默吞掉 `voice_profile`（`GrammarVariantV2` / `TextVariantV2` 没这个
+/// 字段且不 deny），和 `component_usages` 一样，每个落库点都要从往返前的 V3 内容按节点 id 回填。
+///
+/// 语法结构变体与英文文本变体共用一张 id → profile 表：两者的 id 都是 `text_variants.id`，
+/// 全库唯一，不会互相串。
+pub(super) fn restore_voice_profiles(
+    source: &DraftMeaningsStepContentV3,
+    target: &mut DraftMeaningsStepContentV3,
+) {
+    let mut by_node = HashMap::new();
+    for pos in &source.pos {
+        for variant in pos
+            .grammar_structures
+            .iter()
+            .flat_map(|grammar| &grammar.variants)
+        {
+            by_node.insert(variant.id, variant.voice_profile.clone());
+        }
+        for text in source_english_texts(pos) {
+            for variant in crate::lexicon::v3_contract::english_text_variants(text) {
+                by_node.insert(variant.id, variant.voice_profile.clone());
+            }
+        }
+    }
+    for pos in &mut target.pos {
+        for variant in pos
+            .grammar_structures
+            .iter_mut()
+            .flat_map(|grammar| &mut grammar.variants)
+        {
+            variant.voice_profile = by_node.get(&variant.id).cloned().flatten();
+        }
+        for text in target_english_texts(pos) {
+            for variant in english_text_variants_mut(text) {
+                variant.voice_profile = by_node.get(&variant.id).cloned().flatten();
+            }
+        }
+    }
+}
+
+fn source_english_texts(pos: &WordPosMeaningsV3) -> Vec<&EnglishTextV3> {
+    pos.senses
+        .iter()
+        .flat_map(|sense| {
+            sense
+                .definitions
+                .iter()
+                .filter_map(|definition| match definition {
+                    WordDefinitionV3::EnDefinition { content, .. }
+                    | WordDefinitionV3::EnSentence { content, .. } => Some(content),
+                    _ => None,
+                })
+                .chain(sense.sentences.iter().map(|sentence| &sentence.en_text))
+        })
+        .collect()
+}
+
+fn target_english_texts(pos: &mut WordPosMeaningsV3) -> Vec<&mut EnglishTextV3> {
+    pos.senses
+        .iter_mut()
+        .flat_map(|sense| {
+            sense
+                .definitions
+                .iter_mut()
+                .filter_map(|definition| match definition {
+                    WordDefinitionV3::EnDefinition { content, .. }
+                    | WordDefinitionV3::EnSentence { content, .. } => Some(content),
+                    _ => None,
+                })
+                .chain(
+                    sense
+                        .sentences
+                        .iter_mut()
+                        .map(|sentence| &mut sentence.en_text),
+                )
+        })
+        .collect()
+}
+
+fn english_text_variants_mut(content: &mut EnglishTextV3) -> Vec<&mut RichTextVariantV3> {
+    match content {
+        EnglishTextV3::Unified { common } => vec![common],
+        EnglishTextV3::Distinguish { uk, us, .. } => [uk, us]
+            .into_iter()
+            .filter_map(|slot| match slot {
+                DialectVariantRichTextSlotV3::Ready { variant } => Some(variant),
+                DialectVariantRichTextSlotV3::Missing => None,
+            })
+            .collect(),
     }
 }
 
