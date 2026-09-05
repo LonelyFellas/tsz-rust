@@ -105,6 +105,7 @@ impl LexiconService {
             crate::lexicon::v3_contract::validate_forms(&word.forms, StepSaveIntent::Complete);
         issues.extend(crate::lexicon::v3_contract::validate_meanings(
             &word.meanings,
+            StepSaveIntent::Complete,
         ));
         issues.extend(
             crate::lexicon::v3_contract::validate_complete_definition_grammar(&word.meanings),

@@ -320,7 +320,7 @@ pub async fn save_meanings(
             {
                 return Err(v3_storage_unavailable());
             }
-            let issues = v3_contract::validate_meanings(&input.content);
+            let issues = v3_contract::validate_meanings(&input.content, input.intent);
             if !issues.is_empty() {
                 return Err(v3_contract::contract_validation_error(&issues));
             }
@@ -334,7 +334,6 @@ pub async fn save_meanings(
                     path.id,
                     input,
                     draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-                    sense_component_usages_enabled(state.smart_lexicon_v3_flags),
                 )
                 .await
                 .map_err(map_error)?;

@@ -21185,14 +21185,13 @@ async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool)
 }
 
 #[sqlx::test]
-async fn v3_sense_component_capability_key_is_absent_while_the_flag_is_off(pool: PgPool) {
+async fn v3_sense_component_capability_is_always_on(pool: PgPool) {
+    // 开关已移除：能力位恒为 true 并继续下发，写入非空成分不再被 503 拦。
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
-    let mut flags = SmartLexiconV3Flags::all_enabled();
-    flags.sense_component_usages = false;
-    let state = AppState::for_test_with_redis(pool.clone(), redis.clone())
-        .with_smart_lexicon_v3_flags_for_test(flags);
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
 
@@ -21200,11 +21199,9 @@ async fn v3_sense_component_capability_key_is_absent_while_the_flag_is_off(pool:
     let (_, forms_saved) =
         save_v3_forms_after_impact(&state, &bearer, &entry_id, 1, "complete", forms).await;
     let capabilities = &forms_saved["word"]["capabilities"];
-    assert!(
-        capabilities
-            .as_object()
-            .is_some_and(|capabilities| !capabilities.contains_key("sense_component_usages")),
-        "能力位关闭时该键必须缺席，否则未同步 spec 的旧前端每个 GET 都会挂：{capabilities}"
+    assert_eq!(
+        capabilities["sense_component_usages"], true,
+        "能力位恒开且键必须在场，按能力位判断的客户端才不必跟着后端同批部署：{capabilities}"
     );
     assert_eq!(
         capabilities["draft_relation_prebinding"], true,
@@ -21218,21 +21215,6 @@ async fn v3_sense_component_capability_key_is_absent_while_the_flag_is_off(pool:
         "state": "unresolved",
         "literal": "capability"
     }]);
-    let (status, rejected) = save_v3_meanings_raw(
-        &state,
-        &bearer,
-        &entry_id,
-        forms_saved["word"]["revision"].as_i64().unwrap(),
-        meanings.clone(),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "能力关闭时不得写入释义级成分：{rejected}"
-    );
-
-    meanings["pos"][0]["senses"][0]["component_usages"] = json!([]);
     let (status, accepted) = save_v3_meanings_raw(
         &state,
         &bearer,
@@ -21241,12 +21223,14 @@ async fn v3_sense_component_capability_key_is_absent_while_the_flag_is_off(pool:
         meanings,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "显式清空不受能力位限制：{accepted}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "写入闸已随开关一并移除，非空成分应当直接落库：{accepted}"
+    );
 
-    let enabled_state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let (status, enabled) = call(
-        &enabled_state,
+    let (status, reread) = call(
+        &state,
         Method::GET,
         &format!("{ROOT}/entries/{entry_id}"),
         &bearer,
@@ -21254,9 +21238,9 @@ async fn v3_sense_component_capability_key_is_absent_while_the_flag_is_off(pool:
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{enabled}");
+    assert_eq!(status, StatusCode::OK, "{reread}");
     assert_eq!(
-        enabled["word"]["capabilities"]["sense_component_usages"],
+        reread["word"]["capabilities"]["sense_component_usages"],
         true
     );
 }

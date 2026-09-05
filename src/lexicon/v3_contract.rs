@@ -409,7 +409,11 @@ fn regional_variants_match_rules(variants: &WordRegionalVariantsV3, rules: Diale
     }
 }
 
-pub(crate) fn validate_meanings(content: &DraftMeaningsStepContentV3) -> Vec<DraftValidationIssue> {
+pub(crate) fn validate_meanings(
+    content: &DraftMeaningsStepContentV3,
+    intent: StepSaveIntent,
+) -> Vec<DraftValidationIssue> {
+    let complete = intent == StepSaveIntent::Complete;
     let mut issues = Vec::new();
     let node_count = meanings_node_count(content);
     if node_count > MAX_ENTRY_NODES {
@@ -476,7 +480,9 @@ pub(crate) fn validate_meanings(content: &DraftMeaningsStepContentV3) -> Vec<Dra
                             "each Chinese translation band may appear only once",
                         ));
                     }
-                    if translation.content.text().trim().is_empty() {
+                    // 译文留空是草稿的正常中间态（新建例句行默认就是空的），
+                    // 只有收尾提交才要求填齐——与 validate_forms 的 complete 门一致。
+                    if complete && translation.content.text().trim().is_empty() {
                         issues.push(meanings_issue(
                             V3ValidationIssueCode::SentenceTranslationRequired,
                             "content",
@@ -2129,7 +2135,7 @@ mod tests {
             })
             .collect();
         assert!(has_code(
-            &validate_meanings(&oversized.content),
+            &validate_meanings(&oversized.content, StepSaveIntent::Save),
             V3ValidationIssueCode::ContentLimitExceeded
         ));
     }
@@ -2160,15 +2166,15 @@ mod tests {
         };
         // 上限跟 lexicon.text_variants.plain_text 的 CHECK 走，词头那条 200 不适用于正文。
         assert!(!has_code(
-            &validate_meanings(&content(MAX_HEADWORD_CODEPOINTS + 1)),
+            &validate_meanings(&content(MAX_HEADWORD_CODEPOINTS + 1), StepSaveIntent::Save),
             V3ValidationIssueCode::ContentLimitExceeded
         ));
         assert!(!has_code(
-            &validate_meanings(&content(MAX_RICH_TEXT_CODEPOINTS)),
+            &validate_meanings(&content(MAX_RICH_TEXT_CODEPOINTS), StepSaveIntent::Save),
             V3ValidationIssueCode::ContentLimitExceeded
         ));
         assert!(has_code(
-            &validate_meanings(&content(MAX_RICH_TEXT_CODEPOINTS + 1)),
+            &validate_meanings(&content(MAX_RICH_TEXT_CODEPOINTS + 1), StepSaveIntent::Save),
             V3ValidationIssueCode::ContentLimitExceeded
         ));
     }
@@ -2261,7 +2267,7 @@ mod tests {
         );
         assert_eq!(sentence.zh_text.text(), "高");
         assert!(!has_code(
-            &validate_meanings(&legacy),
+            &validate_meanings(&legacy, StepSaveIntent::Save),
             V3ValidationIssueCode::SentenceTranslationInvalid
         ));
 
@@ -2270,8 +2276,58 @@ mod tests {
             .zh_translations
             .push(duplicate);
         assert!(has_code(
-            &validate_meanings(&legacy),
+            &validate_meanings(&legacy, StepSaveIntent::Save),
             V3ValidationIssueCode::DuplicateSentenceTranslationBand
+        ));
+    }
+
+    #[test]
+    fn empty_sentence_translation_blocks_completion_but_not_draft_saves() {
+        // 回归：step3 的例句行默认带一条空译文，草稿保存不该被它拦下。
+        let content: DraftMeaningsStepContentV3 = serde_json::from_value(json!({
+            "sense_groups": [],
+            "pos": [{
+                "pos_id": Uuid::now_v7(),
+                "grammar_structures": [],
+                "senses": [{
+                    "id": Uuid::now_v7(),
+                    "sub_pos": "",
+                    "level": "A1",
+                    "depends_on_context": false,
+                    "definitions": [],
+                    "sentences": [{
+                        "id": Uuid::now_v7(),
+                        "level": "A1",
+                        "en_text": {
+                            "mode": "unified",
+                            "common": {
+                                "id": Uuid::now_v7(),
+                                "origin": "manual",
+                                "value": {"version": 2, "text": "", "annotations": []}
+                            }
+                        },
+                        "zh_text_id": Uuid::now_v7(),
+                        "zh_text": {"version": 2, "text": "", "annotations": []},
+                        "zh_translations": [{
+                            "id": Uuid::now_v7(),
+                            "band": "a1_a2",
+                            "content": {"version": 2, "text": "  ", "annotations": []}
+                        }],
+                        "links": []
+                    }],
+                    "relations": []
+                }]
+            }]
+        }))
+        .unwrap();
+
+        assert!(!has_code(
+            &validate_meanings(&content, StepSaveIntent::Save),
+            V3ValidationIssueCode::SentenceTranslationRequired
+        ));
+        assert!(has_code(
+            &validate_meanings(&content, StepSaveIntent::Complete),
+            V3ValidationIssueCode::SentenceTranslationRequired
         ));
     }
 

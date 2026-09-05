@@ -77,3 +77,14 @@ swagger = ["dep:utoipa-swagger-ui"]
 [dev-dependencies]
 http-body-util = "0.1.3"
 tower = { version = "0.5.3", features = ["util"] }
+
+# 依赖的 DWARF 调试符号占 deps/ 约 38%（实测 2.19G → 1.35G），而调试时基本不会单步进
+# 依赖内部。所以依赖不带调试符号，本 crate 只留行号表。
+# line-tables-only 保留 panic 回溯里的 file:line（已实测）；依赖帧仍有函数名（来自符号表），
+# 只是没有行号。注意这里关的是调试符号，不是 debug-assertions，后者未受影响。
+# 只作用于 dev/test，release 与部署产物不受影响。
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
