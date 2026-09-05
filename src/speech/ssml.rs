@@ -1,4 +1,4 @@
-use crate::lexicon::dto::{RichTextAnnotation, RichTextEmphasisLevel, RichTextPhonemeAlphabet};
+use crate::lexicon::dto::{RichTextAnnotation, RichTextPhonemeAlphabet};
 
 use super::{SpeechModelError, SynthesisRequest};
 
@@ -108,10 +108,9 @@ fn open_range(
     annotation: &RichTextAnnotation,
 ) -> Result<(), SpeechModelError> {
     match annotation {
-        RichTextAnnotation::Emphasis {
-            level: RichTextEmphasisLevel::Strong,
-            ..
-        } => output.push_str(r#"<emphasis level="strong">"#),
+        // 三分类（功能词 / 核心词 / 语法词）是教学标注，不是韵律指令；试听一律沿用
+        // 三分类落地之前的 `strong`，等产品定了各类该怎么读再分开映射。
+        RichTextAnnotation::Emphasis { .. } => output.push_str(r#"<emphasis level="strong">"#),
         RichTextAnnotation::Phoneme {
             alphabet: RichTextPhonemeAlphabet::Ipa,
             phoneme,

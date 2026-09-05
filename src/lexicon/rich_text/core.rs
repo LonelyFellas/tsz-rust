@@ -163,7 +163,10 @@ fn canonicalize_v2(value: &mut RichTextV2) -> Result<(), Vec<RichTextIssue>> {
         if let Some(previous) = previous {
             let (_, previous_end) = range_bounds(previous).expect("mergeable range annotation");
             if start <= previous_end {
-                set_range_end(previous, previous_end.max(end));
+                if end > previous_end {
+                    set_range_end(previous, end);
+                    adopt_end_anchor(previous, &annotation);
+                }
                 continue;
             }
         }
@@ -248,6 +251,28 @@ pub(super) fn validate_v2(value: &RichTextV2) -> Vec<RichTextIssue> {
                         "invalid_phoneme",
                         path,
                         "IPA 不能为空且不能超过 200 个码点",
+                    );
+                }
+            }
+            RichTextAnnotation::Liaison {
+                start,
+                end,
+                start_len,
+                end_len,
+            } => {
+                validate_range(&mut issues, &value.text, *start, *end, &path);
+                let start_anchor_end = start.checked_add(*start_len);
+                let end_anchor_start = end.checked_sub(*end_len);
+                if *start_len == 0
+                    || *end_len == 0
+                    || start_anchor_end.is_none_or(|anchor_end| anchor_end > *end)
+                    || end_anchor_start.is_none_or(|anchor_start| anchor_start < *start)
+                {
+                    push_issue(
+                        &mut issues,
+                        "invalid_liaison_anchor",
+                        path,
+                        "连读两端的锚点宽度必须为正且落在连读区间内",
                     );
                 }
             }
@@ -408,7 +433,7 @@ pub(super) fn range_bounds(annotation: &RichTextAnnotation) -> Option<(usize, us
     match annotation {
         RichTextAnnotation::Emphasis { start, end, .. }
         | RichTextAnnotation::Phoneme { start, end, .. }
-        | RichTextAnnotation::Liaison { start, end }
+        | RichTextAnnotation::Liaison { start, end, .. }
         | RichTextAnnotation::Highlight { start, end, .. } => Some((*start, *end)),
         RichTextAnnotation::Pause { .. } => None,
     }
@@ -421,6 +446,21 @@ pub(super) fn set_range_end(annotation: &mut RichTextAnnotation, next_end: usize
         | RichTextAnnotation::Liaison { end, .. }
         | RichTextAnnotation::Highlight { end, .. } => *end = next_end,
         RichTextAnnotation::Pause { .. } => unreachable!("pause is not a range annotation"),
+    }
+}
+
+/// 两条连读合并后，弧线从前一条的起点锚点连到后一条的终点锚点，终点宽度要一起搬过来，
+/// 否则新的 `end` 会配上旧的 `end_len`，锚点落在错误的字母上。
+fn adopt_end_anchor(previous: &mut RichTextAnnotation, annotation: &RichTextAnnotation) {
+    if let (
+        RichTextAnnotation::Liaison {
+            end_len: previous_len,
+            ..
+        },
+        RichTextAnnotation::Liaison { end_len, .. },
+    ) = (previous, annotation)
+    {
+        *previous_len = *end_len;
     }
 }
 
