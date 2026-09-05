@@ -106,12 +106,8 @@ impl LexiconService {
                 .map_err(repository_error)?
                 .into_iter()
                 .map(|record| {
-                    PublishedAssociationTarget::from_snapshot(
-                        record.snapshot,
-                        true,
-                        record.publication_id,
-                    )
-                    .map(|target| (record.entry_id, target))
+                    PublishedAssociationTarget::from_snapshot(record.snapshot, true)
+                        .map(|target| (record.entry_id, target))
                 })
                 .collect::<Result<HashMap<_, _>, _>>()?;
 
@@ -255,12 +251,8 @@ impl LexiconService {
                 .map_err(repository_error)?
                 .into_iter()
                 .map(|record| {
-                    PublishedAssociationTarget::from_snapshot(
-                        record.snapshot,
-                        true,
-                        record.publication_id,
-                    )
-                    .map(|target| (record.entry_id, target))
+                    PublishedAssociationTarget::from_snapshot(record.snapshot, true)
+                        .map(|target| (record.entry_id, target))
                 })
                 .collect::<Result<HashMap<_, _>, _>>()?;
         transaction.commit().await.map_err(database_error)?;

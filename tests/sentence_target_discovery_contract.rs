@@ -3,8 +3,6 @@ use tsz_rust::openapi::ApiDoc;
 use utoipa::OpenApi;
 
 const RESOLVE_PATH: &str = "/api/v1/admin/lexicon/entries/sentence-targets/resolve";
-const REPLACE_PATH: &str =
-    "/api/v1/admin/lexicon/entries/{id}/sentences/{sentence_id}/associations";
 
 fn spec() -> Value {
     serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI should serialize")
@@ -105,11 +103,6 @@ fn branch_by_literal<'a>(
                 == Some(expected)
         })
         .unwrap_or_else(|| panic!("missing {property}={expected} branch"))
-}
-
-fn component_schema<'a>(spec: &'a Value, name: &str) -> &'a Value {
-    spec.pointer(&format!("/components/schemas/{name}"))
-        .unwrap_or_else(|| panic!("missing components.schemas.{name}"))
 }
 
 fn component_by_required<'a>(spec: &'a Value, names: &[&str]) -> &'a Value {
@@ -340,72 +333,4 @@ fn resolve_candidates_preserve_base_and_sense_identity_and_draft_safety() {
             .pointer("/properties/publication_id")
             .is_none()
     );
-}
-
-#[test]
-fn association_v3_uses_segments_as_the_only_position_authority() {
-    let spec = spec();
-    let replace = operation(&spec, REPLACE_PATH, "put");
-    let request = request_schema(&spec, replace);
-    let v3 = branch_by_literal(
-        &spec,
-        request,
-        "association_schema_version",
-        &Value::from(3),
-    );
-    assert_required(&spec, v3, &["association_schema_version", "associations"]);
-    let v3_item = schema_property(&spec, v3, "associations")
-        .get("items")
-        .map(|schema| dereference(&spec, schema))
-        .expect("V3 associations should expose item schema");
-    assert_required(&spec, v3_item, &["id", "source_dialect", "source_segments"]);
-    assert!(v3_item.pointer("/properties/source_range").is_none());
-    let segments = schema_property(&spec, v3_item, "source_segments");
-    assert_eq!(segments.get("minItems").and_then(Value::as_u64), Some(1));
-    assert_eq!(segments.get("maxItems").and_then(Value::as_u64), Some(20));
-
-    let legacy = request
-        .get("oneOf")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|branch| dereference(&spec, branch))
-        .find(|branch| {
-            branch
-                .pointer("/properties/association_schema_version")
-                .is_none()
-        })
-        .expect("legacy source_range branch should remain explicit");
-    let legacy_item = schema_property(&spec, legacy, "associations")
-        .get("items")
-        .map(|schema| dereference(&spec, schema))
-        .expect("legacy associations should expose item schema");
-    assert_required(&spec, legacy_item, &["source_range"]);
-    assert!(legacy_item.pointer("/properties/source_segments").is_none());
-
-    for name in [
-        "SentenceAssociationInputV3",
-        "PendingSentenceAssociationItemV3",
-    ] {
-        let schema = component_schema(&spec, name);
-        assert_required(&spec, schema, &["source_segments"]);
-        assert!(
-            schema.pointer("/properties/source_range").is_none(),
-            "{name} must not mix source_range with source_segments"
-        );
-    }
-
-    let projected = component_schema(&spec, "WordSentenceAssociationV3");
-    for state in ["linked", "pending"] {
-        let branch = branch_by_literal(&spec, projected, "state", &Value::String(state.to_owned()));
-        assert_required(&spec, branch, &["source_segments"]);
-        assert!(
-            branch.pointer("/properties/source_range").is_none(),
-            "WordSentenceAssociationV3 {state} branch must not mix source_range with source_segments"
-        );
-    }
-
-    let v2 = component_schema(&spec, "SentenceAssociationInputV2");
-    assert_required(&spec, v2, &["source_range"]);
-    assert!(v2.pointer("/properties/source_segments").is_none());
 }

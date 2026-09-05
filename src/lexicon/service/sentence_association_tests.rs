@@ -2,19 +2,7 @@ use super::*;
 
 use serde_json::{Value, json};
 
-use crate::lexicon::dto::{
-    ReplaceSentenceAssociationsInputV2, SentenceAssociationInputV2, SentenceTargetMatchKindV3,
-};
-
-fn normalized_v2(input: SentenceAssociationInputV2) -> Vec<ManualAssociationInput> {
-    normalize_manual_association_inputs(&ReplaceSentenceAssociationsInput::V2(
-        ReplaceSentenceAssociationsInputV2 {
-            base_revision: 1,
-            base_lifecycle_revision: 1,
-            associations: vec![input],
-        },
-    ))
-}
+use crate::lexicon::dto::SentenceTargetMatchKindV3;
 
 struct V3Fixture {
     snapshot: Value,
@@ -23,7 +11,6 @@ struct V3Fixture {
     sense_id: Uuid,
     form_ids: Vec<Uuid>,
     variant_ids: Vec<Uuid>,
-    sentence_id: Uuid,
 }
 
 fn rich_text(text: &str) -> Value {
@@ -140,15 +127,13 @@ fn v3_fixture(form_count: usize) -> V3Fixture {
         sense_id,
         form_ids,
         variant_ids,
-        sentence_id,
     }
 }
 
 #[test]
-fn v3_target_resolves_auto_and_manual_associations() {
+fn v3_target_resolves_automatic_associations() {
     let fixture = v3_fixture(1);
-    let publication_id = Uuid::now_v7();
-    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true, publication_id)
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true)
         .expect("V3 publication snapshot should be supported");
 
     let automatic = target
@@ -161,33 +146,12 @@ fn v3_target_resolves_auto_and_manual_associations() {
     assert_eq!(automatic.target_gloss, "港口");
     assert_eq!(automatic.resolved_pos, "noun");
     assert_eq!(automatic.resolved_form_type.as_deref(), Some("base"));
-
-    let manual = target
-        .manual_target(
-            fixture.sense_id,
-            "harbour",
-            Some(publication_id),
-            Some(fixture.variant_ids[0]),
-        )
-        .expect("V3 manual target should resolve");
-    assert_eq!(manual.target_form_slot_id, Some(fixture.form_ids[0]));
-
-    let compatibility_manual = target
-        .manual_target(fixture.sense_id, "harbour", None, None)
-        .expect("legacy request may still target a uniquely matched V3 word");
-    assert_eq!(
-        compatibility_manual.target_form_slot_id,
-        Some(fixture.form_ids[0])
-    );
-    assert_eq!(compatibility_manual.target_publication_id, None);
-    assert_eq!(compatibility_manual.target_form_variant_id, None);
 }
 
 #[test]
 fn v3_same_surface_across_forms_keeps_association_without_guessing_form() {
     let fixture = v3_fixture(2);
-    let publication_id = Uuid::now_v7();
-    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true, publication_id)
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true)
         .expect("V3 publication snapshot should be supported");
 
     let automatic = target
@@ -195,152 +159,6 @@ fn v3_same_surface_across_forms_keeps_association_without_guessing_form() {
         .expect("unique V3 POS and sense should still resolve");
     assert_eq!(automatic.target_form_slot_id, None);
     assert_eq!(automatic.resolved_form_type, None);
-
-    let manual = target
-        .manual_target(
-            fixture.sense_id,
-            "harbour",
-            Some(publication_id),
-            Some(fixture.variant_ids[0]),
-        )
-        .expect("exact V3 variant should disambiguate the form");
-    assert_eq!(manual.target_form_slot_id, Some(fixture.form_ids[0]));
-    assert_eq!(manual.resolved_form_type.as_deref(), Some("base"));
-}
-
-#[test]
-fn v3_phrase_target_requires_exact_publication_variant_and_restores_components() {
-    let mut fixture = v3_fixture(1);
-    fixture.snapshot["kind"] = json!("phrase");
-    // 成分用词已改为释义级绑定：挂在 sense 上，不再挂在词形变体上。
-    fixture.snapshot["meanings"]["pos"][0]["senses"][0]["component_usages"] = json!([{
-        "state": "unresolved",
-        "id": Uuid::now_v7(),
-        "literal": "harbour"
-    }]);
-    let publication_id = Uuid::now_v7();
-    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true, publication_id)
-        .expect("V3 phrase snapshot should be supported");
-
-    assert!(
-        target
-            .manual_target(fixture.sense_id, "harbour", None, None)
-            .is_none(),
-        "phrase association must not guess a concrete variant"
-    );
-    assert!(
-        target
-            .manual_target(
-                fixture.sense_id,
-                "harbour",
-                Some(Uuid::now_v7()),
-                Some(fixture.variant_ids[0]),
-            )
-            .is_none(),
-        "variant identity must be bound to the exact publication"
-    );
-    let resolved = target
-        .manual_target(
-            fixture.sense_id,
-            "harbour",
-            Some(publication_id),
-            Some(fixture.variant_ids[0]),
-        )
-        .expect("exact phrase variant should resolve");
-    assert_eq!(resolved.target_publication_id, Some(publication_id));
-    assert_eq!(
-        resolved.target_form_variant_id,
-        Some(fixture.variant_ids[0])
-    );
-    assert_eq!(resolved.target_component_usages.len(), 1);
-}
-
-#[test]
-fn v3_phrase_association_prefers_the_sense_over_the_matched_variant() {
-    // 两侧都非空时优先级必须是 sense 赢；只测其中一侧非空的用例挡不住把条件写反。
-    let mut fixture = v3_fixture(1);
-    fixture.snapshot["kind"] = json!("phrase");
-    fixture.snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["component_usages"] = json!([{
-        "state": "unresolved",
-        "id": Uuid::now_v7(),
-        "literal": "变体级的那份"
-    }]);
-    fixture.snapshot["meanings"]["pos"][0]["senses"][0]["component_usages"] = json!([{
-        "state": "unresolved",
-        "id": Uuid::now_v7(),
-        "literal": "释义级的那份"
-    }]);
-    let publication_id = Uuid::now_v7();
-    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true, publication_id)
-        .expect("V3 phrase snapshot should be supported");
-
-    let resolved = target
-        .manual_target(
-            fixture.sense_id,
-            "harbour",
-            Some(publication_id),
-            Some(fixture.variant_ids[0]),
-        )
-        .expect("exact phrase variant should resolve");
-    let [PhraseComponentUsageV3::Unresolved { literal, .. }] =
-        resolved.target_component_usages.as_slice()
-    else {
-        panic!(
-            "期望恰好一条未解析成分：{:?}",
-            resolved.target_component_usages
-        );
-    };
-    assert_eq!(
-        literal, "释义级的那份",
-        "两侧都非空时必须取被选中 sense 的成分"
-    );
-}
-
-#[test]
-fn v3_phrase_association_falls_back_to_the_matched_variant_when_the_sense_has_none() {
-    // B1 存量：成分还挂在词形上、sense 侧为空。关联快照必须回退到命中词形那份，
-    // 否则这段窗口里新建的关联会丢掉候选行上显示着的成分。
-    let mut fixture = v3_fixture(1);
-    fixture.snapshot["kind"] = json!("phrase");
-    fixture.snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["component_usages"] = json!([{
-        "state": "unresolved",
-        "id": Uuid::now_v7(),
-        "literal": "harbour"
-    }]);
-    let publication_id = Uuid::now_v7();
-    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true, publication_id)
-        .expect("V3 phrase snapshot should be supported");
-
-    let resolved = target
-        .manual_target(
-            fixture.sense_id,
-            "harbour",
-            Some(publication_id),
-            Some(fixture.variant_ids[0]),
-        )
-        .expect("exact phrase variant should resolve");
-    assert_eq!(
-        resolved.target_component_usages.len(),
-        1,
-        "sense 没有成分时必须回退到命中词形的成分"
-    );
-}
-
-#[test]
-fn v3_source_exposes_sentence_variants_to_the_manual_editor() {
-    let fixture = v3_fixture(1);
-    let word: AdminWordV3 =
-        serde_json::from_value(fixture.snapshot).expect("fixture should be valid V3");
-    let word = AdminWordAny::V3(Box::new(word));
-
-    ensure_association_source_state(&word, 7, 2).expect("current V3 revisions should be accepted");
-    let meanings = association_source_meanings(&word).expect("V3 meanings should adapt to V2 wire");
-    let variant = sentence_variants(&meanings)
-        .into_iter()
-        .find(|variant| variant.sentence_id == fixture.sentence_id)
-        .expect("V3 sentence should be editable");
-    assert_eq!(variant.dialect, Dialect::Common);
-    assert_eq!(variant.text, "The harbour is calm.");
 }
 
 #[test]
@@ -358,91 +176,10 @@ fn candidate_source_kinds_cover_v2_and_v3_publication_rows() {
 #[test]
 fn rollback_gate_rejects_v3_publication_targets() {
     let fixture = v3_fixture(1);
-    let error = PublishedAssociationTarget::from_snapshot(fixture.snapshot, false, Uuid::now_v7())
+    let error = PublishedAssociationTarget::from_snapshot(fixture.snapshot, false)
         .expect_err("V3 target consumption must stop when the capability is disabled");
 
     assert!(matches!(error, LexiconServiceError::V3StorageUnavailable));
-}
-
-#[test]
-fn v3_idempotent_replay_respects_the_rollback_gate() {
-    let fixture = v3_fixture(1);
-    let word: AdminWordV3 =
-        serde_json::from_value(fixture.snapshot).expect("fixture should be valid V3");
-    let response = AdminWordAnyEnvelope {
-        word: AdminWordAny::V3(Box::new(word)),
-    };
-
-    let error = ensure_association_response_capability(&response, false)
-        .expect_err("disabled V3 capability must reject a stored V3 response");
-    assert!(matches!(error, LexiconServiceError::V3StorageUnavailable));
-    ensure_association_response_capability(&response, true)
-        .expect("enabled V3 capability should allow the same replay");
-}
-
-#[test]
-fn v2_manual_slot_selection_keeps_legacy_first_match_behavior() {
-    let first_form_id = Uuid::now_v7();
-    let second_form_id = Uuid::now_v7();
-    let second_variant_id = Uuid::now_v7();
-    let sense_id = Uuid::now_v7();
-    let pos_id = Uuid::now_v7();
-    let target = PublishedAssociationTarget {
-        schema_version: 2,
-        id: Uuid::now_v7(),
-        publication_id: Uuid::now_v7(),
-        kind: EntryKind::Word,
-        headword: "cut".to_owned(),
-        pos: vec![PublishedAssociationPos {
-            id: pos_id,
-            pos: "verb".to_owned(),
-            forms: vec![
-                PublishedAssociationForm {
-                    id: first_form_id,
-                    form_type: "base".to_owned(),
-                    base_form_ids: vec![first_form_id],
-                    variants: vec![PublishedAssociationVariant {
-                        id: Uuid::now_v7(),
-                        dialect: Dialect::Common,
-                        spelling: "cut".to_owned(),
-                        normalized_surface: Some("cut".to_owned()),
-                        component_usages: Vec::new(),
-                    }],
-                    normalized_surfaces: vec!["cut".to_owned()],
-                },
-                PublishedAssociationForm {
-                    id: second_form_id,
-                    form_type: "past_tense".to_owned(),
-                    base_form_ids: vec![first_form_id],
-                    variants: vec![PublishedAssociationVariant {
-                        id: second_variant_id,
-                        dialect: Dialect::Common,
-                        spelling: "cut".to_owned(),
-                        normalized_surface: Some("cut".to_owned()),
-                        component_usages: Vec::new(),
-                    }],
-                    normalized_surfaces: vec!["cut".to_owned()],
-                },
-            ],
-            senses: vec![PublishedAssociationSense {
-                id: sense_id,
-                level: "B1".to_owned(),
-                gloss: "切".to_owned(),
-                component_usages: Vec::new(),
-            }],
-        }],
-    };
-
-    let manual = target
-        .manual_target(sense_id, "cut", None, None)
-        .expect("legacy V2 manual target should resolve");
-    assert_eq!(manual.target_form_slot_id, Some(first_form_id));
-
-    let automatic = target
-        .automatic_target(pos_id, &[second_variant_id])
-        .expect("legacy V2 automatic target should resolve");
-    assert_eq!(automatic.target_form_slot_id, Some(second_form_id));
-    assert_eq!(automatic.resolved_form_type.as_deref(), Some("past_tense"));
 }
 
 #[test]
@@ -467,17 +204,14 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
                 id: variant_id,
                 dialect: Dialect::Common,
                 spelling: spelling.to_owned(),
-                normalized_surface: Some(spelling.to_owned()),
                 component_usages: Vec::new(),
             }],
-            normalized_surfaces: vec![spelling.to_owned()],
         }
     };
 
     let target = PublishedAssociationTarget {
         schema_version: 3,
         id: Uuid::now_v7(),
-        publication_id,
         kind: EntryKind::Word,
         headword: "hang".to_owned(),
         pos: vec![PublishedAssociationPos {
@@ -596,7 +330,6 @@ fn v2_target_candidate_forms_carry_no_base_form_ids() {
     let target = PublishedAssociationTarget {
         schema_version: 2,
         id: Uuid::now_v7(),
-        publication_id,
         kind: EntryKind::Word,
         headword: "location".to_owned(),
         pos: vec![PublishedAssociationPos {
@@ -610,10 +343,8 @@ fn v2_target_candidate_forms_carry_no_base_form_ids() {
                     id: variant_id,
                     dialect: Dialect::Common,
                     spelling: "location".to_owned(),
-                    normalized_surface: Some("location".to_owned()),
                     component_usages: Vec::new(),
                 }],
-                normalized_surfaces: vec!["location".to_owned()],
             }],
             senses: vec![PublishedAssociationSense {
                 id: Uuid::now_v7(),
@@ -706,7 +437,7 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
         group(true, &[base_a]),
     ]);
 
-    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true, publication_id)
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true)
         .expect("V3 snapshot with form groups should convert");
     let candidates = target.sentence_discovery_candidates(
         publication_id,
@@ -754,151 +485,5 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
         candidates
             .iter()
             .all(|candidate| inventory[&past_id].contains(&candidate.base_form_id))
-    );
-}
-
-#[test]
-fn manual_pending_phrase_keeps_surface_and_prefilled_gloss_without_target() {
-    let sentence_id = Uuid::now_v7();
-    let association_id = Uuid::now_v7();
-    let variants = vec![(Dialect::Common, "A center of the wall here.".to_owned())];
-    let input = SentenceAssociationInputV2 {
-        id: association_id,
-        source_dialect: Dialect::Common,
-        source_range: SentenceSourceRangeV1 {
-            start: 2,
-            end: 20,
-            surface: "center of the wall".to_owned(),
-        },
-        target_word_id: None,
-        target_sense_id: None,
-        pending_target_kind: Some(EntryKind::Phrase),
-        pending_target_headword: Some(" center of the wall ".to_owned()),
-        pending_target_gloss: Some(" 墙的中心位置 ".to_owned()),
-    };
-
-    let (rows, issues) = validate_manual_associations(
-        Uuid::now_v7(),
-        sentence_id,
-        &variants,
-        &normalized_v2(input),
-        &HashMap::new(),
-        &HashMap::new(),
-    );
-
-    assert!(issues.is_empty(), "{issues:?}");
-    assert_eq!(rows.len(), 1);
-    let row = &rows[0];
-    assert_eq!(row.id, association_id);
-    assert_eq!(row.state, "pending");
-    assert_eq!(row.target_entry_id, None);
-    assert_eq!(row.target_sense_id, None);
-    assert_eq!(row.pending_target_kind.as_deref(), Some("phrase"));
-    assert_eq!(
-        row.pending_target_headword.as_deref(),
-        Some("center of the wall")
-    );
-    assert_eq!(
-        row.normalized_pending_target_headword.as_deref(),
-        Some("center of the wall")
-    );
-    assert_eq!(row.pending_target_gloss.as_deref(), Some("墙的中心位置"));
-}
-
-#[test]
-fn manual_association_rejects_mixed_linked_and_pending_target_shape() {
-    let target_id = Uuid::now_v7();
-    let sense_id = Uuid::now_v7();
-    let input = SentenceAssociationInputV2 {
-        id: Uuid::now_v7(),
-        source_dialect: Dialect::Common,
-        source_range: SentenceSourceRangeV1 {
-            start: 0,
-            end: 6,
-            surface: "center".to_owned(),
-        },
-        target_word_id: Some(target_id),
-        target_sense_id: Some(sense_id),
-        pending_target_kind: Some(EntryKind::Word),
-        pending_target_headword: Some("center".to_owned()),
-        pending_target_gloss: None,
-    };
-
-    let (_, issues) = validate_manual_associations(
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        &[(Dialect::Common, "center".to_owned())],
-        &normalized_v2(input),
-        &HashMap::new(),
-        &HashMap::new(),
-    );
-
-    assert_eq!(issues.len(), 1, "{issues:?}");
-    assert_eq!(issues[0].code, "sentence_association_target_shape_invalid");
-}
-
-#[test]
-fn manual_association_rejects_single_word_phrase_pending() {
-    let input = SentenceAssociationInputV2 {
-        id: Uuid::now_v7(),
-        source_dialect: Dialect::Common,
-        source_range: SentenceSourceRangeV1 {
-            start: 0,
-            end: 6,
-            surface: "center".to_owned(),
-        },
-        target_word_id: None,
-        target_sense_id: None,
-        pending_target_kind: Some(EntryKind::Phrase),
-        pending_target_headword: Some("center".to_owned()),
-        pending_target_gloss: None,
-    };
-
-    let (_, issues) = validate_manual_associations(
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        &[(Dialect::Common, "center".to_owned())],
-        &normalized_v2(input),
-        &HashMap::new(),
-        &HashMap::new(),
-    );
-
-    assert_eq!(issues.len(), 1, "{issues:?}");
-    assert_eq!(
-        issues[0].code,
-        "sentence_association_pending_phrase_invalid"
-    );
-}
-
-#[test]
-fn manual_association_rejects_phrase_crossing_punctuation() {
-    let input = SentenceAssociationInputV2 {
-        id: Uuid::now_v7(),
-        source_dialect: Dialect::Common,
-        source_range: SentenceSourceRangeV1 {
-            start: 0,
-            end: 12,
-            surface: "center, wall".to_owned(),
-        },
-        target_word_id: None,
-        target_sense_id: None,
-        pending_target_kind: Some(EntryKind::Phrase),
-        pending_target_headword: Some("center, wall".to_owned()),
-        pending_target_gloss: None,
-    };
-
-    let (_, issues) = validate_manual_associations(
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        &[(Dialect::Common, "center, wall".to_owned())],
-        &normalized_v2(input),
-        &HashMap::new(),
-        &HashMap::new(),
-    );
-
-    assert_eq!(issues.len(), 1, "{issues:?}");
-    assert_eq!(
-        issues[0].code,
-        "sentence_association_pending_phrase_invalid"
     );
 }

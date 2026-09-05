@@ -18,24 +18,21 @@ use crate::{
             AdminWordAny, AdminWordAnyEnvelope, AdminWordDraftAnyEnvelope, AdminWordListQuery,
             AdminWordListResponse, AdminWordPublicationAny, AdminWordPublicationEnvelope,
             AdminWordPublicationListResponse, AdminWordStats, AdminWordV3Capabilities,
-            ClaimPendingSentenceAssociationInput, CreateAdminWordAnyInput, CreateAdminWordV2Input,
-            CreateAdminWordV3Input, DeleteDraftInput, DetectLexiconInputAny,
-            DetectLexiconResponseAny, DetectLexiconSurfaceV3Input, DetectWordInputV2,
-            DraftValidationResponseAny, EntryDeleteBatchInput, EntryDeleteBatchResponse,
-            EntryLifecycleBatchInput, EntryLifecycleBatchResponseAny, EntryLifecycleInput,
-            EntryPath, FormsImpactResponseAny, PendingSentenceAssociationListQuery,
-            PendingSentenceAssociationListResponse, PendingSentenceAssociationPath,
+            CreateAdminWordAnyInput, CreateAdminWordV2Input, CreateAdminWordV3Input,
+            DeleteDraftInput, DetectLexiconInputAny, DetectLexiconResponseAny,
+            DetectLexiconSurfaceV3Input, DetectWordInputV2, DraftValidationResponseAny,
+            EntryDeleteBatchInput, EntryDeleteBatchResponse, EntryLifecycleBatchInput,
+            EntryLifecycleBatchResponseAny, EntryLifecycleInput, EntryPath, FormsImpactResponseAny,
             PreviewFormsImpactInputAny, PreviewFormsImpactInputV2, PreviewFormsImpactInputV3,
             PublicationPath, PublishAdminWordAnyInput, PublishAdminWordV2Input,
             PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
-            ReplaceSentenceAssociationsInput, ResolveSentenceTargetsV3Input,
-            ResolveSentenceTargetsV3Response, SaveFormsStepInput, SaveFormsStepInputAny,
-            SaveFormsStepInputV3, SaveMeaningsStepInput, SaveMeaningsStepInputAny,
-            SaveMeaningsStepInputV3, SearchComponentTargetsV3Input,
-            SearchComponentTargetsV3Response, SentencePath, StepSaveIntent,
-            SuggestDialectVariantsInputV2, SuggestDialectVariantsResponseV2, SurfaceMatchPageAny,
-            SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2, ValidateAdminWordAnyInput,
-            ValidateAdminWordV2Input, ValidateAdminWordV3Input,
+            ResolveSentenceTargetsV3Input, ResolveSentenceTargetsV3Response, SaveFormsStepInput,
+            SaveFormsStepInputAny, SaveFormsStepInputV3, SaveMeaningsStepInput,
+            SaveMeaningsStepInputAny, SaveMeaningsStepInputV3, SearchComponentTargetsV3Input,
+            SearchComponentTargetsV3Response, StepSaveIntent, SuggestDialectVariantsInputV2,
+            SuggestDialectVariantsResponseV2, SurfaceMatchPageAny, SurfaceMatchSnapshotPathV2,
+            SurfaceMatchSnapshotQueryV2, ValidateAdminWordAnyInput, ValidateAdminWordV2Input,
+            ValidateAdminWordV3Input,
         },
         impact_store::ImpactStore,
         repository::LexiconRepository,
@@ -53,15 +50,13 @@ pub(crate) mod lifecycle;
 pub(crate) mod query;
 
 pub use commands::{
-    activate_publication, claim_pending_sentence_association, create, detect, preview_forms_impact,
-    publish, replace_sentence_associations, save_forms, save_meanings, suggest_dialect_variants,
-    validate,
+    activate_publication, create, detect, preview_forms_impact, publish, save_forms, save_meanings,
+    suggest_dialect_variants, validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
 pub use query::{
-    get, get_publication, list, list_pending_sentence_associations, list_publications,
-    related_search, resolve_sentence_targets, search_component_targets, stats,
-    surface_match_snapshot_page,
+    get, get_publication, list, list_publications, related_search, resolve_sentence_targets,
+    search_component_targets, stats, surface_match_snapshot_page,
 };
 
 fn service(state: &AppState) -> LexiconService {
@@ -346,20 +341,6 @@ fn map_error(error: LexiconServiceError) -> AppError {
             ErrorCode::SentenceAssociationsUnresolved,
             None,
             "sentence associations are not resolved for the current text",
-        ),
-        LexiconServiceError::SentenceAssociationClientUpgradeRequired => AppError::conflict(
-            ErrorCode::SentenceAssociationClientUpgradeRequired,
-            None,
-            "upgrade the editor before replacing segmented sentence associations",
-        ),
-        LexiconServiceError::PendingSentenceAssociationNotFound => AppError::not_found_with_code(
-            ErrorCode::PendingSentenceAssociationNotFound,
-            "pending sentence association not found",
-        ),
-        LexiconServiceError::PendingSentenceAssociationClaimed => AppError::conflict(
-            ErrorCode::PendingSentenceAssociationClaimed,
-            None,
-            "pending sentence association was already claimed",
         ),
         LexiconServiceError::PublicationNotFound => {
             AppError::not_found_with_code(ErrorCode::PublicationNotFound, "publication not found")

@@ -429,7 +429,6 @@ pub(crate) struct ListFilter {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct SentenceAssociationRecord {
     pub id: Uuid,
-    pub entry_id: Uuid,
     pub sentence_id: Uuid,
     pub source_dialect: String,
     pub association_schema_version: i16,
@@ -455,25 +454,6 @@ pub(crate) struct SentenceAssociationRecord {
     pub pending_target_headword: Option<String>,
     pub normalized_pending_target_headword: Option<String>,
     pub pending_target_gloss: Option<String>,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct PendingSentenceAssociationListRecord {
-    pub id: Uuid,
-    pub entry_id: Uuid,
-    pub owner_revision: i64,
-    pub owner_lifecycle_revision: i64,
-    pub sentence_id: Uuid,
-    pub source_dialect: String,
-    pub association_schema_version: i16,
-    pub segment_count: i16,
-    pub source_segments: Value,
-    pub sentence_text: String,
-    pub pending_target_kind: String,
-    pub pending_target_headword: String,
-    pub pending_target_gloss: Option<String>,
-    pub scan_text_hash: Vec<u8>,
-    pub scan_resolver_version: i16,
 }
 
 /// 某条例句的某一侧正文解析到哪个版本了。
@@ -537,7 +517,6 @@ pub(crate) struct PublishedFormSurfaceRecord {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct PublishedEntrySnapshotRecord {
     pub entry_id: Uuid,
-    pub publication_id: Uuid,
     pub snapshot: Value,
 }
 

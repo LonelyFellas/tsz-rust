@@ -450,15 +450,6 @@ pub(crate) enum SegmentError {
     NotStrictlyOrdered,
 }
 
-pub(crate) fn any_segment_intersection(left: &[SourceSegment], right: &[SourceSegment]) -> bool {
-    left.iter().any(|left_segment| {
-        right.iter().any(|right_segment| {
-            left_segment.range.start < right_segment.range.end
-                && right_segment.range.start < left_segment.range.end
-        })
-    })
-}
-
 pub(crate) fn codepoint_slice(text: &str, range: CodepointRange) -> Option<&str> {
     if range.end < range.start || range.end > text.chars().count() {
         return None;
@@ -1111,30 +1102,5 @@ mod tests {
             ),
             Err(SegmentError::NotStrictlyOrdered)
         );
-    }
-
-    #[test]
-    fn segment_intersection_uses_only_real_half_open_ranges() {
-        let turn_and_off = [
-            SourceSegment {
-                range: CodepointRange { start: 0, end: 4 },
-            },
-            SourceSegment {
-                range: CodepointRange { start: 15, end: 18 },
-            },
-        ];
-        let middle = [SourceSegment {
-            range: CodepointRange { start: 5, end: 14 },
-        }];
-        let shared_turn = [SourceSegment {
-            range: CodepointRange { start: 0, end: 4 },
-        }];
-        let touching_after = [SourceSegment {
-            range: CodepointRange { start: 18, end: 20 },
-        }];
-
-        assert!(!any_segment_intersection(&turn_and_off, &middle));
-        assert!(any_segment_intersection(&turn_and_off, &shared_turn));
-        assert!(!any_segment_intersection(&turn_and_off, &touching_after));
     }
 }
