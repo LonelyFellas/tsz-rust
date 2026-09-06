@@ -23949,6 +23949,75 @@ fn component_match_entry_ids(response: &Value) -> HashSet<String> {
 }
 
 #[sqlx::test]
+async fn component_target_search_recovers_after_missing_generation_is_repaired(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let (published, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "time being", json!([])).await;
+    let entry_id = published["word"]["id"].as_str().unwrap().to_owned();
+
+    sqlx::query("DELETE FROM lexicon.sentence_discovery_generation")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let body = json!({"schema_version": 3, "q": "time", "page_size": 50});
+    let (status, failed) = search_component_targets(&state, &bearer, body.clone()).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+    assert_eq!(failed["code"], "internal_error");
+
+    const REPAIR: &str = include_str!(
+        "../migrations/20260906170000_repair_missing_sentence_discovery_generation.up.sql"
+    );
+    sqlx::raw_sql(REPAIR).execute(&pool).await.unwrap();
+    let generation_query = "SELECT generation, last_txid FROM lexicon.sentence_discovery_generation WHERE singleton = TRUE";
+    let repaired: (i64, Option<i64>) = sqlx::query_as(generation_query)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(repaired.0 > 1);
+    assert_eq!(repaired.1, None);
+
+    let (status, found) = search_component_targets(&state, &bearer, body).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert!(component_match_entry_ids(&found).contains(&entry_id));
+
+    // The existing statement trigger must still bump once per transaction.
+    let mut tx = pool.begin().await.unwrap();
+    for _ in 0..2 {
+        sqlx::query("UPDATE lexicon.surface_sources SET event_offset = event_offset WHERE FALSE")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+    let bumped: (i64, Option<i64>) = sqlx::query_as(generation_query)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bumped.0, repaired.0 + 1);
+    assert!(bumped.1.is_some());
+
+    sqlx::raw_sql(REPAIR).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260906170000_repair_missing_sentence_discovery_generation.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let retained: (i64, Option<i64>) = sqlx::query_as(generation_query)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        retained, bumped,
+        "reapply/rollback must preserve healthy state"
+    );
+}
+
+#[sqlx::test]
 async fn component_target_search_matches_published_surfaces_and_hides_drafts_and_archived(
     pool: PgPool,
 ) {
