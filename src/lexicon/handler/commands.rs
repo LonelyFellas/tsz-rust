@@ -309,17 +309,6 @@ pub async fn save_meanings(
         Some(3) => {
             let input: SaveMeaningsStepInputV3 = v3_contract::decode_v3_meanings_request(input)?;
             v3_contract::require_positive_revision("base_revision", input.base_revision)?;
-            if !draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags)
-                && input
-                    .content
-                    .pos
-                    .iter()
-                    .flat_map(|pos| &pos.senses)
-                    .flat_map(|sense| &sense.relations)
-                    .any(|relation| relation.prebound_target_word_id.is_some())
-            {
-                return Err(v3_storage_unavailable());
-            }
             let issues = v3_contract::validate_meanings(&input.content, input.intent);
             if !issues.is_empty() {
                 return Err(v3_contract::contract_validation_error(&issues));
@@ -328,13 +317,7 @@ pub async fn save_meanings(
                 return Err(v3_storage_unavailable());
             }
             let mut response = service(&state)
-                .save_meanings_v3(
-                    admin.id,
-                    request_id.as_uuid(),
-                    path.id,
-                    input,
-                    draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags),
-                )
+                .save_meanings_v3(admin.id, request_id.as_uuid(), path.id, input)
                 .await
                 .map_err(map_error)?;
             apply_legacy_bridge_read_flag(

@@ -7647,315 +7647,6 @@ async fn list_rows_order_headword_spellings_by_source_dialect(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn publishing_materializes_a_relation_word_that_has_no_entry_yet(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    let source_headword = format!("matsource{}", admin_id.simple());
-    let pending_headword = format!("matpending{}", admin_id.simple());
-    let pending_gloss = "发布时预填的中文词义";
-    let source = create_ready_draft(&state, &pool, &bearer, &source_headword).await;
-    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
-
-    // 库里没有这个词，管理员直接把它写成近义词。
-    let dictionary_hit: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM lexicon.entry_headword_keys WHERE normalized_headword = $1)",
-    )
-    .bind(&pending_headword)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(!dictionary_hit, "前置：待建词此刻不应存在");
-
-    let mut meanings = source["word"]["meanings"].clone();
-    meanings["pos"][0]["senses"][0]["relations"] = json!([{
-        "id": Uuid::now_v7(),
-        "relation": "synonym",
-        "pending_target_headword": pending_headword,
-        "pending_target_gloss": pending_gloss,
-        "score": "88.00"
-    }]);
-    let (status, saved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "base_revision": source["word"]["revision"],
-            "intent": "complete",
-            "content": meanings,
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "草稿必须能存下待建关联词：{saved}");
-    let saved_relation = &saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(saved_relation["pending_target_headword"], pending_headword);
-    assert_eq!(saved_relation["pending_target_gloss"], pending_gloss);
-    assert!(
-        saved_relation["target_word_id"].is_null(),
-        "草稿保存不得建条，target 必须还空着：{saved_relation}"
-    );
-
-    // 草稿保存不建条——这是「错字和弃稿不落成词条」的根据。
-    let created_early: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM lexicon.entry_headword_keys WHERE normalized_headword = $1)",
-    )
-    .bind(&pending_headword)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(!created_early, "草稿保存绝不能建出词条");
-
-    let (status, published) = publish_ready(&state, &bearer, &saved).await;
-    assert_eq!(status, StatusCode::CREATED, "发布失败：{published}");
-
-    // 发布把待建词物化成真实词条，并回填 target。
-    let materialized: Option<Uuid> = sqlx::query_scalar(
-        "SELECT entry_id FROM lexicon.entry_headword_keys WHERE normalized_headword = $1 LIMIT 1",
-    )
-    .bind(&pending_headword)
-    .fetch_optional(&pool)
-    .await
-    .unwrap();
-    let materialized = materialized.expect("发布后待建词必须已成词条");
-
-    let published_relation = &published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(
-        published_relation["target_word_id"],
-        materialized.to_string(),
-        "发布出去的关联词必须已绑定：{published_relation}"
-    );
-    assert!(
-        published_relation["pending_target_headword"].is_null(),
-        "绑定后不得再留待建词面：{published_relation}"
-    );
-    assert!(
-        published_relation["pending_target_gloss"].is_null(),
-        "绑定后不得再留待建预定义词义：{published_relation}"
-    );
-
-    let (status, reloaded_source) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_entry_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "发布后读取源词条失败：{reloaded_source}"
-    );
-    let reloaded_relation =
-        &reloaded_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(
-        reloaded_relation["target_word_id"],
-        materialized.to_string(),
-        "发布后的 canonical 草稿必须同步为已绑定关系：{reloaded_relation}"
-    );
-    assert!(
-        reloaded_relation["pending_target_headword"].is_null(),
-        "发布后的 canonical 草稿不得残留 pending headword：{reloaded_relation}"
-    );
-    assert!(
-        reloaded_relation["pending_target_gloss"].is_null(),
-        "发布后的 canonical 草稿不得残留 pending gloss：{reloaded_relation}"
-    );
-
-    let stored_editor_meanings: Value = sqlx::query_scalar(
-        "SELECT meanings FROM lexicon.entry_editor_projection WHERE entry_id = $1",
-    )
-    .bind(source_entry_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let stored_editor_relation = &stored_editor_meanings["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(stored_editor_relation, reloaded_relation);
-
-    let (stored_target, stored_pending_headword, stored_pending_gloss): (
-        Option<Uuid>,
-        Option<String>,
-        Option<String>,
-    ) = sqlx::query_as(
-        "SELECT target_entry_id, pending_target_headword, pending_target_gloss FROM lexicon.relations WHERE entry_id = $1",
-    )
-    .bind(source_entry_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(stored_target, Some(materialized));
-    assert_eq!(stored_pending_headword, None);
-    assert_eq!(stored_pending_gloss, None);
-
-    let (status, resaved_source) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "base_revision": reloaded_source["word"]["revision"],
-            "intent": "complete",
-            "content": reloaded_source["word"]["meanings"].clone(),
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "发布后 canonical 草稿应可再次保存：{resaved_source}"
-    );
-    let (status, republished_source) = publish_ready(&state, &bearer, &resaved_source).await;
-    assert_eq!(
-        status,
-        StatusCode::CREATED,
-        "发布后再次保存并重复发布应保持可用：{republished_source}"
-    );
-
-    let (status, materialized_word) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{materialized}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "读取物化词条失败：{materialized_word}"
-    );
-    assert_eq!(
-        materialized_word["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"],
-        pending_gloss,
-        "预定义词义必须写入新建词条的默认中文释义：{materialized_word}"
-    );
-
-    // 占位是普通草稿，带一个词性和一个可被指向的义项。
-    let (kind, status_row): (String, bool) = sqlx::query_as(
-        "SELECT kind, current_publication_id IS NOT NULL FROM lexicon.entries WHERE id = $1",
-    )
-    .bind(materialized)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(kind, "word");
-    assert!(!status_row, "占位应当是草稿");
-    let sense_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM lexicon.senses WHERE entry_id = $1")
-            .bind(materialized)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(sense_count, 1, "关联词必须有义项可指");
-
-    // 审计如实记录这个词条为什么存在。
-    let audit: Option<Uuid> = sqlx::query_scalar(
-        "SELECT resource_id FROM audit.admin_actions
-         WHERE action = 'lexicon.entry.materialize_relation_target' AND resource_id = $1",
-    )
-    .bind(materialized)
-    .fetch_optional(&pool)
-    .await
-    .unwrap();
-    assert_eq!(audit, Some(materialized), "物化必须留下独立审计动作");
-
-    // 闭环最后一步：再检测这个词，它已经命中词典。
-    let (status, detection) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/detections"),
-        &bearer,
-        None,
-        Some(json!({"language": "en", "headword": pending_headword})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "检测失败：{detection}");
-    assert_eq!(
-        detection["smart_dictionary"]["status"], "warning",
-        "物化出来的占位必须能在下次录入时被检测到：{detection}"
-    );
-}
-
-#[sqlx::test]
-async fn saving_rejects_conflicting_glosses_for_the_same_pending_relation_target(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    let source = create_ready_draft(
-        &state,
-        &pool,
-        &bearer,
-        &format!("glossconflictsrc{}", admin_id.simple()),
-    )
-    .await;
-    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
-    let pending_headword = format!("glossconflicttarget{}", admin_id.simple());
-    let first_relation_id = Uuid::now_v7();
-    let second_relation_id = Uuid::now_v7();
-    let mut meanings = source["word"]["meanings"].clone();
-    meanings["pos"][0]["senses"][0]["relations"] = json!([
-        {
-            "id": first_relation_id,
-            "relation": "synonym",
-            "pending_target_headword": pending_headword,
-            "pending_target_gloss": "第一个预定义词义",
-            "score": "80.00"
-        },
-        {
-            "id": second_relation_id,
-            "relation": "antonym",
-            "pending_target_headword": pending_headword,
-            "pending_target_gloss": "另一个预定义词义",
-            "score": "60.00"
-        }
-    ]);
-
-    let (status, blocked) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "base_revision": source["word"]["revision"],
-            "intent": "complete",
-            "content": meanings,
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "应拒绝冲突词义：{blocked}"
-    );
-    let conflict = blocked["field_issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|issue| issue["code"] == "relation_pending_gloss_conflict")
-        .unwrap_or_else(|| panic!("应返回稳定的预定义词义冲突错误：{blocked}"));
-    assert_eq!(conflict["field"], "pending_target_gloss");
-    assert!(
-        conflict["node_id"] == first_relation_id.to_string()
-            || conflict["node_id"] == second_relation_id.to_string(),
-        "错误必须锚定冲突的关联词行：{conflict}"
-    );
-}
-
-#[sqlx::test]
 async fn saving_does_not_discard_a_pending_gloss_when_the_target_already_exists(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
@@ -8001,19 +7692,11 @@ async fn saving_does_not_discard_a_pending_gloss_when_the_target_already_exists(
         })),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "应拒绝静默丢弃：{blocked}"
-    );
-    let issue = blocked["field_issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|issue| issue["code"] == "relation_pending_gloss_target_exists")
-        .unwrap_or_else(|| panic!("应返回已有目标错误：{blocked}"));
-    assert_eq!(issue["node_id"], relation_id.to_string());
-    assert_eq!(issue["field"], "pending_target_gloss");
+    assert_eq!(status, StatusCode::OK, "{blocked}");
+    let relation = &blocked["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(relation["pending_target_headword"], target_headword);
+    assert_eq!(relation["pending_target_gloss"], "不得覆盖已有词条");
+    assert!(relation["target_word_id"].is_null());
 
     let (status, reread) = call(
         &state,
@@ -8030,626 +7713,6 @@ async fn saving_does_not_discard_a_pending_gloss_when_the_target_already_exists(
         original_gloss,
         "已有目标内容不得被预定义词义覆盖"
     );
-}
-
-#[sqlx::test]
-async fn saving_a_draft_binds_a_pending_relation_once_the_word_exists(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    let target_headword = format!("bindlater{}", admin_id.simple());
-    let source = create_ready_draft(
-        &state,
-        &pool,
-        &bearer,
-        &format!("bindsrc{}", admin_id.simple()),
-    )
-    .await;
-    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
-
-    let relation_id = Uuid::now_v7();
-    let mut meanings = source["word"]["meanings"].clone();
-    meanings["pos"][0]["senses"][0]["relations"] = json!([{
-        "id": relation_id,
-        "relation": "synonym",
-        "pending_target_headword": target_headword,
-        "score": "75.00"
-    }]);
-    let save = |content: Value, base_revision: Value| {
-        let state = state.clone();
-        let bearer = bearer.clone();
-        async move {
-            call(
-                &state,
-                Method::PUT,
-                &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
-                &bearer,
-                None,
-                Some(json!({
-                    "base_revision": base_revision,
-                    "intent": "complete",
-                    "content": content,
-                })),
-            )
-            .await
-        }
-    };
-
-    // 目标还不存在：存下来仍是待物化形态。
-    let (status, saved) = save(meanings.clone(), source["word"]["revision"].clone()).await;
-    assert_eq!(status, StatusCode::OK, "保存失败：{saved}");
-    let stored = &saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert!(
-        stored["target_word_id"].is_null(),
-        "目标不存在时必须留在待物化形态：{stored}"
-    );
-
-    // 目标词条被单独建出来之后，下一次保存草稿就顺带绑上——只绑不建。
-    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
-    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
-    let entry_count_before: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entries")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-    let (status, rebound) = save(
-        saved["word"]["meanings"].clone(),
-        saved["word"]["revision"].clone(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "再次保存失败：{rebound}");
-    let bound = &rebound["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(
-        bound["target_word_id"],
-        target_entry_id.to_string(),
-        "同名词条已存在时，保存草稿应当顺带绑定：{bound}"
-    );
-    assert!(
-        bound["pending_target_headword"].is_null(),
-        "绑定后不得再留待建词面：{bound}"
-    );
-
-    let entry_count_after: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entries")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        entry_count_before, entry_count_after,
-        "草稿保存只绑不建，词条总数不得变化"
-    );
-}
-
-#[sqlx::test]
-async fn materialization_binds_to_an_existing_entry_instead_of_creating_a_twin(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    let shared_target = format!("mattwin{}", admin_id.simple());
-    let first = create_ready_draft(
-        &state,
-        &pool,
-        &bearer,
-        &format!("matone{}", admin_id.simple()),
-    )
-    .await;
-    let second = create_ready_draft(
-        &state,
-        &pool,
-        &bearer,
-        &format!("mattwo{}", admin_id.simple()),
-    )
-    .await;
-
-    // 两个词条各自把同一个还不存在的词写成关联词，先后发布。
-    let mut materialized_ids = Vec::new();
-    for source in [&first, &second] {
-        let entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
-        let mut meanings = source["word"]["meanings"].clone();
-        meanings["pos"][0]["senses"][0]["relations"] = json!([{
-            "id": Uuid::now_v7(),
-            "relation": "synonym",
-            "pending_target_headword": shared_target,
-            "score": "70.00"
-        }]);
-        let (status, saved) = call(
-            &state,
-            Method::PUT,
-            &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
-            &bearer,
-            None,
-            Some(json!({
-                "base_revision": source["word"]["revision"],
-                "intent": "complete",
-                "content": meanings,
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "保存失败：{saved}");
-        let (status, published) = publish_ready(&state, &bearer, &saved).await;
-        assert_eq!(status, StatusCode::CREATED, "发布失败：{published}");
-        materialized_ids.push(
-            published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
-                .as_str()
-                .expect("发布出去的关联词必须已绑定")
-                .to_owned(),
-        );
-    }
-
-    assert_eq!(
-        materialized_ids[0], materialized_ids[1],
-        "同名关联词必须绑到同一个词条，不能各建一条"
-    );
-    let entry_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM lexicon.entry_headword_keys WHERE normalized_headword = $1",
-    )
-    .bind(&shared_target)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    // 每个词条按 uk/us 两个 dialect_scope 各占一行，所以一个词条是 2。
-    assert_eq!(entry_count, 2, "只应存在一个同名词条");
-}
-
-#[sqlx::test]
-async fn materialization_refuses_a_target_entry_that_has_no_sense(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    // 未收录词建出来的草稿没有词典建议，也就没有词性和词义节点。
-    let bare_headword = format!("matbare{}", admin_id.simple());
-    let (status, detection) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/detections"),
-        &bearer,
-        None,
-        Some(json!({"language": "en", "headword": bare_headword})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "检测失败：{detection}");
-    let (status, bare) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "schema_version": 2,
-            "detection_id": detection["detection_id"],
-            "headwords": {"mode": "unified", "common": bare_headword},
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "建稿失败：{bare}");
-    let sense_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM lexicon.senses WHERE entry_id = $1")
-            .bind(Uuid::parse_str(bare["word"]["id"].as_str().unwrap()).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(sense_count, 0, "前置：目标词条此刻没有词义");
-
-    let source = create_ready_draft(
-        &state,
-        &pool,
-        &bearer,
-        &format!("matref{}", admin_id.simple()),
-    )
-    .await;
-    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
-    // 第二个待建词是可以建出来的，用它见证「事务一起回滚」。
-    let rollback_witness = format!("matrollback{}", admin_id.simple());
-    let relation_id = Uuid::now_v7();
-    let mut meanings = source["word"]["meanings"].clone();
-    meanings["pos"][0]["senses"][0]["relations"] = json!([
-        {
-            "id": Uuid::now_v7(),
-            "relation": "derivative",
-            "pending_target_headword": rollback_witness,
-            "score": "50.00"
-        },
-        {
-            "id": relation_id,
-            "relation": "synonym",
-            "pending_target_headword": bare_headword,
-            "score": "60.00"
-        }
-    ]);
-    let (status, saved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "base_revision": source["word"]["revision"],
-            "intent": "complete",
-            "content": meanings,
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "草稿保存不该受目标状态影响：{saved}"
-    );
-
-    // 同名词条已存在但没有词义可指——报可操作的错误，不去改别人的草稿。
-    let (status, blocked) = publish_ready(&state, &bearer, &saved).await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "应被拦下：{blocked}"
-    );
-    let issue = blocked["field_issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|issue| issue["code"] == "relation_target_has_no_sense")
-        .unwrap_or_else(|| panic!("错误必须说清是目标词条缺词义：{blocked}"));
-    // 锚回具体那一条关联词，否则前端只能指向词条本身，管理员不知道该改哪一行。
-    assert_eq!(issue["node_id"], relation_id.to_string());
-    assert_eq!(issue["field"], "pending_target_headword");
-
-    // 同一次发布里另一个待建词已经建成功了，但整笔事务必须一起回滚——
-    // 「发布失败不留没人引用的占位」是这个设计不产生脏数据的前提。
-    let rollback_probe: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM lexicon.entry_headword_keys WHERE normalized_headword = $1",
-    )
-    .bind(&rollback_witness)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(rollback_probe, 0, "发布失败时先建出来的占位必须跟着回滚");
-}
-
-/// 关联词搜索只搜「已发布且未归档」的词条，所以同名词条一旦归档，管理员在下拉里
-/// 看不到它，只会把这个词当库外新词写成待建关联词。此时绑上去就是死结：草稿存得下、
-/// 发布必被拒，而待建词面已被清空，重填同一个词还会再绑上来。必须在绑定这一步拦住。
-#[sqlx::test]
-async fn saving_a_draft_refuses_to_bind_a_pending_relation_onto_an_archived_twin(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    let target_headword = format!("arctarget{}", admin_id.simple());
-    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
-    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
-    let (status, archived) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{target_entry_id}/archive"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "base_revision": target["word"]["revision"],
-            "base_lifecycle_revision": target["word"]["lifecycle_revision"],
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "归档目标词条失败：{archived}");
-
-    let source = create_ready_draft(
-        &state,
-        &pool,
-        &bearer,
-        &format!("arcsource{}", admin_id.simple()),
-    )
-    .await;
-    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
-    let relation_id = Uuid::now_v7();
-    let mut meanings = source["word"]["meanings"].clone();
-    meanings["pos"][0]["senses"][0]["relations"] = json!([{
-        "id": relation_id,
-        "relation": "synonym",
-        "pending_target_headword": target_headword,
-        "score": "70.00"
-    }]);
-    let save = |content: Value, base_revision: Value| {
-        let state = state.clone();
-        let bearer = bearer.clone();
-        async move {
-            call(
-                &state,
-                Method::PUT,
-                &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
-                &bearer,
-                None,
-                Some(json!({
-                    "base_revision": base_revision,
-                    "intent": "complete",
-                    "content": content,
-                })),
-            )
-            .await
-        }
-    };
-
-    let (status, blocked) = save(meanings.clone(), source["word"]["revision"].clone()).await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "同名词条已归档时草稿保存就该被拦下：{blocked}"
-    );
-    let issue = blocked["field_issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|issue| issue["code"] == "relation_target_archived")
-        .unwrap_or_else(|| panic!("错误必须说清是同名词条已归档：{blocked}"));
-    // 锚回具体那一条关联词，并指向管理员实际填过的字段——他没填过 target_sense_id。
-    assert_eq!(issue["node_id"], relation_id.to_string());
-    assert_eq!(issue["field"], "pending_target_headword");
-
-    // 被拒的保存必须整笔回滚——revision 不许往前走，否则前端手里的 base_revision
-    // 会平白失效，管理员改完词面再存就撞 revision 冲突，等于换了个方式卡死。
-    let (status, reread) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_entry_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "重读词条失败：{reread}");
-    assert_eq!(
-        reread["word"]["revision"], source["word"]["revision"],
-        "被拒的保存不得推进 revision：{reread}"
-    );
-
-    // 出路必须真的存在：恢复那条词条之后，同一份草稿就能存下并绑上去。
-    let (status, restored) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{target_entry_id}/restore"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "base_revision": archived["word"]["revision"],
-            "base_lifecycle_revision": archived["word"]["lifecycle_revision"],
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "恢复目标词条失败：{restored}");
-
-    let (status, saved) = save(meanings, source["word"]["revision"].clone()).await;
-    assert_eq!(status, StatusCode::OK, "恢复之后应能存下：{saved}");
-    let bound = &saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(
-        bound["target_word_id"],
-        target_entry_id.to_string(),
-        "恢复之后应当绑上原来那条词条：{bound}"
-    );
-}
-
-/// 待建关联词是先存下、后发布的，目标可能在这中间才被建出来并归档。发布时的物化
-/// 同样不能绑上去——归档词条占着词头唯一键，绕过它另建同名新条会撞唯一索引。
-#[sqlx::test]
-async fn publishing_refuses_to_materialize_a_pending_relation_onto_an_archived_twin(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    let target_headword = format!("arclate{}", admin_id.simple());
-    let source = create_ready_draft(
-        &state,
-        &pool,
-        &bearer,
-        &format!("arclatesrc{}", admin_id.simple()),
-    )
-    .await;
-    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
-    let relation_id = Uuid::now_v7();
-    let mut meanings = source["word"]["meanings"].clone();
-    meanings["pos"][0]["senses"][0]["relations"] = json!([{
-        "id": relation_id,
-        "relation": "synonym",
-        "pending_target_headword": target_headword,
-        "score": "65.00"
-    }]);
-
-    // 存下时库里还没有这个词，草稿留在待物化形态。
-    let (status, saved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "base_revision": source["word"]["revision"],
-            "intent": "complete",
-            "content": meanings,
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "保存失败：{saved}");
-    assert!(
-        saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
-            .is_null(),
-        "前置：目标不存在时应留在待物化形态：{saved}"
-    );
-
-    // 之后别人把这个词建了出来，又把它归档了。
-    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
-    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
-    let (status, archived) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{target_entry_id}/archive"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "base_revision": target["word"]["revision"],
-            "base_lifecycle_revision": target["word"]["lifecycle_revision"],
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "归档目标词条失败：{archived}");
-
-    let (status, blocked) = publish_ready(&state, &bearer, &saved).await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "应被拦下：{blocked}"
-    );
-    let issue = blocked["field_issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|issue| issue["code"] == "relation_target_archived")
-        .unwrap_or_else(|| panic!("错误必须说清是同名词条已归档：{blocked}"));
-    assert_eq!(issue["node_id"], relation_id.to_string());
-    assert_eq!(issue["field"], "pending_target_headword");
-
-    // 既没绑上归档词条，也没另建一条同名的——那会撞词头唯一索引。
-    let twin_count: i64 = sqlx::query_scalar(
-        "SELECT count(DISTINCT entry_id) FROM lexicon.entry_headword_keys
-         WHERE normalized_headword = $1",
-    )
-    .bind(&target_headword)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(twin_count, 1, "不得为同一个词面再建一条词条");
-    let pending: Option<String> =
-        sqlx::query_scalar("SELECT pending_target_headword FROM lexicon.relations WHERE id = $1")
-            .bind(relation_id)
-            .fetch_optional(&pool)
-            .await
-            .unwrap()
-            .flatten();
-    assert_eq!(
-        pending.as_deref(),
-        Some(target_headword.as_str()),
-        "发布失败后关联词必须仍是待物化形态，词面还在管理员手上"
-    );
-}
-
-/// 词形步骤保存也会顺带绑定待物化关联词（`save_forms` 与 `save_meanings` 各有一个
-/// `BindExisting` 调用点），所以同名词条被第三方归档之后，管理员**在词形步骤也存不下**。
-///
-/// 这是有意的：放行就等于让词形保存把关联词绑成死结。但代价是错误落在一个他当时
-/// 看不见的地方——`reference_issue` 把 `step` 硬编码成 `meanings`，`node_id` 指向词义
-/// 步骤的关联词节点。这里把这个形态钉住，将来要调整必须是有意为之。
-#[sqlx::test]
-async fn saving_the_forms_step_is_blocked_by_an_archived_relation_twin_too(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis);
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    let target_headword = format!("arcforms{}", admin_id.simple());
-    let source = create_ready_draft(
-        &state,
-        &pool,
-        &bearer,
-        &format!("arcformssrc{}", admin_id.simple()),
-    )
-    .await;
-    let source_entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
-    let relation_id = Uuid::now_v7();
-    let mut meanings = source["word"]["meanings"].clone();
-    meanings["pos"][0]["senses"][0]["relations"] = json!([{
-        "id": relation_id,
-        "relation": "synonym",
-        "pending_target_headword": target_headword,
-        "score": "55.00"
-    }]);
-
-    // 存下时库里还没有这个词，关联词留在待物化形态。
-    let (status, saved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_entry_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "base_revision": source["word"]["revision"],
-            "intent": "complete",
-            "content": meanings,
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "保存失败：{saved}");
-
-    // 之后别人把这个词建了出来，又把它归档了。
-    let target = create_ready_draft(&state, &pool, &bearer, &target_headword).await;
-    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
-    let (status, archived) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{target_entry_id}/archive"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "base_revision": target["word"]["revision"],
-            "base_lifecycle_revision": target["word"]["lifecycle_revision"],
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "归档目标词条失败：{archived}");
-
-    // 管理员回来改词形——内容原样重存，跟关联词毫无关系。
-    let (status, blocked) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_entry_id}/steps/forms"),
-        &bearer,
-        None,
-        Some(json!({
-            "base_revision": saved["word"]["revision"],
-            "intent": "complete",
-            "content": saved["word"]["forms"],
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "词形步骤同样绑定待物化关联词，归档目标必须一并拦下：{blocked}"
-    );
-    let issue = blocked["field_issues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|issue| issue["code"] == "relation_target_archived")
-        .unwrap_or_else(|| panic!("错误必须说清是同名词条已归档：{blocked}"));
-    // 已知的错位：人在词形步骤，issue 却锚在词义步骤的关联词节点上。前端得据此
-    // 把管理员引到词义步骤，不能就地渲染。
-    assert_eq!(issue["step"], "meanings");
-    assert_eq!(issue["node_id"], relation_id.to_string());
-    assert_eq!(issue["field"], "pending_target_headword");
-
-    // 词面仍在草稿里，管理员去词义步骤就能改。
-    let pending: Option<String> =
-        sqlx::query_scalar("SELECT pending_target_headword FROM lexicon.relations WHERE id = $1")
-            .bind(relation_id)
-            .fetch_optional(&pool)
-            .await
-            .unwrap()
-            .flatten();
-    assert_eq!(pending.as_deref(), Some(target_headword.as_str()));
 }
 
 #[sqlx::test]
@@ -14046,63 +13109,7 @@ async fn v3_form_storage_uses_the_authoritative_surface_normalization(pool: PgPo
 }
 
 #[sqlx::test]
-async fn v3_rejects_conflicting_pending_relation_glosses_with_closed_issue_code(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-    let forms_saved = create_v3_with_complete_forms(&state, &pool, &bearer).await;
-    let entry_id = forms_saved["word"]["id"].as_str().unwrap();
-    let pending_headword = format!("vthreeconflict{}", admin_id.simple());
-    let mut meanings =
-        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
-    meanings["pos"][0]["senses"][0]["relations"] = json!([
-        {
-            "id": Uuid::now_v7(),
-            "relation": "synonym",
-            "pending_target_headword": pending_headword,
-            "pending_target_gloss": "V3 第一个预定义词义",
-            "score": "82.00"
-        },
-        {
-            "id": Uuid::now_v7(),
-            "relation": "antonym",
-            "pending_target_headword": pending_headword,
-            "pending_target_gloss": "V3 第二个预定义词义",
-            "score": "64.00"
-        }
-    ]);
-
-    let (status, blocked) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": forms_saved["word"]["revision"],
-            "intent": "complete",
-            "content": meanings
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "V3 应返回结构化 gloss 冲突：{blocked}"
-    );
-    assert!(
-        has_issue(&blocked, "relation_pending_gloss_conflict"),
-        "V3 issue code 必须属于闭合集合：{blocked}"
-    );
-}
-
-#[sqlx::test]
-async fn v3_pending_relation_gloss_round_trips_and_materializes(pool: PgPool) {
+async fn v3_text_relation_round_trips_and_publishes_without_materializing(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -14161,9 +13168,12 @@ async fn v3_pending_relation_gloss_round_trips_and_materializes(pool: PgPool) {
         "V3 pending gloss 发布失败：{published}"
     );
     let published_relation = &published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert!(published_relation["target_word_id"].is_string());
-    assert!(published_relation["pending_target_headword"].is_null());
-    assert!(published_relation["pending_target_gloss"].is_null());
+    assert!(published_relation["target_word_id"].is_null());
+    assert_eq!(
+        published_relation["pending_target_headword"],
+        pending_headword
+    );
+    assert_eq!(published_relation["pending_target_gloss"], pending_gloss);
 
     let (status, reloaded_source) = call(
         &state,
@@ -14181,598 +13191,24 @@ async fn v3_pending_relation_gloss_round_trips_and_materializes(pool: PgPool) {
     );
     let reloaded_relation =
         &reloaded_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert!(reloaded_relation["target_word_id"].is_string());
-    assert!(reloaded_relation["pending_target_headword"].is_null());
-    assert!(reloaded_relation["pending_target_gloss"].is_null());
+    assert!(reloaded_relation["target_word_id"].is_null());
+    assert_eq!(
+        reloaded_relation["pending_target_headword"],
+        pending_headword
+    );
+    assert_eq!(reloaded_relation["pending_target_gloss"], pending_gloss);
 
-    let materialized_id: Uuid = sqlx::query_scalar(
+    let materialized_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT entry_id FROM lexicon.entry_headword_keys WHERE normalized_headword = $1 LIMIT 1",
     )
     .bind(&pending_headword)
-    .fetch_one(&pool)
+    .fetch_optional(&pool)
     .await
     .unwrap();
-    let (status, materialized) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{materialized_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "读取 V3 物化目标失败：{materialized}"
-    );
-    assert_eq!(
-        materialized["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"],
-        pending_gloss
-    );
-}
-
-#[sqlx::test]
-async fn v3_draft_relation_prebinding_promotes_once_and_detaches_without_rebinding(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    let target_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-    let target_id = target_forms["word"]["id"].as_str().unwrap();
-    let target_headword = target_forms["word"]["presentation"]["label"]
-        .as_str()
-        .unwrap();
-
-    let (status, default_search) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "默认搜索失败：{default_search}");
     assert!(
-        default_search["results"]
-            .as_array()
-            .is_some_and(Vec::is_empty),
-        "未 opt-in 时不得暴露草稿：{default_search}"
+        materialized_id.is_none(),
+        "text must never create a target entry"
     );
-
-    let (status, draft_search) = call(
-        &state,
-        Method::GET,
-        &format!(
-            "{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20&include_drafts=true"
-        ),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "草稿搜索失败：{draft_search}");
-    let target_result = draft_search["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|result| result["entry_id"] == target_id)
-        .expect("include_drafts 应返回零词义目标草稿");
-    assert_eq!(target_result["status"], "draft");
-    assert_eq!(target_result["senses"], json!([]));
-
-    let source_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-    let source_id = source_forms["word"]["id"].as_str().unwrap();
-    let relation_id = Uuid::now_v7();
-    let mut source_meanings =
-        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
-    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
-        "id": relation_id,
-        "relation": "synonym",
-        "prebound_target_word_id": target_id,
-        "pending_target_gloss": "管理员预先填写的释义",
-        "score": "88.00"
-    }]);
-    let (status, source_saved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": source_forms["word"]["revision"],
-            "intent": "complete",
-            "content": source_meanings.clone()
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "零词义预绑定保存失败：{source_saved}"
-    );
-    let source_revision = source_saved["word"]["revision"].as_i64().unwrap();
-    let waiting = &source_saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(waiting["prebound_target_word_id"], target_id);
-    assert_eq!(waiting["prebinding_state"], "waiting_first_sense");
-    assert_eq!(waiting["target_status"], "draft");
-    assert_eq!(waiting["pending_target_gloss"], "管理员预先填写的释义");
-    assert!(
-        waiting["pending_target_headword"].is_null(),
-        "预绑定不携带待建词面：{waiting}"
-    );
-    assert_eq!(
-        waiting["target_headword"], target_headword,
-        "预绑定词面回显走只读 target_headword：{waiting}"
-    );
-
-    let disabled_redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let mut disabled_flags = SmartLexiconV3Flags::all_enabled();
-    disabled_flags.draft_relation_prebinding = false;
-    let disabled_state = AppState::for_test_with_redis(pool.clone(), disabled_redis)
-        .with_smart_lexicon_v3_flags_for_test(disabled_flags);
-    let disabled_bearer = token(&disabled_state, admin_id);
-    let downgraded_relation = source_meanings["pos"][0]["senses"][0]["relations"][0]
-        .as_object_mut()
-        .unwrap();
-    downgraded_relation.remove("prebound_target_word_id");
-    // 旧客户端不认识预绑定，会按纯待建形态回发词面。
-    downgraded_relation.insert("pending_target_headword".to_owned(), json!(target_headword));
-    let (status, disabled_save) = call(
-        &disabled_state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
-        &disabled_bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": source_revision,
-            "intent": "complete",
-            "content": source_meanings
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "capability 关闭时旧客户端不得清掉稳定预绑定：{disabled_save}"
-    );
-    assert_eq!(
-        disabled_save["code"],
-        "smart_lexicon_v3_storage_unavailable"
-    );
-
-    let (status, delete_blocked) = call(
-        &state,
-        Method::DELETE,
-        &format!("{ROOT}/entries/{target_id}"),
-        &bearer,
-        None,
-        Some(json!({
-            "base_revision": target_forms["word"]["revision"],
-            "base_lifecycle_revision": target_forms["word"]["lifecycle_revision"]
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "预绑定目标不得永久删除：{delete_blocked}"
-    );
-    assert_eq!(
-        delete_blocked["code"],
-        "entry_has_inbound_prebound_relations"
-    );
-
-    let (status, waiting_publish) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{source_id}/publications"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": source_revision
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "waiting 来源发布必须阻断：{waiting_publish}"
-    );
-    assert!(has_issue(
-        &waiting_publish,
-        "relation_prebound_target_has_no_sense"
-    ));
-
-    let (status, archived_target) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{target_id}/archive"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "base_revision": target_forms["word"]["revision"],
-            "base_lifecycle_revision": target_forms["word"]["lifecycle_revision"]
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "预绑定目标归档失败：{archived_target}"
-    );
-    let (status, archived_source) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        archived_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_status"],
-        "archived"
-    );
-    let mut archived_publish_body = json!({
-        "schema_version": 3,
-        "base_revision": source_revision
-    });
-    let (mut status, mut archived_publish) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{source_id}/publications"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(archived_publish_body.clone()),
-    )
-    .await;
-    if status == StatusCode::CONFLICT
-        && archived_publish["code"] == "surface_match_acknowledgement_required"
-    {
-        archived_publish_body["confirmed_surface_match_token"] =
-            archived_publish["meta"]["surface_match_page"]["surface_confirmation_token"].clone();
-        (status, archived_publish) = call(
-            &state,
-            Method::POST,
-            &format!("{ROOT}/entries/{source_id}/publications"),
-            &bearer,
-            Some(Uuid::now_v7()),
-            Some(archived_publish_body),
-        )
-        .await;
-    }
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "归档目标来源发布必须阻断：{archived_publish}"
-    );
-    assert!(has_issue(
-        &archived_publish,
-        "relation_prebound_target_archived"
-    ));
-    let mut restore_body = json!({
-        "base_revision": archived_target["word"]["revision"],
-        "base_lifecycle_revision": archived_target["word"]["lifecycle_revision"]
-    });
-    let (mut status, mut restored_target) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{target_id}/restore"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(restore_body.clone()),
-    )
-    .await;
-    if status == StatusCode::CONFLICT
-        && restored_target["code"] == "surface_match_acknowledgement_required"
-    {
-        restore_body["confirmed_surface_match_token"] =
-            restored_target["meta"]["surface_match_page"]["surface_confirmation_token"].clone();
-        (status, restored_target) = call(
-            &state,
-            Method::POST,
-            &format!("{ROOT}/entries/{target_id}/restore"),
-            &bearer,
-            Some(Uuid::now_v7()),
-            Some(restore_body),
-        )
-        .await;
-    }
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "预绑定目标恢复失败：{restored_target}"
-    );
-
-    let mut target_meanings =
-        complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
-    let first_sense_id = target_meanings["pos"][0]["senses"][0]["id"].clone();
-    let mut second_sense = target_meanings["pos"][0]["senses"][0].clone();
-    second_sense["id"] = json!(Uuid::now_v7());
-    second_sense["definitions"][0]["id"] = json!(Uuid::now_v7());
-    second_sense["definitions"][0]["content_id"] = json!(Uuid::now_v7());
-    second_sense["definitions"][0]["content"]["text"] = json!("第二条，不得优先绑定");
-    target_meanings["pos"][0]["senses"]
-        .as_array_mut()
-        .unwrap()
-        .push(second_sense);
-
-    let meanings_events_before: i64 = sqlx::query_scalar(
-        r#"
-        SELECT count(*)
-        FROM platform.outbox_events
-        WHERE aggregate_type = 'lexicon.entry'
-          AND aggregate_id = $1
-          AND event_type = 'lexicon.entry.draft_meanings_saved'
-        "#,
-    )
-    .bind(Uuid::parse_str(target_id).unwrap())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    let (status, target_saved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": target_forms["word"]["revision"],
-            "intent": "complete",
-            "content": target_meanings.clone()
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "目标第一词义保存失败：{target_saved}"
-    );
-    let meanings_events: i64 = sqlx::query_scalar(
-        r#"
-        SELECT count(*)
-        FROM platform.outbox_events
-        WHERE aggregate_type = 'lexicon.entry'
-          AND aggregate_id = $1
-          AND event_type = 'lexicon.entry.draft_meanings_saved'
-        "#,
-    )
-    .bind(Uuid::parse_str(target_id).unwrap())
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        meanings_events,
-        meanings_events_before + 1,
-        "meanings 保存必须新增事件以失效草稿搜索游标"
-    );
-
-    let (status, promoted_source) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "转正后读取来源失败：{promoted_source}"
-    );
-    assert_eq!(promoted_source["word"]["revision"], source_revision + 1);
-    let promoted = &promoted_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(promoted["id"], relation_id.to_string());
-    assert_eq!(promoted["target_word_id"], target_id);
-    assert_eq!(promoted["target_sense_id"], first_sense_id);
-    assert!(promoted["prebound_target_word_id"].is_null());
-    assert!(promoted["pending_target_gloss"].is_null());
-
-    target_meanings["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
-        json!("港湾（更新文本但保留稳定词义 ID）");
-    let (status, target_resaved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": target_saved["word"]["revision"],
-            "intent": "complete",
-            "content": target_meanings.clone()
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "重复 reconciliation 保存失败：{target_resaved}"
-    );
-    let (status, source_after_repeat) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(source_after_repeat["word"]["revision"], source_revision + 1);
-    assert_eq!(
-        source_after_repeat["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_sense_id"],
-        first_sense_id
-    );
-
-    let mut without_first = target_meanings;
-    without_first["pos"][0]["senses"]
-        .as_array_mut()
-        .unwrap()
-        .remove(0);
-    let (status, target_without_sense) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": target_resaved["word"]["revision"],
-            "intent": "save",
-            "content": without_first
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "删除已绑定词义失败：{target_without_sense}"
-    );
-
-    let (status, detached_source) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "退回后读取来源失败：{detached_source}"
-    );
-    let detached = &detached_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(detached["prebound_target_word_id"], target_id);
-    assert_eq!(detached["prebinding_state"], "target_sense_deleted");
-    assert!(detached["target_sense_id"].is_null());
-    assert!(
-        detached["pending_target_headword"].is_null(),
-        "退回预绑定后不得回填待建词面：{detached}"
-    );
-    assert_eq!(
-        detached["target_headword"], target_headword,
-        "退回预绑定后词面回显保留在只读 target_headword：{detached}"
-    );
-    let (status, detached_validation) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{source_id}/validate"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": detached_source["word"]["revision"]
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "detached 校验失败：{detached_validation}"
-    );
-    assert_eq!(detached_validation["valid"], false);
-    assert!(
-        detached_validation["issues"]
-            .as_array()
-            .is_some_and(|issues| issues
-                .iter()
-                .any(|issue| issue["code"] == "relation_target_sense_deleted")),
-        "detached 必须返回稳定 issue，而不是把展示词面当 text pending：{detached_validation}"
-    );
-
-    let replacement = complete_v3_meanings_fixture(
-        target_without_sense["word"]["forms"]["pos"][0]["pos_id"].clone(),
-    );
-    let (status, recreated) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": target_without_sense["word"]["revision"],
-            "intent": "complete",
-            "content": replacement
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "目标重建词义失败：{recreated}");
-    let (status, still_detached_source) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let still_detached =
-        &still_detached_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(still_detached["prebinding_state"], "target_sense_deleted");
-    assert!(still_detached["target_sense_id"].is_null());
-
-    let replacement_sense_id = recreated["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
-    let mut repaired_meanings = still_detached_source["word"]["meanings"].clone();
-    let repaired_relation = repaired_meanings["pos"][0]["senses"][0]["relations"][0]
-        .as_object_mut()
-        .unwrap();
-    repaired_relation.insert("target_word_id".to_owned(), json!(target_id));
-    repaired_relation.insert("target_sense_id".to_owned(), replacement_sense_id.clone());
-    for read_or_prebound in [
-        "prebound_target_word_id",
-        "prebinding_state",
-        "target_status",
-        "pending_target_headword",
-        "pending_target_gloss",
-        "target_headword",
-        "target_gloss",
-    ] {
-        repaired_relation.remove(read_or_prebound);
-    }
-    let (status, repaired_source) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": still_detached_source["word"]["revision"],
-            "intent": "complete",
-            "content": repaired_meanings
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "detached 显式重选失败：{repaired_source}"
-    );
-    let repaired = &repaired_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert_eq!(repaired["id"], relation_id.to_string());
-    assert_eq!(repaired["target_word_id"], target_id);
-    assert_eq!(repaired["target_sense_id"], replacement_sense_id);
-    assert!(repaired["prebound_target_word_id"].is_null());
 }
 
 #[sqlx::test]
@@ -15409,378 +13845,6 @@ async fn inbound_relation_previews_hide_other_admins_draft_sources(pool: PgPool)
             .count();
         assert_eq!(previews, 1, "{label}应恰好看到一条已发布引用：{context}");
     }
-}
-
-#[sqlx::test]
-async fn prebound_gloss_is_field_validated_on_save(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-    let target_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-    let target_id = target_forms["word"]["id"].as_str().unwrap();
-    let source_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-    let source_id = source_forms["word"]["id"].as_str().unwrap();
-    let mut source_meanings =
-        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
-    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
-        "id": Uuid::now_v7(),
-        "relation": "synonym",
-        "prebound_target_word_id": target_id,
-        "pending_target_gloss": "超".repeat(5001),
-        "score": "10"
-    }]);
-    let (status, saved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": source_forms["word"]["revision"],
-            "intent": "save",
-            "content": source_meanings
-        })),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "预绑定超长 gloss 必须是字段级 422 而非撞库约束：{saved}"
-    );
-    assert!(
-        has_issue(&saved, "relation_pending_gloss_invalid"),
-        "{saved}"
-    );
-}
-
-#[sqlx::test]
-async fn stale_wide_prebound_projection_heals_on_read(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-    let target_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-    let target_id = target_forms["word"]["id"].as_str().unwrap();
-    let target_headword = target_forms["word"]["presentation"]["label"]
-        .as_str()
-        .unwrap();
-    let source_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-    let source_id = source_forms["word"]["id"].as_str().unwrap();
-    let mut source_meanings =
-        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
-    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
-        "id": Uuid::now_v7(),
-        "relation": "synonym",
-        "prebound_target_word_id": target_id,
-        "score": "10"
-    }]);
-    let (status, saved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": source_forms["word"]["revision"],
-            "intent": "save",
-            "content": source_meanings
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{saved}");
-
-    // 把投影 JSONB 手术回迁移前的旧宽形态：带待建词面、缺只读词面回显。
-    sqlx::query(
-        r#"
-        UPDATE lexicon.entry_editor_projection
-        SET meanings = jsonb_set(
-            meanings,
-            '{pos,0,senses,0,relations,0}',
-            (meanings #> '{pos,0,senses,0,relations,0}') - 'target_headword'
-                || jsonb_build_object('pending_target_headword', $2::text)
-        )
-        WHERE entry_id = $1
-        "#,
-    )
-    .bind(Uuid::parse_str(source_id).unwrap())
-    .bind(target_headword)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let (status, reread) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{reread}");
-    let relation = &reread["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert!(
-        relation["pending_target_headword"].is_null(),
-        "读路径必须剥掉旧宽形态的待建词面：{relation}"
-    );
-    assert_eq!(
-        relation["target_headword"], target_headword,
-        "读路径必须按目标当前 presentation 回填词面回显：{relation}"
-    );
-}
-
-#[sqlx::test]
-async fn v3_relation_prebinding_reconciliation_is_atomic_at_500_and_501(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-
-    for relation_count in [500usize, 501usize] {
-        let target_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-        let target_id = target_forms["word"]["id"].as_str().unwrap();
-        let source_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-        let source_id = source_forms["word"]["id"].as_str().unwrap();
-        let mut source_meanings =
-            complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
-        source_meanings["pos"][0]["senses"][0]["relations"] = Value::Array(
-            (0..relation_count)
-                .map(|ordinal| {
-                    json!({
-                        "id": Uuid::now_v7(),
-                        "relation": "synonym",
-                        "prebound_target_word_id": target_id,
-                        "score": format!("{}", ordinal % 101)
-                    })
-                })
-                .collect(),
-        );
-        let (status, source_saved) = call(
-            &state,
-            Method::PUT,
-            &format!("{ROOT}/entries/{source_id}/steps/meanings"),
-            &bearer,
-            None,
-            Some(json!({
-                "schema_version": 3,
-                "base_revision": source_forms["word"]["revision"],
-                "intent": "complete",
-                "content": source_meanings
-            })),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "{relation_count} 条预绑定保存失败：{source_saved}"
-        );
-        let source_revision = source_saved["word"]["revision"].as_i64().unwrap();
-        let target_revision = target_forms["word"]["revision"].as_i64().unwrap();
-        let target_meanings =
-            complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
-        let (status, target_saved) = call(
-            &state,
-            Method::PUT,
-            &format!("{ROOT}/entries/{target_id}/steps/meanings"),
-            &bearer,
-            None,
-            Some(json!({
-                "schema_version": 3,
-                "base_revision": target_revision,
-                "intent": "complete",
-                "content": target_meanings
-            })),
-        )
-        .await;
-
-        let (read_status, source_after) = call(
-            &state,
-            Method::GET,
-            &format!("{ROOT}/entries/{source_id}"),
-            &bearer,
-            None,
-            None,
-        )
-        .await;
-        assert_eq!(read_status, StatusCode::OK);
-        let relations = source_after["word"]["meanings"]["pos"][0]["senses"][0]["relations"]
-            .as_array()
-            .unwrap();
-        assert_eq!(relations.len(), relation_count);
-        if relation_count == 500 {
-            assert_eq!(status, StatusCode::OK, "500 条应全部成功：{target_saved}");
-            assert_eq!(source_after["word"]["revision"], source_revision + 1);
-            assert!(relations.iter().all(|relation| {
-                relation["target_word_id"] == target_id
-                    && relation["prebound_target_word_id"].is_null()
-            }));
-        } else {
-            assert_eq!(
-                status,
-                StatusCode::CONFLICT,
-                "501 条必须整体拒绝：{target_saved}"
-            );
-            assert_eq!(target_saved["code"], "relation_prebinding_fanout_exceeded");
-            assert_eq!(source_after["word"]["revision"], source_revision);
-            assert!(relations.iter().all(|relation| {
-                relation["prebound_target_word_id"] == target_id
-                    && relation["target_word_id"].is_null()
-            }));
-            let (target_read_status, target_after) = call(
-                &state,
-                Method::GET,
-                &format!("{ROOT}/entries/{target_id}"),
-                &bearer,
-                None,
-                None,
-            )
-            .await;
-            assert_eq!(target_read_status, StatusCode::OK);
-            assert_eq!(target_after["word"]["revision"], target_revision);
-            assert!(
-                target_after["word"]["meanings"]["pos"]
-                    .as_array()
-                    .unwrap()
-                    .is_empty()
-            );
-        }
-    }
-}
-
-#[sqlx::test]
-async fn v3_relation_prebinding_uses_nowait_and_retries_without_partial_writes(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url())
-        .await
-        .expect("测试 Redis 连接池应能创建");
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-    let target_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-    let source_forms = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
-    let target_id = target_forms["word"]["id"].as_str().unwrap();
-    let source_id = source_forms["word"]["id"].as_str().unwrap();
-    let mut source_meanings =
-        complete_v3_meanings_fixture(source_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
-    source_meanings["pos"][0]["senses"][0]["relations"] = json!([{
-        "id": Uuid::now_v7(),
-        "relation": "synonym",
-        "prebound_target_word_id": target_id,
-        "score": "80"
-    }]);
-    let (status, source_saved) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": source_forms["word"]["revision"],
-            "intent": "complete",
-            "content": source_meanings
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{source_saved}");
-    let source_revision = source_saved["word"]["revision"].as_i64().unwrap();
-    let target_revision = target_forms["word"]["revision"].as_i64().unwrap();
-    let target_meanings =
-        complete_v3_meanings_fixture(target_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
-    let target_request = json!({
-        "schema_version": 3,
-        "base_revision": target_revision,
-        "intent": "complete",
-        "content": target_meanings
-    });
-
-    let mut blocker = pool.begin().await.unwrap();
-    sqlx::query("SELECT id FROM lexicon.entries WHERE id = $1 FOR UPDATE")
-        .bind(Uuid::parse_str(source_id).unwrap())
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    let (status, conflict) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(target_request.clone()),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "NOWAIT 应快速返回 409：{conflict}"
-    );
-    assert_eq!(conflict["code"], "reference_conflict");
-    blocker.rollback().await.unwrap();
-
-    let (status, target_after_conflict) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{target_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(target_after_conflict["word"]["revision"], target_revision);
-    let (status, source_after_conflict) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(source_after_conflict["word"]["revision"], source_revision);
-    assert_eq!(
-        source_after_conflict["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["prebinding_state"],
-        "waiting_first_sense"
-    );
-
-    let (status, retried) = call(
-        &state,
-        Method::PUT,
-        &format!("{ROOT}/entries/{target_id}/steps/meanings"),
-        &bearer,
-        None,
-        Some(target_request),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "释放锁后重试应收敛：{retried}");
-    let (status, source_after_retry) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{source_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(source_after_retry["word"]["revision"], source_revision + 1);
-    assert_eq!(
-        source_after_retry["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"],
-        target_id
-    );
 }
 
 #[sqlx::test]
@@ -19970,7 +18034,7 @@ async fn v3_sense_phrase_components_persist_publish_and_survive_forms_resave(poo
 }
 
 #[sqlx::test]
-async fn v3_publish_with_newly_bound_relations_keeps_sense_phrase_components(pool: PgPool) {
+async fn v3_publish_with_text_relations_keeps_sense_phrase_components(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -20000,7 +18064,7 @@ async fn v3_publish_with_newly_bound_relations_keeps_sense_phrase_components(poo
     .await;
     let entry_uuid = Uuid::parse_str(saved["word"]["id"].as_str().unwrap()).unwrap();
 
-    // 待建关联词让发布走 newly_bound 分支：sync_canonical_meanings 会再退役一轮成分节点。
+    // 纯文本关联发布应保留释义级成分，且不得创建目标关联。
     let pending_headword = format!("boundpending{}", admin_id.simple());
     let mut meanings = saved["word"]["meanings"].clone();
     meanings["pos"][0]["senses"][0]["relations"] = json!([{
@@ -20015,17 +18079,17 @@ async fn v3_publish_with_newly_bound_relations_keeps_sense_phrase_components(poo
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "带 newly_bound 的发布必须成功：{published}"
+        "带纯文本关联的发布必须成功：{published}"
     );
     assert_eq!(
         published["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["id"],
         component["id"],
-        "newly_bound 路径的 V2 往返不得吞掉释义级成分：{published}"
+        "发布不得吞掉释义级成分：{published}"
     );
     assert!(
         published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
-            .is_string(),
-        "前置：这条发布必须真的物化了待建关联词"
+            .is_null(),
+        "纯文本关联不得创建词条或绑定词义"
     );
 
     let publication_id = current_publication_id(&pool, entry_uuid).await;
@@ -20039,10 +18103,7 @@ async fn v3_publish_with_newly_bound_relations_keeps_sense_phrase_components(poo
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        published_component_nodes, 1,
-        "sync_canonical_meanings 之后必须重建成分节点，否则发布节点会漏行"
-    );
+    assert_eq!(published_component_nodes, 1, "发布必须保留成分节点");
     let refs: Vec<Uuid> = sqlx::query_scalar(
         r#"
         SELECT source_node_id FROM lexicon.entry_publication_sense_refs
@@ -20611,7 +18672,7 @@ async fn v3_sense_component_capability_is_always_on(pool: PgPool) {
         "能力位恒开且键必须在场，按能力位判断的客户端才不必跟着后端同批部署：{capabilities}"
     );
     assert_eq!(
-        capabilities["draft_relation_prebinding"], true,
+        capabilities["draft_relation_prebinding"], false,
         "既有能力位仍旧无条件输出"
     );
 
@@ -22747,7 +20808,7 @@ async fn v3_forms_resave_preserves_sentence_translation_node_roles(pool: PgPool)
 }
 
 /// 发布路径的 V2 往返曾把每句多档 zh_translations 塌成 1 档（既有缺陷）。
-/// 钉住：发布响应与不可变快照都保留全部三档；带 newly_bound 关联的发布同样保留。
+/// 钉住：发布响应与不可变快照都保留全部三档；带纯文本关联的发布同样保留。
 #[sqlx::test]
 async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
@@ -22830,7 +20891,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         "发布快照必须固化全部三档，否则下游只能读到 1 档"
     );
 
-    // 3) newly_bound 分支（带待建关联词的发布）同样保留三档
+    // 3) 带纯文本关联的发布同样保留三档
     let source = create_ready_v3_annotated_draft_with_sentences(
         &state,
         &pool,
@@ -22860,7 +20921,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "带 newly_bound 的发布必须成功：{src_published}"
+        "带纯文本关联的发布必须成功：{src_published}"
     );
     assert!(
         first_sentence(&src_published)["zh_translations"][0]["band"].is_string(),
@@ -22875,12 +20936,12 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
     assert_eq!(
         src_bands,
         ["c1_c2", "b1_b2", "a1_a2"],
-        "newly_bound 路径也必须保留三档（sync_canonical_meanings 前回填）：{src_published}"
+        "纯文本关联发布必须保留三档：{src_published}"
     );
     assert!(
         src_published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
-            .is_string(),
-        "前置：这条发布确实走了 newly_bound（待建关联词已被物化）：{src_published}"
+            .is_null(),
+        "纯文本关联不应被自动物化：{src_published}"
     );
     // 投影也回填了三档
     let projected: Value = sqlx::query_scalar(
@@ -22894,7 +20955,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
     assert_eq!(
         projected.as_array().map(Vec::len),
         Some(3),
-        "newly_bound 的 sync_canonical_meanings 覆盖投影时必须回填三档"
+        "纯文本关联发布后投影必须保留三档"
     );
 }
 
@@ -24562,6 +22623,101 @@ async fn v3_detection_drops_suggested_pos_missing_from_catalog(pool: PgPool) {
     assert_eq!(
         detection["builtin_dictionary"]["suggested_pos"],
         json!(["verb", "noun"])
+    );
+}
+
+#[sqlx::test]
+async fn v3_relations_require_explicit_sense_binding_and_keep_same_name_text(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let target = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
+    let source = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
+    let source_id = source["word"]["id"].as_str().unwrap();
+    let target_id = target["word"]["id"].as_str().unwrap();
+    let relation_id = Uuid::now_v7();
+    let mut content =
+        complete_v3_meanings_fixture(source["word"]["forms"]["pos"][0]["pos_id"].clone());
+    content["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id, "relation": "synonym", "score": "80.00",
+        "prebound_target_word_id": target_id
+    }]);
+    let (status, rejected) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        source_id,
+        source["word"]["revision"].as_i64().unwrap(),
+        content.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    content["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id, "relation": "synonym", "score": "80.00",
+        "pending_target_headword": "harbour"
+    }]);
+    let source = save_v3_meanings(&state, &bearer, &source, content.clone()).await;
+    let source_revision = source["word"]["revision"].clone();
+    let mut target_content =
+        complete_v3_meanings_fixture(target["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let target_sense_id = target_content["pos"][0]["senses"][0]["id"].clone();
+    let mut unreferenced_sense = target_content["pos"][0]["senses"][0].clone();
+    unreferenced_sense["id"] = json!(Uuid::now_v7());
+    unreferenced_sense["definitions"][0]["id"] = json!(Uuid::now_v7());
+    unreferenced_sense["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    target_content["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, unreferenced_sense);
+    let target = save_v3_meanings(&state, &bearer, &target, target_content).await;
+    let (status, unchanged) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{source_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unchanged["word"]["revision"], source_revision);
+    let source = save_v3_meanings(&state, &bearer, &source, content.clone()).await;
+    assert!(
+        source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
+            .is_null()
+    );
+    let (status, search) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/related-search?q=harbour&kind=word&include_drafts=true"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{search}");
+    content["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id, "relation": "synonym", "score": "80.00",
+        "target_word_id": target_id, "target_sense_id": target_sense_id
+    }]);
+    let source = save_v3_meanings(&state, &bearer, &source, content).await;
+    assert_eq!(
+        source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"],
+        target_id
+    );
+    let mut removed = writable_v3_meanings(&target);
+    removed["pos"][0]["senses"] = json!([]);
+    let (status, rejected) = call(&state, Method::PUT, &format!("{ROOT}/entries/{target_id}/steps/meanings"),
+        &bearer, None, Some(json!({"schema_version": 3, "base_revision": target["word"]["revision"], "intent": "save", "content": removed}))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        rejected["field_issues"]
+            .as_array()
+            .unwrap_or_else(|| panic!("unexpected error: {rejected}"))
+            .iter()
+            .any(|issue| issue["code"] == "relation_target_unavailable"
+                && issue["node_id"] == target_sense_id)
     );
 }
 

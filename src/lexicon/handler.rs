@@ -121,17 +121,13 @@ fn sentence_target_discovery_enabled(flags: SmartLexiconV3Flags) -> bool {
     sentence_association_enabled(flags) && flags.sentence_target_discovery
 }
 
-fn draft_relation_prebinding_enabled(flags: SmartLexiconV3Flags) -> bool {
-    flags.read && flags.edit && flags.projection && flags.draft_relation_prebinding
-}
-
 /// 运行时能力位统一从 flags 推导，避免每个调用点各传一串同序布尔。
 /// `sense_component_usages` 不再受开关控制（恒开），但键继续下发：客户端仍按
 /// 能力位判断，省得前后端必须同批部署。
 fn apply_capability_flags(capabilities: &mut AdminWordV3Capabilities, flags: SmartLexiconV3Flags) {
     capabilities.sentence_associations = Some(sentence_association_enabled(flags));
     capabilities.sentence_target_discovery = Some(sentence_target_discovery_enabled(flags));
-    capabilities.draft_relation_prebinding = Some(draft_relation_prebinding_enabled(flags));
+    capabilities.draft_relation_prebinding = Some(false);
     capabilities.sense_component_usages = Some(true);
 }
 

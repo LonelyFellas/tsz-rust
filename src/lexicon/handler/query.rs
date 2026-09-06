@@ -318,11 +318,6 @@ pub async fn related_search(
     ApiQuery(query): ApiQuery<RelatedSearchQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
-    if query.include_drafts == Some(true)
-        && !draft_relation_prebinding_enabled(state.smart_lexicon_v3_flags)
-    {
-        return Err(v3_storage_unavailable());
-    }
     let response = service(&state)
         .related_search(auth.subject, query, state.smart_lexicon_v3_flags.read)
         .await

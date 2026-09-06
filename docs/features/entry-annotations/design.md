@@ -62,7 +62,7 @@ entries 使用现有 `MatchedEntryContextV3`（上例 inbound_relations 结构�
 ## 数据与事务
 
 entries 增加可空 text annotation、非空 bigint annotation_revision 默认1（历史数据 null/1）。创建规范化在请求哈希前进行，现有 token 校验成功后、INSERT 前校验全部组并更新旧值；所有更新、新条、审计、幂等结果同事务。编辑复用 surface policy/key/context locks 顺序并重新检查当前组。匹配上下文加入标注及修订，owner_bundle digest 自动绑定；变更后旧 token 走既有 surface_matches_changed，不绕过快照。
-新增响应字段使用 serde 默认值读取历史缓存/发布快照。旧程序 deny_unknown_fields 不能读取新对象，回滚程序前须清理相关短期检测/匹配缓存；数据库 down 会删除标注，回退迁移前必须备份。
+新增响应字段使用 serde 默认值读取历史缓存/发布快照。旧程序 deny_unknown_fields 不能读取新对象，回滚程序前须清理相关短期检测/匹配缓存；V3 发布快照（JSONB）同样持久化了 annotation/annotation_revision，down 迁移清不掉，旧程序读取快照会 500，回滚须按 V3 原生发布的「恢复发布前数据库备份」规则执行（或先剥离快照里的这两个键）；数据库 down 会删除标注，回退迁移前必须备份。
 
 ## 验证
 

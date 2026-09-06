@@ -4,8 +4,7 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::v3::{
-    replace_v3_sense_component_usages, restore_sense_component_usages,
-    restore_sentence_zh_translations, restore_voice_profiles,
+    restore_sense_component_usages, restore_sentence_zh_translations, restore_voice_profiles,
 };
 use super::*;
 use crate::lexicon::dto::{
@@ -144,26 +143,12 @@ impl LexiconService {
             return Err(v3_validation_failed(issues));
         }
 
-        let (materialization_issues, newly_bound) = self
-            .resolve_pending_relation_targets(
-                &mut tx,
-                actor_id,
-                request_id,
-                entry_id,
-                &mut relational_meanings,
-                PendingRelationResolution::Materialize,
-            )
-            .await?;
-        if !materialization_issues.is_empty() {
-            return Err(v3_validation_failed(materialization_issues));
-        }
         let reference_resolution = resolve_meaning_references(
             &mut tx,
             entry_id,
             &mut relational_meanings,
             ReferenceResolutionMode::Verify,
             true,
-            &newly_bound,
         )
         .await?;
         if !reference_resolution.issues.is_empty() {
@@ -173,48 +158,7 @@ impl LexiconService {
         publication_references.extend(
             phrase_component_publication_references(&mut tx, &word.forms, &word.meanings).await?,
         );
-        // V2 往返（下面两处 v2_meanings_to_v3）会丢掉 sense 级成分与多档 zh_translations；
-        // newly_bound 分支还会在中途覆盖 word.meanings，所以先抓一份往返前的原始 V3 作回填源。
         let pristine_meanings = word.meanings.clone();
-        if !newly_bound.is_empty() {
-            let mut canonical_v3_meanings = v2_meanings_to_v3(relational_meanings.clone())?;
-            // V2 往返吞掉了释义级成分与多档译文，回填后才能进投影与快照。
-            restore_sense_component_usages(&pristine_meanings, &mut canonical_v3_meanings);
-            restore_sentence_zh_translations(&pristine_meanings, &mut canonical_v3_meanings);
-            restore_voice_profiles(&pristine_meanings, &mut canonical_v3_meanings);
-            let editor_meanings =
-                serde_json::to_value(&canonical_v3_meanings).map_err(serialization_error)?;
-            // sync_canonical_meanings 内部只做 replace_meanings_content（按 V2 relational 重建，
-            // 每句仅 1 档译文、无成分），所以必须复刻 save 路径的持久化顺序：
-            // prepare 别名 → replace_meanings_content → replace_v3_sentence_translations → 成分。
-            // 漏掉译文/成分的重建，投影里的多档/成分就会与节点表脱节，发布节点会漏行、
-            // sense_refs 外键失败。
-            LexiconRepository::prepare_v3_sentence_translation_aliases(
-                &mut tx,
-                entry_id,
-                &canonical_v3_meanings,
-            )
-            .await
-            .map_err(repository_error)?;
-            LexiconRepository::sync_canonical_meanings(
-                &mut tx,
-                entry_id,
-                &relational_meanings,
-                &editor_meanings,
-                &catalog.sub_part_ids,
-            )
-            .await
-            .map_err(repository_error)?;
-            LexiconRepository::replace_v3_sentence_translations(
-                &mut tx,
-                entry_id,
-                &canonical_v3_meanings,
-            )
-            .await
-            .map_err(repository_error)?;
-            replace_v3_sense_component_usages(&mut tx, entry_id, &canonical_v3_meanings).await?;
-            word.meanings = canonical_v3_meanings;
-        }
         ensure_no_removed_inbound_senses(&mut tx, entry_id, &relational_meanings).await?;
 
         if let Some(publication) =

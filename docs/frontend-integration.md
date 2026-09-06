@@ -1489,8 +1489,72 @@ JSONB 走，不需要新表新列），revert 即可回退；但已经写进库�
 与 `voice_profile` 在 revert 后会被 V3 契约拒绝反序列化（两处 DTO 都是 `deny_unknown_fields`），
 所以后端回退前要先把前端停在不写新值的版本上。
 
+## 22. 词条标注 `annotation`：同原型词条的区分标签（后端已实现）
 
-## 22. 无已保存原型的V3草稿继续编辑（2026-09-06）
+> **状态（2026-09-06）**：后端已实现并导出到 `docs/openapi.json`；契约与规则全文见
+> [`features/entry-annotations/design.md`](features/entry-annotations/design.md)，错误码见
+> [`api-errors.md`](api-errors.md)「词条标注」。
+
+### 22.1 背景
+
+同一词面可以建出多个词条（同形异义、V2/V3 并存的同名条目）。管理端列表和创建弹窗里
+它们只显示同一个 headword，管理员分不清哪条是哪条。`annotation` 是挂在词条上的一段
+短标签（≤ 20 个 Unicode scalar），只在**同原型组**（相同 `dialect_scope` +
+`normalized_surface`）内要求彼此不同；它独立于内容 revision，改标注不产生未发布变更。
+
+### 22.2 后端改动
+
+- 迁移 `20260906180000_entry_annotations`：`entries` 加可空 `annotation text` 与
+  `annotation_revision bigint not null default 1`（历史数据 `null` / `1`）。
+- 响应新增字段（**必填键**，值可为 `null`）：`AdminWordV2` / `AdminWordV3` /
+  `AdminWordListItem` / `AdminWordListItemV3` / `MatchedEntryContextV3` 各加
+  `annotation: string | null` 与 `annotation_revision: integer ≥ 1`。
+- `POST /admin/lexicon/entries` 请求新增可选 `annotation` 与
+  `annotation_updates: [{ entry_id, annotation, base_annotation_revision }]`。新词条与已有
+  词条落进同一原型组时，服务端返回 `409 annotation_conflict`，`meta.annotation_conflict`
+  带 `reason`（`required` / `duplicate` / `revision_conflict` / `group_changed`）、
+  完整的直接相关 `entries`（复用 `MatchedEntryContextV3`）与 `groups`；前端据此弹窗
+  收齐所有相关词条的标注后**带上全部旧条目的修订**重试同一个 `Idempotency-Key`。
+- 新端点 `PATCH /admin/lexicon/entries/{id}/annotation`，请求
+  `{ annotation, base_annotation_revision }`，成功 `200 { entry_id, annotation,
+  annotation_revision }`；修订不符或与直接邻居重复同样 `409 annotation_conflict`。
+- 新 schema：`EntryAnnotationConflict` / `EntryAnnotationConflictReason` /
+  `EntryAnnotationGroup` / `EntryAnnotationResponse` / `EntryAnnotationUpdate` /
+  `UpdateEntryAnnotationInput`；`ProblemMeta` 新增可选 `annotation_conflict`。
+
+### 22.3 前端要怎么改
+
+1. `sync:openapi`，`@tsz/types` 镜像新增字段与 schema（snake_case）。
+2. 列表与详情展示 `annotation`（有值时跟在 headword 后，形如 `bank · 河岸`）。
+3. 创建向导：`409 annotation_conflict` 不再当普通错误——按 `meta.annotation_conflict`
+   弹出「同形词条标注」表格，列出 `entries`（含新条），全部填好后附加
+   `annotation` / `annotation_updates` 用同一个幂等键重试；`duplicate` 时提示
+   「标注与同原型词条重复，已有词条可能还关联其他原型」并保留输入。
+4. 详情页加标注编辑入口，走 PATCH，`revision_conflict` 时刷新后重填。
+   长度判定与后端一致：`Array.from(value.trim()).length <= 20`，比较用 `toLowerCase()`。
+
+### 22.4 部署顺序与兼容性
+
+**这次不是单向兼容，前后端必须同批部署。** 新字段在响应 schema 里是必填键：
+
+| 顺序 | 结果 |
+| --- | --- |
+| 只上后端 | 旧前端的 runtime contract（`additionalProperties: false`）拒收多出来的键，词条列表/详情整体报错 |
+| 只上前端 | 新前端的 runtime contract 要求 `annotation` / `annotation_revision` 必填，旧后端不返回，同样整体报错 |
+
+所以按「前端 `sync:openapi` 合并 → 前端部署 → **紧接着**后端部署」执行，把窗口压到后端
+二进制原子替换那一两分钟内。前端尚未实现标注弹窗前，同原型建条会收到
+`409 annotation_conflict`（`reason: required`）——这是预期行为，旧前端会把它当普通错误展示，
+不阻塞其他建条。
+
+回退：后端 revert 后旧二进制的 `deny_unknown_fields` 读不了带标注的检测/匹配缓存，
+回退前清一次相关短期缓存；V3 **发布快照**（JSONB）同样带着 `annotation` /
+`annotation_revision`，down 迁移删列也清不掉它，旧二进制读快照会 500——回滚按 V3 原生发布
+的「恢复发布前数据库备份」规则执行（或回滚前先从快照 JSONB 剥掉这两个键）；迁移 down 会
+**删除**标注列，回退迁移前必须先备份。
+
+
+## 23. 无已保存原型的V3草稿继续编辑（2026-09-06）
 
 `DetectLexiconSurfaceResponseV3` 增加可选 `existing_draft_id: UUID`（无可见目标时省略）。这是当前管理员自己的未归档、无有效surface source草稿，不是真实原型匹配：不得合入 `matches`，不据此签发/消费surface确认。前端独立显示已有未完成草稿并提供 `/words/{id}/v3/wizard/forms` 入口；即使同时有其他真实匹配，也应先继续已有草稿。
 
@@ -1499,7 +1563,7 @@ JSONB 走，不需要新表新列），revert 即可回退；但已经写进库�
 部署顺序：前端先 `sync:openapi`，同步并发布能接受此可选字段的runtime契约，再更新后端。联合本地验收应显式 `OPENAPI_SOURCE` 指向后端实际worktree的 `docs/openapi.json`。旧缓存因字段可选仍可读；程序回退前需考虑旧版严格反序列化不接受新字段的短期检测缓存。本次不增加数据库迁移。
 
 
-## 23. 标注列表显示条件（2026-09-06）
+## 24. 标注列表显示条件（2026-09-06）
 
 `AdminWordListItem`与`AdminWordListItemV3`新增必填 `annotation_visible: boolean`，只控制列表标注和tooltip展示。前端用 `annotation && annotation_visible` 渲染，编辑入口继续读取原annotation；不要在隐藏时清空标注或改变修订。分页、过滤外的同原型词条也参与后端判断，前端不得按当前页计数。
 
