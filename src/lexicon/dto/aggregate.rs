@@ -478,16 +478,14 @@ pub struct WordSentenceV2 {
     pub associations_state: SentenceAssociationsStateV2,
 }
 
-/// 关联词有三种形态，由 `lexicon_relations_target_shape_check` 在库层保证互斥：
+/// 关联词支持显式词义绑定与纯文本两种形态：
 ///
-/// - **已绑定**：`target_word_id` + `target_sense_id` 指向真实义项，
+/// - `target_word_id` + `target_sense_id` 指向管理员选择的真实义项，
 ///   `target_headword` / `target_gloss` 是服务端回填的快照。
-/// - **待物化**：目标词还没有词条，`pending_target_headword` 承载管理员录入的词面，
-///   `pending_target_gloss` 可选地承载创建目标草稿时预填的中文词义。这种形态只允许存在
-///   于草稿；发布时会先建出词条再回填 target，所以发布出去的关联词永远是已绑定的。
-/// - **预绑定**：目标词条已存在但还没有可绑词义，`prebound_target_word_id` 锁定词条身份，
-///   不携带 `pending_target_headword`（词面回显走服务端回填的只读 `target_headword`），
-///   `pending_target_gloss` 可选。目标长出第一词义后自动物化为已绑定。
+/// - `pending_target_headword` 是独立展示文本，保存和发布均不创建词条或自动绑定。
+///   `pending_target_gloss` 仅保留旧数据兼容，不再用于创建或匹配目标。
+///
+/// 旧预绑定字段仅供内部历史数据兼容；写入不接受，迁移会移除旧预绑定关联。
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WordRelationV2 {
     pub id: Uuid,
