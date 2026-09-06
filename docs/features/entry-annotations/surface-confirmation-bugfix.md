@@ -36,3 +36,25 @@
 - `/tmp/surface-confirm-bugfix-unit.log` SHA256 `632f46e7d58275e189a76ba1b91096da22754a11805560073f6d1e4fdde11306`
 - `/tmp/surface-confirm-bugfix-doc.log` SHA256 `3152b17c71039071e8e0ebcabf2002ae04648667919a97c8fed29c0aedf3f168`
 - `/tmp/surface-confirm-bugfix-build.log` SHA256 `a41051563a4cb5fc1b1bcdd9aa0ba28ca80f7736d629d90cc138218756e8e3a9`
+
+## 最终状态
+
+- 完整 lexicon_handler 151通过，lexicon_surface_snapshot 1通过，单轮全绿。
+- 已核实旧8583 PID2726的cwd与监听，再仅重启该进程；修复服务PID15866，readyz HTTP200 {"status":"ready"}。
+- 服务显式使用localhost5433/tsz_dev_worktree_20260906、Redis DB2、PORT8583、COOKIE_SECURE=false。
+- 临时PG无活跃测试连接后已 docker stop，--rm清理容器及测试子库（包括失败基线可能遗留的子库）。Redis未广泛清理，测试快照沿用TTL。
+- 未写入现场center，测试业务数据只存在于已清理的临时PG；既有业务服务数据保留。原保存项目目录、前端、8383/8483不动。
+- 已通知主协调任务01a0763f-ffe9-74a0-aba7-e6069491d36e进行最终浏览器验收。此处后端真实HTTP证据不替代UI验收。
+- 完整回归日志 `/tmp/surface-confirm-bugfix-regression.log` SHA256 `6bc6f2f3780cf811da8d71aa2a7ca5b0a8af09aa978f85e659ff163c10724c86`
+
+## 主任务最终浏览器验收
+
+证据来源：主协调任务 `01a0763f-ffe9-74a0-aba7-e6069491d36e` 的真实 UI 操作与回报；本修复任务未重复操作浏览器或数据。
+
+- 右侧会话过期后，主任务使用原本地测试管理员重新登录。
+- 重新输入 `center` 检测，不修改 headwords；第一次点击确认直接出现标注弹窗，没有“匹配结果已更新”红错。
+- 保持旧3条标注原值，填写新标注“居中动作”；单击保存直接进入 `/words/01a07699-4f28-7a21-968b-662692ea8be9/v3/wizard/forms`。
+- 新草稿初始无词形；主任务随后经 UI 填写 base `center`，保存草稿并确认同形影响。
+- 整页重载 `/words?keyword=center` 显示4条，新标注“居中动作”可见，旧3条“中心位置”“球场中锋”“机构中心”保持原值。
+
+现场数据台账：主任务新增第4条草稿 `01a07699-4f28-7a21-968b-662692ea8be9`，未发布，保留供用户查看；没有新增其他条。最终用户通知由主任务负责。本次追加仅更新文档，未改业务代码、未重跑质量门、未操作数据。

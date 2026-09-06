@@ -1552,3 +1552,49 @@ JSONB 走，不需要新表新列），revert 即可回退；但已经写进库�
 `annotation_revision`，down 迁移删列也清不掉它，旧二进制读快照会 500——回滚按 V3 原生发布
 的「恢复发布前数据库备份」规则执行（或回滚前先从快照 JSONB 剥掉这两个键）；迁移 down 会
 **删除**标注列，回退迁移前必须先备份。
+
+
+## 23. 无已保存原型的V3草稿继续编辑（2026-09-06）
+
+`DetectLexiconSurfaceResponseV3` 增加可选 `existing_draft_id: UUID`（无可见目标时省略）。这是当前管理员自己的未归档、无有效surface source草稿，不是真实原型匹配：不得合入 `matches`，不据此签发/消费surface确认。前端独立显示已有未完成草稿并提供 `/words/{id}/v3/wizard/forms` 入口；即使同时有其他真实匹配，也应先继续已有草稿。
+
+创建竞态仍返回 HTTP409 `duplicate_word`；只有可继续的当前管理员V3空草稿才带既有 `meta.word_id`。没有ID时仅提示无法重复创建，不展示/搜索其他人草稿或自动重试。创建方会重新检查最终主词及当前状态，检测提示可能过时。
+
+部署顺序：前端先 `sync:openapi`，同步并发布能接受此可选字段的runtime契约，再更新后端。联合本地验收应显式 `OPENAPI_SOURCE` 指向后端实际worktree的 `docs/openapi.json`。旧缓存因字段可选仍可读；程序回退前需考虑旧版严格反序列化不接受新字段的短期检测缓存。本次不增加数据库迁移。
+
+
+## 24. 标注列表显示条件（2026-09-06）
+
+`AdminWordListItem`与`AdminWordListItemV3`新增必填 `annotation_visible: boolean`，只控制列表标注和tooltip展示。前端用 `annotation && annotation_visible` 渲染，编辑入口继续读取原annotation；不要在隐藏时清空标注或改变修订。分页、过滤外的同原型词条也参与后端判断，前端不得按当前页计数。
+
+### 24.1 部署顺序与兼容性
+
+**这次不是单向兼容，前后端必须同批部署。** `annotation_visible` 是列表行的**必填**键，
+两个方向都会打挂：
+
+| 顺序 | 结果 |
+| --- | --- |
+| 只上后端 | 已部署前端的 `AdminWordListItemV3` 是 `additionalProperties: false` 且不认识这个键，整行拒收 → 智能词库列表整页报错（不是降级） |
+| 只上前端 | 新前端把它列入 `required`，旧后端不返回 → 同样整页失败 |
+
+所以按「前端 `sync:openapi` 合并 → 部署 web（C 端不读 admin 契约，先上无风险）→ 后端 CI 产物
+预先下载校验、只读预检做完 → 部署 admin → **紧接着**切后端二进制」执行，把窗口压到二进制
+原子替换那一两分钟。这与 §22.4 的处置一致。
+
+后端权威源为 `tsz-rust/docs/openapi.json`（用 `OPENAPI_SOURCE` 显式指向该仓，不要指向个人
+worktree，否则他人重跑 `sync:openapi` 无法复现快照）。归档、恢复、删除或创建后沿用列表失效
+刷新即可；本次无新迁移或详情字段。
+
+回退：无迁移，revert 二进制即可，但前端须同时回退到不要求该字段的版本。
+
+### 24.2 已知取舍：徽标可见性按 actor 作用域
+
+`annotation_visible` 的同原型对照集与写路径 `annotation_groups_in` 同口径——草稿只算**当前
+管理员自己的**。而管理列表本身没有 actor 过滤（别人的草稿连创建人、释义、状态一起展示）。
+因此两个管理员就同一词面各有一条词条时，双方看到的徽标显隐可能相反。
+
+这是有意为之并有测试保护的（`tests/lexicon_handler.rs` 的
+`another actor's draft must not count`）。若后续认为徽标应回答「这张列表里还有没有同名行」，
+则应把 `annotation_visible_entry_ids` 的草稿判定改为与列表一致
+（`source_revision = entry.revision AND is_deleted = FALSE`，去掉 actor 条件），
+`annotation_groups_in` 保持 actor 作用域不动（它管的是写入不变量）。**尚未定案。**

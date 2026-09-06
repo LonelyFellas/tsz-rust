@@ -23507,3 +23507,406 @@ async fn surface_confirm_bugfix_rejects_unseen_dictionary_form(pool: PgPool) {
         "unseen dictionary form: {response}"
     );
 }
+
+#[sqlx::test]
+async fn empty_draft_bugfix_http_detect_and_create_explain_existing_draft(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, tsz_rust::router(state))
+            .await
+            .unwrap()
+    });
+    let client = reqwest::Client::new();
+    let mut existing_id = Value::Null;
+    for attempt in 0..2 {
+        let response = client.post(format!("http://{address}{ROOT}/detections"))
+            .bearer_auth(&bearer).header("content-type", "application/json")
+            .body(json!({"schema_version":3,"language":"en","kind":"word","surface":"emptydraftprobe"}).to_string())
+            .send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let detection: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        assert_eq!(detection["matches"], json!([]));
+        assert_eq!(detection["requires_acknowledgement"], false);
+        let response = client
+            .post(format!("http://{address}{ROOT}/entries"))
+            .bearer_auth(&bearer)
+            .header("content-type", "application/json")
+            .header("Idempotency-Key", Uuid::now_v7().to_string())
+            .body(
+                json!({"schema_version":3,"detection_id":detection["detection_id"],"kind":"word",
+                "headwords":{"mode":"unified","common":"emptydraftprobe"}})
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let result: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        if attempt == 0 {
+            assert_eq!(status, 201, "{result}");
+            existing_id = result["word"]["id"].clone();
+        } else {
+            assert_eq!(status, 409, "{result}");
+            assert_eq!(result["code"], "duplicate_word", "{result}");
+            eprintln!(
+                "empty draft baseline detection={detection}; create_status={status}; create={result}"
+            );
+            assert_eq!(
+                detection["existing_draft_id"], existing_id,
+                "detect must expose own empty draft"
+            );
+            assert_eq!(
+                result["meta"]["word_id"], existing_id,
+                "conflict must offer the same draft"
+            );
+        }
+    }
+    server.abort();
+}
+
+#[sqlx::test]
+async fn empty_draft_bugfix_visibility_race_archive_and_resume(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let other = token(&state, seed_admin(&pool).await);
+    // Detect before another request creates the skeleton: creation must return a resumable conflict.
+    let (_, before) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"schema_version":3,"language":"en","kind":"word","surface":"harbour"})),
+    )
+    .await;
+    assert!(before.get("existing_draft_id").is_none());
+    let id = create_legacy_v3_empty_skeleton(&state, &bearer, "harbour").await;
+    let (_, raced) = call(&state, Method::POST, &format!("{ROOT}/entries"), &bearer, Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"detection_id":before["detection_id"],"kind":"word","headwords":{"mode":"unified","common":"harbour"}}))).await;
+    assert_eq!(raced["code"], "duplicate_word", "{raced}");
+    assert_eq!(raced["meta"]["word_id"], id.to_string());
+    let (_, hidden) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &other,
+        None,
+        Some(json!({"schema_version":3,"language":"en","kind":"word","surface":"harbour"})),
+    )
+    .await;
+    assert!(hidden.get("existing_draft_id").is_none(), "{hidden}");
+    assert_eq!(hidden["matches"], json!([]));
+    let (_, denied) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &other,
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"detection_id":hidden["detection_id"],"kind":"word"})),
+    )
+    .await;
+    assert_eq!(denied["code"], "duplicate_word", "{denied}");
+    assert!(denied["meta"].get("word_id").is_none(), "{denied}");
+    // Same surface in another kind must not expose a word draft.
+    let (_, phrase) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"schema_version":3,"language":"en","kind":"phrase","surface":"harbour"})),
+    )
+    .await;
+    assert!(phrase.get("existing_draft_id").is_none(), "{phrase}");
+    let (status, original) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{original}");
+    assert_eq!(original["word"]["id"], id.to_string());
+    save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &id.to_string(),
+        1,
+        "save",
+        complete_v3_forms_fixture(),
+    )
+    .await;
+    let (_, saved) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"schema_version":3,"language":"en","kind":"word","surface":"harbour"})),
+    )
+    .await;
+    assert!(saved.get("existing_draft_id").is_none(), "{saved}");
+    assert!(!saved["matches"].as_array().unwrap().is_empty());
+    let (_, annotations) = call(&state, Method::POST, &format!("{ROOT}/entries"), &bearer, Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"detection_id":saved["detection_id"],"kind":"word",
+            "headwords":{"mode":"unified","common":"harbour"},
+            "confirmed_surface_match_token":saved["surface_match_page"]["surface_confirmation_token"]}))).await;
+    assert_eq!(annotations["code"], "annotation_conflict", "{annotations}");
+    let archived_id = create_legacy_v3_empty_skeleton(&state, &bearer, "emptyarchiveprobe").await;
+    let (_, before_archive) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(
+            json!({"schema_version":3,"language":"en","kind":"word","surface":"emptyarchiveprobe"}),
+        ),
+    )
+    .await;
+    assert_eq!(before_archive["existing_draft_id"], archived_id.to_string());
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/archive-batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"entries":[{"id":archived_id,"base_revision":1,"base_lifecycle_revision":1}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    let (_, absent) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(
+            json!({"schema_version":3,"language":"en","kind":"word","surface":"emptyarchiveprobe"}),
+        ),
+    )
+    .await;
+    assert!(absent.get("existing_draft_id").is_none(), "{absent}");
+    let (status, replacement) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(
+            json!({"schema_version":3,"detection_id":before_archive["detection_id"],"kind":"word"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "stale hint must not block after archive: {replacement}"
+    );
+    assert_ne!(replacement["word"]["id"], archived_id.to_string());
+    // Final confirmed keys, not the obsolete original detection surface, own the skeleton.
+    let final_body = entry_annotations_create_body(
+        &state,
+        &bearer,
+        "emptyoldprobe",
+        json!({"mode":"unified","common":"emptyfinalprobe"}),
+    )
+    .await;
+    let (status, final_draft) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(final_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{final_draft}");
+    for surface in ["emptyoldprobe", "emptyfinalprobe"] {
+        let (_, detection) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({"schema_version":3,"language":"en","kind":"word","surface":surface})),
+        )
+        .await;
+        if surface == "emptyoldprobe" {
+            assert!(detection.get("existing_draft_id").is_none(), "{detection}");
+        } else {
+            assert_eq!(detection["existing_draft_id"], final_draft["word"]["id"]);
+        }
+    }
+}
+
+async fn annotation_visibility_list(state: &AppState, bearer: &str, query: &str) -> Value {
+    let (status, response) = call(
+        state,
+        Method::GET,
+        &format!("{ROOT}/entries?{query}"),
+        bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    response
+}
+
+#[sqlx::test]
+async fn annotation_visibility_tracks_peers_across_pages_archive_restore_delete(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let first = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let first_id = first["word"]["id"].as_str().unwrap();
+    let (status, annotated) = call(
+        &state,
+        Method::PATCH,
+        &format!("{ROOT}/entries/{first_id}/annotation"),
+        &bearer,
+        None,
+        Some(json!({"annotation":"1","base_annotation_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{annotated}");
+    let alone = annotation_visibility_list(&state, &bearer, "q=harbour").await;
+    assert_eq!(
+        alone["words"][0]["annotation_visible"], false,
+        "own repeated base sources are not peers: {alone}"
+    );
+    assert_eq!(alone["words"][0]["annotation"], "1");
+    // V2 harbor shares only the US prototype with the V3 harbour/harbor entry.
+    let second = create_ready_draft(&state, &pool, &bearer, "harbor").await;
+    let second_id = second["word"]["id"].as_str().unwrap();
+    let filtered = annotation_visibility_list(&state, &bearer, "q=harbour").await;
+    assert_eq!(filtered["words"].as_array().unwrap().len(), 1, "{filtered}");
+    assert_eq!(
+        filtered["words"][0]["annotation_visible"], true,
+        "unlisted peer must count: {filtered}"
+    );
+    for page in [1, 2] {
+        let list =
+            annotation_visibility_list(&state, &bearer, &format!("page_size=1&page={page}")).await;
+        assert_eq!(list["words"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            list["words"][0]["annotation_visible"], true,
+            "V2 and V3 must both count off-page peers: {list}"
+        );
+    }
+    let (status, archived) = call(&state, Method::POST, &format!("{ROOT}/entries/{second_id}/archive"), &bearer, Some(Uuid::now_v7()),
+        Some(json!({"base_revision":second["word"]["revision"],"base_lifecycle_revision":second["word"]["lifecycle_revision"]}))).await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    let alone = annotation_visibility_list(&state, &bearer, "q=harbour").await;
+    assert_eq!(alone["words"][0]["annotation_visible"], false);
+    assert_eq!(alone["words"][0]["annotation"], "1");
+    assert_eq!(
+        alone["words"][0]["annotation_revision"],
+        annotated["annotation_revision"]
+    );
+    assert_eq!(alone["words"][0]["revision"], first["word"]["revision"]);
+    let (status, edited) = call(
+        &state,
+        Method::PATCH,
+        &format!("{ROOT}/entries/{first_id}/annotation"),
+        &bearer,
+        None,
+        Some(json!({"annotation":"2","base_annotation_revision":annotated["annotation_revision"]})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hidden annotation remains editable: {edited}"
+    );
+    let (status, restored) = restore_confirming(&state, &bearer, &archived["word"]).await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    let together = annotation_visibility_list(&state, &bearer, "q=harbour").await;
+    assert_eq!(together["words"][0]["annotation_visible"], true);
+    assert_eq!(together["words"][0]["annotation"], "2");
+    let (status, archived) = call(&state, Method::POST, &format!("{ROOT}/entries/{second_id}/archive"), &bearer, Some(Uuid::now_v7()),
+        Some(json!({"base_revision":restored["word"]["revision"],"base_lifecycle_revision":restored["word"]["lifecycle_revision"]}))).await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    let (status, deleted) = call(&state, Method::POST, &format!("{ROOT}/entries/delete-batch"), &bearer, Some(Uuid::now_v7()),
+        Some(json!({"entries":[{"id":second_id,"base_revision":archived["word"]["revision"],"base_lifecycle_revision":archived["word"]["lifecycle_revision"]}]}))).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    let alone = annotation_visibility_list(&state, &bearer, "q=harbour").await;
+    assert_eq!(alone["words"][0]["annotation_visible"], false);
+    assert_eq!(alone["words"][0]["annotation"], "2");
+}
+
+#[sqlx::test]
+async fn annotation_visibility_respects_draft_owner_and_current_publication(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let other = token(&state, seed_admin(&pool).await);
+    create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let peer = create_ready_draft(&state, &pool, &other, "harbor").await;
+    let list = annotation_visibility_list(&state, &bearer, "q=harbour").await;
+    assert_eq!(
+        list["words"][0]["annotation_visible"], false,
+        "another actor's draft must not count: {list}"
+    );
+    let (status, published) = publish_ready_confirming(&state, &other, &peer).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let list = annotation_visibility_list(&state, &bearer, "q=harbour").await;
+    assert_eq!(
+        list["words"][0]["annotation_visible"], true,
+        "current publication is visible: {list}"
+    );
+    let list = annotation_visibility_list(&state, &other, "q=harbor").await;
+    assert!(
+        list["words"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|word| word["annotation_visible"] == false),
+        "unpublished other-actor prototype must not count: {list}"
+    );
+}
+
+#[sqlx::test]
+async fn annotation_visibility_ignores_non_base_form_matches(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let first = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let mut forms = complete_v3_forms_fixture();
+    forms["pos"][0]["forms"][1]["form_type"] = json!("plural");
+    forms["pos"][0]["forms"][1]["regional_variants"]["uk"]["spelling"] = json!("harbours");
+    forms["pos"][0]["forms"][1]["regional_variants"]["us"]["spelling"] = json!("harbors");
+    save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        first["word"]["id"].as_str().unwrap(),
+        first["word"]["revision"].as_i64().unwrap(),
+        "save",
+        forms,
+    )
+    .await;
+    create_ready_draft(&state, &pool, &bearer, "harbours").await;
+    let list = annotation_visibility_list(&state, &bearer, "q=harbours").await;
+    assert_eq!(list["words"].as_array().unwrap().len(), 2, "{list}");
+    assert!(
+        list["words"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|word| word["annotation_visible"] == false),
+        "surface matches without shared base must not show annotations: {list}"
+    );
+}

@@ -99,6 +99,40 @@ async fn lock_keys(
 }
 
 impl LexiconService {
+    pub(super) async fn annotation_visible_entry_ids(
+        &self,
+        actor_id: Uuid,
+        entry_ids: &[Uuid],
+    ) -> Result<BTreeSet<Uuid>, LexiconServiceError> {
+        if entry_ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        // Same effective prototype/visibility rules as annotation_groups_in.
+        // Inline the CTE so the requested IDs restrict the target-side source scan.
+        let ids = sqlx::query_scalar::<_, Uuid>(r#"
+            WITH visible_bases AS NOT MATERIALIZED (
+                SELECT source.entry_id, entry.kind, source.language,
+                       source.dialect_scope, source.normalized_surface
+                FROM lexicon.surface_sources source
+                JOIN lexicon.entries entry ON entry.id = source.entry_id
+                WHERE source.language = 'en' AND source.is_deleted = FALSE
+                  AND entry.archived_at IS NULL
+                  AND ((source.content_schema_version = 3 AND source.source_kind = 'form_variant' AND source.form_type = 'base')
+                    OR (source.content_schema_version = 2 AND source.source_kind = 'headword'))
+                  AND ((source.content_scope = 'draft' AND entry.created_by_admin_id = $2)
+                    OR (source.content_scope = 'current_publication' AND source.publication_id = entry.current_publication_id))
+            )
+            SELECT DISTINCT target.entry_id
+            FROM visible_bases target
+            JOIN visible_bases peer ON peer.entry_id <> target.entry_id
+              AND peer.language = target.language AND peer.kind = target.kind
+              AND peer.dialect_scope = target.dialect_scope
+              AND peer.normalized_surface = target.normalized_surface
+            WHERE target.entry_id = ANY($1)
+        "#).bind(entry_ids).bind(actor_id).fetch_all(self.repository.pool()).await.map_err(database_error)?;
+        Ok(ids.into_iter().collect())
+    }
+
     async fn annotation_groups_in(
         &self,
         tx: &mut Transaction<'_, Postgres>,

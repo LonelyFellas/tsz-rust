@@ -431,6 +431,7 @@ impl LexiconService {
                     word.kind,
                     &encoded_initial_keys,
                     None,
+                    None,
                 )
                 .await?;
                 for key in &initial_keys {
@@ -877,6 +878,7 @@ impl LexiconService {
             entry_kind,
             initial_headword_keys,
             None,
+            Some(actor_id),
         )
         .await?;
         let material = self
@@ -956,6 +958,7 @@ impl LexiconService {
             entry_kind,
             initial_headword_keys,
             None,
+            Some(actor_id),
         )
         .await?;
         let material = self
@@ -1038,7 +1041,45 @@ impl LexiconService {
         entry_kind: WordEntryKindV3,
         initial_headword_keys: &[String],
         excluded_entry_id: Option<Uuid>,
+        resume_actor_id: Option<Uuid>,
     ) -> Result<(), LexiconServiceError> {
+        if self
+            .v3_empty_draft_conflict_in(
+                tx,
+                entry_kind,
+                initial_headword_keys,
+                excluded_entry_id,
+                None,
+            )
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        if let Some(actor_id) = resume_actor_id
+            && let Some(id) = self
+                .v3_empty_draft_conflict_in(
+                    tx,
+                    entry_kind,
+                    initial_headword_keys,
+                    excluded_entry_id,
+                    Some(actor_id),
+                )
+                .await?
+        {
+            return Err(LexiconServiceError::ExistingEmptyDraft(id));
+        }
+        Err(LexiconServiceError::DuplicateWord)
+    }
+
+    pub(super) async fn v3_empty_draft_conflict_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        entry_kind: WordEntryKindV3,
+        initial_headword_keys: &[String],
+        excluded_entry_id: Option<Uuid>,
+        visible_to: Option<Uuid>,
+    ) -> Result<Option<Uuid>, LexiconServiceError> {
         let normalized_surfaces = initial_headword_keys
             .iter()
             .map(|key| {
@@ -1047,10 +1088,9 @@ impl LexiconService {
                     .ok_or_else(invariant_record)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let hidden_initial_headword_conflict = sqlx::query_scalar::<_, bool>(
+        sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT EXISTS (
-                SELECT 1
+                SELECT state.entry_id
                 FROM lexicon.v3_entry_state state
                 JOIN lexicon.entries entry ON entry.id = state.entry_id
                 WHERE (
@@ -1063,6 +1103,7 @@ impl LexiconService {
                     )
                   AND entry.archived_at IS NULL
                   AND entry.kind = $2
+                  AND ($5::uuid IS NULL OR entry.created_by_admin_id = $5)
                   AND ($4::uuid IS NULL OR state.entry_id <> $4)
                   AND NOT EXISTS (
                       SELECT 1
@@ -1070,20 +1111,18 @@ impl LexiconService {
                       WHERE source.entry_id = state.entry_id
                         AND source.is_deleted = FALSE
                   )
-            )
+                ORDER BY entry.created_at, state.entry_id
+                LIMIT 1
             "#,
         )
         .bind(initial_headword_keys)
         .bind(v3_kind_string(entry_kind))
         .bind(&normalized_surfaces)
         .bind(excluded_entry_id)
-        .fetch_one(&mut **tx)
+        .bind(visible_to)
+        .fetch_optional(&mut **tx)
         .await
-        .map_err(database_error)?;
-        if hidden_initial_headword_conflict {
-            return Err(LexiconServiceError::DuplicateWord);
-        }
-        Ok(())
+        .map_err(database_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1195,6 +1234,7 @@ impl LexiconService {
                 entry_kind,
                 &encoded_initial_keys,
                 Some(entry_id),
+                None,
             )
             .await?;
         }

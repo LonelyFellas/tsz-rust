@@ -1231,8 +1231,22 @@ impl LexiconService {
                 suggested_pos.push(pos);
             }
         }
+        let mut tx = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        let keys = initial_v3_headword_keys(&WordHeadwordsV2::Unified {
+            common: normalized.display.clone(),
+        })?;
+        let existing_draft_id = self
+            .v3_empty_draft_conflict_in(&mut tx, input.kind, &keys, None, Some(actor_id))
+            .await?;
+        tx.commit().await.map_err(database_error)?;
         let now = Utc::now();
         let detection = DetectLexiconSurfaceResponseV3 {
+            existing_draft_id,
             schema_version: 3,
             detection_id,
             expires_at: now + Duration::from_std(V3_DETECTION_TTL).expect("five minutes is valid"),
