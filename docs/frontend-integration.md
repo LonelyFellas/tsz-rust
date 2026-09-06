@@ -1567,4 +1567,34 @@ JSONB 走，不需要新表新列），revert 即可回退；但已经写进库�
 
 `AdminWordListItem`与`AdminWordListItemV3`新增必填 `annotation_visible: boolean`，只控制列表标注和tooltip展示。前端用 `annotation && annotation_visible` 渲染，编辑入口继续读取原annotation；不要在隐藏时清空标注或改变修订。分页、过滤外的同原型词条也参与后端判断，前端不得按当前页计数。
 
-部署顺序：前端先 `sync:openapi` 并安排两端契约同步更新。该字段必填，旧后端缺字段与旧客户端不接受新字段均需避免，不能长期混用。后端权威源为实际worktree的 `docs/openapi.json`。归档、恢复、删除或创建后沿用列表失效刷新即可；本次无新迁移或详情字段。
+### 24.1 部署顺序与兼容性
+
+**这次不是单向兼容，前后端必须同批部署。** `annotation_visible` 是列表行的**必填**键，
+两个方向都会打挂：
+
+| 顺序 | 结果 |
+| --- | --- |
+| 只上后端 | 已部署前端的 `AdminWordListItemV3` 是 `additionalProperties: false` 且不认识这个键，整行拒收 → 智能词库列表整页报错（不是降级） |
+| 只上前端 | 新前端把它列入 `required`，旧后端不返回 → 同样整页失败 |
+
+所以按「前端 `sync:openapi` 合并 → 部署 web（C 端不读 admin 契约，先上无风险）→ 后端 CI 产物
+预先下载校验、只读预检做完 → 部署 admin → **紧接着**切后端二进制」执行，把窗口压到二进制
+原子替换那一两分钟。这与 §22.4 的处置一致。
+
+后端权威源为 `tsz-rust/docs/openapi.json`（用 `OPENAPI_SOURCE` 显式指向该仓，不要指向个人
+worktree，否则他人重跑 `sync:openapi` 无法复现快照）。归档、恢复、删除或创建后沿用列表失效
+刷新即可；本次无新迁移或详情字段。
+
+回退：无迁移，revert 二进制即可，但前端须同时回退到不要求该字段的版本。
+
+### 24.2 已知取舍：徽标可见性按 actor 作用域
+
+`annotation_visible` 的同原型对照集与写路径 `annotation_groups_in` 同口径——草稿只算**当前
+管理员自己的**。而管理列表本身没有 actor 过滤（别人的草稿连创建人、释义、状态一起展示）。
+因此两个管理员就同一词面各有一条词条时，双方看到的徽标显隐可能相反。
+
+这是有意为之并有测试保护的（`tests/lexicon_handler.rs` 的
+`another actor's draft must not count`）。若后续认为徽标应回答「这张列表里还有没有同名行」，
+则应把 `annotation_visible_entry_ids` 的草稿判定改为与列表一致
+（`source_revision = entry.revision AND is_deleted = FALSE`，去掉 actor 条件），
+`annotation_groups_in` 保持 actor 作用域不动（它管的是写入不变量）。**尚未定案。**
