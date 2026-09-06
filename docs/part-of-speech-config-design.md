@@ -76,6 +76,8 @@ WHERE id = TRUE;
 | `name_zh`             | TEXT        | NOT NULL                                                   |
 | `name_en`             | TEXT        | NOT NULL                                                   |
 | `abbreviation`        | TEXT        | NOT NULL                                                   |
+| `short_name_zh`       | TEXT        | NOT NULL；简洁显示（业务页面用的短中文名），2026-09-06 新增 |
+| `full_name_en`        | TEXT        | NOT NULL；英文全称，2026-09-06 新增                        |
 | `sort_order`          | INTEGER     | NOT NULL，默认 0                                           |
 | `revision`            | BIGINT      | NOT NULL，默认 1，必须大于 0                               |
 | `created_by_admin_id` | UUID        | NULL，FK `admins.id` `ON DELETE RESTRICT`；系统种子为 NULL |
@@ -88,10 +90,13 @@ WHERE id = TRUE;
 - `code`：`^[a-z][a-z0-9_]{0,31}$`，数据库 CHECK 与 Rust 校验同时执行；
 - `name_zh`、`name_en`：服务端 trim 后长度 1–64；数据库 CHECK 同时保证已 trim 且长度合法；
 - `abbreviation`：服务端 trim 后长度 1–16；数据库 CHECK 同时保证已 trim 且长度合法；
+- `short_name_zh`：服务端 trim 后长度 1–16；`full_name_en`：trim 后 1–64；数据库 CHECK 同样保证；
 - `code` 全局唯一；
 - `name_zh` 全局唯一；
 - `name_en` 忽略大小写后全局唯一；
 - `abbreviation` 忽略大小写后全局唯一；
+- `short_name_zh` 全局唯一（`catalog_parts_of_speech_short_name_zh_unique_idx`）；
+- `full_name_en` 忽略大小写后全局唯一（`catalog_parts_of_speech_full_name_en_unique_idx`）；
 - `sort_order` 接受完整的 PostgreSQL `INTEGER`（有符号 32 位整数）值域并允许重复；读取时按
   `sort_order, created_at, id` 稳定排序。负数用于把项目排到默认项之前，不属于业务校验错误。
 
@@ -137,6 +142,9 @@ CHECK (revision > 0)
 | `code`                | TEXT        | NOT NULL，由固定名字的唯一索引保证唯一，创建后不可修改     |
 | `name_zh`             | TEXT        | NOT NULL                                                   |
 | `name_en`             | TEXT        | NOT NULL                                                   |
+| `short_name_zh`       | TEXT        | NOT NULL；简洁显示，2026-09-06 新增，同父级允许重复         |
+| `abbreviation`        | TEXT        | NOT NULL；英文缩写，2026-09-06 新增，同父级允许重复         |
+| `full_name_en`        | TEXT        | NOT NULL；英文全称，2026-09-06 新增，同父级忽略大小写唯一   |
 | `sort_order`          | INTEGER     | NOT NULL，默认 0                                           |
 | `revision`            | BIGINT      | NOT NULL，默认 1，必须大于 0                               |
 | `created_by_admin_id` | UUID        | NULL，FK `admins.id` `ON DELETE RESTRICT`；系统种子为 NULL |
@@ -147,10 +155,10 @@ CHECK (revision > 0)
 父级外键使用：
 
 ```sql
-REFERENCES catalog.parts_of_speech(id) ON DELETE CASCADE
+REFERENCES catalog.parts_of_speech(id) ON DELETE RESTRICT
 ```
 
-只有未被词条引用的基本词性才允许删除，因此父级删除成功后可以安全级联删除其细分词性。
+只有未被词条引用、且已不再挂有任何细分词性的基本词性才允许删除（仍有细分词性时返回 409 `part_of_speech_has_sub_parts`，2026-09-06 起）；数据库外键 `ON DELETE RESTRICT`（迁移 `20260906160000`）在同一口径下兜底。
 未来智能词库引用本表时使用 `ON DELETE RESTRICT`。
 
 校验：
@@ -190,46 +198,40 @@ CHECK (revision > 0)
 
 ## 3. 默认数据
 
-migration 中初始化当前前端 mock 使用的 11 个基本词性。英文名大小写和排序值也是初始展示契约，
-不得在后端自行改成 Title Case：
+migration 初始化五个**基础词性**（2026-09-06 起：介词、冠词、限定词、连词、数词、感叹词六个
+非基础种子已由 `20260906120000` 迁移下线，管理员可按需自建，但自建的非基础词性不能挂细分词性）。
+英文名大小写和排序值也是初始展示契约，不得在后端自行改成 Title Case：
 
-| code           | 中文名 | 英文名       | 缩写  | sort_order |
-| -------------- | ------ | ------------ | ----- | ---------: |
-| `noun`         | 名词   | NOUN         | n.    |         10 |
-| `pronoun`      | 代词   | PRONOUN      | pron. |         20 |
-| `verb`         | 动词   | VERB         | v.    |         30 |
-| `adjective`    | 形容词 | ADJECTIVE    | adj.  |         40 |
-| `adverb`       | 副词   | ADVERB       | adv.  |         50 |
-| `preposition`  | 介词   | PREPOSITION  | prep. |         60 |
-| `article`      | 冠词   | ARTICLE      | art.  |         70 |
-| `determiner`   | 限定词 | DETERMINER   | det.  |         80 |
-| `conjunction`  | 连词   | CONJUNCTION  | conj. |         90 |
-| `numeral`      | 数词   | NUMERAL      | num.  |        100 |
-| `interjection` | 感叹词 | INTERJECTION | int.  |        110 |
+| code        | 中文名 | 英文名    | 缩写  | 简洁显示 | 英文全称  | sort_order |
+| ----------- | ------ | --------- | ----- | -------- | --------- | ---------: |
+| `noun`      | 名词   | NOUN      | n.    | 名词     | noun      |         10 |
+| `pronoun`   | 代词   | PRONOUN   | pron. | 代词     | pronoun   |         20 |
+| `verb`      | 动词   | VERB      | v.    | 动词     | verb      |         30 |
+| `adjective` | 形容词 | ADJECTIVE | adj.  | 形容词   | adjective |         40 |
+| `adverb`    | 副词   | ADVERB    | adv.  | 副词     | adverb    |         50 |
 
-同时初始化当前 19 个细分词性，完整值与前端 fixture 一致：
+**基础词性规则**：只有这五个编码允许扩展细分词性。规则不落库，由 `catalog::rules::is_basic_part_of_speech`
+按 `code` 派生成 `sub_parts_extensible` 随管理项与 catalog 项下发；对非基础父级创建细分词性返回
+409 `sub_part_of_speech_not_allowed`（meta 带 `part_of_speech_id`、`code`）。
 
-| 基本词性       | code        | 中文名     | 英文名            | sort_order |
-| -------------- | ----------- | ---------- | ----------------- | ---------: |
-| `verb`         | `V-T`       | 及物动词   | Transitive verb   |         10 |
-| `verb`         | `V-I`       | 不及物动词 | Intransitive verb |         20 |
-| `verb`         | `V-LINK`    | 系动词     | Linking verb      |         30 |
-| `verb`         | `AUX`       | 助动词     | Auxiliary verb    |         40 |
-| `verb`         | `MODAL`     | 情态动词   | Modal verb        |         50 |
-| `adjective`    | `ADJ`       | 形容词     | Adjective         |         60 |
-| `adverb`       | `ADV`       | 副词       | Adverb            |         70 |
-| `noun`         | `N-COUNT`   | 可数名词   | Countable noun    |         80 |
-| `noun`         | `N-UNCOUNT` | 不可数名词 | Uncountable noun  |         90 |
-| `noun`         | `N-PROPER`  | 专有名词   | Proper noun       |        100 |
-| `noun`         | `N-PLURAL`  | 复数名词   | Plural noun       |        110 |
-| `noun`         | `N-SING`    | 单数名词   | Singular noun     |        120 |
-| `pronoun`      | `PRON`      | 代词       | Pronoun           |        130 |
-| `preposition`  | `PREP`      | 介词       | Preposition       |        140 |
-| `conjunction`  | `CONJ`      | 连词       | Conjunction       |        150 |
-| `determiner`   | `DET`       | 限定词     | Determiner        |        160 |
-| `article`      | `ART`       | 冠词       | Article           |        170 |
-| `numeral`      | `NUM`       | 数词       | Numeral           |        180 |
-| `interjection` | `INT`       | 感叹词     | Interjection      |        190 |
+同时初始化五个基础词性下的 13 个细分词性，完整值与前端 fixture 一致（简洁显示、英文缩写、英文全称三列
+由 `20260906150000` 迁移补齐；简洁显示与缩写允许同父级重复，英文全称同父级忽略大小写唯一）：
+
+| 基本词性    | code        | 中文名     | 英文名            | 简洁显示   | 缩写     | 英文全称          | sort_order |
+| ----------- | ----------- | ---------- | ----------------- | ---------- | -------- | ----------------- | ---------: |
+| `verb`      | `V-T`       | 及物动词   | Transitive verb   | 及物动词   | vt.      | transitive verb   |         10 |
+| `verb`      | `V-I`       | 不及物动词 | Intransitive verb | 不及物动词 | vi.      | intransitive verb |         20 |
+| `verb`      | `V-LINK`    | 系动词     | Linking verb      | 系动词     | link.v.  | linking verb      |         30 |
+| `verb`      | `AUX`       | 助动词     | Auxiliary verb    | 助动词     | aux.     | auxiliary verb    |         40 |
+| `verb`      | `MODAL`     | 情态动词   | Modal verb        | 情态动词   | modal v. | modal verb        |         50 |
+| `adjective` | `ADJ`       | 形容词     | Adjective         | 形容词     | adj.     | adjective         |         60 |
+| `adverb`    | `ADV`       | 副词       | Adverb            | 副词       | adv.     | adverb            |         70 |
+| `noun`      | `N-COUNT`   | 可数名词   | Countable noun    | 可数名词   | n.       | countable noun    |         80 |
+| `noun`      | `N-UNCOUNT` | 不可数名词 | Uncountable noun  | 不可数名词 | n.       | uncountable noun  |         90 |
+| `noun`      | `N-PROPER`  | 专有名词   | Proper noun       | 专有名词   | n.       | proper noun       |        100 |
+| `noun`      | `N-PLURAL`  | 复数名词   | Plural noun       | 复数名词   | n-pl.    | plural noun       |        110 |
+| `noun`      | `N-SING`    | 单数名词   | Singular noun     | 单数名词   | n.       | singular noun     |        120 |
+| `pronoun`   | `PRON`      | 代词       | Pronoun           | 代词       | pron.    | pronoun           |        130 |
 
 种子数据的 `created_by_admin_id` 为 NULL。API 映射为：
 
@@ -531,7 +533,7 @@ WHERE id = $id AND revision = $base_revision;
    `revision_conflict`，不继续引用检查或删除；
 3. 查询当前草稿与仍保留 publication 的真实引用数量；
 4. 有引用则返回 409，不修改数据；
-5. 删除细分词性，或删除基本词性并级联其未引用细分词性；
+5. 删除细分词性，或删除已不再挂有细分词性的基本词性；
 6. `catalog.metadata.version + 1`；
 7. 提交并返回 204。
 
@@ -670,7 +672,9 @@ lexicon.entry_publication_sub_part_of_speech_refs
 
 ### 11.1 Schema 测试
 
-- 默认种子数量为 11 个基本词性、19 个细分词性；
+- 默认种子数量为 5 个基础词性、13 个细分词性（2026-09-06 起）；
+- `short_name_zh` / `full_name_en` 的 NOT NULL、CHECK 与固定名唯一索引；
+- 细分词性 `short_name_zh` / `abbreviation` / `full_name_en` 的 NOT NULL、CHECK 与同父级唯一索引；
 - 种子的名称、父级和 sort_order 与 §3 完全一致；
 - code、名称和缩写唯一约束；
 - 唯一索引使用 §2 固定名字，能够稳定映射冲突字段；
@@ -678,7 +682,7 @@ lexicon.entry_publication_sub_part_of_speech_refs
 - 未 trim、空白、超长名称/缩写被 CHECK 拒绝；
 - 细分词性不能引用不存在的基本词性；
 - `catalog.metadata` 不能插入 `id = FALSE`，version 必须大于 0；
-- 删除未引用基本词性会级联删除其细分词性；
+- 删除基本词性前须先删完其细分词性（仍挂有时 409 `part_of_speech_has_sub_parts`，外键 RESTRICT 兜底）；
 - revision 必须大于 0；
 - catalog 的管理员审计 FK 使用预定的 RESTRICT 行为。
 - lexicon 落地时四类 catalog 引用 FK 使用 §10 固定 constraint 名。

@@ -14,6 +14,8 @@ impl CatalogService {
             name_zh: normalized_text(request.name_zh, "name_zh", 64)?,
             name_en: normalized_text(request.name_en, "name_en", 64)?,
             abbreviation: normalized_text(request.abbreviation, "abbreviation", 16)?,
+            short_name_zh: normalized_text(request.short_name_zh, "short_name_zh", 16)?,
+            full_name_en: normalized_text(request.full_name_en, "full_name_en", 64)?,
             sort_order: request.sort_order,
             actor_id,
         };
@@ -50,6 +52,8 @@ impl CatalogService {
             name_zh: normalized_text(request.name_zh, "name_zh", 64)?,
             name_en: normalized_text(request.name_en, "name_en", 64)?,
             abbreviation: normalized_text(request.abbreviation, "abbreviation", 16)?,
+            short_name_zh: normalized_text(request.short_name_zh, "short_name_zh", 16)?,
+            full_name_en: normalized_text(request.full_name_en, "full_name_en", 64)?,
             sort_order: request.sort_order,
         };
         let mut tx = self
@@ -109,6 +113,13 @@ impl CatalogService {
                 usage_count: Some(usage_count),
             });
         }
+        // 还挂着细分词性时不允许连带删除：要求管理员先清空细分词性，避免一键删掉一整组配置。
+        let sub_part_count = CatalogRepository::sub_part_count(&mut tx, id)
+            .await
+            .map_err(map_repository_error)?;
+        if sub_part_count > 0 {
+            return Err(CatalogServiceError::PartHasSubParts);
+        }
         CatalogRepository::delete_part(&mut tx, id)
             .await
             .map_err(map_repository_error)?;
@@ -135,6 +146,9 @@ impl CatalogService {
             code: valid_sub_part_code(request.code)?,
             name_zh: normalized_text(request.name_zh, "name_zh", 64)?,
             name_en: normalized_text(request.name_en, "name_en", 64)?,
+            short_name_zh: normalized_text(request.short_name_zh, "short_name_zh", 16)?,
+            abbreviation: normalized_text(request.abbreviation, "abbreviation", 16)?,
+            full_name_en: normalized_text(request.full_name_en, "full_name_en", 64)?,
             sort_order: request.sort_order,
             actor_id,
         };
@@ -144,12 +158,18 @@ impl CatalogService {
             .begin()
             .await
             .map_err(database_error)?;
-        if CatalogRepository::part_revision(&mut tx, part_id, false)
+        let Some((_, parent_code)) = CatalogRepository::part_revision(&mut tx, part_id, false)
             .await
             .map_err(map_repository_error)?
-            .is_none()
-        {
+        else {
             return Err(CatalogServiceError::PartNotFound);
+        };
+        // 细分词性只能挂在五个基础词性下；非基础父级在写入前拦下，不依赖前端过滤。
+        if !crate::catalog::rules::is_basic_part_of_speech(&parent_code) {
+            return Err(CatalogServiceError::SubPartNotAllowed {
+                part_of_speech_id: part_id,
+                code: parent_code,
+            });
         }
         CatalogRepository::insert_sub_part(&mut tx, &value)
             .await
@@ -177,6 +197,9 @@ impl CatalogService {
         let changes = SubPartChanges {
             name_zh: normalized_text(request.name_zh, "name_zh", 64)?,
             name_en: normalized_text(request.name_en, "name_en", 64)?,
+            short_name_zh: normalized_text(request.short_name_zh, "short_name_zh", 16)?,
+            abbreviation: normalized_text(request.abbreviation, "abbreviation", 16)?,
+            full_name_en: normalized_text(request.full_name_en, "full_name_en", 64)?,
             sort_order: request.sort_order,
         };
         let mut tx = self

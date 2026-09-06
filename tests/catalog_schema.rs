@@ -59,12 +59,13 @@ async fn insert_part_values(
     sort_order: i32,
 ) -> Result<Uuid, sqlx::Error> {
     let id = Uuid::now_v7();
+    let suffix = short_id(id);
     sqlx::query(
         r#"
         INSERT INTO catalog.parts_of_speech (
-            id, code, name_zh, name_en, abbreviation, sort_order
+            id, code, name_zh, name_en, abbreviation, sort_order, short_name_zh, full_name_en
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(id)
@@ -73,6 +74,8 @@ async fn insert_part_values(
     .bind(name_en)
     .bind(abbreviation)
     .bind(sort_order)
+    .bind(format!("简{suffix}"))
+    .bind(format!("full {suffix}"))
     .execute(pool)
     .await?;
     Ok(id)
@@ -84,9 +87,9 @@ async fn insert_part(pool: &PgPool, code: &str) -> Result<Uuid, sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO catalog.parts_of_speech (
-            id, code, name_zh, name_en, abbreviation
+            id, code, name_zh, name_en, abbreviation, short_name_zh, full_name_en
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(id)
@@ -94,6 +97,8 @@ async fn insert_part(pool: &PgPool, code: &str) -> Result<Uuid, sqlx::Error> {
     .bind(format!("测试{suffix}"))
     .bind(format!("Test {suffix}"))
     .bind(format!("t{suffix}"))
+    .bind(format!("简{suffix}"))
+    .bind(format!("full {suffix}"))
     .execute(pool)
     .await?;
     Ok(id)
@@ -111,9 +116,10 @@ async fn insert_sub_values(
     sqlx::query(
         r#"
         INSERT INTO catalog.sub_parts_of_speech (
-            id, part_of_speech_id, code, name_zh, name_en, sort_order
+            id, part_of_speech_id, code, name_zh, name_en, sort_order,
+            short_name_zh, abbreviation, full_name_en
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, '简', 'ab.', 'full ' || $3)
         "#,
     )
     .bind(id)
@@ -133,9 +139,10 @@ async fn insert_sub(pool: &PgPool, parent_id: Uuid, code: &str) -> Result<Uuid, 
     sqlx::query(
         r#"
         INSERT INTO catalog.sub_parts_of_speech (
-            id, part_of_speech_id, code, name_zh, name_en
+            id, part_of_speech_id, code, name_zh, name_en,
+            short_name_zh, abbreviation, full_name_en
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, '简', 'ab.', 'full ' || $3)
         "#,
     )
     .bind(id)
@@ -181,8 +188,8 @@ async fn catalog_schema_and_metadata_seed_are_present(pool: PgPool) {
     .expect("查询 catalog.metadata 应成功");
     assert_eq!(
         rows,
-        vec![(true, 2, true)],
-        "能力契约迁移后 metadata 应为唯一一行 version=2"
+        vec![(true, 4, true)],
+        "细分词性展示字段迁移后 metadata 应为唯一一行 version=4"
     );
 }
 
@@ -214,9 +221,9 @@ async fn metadata_rejects_false_id_and_nonpositive_version(pool: PgPool) {
 
 #[sqlx::test]
 async fn part_of_speech_seeds_match_the_contract(pool: PgPool) {
-    let actual: Vec<(String, String, String, String, i32)> = sqlx::query_as(
+    let actual: Vec<(String, String, String, String, String, String, i32)> = sqlx::query_as(
         r#"
-        SELECT code, name_zh, name_en, abbreviation, sort_order
+        SELECT code, name_zh, name_en, abbreviation, short_name_zh, full_name_en, sort_order
         FROM catalog.parts_of_speech
         ORDER BY sort_order, created_at, id
         "#,
@@ -225,39 +232,48 @@ async fn part_of_speech_seeds_match_the_contract(pool: PgPool) {
     .await
     .expect("查询基本词性种子应成功");
 
+    // 2026-09-06 起默认种子只剩五个基础词性；介词等六个非基础种子已随规则迁移下线。
     let expected = vec![
-        ("noun", "名词", "NOUN", "n.", 10),
-        ("pronoun", "代词", "PRONOUN", "pron.", 20),
-        ("verb", "动词", "VERB", "v.", 30),
-        ("adjective", "形容词", "ADJECTIVE", "adj.", 40),
-        ("adverb", "副词", "ADVERB", "adv.", 50),
-        ("preposition", "介词", "PREPOSITION", "prep.", 60),
-        ("article", "冠词", "ARTICLE", "art.", 70),
-        ("determiner", "限定词", "DETERMINER", "det.", 80),
-        ("conjunction", "连词", "CONJUNCTION", "conj.", 90),
-        ("numeral", "数词", "NUMERAL", "num.", 100),
-        ("interjection", "感叹词", "INTERJECTION", "int.", 110),
+        ("noun", "名词", "NOUN", "n.", "名词", "noun", 10),
+        ("pronoun", "代词", "PRONOUN", "pron.", "代词", "pronoun", 20),
+        ("verb", "动词", "VERB", "v.", "动词", "verb", 30),
+        (
+            "adjective",
+            "形容词",
+            "ADJECTIVE",
+            "adj.",
+            "形容词",
+            "adjective",
+            40,
+        ),
+        ("adverb", "副词", "ADVERB", "adv.", "副词", "adverb", 50),
     ]
     .into_iter()
-    .map(|(code, zh, en, abbreviation, order)| {
+    .map(|(code, zh, en, abbreviation, short_zh, full_en, order)| {
         (
             code.to_owned(),
             zh.to_owned(),
             en.to_owned(),
             abbreviation.to_owned(),
+            short_zh.to_owned(),
+            full_en.to_owned(),
             order,
         )
     })
     .collect::<Vec<_>>();
 
-    assert_eq!(actual, expected, "11 个基本词性种子必须逐字段匹配设计契约");
+    assert_eq!(actual, expected, "5 个基础词性种子必须逐字段匹配设计契约");
 }
+
+/// (parent.code, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en, sort_order)
+type SubSeedRow = (String, String, String, String, String, String, String, i32);
 
 #[sqlx::test]
 async fn sub_part_of_speech_seeds_match_the_contract(pool: PgPool) {
-    let actual: Vec<(String, String, String, String, i32)> = sqlx::query_as(
+    let actual: Vec<SubSeedRow> = sqlx::query_as(
         r#"
-        SELECT parent.code, child.code, child.name_zh, child.name_en, child.sort_order
+        SELECT parent.code, child.code, child.name_zh, child.name_en,
+               child.short_name_zh, child.abbreviation, child.full_name_en, child.sort_order
         FROM catalog.sub_parts_of_speech AS child
         JOIN catalog.parts_of_speech AS parent ON parent.id = child.part_of_speech_id
         ORDER BY child.sort_order, child.created_at, child.id
@@ -268,39 +284,141 @@ async fn sub_part_of_speech_seeds_match_the_contract(pool: PgPool) {
     .expect("查询细分词性种子应成功");
 
     let expected = vec![
-        ("verb", "V-T", "及物动词", "Transitive verb", 10),
-        ("verb", "V-I", "不及物动词", "Intransitive verb", 20),
-        ("verb", "V-LINK", "系动词", "Linking verb", 30),
-        ("verb", "AUX", "助动词", "Auxiliary verb", 40),
-        ("verb", "MODAL", "情态动词", "Modal verb", 50),
-        ("adjective", "ADJ", "形容词", "Adjective", 60),
-        ("adverb", "ADV", "副词", "Adverb", 70),
-        ("noun", "N-COUNT", "可数名词", "Countable noun", 80),
-        ("noun", "N-UNCOUNT", "不可数名词", "Uncountable noun", 90),
-        ("noun", "N-PROPER", "专有名词", "Proper noun", 100),
-        ("noun", "N-PLURAL", "复数名词", "Plural noun", 110),
-        ("noun", "N-SING", "单数名词", "Singular noun", 120),
-        ("pronoun", "PRON", "代词", "Pronoun", 130),
-        ("preposition", "PREP", "介词", "Preposition", 140),
-        ("conjunction", "CONJ", "连词", "Conjunction", 150),
-        ("determiner", "DET", "限定词", "Determiner", 160),
-        ("article", "ART", "冠词", "Article", 170),
-        ("numeral", "NUM", "数词", "Numeral", 180),
-        ("interjection", "INT", "感叹词", "Interjection", 190),
+        (
+            "verb",
+            "V-T",
+            "及物动词",
+            "Transitive verb",
+            "及物动词",
+            "vt.",
+            "transitive verb",
+            10,
+        ),
+        (
+            "verb",
+            "V-I",
+            "不及物动词",
+            "Intransitive verb",
+            "不及物动词",
+            "vi.",
+            "intransitive verb",
+            20,
+        ),
+        (
+            "verb",
+            "V-LINK",
+            "系动词",
+            "Linking verb",
+            "系动词",
+            "link.v.",
+            "linking verb",
+            30,
+        ),
+        (
+            "verb",
+            "AUX",
+            "助动词",
+            "Auxiliary verb",
+            "助动词",
+            "aux.",
+            "auxiliary verb",
+            40,
+        ),
+        (
+            "verb",
+            "MODAL",
+            "情态动词",
+            "Modal verb",
+            "情态动词",
+            "modal v.",
+            "modal verb",
+            50,
+        ),
+        (
+            "adjective",
+            "ADJ",
+            "形容词",
+            "Adjective",
+            "形容词",
+            "adj.",
+            "adjective",
+            60,
+        ),
+        (
+            "adverb", "ADV", "副词", "Adverb", "副词", "adv.", "adverb", 70,
+        ),
+        (
+            "noun",
+            "N-COUNT",
+            "可数名词",
+            "Countable noun",
+            "可数名词",
+            "n.",
+            "countable noun",
+            80,
+        ),
+        (
+            "noun",
+            "N-UNCOUNT",
+            "不可数名词",
+            "Uncountable noun",
+            "不可数名词",
+            "n.",
+            "uncountable noun",
+            90,
+        ),
+        (
+            "noun",
+            "N-PROPER",
+            "专有名词",
+            "Proper noun",
+            "专有名词",
+            "n.",
+            "proper noun",
+            100,
+        ),
+        (
+            "noun",
+            "N-PLURAL",
+            "复数名词",
+            "Plural noun",
+            "复数名词",
+            "n-pl.",
+            "plural noun",
+            110,
+        ),
+        (
+            "noun",
+            "N-SING",
+            "单数名词",
+            "Singular noun",
+            "单数名词",
+            "n.",
+            "singular noun",
+            120,
+        ),
+        (
+            "pronoun", "PRON", "代词", "Pronoun", "代词", "pron.", "pronoun", 130,
+        ),
     ]
     .into_iter()
-    .map(|(parent, code, zh, en, order)| {
-        (
-            parent.to_owned(),
-            code.to_owned(),
-            zh.to_owned(),
-            en.to_owned(),
-            order,
-        )
-    })
+    .map(
+        |(parent, code, zh, en, short_zh, abbreviation, full_en, order)| {
+            (
+                parent.to_owned(),
+                code.to_owned(),
+                zh.to_owned(),
+                en.to_owned(),
+                short_zh.to_owned(),
+                abbreviation.to_owned(),
+                full_en.to_owned(),
+                order,
+            )
+        },
+    )
     .collect::<Vec<_>>();
 
-    assert_eq!(actual, expected, "19 个细分词性种子必须逐字段匹配设计契约");
+    assert_eq!(actual, expected, "13 个细分词性种子必须逐字段匹配设计契约");
 }
 
 #[sqlx::test]
@@ -324,7 +442,11 @@ async fn seeds_use_fixed_v7_ids_and_system_audit_fields(pool: PgPool) {
     .await
     .expect("查询种子 ID 与审计字段应成功");
 
-    assert_eq!(rows.len(), 30, "应检查全部 30 条默认种子");
+    assert_eq!(
+        rows.len(),
+        18,
+        "应检查全部 18 条默认种子（5 基本 + 13 细分）"
+    );
     for (id, created_by_is_null, updated_by_is_null, revision) in rows {
         assert_eq!(
             id.get_version_num(),
@@ -531,9 +653,10 @@ async fn part_revision_must_be_positive(pool: PgPool) {
         let result = sqlx::query(
             r#"
             INSERT INTO catalog.parts_of_speech (
-                id, code, name_zh, name_en, abbreviation, revision
+                id, code, name_zh, name_en, abbreviation, revision,
+            short_name_zh, full_name_en
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $3, lower($4))
             "#,
         )
         .bind(id)
@@ -747,9 +870,10 @@ async fn sub_part_revision_must_be_positive(pool: PgPool) {
         let result = sqlx::query(
             r#"
             INSERT INTO catalog.sub_parts_of_speech (
-                id, part_of_speech_id, code, name_zh, name_en, revision
+                id, part_of_speech_id, code, name_zh, name_en, revision,
+                short_name_zh, abbreviation, full_name_en
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, '简', 'ab.', 'full ' || $3)
             "#,
         )
         .bind(Uuid::now_v7())
@@ -781,22 +905,39 @@ async fn sub_part_must_reference_an_existing_parent(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn deleting_part_cascades_its_sub_parts(pool: PgPool) {
-    let parent = insert_part(&pool, "cascade_parent")
+async fn deleting_part_with_sub_parts_is_restricted_until_they_are_removed(pool: PgPool) {
+    let parent = insert_part(&pool, "restrict_parent")
         .await
         .expect("插入待删除基本词性应成功");
-    insert_sub(&pool, parent, "CASCADE-A")
+    insert_sub(&pool, parent, "RESTRICT-A")
         .await
         .expect("插入细分词性 A 应成功");
-    insert_sub(&pool, parent, "CASCADE-B")
+    insert_sub(&pool, parent, "RESTRICT-B")
         .await
         .expect("插入细分词性 B 应成功");
 
+    // 2026-09-06 起父级外键为 RESTRICT：仍挂有细分词性时数据库层就拒绝，不再级联。
+    let blocked = sqlx::query("DELETE FROM catalog.parts_of_speech WHERE id = $1")
+        .bind(parent)
+        .execute(&pool)
+        .await;
+    assert_db_error(
+        blocked,
+        FOREIGN_KEY_VIOLATION,
+        Some("catalog_sub_parts_parent_fkey"),
+        "仍挂有细分词性的基本词性不能删除",
+    );
+
+    sqlx::query("DELETE FROM catalog.sub_parts_of_speech WHERE part_of_speech_id = $1")
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .expect("先清空细分词性应成功");
     sqlx::query("DELETE FROM catalog.parts_of_speech WHERE id = $1")
         .bind(parent)
         .execute(&pool)
         .await
-        .expect("删除未被词条引用的基本词性应成功");
+        .expect("清空细分词性后删除基本词性应成功");
 
     let remaining: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM catalog.sub_parts_of_speech WHERE part_of_speech_id = $1",
@@ -804,8 +945,8 @@ async fn deleting_part_cascades_its_sub_parts(pool: PgPool) {
     .bind(parent)
     .fetch_one(&pool)
     .await
-    .expect("查询级联删除结果应成功");
-    assert_eq!(remaining, 0, "删除基本词性应级联删除其全部细分词性");
+    .expect("查询剩余细分词性应成功");
+    assert_eq!(remaining, 0, "父级删除后不应再残留任何细分词性");
 }
 
 #[sqlx::test]
@@ -864,17 +1005,19 @@ async fn audit_columns_reject_nonexistent_admins(pool: PgPool) {
             "created_by_admin_id" => {
                 r#"
                 INSERT INTO catalog.parts_of_speech (
-                    id, code, name_zh, name_en, abbreviation, created_by_admin_id
+                    id, code, name_zh, name_en, abbreviation, created_by_admin_id,
+                    short_name_zh, full_name_en
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $3, lower($4))
                 "#
             }
             "updated_by_admin_id" => {
                 r#"
                 INSERT INTO catalog.parts_of_speech (
-                    id, code, name_zh, name_en, abbreviation, updated_by_admin_id
+                    id, code, name_zh, name_en, abbreviation, updated_by_admin_id,
+                    short_name_zh, full_name_en
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, $3, lower($4))
                 "#
             }
             _ => unreachable!("审计列名来自固定测试用例"),
@@ -905,17 +1048,19 @@ async fn audit_columns_reject_nonexistent_admins(pool: PgPool) {
             "created_by_admin_id" => {
                 r#"
                 INSERT INTO catalog.sub_parts_of_speech (
-                    id, part_of_speech_id, code, name_zh, name_en, created_by_admin_id
+                    id, part_of_speech_id, code, name_zh, name_en, created_by_admin_id,
+                    short_name_zh, abbreviation, full_name_en
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, '简', 'ab.', 'full ' || $3)
                 "#
             }
             "updated_by_admin_id" => {
                 r#"
                 INSERT INTO catalog.sub_parts_of_speech (
-                    id, part_of_speech_id, code, name_zh, name_en, updated_by_admin_id
+                    id, part_of_speech_id, code, name_zh, name_en, updated_by_admin_id,
+                    short_name_zh, abbreviation, full_name_en
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, $6, '简', 'ab.', 'full ' || $3)
                 "#
             }
             _ => unreachable!("审计列名来自固定测试用例"),
@@ -1000,9 +1145,10 @@ async fn referenced_admin_cannot_be_deleted(pool: PgPool) {
         r#"
         INSERT INTO catalog.parts_of_speech (
             id, code, name_zh, name_en, abbreviation,
-            created_by_admin_id, updated_by_admin_id
+            created_by_admin_id, updated_by_admin_id,
+            short_name_zh, full_name_en
         )
-        VALUES ($1, 'audited_part', '有审计词性', 'Audited Part', 'audit', $2, $2)
+        VALUES ($1, 'audited_part', '有审计词性', 'Audited Part', 'audit', $2, $2, '有审计', 'audited part')
         "#,
     )
     .bind(id)
@@ -1063,4 +1209,215 @@ async fn all_fixed_catalog_indexes_exist(pool: PgPool) {
         "catalog_sub_parts_order_idx".to_owned(),
     ];
     assert_eq!(actual, expected, "设计中固定名称的 9 个索引必须全部存在");
+}
+
+// ===== 基本词性：简洁显示 / 英文全称（2026-09-06 新增列） =====
+
+async fn insert_part_display(
+    pool: &PgPool,
+    short_name_zh: &str,
+    full_name_en: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::now_v7();
+    let suffix = short_id(id);
+    sqlx::query(
+        r#"
+        INSERT INTO catalog.parts_of_speech (
+            id, code, name_zh, name_en, abbreviation, short_name_zh, full_name_en
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(id)
+    .bind(format!("d{suffix}"))
+    .bind(format!("显示{suffix}"))
+    .bind(format!("Display {suffix}"))
+    .bind(format!("d{suffix}"))
+    .bind(short_name_zh)
+    .bind(full_name_en)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+#[sqlx::test]
+async fn part_display_names_use_fixed_unique_index_names(pool: PgPool) {
+    let cases = [
+        (
+            "名词",
+            "Unique Full One",
+            "catalog_parts_of_speech_short_name_zh_unique_idx",
+        ),
+        (
+            "唯一简称二",
+            "NOUN",
+            "catalog_parts_of_speech_full_name_en_unique_idx",
+        ),
+    ];
+    for (short_name_zh, full_name_en, expected_index) in cases {
+        let result = insert_part_display(&pool, short_name_zh, full_name_en).await;
+        assert_db_error(
+            result,
+            UNIQUE_VIOLATION,
+            Some(expected_index),
+            "简洁显示 / 英文全称重复值应命中固定唯一索引",
+        );
+    }
+}
+
+#[sqlx::test]
+async fn part_display_name_checks_reject_blank_untrimmed_and_overlong_values(pool: PgPool) {
+    let invalid_short = ["", " 名词", "名词 ", &"简".repeat(17)];
+    for short_name_zh in invalid_short {
+        let result = insert_part_display(&pool, short_name_zh, "valid full name").await;
+        assert_db_error(
+            result,
+            CHECK_VIOLATION,
+            Some("catalog_parts_of_speech_short_name_zh_check"),
+            "简洁显示必须 trim 后 1–16 字",
+        );
+    }
+    let invalid_full = ["", " noun", "noun ", &"f".repeat(65)];
+    for full_name_en in invalid_full {
+        let result = insert_part_display(&pool, "合法简称", full_name_en).await;
+        assert_db_error(
+            result,
+            CHECK_VIOLATION,
+            Some("catalog_parts_of_speech_full_name_en_check"),
+            "英文全称必须 trim 后 1–64 字",
+        );
+    }
+
+    insert_part_display(&pool, &"简".repeat(16), &"f".repeat(64))
+        .await
+        .expect("边界长度的简洁显示 / 英文全称应被接受");
+}
+
+// ===== 细分词性：简洁显示 / 英文缩写 / 英文全称（2026-09-06 新增列） =====
+
+async fn insert_sub_display(
+    pool: &PgPool,
+    parent_id: Uuid,
+    short_name_zh: &str,
+    abbreviation: &str,
+    full_name_en: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::now_v7();
+    let suffix = short_id(id).to_uppercase();
+    sqlx::query(
+        r#"
+        INSERT INTO catalog.sub_parts_of_speech (
+            id, part_of_speech_id, code, name_zh, name_en,
+            short_name_zh, abbreviation, full_name_en
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "#,
+    )
+    .bind(id)
+    .bind(parent_id)
+    .bind(format!("D-{suffix}"))
+    .bind(format!("显示{suffix}"))
+    .bind(format!("Display {suffix}"))
+    .bind(short_name_zh)
+    .bind(abbreviation)
+    .bind(full_name_en)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+#[sqlx::test]
+async fn sub_part_display_names_repeat_within_parent_except_full_name(pool: PgPool) {
+    let noun = part_id(&pool, "noun").await;
+    let verb = part_id(&pool, "verb").await;
+
+    // 简洁显示与缩写允许在同一父级下重复（原型里多个名词短语共用 n.）。
+    insert_sub_display(&pool, noun, "可数名词", "n.", "unique full one")
+        .await
+        .expect("重复的简洁显示与缩写应被接受");
+    // 英文全称只在同一父级下忽略大小写唯一：不同父级可以重复。
+    insert_sub_display(&pool, verb, "任意", "v.", "Countable Noun")
+        .await
+        .expect("不同父级下的英文全称可以重复");
+    let duplicate = insert_sub_display(&pool, noun, "任意", "n.", "Countable Noun").await;
+    assert_db_error(
+        duplicate,
+        UNIQUE_VIOLATION,
+        Some("catalog_sub_parts_full_name_en_unique_idx"),
+        "同一父级下英文全称忽略大小写唯一",
+    );
+}
+
+#[sqlx::test]
+async fn sub_part_display_checks_reject_blank_untrimmed_and_overlong_values(pool: PgPool) {
+    let noun = part_id(&pool, "noun").await;
+    for (short_name_zh, abbreviation, full_name_en, constraint) in [
+        (
+            "",
+            "n.",
+            "valid full",
+            "catalog_sub_parts_short_name_zh_check",
+        ),
+        (
+            " 名词",
+            "n.",
+            "valid full",
+            "catalog_sub_parts_short_name_zh_check",
+        ),
+        (
+            &"简".repeat(17),
+            "n.",
+            "valid full",
+            "catalog_sub_parts_short_name_zh_check",
+        ),
+        (
+            "合法",
+            "",
+            "valid full",
+            "catalog_sub_parts_abbreviation_check",
+        ),
+        (
+            "合法",
+            "n. ",
+            "valid full",
+            "catalog_sub_parts_abbreviation_check",
+        ),
+        (
+            "合法",
+            &"a".repeat(17),
+            "valid full",
+            "catalog_sub_parts_abbreviation_check",
+        ),
+        ("合法", "n.", "", "catalog_sub_parts_full_name_en_check"),
+        (
+            "合法",
+            "n.",
+            " full",
+            "catalog_sub_parts_full_name_en_check",
+        ),
+        (
+            "合法",
+            "n.",
+            &"f".repeat(65),
+            "catalog_sub_parts_full_name_en_check",
+        ),
+    ] {
+        let result =
+            insert_sub_display(&pool, noun, short_name_zh, abbreviation, full_name_en).await;
+        assert_db_error(
+            result,
+            CHECK_VIOLATION,
+            Some(constraint),
+            "细分词性展示字段必须 trim 且长度合法",
+        );
+    }
+    insert_sub_display(
+        &pool,
+        noun,
+        &"简".repeat(16),
+        &"a".repeat(16),
+        &"f".repeat(64),
+    )
+    .await
+    .expect("边界长度的展示字段应被接受");
 }
