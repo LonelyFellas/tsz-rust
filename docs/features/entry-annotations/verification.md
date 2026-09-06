@@ -69,3 +69,26 @@
 路径排序、以 path + NUL + 文件内容 + NUL 聚合的SHA256为
 `84be379de0e21f061d19df4cec13c7ef20554ba1b2cd8819b6ada2dd49bb6fcb`。
 最终再次核对PID2726 cwd和8583监听一致，readyz仍ready，临时测试容器已不存在。
+
+## 列表单条隐藏标注补充验证（2026-09-06）
+
+已批准新增V2/V3列表必填annotation_visible，annotation/annotation_revision/PATCH不变。后端以列表IDs单次批量SELECT判断同原型的另一可见有效entry，不依赖分页/筛选，不加写锁或迁移。
+
+- 3项annotation_visibility_*通过：自身多source不算重复、V2/V3一致、任意原型直接重复、分页/筛选外peer、归档隐藏/恢复显示/硬删除隐藏、隐藏标注仍可编辑且原数据不清、draft actor/currentpub、普通plural命中不显示。
+- 4项entry_annotations原专项通过；lib301通过/1已有忽略、bins7通过；全目标全features check、Clippy -D warnings及格式通过。新增最后一条负向测试后仅复跑3项visibility，运行时代码与独立已审版本一致。
+- 独立只读review无P0–P2；NOT MATERIALIZED允许条件下推，现有entry/lookup索引可用。没有实测EXPLAIN或大组压测，不声称具体查询耗时；单次JOIN+DISTINCT极大同名组中间行量是性能边界。
+- 权威OpenAPI SHA256：f8352c91a0165506a80034273645a339e0e0cbb25ec1ee7e77d95aa0a24c172c。前端已显式同步，报告11文件275测试、3包typecheck、admin/API lint通过。
+- 原8583 PID37278核对cwd及监听后仅重启为PID49628，readyz200。显式localhost5433/tsz_dev_worktree_20260906、Redis DB2；现场3条center未操作。主任务负责最终浏览器验收。
+- 本轮独立PG16容器tsz-annotation-visibility-20260906，localhost55433/master annotation_visibility；全部cargo显式隔离URL。活跃测试连接0后已停止，--rm清理测试子库/数据。Redis不广泛清理，快照沿TTL。
+- ship保持暂停，未stage/commit/push/PR/rebase/整合dev或部署，原保存目录与前端由本任务保持只读。
+
+日志完整性：
+- `/tmp/annotation-visibility-check.log` SHA256 `5cf661f9d46751e162004e6c2788dc6d986cbe7685c4af1e8d13f751095fdec1`
+- `/tmp/annotation-visibility-tests-final.log` SHA256 `648dee8311fb47d6f54e4b0422251cd9c1a5f012c890317e28554e104da06390`
+- `/tmp/annotation-visibility-openapi.log` SHA256 `24e280bb0a8ea5992e93549ab0e6102c89789c6e4056511876707f6ccf8db723`
+- `/tmp/annotation-visibility-clippy.log` SHA256 `2bab22d201d48d241fe854cef3707ac458274525c6463152428b4d01dfdef7a8`
+- `/tmp/annotation-visibility-unit.log` SHA256 `11f2457385de6750e5657c1bc30cb0fe5117149dced35fa9620d8657c094d924`
+- `/tmp/annotation-visibility-annotations.log` SHA256 `c3ec76774be3cfc16d10eb9efabdec808423e37e3726ad54023d66aff91de955`
+- `/tmp/annotation-visibility-build.log` SHA256 `6ee867f41747b2810b88ee16f24783b7ce71881232220f7b05c6bf568bc0a25e`
+
+当前代码/测试/迁移聚合（path+NUL+内容+NUL）SHA256：`686596a6dc4e03ca38f2277643cda7193ac7dd622d5c985ec7d9764656f0ca40`。

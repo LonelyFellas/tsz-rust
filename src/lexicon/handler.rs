@@ -326,6 +326,15 @@ fn map_error(error: LexiconServiceError) -> AppError {
                 ..ProblemMeta::default()
             })
         }
+        LexiconServiceError::ExistingEmptyDraft(id) => AppError::conflict(
+            ErrorCode::DuplicateWord,
+            Some("headword"),
+            "an unfinished draft already exists; continue editing it",
+        )
+        .with_meta(ProblemMeta {
+            word_id: Some(id),
+            ..ProblemMeta::default()
+        }),
         LexiconServiceError::DuplicateWord => AppError::conflict(
             ErrorCode::DuplicateWord,
             Some("headword"),

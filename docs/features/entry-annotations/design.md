@@ -68,3 +68,10 @@ entries 增加可空 text annotation、非空 bigint annotation_revision 默认1
 
 重点覆盖：无重复可创建；普通变体不强制；第二/第三条和历史 null；多原型去重、非直接邻居可同值；trim/大小写/Unicode长度；旧修订与快照漂移；事务失败无部分修改；并发创建/编辑；成功重试与不同body幂等冲突；V2读取；空骨架/草稿可见性；标注不改变内容修订与发布状态。
 仅使用显式 DATABASE_URL 指向 tsz_dev_worktree_20260906 或本功能独立测试库。服务仅允许8583，启动前检查进程来源，记录测试数据及清理。定向测试后执行仓库适度质量门，更新 docs/openapi.json，并用只读 agent 独立审查。
+
+
+## 列表单条时隐藏标注（后续已批准）
+
+V2/V3列表项新增必填布尔 `annotation_visible`，详情不扩展。仅在当前管理员可见的有效原型集合中，存在另一独立entry与该条任意原型直接重叠时为true。采用与annotation_groups_in相同的en/类型/方言/V3 base或V2 headword/本人draft或精确current_publication/非归档口径；自身多source、普通词形匹配不算重复。没有有效原型则false。
+
+显示状态通过列表entry IDs的一次批量只读查询计算，peer不受列表分页或筛选限制，无逐行N+1、写锁或新增存储。前端仅在annotation有值且annotation_visible为true时展示；原annotation、annotation_revision、编辑入口及PATCH完全保留。归档/删除后降为单条自动false，恢复或新同原型条目后自动true，不清空标注。

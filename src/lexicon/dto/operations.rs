@@ -1271,6 +1271,8 @@ pub enum RelatedSearchResponse {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AdminWordListItem {
+    /// Whether another visible active entry shares any base/headword prototype.
+    pub annotation_visible: bool,
     #[serde(default)]
     #[schema(required = true)]
     pub annotation: Option<String>,

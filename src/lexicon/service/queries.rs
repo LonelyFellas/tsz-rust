@@ -527,6 +527,7 @@ impl LexiconService {
 
     pub async fn list(
         &self,
+        actor_id: Uuid,
         query: AdminWordListQuery,
         include_v3: bool,
     ) -> Result<AdminWordListResponse, LexiconServiceError> {
@@ -602,6 +603,9 @@ impl LexiconService {
         // 引用汇总单独一次批量查询：塞进列表主 SQL 会让本就复杂的查询更难维护，
         // 而这一次往返的代价远低于逐行标量子查询。
         let entry_ids = records.iter().map(|record| record.id).collect::<Vec<_>>();
+        let annotation_visible_ids = self
+            .annotation_visible_entry_ids(actor_id, &entry_ids)
+            .await?;
         let mut reference_summaries = entry_reference_summaries(
             self.repository
                 .entry_reference_rows(&entry_ids)
@@ -650,6 +654,7 @@ impl LexiconService {
                         headword_variants,
                         revision: record.revision,
                         lifecycle_revision: record.lifecycle_revision,
+                        annotation_visible: annotation_visible_ids.contains(&record.id),
                         annotation: record.annotation,
                         annotation_revision: record.annotation_revision,
                         gloss: record.gloss,
@@ -708,6 +713,7 @@ impl LexiconService {
                             dialects: v3_list_dialects(&record.pos_spelling_modes),
                             revision: record.revision,
                             lifecycle_revision: record.lifecycle_revision,
+                            annotation_visible: annotation_visible_ids.contains(&record.id),
                             annotation: record.annotation,
                             annotation_revision: record.annotation_revision,
                             gloss: record.gloss,

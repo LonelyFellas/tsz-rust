@@ -1932,6 +1932,8 @@ pub enum SurfaceMatchPageAny {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordListItemV3 {
+    /// Whether another visible active entry shares any base/headword prototype.
+    pub annotation_visible: bool,
     #[serde(default)]
     #[schema(required = true)]
     pub annotation: Option<String>,
@@ -2123,6 +2125,10 @@ pub enum BuiltinDictionaryEvidenceV3 {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DetectLexiconSurfaceResponseV3 {
+    /// Own unfinished V3 draft without saved surface sources; not a surface match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub existing_draft_id: Option<Uuid>,
     #[serde(deserialize_with = "deserialize_schema_version_3")]
     #[schema(schema_with = schema_version_3_schema)]
     pub schema_version: u8,
