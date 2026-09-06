@@ -64,6 +64,8 @@ struct V3SurfaceContextRecord {
     matched_surfaces: Vec<String>,
     strategy_version: String,
     updated_at: DateTime<Utc>,
+    annotation: Option<String>,
+    annotation_revision: i64,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -928,6 +930,7 @@ impl LexiconService {
         entry_kind: WordEntryKindV3,
         forms: &DraftFormsStepContentV3,
         headwords: &WordHeadwordsV2,
+        equivalent_detection_surface: Option<&str>,
         initial_headword_keys: &[String],
         token: Option<&str>,
     ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
@@ -992,6 +995,38 @@ impl LexiconService {
                 Box::new(page),
             ));
         };
+        if let Some(surface) = equivalent_detection_surface {
+            // Recompute detection evidence from ALL final matches, so an unseen match or
+            // changed context cannot be accepted merely because the headwords agree.
+            let (detection_binding, _) =
+                detection_surface_binding(actor_id, detection_id, surface, &material, policy)?;
+            match self
+                .surface_snapshots
+                .verify(
+                    token,
+                    &ExpectedSurfaceConfirmation {
+                        binding: detection_binding,
+                        current_policy: policy,
+                    },
+                )
+                .await
+            {
+                Ok(confirmation) => return Ok(Some(confirmation)),
+                Err(SurfaceSnapshotError::BindingMismatch) => {}
+                Err(SurfaceSnapshotError::Expired) => {
+                    return Err(LexiconServiceError::SurfaceMatchSnapshotExpired);
+                }
+                Err(SurfaceSnapshotError::PolicyChanged(name)) => {
+                    let current = self
+                        .surface_policies
+                        .policy(name)
+                        .await
+                        .map_err(LexiconServiceError::SurfacePolicy)?;
+                    return Err(LexiconServiceError::SurfacePolicyChanged(current));
+                }
+                Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
+            }
+        }
         self.verify_v3_surface_token(token, binding, owner_bundle, &material, false, policy)
             .await
             .map(Some)
@@ -1985,7 +2020,7 @@ impl LexiconService {
         Ok(V3SurfaceMaterial { matches, contexts })
     }
 
-    async fn v3_surface_contexts_in(
+    pub(super) async fn v3_surface_contexts_in(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         entry_ids: &[Uuid],
@@ -2003,7 +2038,7 @@ impl LexiconService {
                        AS matched_surfaces,
                    COALESCE(presentation.strategy_version, 'legacy_v2_surface_adapter_v1')
                        AS strategy_version,
-                   entry.updated_at
+                   entry.updated_at, entry.annotation, entry.annotation_revision
             FROM lexicon.entries entry
             JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
             LEFT JOIN lexicon.entry_presentation_projection presentation
@@ -2093,6 +2128,8 @@ impl LexiconService {
                 gloss_previews.dedup();
                 Ok(MatchedEntryContextV3 {
                     entry_id: record.entry_id,
+                    annotation: record.annotation,
+                    annotation_revision: record.annotation_revision,
                     presentation: EntryPresentationV3 {
                         label: record.label,
                         matched_surfaces: record.matched_surfaces,

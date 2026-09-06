@@ -51,6 +51,7 @@ pub enum ErrorCode {
     SubPartOfSpeechNotFound,
     PartOfSpeechConflict,
     SubPartOfSpeechConflict,
+    AnnotationConflict,
     RevisionConflict,
     ReferenceConflict,
     RelationPrebindingFanoutExceeded,
@@ -107,7 +108,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 84] = [
+    pub const ALL: [Self; 85] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -148,6 +149,7 @@ impl ErrorCode {
         Self::SubPartOfSpeechNotFound,
         Self::PartOfSpeechConflict,
         Self::SubPartOfSpeechConflict,
+        Self::AnnotationConflict,
         Self::RevisionConflict,
         Self::ReferenceConflict,
         Self::RelationPrebindingFanoutExceeded,
@@ -358,6 +360,11 @@ impl ErrorCode {
             Self::SubPartOfSpeechConflict => (
                 "sub_part_of_speech_conflict",
                 "Sub part of speech conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::AnnotationConflict => (
+                "annotation_conflict",
+                "Entry annotation conflict",
                 StatusCode::CONFLICT,
             ),
             Self::RevisionConflict => (
@@ -623,6 +630,9 @@ pub struct ProblemDetails {
 #[derive(Debug, Default, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProblemMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub annotation_conflict: Option<crate::lexicon::dto::EntryAnnotationConflict>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub current_revision: Option<i64>,

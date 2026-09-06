@@ -207,6 +207,8 @@ async fn seed_published_v2_with_surface(
         status: AdminWordStatus::Published,
         revision: 7,
         lifecycle_revision: 1,
+        annotation: None,
+        annotation_revision: 1,
         published_revision: Some(7),
         has_unpublished_changes: false,
         headwords: WordHeadwordsV2::Unified {

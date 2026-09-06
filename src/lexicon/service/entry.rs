@@ -57,6 +57,8 @@ pub(crate) fn entry_from_record(record: EntryRecord) -> Result<AdminWordV2, Lexi
         },
         revision: record.revision,
         lifecycle_revision: record.lifecycle_revision,
+        annotation: record.annotation,
+        annotation_revision: record.annotation_revision,
         published_revision: record.current_publication_source_revision,
         has_unpublished_changes: record
             .current_publication_source_revision
@@ -803,6 +805,8 @@ impl LexiconService {
             status: AdminWordStatus::Draft,
             revision: 1,
             lifecycle_revision: 1,
+            annotation: None,
+            annotation_revision: 1,
             published_revision: None,
             has_unpublished_changes: false,
             headwords: input.headwords.clone(),
