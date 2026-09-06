@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -24,13 +24,13 @@ use crate::lexicon::dto::{
     EnglishTextV3, EntryPresentationV3, FormsImpactItemV3, FormsImpactNodeTypeV3,
     FormsImpactResponseV3, LegacyHeadwordsCompatibilityV3, PhraseComponentUsageV3,
     PreviewFormsImpactInputV3, PronunciationNormalizationVersionV3, PronunciationStyle,
-    RelationPrebindingStateV3, RetiredStableNodeV3, RichTextVariantV3, SaveFormsStepInputV3,
-    SaveMeaningsStepInputV3, SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin,
-    UkDialectV3, UsDialectV3, V3PublicationBlockCode, V3PublicationCapability, V3RetiredNodeRole,
-    V3ValidationIssueCode, ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3,
-    WordDefinitionV3, WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3,
-    WordHeadwordsV2, WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3,
-    WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
+    RetiredStableNodeV3, RichTextVariantV3, SaveFormsStepInputV3, SaveMeaningsStepInputV3,
+    SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3, UsDialectV3,
+    V3PublicationBlockCode, V3PublicationCapability, V3RetiredNodeRole, V3ValidationIssueCode,
+    ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3,
+    WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordHeadwordsV2,
+    WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3, WordRegionalVariantsV3,
+    WordUkFormVariantV3, WordUsFormVariantV3,
 };
 use crate::lexicon::model::{NodeIdentityRecord, RegionEvidenceRecord};
 
@@ -96,33 +96,11 @@ struct V3PresentationRecord {
 }
 
 #[derive(Debug, sqlx::FromRow)]
-struct V3PreboundTargetRecord {
-    content_schema_version: i16,
-    is_archived: bool,
-    is_published: bool,
-    presentation_label: String,
-    first_sense_id: Option<Uuid>,
-    first_sense_gloss: Option<String>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
 struct V3RelationTargetStatusRecord {
     id: Uuid,
     is_archived: bool,
     is_published: bool,
-    presentation_label: Option<String>,
 }
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-struct V3RelationReconciliationRecord {
-    relation_id: Uuid,
-    source_entry_id: Uuid,
-    action: String,
-    target_headword_snapshot: Option<String>,
-    target_gloss_snapshot: Option<String>,
-}
-
-const V3_RELATION_RECONCILIATION_LIMIT: usize = 500;
 
 #[derive(Debug, sqlx::FromRow)]
 struct RetiredV3NodeRecord {
@@ -771,7 +749,7 @@ impl LexiconService {
             .iter()
             .flat_map(|pos| &pos.senses)
             .flat_map(|sense| &sense.relations)
-            .filter_map(|relation| relation.target_word_id.or(relation.prebound_target_word_id))
+            .filter_map(|relation| relation.target_word_id)
             .collect::<Vec<_>>();
         target_ids.sort_unstable();
         target_ids.dedup();
@@ -782,8 +760,7 @@ impl LexiconService {
             r#"
             SELECT entry.id,
                    entry.archived_at IS NOT NULL AS is_archived,
-                   entry.current_publication_id IS NOT NULL AS is_published,
-                   presentation.label AS presentation_label
+                   entry.current_publication_id IS NOT NULL AS is_published
             FROM lexicon.entries entry
             LEFT JOIN lexicon.entry_presentation_projection presentation
               ON presentation.entry_id = entry.id
@@ -805,8 +782,7 @@ impl LexiconService {
             .flat_map(|pos| &mut pos.senses)
             .flat_map(|sense| &mut sense.relations)
         {
-            let Some(target_id) = relation.target_word_id.or(relation.prebound_target_word_id)
-            else {
+            let Some(target_id) = relation.target_word_id else {
                 relation.target_status = None;
                 continue;
             };
@@ -818,14 +794,6 @@ impl LexiconService {
             } else {
                 AdminWordStatus::Draft
             });
-            // 预绑定的词面回显按目标当前 presentation 现取，目标改名即时生效；
-            // 同时在读路径剥掉旧宽形态的待建词面，使迁移前投影自愈到新契约。
-            if relation.prebound_target_word_id.is_some() {
-                relation.pending_target_headword = None;
-                if let Some(label) = &status.presentation_label {
-                    relation.target_headword = Some(label.clone());
-                }
-            }
         }
         Ok(())
     }
@@ -1927,7 +1895,6 @@ impl LexiconService {
         request_id: Uuid,
         entry_id: Uuid,
         input: SaveMeaningsStepInputV3,
-        allow_relation_prebinding: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         let SaveMeaningsStepInputV3 {
             base_revision,
@@ -2004,16 +1971,6 @@ impl LexiconService {
             serde_json::to_value(&current_v3_meanings).map_err(serialization_error)?,
         )
         .map_err(serialization_error)?;
-        if !allow_relation_prebinding
-            && current_relational_meanings
-                .pos
-                .iter()
-                .flat_map(|pos| &pos.senses)
-                .flat_map(|sense| &sense.relations)
-                .any(|relation| relation.prebound_target_word_id.is_some())
-        {
-            return Err(LexiconServiceError::V3StorageUnavailable);
-        }
         let form_pos = forms
             .pos
             .iter()
@@ -2041,36 +1998,12 @@ impl LexiconService {
         LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
             .await
             .map_err(repository_error)?;
-        let prebinding_issues = merge_v3_relation_prebindings(
-            &mut transaction,
-            entry_id,
-            &current_relational_meanings,
-            &mut relational_meanings,
-        )
-        .await?;
-        if !prebinding_issues.is_empty() {
-            return Err(v3_validation_failed(prebinding_issues));
-        }
-        let (binding_issues, _) = self
-            .resolve_pending_relation_targets(
-                &mut transaction,
-                actor_id,
-                request_id,
-                entry_id,
-                &mut relational_meanings,
-                PendingRelationResolution::BindExisting,
-            )
-            .await?;
-        if !binding_issues.is_empty() {
-            return Err(v3_validation_failed(binding_issues));
-        }
         let reference_resolution = resolve_meaning_references(
             &mut transaction,
             entry_id,
             &mut relational_meanings,
             ReferenceResolutionMode::Canonicalize,
             false,
-            &HashSet::new(),
         )
         .await?;
         if !reference_resolution.issues.is_empty() {
@@ -2162,19 +2095,27 @@ impl LexiconService {
             .flat_map(|pos| &pos.senses)
             .map(|sense| sense.id)
             .collect::<HashSet<_>>();
-        let created_first_sense = current_sense_ids.is_empty() && !next_sense_ids.is_empty();
-        let mut removed_sense_ids = current_sense_ids
+        let removed_sense_ids = current_sense_ids
             .difference(&next_sense_ids)
             .copied()
             .collect::<Vec<_>>();
-        removed_sense_ids.sort_unstable();
-        let relation_reconciliation = prepare_v3_relation_reconciliation(
-            &mut transaction,
-            entry_id,
-            created_first_sense,
-            &removed_sense_ids,
+        // An explicit relation must be removed or changed before its target sense is deleted.
+        let inbound = sqlx::query_scalar::<_, Uuid>(
+            "SELECT DISTINCT target_sense_id FROM lexicon.relations WHERE target_entry_id = $1 AND target_sense_id = ANY($2) AND entry_id <> $1 ORDER BY target_sense_id LIMIT 1",
         )
-        .await?;
+        .bind(entry_id)
+        .bind(&removed_sense_ids)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(database_error)?;
+        if let Some(referenced_sense_id) = inbound {
+            return Err(v3_validation_failed(vec![reference_issue(
+                referenced_sense_id,
+                "senses",
+                "relation_target_unavailable",
+                "该词义仍被其他词条关联，请先删除或修改关联再删除词义",
+            )]));
+        }
         LexiconRepository::prepare_v3_sentence_translation_aliases(
             &mut transaction,
             entry_id,
@@ -2198,37 +2139,6 @@ impl LexiconService {
         .await
         .map_err(repository_error)?;
         replace_v3_sense_component_usages(&mut transaction, entry_id, &canonical_content).await?;
-        let first_sense = if created_first_sense {
-            let first_sense_id = LexiconRepository::first_draft_sense(&mut transaction, entry_id)
-                .await
-                .map_err(repository_error)?
-                .ok_or_else(invariant_record)?;
-            let gloss = relational_meanings
-                .pos
-                .iter()
-                .flat_map(|pos| &pos.senses)
-                .find(|sense| sense.id == first_sense_id)
-                .map(published_sense_gloss)
-                .ok_or_else(invariant_record)?;
-            Some((first_sense_id, gloss))
-        } else {
-            None
-        };
-        apply_v3_relation_reconciliation(
-            &mut transaction,
-            actor_id,
-            request_id,
-            entry_id,
-            &compatibility_source.presentation.label,
-            if record.current_publication_id.is_some() {
-                AdminWordStatus::Published
-            } else {
-                AdminWordStatus::Draft
-            },
-            first_sense,
-            &relation_reconciliation,
-        )
-        .await?;
         let next_revision = record.revision + 1;
         let now = Utc::now();
         let updated = sqlx::query(
@@ -2413,19 +2323,9 @@ impl LexiconService {
             &mut relational_meanings,
             ReferenceResolutionMode::Verify,
             false,
-            &HashSet::new(),
         )
         .await?;
         issues.extend(reference_resolution.issues);
-        issues.extend(
-            relational_meanings
-                .pos
-                .iter()
-                .flat_map(|pos| &pos.senses)
-                .flat_map(|sense| &sense.relations)
-                .filter(|relation| relation.prebound_target_word_id.is_some())
-                .filter_map(|relation| pending_relation_issue(relation, true)),
-        );
         transaction.commit().await.map_err(database_error)?;
         Ok(DraftValidationResponseV3 {
             schema_version: 3,
@@ -2434,520 +2334,6 @@ impl LexiconService {
             issues: crate::lexicon::v3_contract::v3_issues(&issues),
         })
     }
-}
-
-async fn merge_v3_relation_prebindings(
-    tx: &mut Transaction<'_, Postgres>,
-    source_entry_id: Uuid,
-    current: &DraftMeaningsStepContent,
-    proposed: &mut DraftMeaningsStepContent,
-) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
-    let current_states = current
-        .pos
-        .iter()
-        .flat_map(|pos| &pos.senses)
-        .flat_map(|sense| &sense.relations)
-        .map(|relation| {
-            (
-                relation.id,
-                (
-                    relation.prebound_target_word_id,
-                    relation.prebinding_state.clone(),
-                ),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let mut targets = HashMap::<Uuid, Option<V3PreboundTargetRecord>>::new();
-    let mut issues = Vec::new();
-
-    for relation in proposed
-        .pos
-        .iter_mut()
-        .flat_map(|pos| &mut pos.senses)
-        .flat_map(|sense| &mut sense.relations)
-    {
-        relation.target_status = None;
-        if relation.bound_target().is_some() {
-            relation.prebound_target_word_id = None;
-            relation.prebinding_state = None;
-            continue;
-        }
-        let Some(target_entry_id) = relation.prebound_target_word_id else {
-            relation.prebinding_state = None;
-            continue;
-        };
-        if target_entry_id == source_entry_id {
-            issues.push(reference_issue(
-                relation.id,
-                "prebound_target_word_id",
-                "relation_self_target",
-                "关联词不能指向当前词条自身",
-            ));
-            continue;
-        }
-
-        let same_detached_target =
-            current_states
-                .get(&relation.id)
-                .is_some_and(|(current_target, current_state)| {
-                    *current_target == Some(target_entry_id)
-                        && current_state.as_deref() == Some("target_sense_deleted")
-                });
-        relation.prebinding_state = Some(
-            if same_detached_target {
-                "target_sense_deleted"
-            } else {
-                "waiting_first_sense"
-            }
-            .to_owned(),
-        );
-        // 预绑定关系不携带待建词面：词条身份在 prebound_target_word_id 上，
-        // 词面回显由下方 target_headword 只读快照提供。
-        relation.pending_target_headword = None;
-        relation.pending_target_gloss = relation
-            .pending_target_gloss
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
-        // 与待建路径同款的 gloss 校验：否则超长/含 NUL 会穿透到 DB 约束变 500。
-        if relation
-            .pending_target_gloss
-            .as_deref()
-            .is_some_and(|value| {
-                value.contains('\0')
-                    || value.chars().count() > crate::lexicon::rich_text::MAX_RICH_TEXT_CODEPOINTS
-            })
-        {
-            issues.push(reference_issue(
-                relation.id,
-                "pending_target_gloss",
-                "relation_pending_gloss_invalid",
-                "预定义词义不能超过 5000 个字符",
-            ));
-            continue;
-        }
-
-        if let std::collections::hash_map::Entry::Vacant(entry) = targets.entry(target_entry_id) {
-            let target = sqlx::query_as::<_, V3PreboundTargetRecord>(
-                r#"
-                SELECT entry.content_schema_version,
-                       entry.archived_at IS NOT NULL AS is_archived,
-                       entry.current_publication_id IS NOT NULL AS is_published,
-                       presentation.label AS presentation_label,
-                       first_sense.sense_id AS first_sense_id,
-                       first_sense.gloss AS first_sense_gloss
-                FROM lexicon.entries entry
-                JOIN lexicon.entry_presentation_projection presentation
-                  ON presentation.entry_id = entry.id
-                 AND presentation.content_schema_version = 3
-                 AND presentation.source_revision = entry.revision
-                LEFT JOIN LATERAL (
-                    SELECT sense.id AS sense_id,
-                           COALESCE((
-                               SELECT text.plain_text
-                               FROM lexicon.definitions definition
-                               JOIN lexicon.text_variants text
-                                 ON text.owner_node_id = definition.id
-                                AND text.entry_id = definition.entry_id
-                                AND text.field_role = 'content'
-                                AND text.language = 'zh'
-                               WHERE definition.entry_id = sense.entry_id
-                                 AND definition.sense_id = sense.id
-                               ORDER BY definition.sort_order, definition.id,
-                                        text.sort_order, text.id
-                               LIMIT 1
-                           ), '') AS gloss
-                    FROM lexicon.senses sense
-                    JOIN lexicon.entry_pos pos
-                      ON pos.id = sense.entry_pos_id
-                     AND pos.entry_id = sense.entry_id
-                    JOIN lexicon.nodes node
-                      ON node.id = sense.id
-                     AND node.entry_id = sense.entry_id
-                     AND node.removed_from_draft_at IS NULL
-                    WHERE sense.entry_id = entry.id
-                    ORDER BY pos.sort_order, sense.sort_order, sense.id
-                    LIMIT 1
-                ) first_sense ON TRUE
-                WHERE entry.id = $1
-                "#,
-            )
-            .bind(target_entry_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(database_error)?;
-            entry.insert(target);
-        }
-        let Some(target) = targets.get(&target_entry_id).and_then(Option::as_ref) else {
-            issues.push(reference_issue(
-                relation.id,
-                "prebound_target_word_id",
-                "relation_prebound_target_not_found",
-                "已选择的关联词草稿不存在，请重新搜索",
-            ));
-            continue;
-        };
-        if target.content_schema_version != 3 {
-            issues.push(reference_issue(
-                relation.id,
-                "prebound_target_word_id",
-                "relation_prebound_target_not_found",
-                "已选择的关联词不是当前最新词条模型，请重新搜索",
-            ));
-            continue;
-        }
-        relation.target_status = Some(
-            if target.is_archived {
-                "archived"
-            } else if target.is_published {
-                "published"
-            } else {
-                "draft"
-            }
-            .to_owned(),
-        );
-        // 等待态的词面回显：进 editor projection 供前端展示，不落 snapshot 列
-        // （insert 侧以 target_word_id 为快照写入前提，预绑定天然不写）。
-        relation.target_headword = Some(target.presentation_label.clone());
-        if target.is_archived
-            && !current_states
-                .get(&relation.id)
-                .is_some_and(|(id, _)| *id == Some(target_entry_id))
-        {
-            issues.push(reference_issue(
-                relation.id,
-                "prebound_target_word_id",
-                "relation_prebound_target_archived",
-                "已选择的关联词草稿已归档，请恢复或重新选择",
-            ));
-            continue;
-        }
-        if relation.prebinding_state.as_deref() == Some("waiting_first_sense")
-            && let Some(first_sense_id) = target.first_sense_id
-        {
-            relation.target_word_id = Some(target_entry_id);
-            relation.target_sense_id = Some(first_sense_id);
-            relation.target_gloss = Some(target.first_sense_gloss.clone().unwrap_or_default());
-            relation.prebound_target_word_id = None;
-            relation.prebinding_state = None;
-            relation.target_status = Some(
-                if target.is_published {
-                    "published"
-                } else {
-                    "draft"
-                }
-                .to_owned(),
-            );
-            relation.pending_target_gloss = None;
-        }
-    }
-    Ok(issues)
-}
-
-async fn prepare_v3_relation_reconciliation(
-    tx: &mut Transaction<'_, Postgres>,
-    target_entry_id: Uuid,
-    created_first_sense: bool,
-    removed_sense_ids: &[Uuid],
-) -> Result<Vec<V3RelationReconciliationRecord>, LexiconServiceError> {
-    let records = sqlx::query_as::<_, V3RelationReconciliationRecord>(
-        r#"
-        SELECT relation.id AS relation_id,
-               relation.entry_id AS source_entry_id,
-               CASE
-                   WHEN relation.prebound_target_entry_id = $1
-                       THEN 'promote'
-                   ELSE 'detach'
-               END AS action,
-               relation.target_headword_snapshot,
-               relation.target_gloss_snapshot
-        FROM lexicon.relations relation
-        JOIN lexicon.entries source ON source.id = relation.entry_id
-        WHERE source.content_schema_version = 3
-          AND source.id <> $1
-          AND (
-              (
-                  $2
-                  AND relation.prebound_target_entry_id = $1
-                  AND relation.prebinding_reason = 'waiting_first_sense'
-              )
-              OR (
-                  relation.target_entry_id = $1
-                  AND relation.target_sense_id = ANY($3)
-              )
-          )
-        ORDER BY relation.entry_id, relation.id
-        LIMIT 501
-        "#,
-    )
-    .bind(target_entry_id)
-    .bind(created_first_sense)
-    .bind(removed_sense_ids)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    if records.len() > V3_RELATION_RECONCILIATION_LIMIT {
-        return Err(LexiconServiceError::RelationPrebindingFanoutExceeded);
-    }
-
-    let source_ids = records
-        .iter()
-        .map(|record| record.source_entry_id)
-        .collect::<BTreeSet<_>>();
-    for source_id in source_ids {
-        let locked = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT id
-            FROM lexicon.entries
-            WHERE id = $1 AND content_schema_version = 3
-            FOR UPDATE NOWAIT
-            "#,
-        )
-        .bind(source_id)
-        .fetch_optional(&mut **tx)
-        .await;
-        match locked {
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(invariant_record()),
-            Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("55P03") => {
-                return Err(LexiconServiceError::ReferenceConflict);
-            }
-            Err(error) => return Err(database_error(error)),
-        }
-    }
-    Ok(records)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn apply_v3_relation_reconciliation(
-    tx: &mut Transaction<'_, Postgres>,
-    actor_id: Uuid,
-    request_id: Uuid,
-    target_entry_id: Uuid,
-    target_headword: &str,
-    target_status: AdminWordStatus,
-    first_sense: Option<(Uuid, String)>,
-    records: &[V3RelationReconciliationRecord],
-) -> Result<(), LexiconServiceError> {
-    if records.is_empty() {
-        return Ok(());
-    }
-    let sub_parts = LexiconRepository::catalog_sub_parts_for_reference(tx)
-        .await
-        .map_err(repository_error)?
-        .into_iter()
-        .map(|part| (part.code, part.id))
-        .collect::<HashMap<_, _>>();
-    let mut by_source = BTreeMap::<Uuid, Vec<&V3RelationReconciliationRecord>>::new();
-    for record in records {
-        by_source
-            .entry(record.source_entry_id)
-            .or_default()
-            .push(record);
-    }
-
-    for (source_entry_id, source_records) in by_source {
-        let source = LexiconRepository::entry_by_id_for_update(tx, source_entry_id)
-            .await
-            .map_err(repository_error)?
-            .ok_or_else(invariant_record)?;
-        if source.content_schema_version != 3 {
-            return Err(invariant_record());
-        }
-        let mut meanings: DraftMeaningsStepContentV3 =
-            serde_json::from_value(source.meanings.clone()).map_err(serialization_error)?;
-        crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
-        let record_by_id = source_records
-            .iter()
-            .map(|record| (record.relation_id, *record))
-            .collect::<HashMap<_, _>>();
-        let mut changed_ids = Vec::new();
-        let mut detached = false;
-        for relation in meanings
-            .pos
-            .iter_mut()
-            .flat_map(|pos| &mut pos.senses)
-            .flat_map(|sense| &mut sense.relations)
-        {
-            let Some(record) = record_by_id.get(&relation.id) else {
-                continue;
-            };
-            match record.action.as_str() {
-                "promote" => {
-                    if relation.prebound_target_word_id != Some(target_entry_id)
-                        || relation.prebinding_state
-                            != Some(RelationPrebindingStateV3::WaitingFirstSense)
-                    {
-                        continue;
-                    }
-                    let (first_sense_id, first_sense_gloss) =
-                        first_sense.as_ref().ok_or_else(invariant_record)?;
-                    relation.target_word_id = Some(target_entry_id);
-                    relation.target_sense_id = Some(*first_sense_id);
-                    relation.target_headword = Some(target_headword.to_owned());
-                    relation.target_gloss = Some(first_sense_gloss.clone());
-                    relation.prebound_target_word_id = None;
-                    relation.prebinding_state = None;
-                    relation.pending_target_headword = None;
-                    relation.pending_target_gloss = None;
-                    relation.target_status = Some(target_status);
-                }
-                "detach" => {
-                    if relation.target_word_id != Some(target_entry_id) {
-                        continue;
-                    }
-                    relation.target_word_id = None;
-                    relation.target_sense_id = None;
-                    relation.prebound_target_word_id = Some(target_entry_id);
-                    relation.prebinding_state = Some(RelationPrebindingStateV3::TargetSenseDeleted);
-                    // 预绑定不携带待建词面：词面回显留在只读 target_headword 上。
-                    relation.pending_target_headword = None;
-                    relation.pending_target_gloss = record
-                        .target_gloss_snapshot
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned);
-                    relation.target_headword = Some(
-                        record
-                            .target_headword_snapshot
-                            .clone()
-                            .unwrap_or_else(|| target_headword.to_owned()),
-                    );
-                    relation.target_gloss = None;
-                    relation.target_status = Some(target_status);
-                    detached = true;
-                }
-                _ => return Err(invariant_record()),
-            }
-            changed_ids.push(relation.id);
-        }
-        if changed_ids.is_empty() {
-            continue;
-        }
-
-        let mut relational: DraftMeaningsStepContent =
-            serde_json::from_value(serde_json::to_value(&meanings).map_err(serialization_error)?)
-                .map_err(serialization_error)?;
-        crate::lexicon::sentence_association::clear_sentence_associations(&mut relational);
-        LexiconRepository::prepare_v3_sentence_translation_aliases(tx, source_entry_id, &meanings)
-            .await
-            .map_err(repository_error)?;
-        LexiconRepository::replace_meanings_content(tx, source_entry_id, &relational, &sub_parts)
-            .await
-            .map_err(repository_error)?;
-        LexiconRepository::replace_v3_sentence_translations(tx, source_entry_id, &meanings)
-            .await
-            .map_err(repository_error)?;
-        replace_v3_sense_component_usages(tx, source_entry_id, &meanings).await?;
-
-        let next_revision = source.revision + 1;
-        let now = Utc::now();
-        let updated = sqlx::query(
-            r#"
-            UPDATE lexicon.entries
-            SET revision = $2, updated_by_admin_id = $3, updated_at = $4
-            WHERE id = $1 AND content_schema_version = 3 AND revision = $5
-            "#,
-        )
-        .bind(source_entry_id)
-        .bind(next_revision)
-        .bind(actor_id)
-        .bind(now)
-        .bind(source.revision)
-        .execute(&mut **tx)
-        .await
-        .map_err(database_error)?;
-        if updated.rows_affected() != 1 {
-            return Err(LexiconServiceError::ReferenceConflict);
-        }
-        sqlx::query(
-            r#"
-            UPDATE lexicon.entry_editor_projection
-            SET meanings = $2, rebuilt_revision = $3, updated_at = $4
-            WHERE entry_id = $1 AND rebuilt_revision = $5
-            "#,
-        )
-        .bind(source_entry_id)
-        .bind(serde_json::to_value(&meanings).map_err(serialization_error)?)
-        .bind(next_revision)
-        .bind(now)
-        .bind(source.revision)
-        .execute(&mut **tx)
-        .await
-        .map_err(database_error)?;
-        sqlx::query(
-            r#"
-            UPDATE lexicon.entry_presentation_projection
-            SET source_revision = $2, updated_at = $3
-            WHERE entry_id = $1 AND content_schema_version = 3 AND source_revision = $4
-            "#,
-        )
-        .bind(source_entry_id)
-        .bind(next_revision)
-        .bind(now)
-        .bind(source.revision)
-        .execute(&mut **tx)
-        .await
-        .map_err(database_error)?;
-        sqlx::query(
-            r#"
-            UPDATE lexicon.surface_sources
-            SET source_revision = $2, updated_at = $3
-            WHERE entry_id = $1
-              AND content_schema_version = 3
-              AND content_scope = 'draft'
-              AND is_deleted = FALSE
-              AND source_revision = $4
-            "#,
-        )
-        .bind(source_entry_id)
-        .bind(next_revision)
-        .bind(now)
-        .bind(source.revision)
-        .execute(&mut **tx)
-        .await
-        .map_err(database_error)?;
-        let meanings_was_complete = source.completed_steps.iter().any(|step| step == "meanings");
-        update_v3_step_progress(
-            tx,
-            source_entry_id,
-            "meanings",
-            next_revision,
-            &meanings,
-            meanings_was_complete && !detached,
-        )
-        .await?;
-        sqlx::query(
-            r#"
-            UPDATE lexicon.v3_entry_state
-            SET first_v3_write_revision = COALESCE(first_v3_write_revision, $2)
-            WHERE entry_id = $1
-            "#,
-        )
-        .bind(source_entry_id)
-        .bind(next_revision)
-        .execute(&mut **tx)
-        .await
-        .map_err(database_error)?;
-        changed_ids.sort_unstable();
-        insert_v3_audit(
-            tx,
-            actor_id,
-            request_id,
-            "lexicon.entry.relations.reconcile.v3",
-            source_entry_id,
-            next_revision,
-            serde_json::json!({
-                "target_entry_id": target_entry_id,
-                "relation_ids": changed_ids,
-                "detached": detached,
-            }),
-        )
-        .await?;
-    }
-    Ok(())
 }
 
 fn legacy_headwords_from_record(

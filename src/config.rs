@@ -55,6 +55,7 @@ pub struct SmartLexiconV3Flags {
         deserialize_with = "deserialize_explicit_bool"
     )]
     pub sentence_target_discovery: bool,
+    /// Deprecated: accepted for configuration compatibility only; no longer enables any behavior.
     #[serde(
         default,
         rename = "smart_lexicon_v3_draft_relation_prebinding",

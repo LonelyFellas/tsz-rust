@@ -1,5 +1,4 @@
 use super::*;
-use crate::lexicon::dto::RichTextV1;
 
 // --- publication ---
 
@@ -37,8 +36,6 @@ impl LexiconService {
             &mut meanings,
             ReferenceResolutionMode::Verify,
             false,
-            // 不物化的调用点：没有本次刚绑定的关联词。
-            &std::collections::HashSet::new(),
         )
         .await?;
         issues.extend(reference_resolution.issues);
@@ -218,49 +215,18 @@ impl LexiconService {
             return Ok(AdminWordV2Envelope { word });
         }
 
-        // 待物化的关联词必须先长成真实词条，随后的 Verify 复核才有目标可解析。
-        // 放在同一个事务里：发布失败就一起回滚，不会留下没人引用的占位。
-        let (materialization_issues, newly_bound_relations) = self
-            .resolve_pending_relation_targets(
-                &mut transaction,
-                actor_id,
-                request_id,
-                entry_id,
-                &mut word.meanings,
-                PendingRelationResolution::Materialize,
-            )
-            .await?;
-        if !materialization_issues.is_empty() {
-            return Err(LexiconServiceError::ValidationFailed(
-                materialization_issues,
-            ));
-        }
         let reference_resolution = resolve_meaning_references(
             &mut transaction,
             entry_id,
             &mut word.meanings,
             ReferenceResolutionMode::Verify,
             true,
-            &newly_bound_relations,
         )
         .await?;
         if !reference_resolution.issues.is_empty() {
             return Err(LexiconServiceError::ValidationFailed(
                 reference_resolution.issues,
             ));
-        }
-        if !newly_bound_relations.is_empty() {
-            let editor_meanings =
-                serde_json::to_value(&word.meanings).map_err(serialization_error)?;
-            LexiconRepository::sync_canonical_meanings(
-                &mut transaction,
-                entry_id,
-                &word.meanings,
-                &editor_meanings,
-                &catalog.sub_part_ids,
-            )
-            .await
-            .map_err(repository_error)?;
         }
         let retained_sense_ids = word
             .meanings
@@ -1079,422 +1045,12 @@ pub(super) struct MeaningReferenceResolution {
     pub(super) publication_references: Vec<NewPublicationSenseReference>,
 }
 
-/// 待物化关联词的处理强度。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PendingRelationResolution {
-    /// 草稿保存：同名词条已经存在就顺带绑定，不建条、也不报错。
-    ///
-    /// 草稿不该因为目标还没建、或者别人的草稿没写完而存不下来；绑不上的就继续留在
-    /// 待物化形态，等发布时物化。这条路让「发布建出占位之后草稿还显示待建」自然收敛。
-    BindExisting,
-    /// 发布：目标必须落定——缺就建，建不出来（目标词条没有词义可指）就报错。
-    Materialize,
-}
-
-/// 一个待建的关联词目标，连同引用了它的关联词节点。
-///
-/// 节点 id 必须带着走：出错时要把 issue 锚回具体那一条关联词，否则前端只能指向词条
-/// 本身，管理员不知道该改哪一行；多个目标同时出错还会产出无法区分的重复 issue。
-struct PendingRelationTarget {
-    display: String,
-    kind: EntryKind,
-    gloss: Option<String>,
-    relation_ids: Vec<Uuid>,
-}
-
-impl LexiconService {
-    /// 处理草稿里待物化的关联词：能绑的绑上，`Materialize` 模式下缺的还会建出来。
-    ///
-    /// **只有 `Materialize` 会建条**，而它只从发布链路调用。草稿保存走
-    /// `BindExisting`，一个词条都不会造出来——错字和被放弃的草稿因此永远不会落成词条，
-    /// 走到发布那一步的每个占位背后都是一次经过校验并由管理员确认的编辑意图。
-    ///
-    /// 同名词条已存在时绑过去而不是再建一条：两个同名词条会撞
-    /// `lexicon_entry_headword_keys_unique_idx`，语义上本来也该是同一个词。
-    pub(super) async fn resolve_pending_relation_targets(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        actor_id: Uuid,
-        request_id: Uuid,
-        entry_id: Uuid,
-        meanings: &mut DraftMeaningsStepContent,
-        resolution: PendingRelationResolution,
-    ) -> Result<(Vec<DraftValidationIssue>, std::collections::HashSet<Uuid>), LexiconServiceError>
-    {
-        let mut pending = BTreeMap::<String, PendingRelationTarget>::new();
-        let mut issues = Vec::new();
-        for pos in &mut meanings.pos {
-            for sense in &mut pos.senses {
-                for relation in &mut sense.relations {
-                    if relation.bound_target().is_some()
-                        || relation.prebound_target_word_id.is_some()
-                    {
-                        continue;
-                    }
-                    // 词面在草稿保存时已经校验过；这里再拒一次不合法的，交给随后的
-                    // Verify 复核统一报错，不在物化里制造第二套错误码。
-                    let Some(raw) = relation.pending_target_headword.as_deref() else {
-                        continue;
-                    };
-                    let Ok(normalized) =
-                        crate::lexicon::normalization::NormalizedHeadword::parse(raw)
-                    else {
-                        continue;
-                    };
-                    let kind = if normalized.display.contains(' ') {
-                        EntryKind::Phrase
-                    } else {
-                        EntryKind::Word
-                    };
-                    let gloss = relation
-                        .pending_target_gloss
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned);
-                    relation.pending_target_gloss = gloss.clone();
-                    if gloss.as_deref().is_some_and(|value| {
-                        value.contains('\0')
-                            || value.chars().count()
-                                > crate::lexicon::rich_text::MAX_RICH_TEXT_CODEPOINTS
-                    }) {
-                        issues.push(reference_issue(
-                            relation.id,
-                            "pending_target_gloss",
-                            "relation_pending_gloss_invalid",
-                            "预定义词义不能超过 5000 个字符",
-                        ));
-                        continue;
-                    }
-                    let target =
-                        pending
-                            .entry(normalized.key)
-                            .or_insert_with(|| PendingRelationTarget {
-                                display: normalized.display,
-                                kind,
-                                gloss: gloss.clone(),
-                                relation_ids: Vec::new(),
-                            });
-                    if target.gloss.is_none() {
-                        target.gloss = gloss.clone();
-                    } else if gloss.is_some() && gloss != target.gloss {
-                        issues.push(reference_issue(
-                            relation.id,
-                            "pending_target_gloss",
-                            "relation_pending_gloss_conflict",
-                            "同一待建关联词不能填写不同的预定义词义",
-                        ));
-                    }
-                    target.relation_ids.push(relation.id);
-                }
-            }
-        }
-        if !issues.is_empty() {
-            return Ok((issues, std::collections::HashSet::new()));
-        }
-        if pending.is_empty() {
-            return Ok((Vec::new(), std::collections::HashSet::new()));
-        }
-
-        let materializing = resolution == PendingRelationResolution::Materialize;
-        // 只有真要建条时才解析词性目录——绑定模式一个词条都不会造出来。
-        let stub_part = if materializing {
-            let parts = LexiconRepository::catalog_parts_for_reference(
-                tx,
-                std::slice::from_ref(&STUB_PART_OF_SPEECH.to_owned()),
-            )
-            .await
-            .map_err(repository_error)?;
-            Some(parts.into_iter().next().ok_or_else(invariant_record)?)
-        } else {
-            None
-        };
-
-        let mut bindings = HashMap::<String, (Uuid, Uuid)>::new();
-        for (normalized_key, target) in pending {
-            let existing = if materializing {
-                {
-                    // 先锁词面再查同名：否则两个并发发布会各自查到「不存在」，各建一条
-                    // 同名占位，第二条撞唯一索引变成内部错误。锁键只由词面决定，
-                    // 不需要为此造出一整个占位聚合。
-                    let lock_keys = crate::lexicon::surface::normalize_surface_scopes(
-                        &target.display,
-                        Dialect::Common,
-                    )
-                    .map_err(surface_projection_error)?
-                    .into_iter()
-                    .map(|scope| crate::lexicon::repository::SurfaceLockKey {
-                        language: "en".to_owned(),
-                        dialect_scope: scope.dialect_scope.to_owned(),
-                        normalized_surface: scope.normalized_surface,
-                    })
-                    .collect::<Vec<_>>();
-                    LexiconRepository::lock_surface_keys(tx, &lock_keys)
-                        .await
-                        .map_err(repository_error)?;
-                    LexiconRepository::find_entry_by_headword_key_for_update(
-                        tx,
-                        target.kind,
-                        &normalized_key,
-                    )
-                    .await
-                    .map_err(repository_error)?
-                }
-            } else {
-                // 绑定模式不建条，也就不需要防并发建重；加锁反而会让保存 A 的事务
-                // 占着 B 的行到提交，把 B 自己的保存挡在外面。
-                LexiconRepository::find_entry_by_headword_key(tx, target.kind, &normalized_key)
-                    .await
-                    .map_err(repository_error)?
-            };
-
-            let bound = match existing {
-                // 关联词写成了本词条自己的主词。绑上去只会在随后的复核里以
-                // relation_self_target 报错，而那条错误指向管理员根本没填过的
-                // target_word_id；直接在这里按他实际写的字段报出来。
-                Some(found) if found.entry_id == entry_id => {
-                    issues.extend(target.relation_ids.iter().map(|relation_id| {
-                        reference_issue(
-                            *relation_id,
-                            "pending_target_headword",
-                            "relation_self_target",
-                            "关联词不能指向当前词条自身",
-                        )
-                    }));
-                    continue;
-                }
-                // 同名词条已归档。这里必须报错，且草稿保存就报——别的绑不上的情形
-                // （目标还没建、目标还没写词义）都会自愈，留着待物化等下一次即可，
-                // 归档不会：关联词搜索只搜已发布未归档词条，管理员根本看不见它，
-                // 绑上去就是「草稿存得下、发布必被拒」，而那时待建词面已被清空，
-                // 他重填同一个词还会再绑上来。归档词条又占着词头唯一键，绕过它
-                // 另建同名新条会撞 lexicon_entry_headword_keys_unique_idx。
-                // 趁词面还在手上报出来，管理员才能改词面、或先去恢复那条词条。
-                Some(found) if found.is_archived => {
-                    issues.extend(target.relation_ids.iter().map(|relation_id| {
-                        reference_issue(
-                            *relation_id,
-                            "pending_target_headword",
-                            "relation_target_archived",
-                            "同名词条已归档，请先恢复它再关联，或改指向其他词",
-                        )
-                    }));
-                    continue;
-                }
-                Some(_) if target.gloss.is_some() => {
-                    issues.extend(target.relation_ids.iter().map(|relation_id| {
-                        reference_issue(
-                            *relation_id,
-                            "pending_target_gloss",
-                            "relation_pending_gloss_target_exists",
-                            "同名词条已存在，请选择它的具体词义，预定义词义不会覆盖已有内容",
-                        )
-                    }));
-                    continue;
-                }
-                Some(found) => {
-                    let sense = LexiconRepository::first_draft_sense(tx, found.entry_id)
-                        .await
-                        .map_err(repository_error)?;
-                    match sense {
-                        Some(sense_id) => (found.entry_id, sense_id),
-                        // 目标词条已存在但还停在 forms 步骤，没有义项可指。草稿保存不该
-                        // 因此失败，留着待物化即可；发布必须落定，就报出可操作的错误，
-                        // 让管理员先去把那边的词义补上，而不是替他改别人的草稿。
-                        None if !materializing => continue,
-                        None => {
-                            issues.extend(target.relation_ids.iter().map(|relation_id| {
-                                reference_issue(
-                                    *relation_id,
-                                    "pending_target_headword",
-                                    "relation_target_has_no_sense",
-                                    "关联词目标词条还没有词义，请先补全后再发布",
-                                )
-                            }));
-                            continue;
-                        }
-                    }
-                }
-                // 绑定模式下目标还不存在：继续留在待物化形态，等发布时物化。
-                None if !materializing => continue,
-                None => {
-                    let part = stub_part.as_ref().ok_or_else(invariant_record)?;
-                    let stub = build_relation_target_stub(&target, &normalized_key, actor_id, part);
-                    let sources = crate::lexicon::repository::surface_projection_sources(&stub)
-                        .map_err(surface_projection_error)?;
-                    let sense_id = stub
-                        .meanings
-                        .pos
-                        .first()
-                        .and_then(|pos| pos.senses.first())
-                        .map(|sense| sense.id)
-                        .ok_or_else(invariant_record)?;
-                    let stub_id = stub.id;
-                    let part_map = HashMap::from([(part.code.clone(), part.id)]);
-                    LexiconRepository::insert_relation_target_entry(
-                        tx, &stub, actor_id, request_id, &part_map, entry_id,
-                    )
-                    .await
-                    .map_err(repository_error)?;
-                    LexiconRepository::replace_surface_projection(
-                        tx,
-                        stub_id,
-                        stub.revision,
-                        crate::lexicon::repository::SurfaceContentScope::Draft,
-                        None,
-                        &[],
-                        &sources,
-                    )
-                    .await
-                    .map_err(repository_error)?;
-                    (stub_id, sense_id)
-                }
-            };
-            bindings.insert(normalized_key, bound);
-        }
-
-        let mut newly_bound = std::collections::HashSet::new();
-        for pos in &mut meanings.pos {
-            for sense in &mut pos.senses {
-                for relation in &mut sense.relations {
-                    if relation.bound_target().is_some()
-                        || relation.prebound_target_word_id.is_some()
-                    {
-                        continue;
-                    }
-                    let Some(raw) = relation.pending_target_headword.as_deref() else {
-                        continue;
-                    };
-                    let Ok(normalized) =
-                        crate::lexicon::normalization::NormalizedHeadword::parse(raw)
-                    else {
-                        continue;
-                    };
-                    let Some((target_word_id, target_sense_id)) = bindings.get(&normalized.key)
-                    else {
-                        continue;
-                    };
-                    relation.target_word_id = Some(*target_word_id);
-                    relation.target_sense_id = Some(*target_sense_id);
-                    relation.pending_target_headword = None;
-                    relation.pending_target_gloss = None;
-                    newly_bound.insert(relation.id);
-                }
-            }
-        }
-        Ok((issues, newly_bound))
-    }
-}
-
-/// 占位词条的默认词性。关联词的外键钉在**义项**节点上，所以占位不能是空壳——
-/// 至少要有一个词性和一个义项供指向，词性只能给个默认值。
-const STUB_PART_OF_SPEECH: &str = "noun";
-
-/// 按最省的形状造一个占位词条：unified 主词、一个词性、一个空义项。
-///
-/// `detection_snapshot` 是库层 NOT NULL 的，而占位并没有经过检测，所以合成一份
-/// `clear` 的快照如实记录「没有检测过」，而不是伪造一次命中。
-fn build_relation_target_stub(
-    target: &PendingRelationTarget,
-    normalized_key: &str,
-    actor_id: Uuid,
-    part: &CatalogPartRecord,
-) -> AdminWordV2 {
-    let word_id = Uuid::now_v7();
-    let now = Utc::now();
-    let headwords = WordHeadwordsV2::Unified {
-        common: target.display.clone(),
-    };
-    let forms = crate::lexicon::service::entry::build_suggested_forms(
-        &headwords,
-        std::slice::from_ref(part),
-    );
-    let sense_group_id = Uuid::now_v7();
-    let mut meanings = DraftMeaningsStepContent {
-        sense_groups: vec![SenseGroupV2 {
-            id: sense_group_id,
-            name_zh: String::new(),
-            name_en: String::new(),
-        }],
-        pos: forms
-            .pos
-            .iter()
-            .map(|forms_pos| {
-                crate::lexicon::service::entry::build_initial_pos_meanings(
-                    word_id,
-                    &headwords,
-                    forms_pos,
-                    sense_group_id,
-                )
-            })
-            .collect(),
-    };
-    if let Some(gloss) = target.gloss.as_ref()
-        && let Some(WordDefinitionV2::ZhDefinition { content, .. }) = meanings
-            .pos
-            .first_mut()
-            .and_then(|pos| pos.senses.first_mut())
-            .and_then(|sense| sense.definitions.first_mut())
-    {
-        *content = RichText::V1(RichTextV1 {
-            version: 1,
-            text: gloss.clone(),
-            spans: Vec::new(),
-            liaisons: Vec::new(),
-        });
-    }
-    AdminWordV2 {
-        schema_version: 2,
-        id: word_id,
-        language: "en".to_owned(),
-        kind: target.kind,
-        status: AdminWordStatus::Draft,
-        revision: 1,
-        lifecycle_revision: 1,
-        published_revision: None,
-        has_unpublished_changes: false,
-        headwords: headwords.clone(),
-        frequency: None,
-        detection_snapshot: WordDetectionSnapshotV2 {
-            detection_id: Uuid::now_v7(),
-            request: DetectionRequestEcho {
-                language: "en".to_owned(),
-                headword: target.display.clone(),
-            },
-            normalized_headword: normalized_key.to_owned(),
-            entry_kind: target.kind,
-            matched_dialect: Dialect::Common,
-            builtin_dictionary_status: "not_found".to_owned(),
-            smart_dictionary: WordDetectionSnapshotSmartDictionaryV2::Clear {
-                surface_warning: None,
-            },
-            headwords,
-            suggested_pos: vec![part.code.clone()],
-            dictionary_provider: None,
-            dictionary_coverage: None,
-            dictionary_provenance: None,
-            detected_at: now,
-        },
-        forms,
-        meanings,
-        completed_steps: vec![PersistedWordStep::Basics],
-        max_reachable_step: WordCreationStep::Forms,
-        created_by: actor_id,
-        created_at: now,
-        updated_at: now,
-        archived_at: None,
-        archived_by: None,
-        published_at: None,
-    }
-}
-
 pub(super) async fn resolve_meaning_references(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: Uuid,
     meanings: &mut DraftMeaningsStepContent,
     mode: ReferenceResolutionMode,
     lock_for_publish: bool,
-    newly_bound: &std::collections::HashSet<Uuid>,
 ) -> Result<MeaningReferenceResolution, LexiconServiceError> {
     let active_sense_ids = meanings
         .pos
@@ -1535,10 +1091,8 @@ pub(super) async fn resolve_meaning_references(
             }
             for relation in &sense.relations {
                 let Some((target_entry_id, target_sense_id)) = relation.bound_target() else {
-                    // 待物化：目标词条还不存在，这里只校验词面本身立不立得住。
-                    // 真正建条发生在发布事务里（materialize_pending_relation_targets），
-                    // 所以 Verify 模式下不该再见到这种形态。
-                    if let Some(issue) = pending_relation_issue(relation, lock_for_publish) {
+                    // Unlinked display text is valid in drafts and publications.
+                    if let Some(issue) = pending_relation_issue(relation) {
                         issues.push(issue);
                     }
                     continue;
@@ -1658,13 +1212,6 @@ pub(super) async fn resolve_meaning_references(
                 };
                 match mode {
                     ReferenceResolutionMode::Canonicalize => {
-                        relation.target_headword = Some(snapshot.headword.clone());
-                        relation.target_gloss = Some(snapshot.gloss.clone());
-                    }
-                    // 本次事务刚物化并绑定的关联词没有可比的旧快照——它就是权威版本，
-                    // 直接落快照。过期检查针对的是「目标内容在你保存之后变了」，
-                    // 对刚长出来的目标不成立。
-                    ReferenceResolutionMode::Verify if newly_bound.contains(&relation.id) => {
                         relation.target_headword = Some(snapshot.headword.clone());
                         relation.target_gloss = Some(snapshot.gloss.clone());
                     }
@@ -1839,13 +1386,7 @@ pub(super) fn published_sense_snapshot(
 /// 词面本身永远要校验——归一化 + 字符集，与主词录入同一把尺子，否则「中文近义词」
 /// 会绕过 headword 校验从关联词这条路溜进词库。
 ///
-/// `materialized_expected` 只有真正的发布链路会传 true：它在复核之前已经物化过一遍，
-/// 走到这里还剩待物化形态就说明物化漏了，按引用不可用拦下而不是放行。草稿校验接口
-/// （同样是 Verify 模式）不物化，待物化在那里是合法的草稿状态。
-pub(super) fn pending_relation_issue(
-    relation: &WordRelationV2,
-    materialized_expected: bool,
-) -> Option<DraftValidationIssue> {
+pub(super) fn pending_relation_issue(relation: &WordRelationV2) -> Option<DraftValidationIssue> {
     if relation.pending_target_headword.is_none()
         && relation.prebound_target_word_id.is_none()
         && relation.pending_target_gloss.is_some()
@@ -1854,7 +1395,7 @@ pub(super) fn pending_relation_issue(
             relation.id,
             "pending_target_gloss",
             "relation_pending_gloss_without_headword",
-            "预定义词义只能跟随待建词面或预绑定草稿",
+            "文本注释必须跟随关联词文本",
         ));
     }
     if relation
@@ -1873,31 +1414,12 @@ pub(super) fn pending_relation_issue(
         ));
     }
     if relation.prebound_target_word_id.is_some() {
-        if relation.target_status.as_deref() == Some("archived") {
-            return Some(reference_issue(
-                relation.id,
-                "prebound_target_word_id",
-                "relation_prebound_target_archived",
-                "关联词目标已归档，请先恢复目标或重新选择",
-            ));
-        }
-        if materialized_expected {
-            return Some(match relation.prebinding_state.as_deref() {
-                Some("target_sense_deleted") => reference_issue(
-                    relation.id,
-                    "prebound_target_word_id",
-                    "relation_target_sense_deleted",
-                    "原关联词义已删除，请显式重选词义或删除关联",
-                ),
-                _ => reference_issue(
-                    relation.id,
-                    "prebound_target_word_id",
-                    "relation_prebound_target_has_no_sense",
-                    "关联词目标还没有可用词义，请先补充目标第一词义",
-                ),
-            });
-        }
-        return None;
+        return Some(reference_issue(
+            relation.id,
+            "prebound_target_word_id",
+            "relation_target_shape_invalid",
+            "预绑定已停用，请选择具体词义或使用纯文本",
+        ));
     }
     let headword = relation.pending_target_headword.as_deref().unwrap_or("");
     if let Some(issue) = crate::lexicon::normalization::NormalizedHeadword::parse(headword)
@@ -1913,14 +1435,7 @@ pub(super) fn pending_relation_issue(
     {
         return Some(issue);
     }
-    materialized_expected.then(|| {
-        reference_issue(
-            relation.id,
-            "target_sense_id",
-            "relation_target_unavailable",
-            "关联词目标必须是未归档词条当前草稿或当前发布中的有效词义",
-        )
-    })
+    None
 }
 
 pub(super) fn published_word_headword(word: &AdminWordV2) -> String {
