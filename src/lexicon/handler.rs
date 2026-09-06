@@ -189,6 +189,15 @@ fn apply_publication_legacy_bridge_read_flag(
 
 fn map_error(error: LexiconServiceError) -> AppError {
     match error {
+        LexiconServiceError::AnnotationConflict(conflict) => AppError::conflict(
+            ErrorCode::AnnotationConflict,
+            Some("annotation"),
+            "entry annotations require confirmation",
+        )
+        .with_meta(ProblemMeta {
+            annotation_conflict: Some(*conflict),
+            ..ProblemMeta::default()
+        }),
         LexiconServiceError::InvalidField { field, message } => {
             let code = if matches!(field, "headword" | "surface") {
                 ErrorCode::InvalidHeadword
