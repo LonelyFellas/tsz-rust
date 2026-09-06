@@ -59,3 +59,14 @@ Content-Type: application/problem+json
 - Admin 登录验证码的反枚举分支继续返回空的 `202` 响应。
 
 这些组的 HTTP 状态和完整 JSON body 必须逐字节一致；内部原因不得写入任何 Problem 字段。
+
+
+## 词条标注
+
+`409 annotation_conflict` 的 `field` 为 `annotation`，`meta.annotation_conflict` 包含
+`reason`（`required`、`duplicate`、`revision_conflict`、`group_changed`）、完整直接相关
+`entries` 和 `groups`。创建响应只返回新条直接相关组；修改旧条的其他原型也可能导致
+`duplicate`，不能仅以当前表格找重复行。所有失败均回滚旧标注与新词条。
+标注长度/控制字符、非法修订、重复更新 ID 沿用词库字段校验：
+`400 invalid_request_body`；DTO无法反序列化仍为 `422 invalid_request_body`。
+请求、修订及兼容规则见 [词条标注设计](features/entry-annotations/design.md)。

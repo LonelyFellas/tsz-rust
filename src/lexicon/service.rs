@@ -76,6 +76,7 @@ use crate::lexicon::{
     },
 };
 
+mod annotations;
 mod dictionary_suggestions;
 mod editing;
 mod entry;
@@ -140,6 +141,8 @@ pub enum LexiconServiceError {
     PublicationNotFound,
     #[error("configured part of speech disappeared")]
     CatalogMismatch,
+    #[error("entry annotation conflict")]
+    AnnotationConflict(Box<crate::lexicon::dto::EntryAnnotationConflict>),
     #[error("entry revision conflict")]
     RevisionConflict { current_revision: i64 },
     #[error("entry lifecycle revision conflict")]

@@ -80,6 +80,7 @@ use utoipa::{
         crate::lexicon::handler::query::surface_match_snapshot_page,
         crate::lexicon::handler::commands::suggest_dialect_variants,
         crate::lexicon::handler::commands::create,
+        crate::lexicon::handler::commands::update_annotation,
         crate::lexicon::handler::lifecycle::archive_batch,
         crate::lexicon::handler::lifecycle::restore_batch,
         crate::lexicon::handler::query::get,

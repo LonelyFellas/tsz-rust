@@ -1057,6 +1057,12 @@ pub struct AdminWordV3Capabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordV3 {
+    #[serde(default)]
+    #[schema(required = true)]
+    pub annotation: Option<String>,
+    #[serde(default = "crate::lexicon::dto::default_annotation_revision")]
+    #[schema(required = true, minimum = 1)]
+    pub annotation_revision: i64,
     #[serde(deserialize_with = "deserialize_schema_version_3")]
     #[schema(schema_with = schema_version_3_schema)]
     pub schema_version: u8,
@@ -1180,6 +1186,11 @@ pub struct CreateAdminWordV3Input {
     #[schema(schema_with = schema_version_3_schema)]
     pub schema_version: u8,
     pub detection_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(max_length = 20)]
+    pub annotation: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_updates: Vec<EntryAnnotationUpdate>,
     pub kind: WordEntryKindV3,
     /// Step 1 最终确认值；兼容窗口内旧客户端可省略，由服务端按旧检测规则补齐。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1824,6 +1835,12 @@ pub struct RelationReferenceSummaryV3 {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MatchedEntryContextV3 {
+    #[serde(default)]
+    #[schema(required = true)]
+    pub annotation: Option<String>,
+    #[serde(default = "crate::lexicon::dto::default_annotation_revision")]
+    #[schema(required = true, minimum = 1)]
+    pub annotation_revision: i64,
     pub entry_id: Uuid,
     pub presentation: EntryPresentationV3,
     #[schema(max_items = 5)]
@@ -1915,6 +1932,12 @@ pub enum SurfaceMatchPageAny {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordListItemV3 {
+    #[serde(default)]
+    #[schema(required = true)]
+    pub annotation: Option<String>,
+    #[serde(default = "crate::lexicon::dto::default_annotation_revision")]
+    #[schema(required = true, minimum = 1)]
+    pub annotation_revision: i64,
     #[serde(deserialize_with = "deserialize_schema_version_3")]
     #[schema(schema_with = schema_version_3_schema)]
     pub schema_version: u8,
@@ -2333,4 +2356,62 @@ mod tests {
         form_json["match_kind"] = serde_json::json!("legacy_v2");
         assert!(serde_json::from_value::<SurfaceMatchItemV3>(form_json).is_err());
     }
+}
+
+pub const fn default_annotation_revision() -> i64 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryAnnotationUpdate {
+    pub entry_id: Uuid,
+    #[schema(max_length = 20)]
+    pub annotation: Option<String>,
+    #[schema(minimum = 1)]
+    pub base_annotation_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateEntryAnnotationInput {
+    #[schema(max_length = 20)]
+    pub annotation: Option<String>,
+    #[schema(minimum = 1)]
+    pub base_annotation_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryAnnotationResponse {
+    pub entry_id: Uuid,
+    #[schema(required = true)]
+    pub annotation: Option<String>,
+    #[schema(minimum = 1)]
+    pub annotation_revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryAnnotationGroup {
+    pub dialect_scope: String,
+    pub normalized_surface: String,
+    pub entry_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryAnnotationConflictReason {
+    Required,
+    Duplicate,
+    RevisionConflict,
+    GroupChanged,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryAnnotationConflict {
+    pub reason: EntryAnnotationConflictReason,
+    pub entries: Vec<MatchedEntryContextV3>,
+    pub groups: Vec<EntryAnnotationGroup>,
 }
