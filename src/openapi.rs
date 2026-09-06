@@ -648,43 +648,32 @@ impl Modify for SmartLexiconV3SchemaAddon {
             );
         }
 
-        let build_relation_union =
-            |name: &str, branch_specs: Vec<(Vec<&str>, Vec<&str>, Option<&str>)>| {
-                let derived = component_schema_json(components, name);
-                let derived_properties = derived["properties"]
-                    .as_object()
-                    .expect("relation schema properties must be an object");
-                let one_of = branch_specs
-                    .into_iter()
-                    .map(|(allowed, required, prebinding_state)| {
-                        let mut properties = serde_json::Map::new();
-                        for field in ["id", "relation", "score"].into_iter().chain(allowed) {
-                            properties.insert(field.to_owned(), derived_properties[field].clone());
-                        }
-                        if let Some(state) = prebinding_state {
-                            properties.insert(
-                                "prebinding_state".to_owned(),
-                                serde_json::json!({
-                                    "type": "string",
-                                    "enum": [state],
-                                    "readOnly": true
-                                }),
-                            );
-                        }
-                        let required = ["id", "relation", "score"]
-                            .into_iter()
-                            .chain(required)
-                            .collect::<Vec<_>>();
-                        serde_json::json!({
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": required,
-                            "properties": properties
-                        })
+        let build_relation_union = |name: &str, branch_specs: Vec<(Vec<&str>, Vec<&str>)>| {
+            let derived = component_schema_json(components, name);
+            let derived_properties = derived["properties"]
+                .as_object()
+                .expect("relation schema properties must be an object");
+            let one_of = branch_specs
+                .into_iter()
+                .map(|(allowed, required)| {
+                    let mut properties = serde_json::Map::new();
+                    for field in ["id", "relation", "score"].into_iter().chain(allowed) {
+                        properties.insert(field.to_owned(), derived_properties[field].clone());
+                    }
+                    let required = ["id", "relation", "score"]
+                        .into_iter()
+                        .chain(required)
+                        .collect::<Vec<_>>();
+                    serde_json::json!({
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": required,
+                        "properties": properties
                     })
-                    .collect::<Vec<_>>();
-                serde_json::json!({"oneOf": one_of})
-            };
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({"oneOf": one_of})
+        };
         let relation_response = build_relation_union(
             "WordRelationV3",
             vec![
@@ -702,41 +691,10 @@ impl Modify for SmartLexiconV3SchemaAddon {
                         "target_headword",
                         "target_gloss",
                     ],
-                    None,
                 ),
                 (
                     vec!["pending_target_headword", "pending_target_gloss"],
                     vec!["pending_target_headword"],
-                    None,
-                ),
-                // 预绑定不携带待建词面：词条身份在 prebound id 上，词面回显走只读 target_headword。
-                (
-                    vec![
-                        "prebound_target_word_id",
-                        "pending_target_gloss",
-                        "target_headword",
-                        "target_status",
-                    ],
-                    vec![
-                        "prebound_target_word_id",
-                        "target_headword",
-                        "prebinding_state",
-                    ],
-                    Some("waiting_first_sense"),
-                ),
-                (
-                    vec![
-                        "prebound_target_word_id",
-                        "pending_target_gloss",
-                        "target_headword",
-                        "target_status",
-                    ],
-                    vec![
-                        "prebound_target_word_id",
-                        "target_headword",
-                        "prebinding_state",
-                    ],
-                    Some("target_sense_deleted"),
                 ),
             ],
         );
@@ -746,18 +704,10 @@ impl Modify for SmartLexiconV3SchemaAddon {
                 (
                     vec!["target_word_id", "target_sense_id"],
                     vec!["target_word_id", "target_sense_id"],
-                    None,
                 ),
                 (
                     vec!["pending_target_headword", "pending_target_gloss"],
                     vec!["pending_target_headword"],
-                    None,
-                ),
-                // 预绑定写入只带稳定 id 与可选预定义词义。
-                (
-                    vec!["prebound_target_word_id", "pending_target_gloss"],
-                    vec!["prebound_target_word_id"],
-                    None,
                 ),
             ],
         );

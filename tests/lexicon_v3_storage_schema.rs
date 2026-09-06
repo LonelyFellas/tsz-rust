@@ -26,7 +26,13 @@ fn assert_db_error<T: std::fmt::Debug>(
 }
 
 #[sqlx::test]
-async fn relation_prebinding_shape_has_stable_target_identity(pool: PgPool) {
+async fn retiring_prebinding_cleans_projection_and_nodes_but_preserves_text(pool: PgPool) {
+    sqlx::query(
+        "ALTER TABLE lexicon.relations DROP CONSTRAINT lexicon_relations_no_prebinding_check",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     let admin_id = insert_admin(&pool).await;
     let source_entry = insert_v3_entry(&pool, admin_id).await;
     let target_entry = insert_v3_entry(&pool, admin_id).await;
@@ -94,76 +100,74 @@ async fn relation_prebinding_shape_has_stable_target_identity(pool: PgPool) {
     }
     tx.commit().await.unwrap();
 
-    let invalid_relation_id = Uuid::now_v7();
-    let mut invalid_node_tx = pool.begin().await.unwrap();
-    insert_node(
-        &mut invalid_node_tx,
-        invalid_relation_id,
-        source_entry,
-        "relation",
-        Some(source_sense),
-        "meanings.relation",
-        false,
+    let relation_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM lexicon.relations WHERE entry_id = $1 ORDER BY sort_order",
     )
-    .await;
-    invalid_node_tx.commit().await.unwrap();
-    let stray_headword = sqlx::query(
-        r#"
-        INSERT INTO lexicon.relations (
-            id, entry_id, source_sense_id, relation_type, score,
-            prebound_target_entry_id, prebinding_reason,
-            pending_target_headword, sort_order
-        ) VALUES ($1, $2, $3, 'synonym', 80, $4, 'waiting_first_sense', 'reliability', 2)
-        "#,
-    )
-    .bind(invalid_relation_id)
     .bind(source_entry)
-    .bind(source_sense)
-    .bind(target_entry)
-    .execute(&pool)
-    .await;
-    assert_db_error(
-        stray_headword,
-        CHECK_VIOLATION,
-        "lexicon_relations_target_shape_check",
-    );
-    let hard_delete = sqlx::query("DELETE FROM lexicon.entries WHERE id = $1")
-        .bind(target_entry)
-        .execute(&pool)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let text_id = Uuid::now_v7();
+    let bound_id = Uuid::now_v7();
+    let mut tx = pool.begin().await.unwrap();
+    for id in [text_id, bound_id] {
+        insert_node(
+            &mut tx,
+            id,
+            source_entry,
+            "relation",
+            Some(source_sense),
+            "meanings.relation",
+            false,
+        )
         .await;
+    }
+    sqlx::query("INSERT INTO lexicon.relations(id,entry_id,source_sense_id,relation_type,score,pending_target_headword,sort_order) VALUES ($1,$2,$3,'synonym',80,'reliability',2)")
+        .bind(text_id).bind(source_entry).bind(source_sense).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.relations(id,entry_id,source_sense_id,relation_type,score,target_entry_id,target_sense_id,target_headword_snapshot,target_gloss_snapshot,sort_order) VALUES ($1,$2,$3,'synonym',80,$2,$3,'bound','meaning',3)")
+        .bind(bound_id).bind(source_entry).bind(source_sense).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let projection = json!({"pos": [{"senses": [{"relations": [
+        {"id": relation_ids[0], "prebound_target_word_id": target_entry},
+        {"id": text_id, "pending_target_headword": "reliability"},
+        {"id": bound_id, "target_word_id": source_entry, "target_sense_id": source_sense},
+        {"id": relation_ids[1], "prebound_target_word_id": target_entry}
+    ]}]}]});
+    sqlx::query("INSERT INTO lexicon.entry_editor_projection(entry_id, forms, meanings, rebuilt_revision) VALUES ($1, '{}', $2, 1)")
+        .bind(source_entry).bind(projection).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260906140000_remove_draft_relation_prebinding.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let removed: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.nodes WHERE id = ANY($1) AND removed_from_draft_at IS NOT NULL")
+        .bind(&relation_ids).fetch_one(&pool).await.unwrap();
+    assert_eq!(removed, 2);
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.relations WHERE entry_id = $1")
+            .bind(source_entry)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 2);
+    let projection: serde_json::Value = sqlx::query_scalar(
+        "SELECT meanings FROM lexicon.entry_editor_projection WHERE entry_id = $1",
+    )
+    .bind(source_entry)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        projection["pos"][0]["senses"][0]["relations"],
+        json!([{"id": text_id, "pending_target_headword": "reliability"}, {"id": bound_id, "target_word_id": source_entry, "target_sense_id": source_sense}])
+    );
+    let rejected = sqlx::query("INSERT INTO lexicon.relations(id, entry_id, source_sense_id, relation_type, score, prebound_target_entry_id, prebinding_reason, sort_order) VALUES ($1,$2,$3,'synonym',80,$4,'waiting_first_sense',0)")
+        .bind(relation_ids[0]).bind(source_entry).bind(source_sense).bind(target_entry).execute(&pool).await;
     assert_db_error(
-        hard_delete,
-        FOREIGN_KEY_VIOLATION,
-        "lexicon_relations_prebound_target_fkey",
-    );
-    let down = sqlx::raw_sql(include_str!(
-        "../migrations/20260830080000_add_draft_relation_prebinding.down.sql"
-    ))
-    .execute(&pool)
-    .await;
-    assert!(
-        down.as_ref()
-            .is_err_and(
-                |error| error.as_database_error().is_some_and(|database| database
-                    .message()
-                    .contains("cannot remove draft relation prebinding"))
-            ),
-        "存在预绑定时 down migration 必须 fail closed：{down:?}"
-    );
-    let narrow_down = sqlx::raw_sql(include_str!(
-        "../migrations/20260901100000_narrow_prebound_relation_shape.down.sql"
-    ))
-    .execute(&pool)
-    .await;
-    assert!(
-        narrow_down
-            .as_ref()
-            .is_err_and(
-                |error| error.as_database_error().is_some_and(|database| database
-                    .message()
-                    .contains("cannot restore the wide prebound relation shape"))
-            ),
-        "存在预绑定时收窄迁移的 down 必须 fail closed：{narrow_down:?}"
+        rejected,
+        CHECK_VIOLATION,
+        "lexicon_relations_no_prebinding_check",
     );
 }
 
