@@ -177,15 +177,18 @@ pub fn validate_meanings(
                     "CEFR 等级无效",
                 );
             }
+            // 只有基础词性才有细分词性可选；非基础词性的释义不填 sub_pos（填了会落到下面的归属校验）。
             if sense.sub_pos.is_empty() {
-                issue(
-                    &mut issues,
-                    PersistedWordStep::Meanings,
-                    sense.id,
-                    "sub_pos",
-                    "sub_pos_required",
-                    "请选择细分词性",
-                );
+                if crate::catalog::rules::is_basic_part_of_speech(pos_code) {
+                    issue(
+                        &mut issues,
+                        PersistedWordStep::Meanings,
+                        sense.id,
+                        "sub_pos",
+                        "sub_pos_required",
+                        "请选择细分词性",
+                    );
+                }
             } else if sub_part_parents
                 .get(&sense.sub_pos)
                 .is_none_or(|parent| parent != pos_code)
@@ -495,4 +498,82 @@ pub fn validate_meanings(
         }
     }
     issues
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexicon::dto::SourceDialect;
+    use serde_json::json;
+
+    fn forms(pos: &str, pos_id: Uuid) -> DraftFormsStepContent {
+        DraftFormsStepContent {
+            pos: vec![
+                serde_json::from_value(json!({
+                    "pos_id": pos_id,
+                    "pos": pos,
+                    "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
+                    "base_form": {
+                        "id": Uuid::now_v7(), "form_type": "base",
+                        "variants": [{
+                            "id": Uuid::now_v7(), "dialect": "common", "spelling": "high",
+                            "origin": "dictionary", "pronunciations": [{
+                                "id": Uuid::now_v7(), "dict_phonetic": "", "actual_pron": "", "style": "normal"
+                            }]
+                        }]
+                    },
+                    "form_groups": []
+                }))
+                .unwrap(),
+            ],
+        }
+    }
+
+    fn meanings_without_sub_pos(pos_id: Uuid) -> DraftMeaningsStepContent {
+        serde_json::from_value(json!({
+            "sense_groups": [],
+            "pos": [{
+                "pos_id": pos_id,
+                "grammar_structures": [],
+                "senses": [{
+                    "id": Uuid::now_v7(),
+                    "sub_pos": "",
+                    "level": "A1",
+                    "depends_on_context": false,
+                    "definitions": [],
+                    "sentences": [],
+                    "relations": []
+                }]
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn sub_pos_required_issues(pos: &str) -> usize {
+        let pos_id = Uuid::now_v7();
+        let headwords = WordHeadwordsV2::Distinguish {
+            uk: "high".to_owned(),
+            us: "high".to_owned(),
+            source_dialect: SourceDialect::Uk,
+        };
+        validate_meanings(
+            Uuid::now_v7(),
+            &forms(pos, pos_id),
+            &meanings_without_sub_pos(pos_id),
+            &headwords,
+            &HashMap::new(),
+        )
+        .into_iter()
+        .filter(|issue| issue.code == "sub_pos_required")
+        .count()
+    }
+
+    /// 细分词性只在基础词性下存在：基础词性的释义必须选，非基础词性没有可选项，不能因此拦住完成。
+    #[test]
+    fn sub_pos_is_required_only_under_basic_parts_of_speech() {
+        assert_eq!(sub_pos_required_issues("noun"), 1);
+        assert_eq!(sub_pos_required_issues("verb"), 1);
+        assert_eq!(sub_pos_required_issues("particle"), 0);
+        assert_eq!(sub_pos_required_issues("preposition"), 0);
+    }
 }

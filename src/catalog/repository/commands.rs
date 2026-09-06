@@ -8,8 +8,9 @@ impl CatalogRepository {
         sqlx::query(
             r#"
             INSERT INTO catalog.parts_of_speech (
-                id, code, name_zh, name_en, abbreviation, sort_order, created_by_admin_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                id, code, name_zh, name_en, abbreviation, short_name_zh, full_name_en,
+                sort_order, created_by_admin_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(value.id)
@@ -17,6 +18,8 @@ impl CatalogRepository {
         .bind(&value.name_zh)
         .bind(&value.name_en)
         .bind(&value.abbreviation)
+        .bind(&value.short_name_zh)
+        .bind(&value.full_name_en)
         .bind(value.sort_order)
         .bind(value.actor_id)
         .execute(&mut **tx)
@@ -35,8 +38,9 @@ impl CatalogRepository {
         sqlx::query(
             r#"
             UPDATE catalog.parts_of_speech
-            SET name_zh = $3, name_en = $4, abbreviation = $5, sort_order = $6,
-                revision = revision + 1, updated_by_admin_id = $7, updated_at = now()
+            SET name_zh = $3, name_en = $4, abbreviation = $5,
+                short_name_zh = $6, full_name_en = $7, sort_order = $8,
+                revision = revision + 1, updated_by_admin_id = $9, updated_at = now()
             WHERE id = $1 AND revision = $2
             "#,
         )
@@ -45,6 +49,8 @@ impl CatalogRepository {
         .bind(&changes.name_zh)
         .bind(&changes.name_en)
         .bind(&changes.abbreviation)
+        .bind(&changes.short_name_zh)
+        .bind(&changes.full_name_en)
         .bind(changes.sort_order)
         .bind(actor_id)
         .execute(&mut **tx)
@@ -60,8 +66,9 @@ impl CatalogRepository {
         sqlx::query(
             r#"
             INSERT INTO catalog.sub_parts_of_speech (
-                id, part_of_speech_id, code, name_zh, name_en, sort_order, created_by_admin_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                id, part_of_speech_id, code, name_zh, name_en,
+                short_name_zh, abbreviation, full_name_en, sort_order, created_by_admin_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(value.id)
@@ -69,6 +76,9 @@ impl CatalogRepository {
         .bind(&value.code)
         .bind(&value.name_zh)
         .bind(&value.name_en)
+        .bind(&value.short_name_zh)
+        .bind(&value.abbreviation)
+        .bind(&value.full_name_en)
         .bind(value.sort_order)
         .bind(value.actor_id)
         .execute(&mut **tx)
@@ -88,8 +98,9 @@ impl CatalogRepository {
         sqlx::query(
             r#"
             UPDATE catalog.sub_parts_of_speech
-            SET name_zh = $4, name_en = $5, sort_order = $6,
-                revision = revision + 1, updated_by_admin_id = $7, updated_at = now()
+            SET name_zh = $4, name_en = $5, short_name_zh = $6, abbreviation = $7,
+                full_name_en = $8, sort_order = $9,
+                revision = revision + 1, updated_by_admin_id = $10, updated_at = now()
             WHERE part_of_speech_id = $1 AND id = $2 AND revision = $3
             "#,
         )
@@ -98,6 +109,9 @@ impl CatalogRepository {
         .bind(base_revision)
         .bind(&changes.name_zh)
         .bind(&changes.name_en)
+        .bind(&changes.short_name_zh)
+        .bind(&changes.abbreviation)
+        .bind(&changes.full_name_en)
         .bind(changes.sort_order)
         .bind(actor_id)
         .execute(&mut **tx)
@@ -162,6 +176,19 @@ impl CatalogRepository {
             .await
             .map(|_| ())
             .map_err(map_part_delete_error)
+    }
+
+    pub(crate) async fn sub_part_count(
+        tx: &mut Transaction<'_, Postgres>,
+        part_id: Uuid,
+    ) -> Result<i64, CatalogRepositoryError> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM catalog.sub_parts_of_speech WHERE part_of_speech_id = $1",
+        )
+        .bind(part_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(CatalogRepositoryError::Database)
     }
 
     /// 删除预检与管理端 usage_count 共用相同去重语义。

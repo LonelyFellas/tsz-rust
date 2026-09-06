@@ -1129,7 +1129,22 @@ impl LexiconService {
             None => None,
         };
         let (builtin_dictionary, mut suggested_pos) = if let Some(term) = term {
-            let builtin_suggested_pos = map_dictionary_pos(&term.pos);
+            // 内置词典的词性映射可能落在目录里已不存在的编码（如 2026-09-06 下线的介词等六个
+            // 非基础种子），与 V2 路径一样只保留 catalog 现存的基本词性，避免建议出无法保存的 pos；
+            // 但保持词典给出的词性顺序（首项是词典主词性），不按目录排序重排。
+            let mapped_pos = map_dictionary_pos(&term.pos);
+            let existing_codes = self
+                .repository
+                .catalog_parts(&mapped_pos)
+                .await
+                .map_err(repository_error)?
+                .into_iter()
+                .map(|part| part.code)
+                .collect::<std::collections::HashSet<_>>();
+            let builtin_suggested_pos = mapped_pos
+                .into_iter()
+                .filter(|code| existing_codes.contains(code))
+                .collect::<Vec<_>>();
             let mut base_content_keys = vec![normalized.key.clone()];
             if let Some(surface) = &surface {
                 base_content_keys.extend(
@@ -1166,6 +1181,8 @@ impl LexiconService {
                     .await
                     .map_err(repository_error)?;
                 content_pairs = content_base_dialect_pairs(&normalized.key, &discovery_content);
+                // 方言配对同样只保留目录现存的词性，否则孤儿 pair 会把仍在目录里的词性的派生词形剪掉。
+                content_pairs.retain(|pair| existing_codes.contains(&pair.pos));
                 discovery_content
                     .into_iter()
                     .filter(|record| {

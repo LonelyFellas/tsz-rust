@@ -87,6 +87,8 @@ pub enum ErrorCode {
     PublicationNotFound,
     PartOfSpeechInUse,
     SubPartOfSpeechInUse,
+    SubPartOfSpeechNotAllowed,
+    PartOfSpeechHasSubParts,
     InvalidSpeechPreview,
     SpeechVoiceNotFound,
     SpeechPreviewInProgress,
@@ -105,7 +107,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 82] = [
+    pub const ALL: [Self; 84] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -180,6 +182,8 @@ impl ErrorCode {
         Self::PublicationNotFound,
         Self::PartOfSpeechInUse,
         Self::SubPartOfSpeechInUse,
+        Self::SubPartOfSpeechNotAllowed,
+        Self::PartOfSpeechHasSubParts,
         Self::InvalidSpeechPreview,
         Self::SpeechVoiceNotFound,
         Self::SpeechPreviewInProgress,
@@ -522,6 +526,16 @@ impl ErrorCode {
             Self::SubPartOfSpeechInUse => (
                 "sub_part_of_speech_in_use",
                 "Sub part of speech in use",
+                StatusCode::CONFLICT,
+            ),
+            Self::SubPartOfSpeechNotAllowed => (
+                "sub_part_of_speech_not_allowed",
+                "Sub part of speech not allowed",
+                StatusCode::CONFLICT,
+            ),
+            Self::PartOfSpeechHasSubParts => (
+                "part_of_speech_has_sub_parts",
+                "Part of speech still has sub parts",
                 StatusCode::CONFLICT,
             ),
             Self::InvalidSpeechPreview => (

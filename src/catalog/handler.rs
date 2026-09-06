@@ -141,7 +141,7 @@ pub async fn update_part(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "需要超级管理员"),
         (status = 404, description = "基本词性不存在"),
-        (status = 409, description = "revision 冲突或配置仍被引用"),
+        (status = 409, description = "revision 冲突、配置仍被引用，或仍挂有细分词性（part_of_speech_has_sub_parts）"),
         (status = 500, description = "数据库写入失败")
     )
 )]
@@ -203,7 +203,7 @@ pub async fn list_sub_parts(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "需要超级管理员"),
         (status = 404, description = "基本词性不存在"),
-        (status = 409, description = "编码或同父级名称冲突"),
+        (status = 409, description = "编码或同父级名称冲突；或父级不是基础词性（sub_part_of_speech_not_allowed）"),
         (status = 422, description = "请求结构非法"),
         (status = 500, description = "数据库写入失败")
     )
@@ -356,6 +356,24 @@ fn map_error(error: CatalogServiceError) -> AppError {
             );
             with_usage(error, usage_count)
         }
+        CatalogServiceError::SubPartNotAllowed {
+            part_of_speech_id,
+            code,
+        } => AppError::conflict(
+            ErrorCode::SubPartOfSpeechNotAllowed,
+            None,
+            "part of speech does not allow sub parts",
+        )
+        .with_meta(ProblemMeta {
+            part_of_speech_id: Some(part_of_speech_id),
+            code: Some(code),
+            ..ProblemMeta::default()
+        }),
+        CatalogServiceError::PartHasSubParts => AppError::conflict(
+            ErrorCode::PartOfSpeechHasSubParts,
+            None,
+            "part of speech still has sub parts",
+        ),
         other => AppError::internal(other),
     }
 }

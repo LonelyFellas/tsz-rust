@@ -262,7 +262,7 @@ async fn catalog_read_allows_active_admin_but_management_requires_super_admin(po
     )
     .await;
     assert_eq!(status, StatusCode::OK, "普通管理员应能读 catalog：{body}");
-    assert_eq!(body["catalog_version"], 2);
+    assert_eq!(body["catalog_version"], 4);
     let all_form_types = json!([
         "third_person_singular",
         "present_participle",
@@ -276,11 +276,30 @@ async fn catalog_read_allows_active_admin_but_management_requires_super_admin(po
         assert_eq!(item["allowed_form_types"], all_form_types, "{item}");
         assert_eq!(item["default_form_types"], all_form_types, "{item}");
     }
-    assert_eq!(body["items"].as_array().map(Vec::len), Some(11));
+    assert_eq!(body["items"].as_array().map(Vec::len), Some(5));
     assert_eq!(body["items"][0]["code"], "noun");
+    assert_eq!(body["items"][0]["short_name_zh"], "名词");
+    assert_eq!(body["items"][0]["full_name_en"], "noun");
+    assert!(
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["sub_parts_extensible"] == true),
+        "默认种子全部是基础词性"
+    );
     assert_eq!(
         body["items"][0]["sub_parts"].as_array().map(Vec::len),
         Some(5)
+    );
+    assert_eq!(
+        body["items"][0]["sub_parts"][0]["short_name_zh"],
+        "可数名词"
+    );
+    assert_eq!(body["items"][0]["sub_parts"][0]["abbreviation"], "n.");
+    assert_eq!(
+        body["items"][0]["sub_parts"][0]["full_name_en"],
+        "countable noun"
     );
 
     let (status, _, body, _) = call(&state, Method::GET, ROOT, Some(&admin_token), None).await;
@@ -292,7 +311,7 @@ async fn catalog_read_allows_active_admin_but_management_requires_super_admin(po
     let (status, _, body, _) = call(&state, Method::GET, ROOT, Some(&super_token), None).await;
     assert_eq!(status, StatusCode::OK, "超级管理员应能读管理列表：{body}");
     assert_eq!(body["pagination"]["page_size"], 10);
-    assert_eq!(body["pagination"]["total"], 11);
+    assert_eq!(body["pagination"]["total"], 5);
     let noun = body["items"]
         .as_array()
         .unwrap()
@@ -333,6 +352,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
             "name_zh": "  小品词  ",
             "name_en": "  Particle  ",
             "abbreviation": " part. ",
+            "short_name_zh": "  小品  ",
+            "full_name_en": "  Particle Word  ",
             "sort_order": -10
         })),
     )
@@ -341,6 +362,12 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     let part_id = created["id"].as_str().unwrap();
     assert_eq!(created["name_zh"], "小品词");
     assert_eq!(created["abbreviation"], "part.");
+    assert_eq!(created["short_name_zh"], "小品");
+    assert_eq!(created["full_name_en"], "Particle Word");
+    assert_eq!(
+        created["sub_parts_extensible"], false,
+        "自建词性不是基础词性，不允许挂细分词性"
+    );
     assert_eq!(created["revision"], 1);
     assert_eq!(created["usage_count"], 0);
     assert_eq!(created["sub_part_count"], 0);
@@ -357,6 +384,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
             "name_zh": "另一个中文名",
             "name_en": "Another English Name",
             "abbreviation": "another.",
+            "short_name_zh": "另一个",
+            "full_name_en": "another english name",
             "sort_order": 999
         })),
     )
@@ -376,6 +405,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
             "name_zh": "小品词",
             "name_en": "Particle",
             "abbreviation": "part.",
+            "short_name_zh": "小品",
+            "full_name_en": "particle word",
             "sort_order": 120
         })),
     )
@@ -393,6 +424,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
             "name_zh": "小品词",
             "name_en": "Particle",
             "abbreviation": "part.",
+            "short_name_zh": "小品",
+            "full_name_en": "particle word",
             "sort_order": 120
         })),
     )
@@ -411,6 +444,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
             "name_zh": "新小品词",
             "name_en": "Particle updated",
             "abbreviation": "pt.",
+            "short_name_zh": "小品",
+            "full_name_en": "particle word",
             "sort_order": 120
         })),
     )
@@ -430,6 +465,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
             "name_zh": "过期修改",
             "name_en": "Stale update",
             "abbreviation": "stale.",
+            "short_name_zh": "小品",
+            "full_name_en": "particle word",
             "sort_order": 0
         })),
     )
@@ -441,7 +478,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     assert_eq!(stale["meta"]["part_of_speech_id"], part_id);
     assert_eq!(stale["meta"]["code"], "particle");
 
-    let (status, _, sub, _) = call(
+    // 自建的小品词不是基础词性：创建细分词性必须在写入前被拦下。
+    let (status, _, body, _) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/{part_id}/sub-parts"),
@@ -450,42 +488,72 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
             "code": "PRT-FOCUS",
             "name_zh": "焦点小品词",
             "name_en": "Focus particle",
+            "short_name_zh": "焦点",
+            "abbreviation": "fn.",
+            "full_name_en": "focus particle",
             "sort_order": 10
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "创建细分词性失败：{sub}");
-    let sub_id = sub["id"].as_str().unwrap();
-    assert_eq!(sub["part_of_speech_id"], part_id);
-    assert_eq!(sub["revision"], 1);
-    assert!(sub.get("updated_by").is_none());
-
-    let (status, _, sub_list, _) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/{part_id}/sub-parts"),
-        Some(&bearer),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(sub_list["items"].as_array().map(Vec::len), Some(1));
-    assert!(sub_list.get("pagination").is_none());
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "sub_part_of_speech_not_allowed");
+    assert_eq!(body["meta"]["part_of_speech_id"], part_id);
+    assert_eq!(body["meta"]["code"], "particle");
 
     let noun_id: Uuid =
         sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
             .fetch_one(&pool)
             .await
             .unwrap();
+    let (status, _, sub, _) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/{noun_id}/sub-parts"),
+        Some(&bearer),
+        Some(json!({
+            "code": "N-FOCUS",
+            "name_zh": "焦点名词",
+            "name_en": "Focus noun",
+            "short_name_zh": "焦点",
+            "abbreviation": "fn.",
+            "full_name_en": "focus noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建细分词性失败：{sub}");
+    let sub_id = sub["id"].as_str().unwrap();
+    assert_eq!(sub["part_of_speech_id"], noun_id.to_string());
+    assert_eq!(sub["short_name_zh"], "焦点");
+    assert_eq!(sub["abbreviation"], "fn.");
+    assert_eq!(sub["full_name_en"], "focus noun");
+    assert_eq!(sub["revision"], 1);
+    assert!(sub.get("updated_by").is_none());
+
+    let (status, _, sub_list, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/{noun_id}/sub-parts"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sub_list["items"].as_array().map(Vec::len), Some(6));
+    assert!(sub_list.get("pagination").is_none());
+
     let (status, _, body, _) = call(
         &state,
         Method::PATCH,
-        &format!("{ROOT}/{noun_id}/sub-parts/{sub_id}"),
+        &format!("{ROOT}/{part_id}/sub-parts/{sub_id}"),
         Some(&bearer),
         Some(json!({
             "base_revision": 1,
             "name_zh": "错误父级",
             "name_en": "Wrong parent",
+            "short_name_zh": "焦点",
+            "abbreviation": "fn.",
+            "full_name_en": "wrong parent",
             "sort_order": 10
         })),
     )
@@ -496,12 +564,15 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     let (status, _, updated_sub, _) = call(
         &state,
         Method::PATCH,
-        &format!("{ROOT}/{part_id}/sub-parts/{sub_id}"),
+        &format!("{ROOT}/{noun_id}/sub-parts/{sub_id}"),
         Some(&bearer),
         Some(json!({
             "base_revision": 1,
             "name_zh": "焦点助词",
             "name_en": "Focus marker",
+            "short_name_zh": "焦点",
+            "abbreviation": "fn.",
+            "full_name_en": "focus marker",
             "sort_order": -20
         })),
     )
@@ -509,10 +580,22 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     assert_eq!(status, StatusCode::OK, "更新细分词性失败：{updated_sub}");
     assert_eq!(updated_sub["revision"], 2);
 
+    // 名词还挂着细分词性：即使没有词条引用也不能删，先清空细分词性。
     let (status, _, body, _) = call(
         &state,
         Method::DELETE,
-        &format!("{ROOT}/{part_id}/sub-parts/{sub_id}?base_revision=1"),
+        &format!("{ROOT}/{noun_id}?base_revision=1"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "part_of_speech_has_sub_parts");
+
+    let (status, _, body, _) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/{noun_id}/sub-parts/{sub_id}?base_revision=1"),
         Some(&bearer),
         None,
     )
@@ -523,7 +606,7 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     let (status, _, _, bytes) = call(
         &state,
         Method::DELETE,
-        &format!("{ROOT}/{part_id}/sub-parts/{sub_id}?base_revision=2"),
+        &format!("{ROOT}/{noun_id}/sub-parts/{sub_id}?base_revision=2"),
         Some(&bearer),
         None,
     )
@@ -562,7 +645,7 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(catalog["catalog_version"], 8);
+    assert_eq!(catalog["catalog_version"], 10);
     assert!(
         catalog["items"]
             .as_array()
@@ -709,6 +792,8 @@ async fn usage_counts_merge_active_drafts_and_all_publications_before_delete(poo
             "name_zh": noun["name_zh"],
             "name_en": noun["name_en"],
             "abbreviation": noun["abbreviation"],
+            "short_name_zh": noun["short_name_zh"],
+            "full_name_en": noun["full_name_en"],
             "sort_order": noun["sort_order"]
         })),
     )
@@ -730,6 +815,9 @@ async fn usage_counts_merge_active_drafts_and_all_publications_before_delete(poo
             "base_revision": 1,
             "name_zh": n_count["name_zh"],
             "name_en": n_count["name_en"],
+            "short_name_zh": n_count["short_name_zh"],
+            "abbreviation": n_count["abbreviation"],
+            "full_name_en": n_count["full_name_en"],
             "sort_order": n_count["sort_order"]
         })),
     )
@@ -798,6 +886,23 @@ async fn usage_counts_merge_active_drafts_and_all_publications_before_delete(poo
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(bytes.is_empty());
 
+    // 引用清空后仍挂着其余种子细分词性：先拦下，清空细分词性后才能删。
+    let (status, _, body, _) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/{part_id}?base_revision=2"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "part_of_speech_has_sub_parts");
+
+    sqlx::query("DELETE FROM catalog.sub_parts_of_speech WHERE part_of_speech_id = $1")
+        .bind(part_id)
+        .execute(&pool)
+        .await
+        .expect("清空剩余细分词性应成功");
     let (status, _, _, bytes) = call(
         &state,
         Method::DELETE,

@@ -24451,3 +24451,49 @@ async fn component_target_search_ranks_exact_before_prefix_before_contains_and_p
     );
     assert_eq!(stale["field"], "cursor", "{stale}");
 }
+
+#[sqlx::test]
+async fn v3_detection_drops_suggested_pos_missing_from_catalog(pool: PgPool) {
+    // 2026-09-06 起目录只种五个基础词性；内置词典映射出的介词等编码不在目录里时，
+    // V3 检测必须像 V2 一样只建议目录现存的词性，否则前端会拿到无法保存的 pos。
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_word(&pool, "before").await;
+    sqlx::query(
+        "UPDATE dictionary.terms SET pos = ARRAY['preposition', 'verb', 'noun'] WHERE normalized_term = 'before'",
+    )
+    .execute(&pool)
+    .await
+    .expect("应能把内置词典词性改成含已下线编码");
+
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "word",
+            "surface": "before"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    // 介词被过滤掉；其余保持词典给出的顺序（verb 在 noun 前），不按目录排序重排。
+    assert_eq!(
+        detection["suggested_pos"],
+        json!(["verb", "noun"]),
+        "目录里不存在的介词不得进入建议，且保持词典顺序"
+    );
+    assert_eq!(
+        detection["builtin_dictionary"]["suggested_pos"],
+        json!(["verb", "noun"])
+    );
+}
