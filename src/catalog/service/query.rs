@@ -24,15 +24,22 @@ impl CatalogService {
             if items.last().is_none_or(|item| item.id != part_id) {
                 let code = required(record.part_code, "part code is null")?;
                 let allowed_form_types = crate::lexicon::form_types::catalog_form_types(&code);
+                let sub_parts_extensible = crate::catalog::rules::is_basic_part_of_speech(&code);
                 items.push(CatalogPart {
                     id: part_id,
                     code,
                     name_zh: required(record.part_name_zh, "part name_zh is null")?,
                     name_en: required(record.part_name_en, "part name_en is null")?,
                     abbreviation: required(record.part_abbreviation, "part abbreviation is null")?,
+                    short_name_zh: required(
+                        record.part_short_name_zh,
+                        "part short_name_zh is null",
+                    )?,
+                    full_name_en: required(record.part_full_name_en, "part full_name_en is null")?,
                     sort_order: required(record.part_sort_order, "part sort_order is null")?,
                     default_form_types: allowed_form_types.clone(),
                     allowed_form_types,
+                    sub_parts_extensible,
                     sub_parts: Vec::new(),
                 });
             }
@@ -46,6 +53,18 @@ impl CatalogService {
                         code: required(record.sub_code, "sub part code is null")?,
                         name_zh: required(record.sub_name_zh, "sub part name_zh is null")?,
                         name_en: required(record.sub_name_en, "sub part name_en is null")?,
+                        short_name_zh: required(
+                            record.sub_short_name_zh,
+                            "sub part short_name_zh is null",
+                        )?,
+                        abbreviation: required(
+                            record.sub_abbreviation,
+                            "sub part abbreviation is null",
+                        )?,
+                        full_name_en: required(
+                            record.sub_full_name_en,
+                            "sub part full_name_en is null",
+                        )?,
                         sort_order: required(record.sub_sort_order, "sub part sort_order is null")?,
                     });
             }

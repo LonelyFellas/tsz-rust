@@ -9,7 +9,7 @@ use crate::lexicon::form_types::WordFormTypeWithoutBase;
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct PartListQuery {
-    /// code、中文名、英文名或缩写的忽略大小写字面子串。
+    /// code、中文名、英文名、缩写、简洁显示或英文全称的忽略大小写字面子串。
     pub q: Option<String>,
     #[param(default = 1, minimum = 1)]
     pub page: Option<u32>,
@@ -48,6 +48,12 @@ pub struct CreatePartRequest {
     pub name_en: String,
     #[schema(min_length = 1, max_length = 16)]
     pub abbreviation: String,
+    /// 简洁显示：业务页面用的短中文名，去空白后 1–16 字，全局唯一。
+    #[schema(min_length = 1, max_length = 16)]
+    pub short_name_zh: String,
+    /// 英文全称，去空白后 1–64 字，忽略大小写唯一。
+    #[schema(min_length = 1, max_length = 64)]
+    pub full_name_en: String,
     pub sort_order: i32,
 }
 
@@ -62,6 +68,10 @@ pub struct UpdatePartRequest {
     pub name_en: String,
     #[schema(min_length = 1, max_length = 16)]
     pub abbreviation: String,
+    #[schema(min_length = 1, max_length = 16)]
+    pub short_name_zh: String,
+    #[schema(min_length = 1, max_length = 64)]
+    pub full_name_en: String,
     pub sort_order: i32,
 }
 
@@ -74,6 +84,15 @@ pub struct CreateSubPartRequest {
     pub name_zh: String,
     #[schema(min_length = 1, max_length = 64)]
     pub name_en: String,
+    /// 简洁显示，去空白后 1–16 字；同一父级下允许重复。
+    #[schema(min_length = 1, max_length = 16)]
+    pub short_name_zh: String,
+    /// 英文缩写，去空白后 1–16 字；同一父级下允许重复。
+    #[schema(min_length = 1, max_length = 16)]
+    pub abbreviation: String,
+    /// 英文全称，去空白后 1–64 字；同一父级下忽略大小写唯一。
+    #[schema(min_length = 1, max_length = 64)]
+    pub full_name_en: String,
     pub sort_order: i32,
 }
 
@@ -86,6 +105,15 @@ pub struct UpdateSubPartRequest {
     pub name_zh: String,
     #[schema(min_length = 1, max_length = 64)]
     pub name_en: String,
+    /// 简洁显示，去空白后 1–16 字；同一父级下允许重复。
+    #[schema(min_length = 1, max_length = 16)]
+    pub short_name_zh: String,
+    /// 英文缩写，去空白后 1–16 字；同一父级下允许重复。
+    #[schema(min_length = 1, max_length = 16)]
+    pub abbreviation: String,
+    /// 英文全称，去空白后 1–64 字；同一父级下忽略大小写唯一。
+    #[schema(min_length = 1, max_length = 64)]
+    pub full_name_en: String,
     pub sort_order: i32,
 }
 
@@ -96,6 +124,8 @@ pub(crate) struct NewPart {
     pub name_zh: String,
     pub name_en: String,
     pub abbreviation: String,
+    pub short_name_zh: String,
+    pub full_name_en: String,
     pub sort_order: i32,
     pub actor_id: Uuid,
 }
@@ -105,6 +135,8 @@ pub(crate) struct PartChanges {
     pub name_zh: String,
     pub name_en: String,
     pub abbreviation: String,
+    pub short_name_zh: String,
+    pub full_name_en: String,
     pub sort_order: i32,
 }
 
@@ -115,6 +147,9 @@ pub(crate) struct NewSubPart {
     pub code: String,
     pub name_zh: String,
     pub name_en: String,
+    pub short_name_zh: String,
+    pub abbreviation: String,
+    pub full_name_en: String,
     pub sort_order: i32,
     pub actor_id: Uuid,
 }
@@ -123,6 +158,9 @@ pub(crate) struct NewSubPart {
 pub(crate) struct SubPartChanges {
     pub name_zh: String,
     pub name_en: String,
+    pub short_name_zh: String,
+    pub abbreviation: String,
+    pub full_name_en: String,
     pub sort_order: i32,
 }
 
@@ -148,9 +186,13 @@ pub struct PartOfSpeechConfig {
     pub name_zh: String,
     pub name_en: String,
     pub abbreviation: String,
+    pub short_name_zh: String,
+    pub full_name_en: String,
     pub sort_order: i32,
     pub usage_count: i64,
     pub sub_part_count: i64,
+    /// 按固定基础词性编码派生：仅为 true 时允许挂细分词性。
+    pub sub_parts_extensible: bool,
     pub allowed_form_types: Vec<WordFormTypeWithoutBase>,
     pub default_form_types: Vec<WordFormTypeWithoutBase>,
     pub revision: i64,
@@ -169,6 +211,9 @@ pub struct SubPartOfSpeechConfig {
     pub code: String,
     pub name_zh: String,
     pub name_en: String,
+    pub short_name_zh: String,
+    pub abbreviation: String,
+    pub full_name_en: String,
     pub sort_order: i32,
     pub usage_count: i64,
     pub revision: i64,
@@ -193,9 +238,13 @@ pub struct CatalogPart {
     pub name_zh: String,
     pub name_en: String,
     pub abbreviation: String,
+    pub short_name_zh: String,
+    pub full_name_en: String,
     pub sort_order: i32,
     pub allowed_form_types: Vec<WordFormTypeWithoutBase>,
     pub default_form_types: Vec<WordFormTypeWithoutBase>,
+    /// 与 PartOfSpeechConfig.sub_parts_extensible 同源。
+    pub sub_parts_extensible: bool,
     pub sub_parts: Vec<CatalogSubPart>,
 }
 
@@ -205,6 +254,9 @@ pub struct CatalogSubPart {
     pub code: String,
     pub name_zh: String,
     pub name_en: String,
+    pub short_name_zh: String,
+    pub abbreviation: String,
+    pub full_name_en: String,
     pub sort_order: i32,
 }
 
@@ -222,6 +274,8 @@ pub(crate) struct PartRecord {
     pub name_zh: String,
     pub name_en: String,
     pub abbreviation: String,
+    pub short_name_zh: String,
+    pub full_name_en: String,
     pub sort_order: i32,
     pub revision: i64,
     pub created_by_admin_id: Option<Uuid>,
@@ -237,15 +291,19 @@ pub(crate) struct PartRecord {
 impl From<PartRecord> for PartOfSpeechConfig {
     fn from(value: PartRecord) -> Self {
         let allowed_form_types = crate::lexicon::form_types::catalog_form_types(&value.code);
+        let sub_parts_extensible = crate::catalog::rules::is_basic_part_of_speech(&value.code);
         Self {
             id: value.id,
             code: value.code,
             name_zh: value.name_zh,
             name_en: value.name_en,
             abbreviation: value.abbreviation,
+            short_name_zh: value.short_name_zh,
+            full_name_en: value.full_name_en,
             sort_order: value.sort_order,
             usage_count: value.usage_count,
             sub_part_count: value.sub_part_count,
+            sub_parts_extensible,
             default_form_types: allowed_form_types.clone(),
             allowed_form_types,
             revision: value.revision,
@@ -265,6 +323,9 @@ pub(crate) struct SubPartRecord {
     pub code: String,
     pub name_zh: String,
     pub name_en: String,
+    pub short_name_zh: String,
+    pub abbreviation: String,
+    pub full_name_en: String,
     pub sort_order: i32,
     pub revision: i64,
     pub created_by_admin_id: Option<Uuid>,
@@ -284,6 +345,9 @@ impl From<SubPartRecord> for SubPartOfSpeechConfig {
             code: value.code,
             name_zh: value.name_zh,
             name_en: value.name_en,
+            short_name_zh: value.short_name_zh,
+            abbreviation: value.abbreviation,
+            full_name_en: value.full_name_en,
             sort_order: value.sort_order,
             usage_count: value.usage_count,
             revision: value.revision,
@@ -311,11 +375,16 @@ pub(crate) struct CatalogFlatRecord {
     pub part_name_zh: Option<String>,
     pub part_name_en: Option<String>,
     pub part_abbreviation: Option<String>,
+    pub part_short_name_zh: Option<String>,
+    pub part_full_name_en: Option<String>,
     pub part_sort_order: Option<i32>,
     pub sub_id: Option<Uuid>,
     pub sub_code: Option<String>,
     pub sub_name_zh: Option<String>,
     pub sub_name_en: Option<String>,
+    pub sub_short_name_zh: Option<String>,
+    pub sub_abbreviation: Option<String>,
+    pub sub_full_name_en: Option<String>,
     pub sub_sort_order: Option<i32>,
 }
 

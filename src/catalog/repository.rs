@@ -13,7 +13,8 @@ mod commands;
 mod query;
 
 const PART_LIST_SQL: &str = r#"
-    SELECT p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.sort_order, p.revision,
+    SELECT p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
+           p.sort_order, p.revision,
            p.created_by_admin_id, creator.display_name AS created_by_display_name,
            p.updated_by_admin_id, updater.display_name AS updated_by_display_name,
            p.created_at, p.updated_at,
@@ -54,12 +55,15 @@ const PART_LIST_SQL: &str = r#"
        OR strpos(lower(p.name_zh), lower($1)) > 0
        OR strpos(lower(p.name_en), lower($1)) > 0
        OR strpos(lower(p.abbreviation), lower($1)) > 0
+       OR strpos(lower(p.short_name_zh), lower($1)) > 0
+       OR strpos(lower(p.full_name_en), lower($1)) > 0
     ORDER BY p.sort_order, p.created_at, p.id
     LIMIT $2 OFFSET $3
 "#;
 
 const PART_BY_ID_SQL: &str = r#"
-    SELECT p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.sort_order, p.revision,
+    SELECT p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
+           p.sort_order, p.revision,
            p.created_by_admin_id, creator.display_name AS created_by_display_name,
            p.updated_by_admin_id, updater.display_name AS updated_by_display_name,
            p.created_at, p.updated_at,
@@ -99,7 +103,8 @@ const PART_BY_ID_SQL: &str = r#"
 "#;
 
 const SUB_PART_LIST_SQL: &str = r#"
-    SELECT s.id, s.part_of_speech_id, s.code, s.name_zh, s.name_en, s.sort_order, s.revision,
+    SELECT s.id, s.part_of_speech_id, s.code, s.name_zh, s.name_en,
+           s.short_name_zh, s.abbreviation, s.full_name_en, s.sort_order, s.revision,
            s.created_by_admin_id, creator.display_name AS created_by_display_name,
            s.updated_by_admin_id, updater.display_name AS updated_by_display_name,
            s.created_at, s.updated_at,
@@ -123,7 +128,8 @@ const SUB_PART_LIST_SQL: &str = r#"
 "#;
 
 const SUB_PART_BY_ID_SQL: &str = r#"
-    SELECT s.id, s.part_of_speech_id, s.code, s.name_zh, s.name_en, s.sort_order, s.revision,
+    SELECT s.id, s.part_of_speech_id, s.code, s.name_zh, s.name_en,
+           s.short_name_zh, s.abbreviation, s.full_name_en, s.sort_order, s.revision,
            s.created_by_admin_id, creator.display_name AS created_by_display_name,
            s.updated_by_admin_id, updater.display_name AS updated_by_display_name,
            s.created_at, s.updated_at,
@@ -153,6 +159,8 @@ pub enum CatalogRepositoryError {
     SubPartConflict(&'static str),
     #[error("part of speech is in use")]
     PartInUse,
+    #[error("part of speech still has sub parts")]
+    PartHasSubParts,
     #[error("sub part of speech is in use")]
     SubPartInUse,
     #[error("parent part of speech no longer exists")]
@@ -186,6 +194,14 @@ fn map_part_write_error(error: sqlx::Error) -> CatalogRepositoryError {
             "catalog_parts_of_speech_abbreviation_unique_idx",
             "abbreviation",
         ),
+        (
+            "catalog_parts_of_speech_short_name_zh_unique_idx",
+            "short_name_zh",
+        ),
+        (
+            "catalog_parts_of_speech_full_name_en_unique_idx",
+            "full_name_en",
+        ),
     ] {
         if is_unique_violation(&error, constraint) {
             return CatalogRepositoryError::PartConflict(field);
@@ -199,6 +215,7 @@ fn map_sub_part_write_error(error: sqlx::Error) -> CatalogRepositoryError {
         ("catalog_sub_parts_code_unique_idx", "code"),
         ("catalog_sub_parts_name_zh_unique_idx", "name_zh"),
         ("catalog_sub_parts_name_en_unique_idx", "name_en"),
+        ("catalog_sub_parts_full_name_en_unique_idx", "full_name_en"),
     ] {
         if is_unique_violation(&error, constraint) {
             return CatalogRepositoryError::SubPartConflict(field);
@@ -211,6 +228,10 @@ fn map_sub_part_write_error(error: sqlx::Error) -> CatalogRepositoryError {
 }
 
 fn map_part_delete_error(error: sqlx::Error) -> CatalogRepositoryError {
+    // 细分词性外键已改为 RESTRICT：服务层预检之外的兜底，映射成同一个业务错误。
+    if is_foreign_key_violation(&error, "catalog_sub_parts_parent_fkey") {
+        return CatalogRepositoryError::PartHasSubParts;
+    }
     for constraint in [
         "lexicon_entry_pos_catalog_pos_fkey",
         "lexicon_senses_catalog_sub_pos_fkey",

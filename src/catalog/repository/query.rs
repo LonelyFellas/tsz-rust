@@ -8,9 +8,12 @@ impl CatalogRepository {
             SELECT m.version AS catalog_version,
                    p.id AS part_id, p.code AS part_code, p.name_zh AS part_name_zh,
                    p.name_en AS part_name_en, p.abbreviation AS part_abbreviation,
+                   p.short_name_zh AS part_short_name_zh, p.full_name_en AS part_full_name_en,
                    p.sort_order AS part_sort_order,
                    s.id AS sub_id, s.code AS sub_code, s.name_zh AS sub_name_zh,
-                   s.name_en AS sub_name_en, s.sort_order AS sub_sort_order
+                   s.name_en AS sub_name_en, s.short_name_zh AS sub_short_name_zh,
+                   s.abbreviation AS sub_abbreviation, s.full_name_en AS sub_full_name_en,
+                   s.sort_order AS sub_sort_order
             FROM catalog.metadata m
             LEFT JOIN catalog.parts_of_speech p ON m.id = TRUE
             LEFT JOIN catalog.sub_parts_of_speech s ON s.part_of_speech_id = p.id
@@ -46,6 +49,8 @@ impl CatalogRepository {
                OR strpos(lower(p.name_zh), lower($1)) > 0
                OR strpos(lower(p.name_en), lower($1)) > 0
                OR strpos(lower(p.abbreviation), lower($1)) > 0
+               OR strpos(lower(p.short_name_zh), lower($1)) > 0
+               OR strpos(lower(p.full_name_en), lower($1)) > 0
             "#,
         )
         .bind(filter.q.as_deref())
