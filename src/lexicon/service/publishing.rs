@@ -1451,6 +1451,8 @@ fn build_relation_target_stub(
         status: AdminWordStatus::Draft,
         revision: 1,
         lifecycle_revision: 1,
+        annotation: None,
+        annotation_revision: 1,
         published_revision: None,
         has_unpublished_changes: false,
         headwords: headwords.clone(),

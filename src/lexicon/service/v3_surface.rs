@@ -64,6 +64,8 @@ struct V3SurfaceContextRecord {
     matched_surfaces: Vec<String>,
     strategy_version: String,
     updated_at: DateTime<Utc>,
+    annotation: Option<String>,
+    annotation_revision: i64,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -428,6 +430,7 @@ impl LexiconService {
                     tx,
                     word.kind,
                     &encoded_initial_keys,
+                    None,
                     None,
                 )
                 .await?;
@@ -875,6 +878,7 @@ impl LexiconService {
             entry_kind,
             initial_headword_keys,
             None,
+            Some(actor_id),
         )
         .await?;
         let material = self
@@ -928,6 +932,7 @@ impl LexiconService {
         entry_kind: WordEntryKindV3,
         forms: &DraftFormsStepContentV3,
         headwords: &WordHeadwordsV2,
+        equivalent_detection_surface: Option<&str>,
         initial_headword_keys: &[String],
         token: Option<&str>,
     ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
@@ -953,6 +958,7 @@ impl LexiconService {
             entry_kind,
             initial_headword_keys,
             None,
+            Some(actor_id),
         )
         .await?;
         let material = self
@@ -992,6 +998,38 @@ impl LexiconService {
                 Box::new(page),
             ));
         };
+        if let Some(surface) = equivalent_detection_surface {
+            // Recompute detection evidence from ALL final matches, so an unseen match or
+            // changed context cannot be accepted merely because the headwords agree.
+            let (detection_binding, _) =
+                detection_surface_binding(actor_id, detection_id, surface, &material, policy)?;
+            match self
+                .surface_snapshots
+                .verify(
+                    token,
+                    &ExpectedSurfaceConfirmation {
+                        binding: detection_binding,
+                        current_policy: policy,
+                    },
+                )
+                .await
+            {
+                Ok(confirmation) => return Ok(Some(confirmation)),
+                Err(SurfaceSnapshotError::BindingMismatch) => {}
+                Err(SurfaceSnapshotError::Expired) => {
+                    return Err(LexiconServiceError::SurfaceMatchSnapshotExpired);
+                }
+                Err(SurfaceSnapshotError::PolicyChanged(name)) => {
+                    let current = self
+                        .surface_policies
+                        .policy(name)
+                        .await
+                        .map_err(LexiconServiceError::SurfacePolicy)?;
+                    return Err(LexiconServiceError::SurfacePolicyChanged(current));
+                }
+                Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
+            }
+        }
         self.verify_v3_surface_token(token, binding, owner_bundle, &material, false, policy)
             .await
             .map(Some)
@@ -1003,7 +1041,45 @@ impl LexiconService {
         entry_kind: WordEntryKindV3,
         initial_headword_keys: &[String],
         excluded_entry_id: Option<Uuid>,
+        resume_actor_id: Option<Uuid>,
     ) -> Result<(), LexiconServiceError> {
+        if self
+            .v3_empty_draft_conflict_in(
+                tx,
+                entry_kind,
+                initial_headword_keys,
+                excluded_entry_id,
+                None,
+            )
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        if let Some(actor_id) = resume_actor_id
+            && let Some(id) = self
+                .v3_empty_draft_conflict_in(
+                    tx,
+                    entry_kind,
+                    initial_headword_keys,
+                    excluded_entry_id,
+                    Some(actor_id),
+                )
+                .await?
+        {
+            return Err(LexiconServiceError::ExistingEmptyDraft(id));
+        }
+        Err(LexiconServiceError::DuplicateWord)
+    }
+
+    pub(super) async fn v3_empty_draft_conflict_in(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        entry_kind: WordEntryKindV3,
+        initial_headword_keys: &[String],
+        excluded_entry_id: Option<Uuid>,
+        visible_to: Option<Uuid>,
+    ) -> Result<Option<Uuid>, LexiconServiceError> {
         let normalized_surfaces = initial_headword_keys
             .iter()
             .map(|key| {
@@ -1012,10 +1088,9 @@ impl LexiconService {
                     .ok_or_else(invariant_record)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let hidden_initial_headword_conflict = sqlx::query_scalar::<_, bool>(
+        sqlx::query_scalar::<_, Uuid>(
             r#"
-            SELECT EXISTS (
-                SELECT 1
+                SELECT state.entry_id
                 FROM lexicon.v3_entry_state state
                 JOIN lexicon.entries entry ON entry.id = state.entry_id
                 WHERE (
@@ -1028,6 +1103,7 @@ impl LexiconService {
                     )
                   AND entry.archived_at IS NULL
                   AND entry.kind = $2
+                  AND ($5::uuid IS NULL OR entry.created_by_admin_id = $5)
                   AND ($4::uuid IS NULL OR state.entry_id <> $4)
                   AND NOT EXISTS (
                       SELECT 1
@@ -1035,20 +1111,18 @@ impl LexiconService {
                       WHERE source.entry_id = state.entry_id
                         AND source.is_deleted = FALSE
                   )
-            )
+                ORDER BY entry.created_at, state.entry_id
+                LIMIT 1
             "#,
         )
         .bind(initial_headword_keys)
         .bind(v3_kind_string(entry_kind))
         .bind(&normalized_surfaces)
         .bind(excluded_entry_id)
-        .fetch_one(&mut **tx)
+        .bind(visible_to)
+        .fetch_optional(&mut **tx)
         .await
-        .map_err(database_error)?;
-        if hidden_initial_headword_conflict {
-            return Err(LexiconServiceError::DuplicateWord);
-        }
-        Ok(())
+        .map_err(database_error)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1160,6 +1234,7 @@ impl LexiconService {
                 entry_kind,
                 &encoded_initial_keys,
                 Some(entry_id),
+                None,
             )
             .await?;
         }
@@ -1985,7 +2060,7 @@ impl LexiconService {
         Ok(V3SurfaceMaterial { matches, contexts })
     }
 
-    async fn v3_surface_contexts_in(
+    pub(super) async fn v3_surface_contexts_in(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         entry_ids: &[Uuid],
@@ -2003,7 +2078,7 @@ impl LexiconService {
                        AS matched_surfaces,
                    COALESCE(presentation.strategy_version, 'legacy_v2_surface_adapter_v1')
                        AS strategy_version,
-                   entry.updated_at
+                   entry.updated_at, entry.annotation, entry.annotation_revision
             FROM lexicon.entries entry
             JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
             LEFT JOIN lexicon.entry_presentation_projection presentation
@@ -2093,6 +2168,8 @@ impl LexiconService {
                 gloss_previews.dedup();
                 Ok(MatchedEntryContextV3 {
                     entry_id: record.entry_id,
+                    annotation: record.annotation,
+                    annotation_revision: record.annotation_revision,
                     presentation: EntryPresentationV3 {
                         label: record.label,
                         matched_surfaces: record.matched_surfaces,

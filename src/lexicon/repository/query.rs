@@ -274,7 +274,7 @@ impl LexiconRepository {
                        WHERE headword.entry_id = entry.id
                    ), ARRAY[]::text[]) AS dialects,
                    entry.revision,
-                   entry.lifecycle_revision,
+                   entry.lifecycle_revision, entry.annotation, entry.annotation_revision,
                    -- 每侧拼写与上面的 dialects 同序；展示用的并列串由 service 按序拼接，
                    -- 免得两个聚合各写一遍排序规则、日后又各改各的。
                    COALESCE((

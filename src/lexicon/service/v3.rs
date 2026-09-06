@@ -903,6 +903,8 @@ impl LexiconService {
             },
             revision: record.revision,
             lifecycle_revision: record.lifecycle_revision,
+            annotation: record.annotation,
+            annotation_revision: record.annotation_revision,
             published_revision: record.current_publication_source_revision,
             has_unpublished_changes: record
                 .current_publication_source_revision
@@ -1261,8 +1263,22 @@ impl LexiconService {
                 suggested_pos.push(pos);
             }
         }
+        let mut tx = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        let keys = initial_v3_headword_keys(&WordHeadwordsV2::Unified {
+            common: normalized.display.clone(),
+        })?;
+        let existing_draft_id = self
+            .v3_empty_draft_conflict_in(&mut tx, input.kind, &keys, None, Some(actor_id))
+            .await?;
+        tx.commit().await.map_err(database_error)?;
         let now = Utc::now();
         let detection = DetectLexiconSurfaceResponseV3 {
+            existing_draft_id,
             schema_version: 3,
             detection_id,
             expires_at: now + Duration::from_std(V3_DETECTION_TTL).expect("five minutes is valid"),
@@ -1293,6 +1309,8 @@ impl LexiconService {
         mut input: CreateAdminWordV3Input,
         write_projection: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
+        super::annotations::normalize_annotation(&mut input.annotation)?;
+        super::annotations::normalize_updates(&mut input.annotation_updates)?;
         let explicit_headwords = input.headwords.is_some();
         if let Some(headwords) = &mut input.headwords {
             normalize_submitted_headwords(headwords)?;
@@ -1324,6 +1342,7 @@ impl LexiconService {
             transaction.commit().await.map_err(database_error)?;
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
+        super::annotations::lock_annotation_commands(&mut transaction).await?;
         let detection = self
             .detections
             .load_v3(actor_id, input.detection_id)
@@ -1347,6 +1366,7 @@ impl LexiconService {
         let entry_id = Uuid::now_v7();
         let now = Utc::now();
         let mut forms = materialize_v3_detection_forms(&detection);
+        let suggested_headwords = compatibility_v3_headwords(&detection, &forms)?;
         let confirmed_headwords = if let Some(headwords) = &input.headwords {
             apply_confirmed_v3_headwords(&mut forms, headwords);
             headwords.clone()
@@ -1373,6 +1393,8 @@ impl LexiconService {
                     input.kind,
                     &forms,
                     &confirmed_headwords,
+                    (confirmed_headwords == suggested_headwords)
+                        .then_some(detection.normalized_surface.as_str()),
                     &initial_headword_keys,
                     input.confirmed_surface_match_token.as_deref(),
                 )
@@ -1392,15 +1414,25 @@ impl LexiconService {
         } else {
             None
         };
+        self.apply_create_annotations(
+            &mut transaction,
+            actor_id,
+            request_id,
+            v3_kind_string(input.kind),
+            &initial_headword_keys,
+            &input.annotation,
+            &input.annotation_updates,
+        )
+        .await?;
         let meanings = DraftMeaningsStepContentV3::default();
         let catalog_parts = resolve_v3_catalog_parts(&mut transaction, &forms).await?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.entries (
-                id, content_schema_version, language, kind, revision,
+                id, content_schema_version, language, kind, revision, annotation,
                 headword_mode, source_dialect, detection_snapshot,
                 created_by_admin_id, updated_by_admin_id, created_at, updated_at
-            ) VALUES ($1, 3, 'en', $2, 1, NULL, NULL, $3, $4, $4, $5, $5)
+            ) VALUES ($1, 3, 'en', $2, 1, $6, NULL, NULL, $3, $4, $4, $5, $5)
             "#,
         )
         .bind(entry_id)
@@ -1408,6 +1440,7 @@ impl LexiconService {
         .bind(serde_json::to_value(&detection).map_err(serialization_error)?)
         .bind(actor_id)
         .bind(now)
+        .bind(&input.annotation)
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
@@ -1478,6 +1511,8 @@ impl LexiconService {
             status: AdminWordStatus::Draft,
             revision: 1,
             lifecycle_revision: 1,
+            annotation: input.annotation.clone(),
+            annotation_revision: 1,
             published_revision: None,
             has_unpublished_changes: false,
             presentation,

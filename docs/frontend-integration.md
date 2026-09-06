@@ -1488,3 +1488,19 @@ _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端
 JSONB 走，不需要新表新列），revert 即可回退；但已经写进库的 `function` / `core` / `grammar`
 与 `voice_profile` 在 revert 后会被 V3 契约拒绝反序列化（两处 DTO 都是 `deny_unknown_fields`），
 所以后端回退前要先把前端停在不写新值的版本上。
+
+
+## 22. 无已保存原型的V3草稿继续编辑（2026-09-06）
+
+`DetectLexiconSurfaceResponseV3` 增加可选 `existing_draft_id: UUID`（无可见目标时省略）。这是当前管理员自己的未归档、无有效surface source草稿，不是真实原型匹配：不得合入 `matches`，不据此签发/消费surface确认。前端独立显示已有未完成草稿并提供 `/words/{id}/v3/wizard/forms` 入口；即使同时有其他真实匹配，也应先继续已有草稿。
+
+创建竞态仍返回 HTTP409 `duplicate_word`；只有可继续的当前管理员V3空草稿才带既有 `meta.word_id`。没有ID时仅提示无法重复创建，不展示/搜索其他人草稿或自动重试。创建方会重新检查最终主词及当前状态，检测提示可能过时。
+
+部署顺序：前端先 `sync:openapi`，同步并发布能接受此可选字段的runtime契约，再更新后端。联合本地验收应显式 `OPENAPI_SOURCE` 指向后端实际worktree的 `docs/openapi.json`。旧缓存因字段可选仍可读；程序回退前需考虑旧版严格反序列化不接受新字段的短期检测缓存。本次不增加数据库迁移。
+
+
+## 23. 标注列表显示条件（2026-09-06）
+
+`AdminWordListItem`与`AdminWordListItemV3`新增必填 `annotation_visible: boolean`，只控制列表标注和tooltip展示。前端用 `annotation && annotation_visible` 渲染，编辑入口继续读取原annotation；不要在隐藏时清空标注或改变修订。分页、过滤外的同原型词条也参与后端判断，前端不得按当前页计数。
+
+部署顺序：前端先 `sync:openapi` 并安排两端契约同步更新。该字段必填，旧后端缺字段与旧客户端不接受新字段均需避免，不能长期混用。后端权威源为实际worktree的 `docs/openapi.json`。归档、恢复、删除或创建后沿用列表失效刷新即可；本次无新迁移或详情字段。

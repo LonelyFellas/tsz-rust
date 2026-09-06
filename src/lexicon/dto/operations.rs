@@ -1271,6 +1271,14 @@ pub enum RelatedSearchResponse {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AdminWordListItem {
+    /// Whether another visible active entry shares any base/headword prototype.
+    pub annotation_visible: bool,
+    #[serde(default)]
+    #[schema(required = true)]
+    pub annotation: Option<String>,
+    #[serde(default = "crate::lexicon::dto::default_annotation_revision")]
+    #[schema(required = true, minimum = 1)]
+    pub annotation_revision: i64,
     #[schema(schema_with = schema_version_2_schema)]
     pub schema_version: u8,
     pub id: Uuid,

@@ -137,6 +137,12 @@ pub enum AdminWordStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AdminWordV2 {
+    #[serde(default)]
+    #[schema(required = true)]
+    pub annotation: Option<String>,
+    #[serde(default = "crate::lexicon::dto::default_annotation_revision")]
+    #[schema(required = true, minimum = 1)]
+    pub annotation_revision: i64,
     #[serde(deserialize_with = "deserialize_schema_version_2")]
     #[schema(schema_with = schema_version_2_schema)]
     pub schema_version: u8,

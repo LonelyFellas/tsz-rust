@@ -584,3 +584,31 @@ pub async fn activate_publication(
         }),
     ))
 }
+
+#[utoipa::path(
+    patch, path = "/api/v1/admin/lexicon/entries/{id}/annotation", tag = "admin-lexicon",
+    security(("bearer_auth" = [])), params(EntryPath),
+    request_body = crate::lexicon::dto::UpdateEntryAnnotationInput,
+    responses(
+        (status = 200, description = "标注已保存，内容修订不变", body = crate::lexicon::dto::EntryAnnotationResponse),
+        (status = 400, description = "标注或修订非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号不可编辑"),
+        (status = 404, description = "词条不存在"),
+        (status = 409, description = "标注组、修订冲突或词条已归档")
+    )
+)]
+pub async fn update_annotation(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Extension(request_id): Extension<RequestId>,
+    ApiPath(path): ApiPath<EntryPath>,
+    ApiJson(input): ApiJson<crate::lexicon::dto::UpdateEntryAnnotationInput>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    let response = service(&state)
+        .update_annotation(admin.id, request_id.as_uuid(), path.id, input)
+        .await
+        .map_err(map_error)?;
+    Ok(Json(response))
+}

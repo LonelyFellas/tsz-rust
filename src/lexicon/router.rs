@@ -16,6 +16,10 @@ pub fn router() -> Router<AppState> {
             "/dialect-variant-suggestions",
             axum::routing::post(handler::suggest_dialect_variants),
         )
+        .route(
+            "/entries/{id}/annotation",
+            axum::routing::patch(handler::commands::update_annotation),
+        )
         .route("/entries", get(handler::list).post(handler::create))
         .route(
             "/entries/archive-batch",

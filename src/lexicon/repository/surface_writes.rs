@@ -643,6 +643,8 @@ mod tests {
             status: AdminWordStatus::Draft,
             revision: 2,
             lifecycle_revision: 1,
+            annotation: None,
+            annotation_revision: 1,
             published_revision: None,
             has_unpublished_changes: false,
             headwords: WordHeadwordsV2::Unified {
