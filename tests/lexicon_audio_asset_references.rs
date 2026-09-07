@@ -499,6 +499,16 @@ async fn invalid_audio_references_are_rejected_with_a_locatable_issue(pool: PgPo
             .any(|code| code == "audio_asset_invalid"),
         "{body}"
     );
+    // node_role 必须是 meanings。issue 的 node_location 留成 None 的话上 wire 会退化成 entry
+    // ——那是整词条级错误的角色，前端按它分发就跳不到出问题的变体了。
+    let issue = body["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "audio_asset_invalid")
+        .expect("audio issue");
+    assert_eq!(issue["node_location"]["node_role"], "meanings", "{body}");
+    assert_eq!(issue["node_id"], entry.variant_id.to_string(), "{body}");
 
     // 同一变体里重复引用同一条资产
     let (status, body) = save_meanings(
@@ -1147,9 +1157,15 @@ async fn reclamation_yields_to_a_save_that_is_validating_the_same_asset(pool: Pg
         .await
         .unwrap();
 
-    let reclaimed = tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
-        .await
-        .unwrap();
+    // 加时限：去掉 SKIP LOCKED 之后这里会变成永久等锁，而挂起的测试在 CI 上只表现为超时，
+    // 看不出是哪条不变量被破坏了。
+    let reclaimed = tokio::time::timeout(
+        Duration::from_secs(10),
+        tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store),
+    )
+    .await
+    .expect("回收不得在资产行被锁住时干等——SKIP LOCKED 应当让它立刻让路")
+    .unwrap();
     assert_eq!(reclaimed, 0, "资产行被保存路径锁住时，回收必须让路");
     assert!(asset_exists(&pool, &asset["id"]).await);
     assert!(
@@ -1198,5 +1214,82 @@ async fn a_failing_object_delete_keeps_the_row_and_does_not_burn_the_round(pool:
         delete_calls.lock().unwrap().len(),
         1,
         "同一轮里不得重复重试同一条"
+    );
+}
+
+#[sqlx::test]
+async fn playback_url_opens_up_once_the_asset_is_referenced_by_an_entry(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let owner_id = seed_admin(&pool).await;
+    let other_id = seed_admin(&pool).await;
+    let owner = bearer(&state, owner_id);
+    let other = bearer(&state, other_id);
+    let entry = create_entry(&state, &pool, &owner, "audioshared").await;
+
+    let attached = upload_asset(&state, &store, &owner, "attached.mp3").await;
+    let loose = upload_asset(&state, &store, &owner, "loose.mp3").await;
+
+    // 还没挂进任何词条时，资产只是上传者的私有草稿。
+    let (status, body) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/audio-assets/{}/url",
+            attached["id"].as_str().unwrap()
+        ),
+        &other,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, saved) = save_meanings(
+        &state,
+        &owner,
+        &entry,
+        meanings_with_audio(&entry, json!([attached.clone()])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    // 挂进词条之后，任何在职管理员都该能试听——词条本身对所有在职管理员可读，
+    // 音频是词条内容的一部分，权限不该更窄。否则管理员 B 打开 A 录过音的词条，
+    // 列表渲染正常但点播放一律 404。
+    let (status, body) = call(
+        &state,
+        Method::GET,
+        &format!(
+            "{ROOT}/audio-assets/{}/url",
+            attached["id"].as_str().unwrap()
+        ),
+        &other,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["url"].as_str().is_some_and(|url| !url.is_empty()),
+        "{body}"
+    );
+
+    // 但放开的只是「被引用的那条」：没挂进任何词条的资产对他人仍然不可见。
+    let (status, body) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/audio-assets/{}/url", loose["id"].as_str().unwrap()),
+        &other,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "未被引用的资产不得对他人放开：{body}"
     );
 }
