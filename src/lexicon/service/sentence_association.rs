@@ -361,6 +361,7 @@ fn apply_sentence_associations_v3(
         sentence.associations = rows.into_iter().filter_map(association_wire_v3).collect();
         sentence.associations_state = SentenceAssociationsStateV2::Resolved;
     }
+    super::text_links::apply_manual(meanings);
 }
 
 fn new_association_from_record(record: SentenceAssociationRecord) -> NewSentenceAssociation {

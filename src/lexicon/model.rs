@@ -241,6 +241,7 @@ pub(crate) enum PublicationSenseReferenceKind {
     Relation,
     SentenceContext,
     PhraseComponent,
+    TextLink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +265,7 @@ impl PublicationSenseReferenceKind {
             Self::Relation => "relation",
             Self::SentenceContext => "sentence_context",
             Self::PhraseComponent => "phrase_component",
+            Self::TextLink => "text_link",
         }
     }
 }

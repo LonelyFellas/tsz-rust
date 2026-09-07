@@ -15,7 +15,7 @@ impl LexiconRepository {
             sqlx::query(
                 r#"
                 UPDATE lexicon.nodes
-                SET node_role = 'meanings.zh_text:zh:common'
+                SET node_role = 'meanings.zh_text:zh:common', stable_slot = TRUE
                 WHERE id = $1
                   AND entry_id = $2
                   AND node_type = 'text_variant'
@@ -40,10 +40,11 @@ impl LexiconRepository {
         for pos in &meanings.pos {
             for sense in &pos.senses {
                 for sentence in &sense.sentences {
-                    let primary = sentence
+                    let (primary_index, primary) = sentence
                         .zh_translations
                         .iter()
-                        .find(|translation| translation.id == sentence.zh_text_id)
+                        .enumerate()
+                        .find(|(_, translation)| translation.id == sentence.zh_text_id)
                         .ok_or(LexiconRepositoryError::Invariant(
                             "V3 sentence translation alias is missing from canonical list",
                         ))?;
@@ -61,7 +62,7 @@ impl LexiconRepository {
                     .bind(primary.id)
                     .bind(entry_id)
                     .bind(primary.band.field_role())
-                    .bind(i32::from(primary.band.display_order()))
+                    .bind(primary_index as i32)
                     .bind(sentence.id)
                     .execute(&mut **tx)
                     .await
@@ -74,7 +75,7 @@ impl LexiconRepository {
                     sqlx::query(
                         r#"
                         UPDATE lexicon.nodes
-                        SET node_role = $3
+                        SET node_role = $3, stable_slot = FALSE
                         WHERE id = $1
                           AND entry_id = $2
                           AND node_type = 'text_variant'
@@ -83,13 +84,13 @@ impl LexiconRepository {
                     )
                     .bind(primary.id)
                     .bind(entry_id)
-                    .bind(format!("meanings.{}:zh:common", primary.band.field_role()))
+                    .bind(crate::lexicon::node_identity::SENTENCE_TRANSLATION_ROLE)
                     .bind(sentence.id)
                     .execute(&mut **tx)
                     .await
                     .map_err(map_entry_write_error)?;
 
-                    for translation in &sentence.zh_translations {
+                    for (index, translation) in sentence.zh_translations.iter().enumerate() {
                         if translation.id == primary.id {
                             continue;
                         }
@@ -105,7 +106,7 @@ impl LexiconRepository {
                             Dialect::Common,
                             &content,
                             TextOrigin::Manual,
-                            i32::from(translation.band.display_order()),
+                            index as i32,
                         )
                         .await?;
                     }
