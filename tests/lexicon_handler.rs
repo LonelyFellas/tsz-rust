@@ -23898,6 +23898,85 @@ async fn entry_annotations_published_peer_is_read_only(pool: PgPool) {
     );
 }
 
+/// 超管不豁免「填满整组」：它的可写集合就是整组，所以建条撞名时每个组员都要给值。
+///
+/// 与上面 `entry_annotations_published_peer_is_read_only` 成对——同样的 fixture，
+/// 普通管理员只填自己那条即可。两条路径的分叉点全在 `writable_annotation_ids` 的
+/// 超管短路上，没有用例钉死就会被「顺手简化」掉（把 `writable.len()` 写回
+/// `current.len()` 之类），而超管恰恰是账号里的多数。
+#[sqlx::test]
+async fn entry_annotations_super_admin_must_fill_whole_group(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner_id = seed_admin(&pool).await;
+    let owner = token(&state, owner_id);
+    let super_admin = token(
+        &state,
+        seed_admin_with_role(&pool, AdminRole::SuperAdmin).await,
+    );
+
+    // 只有别人的**已发布**词条进组（草稿不进），且刻意不带标注——留给超管补。
+    let first = create_and_publish(&state, &pool, &owner, "harbour").await;
+    let first_id = first["word"]["id"].as_str().unwrap().to_owned();
+
+    let mut body = entry_annotations_create_body(
+        &state,
+        &super_admin,
+        "harbour",
+        json!({"mode":"unified","common":"harbour"}),
+    )
+    .await;
+    let key = Uuid::now_v7();
+    let (status, required) = entry_annotations_submit(&state, &super_admin, key, &mut body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{required}");
+    assert_eq!(
+        required["meta"]["annotation_conflict"]["reason"], "required",
+        "{required}"
+    );
+    let entries = required["meta"]["annotation_conflict"]["entries"]
+        .as_array()
+        .unwrap();
+    assert_eq!(entries.len(), 1, "{required}");
+    assert_eq!(entries[0]["entry_id"], first_id);
+
+    // 只填自己那条：普通管理员到这步就建成了，超管不行。
+    body["annotation"] = json!("2");
+    body["annotation_updates"] = json!([]);
+    let (status, still_required) =
+        entry_annotations_submit(&state, &super_admin, key, &mut body).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "超管的可写集合是整组，只填自己那条不该放行：{still_required}"
+    );
+    assert_eq!(
+        still_required["meta"]["annotation_conflict"]["reason"], "required",
+        "{still_required}"
+    );
+
+    // 填满整组才建得成，且对方那条确实被写入——证明超管的写权限真的生效，
+    // 而不是「碰巧没人校验」。
+    body["annotation_updates"] = entry_annotations_updates(&required, &["1"]);
+    let (status, created) = entry_annotations_submit(&state, &super_admin, key, &mut body).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["word"]["annotation"], "2");
+    let (status, peer) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{first_id}"),
+        &owner,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{peer}");
+    assert_eq!(
+        peer["word"]["annotation"], "1",
+        "超管应能写入别人的词条：{peer}"
+    );
+}
+
 /// 撞上别人的**草稿**：草稿只是「尚未公开」，不进同原型组，因此不要求填标注。
 #[sqlx::test]
 async fn entry_annotations_ignore_other_admins_drafts(pool: PgPool) {
