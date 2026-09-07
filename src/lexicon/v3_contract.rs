@@ -845,7 +845,7 @@ fn meanings_limit_issue(node_id: Uuid, field: &str, message: &str) -> DraftValid
     )
 }
 
-fn meanings_issue(
+pub(crate) fn meanings_issue(
     code: V3ValidationIssueCode,
     field: &str,
     node_id: Uuid,

@@ -1,10 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use std::collections::HashSet;
+
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::v3::{
-    restore_sense_component_usages, restore_sentence_zh_translations, restore_voice_profiles,
+    restore_audio_assets, restore_sense_component_usages, restore_sentence_zh_translations,
+    restore_voice_profiles,
 };
 use super::*;
 use crate::lexicon::dto::{
@@ -250,6 +253,7 @@ impl LexiconService {
         restore_sense_component_usages(&pristine_meanings, &mut canonical_v3_meanings);
         restore_sentence_zh_translations(&pristine_meanings, &mut canonical_v3_meanings);
         restore_voice_profiles(&pristine_meanings, &mut canonical_v3_meanings);
+        restore_audio_assets(&mut tx, &pristine_meanings, &mut canonical_v3_meanings).await?;
         word.meanings = canonical_v3_meanings;
         Self::hydrate_v3_sentence_associations_in(&mut tx, entry_id, &mut word.meanings).await?;
         word.status = AdminWordStatus::Published;
@@ -996,6 +1000,7 @@ async fn insert_v3_publication(
     .map_err(database_error)?;
 
     insert_v3_publication_nodes(tx, publication_id, word).await?;
+    insert_v3_publication_audio_references(tx, publication_id, word).await?;
     insert_publication_catalog_refs(tx, publication_id, word.id).await?;
     insert_publication_sense_refs(tx, publication_id, word.id, sense_references).await?;
     sqlx::query(
@@ -1015,6 +1020,47 @@ async fn insert_v3_publication(
         snapshot,
         published_at,
     })
+}
+
+/// 把这次快照引用到的音频资产记成 publication 作用域的引用行。
+///
+/// 没有这一步，回收就只能看草稿：管理员发布之后把录音从草稿里去掉，资产会变成「零引用」被回收，
+/// 而激活中的那次发布仍然指着它——线上直接播不出声，且对象已删、不可恢复。
+/// 发布引用一经写入不再变动，与快照本身同寿（发布行被删时随 FK 级联）。
+async fn insert_v3_publication_audio_references(
+    tx: &mut Transaction<'_, Postgres>,
+    publication_id: Uuid,
+    word: &AdminWordV3,
+) -> Result<(), LexiconServiceError> {
+    let mut inserted = HashSet::new();
+    for variant in word
+        .meanings
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.grammar_structures)
+        .flat_map(|grammar| &grammar.variants)
+    {
+        for asset in &variant.audio_assets {
+            if !inserted.insert(asset.id) {
+                continue;
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO lexicon.v3_audio_asset_references
+                    (asset_id, entry_id, scope, publication_id, variant_id)
+                VALUES ($1, $2, 'publication', $3, $4)
+                "#,
+            )
+            .bind(asset.id)
+            .bind(word.id)
+            .bind(publication_id)
+            .bind(variant.id)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+        }
+    }
+    Ok(())
 }
 
 async fn insert_v3_publication_nodes(

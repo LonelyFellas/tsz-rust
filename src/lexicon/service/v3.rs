@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{Postgres, Transaction};
+use sqlx::{Postgres, Row, Transaction};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
@@ -12,6 +12,7 @@ use super::dictionary_suggestions::{
     hard_disallowed_regional_relation_tag, regional_spelling_pair,
 };
 use super::*;
+use crate::lexicon::audio_assets::dto::{AudioAsset, AudioAssetGender, AudioAssetLocale};
 use crate::lexicon::dto::DraftMeaningsStepContent;
 use crate::lexicon::dto::{
     AdminWordAny, AdminWordAnyEnvelope, AdminWordDraftAnyEnvelope, AdminWordDraftV3Envelope,
@@ -1789,6 +1790,11 @@ impl LexiconService {
             .await
             .map_err(repository_error)?;
         replace_v3_sense_component_usages(&mut transaction, entry_id, &meanings).await?;
+        // 词形保存会按新的词性集合裁剪词义内容（`reconcile_v3_meanings_after_forms`），
+        // 被删掉的词性连同其变体上的音频一起从草稿里消失，引用行必须跟着重建。
+        // 漏了这一步，引用行会永久指向已不存在的内容：资产既不会被回收，
+        // 又会被这条词条永久「占用」，别的词条再也挂不上。
+        replace_v3_audio_asset_references(&mut transaction, entry_id, &meanings).await?;
         replace_v3_forms(&mut transaction, entry_id, &input.content, &catalog_parts).await?;
         let now = Utc::now();
         let updated = sqlx::query(
@@ -2000,6 +2006,11 @@ impl LexiconService {
         if !component_issues.is_empty() {
             return Err(v3_validation_failed(component_issues));
         }
+        let audio_issues =
+            validate_audio_assets(&mut transaction, entry_id, &translation_content).await?;
+        if !audio_issues.is_empty() {
+            return Err(v3_validation_failed(audio_issues));
+        }
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
         let mut current_v3_meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
@@ -2076,6 +2087,12 @@ impl LexiconService {
         copy_sentence_translations(&translation_content, &mut canonical_content)?;
         restore_sense_component_usages(&translation_content, &mut canonical_content);
         restore_voice_profiles(&translation_content, &mut canonical_content);
+        restore_audio_assets(
+            &mut transaction,
+            &translation_content,
+            &mut canonical_content,
+        )
+        .await?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut canonical_content);
         let aggregate_issues =
             crate::lexicon::v3_contract::validate_aggregate_node_limit(&forms, &canonical_content);
@@ -2176,6 +2193,7 @@ impl LexiconService {
         .await
         .map_err(repository_error)?;
         replace_v3_sense_component_usages(&mut transaction, entry_id, &canonical_content).await?;
+        replace_v3_audio_asset_references(&mut transaction, entry_id, &canonical_content).await?;
         let next_revision = record.revision + 1;
         let now = Utc::now();
         let updated = sqlx::query(
@@ -3035,6 +3053,233 @@ pub(super) fn restore_voice_profiles(
             }
         }
     }
+}
+
+/// 单个语法结构变体最多挂几条录音。与 `GrammarVariantV3.audio_assets` 的 `max_items` 同一个数。
+const MAX_VARIANT_AUDIO_ASSETS: usize = 8;
+
+/// 按草稿内容重建音频资产的引用行。整条删掉再插，与 `replace_v3_sense_component_usages` 同款：
+/// 词义保存本来就是整块替换，增量对账只会多一份出错的可能。
+///
+/// 这里**不删任何对象或资产行**。失去引用的资产由 `audio_assets` 的回收 worker 处理，
+/// 因为删对象需要对象存储句柄，而把它塞进词库服务只为了这一处补偿并不划算；
+/// 分工也与 speech 试听一致：写路径只管数据库，删除集中在一处。
+pub(super) async fn replace_v3_audio_asset_references(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    content: &DraftMeaningsStepContentV3,
+) -> Result<(), LexiconServiceError> {
+    sqlx::query(
+        "DELETE FROM lexicon.v3_audio_asset_references WHERE entry_id = $1 AND scope = 'draft'",
+    )
+    .bind(entry_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(database_error)?;
+
+    // 同一段录音可以挂在多个变体上，但草稿引用每个资产只记一行（回收只问「还有没有人引用」），
+    // 所以取首次出现的变体作为排障线索。
+    let mut inserted = HashSet::new();
+    for (variant_id, asset_ids) in requested_audio_assets(content) {
+        for asset_id in asset_ids {
+            if !inserted.insert(asset_id) {
+                continue;
+            }
+            sqlx::query(
+                r#"
+                INSERT INTO lexicon.v3_audio_asset_references
+                    (asset_id, entry_id, scope, publication_id, variant_id)
+                VALUES ($1, $2, 'draft', NULL, $3)
+                "#,
+            )
+            .bind(asset_id)
+            .bind(entry_id)
+            .bind(variant_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// 按变体收集草稿引用的音频资产 id，保持出现顺序。
+fn requested_audio_assets(content: &DraftMeaningsStepContentV3) -> Vec<(Uuid, Vec<Uuid>)> {
+    content
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.grammar_structures)
+        .flat_map(|grammar| &grammar.variants)
+        .filter(|variant| !variant.audio_assets.is_empty())
+        .map(|variant| {
+            (
+                variant.id,
+                variant.audio_assets.iter().map(|asset| asset.id).collect(),
+            )
+        })
+        .collect()
+}
+
+/// 校验草稿引用的音频资产：条数、变体内不重复、资产存在、且没有被别的词条占用。
+/// 跨词条引用必须拦住——回收是按「还有没有人引用」判定的，允许共享会让一次删除
+/// 波及另一条词条的历史发布。
+async fn validate_audio_assets(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    content: &DraftMeaningsStepContentV3,
+) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
+    let requested = requested_audio_assets(content);
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut issues = Vec::new();
+    for (variant_id, asset_ids) in &requested {
+        if asset_ids.len() > MAX_VARIANT_AUDIO_ASSETS {
+            issues.push(audio_asset_issue(
+                *variant_id,
+                &format!(
+                    "a grammar variant may reference at most {MAX_VARIANT_AUDIO_ASSETS} audio assets"
+                ),
+            ));
+        }
+        let mut seen = HashSet::new();
+        if asset_ids.iter().any(|id| !seen.insert(*id)) {
+            issues.push(audio_asset_issue(
+                *variant_id,
+                "a grammar variant must not reference the same audio asset twice",
+            ));
+        }
+    }
+
+    // 一次查回「存在」与「被别人占用」，让下面的 issue 收集是纯计算、不再穿插 await。
+    let unique_ids = requested
+        .iter()
+        .flat_map(|(_, ids)| ids.iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT asset.id,
+               EXISTS (
+                   SELECT 1 FROM lexicon.v3_audio_asset_references reference
+                   WHERE reference.asset_id = asset.id AND reference.entry_id <> $2
+               ) AS taken
+        FROM lexicon.audio_assets asset
+        WHERE asset.id = ANY($1)
+        -- 与回收 worker 的 FOR UPDATE 串行：不加锁的话，校验通过之后、引用行写入之前，
+        -- worker 可能刚好把这条资产的对象删掉，留下引用完好但播不出声的资产。
+        FOR SHARE OF asset
+        "#,
+    )
+    .bind(&unique_ids)
+    .bind(entry_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    let mut known = HashSet::new();
+    let mut taken = HashSet::new();
+    for row in rows {
+        let id: Uuid = row.get("id");
+        if row.get::<bool, _>("taken") {
+            taken.insert(id);
+        }
+        known.insert(id);
+    }
+
+    for (variant_id, asset_ids) in &requested {
+        for asset_id in asset_ids {
+            if !known.contains(asset_id) {
+                issues.push(audio_asset_issue(*variant_id, "audio asset does not exist"));
+            } else if taken.contains(asset_id) {
+                issues.push(audio_asset_issue(
+                    *variant_id,
+                    "audio asset is already used by another entry",
+                ));
+            }
+        }
+    }
+    Ok(issues)
+}
+
+/// 直接复用 `meanings_issue`，与 `voice_profile_invalid` 逐字同形。
+/// 自己拼 `DraftValidationIssue` 而把 `node_location` 留成 `None` 的话，上 wire 的
+/// `node_role` 会变成 `entry`——那是整词条级错误的角色，前端按它分发会走到另一条分支，
+/// 跳不到出问题的那个变体。
+fn audio_asset_issue(variant_id: Uuid, message: &str) -> DraftValidationIssue {
+    crate::lexicon::v3_contract::meanings_issue(
+        V3ValidationIssueCode::AudioAssetInvalid,
+        "audio_assets",
+        variant_id,
+        message,
+    )
+}
+
+/// `audio_assets` 和 `voice_profile` 一样活不过 V2 往返，必须按节点 id 回填。
+/// 但这里不是「把请求里的值搬回来」——除 id 外的字段一律以数据库为准重新灌入，
+/// 客户端回传的展示元数据不作数，省掉一整套「改了就 422」的比对。
+pub(super) async fn restore_audio_assets(
+    tx: &mut Transaction<'_, Postgres>,
+    source: &DraftMeaningsStepContentV3,
+    target: &mut DraftMeaningsStepContentV3,
+) -> Result<(), LexiconServiceError> {
+    let requested = requested_audio_assets(source);
+    if requested.is_empty() {
+        return Ok(());
+    }
+    let unique_ids = requested
+        .iter()
+        .flat_map(|(_, ids)| ids.iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT id, locale, gender, content_type, size_bytes, duration_ms, original_name, created_at
+        FROM lexicon.audio_assets WHERE id = ANY($1)
+        "#,
+    )
+    .bind(&unique_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    let mut canonical = HashMap::new();
+    for row in rows {
+        let id: Uuid = row.get("id");
+        let locale: String = row.get("locale");
+        let gender: String = row.get("gender");
+        canonical.insert(
+            id,
+            AudioAsset {
+                id,
+                locale: AudioAssetLocale::parse(&locale).ok_or_else(invariant_record)?,
+                gender: AudioAssetGender::parse(&gender).ok_or_else(invariant_record)?,
+                content_type: row.get("content_type"),
+                size_bytes: row.get("size_bytes"),
+                duration_ms: row.get("duration_ms"),
+                original_name: row.get("original_name"),
+                created_at: row.get("created_at"),
+            },
+        );
+    }
+
+    let by_variant = requested.into_iter().collect::<HashMap<_, _>>();
+    for variant in target
+        .pos
+        .iter_mut()
+        .flat_map(|pos| &mut pos.grammar_structures)
+        .flat_map(|grammar| &mut grammar.variants)
+    {
+        variant.audio_assets = by_variant
+            .get(&variant.id)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| canonical.get(id).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    Ok(())
 }
 
 fn source_english_texts(pos: &WordPosMeaningsV3) -> Vec<&EnglishTextV3> {

@@ -2,6 +2,8 @@ use super::*;
 
 use std::ops::{Deref, DerefMut};
 
+use crate::lexicon::audio_assets::dto::AudioAsset;
+
 use serde::Serializer;
 use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
@@ -611,6 +613,11 @@ pub struct GrammarVariantV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub voice_profile: Option<VoiceProfileV3>,
+    /// 已上传的真人录音。空数组不上 wire，存量内容重新序列化后逐字节不变。
+    /// 元数据以服务端为准：保存时按 id 从 `lexicon.audio_assets` 重新灌入，客户端改了也无效。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 8)]
+    pub audio_assets: Vec<AudioAsset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1489,6 +1496,7 @@ pub enum V3ValidationIssueCode {
     PhraseComponentTargetNested,
     PhraseComponentTargetStale,
     VoiceProfileInvalid,
+    AudioAssetInvalid,
 }
 
 impl V3ValidationIssueCode {
@@ -1566,6 +1574,7 @@ impl V3ValidationIssueCode {
             Self::PhraseComponentTargetNested => "phrase_component_target_nested",
             Self::PhraseComponentTargetStale => "phrase_component_target_stale",
             Self::VoiceProfileInvalid => "voice_profile_invalid",
+            Self::AudioAssetInvalid => "audio_asset_invalid",
         }
     }
 
@@ -1643,6 +1652,7 @@ impl V3ValidationIssueCode {
             "phrase_component_target_nested" => Self::PhraseComponentTargetNested,
             "phrase_component_target_stale" => Self::PhraseComponentTargetStale,
             "voice_profile_invalid" => Self::VoiceProfileInvalid,
+            "audio_asset_invalid" => Self::AudioAssetInvalid,
             _ => return None,
         })
     }
