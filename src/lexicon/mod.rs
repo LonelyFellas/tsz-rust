@@ -1,3 +1,4 @@
+pub mod audio_assets;
 pub mod content_completion;
 pub mod detection_store;
 pub mod dialect_provider;

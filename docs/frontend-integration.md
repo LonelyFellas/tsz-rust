@@ -1685,3 +1685,74 @@ surface 快照（TTL ≤10 分钟）——它用同一个结构存储且 `deny_u
 同一行对 A 亮、对 B 不亮。这是有意的，不是 bug：徽标回答的是「在**你**的同原型组里还有没有
 同词面的另一条」，而这正是标注要解决的问题的作用域。不要为了「两人看到的一样」再把它
 改成不按创建人。
+## 25. 音频资产直传三步（后端已实现，2026-09-07）
+
+管理员上传真人录音的三个端点已上线，与 `voice-editor-audio-upload/design.md` 的契约一致：
+
+| 方法 | 路径 | 请求 | 响应 |
+| --- | --- | --- | --- |
+| POST | `/api/v1/admin/lexicon/audio-assets/upload-url` | `{ content_type, size }` | `200 { upload: { key, url, headers, expires_in, max_bytes } }` |
+| POST | `/api/v1/admin/lexicon/audio-assets` | `{ key, locale, gender, original_name }` | `201 { asset }` |
+| GET | `/api/v1/admin/lexicon/audio-assets/{id}/url` | — | `200 { url, expires_at, url_expires_in_seconds }` |
+
+流程照旧：申请许可 → 浏览器 PUT 直传 OSS → confirm。直传请求不带 Authorization、不带 cookie。
+白名单是 `audio/mpeg`、`audio/mp4`、`audio/wav`、`audio/ogg`，服务端会把大小写与 `; charset=`
+参数归一到这四个值之一后再签名与落库。单文件上限取空间策略，**以响应里的 `max_bytes` 为准**
+（测试环境与生产可以不同），前端预检直接用它。
+
+**签名头要整组回发，别挑。** 把 `upload.headers` 里返回的每个头都原样带上——生产环境返回的是
+`content-type`、`content-length`、`cache-control` 三个（外加浏览器自己补的 `host`），它们全都进了
+V4 签名，少一个或改一个都是 `403 SignatureDoesNotMatch`，而 OSS 不会告诉你是哪个头出的问题。
+其中 `Content-Length` 与 `Host` 是浏览器的 forbidden header，你写了也会被静默丢弃、由浏览器按 body
+自动补上；真正需要你手动设的是 **`Content-Type` 和 `Cache-Control`**。别只回发前两个——
+`cache-control` 恰恰是最容易漏、且漏了就必然失败的那个（它还需要 bucket CORS 放行，见运维侧）。
+
+另外 `size` 必须**严格等于**将要 PUT 的字节数（`file.size`）：它被签进 `Content-Length`，填错同样是验签失败。
+
+### 25.1 与设计稿的四处差异
+
+- **对象键形状是 `uploads/<uuidv7>.<ext>`**，没有 `<admin_id>` 那一层——管理员 id 记在数据库里，
+  没必要出现在 URL 上。confirm **只接受这个形状**（正式前缀 `assets/`、非 UUID 名、白名单外扩展名
+  一律 `400 invalid_audio_key`），所以 `key` 必须原样回传许可里那一串，不要自己拼。
+- **`duration_ms` 恒为 `null`**：探测时长要解码音频，本期不做。字段在响应里始终出现，值为 `null`。
+- **试听 URL 本期只有创建者能取**，他人取一律 `404 audio_asset_not_found`（不是 403，避免探测
+  资产是否存在）。资产与词条的引用关系落地后会放开成「能读该词条即可读」。
+- **`GET .../url` 在资产不存在与无权读两种情况下返回同一个 404**，前端不必区分。
+
+### 25.2 错误码
+
+| 状态 | code | 触发 |
+| --- | --- | --- |
+| 400 | `unsupported_audio_content_type` | MIME 不在白名单（申请许可时，或 confirm 时对象实际类型不合规） |
+| 400 | `invalid_audio_key` | `key` 不是本服务签发过的暂存键形状 |
+| 400 | `audio_upload_not_completed` | 对象不存在，或大小为 0（PUT 没真正写入） |
+| 400 | `invalid_request_body` + `field: "original_name"` | 展示名为空、超过 120 码点，或含控制字符 |
+| 413 | `audio_file_too_large` | 声明或实际大小超过空间上限 |
+| 404 | `audio_asset_not_found` | 资产不存在或当前管理员不可读 |
+| 501 | `audio_storage_not_configured` | 该环境没有配 `audio` 存储空间 |
+| 503 | `service_unavailable` | 对象存储临时不可用（可重试，与 501 不同） |
+
+**501 与 503 要分开处理**：501 是「这个环境永远没开通」，按设计稿在会话内记一次、把面板置灰即可；
+503 是暂时性的，可以重试。
+
+注意 `original_name` 那条是 **400 + `field`**，不是 422。422 在这三个端点上只表示请求体本身反序列化
+失败（结构错、未知字段），两者别混。
+
+### 25.3 confirm 可以安全重试
+
+**同一个 `key` 重复 confirm 是幂等的**：服务端按暂存键回查，第二次返回的是**同一条资产**
+（同样的 `201` 与同样的 `asset.id`），不会登记出第二份。所以 confirm 的响应在网络上丢了、
+或者用户手抖点了两次，直接拿原来那个 `key` 重试就行，不要让用户重传文件——重传会在对象存储里
+留下一份没人认领的音频。
+
+### 25.4 本期范围与部署顺序
+
+**这三个端点是纯新增，不改任何既有响应，所以后端先上没有风险。**
+`GrammarVariantV3.audio_assets` 字段**还没有放开**——本期只登记资产本身，草稿保存、发布快照、
+引用与回收在下一个 PR。在那之前 confirm 出来的资产不属于任何词条，前端的
+`VITE_VOICE_AUDIO_UPLOAD` 开关请继续保持关闭：现在打开，保存草稿仍会因为未知字段被 422。
+字段放开那批走的是老规矩：前端先 `sync:openapi` 并部署，后端随后或同批。
+
+环境依赖：`audio` 空间的环境变量、bucket 生命周期规则、以及**放行 admin 来源 `PUT` 的 CORS**，
+都在 `ops/audio-asset-lifecycle/README.md`。CORS 没配时浏览器只会报一个没有细节的网络错误，
+且规则生效有延迟，务必提前配。未配 `audio` 空间的环境不会启动失败，三个端点统一返回 501。
