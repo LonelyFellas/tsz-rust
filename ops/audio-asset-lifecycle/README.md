@@ -33,7 +33,13 @@ root 与 `/speech` 相邻不重叠，启动期的 root 重叠检查会挡住写�
 | 对象 | 前缀 | 谁回收 |
 |---|---|---|
 | 已签发许可、但从未 confirm 的上传 | `audio/uploads/` | bucket 生命周期规则（本文件） |
-| 已 confirm 的资产 | `audio/assets/` | 本期不回收（引用关系与回收随后续 PR 落地） |
+| 已 confirm、但没有任何词条引用的资产 | `audio/assets/` | 应用内的回收任务（`src/lexicon/audio_assets/cleanup.rs`） |
+| 被草稿或任一发布快照引用的资产 | `audio/assets/` | 不回收，与词条同寿 |
+
+`audio/assets/` **不能挂按年龄回收的生命周期规则**——那会连正在被引用的正式资产一起删掉。
+这个前缀下的垃圾由应用回收：资产行是数据库里的，「有没有人引用」查 `lexicon.v3_audio_asset_references`
+就能得到确定答案，不需要 `list`。回收任务每小时跑一次，先删对象再删行（顺序理由见该文件注释），
+并且只碰**创建满 7 天、且零引用**的资产——7 天保护的是「已上传但还没保存进草稿」的那一段。
 
 confirm 成功时服务端把对象 `copy` 到 `assets/` 再删掉 `uploads/` 里的那份。**这次搬运不是多余的**：
 `ObjectStore` 没有 `list`（`docs/object-storage-design.md` §4 明确禁止为业务接口新增这类能力），
