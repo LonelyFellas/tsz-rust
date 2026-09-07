@@ -27,7 +27,7 @@ annotation 独立于 presentation.label。trim 后保存；空串保存为 null�
 }
 ```
 
-原有字段 `schema_version`, `detection_id`, `kind`, `headwords`, `confirmed_surface_match_token` 不变。annotation 缺省/null 表示未标注；annotation_updates 缺省为空。出现组时必须提交全部相关已有 entries（包括未改的值），禁止额外 entry_id 和重复 entry_id。旧标注即使有效也须携带对应修订，保证完整可编辑且防止覆盖并发修改。
+原有字段 `schema_version`, `detection_id`, `kind`, `headwords`, `confirmed_surface_match_token` 不变。annotation 缺省/null 表示未标注；annotation_updates 缺省为空。出现组时必须提交全部**当前管理员有权改**的已有 entries（包括未改的值），禁止额外 entry_id 和重复 entry_id。2026-09-07 起权限收口：超管可改任何词条，其他管理员只能改自己创建的；带上无权改的 entry_id 走 `403 entry_annotation_forbidden`，别人的已发布词条照常列进 entries 供只读展示但不参与提交。旧标注即使有效也须携带对应修订，保证完整可编辑且防止覆盖并发修改。
 
 首次请求可以不携带标注；先处理既有 surface confirmation 流程，最终头词验证后服务端返回 HTTP 409 `code: "annotation_conflict"`，`meta.annotation_conflict` 如下：
 
@@ -43,7 +43,7 @@ annotation 独立于 presentation.label。trim 后保存；空串保存为 null�
 }
 ```
 
-entries 使用现有 `MatchedEntryContextV3`（上例 inbound_relations 结构以 OpenAPI 原类型为准），增加 annotation/null、annotation_revision。groups 的 entry_ids 是已有词条；创建中的新词条隐式属于每一组，不伪造 UUID。reason 枚举：`required`（缺标注或缺完整已有条目）、`duplicate`（直接同组重复，或修改旧条时与其其他有效原型的直接邻居重复）、`revision_conflict`（旧标注修订变化）、`group_changed`（提交额外/过时条目）。创建冲突始终返回新条直接相关的完整 entries/groups；旧条其他原型的邻居不额外扩展弹窗。duplicate 因此不一定能在当前表格定位，前端应提示标注与同原型词条重复、已有词条可能关联其他原型，保留输入供更换标注。无部分写入。
+entries 使用现有 `MatchedEntryContextV3`（上例 inbound_relations 结构以 OpenAPI 原类型为准），增加 annotation/null、annotation_revision。groups 的 entry_ids 是已有词条；创建中的新词条隐式属于每一组，不伪造 UUID。reason 枚举：`required`（缺标注或缺完整**有权改的**已有条目）、`duplicate`（直接同组重复，或修改旧条时与其其他有效原型的直接邻居重复；未提交的组成员保留原标注，同样占用取值）、`revision_conflict`（旧标注修订变化）、`group_changed`（提交额外/过时条目）。创建冲突始终返回新条直接相关的完整 entries/groups；旧条其他原型的邻居不额外扩展弹窗。duplicate 因此不一定能在当前表格定位，前端应提示标注与同原型词条重复、已有词条可能关联其他原型，保留输入供更换标注。无部分写入。
 
 前端从该 409 原生弹窗呈现所有已有条目并加入新条目；确认后附加字段重试创建。失败未记录成功幂等结果，可复用该 key；成功后相同规范化 body/key 返回原响应，变更 body/key 仍遵守既有 idempotency_conflict。
 

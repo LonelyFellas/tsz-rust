@@ -1272,6 +1272,7 @@ impl LexiconService {
     pub async fn create_v3(
         &self,
         actor_id: Uuid,
+        is_super_admin: bool,
         request_id: Uuid,
         idempotency_key: Uuid,
         mut input: CreateAdminWordV3Input,
@@ -1385,6 +1386,7 @@ impl LexiconService {
         self.apply_create_annotations(
             &mut transaction,
             actor_id,
+            is_super_admin,
             request_id,
             v3_kind_string(input.kind),
             &initial_headword_keys,

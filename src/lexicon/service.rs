@@ -155,6 +155,8 @@ pub enum LexiconServiceError {
     EntryNotDeletable,
     #[error("entry can only be deleted by its creator")]
     EntryDeleteForbidden,
+    #[error("entry annotation can only be edited by its creator")]
+    EntryAnnotationForbidden,
     #[error("entry has inbound prebound relations and cannot be deleted")]
     EntryHasInboundPreboundRelations,
     #[error("entry has inbound publication references")]

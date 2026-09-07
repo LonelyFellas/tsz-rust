@@ -75,6 +75,28 @@ async fn base_keys(
     ).bind(id).fetch_all(&mut **tx).await.map_err(database_error)
 }
 
+/// 标注的可写集合：超管可以改任何词条的标注，其他管理员只能改自己创建的词条
+/// （含自己的草稿）。别人的词条在列表和冲突弹窗里照常可见，只是没有编辑入口。
+async fn writable_annotation_ids(
+    tx: &mut Transaction<'_, Postgres>,
+    actor_id: Uuid,
+    is_super_admin: bool,
+    ids: &[Uuid],
+) -> Result<BTreeSet<Uuid>, LexiconServiceError> {
+    if is_super_admin {
+        return Ok(ids.iter().copied().collect());
+    }
+    let owned = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM lexicon.entries WHERE id = ANY($1) AND created_by_admin_id = $2",
+    )
+    .bind(ids)
+    .bind(actor_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    Ok(owned.into_iter().collect())
+}
+
 async fn lock_keys(
     tx: &mut Transaction<'_, Postgres>,
     keys: &[String],
@@ -99,19 +121,22 @@ async fn lock_keys(
 }
 
 impl LexiconService {
-    /// 徽标长在列表行上，回答的就是「这张列表里还有没有同词面的另一行」，
-    /// 所以可见性必须与列表自己的规则一致，而不是与写路径 `annotation_groups_in`
-    /// 一致——后者按 actor 作用域是写入不变量（谁必须为谁填标注），与展示无关。
-    /// 用 actor 作用域会让 A、B 两个管理员对同一组词条看到相反的显隐。
+    /// 同原型组＝**当前管理员自己的词条（草稿或已发布）＋ 所有人的已发布词条**。
+    ///
+    /// 别人的草稿不算：草稿只是「尚未公开」的状态，不构成需要靠标注区分的歧义。
+    /// 因此这个判定与写路径 `annotation_groups_in` 同源，两处必须一起改。
+    ///
+    /// 结果是 viewer-dependent 的——A 和 B 各有自己的草稿，看到的角标可以不同。
+    /// 这是有意的，不是 bug。
     pub(super) async fn annotation_visible_entry_ids(
         &self,
+        actor_id: Uuid,
         entry_ids: &[Uuid],
     ) -> Result<BTreeSet<Uuid>, LexiconServiceError> {
         if entry_ids.is_empty() {
             return Ok(BTreeSet::new());
         }
-        // 可见性与 repository::query 的列表 WHERE 对齐：草稿按「当前修订投出的
-        // 未删除词面」判定，不按创建人。内联 CTE 让请求的 ID 约束目标侧扫描。
+        // 内联 CTE 让请求的 ID 约束目标侧扫描。
         let ids = sqlx::query_scalar::<_, Uuid>(r#"
             WITH visible_bases AS NOT MATERIALIZED (
                 SELECT source.entry_id, entry.kind, source.language,
@@ -122,7 +147,7 @@ impl LexiconService {
                   AND entry.archived_at IS NULL
                   AND ((source.content_schema_version = 3 AND source.source_kind = 'form_variant' AND source.form_type = 'base')
                     OR (source.content_schema_version = 2 AND source.source_kind = 'headword'))
-                  AND ((source.content_scope = 'draft' AND source.source_revision = entry.revision)
+                  AND ((source.content_scope = 'draft' AND entry.created_by_admin_id = $2)
                     OR (source.content_scope = 'current_publication' AND source.publication_id = entry.current_publication_id))
             )
             SELECT DISTINCT target.entry_id
@@ -132,7 +157,7 @@ impl LexiconService {
               AND peer.dialect_scope = target.dialect_scope
               AND peer.normalized_surface = target.normalized_surface
             WHERE target.entry_id = ANY($1)
-        "#).bind(entry_ids).fetch_all(self.repository.pool()).await.map_err(database_error)?;
+        "#).bind(entry_ids).bind(actor_id).fetch_all(self.repository.pool()).await.map_err(database_error)?;
         Ok(ids.into_iter().collect())
     }
 
@@ -219,6 +244,7 @@ impl LexiconService {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
+        is_super_admin: bool,
         request_id: Uuid,
         kind: &str,
         keys: &[String],
@@ -238,11 +264,17 @@ impl LexiconService {
             .iter()
             .map(|entry| entry.entry_id)
             .collect::<BTreeSet<_>>();
+        // 组里可能有别人的已发布词条：它们照常列进冲突响应供只读展示（避免撞值），
+        // 但当前管理员既不需要、也不允许为它们写值，只需填满自己那部分。
+        let current_ids = current.iter().copied().collect::<Vec<_>>();
+        let writable = writable_annotation_ids(tx, actor_id, is_super_admin, &current_ids).await?;
         let fail = if submitted.keys().any(|id| !current.contains(id)) {
             Some(Reason::GroupChanged)
+        } else if submitted.keys().any(|id| !writable.contains(id)) {
+            return Err(LexiconServiceError::EntryAnnotationForbidden);
         } else if !current.is_empty()
             && (annotation.is_none()
-                || submitted.len() != current.len()
+                || submitted.len() != writable.len()
                 || updates.iter().any(|update| update.annotation.is_none()))
         {
             Some(Reason::Required)
@@ -259,9 +291,19 @@ impl LexiconService {
                     labels.insert(value.to_lowercase());
                 }
                 group.entry_ids.iter().any(|id| {
+                    // 没提交的成员（别人的已发布词条）保留原标注，同样参与查重：
+                    // 新值不得与组内任何已有非空标注重复。
                     submitted
                         .get(id)
-                        .and_then(|update| update.annotation.as_ref())
+                        .map(|update| &update.annotation)
+                        .or_else(|| {
+                            conflict
+                                .entries
+                                .iter()
+                                .find(|entry| entry.entry_id == *id)
+                                .map(|entry| &entry.annotation)
+                        })
+                        .and_then(Option::as_ref)
                         .is_some_and(|value| !labels.insert(value.to_lowercase()))
                 })
             });
@@ -359,6 +401,7 @@ impl LexiconService {
     pub async fn update_annotation(
         &self,
         actor_id: Uuid,
+        is_super_admin: bool,
         request_id: Uuid,
         id: Uuid,
         mut input: UpdateEntryAnnotationInput,
@@ -377,13 +420,19 @@ impl LexiconService {
             .await
             .map_err(database_error)?;
         lock_annotation_commands(&mut tx).await?;
-        let kind =
-            sqlx::query_scalar::<_, String>("SELECT kind FROM lexicon.entries WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(database_error)?
-                .ok_or(LexiconServiceError::WordNotFound)?;
+        let (kind, created_by_admin_id) = sqlx::query_as::<_, (String, Uuid)>(
+            "SELECT kind, created_by_admin_id FROM lexicon.entries WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database_error)?
+        .ok_or(LexiconServiceError::WordNotFound)?;
+        // 归属先于分组、修订与归档判定：无权改这条标注的管理员不该拿到它的
+        // 同原型组、修订号或归档状态。
+        if !is_super_admin && created_by_admin_id != actor_id {
+            return Err(LexiconServiceError::EntryAnnotationForbidden);
+        }
         let keys = base_keys(&mut tx, id).await?;
         lock_keys(&mut tx, &keys).await?;
         let mut groups = self
