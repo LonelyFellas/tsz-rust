@@ -71,6 +71,20 @@ impl AudioAssetRepository {
         }))
     }
 
+    /// 资产是否已经被某条词条引用（草稿或发布皆算）。
+    /// 一旦被引用，任何能读那条词条的管理员都该能试听它——否则多人协作时，
+    /// 非上传者在编辑器里看得见录音却点不开。
+    pub async fn is_referenced(&self, asset_id: Uuid) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            r#"SELECT EXISTS(
+                   SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1
+               )"#,
+        )
+        .bind(asset_id)
+        .fetch_one(&self.pool)
+        .await
+    }
+
     /// 按暂存键回查已登记的资产，供 confirm 重放与并发冲突走同一条返回路径。
     pub async fn find_by_source_key(
         &self,

@@ -15,6 +15,12 @@ const GRACE_DAYS: i32 = 7;
 /// 一轮最多回收多少条，避免突发的对象存储流量。
 const BATCH: usize = 100;
 
+/// 单次对象删除的时限。这一步跨在资产行的排他锁与一个数据库连接上，底座的 OSS operator
+/// 没有配 HTTP 超时，不设时限的话一次挂死的 DELETE 会让回收在本进程内**静默**停摆
+/// （`reclaim_once` 还没返回，错误分支也不会触发），同时把引用同一条资产的词义保存
+/// 顶在 `FOR SHARE` 上无限期等待。
+const DELETE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// 周期性回收失去全部引用的音频资产：先删对象再删行。
 ///
 /// 顺序不能反。先删行的话，一旦对象删除失败，这个对象就再也没有任何记录指向它——
@@ -96,7 +102,12 @@ pub async fn reclaim_once(
             skipped.push(id);
             continue;
         };
-        if let Err(error) = storage.delete(&key).await {
+        let deleted_object = match tokio::time::timeout(DELETE_TIMEOUT, storage.delete(&key)).await
+        {
+            Ok(result) => result.map_err(|error| error.to_string()),
+            Err(_) => Err(format!("delete timed out after {DELETE_TIMEOUT:?}")),
+        };
+        if let Err(error) = deleted_object {
             tracing::warn!(
                 asset_id = %id,
                 object_key = %key,

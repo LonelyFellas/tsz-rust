@@ -877,3 +877,326 @@ async fn entries_without_audio_keep_a_byte_identical_shape(pool: PgPool) {
             .is_none()
     );
 }
+
+/// 只在 delete 上注入失败的 store，用来覆盖回收里两条只在故障时才走到的分支。
+struct FailingDeleteStore {
+    inner: Arc<dyn ObjectStore>,
+    delete_calls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for FailingDeleteStore {
+    fn space(&self) -> &StorageSpace {
+        self.inner.space()
+    }
+    fn policy(&self) -> &StoragePolicy {
+        self.inner.policy()
+    }
+    async fn put(
+        &self,
+        key: &ObjectKey,
+        body: Vec<u8>,
+        options: PutOptions,
+    ) -> Result<
+        tsz_rust::platform::storage::ObjectMetadata,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        self.inner.put(key, body, options).await
+    }
+    async fn read(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<Vec<u8>, tsz_rust::platform::storage::StorageError> {
+        self.inner.read(key).await
+    }
+    async fn stat(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<
+        tsz_rust::platform::storage::ObjectMetadata,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        self.inner.stat(key).await
+    }
+    async fn presign_read(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<
+        tsz_rust::platform::storage::PresignedRequest,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        self.inner.presign_read(key).await
+    }
+    async fn presign_write(
+        &self,
+        key: &ObjectKey,
+        content_length: u64,
+        options: PutOptions,
+    ) -> Result<
+        tsz_rust::platform::storage::PresignedRequest,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        self.inner.presign_write(key, content_length, options).await
+    }
+    async fn copy(
+        &self,
+        source: &ObjectKey,
+        destination: &ObjectKey,
+    ) -> Result<
+        tsz_rust::platform::storage::ObjectMetadata,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        self.inner.copy(source, destination).await
+    }
+    async fn delete(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<(), tsz_rust::platform::storage::StorageError> {
+        self.delete_calls
+            .lock()
+            .unwrap()
+            .push(key.as_str().to_owned());
+        Err(
+            tsz_rust::platform::storage::StorageError::SpaceNotConfigured(
+                self.inner.space().clone(),
+            ),
+        )
+    }
+}
+
+#[sqlx::test]
+async fn forms_save_rebuilds_audio_references_when_a_pos_is_dropped(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = bearer(&state, admin_id);
+    let entry = create_entry(&state, &pool, &bearer, "audioformsdrop").await;
+    let asset = upload_asset(&state, &store, &bearer, "dropped.mp3").await;
+
+    let (status, saved) = save_meanings(
+        &state,
+        &bearer,
+        &entry,
+        meanings_with_audio(&entry, json!([asset.clone()])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(draft_reference_count(&pool, entry.id).await, 1);
+
+    // 词形保存会按新的词性集合裁掉词义内容。把词性删空，挂在它下面的音频随之从草稿消失，
+    // 引用行必须跟着没：否则资产既永远不会被回收，又被这条词条永久占用。
+    let revision = saved["word"]["revision"].as_i64().unwrap();
+    let (status, impact) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{}/steps/forms/impact", entry.id),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": revision,
+            "content": {"pos": []}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    let mut input = json!({
+        "schema_version": 3,
+        "base_revision": revision,
+        "intent": "save",
+        "content": {"pos": []}
+    });
+    if let Some(token) = impact["confirmation_token"].as_str() {
+        input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["impact_confirmation_token"].as_str() {
+        input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+        input["confirmed_surface_match_token"] = json!(token);
+    }
+    let (status, dropped) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{}/steps/forms", entry.id),
+        &bearer,
+        None,
+        Some(input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{dropped}");
+    assert_eq!(
+        draft_reference_count(&pool, entry.id).await,
+        0,
+        "词形保存裁掉词性后，引用行必须跟着重建，否则资产永远回收不掉"
+    );
+
+    age_asset(&pool, &asset["id"]).await;
+    let reclaimed = tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
+        .await
+        .unwrap();
+    assert_eq!(reclaimed, 1, "引用清干净后资产应当可以被回收");
+}
+
+#[sqlx::test]
+async fn keeping_the_same_asset_across_saves_is_not_treated_as_cross_entry(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = bearer(&state, admin_id);
+    let mut entry = create_entry(&state, &pool, &bearer, "audiorepeat").await;
+    let asset = upload_asset(&state, &store, &bearer, "kept.mp3").await;
+
+    let (status, saved) = save_meanings(
+        &state,
+        &bearer,
+        &entry,
+        meanings_with_audio(&entry, json!([asset.clone()])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    entry.revision = saved["word"]["revision"].as_i64().unwrap();
+
+    // 「改词义但音频原样保留」是最普通的动作。此时上一轮自己的草稿引用行还在，
+    // 跨词条判定必须靠 entry_id 把自己排除掉，否则第二次保存就会被自己顶成 422。
+    let (status, again) = save_meanings(
+        &state,
+        &bearer,
+        &entry,
+        meanings_with_audio(&entry, json!([asset.clone()])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(
+        again["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["audio_assets"]
+            [0]["id"],
+        asset["id"]
+    );
+    assert_eq!(draft_reference_count(&pool, entry.id).await, 1);
+}
+
+#[sqlx::test]
+async fn a_variant_may_reference_at_most_eight_assets(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = bearer(&state, admin_id);
+    let mut entry = create_entry(&state, &pool, &bearer, "audiolimit").await;
+
+    let mut assets = Vec::new();
+    for index in 0..9 {
+        assets.push(upload_asset(&state, &store, &bearer, &format!("a{index}.mp3")).await);
+    }
+
+    // 上限只有 service 层这一处生效：`#[schema(max_items = 8)]` 只进 OpenAPI，
+    // 仓库没有按 schema 校验请求的中间件，删掉那段 if 不会有任何其它信号。
+    let (status, body) = save_meanings(
+        &state,
+        &bearer,
+        &entry,
+        meanings_with_audio(&entry, json!(assets)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        issue_codes(&body)
+            .iter()
+            .any(|code| code == "audio_asset_invalid"),
+        "{body}"
+    );
+
+    // 边界钉在 8，而不是「某个大数」。
+    let (status, saved) = save_meanings(
+        &state,
+        &bearer,
+        &entry,
+        meanings_with_audio(&entry, json!(assets[..8])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    entry.revision = saved["word"]["revision"].as_i64().unwrap();
+    assert_eq!(draft_reference_count(&pool, entry.id).await, 8);
+}
+
+#[sqlx::test]
+async fn reclamation_yields_to_a_save_that_is_validating_the_same_asset(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = bearer(&state, admin_id);
+    create_entry(&state, &pool, &bearer, "audiolocked").await;
+    let asset = upload_asset(&state, &store, &bearer, "locked.mp3").await;
+    age_asset(&pool, &asset["id"]).await;
+    let asset_id: Uuid = asset["id"].as_str().unwrap().parse().unwrap();
+
+    // 模拟「保存正在校验这条资产」的那一刻：校验路径取的正是 FOR SHARE。
+    // 没有这对锁的话，worker 会在校验通过之后、引用行写入之前把对象删掉，
+    // 留下一条引用完好却播不出声的资产。
+    let mut holding = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM lexicon.audio_assets WHERE id = $1 FOR SHARE")
+        .bind(asset_id)
+        .fetch_one(&mut *holding)
+        .await
+        .unwrap();
+
+    let reclaimed = tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
+        .await
+        .unwrap();
+    assert_eq!(reclaimed, 0, "资产行被保存路径锁住时，回收必须让路");
+    assert!(asset_exists(&pool, &asset["id"]).await);
+    assert!(
+        object_exists(&store, &pool, &asset["id"]).await,
+        "对象绝不能在这时被删"
+    );
+
+    holding.rollback().await.unwrap();
+
+    // 锁释放之后照常回收，说明上面只是让路而不是漏判。
+    let reclaimed = tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
+        .await
+        .unwrap();
+    assert_eq!(reclaimed, 1);
+}
+
+#[sqlx::test]
+async fn a_failing_object_delete_keeps_the_row_and_does_not_burn_the_round(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let admin_id = seed_admin(&pool).await;
+    let bearer = bearer(&state, admin_id);
+    create_entry(&state, &pool, &bearer, "audiofaildelete").await;
+    let asset = upload_asset(&state, &store, &bearer, "stuck.mp3").await;
+    age_asset(&pool, &asset["id"]).await;
+
+    let delete_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let failing: Arc<dyn ObjectStore> = Arc::new(FailingDeleteStore {
+        inner: store.clone(),
+        delete_calls: delete_calls.clone(),
+    });
+    let reclaimed = tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &failing)
+        .await
+        .unwrap();
+
+    assert_eq!(reclaimed, 0);
+    assert!(
+        asset_exists(&pool, &asset["id"]).await,
+        "对象没删成就把行删掉，这个对象就再也没有任何记录指向它——底座没有 list，永远发现不了"
+    );
+    // 删失败的行会被 rollback 放回候选集；没有 skipped 集合的话，同一条会在这一轮里
+    // 被 LIMIT 1 反复选中 100 次，把名额耗光、挡住其余资产。
+    assert_eq!(
+        delete_calls.lock().unwrap().len(),
+        1,
+        "同一轮里不得重复重试同一条"
+    );
+}

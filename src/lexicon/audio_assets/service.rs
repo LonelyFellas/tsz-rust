@@ -246,8 +246,10 @@ impl AudioAssetService {
         })
     }
 
-    /// 签发短期只读 URL。资产还没有与词条的引用关系，因此本期只有创建者可读；
-    /// 引用关系落地后改为「能读该资产所在词条即可读」。
+    /// 签发短期只读 URL。已被某条词条引用的资产，任何在职管理员都可以试听——
+    /// 词条本身对所有在职管理员可读，音频是词条内容的一部分，权限不该更窄，
+    /// 否则管理员 B 打开管理员 A 录过音的词条时看得见列表却点不开播放。
+    /// 尚未被任何词条引用的资产还只是上传者的私有草稿，仍然只有创建者可读。
     pub async fn presign_url(
         &self,
         admin_id: Uuid,
@@ -260,7 +262,9 @@ impl AudioAssetService {
             .await?
             .ok_or(AudioAssetServiceError::NotFound)?;
         // 非创建者与「不存在」返回同一个错误，不把资产是否存在变成可探测的信号。
-        if record.created_by_admin_id != admin_id {
+        if record.created_by_admin_id != admin_id
+            && !self.repository.is_referenced(asset_id).await?
+        {
             return Err(AudioAssetServiceError::NotFound);
         }
         let key = ObjectKey::parse(record.object_key).map_err(|error| {

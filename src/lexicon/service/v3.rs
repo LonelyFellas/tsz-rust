@@ -1790,6 +1790,11 @@ impl LexiconService {
             .await
             .map_err(repository_error)?;
         replace_v3_sense_component_usages(&mut transaction, entry_id, &meanings).await?;
+        // 词形保存会按新的词性集合裁剪词义内容（`reconcile_v3_meanings_after_forms`），
+        // 被删掉的词性连同其变体上的音频一起从草稿里消失，引用行必须跟着重建。
+        // 漏了这一步，引用行会永久指向已不存在的内容：资产既不会被回收，
+        // 又会被这条词条永久「占用」，别的词条再也挂不上。
+        replace_v3_audio_asset_references(&mut transaction, entry_id, &meanings).await?;
         replace_v3_forms(&mut transaction, entry_id, &input.content, &catalog_parts).await?;
         let now = Utc::now();
         let updated = sqlx::query(
@@ -3197,16 +3202,17 @@ async fn validate_audio_assets(
     Ok(issues)
 }
 
+/// 直接复用 `meanings_issue`，与 `voice_profile_invalid` 逐字同形。
+/// 自己拼 `DraftValidationIssue` 而把 `node_location` 留成 `None` 的话，上 wire 的
+/// `node_role` 会变成 `entry`——那是整词条级错误的角色，前端按它分发会走到另一条分支，
+/// 跳不到出问题的那个变体。
 fn audio_asset_issue(variant_id: Uuid, message: &str) -> DraftValidationIssue {
-    DraftValidationIssue {
-        step: PersistedWordStep::Meanings,
-        node_id: variant_id,
-        field: "audio_assets".to_owned(),
-        code: V3ValidationIssueCode::AudioAssetInvalid.as_str().to_owned(),
-        message: message.to_owned(),
-        reference_location: None,
-        node_location: None,
-    }
+    crate::lexicon::v3_contract::meanings_issue(
+        V3ValidationIssueCode::AudioAssetInvalid,
+        "audio_assets",
+        variant_id,
+        message,
+    )
 }
 
 /// `audio_assets` 和 `voice_profile` 一样活不过 V2 往返，必须按节点 id 回填。
