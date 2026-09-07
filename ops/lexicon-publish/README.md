@@ -33,7 +33,8 @@ export TSZ_ADMIN_PASSWORD='your-password'
 ./publish_words.py --file example-words.json
 ```
 
-打远程环境必须显式给 `--base-url`（默认只打本地 `http://127.0.0.1:8383`）：
+目标地址的优先级为 `--base-url` → `TSZ_BASE_URL` → 本地 `http://127.0.0.1:8383`。
+自动化调用应始终显式指定已授权的地址，不能把「没传参数」当成「一定是本地」。例如，明确要求写入测试环境时：
 
 ```bash
 ./publish_words.py harbour:港口 --base-url http://47.121.142.19:8383
@@ -46,23 +47,23 @@ export TSZ_ADMIN_PASSWORD='your-password'
 
 顶层：
 
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `surface` | 是 | 词面，用于 detect 和默认拼写 |
-| `kind` | 否 | `word`（默认）或 `phrase` |
-| `gloss` | 二选一 | 只给中文释义时，脚本按默认词性生成一个义项 |
-| `pos` | 二选一 | 词性数组，见下 |
+| 字段      | 必填   | 说明                                       |
+| --------- | ------ | ------------------------------------------ |
+| `surface` | 是     | 词面，用于 detect 和默认拼写               |
+| `kind`    | 否     | `word`（默认）或 `phrase`                  |
+| `gloss`   | 二选一 | 只给中文释义时，脚本按默认词性生成一个义项 |
+| `pos`     | 二选一 | 词性数组，见下                             |
 
 `pos` 元素：
 
-| 字段 | 必填 | 说明 |
-| --- | --- | --- |
-| `pos` | 否 | 基本词性 code，必须在后端词性目录里（默认 `noun`） |
-| `spelling` | 否 | `"harbour"` / `{"common": ...}` / `{"uk": ..., "us": ...}`，默认取 `surface` |
-| `pronunciation` | 否 | 同上形状的音标；不给就按拼写兜一个 `/拼写/` 占位 |
-| `extra_forms` | 否 | 派生词形：`{"form_type": "plural", "spelling": ..., "pronunciation": ...}` |
-| `senses` | 二选一 | 义项数组，元素可以是字符串（当作 `gloss`）或对象 |
-| `gloss` | 二选一 | 没有 `senses` 时的单义项简写 |
+| 字段            | 必填   | 说明                                                                         |
+| --------------- | ------ | ---------------------------------------------------------------------------- |
+| `pos`           | 否     | 基本词性 code，必须在后端词性目录里（默认 `noun`）                           |
+| `spelling`      | 否     | `"harbour"` / `{"common": ...}` / `{"uk": ..., "us": ...}`，默认取 `surface` |
+| `pronunciation` | 否     | 同上形状的音标；不给就按拼写兜一个 `/拼写/` 占位                             |
+| `extra_forms`   | 否     | 派生词形：`{"form_type": "plural", "spelling": ..., "pronunciation": ...}`   |
+| `senses`        | 二选一 | 义项数组，元素可以是字符串（当作 `gloss`）或对象                             |
+| `gloss`         | 二选一 | 没有 `senses` 时的单义项简写                                                 |
 
 `senses` 元素：`gloss`（必填）、`sub_pos`（默认取该词性目录里的第一个）、`level`（默认 `A1`）、
 `frequency`（默认 `100`）、`grammar`（语法结构文本）、`group`（语义区间，写 `"引申义"` 则中英同名，
@@ -80,12 +81,13 @@ export TSZ_ADMIN_PASSWORD='your-password'
 2. 过期了先拿 refresh token 续（不消耗验证码）；
 3. 都不行才用手机号+密码+验证码登录。
 
-`--no-cache` 关掉缓存，`--token` 直接传现成 access token。碰到 401 多半是验证码在冷却期内
-被重复消费，等一分钟再跑即可。
+`--no-cache` 关掉缓存；自动化调用优先用 `TSZ_ADMIN_TOKEN` 传入现成 access token，避免凭据出现在命令参数中。
+碰到 401 时按实际错误 code 核对会话、凭据和验证码状态。发布中断后先检查哪些词条已创建或发布，不能直接重跑整批。
 
 ## 已知边界
 
 - V3 词条没有跨词条唯一键，同一个词跑两次会得到两条独立词条，脚本不做去重。
+- create 成功后，后续 forms/meanings/validate/publish 失败可能留下草稿。脚本不支持从该草稿续传；先记录 entry id、失败步骤并只读核实结果，不盲目再次 create 或删除既有词条。
 - 库里同一词面的候选**超过一页（20 条）**时，写操作要求的确认令牌只在末页签发，脚本会自动翻
   `GET /surface-match-snapshots/{id}?cursor=…` 到末页再重放。翻页在 2026-09-02 之前会 503
   （Redis Lua 回写快照时把空数组编成了空对象），后端已修；跑在旧版本上会看到这个 503。
