@@ -23847,7 +23847,7 @@ async fn annotation_visibility_tracks_peers_across_pages_archive_restore_delete(
 }
 
 #[sqlx::test]
-async fn annotation_visibility_respects_draft_owner_and_current_publication(pool: PgPool) {
+async fn annotation_visibility_matches_list_visibility_across_actors(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -23855,10 +23855,12 @@ async fn annotation_visibility_respects_draft_owner_and_current_publication(pool
     let other = token(&state, seed_admin(&pool).await);
     create_v3_with_complete_forms(&state, &pool, &bearer).await;
     let peer = create_ready_draft(&state, &pool, &other, "harbor").await;
+    // 徽标与列表同口径：别人的草稿本来就出现在列表里（连创建人一起显示），
+    // 那它就该参与「还有没有同名行」的判断，否则两个管理员看到相反的显隐。
     let list = annotation_visibility_list(&state, &bearer, "q=harbour").await;
     assert_eq!(
-        list["words"][0]["annotation_visible"], false,
-        "another actor's draft must not count: {list}"
+        list["words"][0]["annotation_visible"], true,
+        "another actor's ready draft is listed, so it must count: {list}"
     );
     let (status, published) = publish_ready_confirming(&state, &other, &peer).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
@@ -23867,14 +23869,13 @@ async fn annotation_visibility_respects_draft_owner_and_current_publication(pool
         list["words"][0]["annotation_visible"], true,
         "current publication is visible: {list}"
     );
+    // 反向也一致：other 看同一组词条时，显隐与 bearer 看到的相同。
     let list = annotation_visibility_list(&state, &other, "q=harbor").await;
+    let rows = list["words"].as_array().unwrap();
+    assert!(!rows.is_empty(), "expected listed rows: {list}");
     assert!(
-        list["words"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|word| word["annotation_visible"] == false),
-        "unpublished other-actor prototype must not count: {list}"
+        rows.iter().all(|word| word["annotation_visible"] == true),
+        "both actors must see the same badges: {list}"
     );
 }
 

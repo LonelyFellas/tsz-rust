@@ -70,3 +70,19 @@ Content-Type: application/problem+json
 标注长度/控制字符、非法修订、重复更新 ID 沿用词库字段校验：
 `400 invalid_request_body`；DTO无法反序列化仍为 `422 invalid_request_body`。
 请求、修订及兼容规则见 [词条标注设计](features/entry-annotations/design.md)。
+
+
+## 重复词条与草稿续建
+
+建条撞上已有词条仍是 `409 duplicate_word`。当且仅当被撞的是**当前管理员自己**、
+可继续编辑的 V3 空草稿时，`meta.word_id` 带上该草稿的 entry id，供前端直接跳
+`/words/{id}/v3/wizard/forms`。
+
+没有 `meta.word_id` 时只提示无法重复创建：**不得**据此搜索或展示他人草稿，也不得自动重试。
+这个字段是可继续目标的指针，不是「存在同名词条」的信号——两次查询之间并发保存词形会让
+第二次查询落空，从而退化成不带 `word_id` 的 `duplicate_word`，重试即自愈。
+
+检测响应的 `existing_draft_id` 同理：只指向当前管理员自己的可继续草稿，不参与原型匹配，
+不签发或消费 surface 确认。契约见
+[frontend-integration.md §23](frontend-integration.md)。
+

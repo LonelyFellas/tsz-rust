@@ -291,7 +291,7 @@ pub async fn list(
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
     let response = service(&state)
-        .list(auth.subject, query, state.smart_lexicon_v3_flags.read)
+        .list(query, state.smart_lexicon_v3_flags.read)
         .await
         .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
