@@ -1842,6 +1842,25 @@ pub struct MatchedEntryContextV3 {
     #[schema(required = true, minimum = 1)]
     pub annotation_revision: i64,
     pub entry_id: Uuid,
+    /// 创建人 admin id，供前端判断「冲突弹窗里这一行我能不能改」——超管可改任何词条，
+    /// 其他管理员只能改自己创建的（含自己的草稿），见 §24.2「标注的修改权限」。
+    ///
+    /// **刻意是 `Option` 且不标 required**，两个方向各挡一种事故：
+    /// - 对外（wire）：schema 不要求这个键，前端可以先 `sync:openapi` 并部署——旧后端不
+    ///   下发时新前端按「可改」降级（等同本字段出现前的行为），之后再切后端二进制。
+    ///   标成 required 则前后端两个方向都硬失败，只能同批部署。
+    /// - 对内（Redis 快照）：本结构同时是 `V3SurfaceSnapshotPageData` 的存储格式。二进制
+    ///   刚切换的那 ≤10 分钟里会读到升级前写的快照，那里没有这个键。用 `Uuid` + `default`
+    ///   会静默填成 nil UUID，前端把本人的行误判成他人的；`None` 则是诚实的「不知道」，
+    ///   序列化时整个键缺席，前端走同一条降级。
+    ///
+    /// `nullable = false` 是同一件事的另一半：未知时**整个键缺席、绝不会是 `null`**，
+    /// schema 就不该描述一种不会发生的取值，否则前端要为一条永远走不到的分支写降级。
+    ///
+    /// 正常路径上服务端始终下发。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub created_by: Option<Uuid>,
     pub presentation: EntryPresentationV3,
     #[schema(max_items = 5)]
     pub pos_labels: Vec<String>,
@@ -2304,6 +2323,58 @@ impl From<RelatedWordResult> for RelatedWordResultAny {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn matched_entry_context(created_by: Option<Uuid>) -> MatchedEntryContextV3 {
+        MatchedEntryContextV3 {
+            annotation: None,
+            annotation_revision: 1,
+            entry_id: Uuid::now_v7(),
+            created_by,
+            presentation: EntryPresentationV3 {
+                label: "harbour".to_owned(),
+                matched_surfaces: vec!["harbour".to_owned()],
+                strategy_version: "surface_summary_v1".to_owned(),
+            },
+            pos_labels: Vec::new(),
+            gloss_previews: Vec::new(),
+            updated_at: Utc::now(),
+            inbound_relations: RelationReferenceSummaryV3 {
+                total: 0,
+                by_type: RelationReferenceCountsV2 {
+                    synonym: 0,
+                    antonym: 0,
+                    derivative: 0,
+                },
+                previews: Vec::new(),
+                truncated: false,
+            },
+        }
+    }
+
+    /// `created_by` 缺席与 `null` 对前端不是一回事：缺席 = 「后端还没下发归属」，按可改降级；
+    /// `null` 会被当成一个具体的、不等于自己的值，把本人的行误判成只读。所以未知时整个键
+    /// 必须消失。
+    #[test]
+    fn matched_entry_context_v3_omits_unknown_creator_instead_of_nulling_it() {
+        let json = serde_json::to_value(matched_entry_context(None)).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("created_by"),
+            "未知创建人时该键必须缺席，不能是 null：{json}"
+        );
+        let actor = Uuid::now_v7();
+        let json = serde_json::to_value(matched_entry_context(Some(actor))).unwrap();
+        assert_eq!(json["created_by"], serde_json::json!(actor));
+    }
+
+    /// 本结构同时是 Redis 快照的存储格式（`V3SurfaceSnapshotPageData`）。二进制刚切换的
+    /// 那 ≤10 分钟里会读到升级前写的快照，那里没有 `created_by`——不能因此整份快照报废。
+    #[test]
+    fn matched_entry_context_v3_reads_pre_upgrade_snapshots() {
+        let mut json = serde_json::to_value(matched_entry_context(Some(Uuid::now_v7()))).unwrap();
+        json.as_object_mut().unwrap().remove("created_by");
+        let revived: MatchedEntryContextV3 = serde_json::from_value(json).unwrap();
+        assert_eq!(revived.created_by, None);
+    }
 
     #[test]
     fn surface_match_item_v3_is_strictly_discriminated_without_synthetic_ids() {

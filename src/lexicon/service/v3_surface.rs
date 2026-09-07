@@ -66,6 +66,7 @@ struct V3SurfaceContextRecord {
     updated_at: DateTime<Utc>,
     annotation: Option<String>,
     annotation_revision: i64,
+    created_by: Uuid,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2078,7 +2079,8 @@ impl LexiconService {
                        AS matched_surfaces,
                    COALESCE(presentation.strategy_version, 'legacy_v2_surface_adapter_v1')
                        AS strategy_version,
-                   entry.updated_at, entry.annotation, entry.annotation_revision
+                   entry.updated_at, entry.annotation, entry.annotation_revision,
+                   entry.created_by_admin_id AS created_by
             FROM lexicon.entries entry
             JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
             LEFT JOIN lexicon.entry_presentation_projection presentation
@@ -2170,6 +2172,7 @@ impl LexiconService {
                     entry_id: record.entry_id,
                     annotation: record.annotation,
                     annotation_revision: record.annotation_revision,
+                    created_by: Some(record.created_by),
                     presentation: EntryPresentationV3 {
                         label: record.label,
                         matched_surfaces: record.matched_surfaces,
