@@ -581,6 +581,43 @@ pub struct RichTextVariantV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub voice_profile: Option<VoiceProfileV3>,
+    /// 人工指定的正文关联；缺键保留存量，显式空数组清除。
+    #[serde(default, skip_serializing_if = "PresenceAwareVec::is_empty")]
+    #[schema(value_type = Vec<TextLinkV3>, max_items = 100)]
+    pub text_links: PresenceAwareVec<TextLinkV3>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TextLinkViaPhraseV3 {
+    pub word_id: Uuid,
+    pub publication_id: Uuid,
+    pub sense_id: Uuid,
+    pub component_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TextLinkV3 {
+    pub id: Uuid,
+    #[schema(min_items = 1, max_items = 20)]
+    pub source_segments: Vec<SentenceSourceRangeV1>,
+    pub target_word_id: Uuid,
+    pub target_publication_id: Uuid,
+    pub target_pos_id: Uuid,
+    pub target_base_form_id: Uuid,
+    pub target_form_id: Uuid,
+    pub target_variant_id: Uuid,
+    pub target_sense_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub via_phrase: Option<TextLinkViaPhraseV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, read_only)]
+    pub target_headword: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, read_only)]
+    pub target_gloss: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -789,7 +826,7 @@ pub struct WordSentenceV3 {
     /// Canonical V3 translations. Empty is accepted only as a compatibility
     /// read/write shape and is promoted from `zh_text` before persistence.
     #[serde(default)]
-    #[schema(required = true, value_type = Vec<WordSentenceTranslationV3>, max_items = 3)]
+    #[schema(required = true, value_type = Vec<WordSentenceTranslationV3>, max_items = 2000)]
     pub zh_translations: PresenceAwareVec<WordSentenceTranslationV3>,
     #[schema(max_items = 2000)]
     pub links: Vec<WordSentenceLinkV3>,
@@ -901,7 +938,7 @@ pub struct WordSentenceWritableV3 {
     pub en_text: EnglishTextV3,
     pub zh_text_id: Uuid,
     pub zh_text: RichTextV3,
-    #[schema(max_items = 3)]
+    #[schema(max_items = 2000)]
     pub zh_translations: Vec<WordSentenceTranslationV3>,
     #[schema(max_items = 2000)]
     pub links: Vec<WordSentenceLinkV3>,
@@ -1039,6 +1076,9 @@ pub enum V3PublicationCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordV3Capabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub text_links: Option<bool>,
     pub publication: V3PublicationCapability,
     /// Phase 1 发音三元组规范化算法版本。
     pub pronunciation_normalization_version: PronunciationNormalizationVersionV3,

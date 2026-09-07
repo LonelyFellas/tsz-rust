@@ -1685,6 +1685,7 @@ surface 快照（TTL ≤10 分钟）——它用同一个结构存储且 `deny_u
 同一行对 A 亮、对 B 不亮。这是有意的，不是 bug：徽标回答的是「在**你**的同原型组里还有没有
 同词面的另一条」，而这正是标注要解决的问题的作用域。不要为了「两人看到的一样」再把它
 改成不按创建人。
+
 ## 25. 音频资产直传三步（后端已实现，2026-09-07）
 
 管理员上传真人录音的三个端点已上线，与 `voice-editor-audio-upload/design.md` 的契约一致：
@@ -1758,6 +1759,7 @@ V4 签名，少一个或改一个都是 `403 SignatureDoesNotMatch`，而 OSS �
 环境依赖：`audio` 空间的环境变量、bucket 生命周期规则、以及**放行 admin 来源 `PUT` 的 CORS**，
 都在 `ops/audio-asset-lifecycle/README.md`。CORS 没配时浏览器只会报一个没有细节的网络错误，
 且规则生效有延迟，务必提前配。未配 `audio` 空间的环境不会启动失败，三个端点统一返回 501。
+
 ## 26. 语法结构变体挂音频：`audio_assets` 放开（后端已实现，2026-09-08）
 
 `GrammarVariantV3` 新增可选字段 `audio_assets: AudioAsset[]`（复用 §25 那个 `AudioAsset` schema）。
@@ -1811,3 +1813,18 @@ V4 签名，少一个或改一个都是 `403 SignatureDoesNotMatch`，而 OSS �
 - 7 天的宽限期保护的是「已 confirm 但还没保存进草稿」的那一段：管理员选完文件去开会、
   回来再保存，中间资产一直是零引用
 - 已经从草稿里去掉、但仍被某次发布引用的资产**不会**被回收
+
+
+## 正文人工关联（2026-09-07）
+
+V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 text_links，capabilities.text_links 表示支持。关联按 source_segments 码点范围保存，目标使用已发布词条的词性、原形、词形、变体、词义稳定 ID；via_phrase 可记录释义级短语成分来源。target_headword / target_gloss 为服务端只读快照，请求不得提交。
+
+### 同档多条汉语译文（2026-09-07，dev 工作区）
+
+`zh_translations` 支持同一句同档多条，取消“每档一条、每句三条”限制。映射保持高阶 `a1_a2`、中阶 `b1_b2`、低阶 `c1_c2`；每条按稳定 ID 编辑、变档或删除。DTO 的数组 maxItems 为 2000，实际仍受词条总节点与请求体大小限制。`zh_text` / `zh_text_id` 继续提供单条兼容别名，省略数组的旧请求保留现有列表。
+
+必须先应用 `20260907180000_allow_multiple_sentence_translations` migration 和新后端，再使用配套前端写入更多译文。旧前端 runtime 的 maxItems=3 无法读取扩展响应。migration 仅解除分档译文槽位唯一限制，其他字段槽位唯一性保留；已有同档多条或退休译文身份无法还原时 down 明确拒绝。集中设计与验证记录见 tsz 仓库 `docs/features/multiple-sentence-translations/`。
+
+省略字段仅在正文未改变时保留旧关联；显式 [] 清除。旧客户端改写带关联的正文会被拒绝，避免错位或数据丢失。例句 associations 仍不可写；读回人工结果优先于重叠的自动结果。发布引用新增 text_link 类型，迁移先于前端发布。
+
+完整范围、字段、兼容与验证集中在 tsz 仓库 docs/features/definition-sentence-editor/，上传后端不包含在本次范围内。

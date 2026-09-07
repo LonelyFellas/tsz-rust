@@ -880,6 +880,7 @@ impl LexiconService {
                 .is_some_and(|revision| revision != record.revision),
             presentation,
             capabilities: AdminWordV3Capabilities {
+                text_links: Some(true),
                 publication: match state.origin.as_str() {
                     "native" => V3PublicationCapability::Native,
                     "migrated_v2" => V3PublicationCapability::MigrationCanary {
@@ -1488,6 +1489,7 @@ impl LexiconService {
             has_unpublished_changes: false,
             presentation,
             capabilities: AdminWordV3Capabilities {
+                text_links: Some(true),
                 publication: V3PublicationCapability::Native,
                 pronunciation_normalization_version:
                     PronunciationNormalizationVersionV3::NfkcTrimLowerV1,
@@ -1950,6 +1952,7 @@ impl LexiconService {
         ensure_v3_revision(&compatibility_source, base_revision)?;
         preserve_missing_sentence_translations(&mut content, &compatibility_source.meanings);
         preserve_missing_sense_component_usages(&mut content, &compatibility_source.meanings);
+        super::text_links::preserve_missing(&mut content, &compatibility_source.meanings)?;
         let mut issues = crate::lexicon::v3_contract::validate_meanings(&content, intent);
         if intent == StepSaveIntent::Complete {
             issues.extend(
@@ -1965,7 +1968,7 @@ impl LexiconService {
                 crate::lexicon::v3_contract::validate_meanings(&content, intent),
             ));
         }
-        let translation_content = content.clone();
+        let mut translation_content = content.clone();
         let mut relational_meanings: DraftMeaningsStepContent =
             serde_json::from_value(serde_json::to_value(content).map_err(serialization_error)?)
                 .map_err(serialization_error)?;
@@ -2006,11 +2009,14 @@ impl LexiconService {
         if !component_issues.is_empty() {
             return Err(v3_validation_failed(component_issues));
         }
+
         let audio_issues =
             validate_audio_assets(&mut transaction, entry_id, &translation_content).await?;
         if !audio_issues.is_empty() {
             return Err(v3_validation_failed(audio_issues));
         }
+        super::text_links::validate_targets(&mut transaction, entry_id, &mut translation_content)
+            .await?;
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
         let mut current_v3_meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
@@ -2087,12 +2093,14 @@ impl LexiconService {
         copy_sentence_translations(&translation_content, &mut canonical_content)?;
         restore_sense_component_usages(&translation_content, &mut canonical_content);
         restore_voice_profiles(&translation_content, &mut canonical_content);
+
         restore_audio_assets(
             &mut transaction,
             &translation_content,
             &mut canonical_content,
         )
         .await?;
+        super::text_links::restore(&translation_content, &mut canonical_content);
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut canonical_content);
         let aggregate_issues =
             crate::lexicon::v3_contract::validate_aggregate_node_limit(&forms, &canonical_content);
@@ -2743,7 +2751,7 @@ fn phrase_component_literal_is_valid(literal: &str) -> bool {
 }
 
 /// 成分目标只接受「未归档 + V3 发布」的词条；行不存在或快照不是 V3 都返回 `None`。
-async fn load_phrase_component_target(
+pub(super) async fn load_phrase_component_target(
     tx: &mut Transaction<'_, Postgres>,
     target_word_id: Uuid,
     target_publication_id: Uuid,
@@ -3282,7 +3290,7 @@ pub(super) async fn restore_audio_assets(
     Ok(())
 }
 
-fn source_english_texts(pos: &WordPosMeaningsV3) -> Vec<&EnglishTextV3> {
+pub(super) fn source_english_texts(pos: &WordPosMeaningsV3) -> Vec<&EnglishTextV3> {
     pos.senses
         .iter()
         .flat_map(|sense| {
@@ -3299,7 +3307,7 @@ fn source_english_texts(pos: &WordPosMeaningsV3) -> Vec<&EnglishTextV3> {
         .collect()
 }
 
-fn target_english_texts(pos: &mut WordPosMeaningsV3) -> Vec<&mut EnglishTextV3> {
+pub(super) fn target_english_texts(pos: &mut WordPosMeaningsV3) -> Vec<&mut EnglishTextV3> {
     pos.senses
         .iter_mut()
         .flat_map(|sense| {
@@ -3321,7 +3329,9 @@ fn target_english_texts(pos: &mut WordPosMeaningsV3) -> Vec<&mut EnglishTextV3> 
         .collect()
 }
 
-fn english_text_variants_mut(content: &mut EnglishTextV3) -> Vec<&mut RichTextVariantV3> {
+pub(super) fn english_text_variants_mut(
+    content: &mut EnglishTextV3,
+) -> Vec<&mut RichTextVariantV3> {
     match content {
         EnglishTextV3::Unified { common } => vec![common],
         EnglishTextV3::Distinguish { uk, us, .. } => [uk, us]
@@ -3613,8 +3623,8 @@ fn v3_translation_proposed_nodes(content: &DraftMeaningsStepContentV3) -> Vec<Pr
                     node_type: "text_variant",
                     step: PersistedWordStep::Meanings,
                     parent_node_id: Some(sentence.id),
-                    node_role: format!("meanings.{}:zh:common", translation.band.field_role()),
-                    stable_slot: true,
+                    node_role: crate::lexicon::node_identity::SENTENCE_TRANSLATION_ROLE.to_owned(),
+                    stable_slot: false,
                 })
         })
         .collect()

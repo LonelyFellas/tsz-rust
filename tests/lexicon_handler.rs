@@ -20785,9 +20785,9 @@ async fn v3_forms_resave_preserves_sentence_translation_node_roles(pool: PgPool)
     );
     let translation_id =
         Uuid::parse_str(first_sentence(&repeated)["zh_text_id"].as_str().unwrap()).unwrap();
-    let stored_roles: (String, String) = sqlx::query_as(
+    let stored_roles: (String, String, bool) = sqlx::query_as(
         r#"
-        SELECT node.node_role, translation.field_role
+        SELECT node.node_role, translation.field_role, node.stable_slot
         FROM lexicon.nodes node
         JOIN lexicon.text_variants translation ON translation.id = node.id
         WHERE node.entry_id = $1::uuid AND node.id = $2::uuid
@@ -20801,8 +20801,9 @@ async fn v3_forms_resave_preserves_sentence_translation_node_roles(pool: PgPool)
     assert_eq!(
         stored_roles,
         (
-            "meanings.zh_translation_b1_b2:zh:common".to_owned(),
-            "zh_translation_b1_b2".to_owned()
+            "meanings.zh_translation".to_owned(),
+            "zh_translation_b1_b2".to_owned(),
+            false
         )
     );
 }
@@ -21032,20 +21033,6 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
             ("zh_translation_a1_a2", "高阶译文"),
         ]
     );
-    let duplicate_band = sqlx::query(
-        r#"
-        UPDATE lexicon.text_variants
-        SET field_role = 'zh_translation_b1_b2'
-        WHERE id = $1
-        "#,
-    )
-    .bind(c_id)
-    .execute(&pool)
-    .await;
-    assert!(
-        duplicate_band.is_err(),
-        "数据库 slot 唯一约束必须拒绝同一句重复 translation band"
-    );
 
     let (status, reloaded) = call(
         &state,
@@ -21097,6 +21084,125 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
     assert_eq!(cleared_translations.len(), 1);
     assert_eq!(cleared_translations[0]["id"], a_id.to_string());
     assert_eq!(cleared_translations[0]["content"]["text"], "高阶译文");
+}
+
+#[sqlx::test]
+async fn v3_sentence_translations_allow_repeated_bands_and_independent_edits(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let word = create_ready_v3_annotated_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &["Multiple translations for one sentence."],
+    )
+    .await;
+    let entry_id = word["word"]["id"].as_str().unwrap();
+    let mut meanings = writable_v3_meanings(&word);
+    let rows: Vec<Value> = ["a1_a2", "b1_b2", "c1_c2"].into_iter().flat_map(|band| {
+        (1..=2).map(move |index| json!({"id":Uuid::now_v7(),"band":band,"content":rich_text(&format!("{band} 译文 {index}"))}))
+    }).collect();
+    meanings["pos"][0]["senses"][0]["sentences"][0]["zh_translations"] = json!(rows);
+    let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
+    let expected = first_sentence(&saved)["zh_translations"].clone();
+    assert_eq!(expected.as_array().unwrap().len(), 6);
+    let stored: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, plain_text FROM lexicon.text_variants WHERE owner_node_id = $1::uuid AND field_role LIKE 'zh_translation_%' ORDER BY sort_order"
+    ).bind(first_sentence(&saved)["id"].as_str().unwrap()).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        stored,
+        expected
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| (
+                Uuid::parse_str(t["id"].as_str().unwrap()).unwrap(),
+                t["content"]["text"].as_str().unwrap().to_owned()
+            ))
+            .collect::<Vec<_>>()
+    );
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    assert_eq!(first_sentence(&published)["zh_translations"], expected);
+    let publication_id = current_publication_id(&pool, Uuid::parse_str(entry_id).unwrap()).await;
+    let snapshot: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id = $1")
+            .bind(publication_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        snapshot["meanings"]["pos"][0]["senses"][0]["sentences"][0]["zh_translations"],
+        expected
+    );
+
+    // 同一个 ID 可改档；删除当前别名后由剩余译文重新产生兼容字段。
+    let alias_id = first_sentence(&published)["zh_text_id"].clone();
+    let mut edited = writable_v3_meanings(&published);
+    let translations = edited["pos"][0]["senses"][0]["sentences"][0]["zh_translations"]
+        .as_array_mut()
+        .unwrap();
+    translations.retain(|t| t["id"] != alias_id);
+    let changed_id = translations[0]["id"].clone();
+    translations[0]["band"] = json!("a1_a2");
+    translations[0]["content"] = rich_text("独立修改并改成高阶");
+    let changed = save_v3_meanings(&state, &bearer, &published, edited).await;
+    let after = first_sentence(&changed)["zh_translations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(after.len(), 5);
+    assert!(!after.iter().any(|t| t["id"] == alias_id));
+    assert_eq!(
+        after.iter().find(|t| t["id"] == changed_id).unwrap()["content"]["text"],
+        "独立修改并改成高阶"
+    );
+    assert_ne!(first_sentence(&changed)["zh_text_id"], alias_id);
+    for translation in after.iter().filter(|t| t["id"] != changed_id) {
+        assert!(expected.as_array().unwrap().contains(translation));
+    }
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        first_sentence(&reloaded)["zh_translations"],
+        first_sentence(&changed)["zh_translations"]
+    );
+    let mut missing = writable_v3_meanings(&reloaded);
+    missing["pos"][0]["senses"][0]["sentences"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("zh_translations");
+    let preserved = save_v3_meanings(&state, &bearer, &reloaded, missing).await;
+    assert_eq!(
+        first_sentence(&preserved)["zh_translations"],
+        first_sentence(&changed)["zh_translations"]
+    );
+
+    // band 可重复，但一个稳定 ID 不能代表两条译文。
+    let mut invalid = writable_v3_meanings(&preserved);
+    let translations = invalid["pos"][0]["senses"][0]["sentences"][0]["zh_translations"]
+        .as_array_mut()
+        .unwrap();
+    translations.push(translations[0].clone());
+    let (status, _) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        entry_id,
+        preserved["word"]["revision"].as_i64().unwrap(),
+        invalid,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[sqlx::test]
@@ -24179,5 +24285,207 @@ async fn annotation_visibility_ignores_non_base_form_matches(pool: PgPool) {
             .iter()
             .all(|word| word["annotation_visible"] == false),
         "surface matches without shared base must not show annotations: {list}"
+    );
+}
+
+#[sqlx::test]
+async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin = seed_admin(&pool).await;
+    let bearer = token(&state, admin);
+    let (target, publication_id) =
+        create_published_v3_phrase(&state, &pool, &bearer, "mother up", json!([])).await;
+    let component = resolved_component_json(&target, publication_id, "uk", "mother");
+    let phrase_draft = create_v3_phrase_with_sense_components(
+        &state,
+        &bearer,
+        "mother phrase",
+        json!([component.clone()]),
+    )
+    .await;
+    let (status, phrase) = publish_ready_v3(&state, &bearer, &phrase_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase}");
+    let phrase_publication = current_publication_id(
+        &pool,
+        Uuid::parse_str(phrase["word"]["id"].as_str().unwrap()).unwrap(),
+    )
+    .await;
+    let source =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["A mother sentence."]).await;
+    let mut link = resolved_component_json(&target, publication_id, "uk", "mother");
+    for field in [
+        "state",
+        "literal",
+        "target_dialect",
+        "target_form_type",
+        "target_headword",
+        "target_gloss",
+    ] {
+        link.as_object_mut().unwrap().remove(field);
+    }
+    link["source_segments"] = json!([{"start":2,"end":8,"surface":"mother"}]);
+    let mut meanings = writable_v3_meanings(&source);
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["text_links"] =
+        json!([link.clone()]);
+    let mut definition_link = link.clone();
+    definition_link["id"] = json!(Uuid::now_v7());
+    definition_link["via_phrase"] = json!({"word_id":phrase["word"]["id"],"publication_id":phrase_publication,"sense_id":phrase["word"]["meanings"]["pos"][0]["senses"][0]["id"],"component_id":component["id"]});
+    let grammar_id = meanings["pos"][0]["grammar_structures"][0]["id"].clone();
+    meanings["pos"][0]["senses"][0]["definitions"].as_array_mut().unwrap().push(json!({
+        "id":Uuid::now_v7(), "level":"B1", "grammar_structure_id":grammar_id, "definition_mode":"en_sentence",
+        "content":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":rich_text("A mother definition."),"text_links":[definition_link]}}
+    }));
+    for (field, forged) in [
+        ("target_form_id", json!(Uuid::now_v7())),
+        ("target_word_id", source["word"]["id"].clone()),
+        ("target_gloss", json!("伪造快照")),
+    ] {
+        let mut invalid = meanings.clone();
+        invalid["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["text_links"][0]
+            [field] = forged;
+        let (status, problem) = save_v3_meanings_raw(
+            &state,
+            &bearer,
+            source["word"]["id"].as_str().unwrap(),
+            source["word"]["revision"].as_i64().unwrap(),
+            invalid,
+        )
+        .await;
+        assert!(status.is_client_error(), "{field}: {problem}");
+    }
+    let mut invalid = meanings.clone();
+    invalid["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["text_links"][0]["via_phrase"]
+        ["component_id"] = json!(Uuid::now_v7());
+    let (status, problem) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        source["word"]["id"].as_str().unwrap(),
+        source["word"]["revision"].as_i64().unwrap(),
+        invalid,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    let saved = save_v3_meanings(&state, &bearer, &source, meanings).await;
+    let entry_id = saved["word"]["id"].as_str().unwrap();
+    let check = |body: &Value| {
+        let sense = &body["word"]["meanings"]["pos"][0]["senses"][0];
+        assert_eq!(
+            sense["sentences"][0]["en_text"]["common"]["text_links"][0]["target_word_id"],
+            target["word"]["id"]
+        );
+        assert_eq!(
+            sense["definitions"][1]["content"]["common"]["text_links"][0]["target_word_id"],
+            target["word"]["id"]
+        );
+        assert_eq!(
+            sense["sentences"][0]["en_text"]["common"]["text_links"][0]["target_headword"],
+            target["word"]["presentation"]["label"]
+        );
+    };
+    check(&saved);
+    assert!(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["associations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["origin"] == "manual" && a["target_word_id"] == target["word"]["id"])
+    );
+    let (status, reread) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reread}");
+    check(&reread);
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    check(&published);
+    let original_publication =
+        current_publication_id(&pool, Uuid::parse_str(entry_id).unwrap()).await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publication_sense_refs WHERE entry_id=$1 AND reference_kind='text_link'")
+        .bind(Uuid::parse_str(entry_id).unwrap()).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 3);
+
+    // 旧客户端省略字段仅在正文未变时保留，显式 [] 则清空。
+    let mut omitted = writable_v3_meanings(&published);
+    omitted["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]
+        .as_object_mut()
+        .unwrap()
+        .remove("text_links");
+    omitted["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]
+        .as_object_mut()
+        .unwrap()
+        .remove("text_links");
+    let preserved = save_v3_meanings(&state, &bearer, &published, omitted.clone()).await;
+    check(&preserved);
+    omitted["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["value"] =
+        rich_text("Changed mother sentence.");
+    let (status, problem) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        entry_id,
+        preserved["word"]["revision"].as_i64().unwrap(),
+        omitted.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    omitted["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["text_links"] = json!([]);
+    omitted["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["text_links"] = json!([]);
+    let cleared = save_v3_meanings(&state, &bearer, &preserved, omitted).await;
+    assert!(cleared["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["text_links"].is_null());
+    assert!(
+        !cleared["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["associations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["origin"] == "manual")
+    );
+    // 发布清除后的版本，再切回旧版本，人工关联与快照一并恢复。
+    let (status, cleared_publication) = publish_ready_v3(&state, &bearer, &cleared).await;
+    assert_eq!(status, StatusCode::CREATED, "{cleared_publication}");
+    let (status, restored) = activate_v3_history(
+        &state,
+        &bearer,
+        Uuid::parse_str(entry_id).unwrap(),
+        original_publication,
+        cleared_publication["word"]["revision"].as_i64().unwrap(),
+        cleared_publication["word"]["lifecycle_revision"]
+            .as_i64()
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(
+        current_publication_id(&pool, Uuid::parse_str(entry_id).unwrap()).await,
+        original_publication
+    );
+    let (status, historical) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}/publications/{original_publication}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{historical}");
+    assert_eq!(historical["publication"]["is_current"], true);
+    check(&historical["publication"]);
+    // 激活历史发布只切换生效指针，保留尚在编辑的草稿。
+    assert!(restored["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["text_links"].is_null());
+    // 经由短语只有正文引用，归档必须被 text_link 守卫阻止。
+    let (status, blocked) = call(&state, Method::POST, &format!("{ROOT}/entries/{}/archive",phrase["word"]["id"].as_str().unwrap()), &bearer, Some(Uuid::now_v7()),
+        Some(json!({"base_revision":phrase["word"]["revision"],"base_lifecycle_revision":phrase["word"]["lifecycle_revision"]}))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    assert_eq!(blocked["code"], "entry_has_inbound_publication_refs");
+    assert_eq!(
+        blocked["meta"]["reference_locations"][0]["reference_kind"],
+        "text_link"
     );
 }

@@ -86,6 +86,7 @@ mod publishing;
 mod queries;
 mod sentence_association;
 mod sentence_target_discovery;
+pub(crate) mod text_links;
 mod v3;
 mod v3_publication;
 mod v3_surface;

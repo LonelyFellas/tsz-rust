@@ -161,6 +161,9 @@ impl LexiconService {
         publication_references.extend(
             phrase_component_publication_references(&mut tx, &word.forms, &word.meanings).await?,
         );
+        publication_references.extend(
+            super::text_links::validate_targets(&mut tx, entry_id, &mut word.meanings).await?,
+        );
         let pristine_meanings = word.meanings.clone();
         ensure_no_removed_inbound_senses(&mut tx, entry_id, &relational_meanings).await?;
 
@@ -253,7 +256,9 @@ impl LexiconService {
         restore_sense_component_usages(&pristine_meanings, &mut canonical_v3_meanings);
         restore_sentence_zh_translations(&pristine_meanings, &mut canonical_v3_meanings);
         restore_voice_profiles(&pristine_meanings, &mut canonical_v3_meanings);
+
         restore_audio_assets(&mut tx, &pristine_meanings, &mut canonical_v3_meanings).await?;
+        super::text_links::restore(&pristine_meanings, &mut canonical_v3_meanings);
         word.meanings = canonical_v3_meanings;
         Self::hydrate_v3_sentence_associations_in(&mut tx, entry_id, &mut word.meanings).await?;
         word.status = AdminWordStatus::Published;
