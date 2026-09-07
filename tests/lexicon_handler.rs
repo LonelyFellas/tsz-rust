@@ -23749,6 +23749,182 @@ async fn empty_draft_bugfix_visibility_race_archive_and_resume(pool: PgPool) {
     }
 }
 
+/// 标注的修改权限：超管可以改任何词条，其他管理员只能改自己创建的。
+#[sqlx::test]
+async fn entry_annotation_edit_is_limited_to_creator_or_super_admin(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner = token(&state, seed_admin(&pool).await);
+    let outsider = token(&state, seed_admin(&pool).await);
+    let super_admin = token(
+        &state,
+        seed_admin_with_role(&pool, AdminRole::SuperAdmin).await,
+    );
+    let entry = create_v3_with_complete_forms(&state, &pool, &owner).await;
+    let path = format!(
+        "{ROOT}/entries/{}/annotation",
+        entry["word"]["id"].as_str().unwrap()
+    );
+
+    let (status, denied) = call(
+        &state,
+        Method::PATCH,
+        &path,
+        &outsider,
+        None,
+        Some(json!({"annotation":"nope","base_annotation_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(denied["code"], "entry_annotation_forbidden", "{denied}");
+
+    // 正向对照：创建者本人不受影响（防「一律拒绝」的空实现全绿）。
+    let (status, saved) = call(
+        &state,
+        Method::PATCH,
+        &path,
+        &owner,
+        None,
+        Some(json!({"annotation":"1","base_annotation_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+
+    let (status, overridden) = call(
+        &state,
+        Method::PATCH,
+        &path,
+        &super_admin,
+        None,
+        Some(json!({"annotation":"2","base_annotation_revision":saved["annotation_revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "超管可以改任何词条：{overridden}");
+    assert_eq!(overridden["annotation"], "2");
+}
+
+/// 撞上别人的**已发布**词条：照常列进冲突供只读展示，要求当前管理员为自己那条
+/// 填一个不与组内已有标注重复的值，但不许（也不需要）代对方写值。
+#[sqlx::test]
+async fn entry_annotations_published_peer_is_read_only(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner = token(&state, seed_admin(&pool).await);
+    let outsider = token(&state, seed_admin(&pool).await);
+    let first = create_and_publish(&state, &pool, &owner, "harbour").await;
+    let first_id = first["word"]["id"].as_str().unwrap().to_owned();
+    let (status, labeled) = call(
+        &state,
+        Method::PATCH,
+        &format!("{ROOT}/entries/{first_id}/annotation"),
+        &owner,
+        None,
+        Some(json!({"annotation":"1","base_annotation_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{labeled}");
+
+    let mut body = entry_annotations_create_body(
+        &state,
+        &outsider,
+        "harbour",
+        json!({"mode":"unified","common":"harbour"}),
+    )
+    .await;
+    let key = Uuid::now_v7();
+    let (status, required) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{required}");
+    assert_eq!(required["code"], "annotation_conflict");
+    assert_eq!(
+        required["meta"]["annotation_conflict"]["reason"], "required",
+        "{required}"
+    );
+    let entries = required["meta"]["annotation_conflict"]["entries"]
+        .as_array()
+        .unwrap();
+    assert_eq!(entries.len(), 1, "对方的已发布词条要列出来：{required}");
+    assert_eq!(entries[0]["entry_id"], first_id);
+
+    // 查重覆盖没提交的成员：对方那条的既有标注同样占用取值。
+    body["annotation"] = json!("1");
+    let (status, duplicate) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+    assert_eq!(
+        duplicate["meta"]["annotation_conflict"]["reason"], "duplicate",
+        "{duplicate}"
+    );
+
+    // 代对方写值要被拒，而不是被默默接受。
+    body["annotation_updates"] = entry_annotations_updates(&required, &["3"]);
+    let (status, denied) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(denied["code"], "entry_annotation_forbidden", "{denied}");
+
+    // 只填自己那条就够，不必凑满全组。
+    body["annotation"] = json!("2");
+    body["annotation_updates"] = json!([]);
+    let (status, created) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["word"]["annotation"], "2");
+    let (status, untouched) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{first_id}"),
+        &owner,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{untouched}");
+    assert_eq!(
+        untouched["word"]["annotation"], "1",
+        "对方那条只读，不该被改动：{untouched}"
+    );
+}
+
+/// 撞上别人的**草稿**：草稿只是「尚未公开」，不进同原型组，因此不要求填标注。
+#[sqlx::test]
+async fn entry_annotations_ignore_other_admins_drafts(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner = token(&state, seed_admin(&pool).await);
+    let outsider = token(&state, seed_admin(&pool).await);
+    let first = create_v3_with_complete_forms(&state, &pool, &owner).await;
+    // owner 那条已经带标注，排除「因为对方没标注才不要求」的解释。
+    let (status, labeled) = call(
+        &state,
+        Method::PATCH,
+        &format!(
+            "{ROOT}/entries/{}/annotation",
+            first["word"]["id"].as_str().unwrap()
+        ),
+        &owner,
+        None,
+        Some(json!({"annotation":"1","base_annotation_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{labeled}");
+
+    let mut body = entry_annotations_create_body(
+        &state,
+        &outsider,
+        "harbour",
+        json!({"mode":"unified","common":"harbour"}),
+    )
+    .await;
+    let (status, created) =
+        entry_annotations_submit(&state, &outsider, Uuid::now_v7(), &mut body).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "别人的草稿不进组，不该被卡住：{created}"
+    );
+    assert!(created["word"]["annotation"].is_null(), "{created}");
+}
+
 async fn annotation_visibility_list(state: &AppState, bearer: &str, query: &str) -> Value {
     let (status, response) = call(
         state,
@@ -23847,7 +24023,7 @@ async fn annotation_visibility_tracks_peers_across_pages_archive_restore_delete(
 }
 
 #[sqlx::test]
-async fn annotation_visibility_matches_list_visibility_across_actors(pool: PgPool) {
+async fn annotation_visibility_scopes_drafts_to_their_creator(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -23855,27 +24031,28 @@ async fn annotation_visibility_matches_list_visibility_across_actors(pool: PgPoo
     let other = token(&state, seed_admin(&pool).await);
     create_v3_with_complete_forms(&state, &pool, &bearer).await;
     let peer = create_ready_draft(&state, &pool, &other, "harbor").await;
-    // 徽标与列表同口径：别人的草稿本来就出现在列表里（连创建人一起显示），
-    // 那它就该参与「还有没有同名行」的判断，否则两个管理员看到相反的显隐。
+    // 同原型组＝自己的词条（草稿或已发布）＋所有人的已发布词条。别人的草稿不进组，
+    // 因此它既不该给自己那条亮角标——那是写路径 annotation_groups_in 的同一口径。
     let list = annotation_visibility_list(&state, &bearer, "q=harbour").await;
     assert_eq!(
-        list["words"][0]["annotation_visible"], true,
-        "another actor's ready draft is listed, so it must count: {list}"
+        list["words"][0]["annotation_visible"], false,
+        "another actor's draft must not count: {list}"
     );
     let (status, published) = publish_ready_confirming(&state, &other, &peer).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let list = annotation_visibility_list(&state, &bearer, "q=harbour").await;
     assert_eq!(
         list["words"][0]["annotation_visible"], true,
-        "current publication is visible: {list}"
+        "current publication counts for everyone: {list}"
     );
-    // 反向也一致：other 看同一组词条时，显隐与 bearer 看到的相同。
+    // 徽标因此是 viewer-dependent 的：other 组里只有自己那条已发布词条，
+    // bearer 的草稿进不来，所以 other 看到的是「没有同名同伴」。这是有意的取舍。
     let list = annotation_visibility_list(&state, &other, "q=harbor").await;
     let rows = list["words"].as_array().unwrap();
     assert!(!rows.is_empty(), "expected listed rows: {list}");
     assert!(
-        rows.iter().all(|word| word["annotation_visible"] == true),
-        "both actors must see the same badges: {list}"
+        rows.iter().all(|word| word["annotation_visible"] == false),
+        "badges are viewer-dependent by design: {list}"
     );
 }
 

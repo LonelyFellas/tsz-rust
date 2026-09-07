@@ -398,6 +398,10 @@ fn map_error(error: LexiconServiceError) -> AppError {
             ErrorCode::EntryDeleteForbidden,
             "entry can only be deleted by its creator",
         ),
+        LexiconServiceError::EntryAnnotationForbidden => AppError::forbidden(
+            ErrorCode::EntryAnnotationForbidden,
+            "only a super admin may edit annotations on entries created by someone else",
+        ),
         LexiconServiceError::EntryHasInboundPreboundRelations => AppError::conflict(
             ErrorCode::EntryHasInboundPreboundRelations,
             None,

@@ -33,7 +33,7 @@ Content-Type: application/problem+json
 |---|---|---|
 | 400 | Invalid syntax, query, or domain input | `invalid_json`, `invalid_phone`, `invalid_email`, `invalid_identifier`, `invalid_query` |
 | 401 | Authentication failed | `invalid_credentials`, `invalid_token`, `invalid_refresh_token` |
-| 403 | Authenticated but forbidden | `forbidden`, `account_disabled`, `must_change_password` |
+| 403 | Authenticated but forbidden | `forbidden`, `account_disabled`, `must_change_password`, `entry_annotation_forbidden` |
 | 404 | Resource not found | `not_found` |
 | 409 | Unique-resource conflict | `user_already_exists`, `phone_already_registered` |
 | 413 | Request body exceeds the route's byte limit | `payload_too_large` |
@@ -70,6 +70,20 @@ Content-Type: application/problem+json
 标注长度/控制字符、非法修订、重复更新 ID 沿用词库字段校验：
 `400 invalid_request_body`；DTO无法反序列化仍为 `422 invalid_request_body`。
 请求、修订及兼容规则见 [词条标注设计](features/entry-annotations/design.md)。
+
+`403 entry_annotation_forbidden` 表示越权改标注：超管可以改任何词条的标注，其他管理员
+只能改**自己创建**的词条（含自己的草稿）。两条写路径同判：
+`PATCH /admin/lexicon/entries/{id}/annotation`，以及建条请求体里的 `annotation_updates`
+带了无权改的 `entry_id`（整单拒绝，不部分写入）。
+
+归属校验先于分组、修订与归档判定，因此无权改这条标注的管理员拿不到它的同原型组、
+修订号或归档状态；对存在但不属于自己的词条返回 403 而不是 404。
+
+建条冲突的 `entries` 仍列出整组供只读展示，但 `annotation_updates` 只需覆盖当前管理员
+有权改的条目：少填走 `409 annotation_conflict` / `required`，多填走 `403`。唯一性判据是
+「新值不得与组内任何已有非空标注重复」，没提交的成员保留原标注同样占用取值，因此
+`duplicate` 可能指向一条前端未提供编辑入口的行。口径与权限规则见
+[frontend-integration.md §24.2](frontend-integration.md)。
 
 
 ## 重复词条与草稿续建

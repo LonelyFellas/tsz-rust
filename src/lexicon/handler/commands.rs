@@ -69,7 +69,7 @@ pub async fn detect(
         (status = 201, description = "版本化词条草稿创建成功", body = AdminWordAnyEnvelope),
         (status = 400, description = "主词为空、过长、含控制字符，或不是英文词条（含非拉丁字符或不含字母）"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用、必须先改密，或 annotation_updates 里带了非超管无权改的他人词条"),
         (status = 409, description = "词头重复或幂等键冲突"),
         (status = 410, description = "检测上下文已过期"),
         (status = 422, description = "请求结构非法、检测上下文不匹配或词典不可用"),
@@ -94,6 +94,7 @@ pub async fn create(
             let response = service(&state)
                 .create_v3(
                     admin.id,
+                    admin.is_super_admin(),
                     request_id.as_uuid(),
                     idempotency_key,
                     input,
@@ -576,7 +577,7 @@ pub async fn activate_publication(
         (status = 200, description = "标注已保存，内容修订不变", body = crate::lexicon::dto::EntryAnnotationResponse),
         (status = 400, description = "标注或修订非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号不可编辑"),
+        (status = 403, description = "账号不可编辑，或非超管改他人创建的词条"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "标注组、修订冲突或词条已归档")
     )
@@ -590,7 +591,13 @@ pub async fn update_annotation(
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let response = service(&state)
-        .update_annotation(admin.id, request_id.as_uuid(), path.id, input)
+        .update_annotation(
+            admin.id,
+            admin.is_super_admin(),
+            request_id.as_uuid(),
+            path.id,
+            input,
+        )
         .await
         .map_err(map_error)?;
     Ok(Json(response))
