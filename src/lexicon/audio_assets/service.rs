@@ -2,19 +2,22 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use thiserror::Error;
+use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::platform::storage::{
-    ObjectContentType, ObjectKey, ObjectStore, PutOptions, StorageError,
+use crate::platform::{
+    is_unique_violation,
+    storage::{ObjectContentType, ObjectKey, ObjectStore, PutOptions, StorageError},
 };
 
 use super::{
     dto::{
-        AUDIO_ASSET_CONTENT_TYPES, AudioAsset, AudioAssetUrlResponse, AudioUploadTicket,
-        ConfirmAudioAssetRequest, ConfirmAudioAssetResponse, CreateAudioUploadRequest,
-        CreateAudioUploadResponse, audio_extension,
+        AUDIO_ASSET_CONTENT_TYPES, AudioAsset, AudioAssetGender, AudioAssetLocale,
+        AudioAssetUrlResponse, AudioUploadTicket, ConfirmAudioAssetRequest,
+        ConfirmAudioAssetResponse, CreateAudioUploadRequest, CreateAudioUploadResponse,
+        audio_extension,
     },
-    repository::{AudioAssetRepository, NewAudioAsset},
+    repository::{AudioAssetRepository, NewAudioAsset, SOURCE_KEY_UNIQUE},
 };
 
 /// 未确认对象的暂存前缀。bucket 生命周期规则只按这个前缀回收孤儿，
@@ -45,6 +48,8 @@ pub enum AudioAssetServiceError {
     Storage(StorageError),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    Task(#[from] tokio::task::JoinError),
 }
 
 impl From<StorageError> for AudioAssetServiceError {
@@ -57,6 +62,7 @@ impl From<StorageError> for AudioAssetServiceError {
     }
 }
 
+#[derive(Clone)]
 pub struct AudioAssetService {
     repository: AudioAssetRepository,
     storage: Option<Arc<dyn ObjectStore>>,
@@ -112,12 +118,22 @@ impl AudioAssetService {
         request: ConfirmAudioAssetRequest,
     ) -> Result<ConfirmAudioAssetResponse, AudioAssetServiceError> {
         let storage = self.storage()?;
-        // 与 `lexicon.audio_assets` 的 CHECK 同口径：应用层不挡，超长就会撞成 500。
-        if !(1..=MAX_ORIGINAL_NAME_CHARS).contains(&request.original_name.chars().count()) {
-            return Err(AudioAssetServiceError::InvalidOriginalName);
-        }
+        let original_name = normalize_original_name(&request.original_name)
+            .ok_or(AudioAssetServiceError::InvalidOriginalName)?;
         let pending_key =
             parse_pending_key(&request.key).ok_or(AudioAssetServiceError::InvalidKey)?;
+
+        // 重放：confirm 的 201 丢在网络上时前端会重试，而那时暂存对象已经删掉了。
+        // 不按 source_key 回查就会报「没传完」，前端只能让用户重传，
+        // 已登记的那份资产与对象则成为无人认领的孤儿（`assets/` 本期没有回收方）。
+        if let Some(asset) = self
+            .repository
+            .find_by_source_key(pending_key.as_str())
+            .await?
+        {
+            return Ok(ConfirmAudioAssetResponse { asset });
+        }
+
         let metadata = storage.stat(&pending_key).await?;
         let (content_type, extension) = metadata
             .content_type
@@ -131,21 +147,67 @@ impl AudioAssetService {
         let size_bytes = i64::try_from(metadata.content_length)
             .map_err(|_| AudioAssetServiceError::FileTooLarge)?;
 
+        // 搬运与落库 detach 到独立任务：客户端中途 abort（关页面、刷新、断网）时 axum 会丢弃
+        // handler future，就地跑就会在 copy 与 insert 之间留下 `assets/` 下无 DB 行的对象——
+        // 那个前缀没有生命周期规则，底座又没有 list，这种孤儿永远发现不了。与 speech 试听同款处置。
+        let service = self.clone();
+        let storage = Arc::clone(storage);
+        let promotion = tokio::spawn(
+            async move {
+                service
+                    .promote(
+                        admin_id,
+                        storage,
+                        pending_key,
+                        content_type,
+                        extension,
+                        size_bytes,
+                        request.locale,
+                        request.gender,
+                        original_name,
+                    )
+                    .await
+            }
+            .instrument(tracing::Span::current()),
+        );
+        promotion.await?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn promote(
+        &self,
+        admin_id: Uuid,
+        storage: Arc<dyn ObjectStore>,
+        pending_key: ObjectKey,
+        content_type: &'static str,
+        extension: &'static str,
+        size_bytes: i64,
+        locale: AudioAssetLocale,
+        gender: AudioAssetGender,
+        original_name: String,
+    ) -> Result<ConfirmAudioAssetResponse, AudioAssetServiceError> {
         let id = Uuid::now_v7();
         let asset_key = ObjectKey::parse(format!("{ASSET_PREFIX}/{id}.{extension}"))
             .expect("常量前缀与 UUID 构成合法对象键");
-        storage.copy(&pending_key, &asset_key).await?;
+
+        // copy 是「read 源 + put 目标」：OSS 提交了 PUT 但响应丢了同样会返回 Err，
+        // 此时目标对象已经真实存在。delete 是幂等的，没写成也只是一次 no-op。
+        if let Err(error) = storage.copy(&pending_key, &asset_key).await {
+            compensate_delete(&storage, &asset_key).await;
+            return Err(error.into());
+        }
 
         let created_at = match self
             .repository
             .insert(NewAudioAsset {
                 id,
                 object_key: asset_key.as_str(),
+                source_key: pending_key.as_str(),
                 content_type,
                 size_bytes,
-                locale: request.locale.as_str(),
-                gender: request.gender.as_str(),
-                original_name: &request.original_name,
+                locale,
+                gender,
+                original_name: &original_name,
                 created_by_admin_id: admin_id,
             })
             .await
@@ -153,22 +215,32 @@ impl AudioAssetService {
             Ok(created_at) => created_at,
             Err(error) => {
                 // 落库失败则回收刚复制出来的正式对象；暂存对象留给生命周期规则。
-                compensate_delete(storage, &asset_key).await;
+                compensate_delete(&storage, &asset_key).await;
+                // 并发 confirm 撞上 source_key 唯一约束：另一边已经登记好了，返回它那条，
+                // 不把同一段录音登记成两份资产。
+                if is_unique_violation(&error, SOURCE_KEY_UNIQUE)
+                    && let Some(asset) = self
+                        .repository
+                        .find_by_source_key(pending_key.as_str())
+                        .await?
+                {
+                    return Ok(ConfirmAudioAssetResponse { asset });
+                }
                 return Err(AudioAssetServiceError::Database(error));
             }
         };
         // 暂存对象已无用；删不掉也不影响正确性，生命周期规则会兜底。
-        compensate_delete(storage, &pending_key).await;
+        compensate_delete(&storage, &pending_key).await;
 
         Ok(ConfirmAudioAssetResponse {
             asset: AudioAsset {
                 id,
-                locale: request.locale,
-                gender: request.gender,
+                locale,
+                gender,
                 content_type: content_type.to_owned(),
                 size_bytes,
                 duration_ms: None,
-                original_name: request.original_name,
+                original_name,
                 created_at,
             },
         })
@@ -187,6 +259,7 @@ impl AudioAssetService {
             .find(asset_id)
             .await?
             .ok_or(AudioAssetServiceError::NotFound)?;
+        // 非创建者与「不存在」返回同一个错误，不把资产是否存在变成可探测的信号。
         if record.created_by_admin_id != admin_id {
             return Err(AudioAssetServiceError::NotFound);
         }
@@ -201,6 +274,19 @@ impl AudioAssetService {
             url_expires_in_seconds: ttl.as_secs(),
         })
     }
+}
+
+/// 展示名与 annotation / headword 同口径：trim 后判空、限长、拒控制字符。
+/// 不挡控制字符的话，含 NUL 的名字会被 Postgres 拒收，本该 400 的输入变成 500。
+fn normalize_original_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > MAX_ORIGINAL_NAME_CHARS
+        || trimmed.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(trimmed.to_owned())
 }
 
 /// 归一到白名单里的 MIME 与扩展名，避免把客户端写法（大小写、charset 参数）带进签名或数据库。

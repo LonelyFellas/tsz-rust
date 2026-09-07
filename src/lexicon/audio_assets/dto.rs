@@ -42,6 +42,14 @@ impl AudioAssetLocale {
             Self::EnUs => "en-US",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "en-GB" => Some(Self::EnGb),
+            "en-US" => Some(Self::EnUs),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -56,6 +64,14 @@ impl AudioAssetGender {
         match self {
             Self::Female => "female",
             Self::Male => "male",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "female" => Some(Self::Female),
+            "male" => Some(Self::Male),
+            _ => None,
         }
     }
 }
@@ -89,8 +105,8 @@ pub struct ConfirmAudioAssetRequest {
     pub key: String,
     pub locale: AudioAssetLocale,
     pub gender: AudioAssetGender,
-    /// 仅作展示元数据，绝不参与对象键。
-    #[schema(max_length = 120)]
+    /// 仅作展示元数据，绝不参与对象键。首尾空白会被去掉，不接受控制字符。
+    #[schema(min_length = 1, max_length = 120)]
     pub original_name: String,
 }
 

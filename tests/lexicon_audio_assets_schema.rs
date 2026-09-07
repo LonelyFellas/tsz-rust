@@ -36,11 +36,13 @@ async fn insert(
 ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO lexicon.audio_assets
-           (id, object_key, content_type, size_bytes, locale, gender, original_name, created_by_admin_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+           (id, object_key, source_key, content_type, size_bytes, locale, gender,
+            original_name, created_by_admin_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
     )
     .bind(Uuid::now_v7())
     .bind(object_key)
+    .bind(format!("uploads/{}.mp3", Uuid::now_v7()))
     .bind(content_type)
     .bind(size_bytes)
     .bind(locale)
@@ -192,5 +194,34 @@ async fn audio_assets_require_an_existing_admin(pool: PgPool) {
         )
         .await,
         FOREIGN_KEY_VIOLATION,
+    );
+}
+
+#[sqlx::test]
+async fn audio_asset_source_key_is_unique(pool: PgPool) {
+    let admin_id = seed_admin(&pool).await;
+    let source_key = format!("uploads/{}.mp3", Uuid::now_v7());
+    let insert_with_source = |object_key: String| {
+        let source_key = source_key.clone();
+        sqlx::query(
+            r#"INSERT INTO lexicon.audio_assets
+               (id, object_key, source_key, content_type, size_bytes, locale, gender,
+                original_name, created_by_admin_id)
+               VALUES ($1, $2, $3, 'audio/mpeg', 1, 'en-GB', 'female', 'a.mp3', $4)"#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(object_key)
+        .bind(source_key)
+        .bind(admin_id)
+        .execute(&pool)
+    };
+
+    insert_with_source("assets/one.mp3".to_owned())
+        .await
+        .unwrap();
+    // 同一个暂存键只能登记一次——这是 confirm 幂等与并发去重的最后一道保险。
+    assert_code(
+        insert_with_source("assets/two.mp3".to_owned()).await,
+        UNIQUE_VIOLATION,
     );
 }

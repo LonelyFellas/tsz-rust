@@ -62,7 +62,7 @@ pub async fn create_audio_upload(
     request_body = ConfirmAudioAssetRequest,
     responses(
         (status = 201, description = "音频资产已登记", body = ConfirmAudioAssetResponse),
-        (status = 400, description = "对象键非法、上传未完成或类型不在白名单"),
+        (status = 400, description = "对象键非法、上传未完成、类型不在白名单或 original_name 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 413, description = "对象超过空间上限"),
@@ -133,16 +133,28 @@ fn map_error(error: AudioAssetServiceError) -> AppError {
             ErrorCode::AudioUploadNotCompleted,
             "audio upload was not completed",
         ),
-        AudioAssetServiceError::InvalidOriginalName => AppError::unprocessable(
+        // 域内字段校验走 400 + field，与词条标注等既有字段错一致；
+        // 422 invalid_request_body 只表示 JSON 反序列化失败，见 docs/api-errors.md。
+        AudioAssetServiceError::InvalidOriginalName => AppError::validation(
             ErrorCode::InvalidRequestBody,
-            "original_name must be 1 to 120 characters",
+            "original_name",
+            "original_name must be 1 to 120 characters without control characters",
         ),
         AudioAssetServiceError::NotFound => {
             AppError::not_found_with_code(ErrorCode::AudioAssetNotFound, "audio asset not found")
         }
-        AudioAssetServiceError::Storage(_) => {
+        // 对外只给一个笼统的 503，但服务端要留下痕迹：copy 半成功之类的故障
+        // 只能靠这条日志定位，响应体里不会有任何线索。
+        AudioAssetServiceError::Storage(error) => {
+            tracing::error!(
+                error = %error,
+                error_kind = "audio_storage",
+                "audio asset storage operation failed"
+            );
             AppError::unavailable(ErrorCode::ServiceUnavailable, "audio storage unavailable")
         }
         AudioAssetServiceError::Database(error) => AppError::internal(error),
+        // 搬运任务 panic 才会走到这里，属于 bug 而非可预期故障，按 500 暴露。
+        AudioAssetServiceError::Task(error) => AppError::internal(error),
     }
 }

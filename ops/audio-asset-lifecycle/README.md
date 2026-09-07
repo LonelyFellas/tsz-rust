@@ -40,8 +40,13 @@ confirm 成功时服务端把对象 `copy` 到 `assets/` 再删掉 `uploads/` �
 所以「对象存在但没有数据库行」这种孤儿只能靠按对象年龄工作的生命周期规则发现，而规则只认前缀。
 不搬前缀，就只能在同一个前缀里既放孤儿又放正式资产，规则一开就会连正式资产一起删。
 
-搬运失败（copy 报错）时资产不落库，客户端拿到 5xx 可重试；落库失败则删掉刚复制出的正式对象，
-暂存那份留给规则。删暂存对象失败只记 `warn`，同样由规则兜底——删除职责不与规则重复。
+搬运失败（copy 报错）时资产不落库，客户端拿到 5xx 可重试。注意底座的 `copy` 是「read 源 + put 目标」，
+**OSS 已提交 PUT 但响应丢失同样会报错**，那时目标对象其实已经写成了——所以这条路径也会尝试删除目标对象
+（`delete` 是幂等的，没写成只是一次 no-op），删不掉时按日志里的 `object_key` 人工清理。
+落库失败同样删掉刚复制出的正式对象，暂存那份留给规则。删暂存对象失败只记 `warn`，
+由规则兜底——删除职责不与规则重复。
+
+搬运与落库跑在 detach 出去的任务里，客户端中途关页面不会把它打断在「对象已搬、行没落」的中间态。
 
 ## 生命周期规则
 
@@ -79,8 +84,14 @@ confirm 成功时服务端把对象 `copy` 到 `assets/` 再删掉 `uploads/` �
 
 - 来源：`http://localhost:3001`、测试服 admin、生产 admin
 - 方法：`PUT`
-- 允许 header：`Content-Type`（预签名把 `Content-Type`、`Content-Length` 和空间固定的
-  `Cache-Control` 一并纳入签名，客户端必须原样回发返回的 headers）
+- 允许 header：`Content-Type`、`Cache-Control`
+
+**`Cache-Control` 必须放行，漏了就是功能不可用。** 预签名把 `Content-Type`、`Content-Length`
+和空间固定的 `Cache-Control` 一并纳入 V4 签名，客户端必须原样回发；而 `Cache-Control` 不在 CORS
+安全列表里，浏览器会为它发预检。只放行 `Content-Type` 的话，预检直接被拒；反过来为了绕开预检
+而不发这个头，OSS 就回 `SignatureDoesNotMatch`——两条路都走不通，而前端看到的都只是一个没有
+细节的网络错误。（`Content-Length` 与 `Host` 是浏览器禁止脚本设置的头，由浏览器自己补，
+不需要也不能在 CORS 里列。）
 
 规则创建后生效有延迟，提前配。
 
@@ -90,5 +101,6 @@ confirm 成功时服务端把对象 `copy` 到 `assets/` 再删掉 `uploads/` �
 - [ ] `OBJECT_STORAGE_AUDIO_OSS_ROOT=/audio`，与本文件一致
 - [ ] 建生命周期规则，前缀逐字核对为 `audio/uploads/`（建完回列表看生效范围，写错不报错）
 - [ ] 确认版本控制状态；开启则必须带历史版本与删除标记两项
-- [ ] 配置 CORS 并确认 OPTIONS 预检通过
+- [ ] 配置 CORS 并确认 OPTIONS 预检通过——**预检请求头里带上 `cache-control` 再验一次**，
+      只用 `content-type` 验会漏掉真正会拒的那个头
 - [ ] RAM 用户只给该 bucket 的对象读写权限，不给 bucket 管理权限

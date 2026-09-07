@@ -11,8 +11,8 @@ use tower::ServiceExt;
 use tsz_rust::{
     admin::{AdminRepository, AdminRole, NewAdmin},
     platform::storage::{
-        MemoryAdapter, ObjectContentType, ObjectKey, ObjectStore, PutOptions, StoragePolicy,
-        StoragePrivacy, StorageRegistry, StorageSpace,
+        CacheControl, MemoryAdapter, ObjectContentType, ObjectKey, ObjectStore, PutOptions,
+        StoragePolicy, StoragePrivacy, StorageRegistry, StorageSpace,
     },
     state::AppState,
 };
@@ -42,11 +42,13 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
 fn configure_audio(state: &mut AppState) -> Arc<dyn ObjectStore> {
     let store: Arc<dyn ObjectStore> = MemoryAdapter::object_store(
         StorageSpace::parse("audio").unwrap(),
+        // 与 ops/audio-asset-lifecycle/README.md 一样配 Cache-Control：它是必填项，
+        // 会被签进 PUT 请求，测试不配就看不到这个头，CORS 少放行它的问题也测不出来。
         StoragePolicy::new(
             StoragePrivacy::Private,
             MAX_BYTES,
             Duration::from_secs(60),
-            None,
+            Some(CacheControl::parse("private, max-age=86400").unwrap()),
         )
         .unwrap(),
     );
@@ -166,6 +168,22 @@ async fn audio_endpoints_require_admin_and_configured_storage(pool: PgPool) {
 
     let (status, body, _) = call(
         &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&token),
+        Some(json!({
+            "key": format!("uploads/{}.mp3", Uuid::now_v7()),
+            "locale": "en-GB",
+            "gender": "female",
+            "original_name": "a.mp3"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(body["code"], "audio_storage_not_configured");
+
+    let (status, body, _) = call(
+        &state,
         Method::GET,
         &format!("{ASSETS_URL}/{}/url", Uuid::now_v7()),
         Some(&token),
@@ -218,9 +236,22 @@ async fn upload_ticket_enforces_whitelist_and_size_then_signs_a_pending_key(pool
     let key = upload["key"].as_str().unwrap();
     assert!(key.starts_with("uploads/"), "{key}");
     assert!(key.ends_with(".mp3"), "{key}");
-    // 客户端必须原样回发签名 headers，否则 OSS 验签失败。
+    // 客户端必须原样回发签名 headers，否则 OSS 验签失败。断言**完整键集合**：
+    // 签名头增减会直接改变 bucket CORS 的放行清单，逐键取值发现不了新增的那个。
+    let mut header_names = upload["headers"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    header_names.sort();
+    assert_eq!(
+        header_names,
+        ["cache-control", "content-length", "content-type"]
+    );
     assert_eq!(upload["headers"]["content-type"], "audio/mpeg");
     assert_eq!(upload["headers"]["content-length"], "512");
+    assert_eq!(upload["headers"]["cache-control"], "private, max-age=86400");
     assert_eq!(upload["expires_in"], 60);
     assert_eq!(upload["max_bytes"], MAX_BYTES);
 }
@@ -347,7 +378,14 @@ async fn confirm_rejects_foreign_keys_and_incomplete_uploads(pool: PgPool) {
         )
         .await
         .unwrap();
-    for name in [String::new(), "n".repeat(121)] {
+    // 空串、超长、以及含 NUL / 换行的名字都必须是 400 + field，而不是撞到数据库变 500。
+    for name in [
+        String::new(),
+        "   ".to_owned(),
+        "n".repeat(121),
+        "a\u{0}b".to_owned(),
+        "a\nb".to_owned(),
+    ] {
         let (status, body, _) = call(
             &state,
             Method::POST,
@@ -361,8 +399,9 @@ async fn confirm_rejects_foreign_keys_and_incomplete_uploads(pool: PgPool) {
             })),
         )
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body["code"], "invalid_request_body");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "name={name:?}");
+        assert_eq!(body["code"], "invalid_request_body", "name={name:?}");
+        assert_eq!(body["field"], "original_name", "name={name:?}");
     }
 
     // 0 字节对象同样按「没传完」处理，不落库。
@@ -414,4 +453,66 @@ async fn audio_asset_url_is_limited_to_the_creator(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "audio_asset_not_found");
+}
+
+#[sqlx::test]
+async fn confirm_is_idempotent_for_a_replayed_key(pool: PgPool) {
+    let admin_id = seed_admin(&pool).await;
+    let mut state = AppState::for_test(pool.clone());
+    let store = configure_audio(&mut state);
+    let token = token(&state, admin_id);
+
+    let (_, ticket, _) = call(
+        &state,
+        Method::POST,
+        UPLOAD_URL,
+        Some(&token),
+        Some(json!({"content_type": "audio/mpeg", "size": 4})),
+    )
+    .await;
+    let pending_key = ObjectKey::parse(ticket["upload"]["key"].as_str().unwrap()).unwrap();
+    store
+        .put(
+            &pending_key,
+            vec![4; 4],
+            PutOptions::new(Some(ObjectContentType::parse("audio/mpeg").unwrap())),
+        )
+        .await
+        .unwrap();
+
+    let confirm = json!({
+        "key": pending_key.as_str(),
+        "locale": "en-GB",
+        "gender": "female",
+        "original_name": "slow.mp3"
+    });
+    let (first_status, first, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&token),
+        Some(confirm.clone()),
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::CREATED);
+
+    // 201 丢在网络上时前端会重试同一个 key。此时暂存对象已被删掉，若不按 source_key 回查，
+    // 这里会报 audio_upload_not_completed，前端只能让用户重传，第一份资产就成了没人清的孤儿。
+    let (second_status, second, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&token),
+        Some(confirm),
+    )
+    .await;
+    assert_eq!(second_status, StatusCode::CREATED);
+    assert_eq!(second["asset"]["id"], first["asset"]["id"]);
+    assert_eq!(second["asset"]["size_bytes"], 4);
+
+    let rows: (i64,) = sqlx::query_as("SELECT count(*) FROM lexicon.audio_assets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.0, 1, "重放不得登记出第二份资产");
 }

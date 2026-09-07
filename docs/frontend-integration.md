@@ -1695,11 +1695,19 @@ surface 快照（TTL ≤10 分钟）——它用同一个结构存储且 `deny_u
 | POST | `/api/v1/admin/lexicon/audio-assets` | `{ key, locale, gender, original_name }` | `201 { asset }` |
 | GET | `/api/v1/admin/lexicon/audio-assets/{id}/url` | — | `200 { url, expires_at, url_expires_in_seconds }` |
 
-流程照旧：申请许可 → 浏览器 PUT 直传 OSS → confirm。`upload.headers` 里的
-`Content-Type`、`Content-Length` 都进了 V4 签名，**必须原样回发**，少一个或改一个都会被 OSS 验签
-拒绝；直传请求不带 Authorization、不带 cookie。白名单是 `audio/mpeg`、`audio/mp4`、`audio/wav`、
-`audio/ogg`，服务端会把大小写与 `; charset=` 参数归一到这四个值之一后再签名与落库。
-单文件上限取空间策略，**以响应里的 `max_bytes` 为准**（测试环境与生产可以不同），前端预检直接用它。
+流程照旧：申请许可 → 浏览器 PUT 直传 OSS → confirm。直传请求不带 Authorization、不带 cookie。
+白名单是 `audio/mpeg`、`audio/mp4`、`audio/wav`、`audio/ogg`，服务端会把大小写与 `; charset=`
+参数归一到这四个值之一后再签名与落库。单文件上限取空间策略，**以响应里的 `max_bytes` 为准**
+（测试环境与生产可以不同），前端预检直接用它。
+
+**签名头要整组回发，别挑。** 把 `upload.headers` 里返回的每个头都原样带上——生产环境返回的是
+`content-type`、`content-length`、`cache-control` 三个（外加浏览器自己补的 `host`），它们全都进了
+V4 签名，少一个或改一个都是 `403 SignatureDoesNotMatch`，而 OSS 不会告诉你是哪个头出的问题。
+其中 `Content-Length` 与 `Host` 是浏览器的 forbidden header，你写了也会被静默丢弃、由浏览器按 body
+自动补上；真正需要你手动设的是 **`Content-Type` 和 `Cache-Control`**。别只回发前两个——
+`cache-control` 恰恰是最容易漏、且漏了就必然失败的那个（它还需要 bucket CORS 放行，见运维侧）。
+
+另外 `size` 必须**严格等于**将要 PUT 的字节数（`file.size`）：它被签进 `Content-Length`，填错同样是验签失败。
 
 ### 25.1 与设计稿的四处差异
 
@@ -1718,6 +1726,7 @@ surface 快照（TTL ≤10 分钟）——它用同一个结构存储且 `deny_u
 | 400 | `unsupported_audio_content_type` | MIME 不在白名单（申请许可时，或 confirm 时对象实际类型不合规） |
 | 400 | `invalid_audio_key` | `key` 不是本服务签发过的暂存键形状 |
 | 400 | `audio_upload_not_completed` | 对象不存在，或大小为 0（PUT 没真正写入） |
+| 400 | `invalid_request_body` + `field: "original_name"` | 展示名为空、超过 120 码点，或含控制字符 |
 | 413 | `audio_file_too_large` | 声明或实际大小超过空间上限 |
 | 404 | `audio_asset_not_found` | 资产不存在或当前管理员不可读 |
 | 501 | `audio_storage_not_configured` | 该环境没有配 `audio` 存储空间 |
@@ -1726,7 +1735,17 @@ surface 快照（TTL ≤10 分钟）——它用同一个结构存储且 `deny_u
 **501 与 503 要分开处理**：501 是「这个环境永远没开通」，按设计稿在会话内记一次、把面板置灰即可；
 503 是暂时性的，可以重试。
 
-### 25.3 本期范围与部署顺序
+注意 `original_name` 那条是 **400 + `field`**，不是 422。422 在这三个端点上只表示请求体本身反序列化
+失败（结构错、未知字段），两者别混。
+
+### 25.3 confirm 可以安全重试
+
+**同一个 `key` 重复 confirm 是幂等的**：服务端按暂存键回查，第二次返回的是**同一条资产**
+（同样的 `201` 与同样的 `asset.id`），不会登记出第二份。所以 confirm 的响应在网络上丢了、
+或者用户手抖点了两次，直接拿原来那个 `key` 重试就行，不要让用户重传文件——重传会在对象存储里
+留下一份没人认领的音频。
+
+### 25.4 本期范围与部署顺序
 
 **这三个端点是纯新增，不改任何既有响应，所以后端先上没有风险。**
 `GrammarVariantV3.audio_assets` 字段**还没有放开**——本期只登记资产本身，草稿保存、发布快照、
