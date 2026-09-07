@@ -1,0 +1,4 @@
+interface:
+  display_name: "TSZ 联调环境诊断"
+  short_description: "核实前后端进程来源、代理、数据隔离和 mock，准备可信联调环境"
+  default_prompt: "使用 $dev-env 检查这个项目的本地联调环境，确认运行版本、代理和数据隔离。"

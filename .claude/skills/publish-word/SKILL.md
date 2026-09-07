@@ -1,56 +1,39 @@
 ---
 name: publish-word
-description: 用 ops/lexicon-publish/publish_words.py 直接经 admin API 创建并发布 V3 词条，替代在管理后台一步步点击。用户说「发布单词」「加个词」「批量造词条」「往词库里塞几个词」「publish word」，或给出一批 单词+释义 要求入库时使用。
+description: 按用户给定词表调用 tsz-rust 的原生 admin API 脚本创建并发布 V3 词条。用于明确的词条入库或批量发布请求；不用于查询、只整理词表或修改发布功能代码。
 ---
 
-# 发布词条（不走后台页面）
+# 发布词条
 
-脚本 `ops/lexicon-publish/publish_words.py` 一次跑完
-`detect → create → forms(complete) → meanings(complete) → validate → publish`，
-详细字段说明在同目录 `README.md`。本技能只负责：把用户口述的词变成正确的脚本调用，并如实回报结果。
+使用 [publish_words.py](../../../ops/lexicon-publish/publish_words.py)，输入字段与能力见 [README](../../../ops/lexicon-publish/README.md) 和 [示例](../../../ops/lexicon-publish/example-words.json)。
+流程为 detect → create → forms → meanings → validate → publish。脚本没有去重，也没有整批事务回滚。
 
-## 红线
+## 目标与输入
 
-- **默认只打本地** `http://127.0.0.1:8383`。用户没有明确说「测试环境 / tshb-test / 47.121.142.19」时，
-  绝不加 `--base-url`。要打远程，先复述一遍「这会往 tshb-test 写真实词条」并拿到确认。
-- 凭据只从环境变量 `TSZ_ADMIN_PHONE` / `TSZ_ADMIN_PASSWORD` 读。不把密码写进仓库文件、
-  不写进 JSON、不打印到回复里。用户没配就让他自己配，别替他猜。
-- 发布是写操作且**没有去重**：同一个词跑两次会得到两条独立词条。批量前先确认词表没重复、
-  也没在库里发过；用户说「重发一遍」才重发。
-- 不为了让脚本跑通去改后端代码或放宽校验。校验拦下来的内容问题，回去改词条描述。
+- 未指定环境时采用本地，并**显式传入** `--base-url http://127.0.0.1:8383`，覆盖脚本可能读取的 TSZ_BASE_URL。
+- 用户明确要求写入 tshb-test 已构成该环境的发布授权，先说明目标和词表再执行，不重复确认。同一词表授权不包含额外词条、其他环境或删除既有数据。
+- 未明确远端写入意图时，先把词表与具体目标准备好再请求决定，不能仅凭环境变量向远端写入。
+- 密码与 token 只从 TSZ_ADMIN_PHONE、TSZ_ADMIN_PASSWORD、TSZ_ADMIN_TOKEN 或脚本私有会话缓存读取；不放在命令参数、词表文件或输出里。
+- 缺失的释义需要用户提供。词性、等级、词频和音标等默认值必须在发布前说明；音标占位不是真实读音。
+- 写前检查输入重复，并通过可用只读 API 核对已有词条。已经存在或结果不明的词条先核实，不能用再次 create 试探。
 
-## 1. 备好输入
+## 执行
 
-- 简单词（一个词性、一个义项）直接用位置参数，一次可以给多个：
-
-  ```bash
-  ops/lexicon-publish/publish_words.py harbour:港口 apple:苹果 nurse:护士
-  ```
-
-- 需要多词性、多义项、英美拼写差异、真实音标、复数/过去式等派生词形时，把词条描述写成 JSON，
-  放到 scratchpad（不要污染仓库），再 `--file` 传进去。字段见 README，样例见
-  `ops/lexicon-publish/example-words.json`。
-- 用户只报了单词没给释义时，先问释义，别自己编。词性、CEFR 等级、词频这些可以按默认值走
-  （`noun` / `A1` / `100`），但要在回报里说明用了默认值。
-- 细分词性 `sub_pos` 必须属于对应基本词性（`noun` → `N-COUNT` 等）。不确定就交给脚本取默认值，
-  或先跑一次读报错里列出的可用值。
-
-## 2. 跑脚本
+从仓库根用完整路径，例如：
 
 ```bash
-./publish_words.py <参数>
+python3 ops/lexicon-publish/publish_words.py --base-url http://127.0.0.1:8383 'harbour:港口' 'apple:苹果'
 ```
 
-跑之前确认目标后端活着（`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8383/healthz`），
-不活着就告诉用户先起服务，别自作主张启动或改配置。
+多词性、义项、英美拼写或派生词形使用临时目录 JSON 加 `--file`；不在仓库留下临时词表。
+先核对目标 health 和脚本前置条件。服务/凭据缺失时报告具体阻塞，不通过改业务代码、配置或校验规则让发布勉强成功。
+sub_pos 必须匹配基本词性；写前依据目录和输入规范核对，不靠反复执行发布获取错误提示。
 
-## 3. 回报
+## 失败与重试
 
-- 逐条列出成功的词和它的 entry id，写清楚哪些字段用了默认值（音标占位、A1、词频 100 等）。
-- 有失败就把后端返回的 `code` 和字段问题原样带出来，并给出下一步：
-  - `401` —— 验证码一次性，60 秒冷却、每天 10 次上限；等一分钟重试，或用 `--token`。
-  - `unknown_part_of_speech` / 细分词性不匹配 —— 词性目录里没有，换一个或先去后台配。
-  - `surface_matches_changed` / `surface_match_acknowledgement_required` —— 脚本已自动确认重放，
-    仍失败说明库里同词面情况复杂，去后台人工确认。
-  - 校验类 `field_issues` —— 是词条内容缺项，改描述重跑。
-- 部分成功时明确说清哪些进去了、哪些没有；已发布的不会自动回滚。
+- 保存每条成功结果、entry id、失败步骤与可见 code。创建成功后后续失败可能留下草稿，不能将失败等同于「没有写入」。
+- 超时、断连或部分失败时先只读确认服务端结果，不重跑整批。脚本不能续传既有草稿时，报告 id/状态并提出最小处理动作。
+- 401 依据实际 code 区分会话、凭据和验证码问题；不把所有 401 都归为短信冷却，也不反复触发登录。
+- surface match 确认仍失败或 field_issues 时报告具体字段和阶段；补完内容也须先核对已有草稿，避免重复 create。
+
+交付成功词条及 id、默认值、失败/不确定项和留下的草稿状态；已发布内容不会自动回滚。

@@ -1,99 +1,74 @@
 ---
 name: ship
-description: 审查并安全提交、推送 tsz-rust 后端改动：运行 Rust、SQLx、数据库契约与 API 质量门，取得用户确认后提交，对精确 commit 做独立 pre-push code review，再正常推送并创建 PR。用户在 tsz-rust 仓库说「push」「提交并推送」「ship」「开 PR」时使用。
+description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或更新面向 dev 的 PR。包含 Rust、SQLx、API/迁移验证和精确提交的独立 pre-push 审查；不用于仅实现或部署。
 ---
 
-# Ship tsz-rust 后端改动
+# 后端交付
 
-将当前后端工作区安全地送到 feature branch 和对 `dev` 的 PR。分支模型是 feature → `dev` → `main`；部署不属于本技能，dev 合入 `main` 并通过 `main` CI 后使用 `deploy`。
+分支模型：feature → dev → main。PR 以 dev 为 base；合并 main 和部署使用各自授权及流程。
 
-## 红线
+## 1. 基线与授权
 
-- 不直接提交或推送 `main` 或 `dev`。
-- 用户确认前不暂存、不提交、不推送。
-- 不绕过 `.githooks`，禁止 `--no-verify`、改写 `core.hooksPath` 或等效手段。
-- 精确 commit 未通过独立 pre-push code review 时不推送；实现者自查不算独立审查。
-- 不使用普通 `--force`，不覆盖远程历史。
-- 测试失败、SQLx 缓存不一致、未接受的 P0–P2/正确性/安全问题均阻断推送。
+- 检查完整 diff、分支、remotes、已有 PR 和用户改动。fetch 后固定本次 origin/dev 基线，保留任务已有分支。
+- 在 main/dev 上时为本次工作建立 `codex/<slug>` 分支；不向 main/dev 直接提交或推送。分支已有已合并 PR 时先核对剩余差异，必要时建立干净的新任务分支。
+- 「提交并推送」「开 PR」「ship」已经授权相应交付步骤；沿用本会话授权，不逐步重复确认。「仅提交」不含 push，「仅审查」不含 commit，实施批准不自动包含交付。
+- 仅审查时交付发现与验证局限，不自动改文件、刷新 .sqlx 或进入提交阶段；修复与写入需要原请求包含相应范围。
+- 缺少授权时，先完成可审查的结果、验证与提交说明，再一次性请求缺少的决定。需要停下时链接本文件并引用触发规则。
+- 核对 `core.hooksPath` 和 [.githooks](../../../.githooks)；按仓库约定启用 hooks，绝不通过改配置绕过。GitHub 是 PR/CI 来源，Gitee 镜像仅在用户要求时同步。
 
-## 时间预算
+## 2. 根据 diff 审查风险
 
-中小改动（十个文件以内）从开始到 PR 链接控制在 30 分钟上下。超时的来源只有三个：审查扇出太宽、修一轮再审一轮、全量测试重复跑。下文每一步都写了对应的刹车；碰到必须超时的情况（真有 P0–P2）才放开。
+| 变化      | 必要检查                                                      |
+| --------- | ------------------------------------------------------------- |
+| API/DTO   | 状态码、Problem Details、字段/枚举、OpenAPI、幂等、调用方兼容 |
+| 数据/并发 | 事务边界、锁、唯一/外键、历史数据、失败原子性与并发冲突       |
+| SQLx/迁移 | 缓存、up/down、迁移顺序、新旧 schema 与二进制兼容性           |
+| 鉴权/IO   | 权限、cookie/token、输入、SQL/命令构造、敏感日志与配置        |
+| 性能/测试 | N+1、阻塞调用、无界结果、关键回归与错误路径的证据             |
 
-## 1. 建立安全基线
+API 响应新增字段也要核对实际消费者。V3 admin 等严格 runtime contract 可能拒绝未知字段；
+若命中，先同步前端契约并验证兼容，在 `docs/frontend-integration.md` 与 PR 写清发布顺序。
+不能把某个 DTO 的历史问题泛化成所有接口一律前端先部署。
+需要跨仓同步时读取本仓 [contract-sync](../contract-sync/SKILL.md)；配套交付再读 [配套发布清单](../contract-sync/references/paired-release.md)，把兼容性、目标版本和顺序纳入已有 PR；此步骤不自动授权前端修改、交付或部署。
 
-1. 检查状态、完整 diff、当前分支、remotes 和近期提交，保留所有无关或用户已有改动。
-2. 先 `git fetch origin`，再比较本地与 `origin/dev`。若历史分叉，停止并说明，不重写远程。
-3. 当前在 `main` 或 `dev` 时，从正确的 `origin/dev` 基线创建 `feat/<slug>` 或 `fix/<slug>` 分支，并携带工作区改动。
-4. 确认 `git config core.hooksPath` 为 `.githooks`；不正确时报告并恢复仓库约定，不能借此跳过钩子。
-5. GitHub `origin` 是 PR 与 CI 的权威源；`gitee` 是独立镜像，只有用户明确要求时才同步。
-6. 当前分支已有开着的 PR 时，先查它有没有在你不注意时被合并（`gh pr list --head <branch>` + `git fetch`）。已合并就先 rebase 到新 `origin/dev`，**再**开始审查——审查的是最终 SHA，不是马上会变的那个。
+纯文档只做相关一致性、格式和引用检查；不套用前端的 coverage、UI 或 SEO 规则。
 
-## 2. 后端专项审查
+## 3. 统一安排质量门
 
-根据 diff 给出 ✅、⚠️、❌ 或 ⏭️，并修复明确问题：
-
-| 维度 | 必查内容 |
-|---|---|
-| 行为与契约 | HTTP 状态、RFC 9457 Problem Details、序列化字段、OpenAPI、幂等重放、revision/并发冲突、调用方兼容性 |
-| 数据完整性 | 事务边界、锁与隔离级别、唯一/外键约束、并发竞态、历史数据、归档语义、失败原子性 |
-| SQLx 与迁移 | query 缓存、up/down 配对、迁移顺序、已有生产数据兼容性、回退后旧二进制兼容性 |
-| 安全 | 认证授权、cookie/token、输入解析、SQL/命令拼接、CORS、secret/env、敏感日志与错误泄露 |
-| 测试质量 | 正常、400/401/403/404/409/422、权限、边界、并发、事务回滚、幂等、迁移与集成契约 |
-| 可维护性 | 模块边界、错误映射、重复查询、N+1、阻塞操作、无界结果集、死代码和未更新调用点 |
-
-「行为与契约」里有一条本仓库特有：**给响应 DTO 加字段不是纯增量。** admin 前端把 V3 admin word 系列响应（含 sentence-targets resolve）灌进 fail-closed 的 runtime contract，后端先上线会让对应接口在 UI 整体报错。凡是加了响应字段，commit/PR 正文必须写「部署顺序：前端先 `sync:openapi`」，`docs/frontend-integration.md` 加一节。
-
-纯文档改动可跳过不相关运行时维度，但仍检查契约一致性和链接。不要把前端的 typecheck、lint、coverage、SEO 或 UI 规则带入后端流程。
-
-## 3. 运行后端质量门
-
-代码、配置、SQL 或契约改动默认运行：
+读取当前 CI、Cargo 配置和 hooks，复用同一代码/配置/环境状态下已有结果。
+迭代跑受影响的 `--lib`、`--test <target>` 或契约检查；完整代码变化交付前安排一次：
 
 ```bash
 cargo fmt --all -- --check
-cargo check --locked --all-targets --all-features
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-- 全量测试需要本地 Postgres/Redis；先按仓库说明启动依赖。环境确实不可用时报告唯一阻塞，不以快速测试代替全量测试后宣称通过。
-- **全量测试只在最终 SHA 上跑一次**；迭代期间只跑受影响的测试二进制（`--lib`、`--test <file>`、契约测试）。全量门禁用后台任务跑，与第 6 步的独立审查并行，别串行等。
-- 后台任务的结束通知里的 exit code 是外层脚本的，不是门禁的。日志里自己写 `### exit=N` 标记并据此判断，脚本最后一句 `exit $rc`。
-- 做突变检查（改坏代码验证测试会红）后，用 `cp` 还原或还原后 `touch` 文件。`mv` 备份回去会保留旧 mtime，cargo 会沿用突变版二进制，全量测试就在改坏的代码上跑。`git diff` 干净只说明源码对，不说明 target/ 里的二进制对。
-- 修改 `sqlx::query!`、schema 或 migrations 时运行 `cargo sqlx prepare -- --all-targets --all-features`，审查 `.sqlx/` diff，并重新执行受影响门禁。
-- 修改 API 时验证 `docs/openapi.json` 与实现、测试和前端精简契约同步；不手工伪造生成结果。
-- 运行 `git diff --check`，确认无调试代码、临时文件、遗留 TODO、未跟踪生成物或无关改动。
+clippy 已包含编译检查，不为同一状态额外重复 `cargo check`。正常 hooks 仍必须执行。
+完整测试需要本地 Postgres/Redis；先检查仓库配置的测试依赖与隔离数据，不能拿快速单测冒充集成通过。
+API 修改按原生导出流程更新 OpenAPI；SQL/schema 修改使用 `cargo sqlx prepare -- --all-targets --all-features` 并审查 .sqlx 差异。
+代码/测试/配置变化后旧结果只适用于未受影响范围；测试恢复文件后须确保构建缓存没有沿用错误产物。
 
-## 4. 用户确认门
+耗时命令使用可继续读取的会话句柄，保存真实退出码。若与只读审查并行，固定相同输入，审查结果不能将仍运行的检查写成通过。
+不要在每个技能、提交或审查回合重复全量门；发现失败时先做定向复验。
 
-汇报审查表、全部命令结果、已修问题、剩余风险和拟用 conventional commit message。存在 ❌ 时先解决；用户明确确认前停止，不提交。
+## 4. 提交与一次独立审查
 
-## 5. 提交
+1. 检查 `git diff --check` 和 staged diff，只提交本任务文件，使用 conventional commit；署名不写死历史模型。
+2. 正常 pre-commit 会刷新并暂存 .sqlx、运行 clippy。核对生成 diff 确属本任务；保留无关用户改动，需要时用隔离 checkout。
+3. 提交后固定完整 `review_base_sha`（本次 origin/dev）与 `review_sha`（HEAD）。使用可用独立 review 工具；不可用时本技能要求一个新的只读 reviewer 子代理。
+4. 给 reviewer 原目标、精确 SHA、项目规则和实际测试结果。只读提交对象及直接受影响调用链，检查完整 `base_sha...review_sha`；不传自审结论，不重跑已提供的全量检查。脏工作区使用隔离 checkout。
+5. P0–P2 或其他实质正确性/安全问题阻断 push，误报用证据排除；P3 风格/清理不扇出额外 verifier。
+6. 修复后记录旧/新 SHA，重跑受影响检查，请同一 reviewer 检查 `old_sha..new_sha`、原问题与相关调用链。不变部分沿用初审证据，最终结论覆盖当前 SHA。范围扩大或原审查假设失效才全量重审。
+7. 不设「只准修一轮」的限额，也不靠无限复审拖延；在安全点报告范围/耗时偏差并收敛下一步。reviewer 不可用或存在阻断时不能推送。
 
-只暂存本次目标文件并正常提交，让 pre-commit 刷新并暂存 `.sqlx/`、运行全 feature clippy。使用 conventional commit（单一 type，别写 `docs+test` 这种复合 type），并追加：
+窄修复沿用已给授权；新增范围或破坏性取舍才重新确认。提交组织按可审查、可回退主题决定，不强制 amend 已发布历史。
 
-```text
-Co-Authored-By: GPT-5 Codex <noreply@openai.com>
-```
+## 5. 推送与 PR
 
-钩子失败就修复，不绕过。提交后要求工作区干净，并确认 `.sqlx/` 自动变化已包含在 commit 中。
+正常 `git push -u origin <branch>`，让 pre-push 执行原生门禁。绝不使用 `--no-verify`、禁用 hooks、跳过 CI 或普通 force。
+失败读实际日志，区分 hooks、网络、认证；不要猜代理问题、擅自修改全局网络配置或引用不可访问的记忆。
+修复产生新 SHA 时补齐增量审查再推送。
 
-审查后需要修的东西，**只允许一轮**，落成一个 commit：未推送前用 `--amend` 并进上一条修复提交，不叠 `fix review` 小提交。修复只改运行时行为以外的内容（文档、测试、契约文案）时不必再过第 4 步；改了运行时行为则回到第 4 步。
-
-## 6. 独立 pre-push code review
-
-1. 记录 `review_base=origin/dev`、`review_sha=$(git rev-parse HEAD)` 和已通过的门禁结果。
-2. 在新上下文运行只读独立 reviewer：优先使用可调用的 detached exact-commit review，否则创建独立 reviewer 子任务。传入原始目标、base、精确 SHA、仓库规则和测试结果，不传入实现者的审查结论。finder 全部并行启动，不要等一个再开一个；不要给每条 P3 候选各配一个核实 agent。
-3. reviewer 只检查 `review_base...review_sha`，不得编辑文件；报告有文件/行号证据的正确性、回归、安全、数据完整性、并发、性能、API/迁移契约和测试缺口。
-4. **核实预算**：只给 P0–P2、正确性、安全、数据完整性、并发、契约行为类候选配独立 verifier。P3 的清理/复用/文案/测试风格候选不核实，原样列进报告，处置为「留作后续」；例外只有一种——本 PR 自己新加的行上一条明显写错的契约文案，顺手改掉。
-5. P0–P2、正确性或安全发现阻断推送。用证据处理误报；非正确性建议记录不阻断。
-6. **修复后的再审查按增量来**：先 `git diff <旧 sha> <新 sha> --stat -- src migrations .sqlx`。为空（只动了文档/测试）就只对 `<旧 sha>...<新 sha>` 跑一个 delta reviewer，并在报告里写明「运行时代码与已审 SHA 逐字节相同」；不为空就只对改动的运行时 hunk 跑完整角度，其余走 delta reviewer。总共最多两轮；第二轮再出 P3 一律留作后续，不开第三轮。
-7. 只有当前 SHA 明确无阻断发现时才允许推送，并向用户报告 reviewer、base、SHA 与结论。reviewer 不可用时停止。
-
-## 7. 推送与 PR
-
-1. 正常运行 `git push -u origin <branch>`，让 pre-push 执行全 feature clippy 和快速单元测试；失败就修复并回到独立审查，不绕过钩子。代理掐 SSH 或 HTTPS 时按 `tsz-rust-repo-workflow` 记忆里的判据换传输方式，别猜。
-2. 使用 `gh pr create --base dev`（分支已有开着的 PR 时用 `gh pr edit` 更新标题正文）。base 必须是 `dev`：直接对 `main` 开会让 dev 落后 main 一个 squash 提交，得再补一次同步。正文包含目标、迁移/契约影响、**部署顺序**、独立审查结论与留作后续的清单、质量门结果与回退注意事项。`gh` 走代理报 EOF 时用 `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy gh ...` 直连。
-3. PR 的 GitHub CI 会在 Postgres/Redis 服务下再次运行格式、全 feature clippy 和完整测试。CI 全绿才可合并；PR 自动审查是 push 后的第二层，不替代第 6 步。
-4. 返回 PR 链接；缺少 GitHub CLI/认证时止步于已推送分支并说明。
+创建 `--base dev` 的 PR，已有同任务 PR 就更新；正文写清结果、契约/迁移、发布顺序、验证、审查与回退限制。多行正文用结构化参数或 `--body-file`。
+报告 SHA、reviewer、检查状态、PR 链接和未验证事项。GitHub CI 全绿后才具备合并条件，合并与部署仍按各自授权执行。
