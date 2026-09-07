@@ -97,6 +97,12 @@ pub enum ErrorCode {
     SpeechProviderUnavailable,
     SpeechRateLimited,
     SpeechStorageUnavailable,
+    UnsupportedAudioContentType,
+    AudioFileTooLarge,
+    AudioUploadNotCompleted,
+    InvalidAudioKey,
+    AudioStorageNotConfigured,
+    AudioAssetNotFound,
     ServiceUnavailable,
     InternalError,
 }
@@ -109,7 +115,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 86] = [
+    pub const ALL: [Self; 92] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -194,6 +200,12 @@ impl ErrorCode {
         Self::SpeechProviderUnavailable,
         Self::SpeechRateLimited,
         Self::SpeechStorageUnavailable,
+        Self::UnsupportedAudioContentType,
+        Self::AudioFileTooLarge,
+        Self::AudioUploadNotCompleted,
+        Self::InvalidAudioKey,
+        Self::AudioStorageNotConfigured,
+        Self::AudioAssetNotFound,
         Self::ServiceUnavailable,
         Self::InternalError,
     ];
@@ -581,6 +593,36 @@ impl ErrorCode {
                 "speech_storage_unavailable",
                 "Speech storage unavailable",
                 StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::UnsupportedAudioContentType => (
+                "unsupported_audio_content_type",
+                "Unsupported audio content type",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::AudioFileTooLarge => (
+                "audio_file_too_large",
+                "Audio file too large",
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            Self::AudioUploadNotCompleted => (
+                "audio_upload_not_completed",
+                "Audio upload not completed",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::InvalidAudioKey => (
+                "invalid_audio_key",
+                "Invalid audio upload key",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::AudioStorageNotConfigured => (
+                "audio_storage_not_configured",
+                "Audio storage is not configured",
+                StatusCode::NOT_IMPLEMENTED,
+            ),
+            Self::AudioAssetNotFound => (
+                "audio_asset_not_found",
+                "Audio asset not found",
+                StatusCode::NOT_FOUND,
             ),
             Self::ServiceUnavailable => (
                 "service_unavailable",

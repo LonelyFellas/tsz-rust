@@ -105,4 +105,16 @@ pub fn router() -> Router<AppState> {
             "/entries/{id}/validate",
             axum::routing::post(handler::validate),
         )
+        .route(
+            "/audio-assets/upload-url",
+            axum::routing::post(crate::lexicon::audio_assets::handler::create_audio_upload),
+        )
+        .route(
+            "/audio-assets",
+            axum::routing::post(crate::lexicon::audio_assets::handler::confirm_audio_asset),
+        )
+        .route(
+            "/audio-assets/{id}/url",
+            get(crate::lexicon::audio_assets::handler::audio_asset_url),
+        )
 }

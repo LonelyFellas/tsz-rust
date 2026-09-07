@@ -1,0 +1,94 @@
+# 上传音频资产的空间配置与生命周期规则
+
+管理员直传的真人录音走 `audio` 空间。本文件是该空间的部署事实来源：环境变量、bucket 生命周期
+规则、CORS，以及新环境上线检查项。
+
+## 空间配置
+
+`audio` 空间未配置时三个端点一律返回 `501 audio_storage_not_configured`，前端据此把音频面板
+置灰——这是刻意的降级路径，不配置不会让服务启动失败。要开通就得把下面这组变量**一次配全**，
+缺任何一项都会在启动期整体失败（`docs/object-storage-design.md` §5）。
+
+```text
+OBJECT_STORAGE_SPACES=speech,audio
+OBJECT_STORAGE_AUDIO_BACKEND=oss
+OBJECT_STORAGE_AUDIO_OSS_ENDPOINT=https://oss-cn-shenzhen.aliyuncs.com
+OBJECT_STORAGE_AUDIO_OSS_REGION=cn-shenzhen
+OBJECT_STORAGE_AUDIO_OSS_BUCKET=tshb-test-assets
+OBJECT_STORAGE_AUDIO_OSS_ROOT=/audio
+OBJECT_STORAGE_AUDIO_OSS_ACCESS_KEY_ID=...
+OBJECT_STORAGE_AUDIO_OSS_ACCESS_KEY_SECRET=...
+OBJECT_STORAGE_AUDIO_PRIVACY=private
+OBJECT_STORAGE_AUDIO_MAX_OBJECT_SIZE_BYTES=10485760
+OBJECT_STORAGE_AUDIO_PRESIGN_TTL_SECONDS=300
+OBJECT_STORAGE_AUDIO_CACHE_CONTROL=private, max-age=86400
+```
+
+`OBJECT_STORAGE_AUDIO_OSS_ROOT` **必须是 `/audio`**：下面的规则前缀是按这个 root 写死的，
+按环境改 root 就得维护一张前缀对照表，而对照表就是下一次写错前缀的温床（speech 空间同款约定）。
+root 与 `/speech` 相邻不重叠，启动期的 root 重叠检查会挡住写反的情况。
+
+## 两个前缀，两种命运
+
+| 对象 | 前缀 | 谁回收 |
+|---|---|---|
+| 已签发许可、但从未 confirm 的上传 | `audio/uploads/` | bucket 生命周期规则（本文件） |
+| 已 confirm 的资产 | `audio/assets/` | 本期不回收（引用关系与回收随后续 PR 落地） |
+
+confirm 成功时服务端把对象 `copy` 到 `assets/` 再删掉 `uploads/` 里的那份。**这次搬运不是多余的**：
+`ObjectStore` 没有 `list`（`docs/object-storage-design.md` §4 明确禁止为业务接口新增这类能力），
+所以「对象存在但没有数据库行」这种孤儿只能靠按对象年龄工作的生命周期规则发现，而规则只认前缀。
+不搬前缀，就只能在同一个前缀里既放孤儿又放正式资产，规则一开就会连正式资产一起删。
+
+搬运失败（copy 报错）时资产不落库，客户端拿到 5xx 可重试；落库失败则删掉刚复制出的正式对象，
+暂存那份留给规则。删暂存对象失败只记 `warn`，同样由规则兜底——删除职责不与规则重复。
+
+## 生命周期规则
+
+真相源是控制台，下面这份 `PutBucketLifecycle` XML 只是同一份意图的文字记录。
+`<Days>` 与 `<ExpiredObjectDeleteMarker>` 互斥，走 API 时必须拆成两条同前缀的规则
+（控制台里是同一条规则的两个开关）。
+
+```xml
+<LifecycleConfiguration>
+  <Rule>
+    <ID>audio-uploads</ID>
+    <Prefix>audio/uploads/</Prefix>
+    <Status>Enabled</Status>
+    <Expiration><Days>7</Days></Expiration>
+    <NoncurrentVersionExpiration><NoncurrentDays>1</NoncurrentDays></NoncurrentVersionExpiration>
+    <AbortMultipartUpload><Days>7</Days></AbortMultipartUpload>
+  </Rule>
+  <Rule>
+    <ID>audio-uploads-delete-marker</ID>
+    <Prefix>audio/uploads/</Prefix>
+    <Status>Enabled</Status>
+    <Expiration><ExpiredObjectDeleteMarker>true</ExpiredObjectDeleteMarker></Expiration>
+  </Rule>
+</LifecycleConfiguration>
+```
+
+7 天远大于一次上传的生命周期（许可 5 分钟过期，confirm 紧随其后），留的是「管理员选完文件去开会、
+回来再 confirm」这类长尾的余量。**规则前缀绝不能写成 `audio/`**：那会把 `audio/assets/` 下
+的正式资产一起删掉，且不可恢复。
+
+## CORS
+
+直传是浏览器直接 PUT 到 OSS 域名，bucket 必须放行 admin 来源，否则前端只会看到一个没有细节的
+网络错误：
+
+- 来源：`http://localhost:3001`、测试服 admin、生产 admin
+- 方法：`PUT`
+- 允许 header：`Content-Type`（预签名把 `Content-Type`、`Content-Length` 和空间固定的
+  `Cache-Control` 一并纳入签名，客户端必须原样回发返回的 headers）
+
+规则创建后生效有延迟，提前配。
+
+## 新环境上线检查项
+
+- [ ] `.env` 配全上面 12 个变量，`OBJECT_STORAGE_SPACES` 里带上 `audio`
+- [ ] `OBJECT_STORAGE_AUDIO_OSS_ROOT=/audio`，与本文件一致
+- [ ] 建生命周期规则，前缀逐字核对为 `audio/uploads/`（建完回列表看生效范围，写错不报错）
+- [ ] 确认版本控制状态；开启则必须带历史版本与删除标记两项
+- [ ] 配置 CORS 并确认 OPTIONS 预检通过
+- [ ] RAM 用户只给该 bucket 的对象读写权限，不给 bucket 管理权限
