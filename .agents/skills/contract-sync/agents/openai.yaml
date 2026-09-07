@@ -1,0 +1,4 @@
+interface:
+  display_name: "TSZ 前后端契约同步"
+  short_description: "核对双仓版本，同步 OpenAPI 与运行时契约并检查混合版本兼容"
+  default_prompt: "使用 $contract-sync 对齐本次 tsz 与 tsz-rust 的接口改动，完成同步和相关验证。"

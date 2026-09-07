@@ -790,7 +790,7 @@ def main() -> int:
             if isinstance(error, ApiError) and "surface-match-snapshots" in str(error):
                 print(
                     "  提示：同词面候选超过一页（20 条）才会走这个翻页接口，而确认令牌只在末页签发。"
-                    "翻页失败就拿不到令牌，先清掉库里重复的同词面词条再试。",
+                    "翻页失败就拿不到令牌；请记录失败阶段，只读核查已有词条与服务版本，不要删除词条或直接重跑。",
                     file=sys.stderr,
                 )
             continue
