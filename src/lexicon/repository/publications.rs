@@ -873,7 +873,7 @@ impl LexiconRepository {
                    OR (
                        -- 短语成分与关联词同款：目标词义既不在目标当前发布里、
                        -- 草稿侧也已消失，这条出引用就悬空了。
-                       sense_ref.reference_kind IN ('relation', 'phrase_component')
+                       sense_ref.reference_kind IN ('relation', 'phrase_component', 'text_link')
                        AND target_node.node_id IS NULL
                        AND (
                            target_draft_node.id IS NULL
@@ -926,7 +926,7 @@ impl LexiconRepository {
                    OR (
                        -- 短语成分与关联词同款：目标词义既不在目标当前发布里、
                        -- 草稿侧也已消失，这条出引用就悬空了。
-                       sense_ref.reference_kind IN ('relation', 'phrase_component')
+                       sense_ref.reference_kind IN ('relation', 'phrase_component', 'text_link')
                        AND target_node.node_id IS NULL
                        AND (
                            target_draft_node.id IS NULL

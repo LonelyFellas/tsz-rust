@@ -687,7 +687,7 @@ pub(super) async fn insert_text_variant(
         "text_variant",
         Some(owner_id),
         &node_role,
-        true,
+        !field_role.starts_with("zh_translation_"),
     )
     .await?;
     let content_json = serde_json::to_value(content)?;

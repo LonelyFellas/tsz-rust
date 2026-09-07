@@ -36,11 +36,12 @@ Content-Type: application/problem+json
 | 403 | Authenticated but forbidden | `forbidden`, `account_disabled`, `must_change_password`, `entry_annotation_forbidden` |
 | 404 | Resource not found | `not_found` |
 | 409 | Unique-resource conflict | `user_already_exists`, `phone_already_registered` |
-| 413 | Request body exceeds the route's byte limit | `payload_too_large` |
+| 413 | Request body, or a declared upload object, exceeds the byte limit | `payload_too_large`, `audio_file_too_large` |
 | 422 | JSON body cannot be deserialized | `invalid_request_body` |
 | 423 | Account temporarily locked | `account_locked` |
 | 429 | OTP rate limit | `otp_rate_limited` |
 | 500 | Unexpected internal failure | `internal_error` |
+| 501 | Optional capability is not configured in this environment | `audio_storage_not_configured` |
 | 503 | Infrastructure temporarily unavailable | `otp_unavailable`, `password_hash_unavailable`, `service_unavailable` |
 
 `invalid_request_body` 只表示请求 JSON 无法反序列化为 DTO，并固定为 422。非法 JSON 语法使用

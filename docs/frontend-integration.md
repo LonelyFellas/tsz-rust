@@ -1685,3 +1685,146 @@ surface 快照（TTL ≤10 分钟）——它用同一个结构存储且 `deny_u
 同一行对 A 亮、对 B 不亮。这是有意的，不是 bug：徽标回答的是「在**你**的同原型组里还有没有
 同词面的另一条」，而这正是标注要解决的问题的作用域。不要为了「两人看到的一样」再把它
 改成不按创建人。
+
+## 25. 音频资产直传三步（后端已实现，2026-09-07）
+
+管理员上传真人录音的三个端点已上线，与 `voice-editor-audio-upload/design.md` 的契约一致：
+
+| 方法 | 路径 | 请求 | 响应 |
+| --- | --- | --- | --- |
+| POST | `/api/v1/admin/lexicon/audio-assets/upload-url` | `{ content_type, size }` | `200 { upload: { key, url, headers, expires_in, max_bytes } }` |
+| POST | `/api/v1/admin/lexicon/audio-assets` | `{ key, locale, gender, original_name }` | `201 { asset }` |
+| GET | `/api/v1/admin/lexicon/audio-assets/{id}/url` | — | `200 { url, expires_at, url_expires_in_seconds }` |
+
+流程照旧：申请许可 → 浏览器 PUT 直传 OSS → confirm。直传请求不带 Authorization、不带 cookie。
+白名单是 `audio/mpeg`、`audio/mp4`、`audio/wav`、`audio/ogg`，服务端会把大小写与 `; charset=`
+参数归一到这四个值之一后再签名与落库。单文件上限取空间策略，**以响应里的 `max_bytes` 为准**
+（测试环境与生产可以不同），前端预检直接用它。
+
+**签名头要整组回发，别挑。** 把 `upload.headers` 里返回的每个头都原样带上——生产环境返回的是
+`content-type`、`content-length`、`cache-control` 三个（外加浏览器自己补的 `host`），它们全都进了
+V4 签名，少一个或改一个都是 `403 SignatureDoesNotMatch`，而 OSS 不会告诉你是哪个头出的问题。
+其中 `Content-Length` 与 `Host` 是浏览器的 forbidden header，你写了也会被静默丢弃、由浏览器按 body
+自动补上；真正需要你手动设的是 **`Content-Type` 和 `Cache-Control`**。别只回发前两个——
+`cache-control` 恰恰是最容易漏、且漏了就必然失败的那个（它还需要 bucket CORS 放行，见运维侧）。
+
+另外 `size` 必须**严格等于**将要 PUT 的字节数（`file.size`）：它被签进 `Content-Length`，填错同样是验签失败。
+
+### 25.1 与设计稿的四处差异
+
+- **对象键形状是 `uploads/<uuidv7>.<ext>`**，没有 `<admin_id>` 那一层——管理员 id 记在数据库里，
+  没必要出现在 URL 上。confirm **只接受这个形状**（正式前缀 `assets/`、非 UUID 名、白名单外扩展名
+  一律 `400 invalid_audio_key`），所以 `key` 必须原样回传许可里那一串，不要自己拼。
+- **`duration_ms` 恒为 `null`**：探测时长要解码音频，本期不做。字段在响应里始终出现，值为 `null`。
+- **试听 URL 本期只有创建者能取**，他人取一律 `404 audio_asset_not_found`（不是 403，避免探测
+  资产是否存在）。~~资产与词条的引用关系落地后会放开成「能读该词条即可读」。~~
+  **已在 §26 那批放开**：被任一词条引用之后，所有在职管理员都能取到播放 URL；
+  仍未被引用的资产（刚 confirm、还没保存进草稿）依旧只有上传者可读。
+- **`GET .../url` 在资产不存在与无权读两种情况下返回同一个 404**，前端不必区分。
+
+### 25.2 错误码
+
+| 状态 | code | 触发 |
+| --- | --- | --- |
+| 400 | `unsupported_audio_content_type` | MIME 不在白名单（申请许可时，或 confirm 时对象实际类型不合规） |
+| 400 | `invalid_audio_key` | `key` 不是本服务签发过的暂存键形状 |
+| 400 | `audio_upload_not_completed` | 对象不存在，或大小为 0（PUT 没真正写入） |
+| 400 | `invalid_request_body` + `field: "original_name"` | 展示名为空、超过 120 码点，或含控制字符 |
+| 413 | `audio_file_too_large` | 声明或实际大小超过空间上限 |
+| 404 | `audio_asset_not_found` | 资产不存在或当前管理员不可读 |
+| 501 | `audio_storage_not_configured` | 该环境没有配 `audio` 存储空间 |
+| 503 | `service_unavailable` | 对象存储临时不可用（可重试，与 501 不同） |
+
+**501 与 503 要分开处理**：501 是「这个环境永远没开通」，按设计稿在会话内记一次、把面板置灰即可；
+503 是暂时性的，可以重试。
+
+注意 `original_name` 那条是 **400 + `field`**，不是 422。422 在这三个端点上只表示请求体本身反序列化
+失败（结构错、未知字段），两者别混。
+
+### 25.3 confirm 可以安全重试
+
+**同一个 `key` 重复 confirm 是幂等的**：服务端按暂存键回查，第二次返回的是**同一条资产**
+（同样的 `201` 与同样的 `asset.id`），不会登记出第二份。所以 confirm 的响应在网络上丢了、
+或者用户手抖点了两次，直接拿原来那个 `key` 重试就行，不要让用户重传文件——重传会在对象存储里
+留下一份没人认领的音频。
+
+### 25.4 本期范围与部署顺序
+
+**这三个端点是纯新增，不改任何既有响应，所以后端先上没有风险。**
+`GrammarVariantV3.audio_assets` 字段**还没有放开**——本期只登记资产本身，草稿保存、发布快照、
+引用与回收在下一个 PR。在那之前 confirm 出来的资产不属于任何词条，前端的
+`VITE_VOICE_AUDIO_UPLOAD` 开关请继续保持关闭：现在打开，保存草稿仍会因为未知字段被 422。
+字段放开那批走的是老规矩：前端先 `sync:openapi` 并部署，后端随后或同批。
+
+环境依赖：`audio` 空间的环境变量、bucket 生命周期规则、以及**放行 admin 来源 `PUT` 的 CORS**，
+都在 `ops/audio-asset-lifecycle/README.md`。CORS 没配时浏览器只会报一个没有细节的网络错误，
+且规则生效有延迟，务必提前配。未配 `audio` 空间的环境不会启动失败，三个端点统一返回 501。
+
+## 26. 语法结构变体挂音频：`audio_assets` 放开（后端已实现，2026-09-08）
+
+`GrammarVariantV3` 新增可选字段 `audio_assets: AudioAsset[]`（复用 §25 那个 `AudioAsset` schema）。
+配合 §25 的三个直传端点，语音编辑器的真人录音现在能存进草稿、随词条发布、并在没人引用时被回收。
+
+本期**只放开语法结构变体**。`RichTextVariantV3` 仍然没有这个字段。
+
+### 26.1 契约要点
+
+- **空数组不上 wire。** 没挂音频的变体，响应里根本没有 `audio_assets` 这个键，存量内容逐字节不变。
+- **除 `id` 外的字段都是服务端权威值。** 保存时后端按 `id` 从库里重新灌入 `locale` / `gender` /
+  `content_type` / `size_bytes` / `duration_ms` / `original_name` / `created_at`，客户端回传什么都不作数。
+  所以不必担心「改了会 422」——改了只是会被覆盖。前端原样回传 confirm 拿到的对象即可。
+- **单个变体最多 8 条**，同一变体里不能重复引用同一条资产。
+- **一条资产只能属于一个词条。** 把别的词条已经在用的资产挂过来会被拒——回收是按「还有没有人引用」
+  判定的，允许共享会让一次删除波及另一条词条的历史发布。
+- 发布时快照原样带上 `audio_assets`（V3 快照存的是完整的 `AdminWordV3`），激活历史发布照样能播。
+- **播放 URL 的权限本期放开了**：资产一旦被某条词条引用，所有在职管理员都能从
+  `GET /audio-assets/{id}/url` 取到播放地址——多人协作时，管理员 B 打开管理员 A 录过音的词条
+  可以正常试听。只有「刚 confirm、还没保存进任何草稿」的资产仍是上传者私有。
+  这兑现了 §25.1 里那条「引用关系落地后放开」的承诺。
+
+### 26.2 校验失败
+
+新增 issue code **`audio_asset_invalid`**，走既有的 `422 validation_failed` + `field_issues`：
+
+| `field` | `node_id` | 触发 |
+| --- | --- | --- |
+| `audio_assets` | 语法结构变体的 id | 资产不存在、被别的词条占用、超过 8 条、或同一变体里重复引用 |
+
+`node_id` 就是变体 id，`node_location.node_role` 是 `meanings`——与 `voice_profile_invalid` 逐字同形，
+前端的 `issueNavigation` 不用改。
+
+**`V3_VALIDATION_ISSUE_CODES` 要补上这个 code**，前端契约测试要求它与 openapi 的枚举完全相等。
+
+### 26.3 部署顺序
+
+**比 §24 那类必须同批部署的改动宽松。** 因为空数组不上 wire，只要没有人真的挂过音频，
+词条响应就与从前逐字节相同，已部署的 admin 不会因为未知字段整行拒收。所以：
+
+1. 后端可以先上，此时前端 `VITE_VOICE_AUDIO_UPLOAD` 仍保持关闭 —— 没有任何响应变化
+2. 前端 `sync:openapi`、补 `audio_assets` 与 `audio_asset_invalid`、部署
+3. 再把开关打开
+
+顺序反了也不会立刻炸，但**开关必须是最后一步**：先开开关、后端还没上，保存草稿会因未知字段 422。
+
+### 26.4 资产的生命周期
+
+- 保存词义时后端重建引用关系；发布时把这次快照引用的资产另记一份，与快照同寿
+- 资产在**既没有草稿引用、也没有任何发布引用**、且创建满 7 天后被回收（删对象与行）
+- 7 天的宽限期保护的是「已 confirm 但还没保存进草稿」的那一段：管理员选完文件去开会、
+  回来再保存，中间资产一直是零引用
+- 已经从草稿里去掉、但仍被某次发布引用的资产**不会**被回收
+
+
+## 正文人工关联（2026-09-07）
+
+V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 text_links，capabilities.text_links 表示支持。关联按 source_segments 码点范围保存，目标使用已发布词条的词性、原形、词形、变体、词义稳定 ID；via_phrase 可记录释义级短语成分来源。target_headword / target_gloss 为服务端只读快照，请求不得提交。
+
+### 同档多条汉语译文（2026-09-07，dev 工作区）
+
+`zh_translations` 支持同一句同档多条，取消“每档一条、每句三条”限制。映射保持高阶 `a1_a2`、中阶 `b1_b2`、低阶 `c1_c2`；每条按稳定 ID 编辑、变档或删除。DTO 的数组 maxItems 为 2000，实际仍受词条总节点与请求体大小限制。`zh_text` / `zh_text_id` 继续提供单条兼容别名，省略数组的旧请求保留现有列表。
+
+必须先应用 `20260907180000_allow_multiple_sentence_translations` migration 和新后端，再使用配套前端写入更多译文。旧前端 runtime 的 maxItems=3 无法读取扩展响应。migration 仅解除分档译文槽位唯一限制，其他字段槽位唯一性保留；已有同档多条或退休译文身份无法还原时 down 明确拒绝。集中设计与验证记录见 tsz 仓库 `docs/features/multiple-sentence-translations/`。
+
+省略字段仅在正文未改变时保留旧关联；显式 [] 清除。旧客户端改写带关联的正文会被拒绝，避免错位或数据丢失。例句 associations 仍不可写；读回人工结果优先于重叠的自动结果。发布引用新增 text_link 类型，迁移先于前端发布。
+
+完整范围、字段、兼容与验证集中在 tsz 仓库 docs/features/definition-sentence-editor/，上传后端不包含在本次范围内。

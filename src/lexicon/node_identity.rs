@@ -8,6 +8,7 @@ pub(crate) const SENSE_GROUP_ROLE: &str = "meanings.sense_group";
 pub(crate) const GRAMMAR_STRUCTURE_ROLE: &str = "meanings.grammar_structure";
 pub(crate) const SENSE_ROLE: &str = "meanings.sense";
 pub(crate) const SENTENCE_ROLE: &str = "meanings.sentence";
+pub(crate) const SENTENCE_TRANSLATION_ROLE: &str = "meanings.zh_translation";
 pub(crate) const RELATION_ROLE: &str = "meanings.relation";
 /// 释义级短语成分用词。变体级的 `forms.phrase_component_usage` B2 才退场，
 /// B1 期间两个角色共用同一个 `node_type`。
@@ -34,6 +35,9 @@ pub(crate) fn definition_role(definition: &WordDefinitionV2) -> &'static str {
 }
 
 pub(crate) fn text_variant_role(field_role: &str, language: &str, dialect: Dialect) -> String {
+    if field_role.starts_with("zh_translation_") {
+        return SENTENCE_TRANSLATION_ROLE.to_owned();
+    }
     format!("meanings.{field_role}:{language}:{}", dialect_name(dialect))
 }
 

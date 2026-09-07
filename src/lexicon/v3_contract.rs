@@ -462,24 +462,7 @@ pub(crate) fn validate_meanings(
             }
             for sentence in &sense.sentences {
                 validate_english_text_limits(&sentence.en_text, &mut issues);
-                if sentence.zh_translations.len() > 3 {
-                    issues.push(meanings_issue(
-                        V3ValidationIssueCode::SentenceTranslationInvalid,
-                        "zh_translations",
-                        sentence.id,
-                        "a sentence supports at most three Chinese translation bands",
-                    ));
-                }
-                let mut bands = HashSet::new();
                 for translation in &sentence.zh_translations {
-                    if !bands.insert(translation.band) {
-                        issues.push(meanings_issue(
-                            V3ValidationIssueCode::DuplicateSentenceTranslationBand,
-                            "zh_translations",
-                            translation.id,
-                            "each Chinese translation band may appear only once",
-                        ));
-                    }
                     // 译文留空是草稿的正常中间态（新建例句行默认就是空的），
                     // 只有收尾提交才要求填齐——与 validate_forms 的 complete 门一致。
                     if complete && translation.content.text().trim().is_empty() {
@@ -760,6 +743,14 @@ fn validate_english_text_limits(content: &EnglishTextV3, issues: &mut Vec<DraftV
     for variant in english_text_variants(content) {
         validate_rich_text_limits(&variant.value, variant.id, "value", issues);
         validate_voice_profile(variant.voice_profile.as_ref(), variant.id, issues);
+        if !crate::lexicon::service::text_links::valid_ranges(variant) {
+            issues.push(meanings_issue(
+                V3ValidationIssueCode::DefinitionInvalid,
+                "text_links",
+                variant.id,
+                "invalid text link ranges",
+            ));
+        }
     }
 }
 
@@ -845,7 +836,7 @@ fn meanings_limit_issue(node_id: Uuid, field: &str, message: &str) -> DraftValid
     )
 }
 
-fn meanings_issue(
+pub(crate) fn meanings_issue(
     code: V3ValidationIssueCode,
     field: &str,
     node_id: Uuid,
@@ -2180,7 +2171,7 @@ mod tests {
     }
 
     #[test]
-    fn sentence_translations_promote_legacy_alias_and_validate_three_unique_bands() {
+    fn sentence_translations_promote_legacy_alias_and_allow_repeated_bands() {
         let sentence_id = Uuid::now_v7();
         let legacy_id = Uuid::now_v7();
         let base = json!({
@@ -2271,14 +2262,12 @@ mod tests {
             V3ValidationIssueCode::SentenceTranslationInvalid
         ));
 
-        let duplicate = sentence.zh_translations[0].clone();
+        let mut duplicate = sentence.zh_translations[0].clone();
+        duplicate.id = Uuid::now_v7();
         legacy.pos[0].senses[0].sentences[0]
             .zh_translations
             .push(duplicate);
-        assert!(has_code(
-            &validate_meanings(&legacy, StepSaveIntent::Save),
-            V3ValidationIssueCode::DuplicateSentenceTranslationBand
-        ));
+        assert!(validate_meanings(&legacy, StepSaveIntent::Save).is_empty());
     }
 
     #[test]
