@@ -29,7 +29,7 @@ description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或
 API 响应新增字段也要核对实际消费者。V3 admin 等严格 runtime contract 可能拒绝未知字段；
 若命中，先同步前端契约并验证兼容，在 `docs/frontend-integration.md` 与 PR 写清发布顺序。
 不能把某个 DTO 的历史问题泛化成所有接口一律前端先部署。
-需要跨仓同步时定位已安装的 `contract-sync`；配套交付再读其 `references/paired-release.md`，把兼容性、目标版本和顺序纳入已有 PR。若个人技能不可用，仍按原生导出流程核实实际前端消费者；此步骤不自动授权前端修改、交付或部署。
+需要跨仓同步时读取本仓 [contract-sync](../contract-sync/SKILL.md)；配套交付再读 [配套发布清单](../contract-sync/references/paired-release.md)，把兼容性、目标版本和顺序纳入已有 PR；此步骤不自动授权前端修改、交付或部署。
 
 纯文档只做相关一致性、格式和引用检查；不套用前端的 coverage、UI 或 SEO 规则。
 

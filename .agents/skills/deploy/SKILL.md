@@ -15,7 +15,7 @@ description: 将 tsz-rust 当前 GitHub main 的成功 CI 制品部署到 tshb-t
 实际执行前必须完整读取 [操作手册](references/runbook.md)，包括失败后的回退和锁清理。
 仅做讨论/评估时按需读取，不执行手册中的变更命令。
 
-本次需要前端配套发布时，定位已安装的 `contract-sync` 并读取 `references/paired-release.md`，核实实际版本组合与顺序。若技能不可用，仍须核实混合版本兼容和组件状态；清单不能替代本技能的 runner、CI、锁或制品门禁。
+本次需要前端配套发布时，读取本仓 [配套发布清单](../contract-sync/references/paired-release.md)，核实实际版本组合与顺序；清单不能替代本技能的 runner、CI、锁或制品门禁。
 
 ## 核心门禁
 
