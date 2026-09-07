@@ -85,6 +85,9 @@ Content-Type: application/problem+json
 `duplicate` 可能指向一条前端未提供编辑入口的行。口径与权限规则见
 [frontend-integration.md §24.2](frontend-integration.md)。
 
+冲突条目带 `created_by`（可选键），前端据此在弹窗里区分可改与只读的行，把这个 403 降级成
+点不下去的灰按钮而不是提交后的报错。
+
 
 ## 重复词条与草稿续建
 

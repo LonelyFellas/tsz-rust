@@ -22807,6 +22807,13 @@ async fn entry_annotations_atomic_third_entry_edit_and_idempotency(pool: PgPool)
         required["meta"]["annotation_conflict"]["reason"],
         "required"
     );
+    // 自己创建的条目也要带 created_by，且指向自己——前端据此把这一行开放编辑。
+    for entry in required["meta"]["annotation_conflict"]["entries"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(entry["created_by"], json!(admin_id), "{required}");
+    }
     body["annotation"] = json!(" Two ");
     body["annotation_updates"] = entry_annotations_updates(&required, &[" One "]);
     let path = format!("{ROOT}/entries");
@@ -23811,7 +23818,8 @@ async fn entry_annotations_published_peer_is_read_only(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let owner = token(&state, seed_admin(&pool).await);
+    let owner_id = seed_admin(&pool).await;
+    let owner = token(&state, owner_id);
     let outsider = token(&state, seed_admin(&pool).await);
     let first = create_and_publish(&state, &pool, &owner, "harbour").await;
     let first_id = first["word"]["id"].as_str().unwrap().to_owned();
@@ -23846,6 +23854,12 @@ async fn entry_annotations_published_peer_is_read_only(pool: PgPool) {
         .unwrap();
     assert_eq!(entries.len(), 1, "对方的已发布词条要列出来：{required}");
     assert_eq!(entries[0]["entry_id"], first_id);
+    // 前端要靠 created_by 把这一行摆成只读：没有它就只能等提交完再吃 403。
+    assert_eq!(
+        entries[0]["created_by"],
+        json!(owner_id),
+        "冲突条目要带创建人，且指向对方：{required}"
+    );
 
     // 查重覆盖没提交的成员：对方那条的既有标注同样占用取值。
     body["annotation"] = json!("1");

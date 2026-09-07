@@ -1641,9 +1641,43 @@ worktree，否则他人重跑 `sync:openapi` 无法复现快照）。归档、�
 - 唯一性判据是「**新值不得与组内任何已有非空标注重复**」——没提交的成员保留原标注，
   同样占用取值，所以 `duplicate` 可能指向一条前端根本没让用户编辑的行。
 
-> 本次未新增响应字段，冲突条目里没有「这条我能不能改」的显式标记。前端暂时只能按
-> 「不是自己创建的就别给编辑入口」处理，或直接把 403 当作只读提示。给
-> `MatchedEntryContextV3` 加一个可写标记是后续可做的改进，需要前后端同批。
+#### `MatchedEntryContextV3.created_by`（2026-09-07 新增）
+
+冲突条目带上创建人 admin id，前端据此在弹窗里把无权改的行摆成只读，而不是让人填完
+再吃 403：
+
+```jsonc
+{
+  "entry_id": "…",
+  "created_by": "…",        // 可选；见下方兼容性
+  "annotation": "1",
+  "annotation_revision": 2
+}
+```
+
+判定与 §24.2 的权限表同源：`created_by == 当前管理员` 或当前管理员是超管 → 可改。
+`created_by` 只出现在 `MatchedEntryContextV3`（V3 surface 匹配与标注冲突共用该结构），
+`MatchedEntryContextV2` 不加。
+
+**这个键在 schema 上刻意不是 required，因此前后端不必同批部署**，与 §24.1 的
+`annotation_visible` 不同：
+
+| 顺序 | 结果 |
+| --- | --- |
+| 前端先上 | 旧后端不下发该键 → 可选键缺席，解码正常 → 前端按「可改」降级，等同本字段出现前的行为 |
+| 后端先上 | 旧前端 `additionalProperties: false` **拒收未知键** → surface 匹配整页失败 |
+
+所以顺序仍然是「**前端先 `sync:openapi` 并部署 → 再切后端二进制**」，只是中间可以隔任意久，
+不需要压到一两分钟的窗口里。
+
+回退同理安全：旧二进制不再下发该键，新前端退回「可改」。唯一的代价是 Redis 里在途的
+surface 快照（TTL ≤10 分钟）——它用同一个结构存储且 `deny_unknown_fields`，旧二进制读到
+新快照会判为失效，在途的确认令牌需重新确认一次。这与 `SNAPSHOT_PREFIX` 注释里记的既有
+取舍是同一类，不需要为此换前缀。
+
+> 反向的坑：`created_by` 未知时**整个键缺席，绝不会是 `null`**（`skip_serializing_if`
+> + `nullable = false`）。前端不要写 `created_by === null` 的分支——把 `null` 当成一个
+> 具体的、不等于自己的值，会把本人的行误判成只读。
 
 #### 取舍：徽标是 viewer-dependent 的
 
