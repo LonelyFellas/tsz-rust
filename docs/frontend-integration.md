@@ -1562,6 +1562,12 @@ JSONB 走，不需要新表新列），revert 即可回退；但已经写进库�
 
 部署顺序：前端先 `sync:openapi`，同步并发布能接受此可选字段的runtime契约，再更新后端。联合本地验收应显式 `OPENAPI_SOURCE` 指向后端实际worktree的 `docs/openapi.json`。旧缓存因字段可选仍可读；程序回退前需考虑旧版严格反序列化不接受新字段的短期检测缓存。本次不增加数据库迁移。
 
+**回退注意（不止缓存）**：`existing_draft_id` 除了写进 5 分钟 TTL 的 Redis 检测缓存，
+还会**永久落进 `entries.detection_snapshot` 这个 JSONB 列**。回退旧二进制后，
+旧版 `deny_unknown_fields` 读到带该键的快照会 500/503。Redis 那份可以 `DEL` 立即消除，
+JSONB 那份不会自己过期——回退前要么确认没有用新版建过词条，要么把快照里的这个键剥掉。
+「本次不增加数据库迁移」指的是没有 schema 变更，不代表没有落库数据。
+
 
 ## 24. 标注列表显示条件（2026-09-06）
 
@@ -1587,14 +1593,14 @@ worktree，否则他人重跑 `sync:openapi` 无法复现快照）。归档、�
 
 回退：无迁移，revert 二进制即可，但前端须同时回退到不要求该字段的版本。
 
-### 24.2 已知取舍：徽标可见性按 actor 作用域
+### 24.2 徽标可见性与列表同口径
 
-`annotation_visible` 的同原型对照集与写路径 `annotation_groups_in` 同口径——草稿只算**当前
-管理员自己的**。而管理列表本身没有 actor 过滤（别人的草稿连创建人、释义、状态一起展示）。
-因此两个管理员就同一词面各有一条词条时，双方看到的徽标显隐可能相反。
+`annotation_visible` 的同原型对照集与**列表自己的可见规则**一致：草稿按「当前修订投出的
+未删除词面」判定（`source_revision = entry.revision`），**不按创建人**。
 
-这是有意为之并有测试保护的（`tests/lexicon_handler.rs` 的
-`another actor's draft must not count`）。若后续认为徽标应回答「这张列表里还有没有同名行」，
-则应把 `annotation_visible_entry_ids` 的草稿判定改为与列表一致
-（`source_revision = entry.revision AND is_deleted = FALSE`，去掉 actor 条件），
-`annotation_groups_in` 保持 actor 作用域不动（它管的是写入不变量）。**尚未定案。**
+徽标长在列表行上，它回答的就是「这张列表里还有没有同词面的另一行」。管理列表本来就没有
+actor 过滤（别人的草稿连创建人、释义、状态一起显示），若徽标改用 actor 作用域，
+A、B 两个管理员对同一组词条会看到相反的显隐——而分辨同名词条正是这个功能的目的。
+
+注意与写路径的区别：`annotation_groups_in` 仍按 actor 作用域，那是**写入不变量**
+（谁必须为谁填标注），与展示无关，两者刻意不同源。

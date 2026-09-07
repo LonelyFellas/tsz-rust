@@ -99,16 +99,19 @@ async fn lock_keys(
 }
 
 impl LexiconService {
+    /// 徽标长在列表行上，回答的就是「这张列表里还有没有同词面的另一行」，
+    /// 所以可见性必须与列表自己的规则一致，而不是与写路径 `annotation_groups_in`
+    /// 一致——后者按 actor 作用域是写入不变量（谁必须为谁填标注），与展示无关。
+    /// 用 actor 作用域会让 A、B 两个管理员对同一组词条看到相反的显隐。
     pub(super) async fn annotation_visible_entry_ids(
         &self,
-        actor_id: Uuid,
         entry_ids: &[Uuid],
     ) -> Result<BTreeSet<Uuid>, LexiconServiceError> {
         if entry_ids.is_empty() {
             return Ok(BTreeSet::new());
         }
-        // Same effective prototype/visibility rules as annotation_groups_in.
-        // Inline the CTE so the requested IDs restrict the target-side source scan.
+        // 可见性与 repository::query 的列表 WHERE 对齐：草稿按「当前修订投出的
+        // 未删除词面」判定，不按创建人。内联 CTE 让请求的 ID 约束目标侧扫描。
         let ids = sqlx::query_scalar::<_, Uuid>(r#"
             WITH visible_bases AS NOT MATERIALIZED (
                 SELECT source.entry_id, entry.kind, source.language,
@@ -119,7 +122,7 @@ impl LexiconService {
                   AND entry.archived_at IS NULL
                   AND ((source.content_schema_version = 3 AND source.source_kind = 'form_variant' AND source.form_type = 'base')
                     OR (source.content_schema_version = 2 AND source.source_kind = 'headword'))
-                  AND ((source.content_scope = 'draft' AND entry.created_by_admin_id = $2)
+                  AND ((source.content_scope = 'draft' AND source.source_revision = entry.revision)
                     OR (source.content_scope = 'current_publication' AND source.publication_id = entry.current_publication_id))
             )
             SELECT DISTINCT target.entry_id
@@ -129,7 +132,7 @@ impl LexiconService {
               AND peer.dialect_scope = target.dialect_scope
               AND peer.normalized_surface = target.normalized_surface
             WHERE target.entry_id = ANY($1)
-        "#).bind(entry_ids).bind(actor_id).fetch_all(self.repository.pool()).await.map_err(database_error)?;
+        "#).bind(entry_ids).fetch_all(self.repository.pool()).await.map_err(database_error)?;
         Ok(ids.into_iter().collect())
     }
 
