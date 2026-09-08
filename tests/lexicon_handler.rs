@@ -13109,7 +13109,7 @@ async fn v3_form_storage_uses_the_authoritative_surface_normalization(pool: PgPo
 }
 
 #[sqlx::test]
-async fn v3_text_relation_round_trips_and_publishes_without_materializing(pool: PgPool) {
+async fn v3_text_relation_round_trips_in_draft_but_blocks_publication(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -13150,7 +13150,9 @@ async fn v3_text_relation_round_trips_and_publishes_without_materializing(pool: 
     assert_eq!(saved_relation["pending_target_headword"], pending_headword);
     assert_eq!(saved_relation["pending_target_gloss"], pending_gloss);
 
-    let (status, published) = call(
+    // 手输文本不会物化成词条，放它随词条发布就等于线上挂一条指不到任何地方的关联词，
+    // 所以发布必须被拦下，管理员要么绑定具体词条、要么删掉这一行。
+    let (status, problem) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries/{entry_id}/publications"),
@@ -13164,16 +13166,13 @@ async fn v3_text_relation_round_trips_and_publishes_without_materializing(pool: 
     .await;
     assert_eq!(
         status,
-        StatusCode::CREATED,
-        "V3 pending gloss 发布失败：{published}"
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "未绑定的文本关联词不该能发布：{problem}"
     );
-    let published_relation = &published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
-    assert!(published_relation["target_word_id"].is_null());
     assert_eq!(
-        published_relation["pending_target_headword"],
-        pending_headword
+        problem["field_issues"][0]["code"],
+        "relation_pending_target_unresolved"
     );
-    assert_eq!(published_relation["pending_target_gloss"], pending_gloss);
 
     let (status, reloaded_source) = call(
         &state,
@@ -13187,7 +13186,7 @@ async fn v3_text_relation_round_trips_and_publishes_without_materializing(pool: 
     assert_eq!(
         status,
         StatusCode::OK,
-        "发布后读取 V3 源词条失败：{reloaded_source}"
+        "发布被拦后读取 V3 源词条失败：{reloaded_source}"
     );
     let reloaded_relation =
         &reloaded_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
@@ -13209,6 +13208,77 @@ async fn v3_text_relation_round_trips_and_publishes_without_materializing(pool: 
         materialized_id.is_none(),
         "text must never create a target entry"
     );
+}
+
+#[sqlx::test]
+async fn v3_freetext_relation_saves_as_draft_but_is_validated_on_publication(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let forms_saved = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let entry_id = forms_saved["word"]["id"].as_str().unwrap();
+    let relation_id = Uuid::now_v7();
+    let mut meanings =
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+    // 手输的待建词面就是一段普通文本，草稿期不该拿「合法英文词条名」去卡它。
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "derivative",
+        "pending_target_headword": "暂记：回头查这个词",
+        "score": "0.00"
+    }]);
+
+    let (status, saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": forms_saved["word"]["revision"],
+            "intent": "save",
+            "content": meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "手输文本不该挡住草稿保存：{saved}");
+    let saved_relation = &saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(
+        saved_relation["pending_target_headword"],
+        "暂记：回头查这个词"
+    );
+    assert!(saved_relation["target_word_id"].is_null());
+
+    // 发布要求关联词绑定到具体词条，手输文本在这一步被拦下。
+    let (status, problem) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": saved["word"]["revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "未绑定的文本关联词不该能发布：{problem}"
+    );
+    let issue = problem["field_issues"]
+        .as_array()
+        .expect("发布失败应带 field_issues")
+        .iter()
+        .find(|issue| issue["node_id"] == json!(relation_id))
+        .expect("issue 应指向那一行关联词");
+    assert_eq!(issue["code"], "relation_pending_target_unresolved");
 }
 
 #[sqlx::test]
@@ -18123,7 +18193,7 @@ async fn v3_sense_phrase_components_persist_publish_and_survive_forms_resave(poo
 }
 
 #[sqlx::test]
-async fn v3_publish_with_text_relations_keeps_sense_phrase_components(pool: PgPool) {
+async fn v3_publish_with_bound_relations_keeps_sense_phrase_components(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -18153,13 +18223,14 @@ async fn v3_publish_with_text_relations_keeps_sense_phrase_components(pool: PgPo
     .await;
     let entry_uuid = Uuid::parse_str(saved["word"]["id"].as_str().unwrap()).unwrap();
 
-    // 纯文本关联发布应保留释义级成分，且不得创建目标关联。
-    let pending_headword = format!("boundpending{}", admin_id.simple());
+    // 带关联词发布应保留释义级成分。关联词必须绑定到具体词条——未绑定的手输文本已不允许
+    // 发布，见 v3_text_relation_round_trips_in_draft_but_blocks_publication。
     let mut meanings = saved["word"]["meanings"].clone();
     meanings["pos"][0]["senses"][0]["relations"] = json!([{
         "id": Uuid::now_v7(),
         "relation": "synonym",
-        "pending_target_headword": pending_headword,
+        "target_word_id": target_published["word"]["id"],
+        "target_sense_id": target_published["word"]["meanings"]["pos"][0]["senses"][0]["id"],
         "score": "88.00"
     }]);
     let with_pending = save_v3_meanings(&state, &bearer, &saved, meanings).await;
@@ -18168,17 +18239,17 @@ async fn v3_publish_with_text_relations_keeps_sense_phrase_components(pool: PgPo
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "带纯文本关联的发布必须成功：{published}"
+        "带绑定关联词的发布必须成功：{published}"
     );
     assert_eq!(
         published["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["id"],
         component["id"],
         "发布不得吞掉释义级成分：{published}"
     );
-    assert!(
-        published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
-            .is_null(),
-        "纯文本关联不得创建词条或绑定词义"
+    assert_eq!(
+        published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"],
+        target_published["word"]["id"],
+        "绑定关联词应保留目标：{published}"
     );
 
     let publication_id = current_publication_id(&pool, entry_uuid).await;
@@ -20996,17 +21067,18 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         .as_str()
         .unwrap()
         .to_owned();
-    let pending_headword = format!("bandpending{}", admin_id.simple());
     let mut src_meanings = source["word"]["meanings"].clone();
     src_meanings["pos"][0]["senses"][0]["sentences"][0]["zh_translations"] = json!([
         {"id": Uuid::now_v7(), "band": "a1_a2", "content": rich_text("源高阶")},
         {"id": src_sentence_b_id, "band": "b1_b2", "content": rich_text("源中阶")},
         {"id": Uuid::now_v7(), "band": "c1_c2", "content": rich_text("源初阶")}
     ]);
+    // 关联词绑定到已发布词条：未绑定的手输文本已不允许发布。
     src_meanings["pos"][0]["senses"][0]["relations"] = json!([{
         "id": Uuid::now_v7(),
         "relation": "synonym",
-        "pending_target_headword": pending_headword,
+        "target_word_id": published["word"]["id"],
+        "target_sense_id": published["word"]["meanings"]["pos"][0]["senses"][0]["id"],
         "score": "88.00"
     }]);
     let src_saved = save_v3_meanings(&state, &bearer, &source, src_meanings).await;
@@ -21014,7 +21086,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "带纯文本关联的发布必须成功：{src_published}"
+        "带绑定关联词的发布必须成功：{src_published}"
     );
     assert!(
         first_sentence(&src_published)["zh_translations"][0]["band"].is_string(),
@@ -21029,12 +21101,12 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
     assert_eq!(
         src_bands,
         ["c1_c2", "b1_b2", "a1_a2"],
-        "纯文本关联发布必须保留三档：{src_published}"
+        "带关联词发布必须保留三档：{src_published}"
     );
-    assert!(
-        src_published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"]
-            .is_null(),
-        "纯文本关联不应被自动物化：{src_published}"
+    assert_eq!(
+        src_published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"],
+        published["word"]["id"],
+        "绑定关联词应保留目标：{src_published}"
     );
     // 投影也回填了三档
     let projected: Value = sqlx::query_scalar(
