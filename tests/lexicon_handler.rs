@@ -6662,6 +6662,23 @@ async fn detection_distinguishes_center_and_centre_in_both_directions(pool: PgPo
     let v3_state = state
         .clone()
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let body = entry_annotations_create_body(
+        &v3_state,
+        &bearer,
+        "center",
+        json!({"mode":"distinguish","uk":"centre","us":"center","source_dialect":"us"}),
+    )
+    .await;
+    let (status, existing) = call(
+        &v3_state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{existing}");
     for input in ["center", "centre"] {
         let (status, response) = call(
             &v3_state,
@@ -6687,6 +6704,38 @@ async fn detection_distinguishes_center_and_centre_in_both_directions(pool: PgPo
                 "us": {"dialect": "us", "spelling": "center", "pronunciations": []}
             })
         );
+        let spellings = response["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["match"]["spelling"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            spellings,
+            std::collections::BTreeSet::from(["center", "centre"])
+        );
+        // Both current and legacy clients consume the first detection confirmation.
+        for explicit in [true, false] {
+            let mut body = json!({"schema_version":3,"detection_id":response["detection_id"],"kind":"word",
+                "confirmed_surface_match_token":response["surface_match_page"]["surface_confirmation_token"]});
+            if explicit {
+                body["headwords"] = json!({"mode":"distinguish","uk":"centre","us":"center",
+                    "source_dialect": if input == "center" { "us" } else { "uk" }});
+            }
+            let (_, required) = call(
+                &v3_state,
+                Method::POST,
+                &format!("{ROOT}/entries"),
+                &bearer,
+                Some(Uuid::now_v7()),
+                Some(body),
+            )
+            .await;
+            assert_eq!(
+                required["code"], "annotation_conflict",
+                "{input}, explicit={explicit}: {required}"
+            );
+        }
     }
 
     seed_dictionary_term(&pool, "priority-source", "word", "british_core").await;
@@ -13435,7 +13484,8 @@ async fn surface_machinery_shows_other_admins_drafts(pool: PgPool) {
     let mut create_input = json!({
         "schema_version": 3,
         "detection_id": outsider_detection["detection_id"],
-        "kind": "word"
+        "kind": "word",
+        "annotation": "1"
     });
     if let Some(confirm) =
         outsider_detection["surface_match_page"]["surface_confirmation_token"].as_str()
@@ -13566,7 +13616,8 @@ async fn other_admins_drafts_require_acknowledgement_and_then_coexist(pool: PgPo
     let mut create_input = json!({
         "schema_version": 3,
         "detection_id": outsider_detection["detection_id"],
-        "kind": "word"
+        "kind": "word",
+        "annotation": "1"
     });
     if let Some(token) =
         outsider_detection["surface_match_page"]["surface_confirmation_token"].as_str()
@@ -23710,7 +23761,7 @@ async fn surface_confirm_bugfix_rejects_changed_evidence(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn surface_confirm_bugfix_rejects_unseen_dictionary_form(pool: PgPool) {
+async fn surface_confirm_bugfix_confirms_all_suggested_dictionary_forms(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -23780,8 +23831,8 @@ async fn surface_confirm_bugfix_rejects_unseen_dictionary_form(pool: PgPool) {
     )
     .await;
     assert_eq!(
-        response["code"], "surface_matches_changed",
-        "unseen dictionary form: {response}"
+        response["code"], "annotation_conflict",
+        "default dictionary forms must be confirmed during detection: {response}"
     );
 }
 
@@ -24177,10 +24228,7 @@ async fn entry_annotations_published_peer_is_read_only(pool: PgPool) {
 
 /// 超管不豁免「填满整组」：它的可写集合就是整组，所以建条撞名时每个组员都要给值。
 ///
-/// 与上面 `entry_annotations_published_peer_is_read_only` 成对——同样的 fixture，
-/// 普通管理员只填自己那条即可。两条路径的分叉点全在 `writable_annotation_ids` 的
-/// 超管短路上，没有用例钉死就会被「顺手简化」掉（把 `writable.len()` 写回
-/// `current.len()` 之类），而超管恰恰是账号里的多数。
+/// 普通管理员只能改自己的标注；超管还必须补齐其他创建者的空标注草稿。
 #[sqlx::test]
 async fn entry_annotations_super_admin_must_fill_whole_group(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
@@ -24193,8 +24241,8 @@ async fn entry_annotations_super_admin_must_fill_whole_group(pool: PgPool) {
         seed_admin_with_role(&pool, AdminRole::SuperAdmin).await,
     );
 
-    // 只有别人的**已发布**词条进组（草稿不进），且刻意不带标注——留给超管补。
-    let first = create_and_publish(&state, &pool, &owner, "harbour").await;
+    // 别人的未标注草稿同样进组，超管可在首次建条冲突中补齐。
+    let first = create_v3_with_complete_forms(&state, &pool, &owner).await;
     let first_id = first["word"]["id"].as_str().unwrap().to_owned();
 
     let mut body = entry_annotations_create_body(
@@ -24216,6 +24264,8 @@ async fn entry_annotations_super_admin_must_fill_whole_group(pool: PgPool) {
         .unwrap();
     assert_eq!(entries.len(), 1, "{required}");
     assert_eq!(entries[0]["entry_id"], first_id);
+    assert_eq!(entries[0]["created_by"], json!(owner_id));
+    assert!(entries[0]["annotation"].is_null());
 
     // 只填自己那条：普通管理员到这步就建成了，超管不行。
     body["annotation"] = json!("2");
@@ -24254,9 +24304,9 @@ async fn entry_annotations_super_admin_must_fill_whole_group(pool: PgPool) {
     );
 }
 
-/// 撞上别人的**草稿**：草稿只是「尚未公开」，不进同原型组，因此不要求填标注。
+/// 别人的草稿也参与分组与查重，但普通管理员无权修改。
 #[sqlx::test]
-async fn entry_annotations_ignore_other_admins_drafts(pool: PgPool) {
+async fn entry_annotations_other_admins_drafts_are_read_only_and_unique(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -24285,14 +24335,46 @@ async fn entry_annotations_ignore_other_admins_drafts(pool: PgPool) {
         json!({"mode":"unified","common":"harbour"}),
     )
     .await;
-    let (status, created) =
-        entry_annotations_submit(&state, &outsider, Uuid::now_v7(), &mut body).await;
+    let key = Uuid::now_v7();
+    let (status, required) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{required}");
+    assert_eq!(required["code"], "annotation_conflict");
     assert_eq!(
-        status,
-        StatusCode::CREATED,
-        "别人的草稿不进组，不该被卡住：{created}"
+        required["meta"]["annotation_conflict"]["entries"][0]["entry_id"],
+        first["word"]["id"]
     );
-    assert!(created["word"]["annotation"].is_null(), "{created}");
+    body["annotation"] = json!("1");
+    let (status, duplicate) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+    assert_eq!(
+        duplicate["meta"]["annotation_conflict"]["reason"],
+        "duplicate"
+    );
+    body["annotation_updates"] = entry_annotations_updates(&required, &["3"]);
+    let (status, denied) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    body["annotation"] = json!("2");
+    body["annotation_updates"] = json!([]);
+    let (status, created) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["word"]["annotation"], "2");
+    let (status, duplicate) = call(
+        &state,
+        Method::PATCH,
+        &format!(
+            "{ROOT}/entries/{}/annotation",
+            created["word"]["id"].as_str().unwrap()
+        ),
+        &outsider,
+        None,
+        Some(json!({"annotation":"1","base_annotation_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
+    assert_eq!(
+        duplicate["meta"]["annotation_conflict"]["reason"],
+        "duplicate"
+    );
 }
 
 async fn annotation_visibility_list(state: &AppState, bearer: &str, query: &str) -> Value {
@@ -24393,7 +24475,7 @@ async fn annotation_visibility_tracks_peers_across_pages_archive_restore_delete(
 }
 
 #[sqlx::test]
-async fn annotation_visibility_scopes_drafts_to_their_creator(pool: PgPool) {
+async fn annotation_visibility_includes_other_admins_drafts(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -24401,12 +24483,11 @@ async fn annotation_visibility_scopes_drafts_to_their_creator(pool: PgPool) {
     let other = token(&state, seed_admin(&pool).await);
     create_v3_with_complete_forms(&state, &pool, &bearer).await;
     let peer = create_ready_draft(&state, &pool, &other, "harbor").await;
-    // 同原型组＝自己的词条（草稿或已发布）＋所有人的已发布词条。别人的草稿不进组，
-    // 因此它既不该给自己那条亮角标——那是写路径 annotation_groups_in 的同一口径。
+    // 草稿与当前发布共同参与分组，其他管理员的同原型草稿也应显示角标。
     let list = annotation_visibility_list(&state, &bearer, "q=harbour").await;
     assert_eq!(
-        list["words"][0]["annotation_visible"], false,
-        "another actor's draft must not count: {list}"
+        list["words"][0]["annotation_visible"], true,
+        "another actor's draft must count: {list}"
     );
     let (status, published) = publish_ready_confirming(&state, &other, &peer).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
@@ -24415,14 +24496,13 @@ async fn annotation_visibility_scopes_drafts_to_their_creator(pool: PgPool) {
         list["words"][0]["annotation_visible"], true,
         "current publication counts for everyone: {list}"
     );
-    // 徽标因此是 viewer-dependent 的：other 组里只有自己那条已发布词条，
-    // bearer 的草稿进不来，所以 other 看到的是「没有同名同伴」。这是有意的取舍。
+    // 切换管理员不改变同原型组，因此角标显示保持一致。
     let list = annotation_visibility_list(&state, &other, "q=harbor").await;
     let rows = list["words"].as_array().unwrap();
     assert!(!rows.is_empty(), "expected listed rows: {list}");
     assert!(
-        rows.iter().all(|word| word["annotation_visible"] == false),
-        "badges are viewer-dependent by design: {list}"
+        rows.iter().all(|word| word["annotation_visible"] == true),
+        "badges must agree across viewers: {list}"
     );
 }
 

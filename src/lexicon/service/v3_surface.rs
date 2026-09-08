@@ -742,6 +742,8 @@ impl LexiconService {
         actor_id: Uuid,
         detection_id: Uuid,
         normalized_surface: &str,
+        forms: &DraftFormsStepContentV3,
+        initial_headword_keys: &[String],
     ) -> Result<
         (
             Vec<SurfaceMatchItemV3>,
@@ -750,7 +752,7 @@ impl LexiconService {
         ),
         LexiconServiceError,
     > {
-        let keys = detection_surface_keys(normalized_surface);
+        let keys = creation_surface_keys(Uuid::nil(), forms, initial_headword_keys)?;
         let mut transaction = self
             .repository
             .pool()
@@ -847,20 +849,11 @@ impl LexiconService {
         detection_id: Uuid,
         entry_kind: WordEntryKindV3,
         normalized_surface: &str,
+        forms: &DraftFormsStepContentV3,
         initial_headword_keys: &[String],
         token: Option<&str>,
     ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
-        let mut keys = detection_surface_keys(normalized_surface);
-        for key in initial_headword_keys {
-            let (dialect_scope, normalized_surface) =
-                key.split_once(':').ok_or_else(invariant_record)?;
-            keys.push(V3SurfaceQueryKey {
-                dialect_scope: dialect_scope.to_owned(),
-                normalized_surface: normalized_surface.to_owned(),
-            });
-        }
-        keys.sort();
-        keys.dedup();
+        let keys = creation_surface_keys(Uuid::nil(), forms, initial_headword_keys)?;
         LexiconRepository::lock_surface_policy_writer(tx)
             .await
             .map_err(repository_error)?;
@@ -928,17 +921,7 @@ impl LexiconService {
         initial_headword_keys: &[String],
         token: Option<&str>,
     ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
-        let mut keys = forms_surface_keys(entry_id, forms)?;
-        for key in initial_headword_keys {
-            let (dialect_scope, normalized_surface) =
-                key.split_once(':').ok_or_else(invariant_record)?;
-            keys.push(V3SurfaceQueryKey {
-                dialect_scope: dialect_scope.to_owned(),
-                normalized_surface: normalized_surface.to_owned(),
-            });
-        }
-        keys.sort();
-        keys.dedup();
+        let keys = creation_surface_keys(entry_id, forms, initial_headword_keys)?;
         LexiconRepository::lock_surface_policy_writer(tx)
             .await
             .map_err(repository_error)?;
@@ -2423,6 +2406,25 @@ fn detection_surface_keys(normalized_surface: &str) -> Vec<V3SurfaceQueryKey> {
             normalized_surface: normalized_surface.to_owned(),
         })
         .collect()
+}
+
+fn creation_surface_keys(
+    entry_id: Uuid,
+    forms: &DraftFormsStepContentV3,
+    initial_headword_keys: &[String],
+) -> Result<Vec<V3SurfaceQueryKey>, LexiconServiceError> {
+    let mut keys = forms_surface_keys(entry_id, forms)?;
+    for key in initial_headword_keys {
+        let (dialect_scope, normalized_surface) =
+            key.split_once(':').ok_or_else(invariant_record)?;
+        keys.push(V3SurfaceQueryKey {
+            dialect_scope: dialect_scope.to_owned(),
+            normalized_surface: normalized_surface.to_owned(),
+        });
+    }
+    keys.sort();
+    keys.dedup();
+    Ok(keys)
 }
 
 fn forms_surface_keys(

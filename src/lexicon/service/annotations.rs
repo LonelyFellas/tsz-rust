@@ -121,16 +121,9 @@ async fn lock_keys(
 }
 
 impl LexiconService {
-    /// 同原型组＝**当前管理员自己的词条（草稿或已发布）＋ 所有人的已发布词条**。
-    ///
-    /// 别人的草稿不算：草稿只是「尚未公开」的状态，不构成需要靠标注区分的歧义。
-    /// 因此这个判定与写路径 `annotation_groups_in` 同源，两处必须一起改。
-    ///
-    /// 结果是 viewer-dependent 的——A 和 B 各有自己的草稿，看到的角标可以不同。
-    /// 这是有意的，不是 bug。
+    /// 所有未归档词条的草稿和当前发布原型共同决定角标，与写路径分组一致。
     pub(super) async fn annotation_visible_entry_ids(
         &self,
-        actor_id: Uuid,
         entry_ids: &[Uuid],
     ) -> Result<BTreeSet<Uuid>, LexiconServiceError> {
         if entry_ids.is_empty() {
@@ -147,7 +140,7 @@ impl LexiconService {
                   AND entry.archived_at IS NULL
                   AND ((source.content_schema_version = 3 AND source.source_kind = 'form_variant' AND source.form_type = 'base')
                     OR (source.content_schema_version = 2 AND source.source_kind = 'headword'))
-                  AND ((source.content_scope = 'draft' AND entry.created_by_admin_id = $2)
+                  AND (source.content_scope = 'draft'
                     OR (source.content_scope = 'current_publication' AND source.publication_id = entry.current_publication_id))
             )
             SELECT DISTINCT target.entry_id
@@ -157,14 +150,13 @@ impl LexiconService {
               AND peer.dialect_scope = target.dialect_scope
               AND peer.normalized_surface = target.normalized_surface
             WHERE target.entry_id = ANY($1)
-        "#).bind(entry_ids).bind(actor_id).fetch_all(self.repository.pool()).await.map_err(database_error)?;
+        "#).bind(entry_ids).fetch_all(self.repository.pool()).await.map_err(database_error)?;
         Ok(ids.into_iter().collect())
     }
 
     async fn annotation_groups_in(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        actor_id: Uuid,
         kind: &str,
         keys: &[String],
     ) -> Result<Vec<EntryAnnotationGroup>, LexiconServiceError> {
@@ -187,13 +179,13 @@ impl LexiconService {
               AND source.normalized_surface = requested.normalized_surface
               AND source.is_deleted = FALSE
             JOIN lexicon.entries entry ON entry.id = source.entry_id
-            WHERE entry.archived_at IS NULL AND entry.kind = $4
+            WHERE entry.archived_at IS NULL AND entry.kind = $3
               AND ((source.content_schema_version = 3 AND source.source_kind = 'form_variant' AND source.form_type = 'base')
                 OR (source.content_schema_version = 2 AND source.source_kind = 'headword'))
-              AND ((source.content_scope = 'draft' AND entry.created_by_admin_id = $3)
+              AND (source.content_scope = 'draft'
                 OR (source.content_scope = 'current_publication' AND source.publication_id = entry.current_publication_id))
             ORDER BY source.dialect_scope, source.normalized_surface, source.entry_id
-        "#).bind(dialects).bind(surfaces).bind(actor_id).bind(kind)
+        "#).bind(dialects).bind(surfaces).bind(kind)
           .fetch_all(&mut **tx).await.map_err(database_error)?;
         let mut groups: BTreeMap<(String, String), Vec<Uuid>> = BTreeMap::new();
         for row in rows {
@@ -250,7 +242,7 @@ impl LexiconService {
         annotation: &Option<String>,
         updates: &[EntryAnnotationUpdate],
     ) -> Result<(), LexiconServiceError> {
-        let groups = self.annotation_groups_in(tx, actor_id, kind, keys).await?;
+        let groups = self.annotation_groups_in(tx, kind, keys).await?;
         let mut conflict = self.annotation_conflict_in(tx, groups, None).await?;
         let submitted = updates
             .iter()
@@ -261,7 +253,7 @@ impl LexiconService {
             .iter()
             .map(|entry| entry.entry_id)
             .collect::<BTreeSet<_>>();
-        // 组里可能有别人的已发布词条：它们照常列进冲突响应供只读展示（避免撞值），
+        // 组里可能有别人的词条：它们照常列进冲突响应供只读展示（避免撞值），
         // 但当前管理员既不需要、也不允许为它们写值，只需填满自己那部分。
         let current_ids = current.iter().copied().collect::<Vec<_>>();
         let writable = writable_annotation_ids(tx, actor_id, is_super_admin, &current_ids).await?;
@@ -288,7 +280,7 @@ impl LexiconService {
                     labels.insert(value.to_lowercase());
                 }
                 group.entry_ids.iter().any(|id| {
-                    // 没提交的成员（别人的已发布词条）保留原标注，同样参与查重：
+                    // 没提交的成员（别人的词条）保留原标注，同样参与查重：
                     // 新值不得与组内任何已有非空标注重复。
                     submitted
                         .get(id)
@@ -323,9 +315,7 @@ impl LexiconService {
             }
             let old_keys = base_keys(tx, update.entry_id).await?;
             lock_keys(tx, &old_keys).await?;
-            let other_groups = self
-                .annotation_groups_in(tx, actor_id, kind, &old_keys)
-                .await?;
+            let other_groups = self.annotation_groups_in(tx, kind, &old_keys).await?;
             let other = self.annotation_conflict_in(tx, other_groups, None).await?;
             if base_keys(tx, update.entry_id).await? != old_keys {
                 return Err(LexiconServiceError::ReferenceConflict);
@@ -430,11 +420,8 @@ impl LexiconService {
         }
         let keys = base_keys(&mut tx, id).await?;
         lock_keys(&mut tx, &keys).await?;
-        let mut groups = self
-            .annotation_groups_in(&mut tx, actor_id, &kind, &keys)
-            .await?;
-        // The target's draft is editable by active admins even when candidate
-        // discovery would hide that draft from them. Do not expose other drafts.
+        let mut groups = self.annotation_groups_in(&mut tx, &kind, &keys).await?;
+        // Keep the edited target in every affected group before checking uniqueness.
         for group in &mut groups {
             if !group.entry_ids.contains(&id) {
                 group.entry_ids.push(id);
