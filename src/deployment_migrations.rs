@@ -47,6 +47,30 @@ pub async fn undo(
         "database migration version does not match the failed deployment"
     );
 
+    let incompatible_payloads: i64 = sqlx::query_scalar(
+        r#"
+        SELECT
+            (SELECT count(*)
+             FROM lexicon.entry_editor_projection
+             WHERE jsonb_path_exists(forms, '$.**.text_links'::jsonpath)
+                OR jsonb_path_exists(meanings, '$.**.text_links'::jsonpath)
+                OR jsonb_path_exists(forms, '$.**.audio_assets'::jsonpath)
+                OR jsonb_path_exists(meanings, '$.**.audio_assets'::jsonpath))
+          + (SELECT count(*)
+             FROM lexicon.entry_publications
+             WHERE content_schema_version = 3
+               AND (jsonb_path_exists(snapshot, '$.**.text_links'::jsonpath)
+                 OR jsonb_path_exists(snapshot, '$.**.audio_assets'::jsonpath)))
+        "#,
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .context("failed to inspect persisted V3 payload compatibility")?;
+    ensure!(
+        incompatible_payloads == 0,
+        "persisted V3 payloads are not readable by the rollback release"
+    );
+
     migrator
         .undo(&mut *transaction, target_version)
         .await
@@ -196,6 +220,27 @@ mod tests {
                 .iter()
                 .all(|(_, role, stable)| role == "meanings.zh_translation" && !stable)
         );
+
+        sqlx::query(
+            "UPDATE lexicon.text_variants SET field_role = 'zh_translation_b1_b2' WHERE id = $1",
+        )
+        .bind(active_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let rebanded = sqlx::raw_sql(include_str!(
+            "../migrations/20260907180000_allow_multiple_sentence_translations.down.sql"
+        ))
+        .execute(&pool)
+        .await;
+        assert!(rebanded.is_err());
+        sqlx::query(
+            "UPDATE lexicon.text_variants SET field_role = 'zh_translation_a1_a2' WHERE id = $1",
+        )
+        .bind(active_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::raw_sql(include_str!(
             "../migrations/20260907180000_allow_multiple_sentence_translations.down.sql"
@@ -348,5 +393,60 @@ mod tests {
             translation_rollback_table.as_deref(),
             Some("lexicon.sentence_translation_slot_rollback_v20260907180000")
         );
+    }
+
+    #[sqlx::test]
+    async fn deployment_undo_rejects_new_keys_in_persisted_v3_payloads(pool: PgPool) {
+        let admin_id = Uuid::now_v7();
+        let entry_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO admins (id, phone, password_hash, display_name) VALUES ($1, $2, 'hash', 'payload rollback guard')",
+        )
+        .bind(admin_id)
+        .bind(format!("payload-rollback-{}", admin_id.simple()))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entries (
+                id, content_schema_version, language, kind, revision,
+                headword_mode, detection_snapshot,
+                created_by_admin_id, updated_by_admin_id
+            ) VALUES ($1, 3, 'en', 'word', 1, NULL, '{}', $2, $2)
+            "#,
+        )
+        .bind(entry_id)
+        .bind(admin_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO lexicon.entry_editor_projection (
+                entry_id, forms, meanings, rebuilt_revision
+            ) VALUES ($1, '{}', '{"pos":[{"text_links":[]}]}', 1)
+            "#,
+        )
+        .bind(entry_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("persisted V3 payloads are not readable")
+        );
+        let latest: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(latest, CURRENT_RELEASE_VERSION);
     }
 }

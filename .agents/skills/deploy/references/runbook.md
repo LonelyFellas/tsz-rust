@@ -242,13 +242,13 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
      | awk -v target="$rollback_target_version" '$1 > target')
    rollback_down_versions=$(printf '%s\n' "$candidate_down_versions" \
      | awk -v target="$rollback_target_version" '$1 > target')
-   test -n "$rollback_up_versions"
    test "$rollback_up_versions" = "$rollback_down_versions"
    test "$(printf '%s\n' "$candidate_up_versions" \
      | awk -v target="$rollback_target_version" '$1 == target' | wc -l | tr -d ' ')" = 1
-   rollback_expected_version=$(printf '%s\n' "$rollback_up_versions" | tail -1)
+   rollback_expected_version=${rollback_up_versions:+$(printf '%s\n' "$rollback_up_versions" | tail -1)}
+   rollback_expected_version=${rollback_expected_version:-$rollback_target_version}
    [[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
-   test "$rollback_expected_version" -gt "$rollback_target_version"
+   test "$rollback_expected_version" -ge "$rollback_target_version"
    printf 'rollback_target_version=%q\nrollback_expected_version=%q\n' \
      "$rollback_target_version" "$rollback_expected_version" \
      >> ~/.config/tsz-rust/deploy.lock/state.env
@@ -298,7 +298,7 @@ test -n "${artifact_name:-}" && test -n "${staging:-}" && test -n "${tools:-}"
 test -n "${rollback_target_version:-}" && test -n "${rollback_expected_version:-}"
 [[ "$rollback_target_version" =~ ^[1-9][0-9]*$ ]]
 [[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
-test "$rollback_expected_version" -gt "$rollback_target_version"
+test "$rollback_expected_version" -ge "$rollback_target_version"
 test -s "$staging/tsz-rust" && test -s "$staging/tsz-rust.manifest.json"
 test -s "$tools/deployment_manifest.py" && test -s "$tools/ci_metrics.py"
 
@@ -397,13 +397,34 @@ ssh tshb-test "set -eu
 python3 "$tools/ci_metrics.py" record --name deploy-server-build \
   --value 0 --unit milliseconds
 
-# 5) 重启 + 基础确认
-ssh tshb-test "set -eu
+# 5) 停止正式服务，把候选进程只绑定在 loopback；部署冒烟完成前不开放业务流量，
+#    DEPLOYMENT_SMOKE_ONLY 同时关闭所有后台 worker，避免隔离窗口内产生业务写入。
+candidate_port=18383
+candidate_log="/opt/tsz-rust/deploy-candidate.$deploy_session.log"
+candidate_pid=$(ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  systemctl restart tsz-rust
+  systemctl stop tsz-rust
+  if systemctl is-active --quiet tsz-rust; then
+    echo 'formal service is still active' >&2
+    exit 1
+  fi
+  if ss -H -ltn 'sport = :$candidate_port' | grep -q .; then
+    echo 'candidate port is already in use' >&2
+    exit 1
+  fi
+  set -a; . /opt/tsz-rust/.env; set +a
+  export BIND_IP=127.0.0.1 DEPLOYMENT_SMOKE_ONLY=true PORT='$candidate_port'
+  nohup /opt/tsz-rust/target/release/tsz-rust > '$candidate_log' 2>&1 </dev/null &
+  pid=\$!
+  printf '%s\n' \"\$pid\" > /opt/tsz-rust/deploy.lock/candidate_pid
   sleep 2
-  systemctl is-active tsz-rust
-  curl -s http://127.0.0.1:8383/healthz"
+  kill -0 \"\$pid\"
+  curl -fsS http://127.0.0.1:$candidate_port/healthz >/dev/null
+  printf '%s\n' \"\$pid\"")
+case "$candidate_pid" in ''|*[!0-9]*) exit 1 ;; esac
+printf 'candidate_port=%q\ncandidate_log=%q\ncandidate_pid=%q\n' \
+  "$candidate_port" "$candidate_log" "$candidate_pid" \
+  >> ~/.config/tsz-rust/deploy.lock/state.env
 ```
 
 取得服务器锁后、撤下正式 manifest 前若备份或工具安装失败，先确认 binary/manifest 未变，
@@ -426,7 +447,9 @@ manifest 中的原始 binary 字节数。两者分别是压缩上传包与二进
 
 ## 5. 冒烟验证（部署不验证 = 没部署）
 
-服务器本机跑,B=`http://127.0.0.1:8383/api/v1`：
+先对隔离候选进程执行完整冒烟，服务器本机
+`B=http://127.0.0.1:$candidate_port/api/v1`；此时正式 `tsz-rust` service 保持停止，外部 API
+不能写业务数据：
 
 1. `healthz` → `{"status":"ok"}`；
 2. `readyz` → **200 `{"status":"ready"}`**，同时证明 DB 与 Redis 可用；
@@ -445,14 +468,16 @@ manifest 中的原始 binary 字节数。两者分别是压缩上传包与二进
    login 200 且 Set-Cookie 含 `HttpOnly; SameSite=Lax; Path=/api/v1/auth`（**不含
    Secure**——服务器 .env 设了 COOKIE_SECURE=false，见下）→ 拿 cookie 刷新 200 且
    轮换出新值 → 带新 cookie logout 204；
-5. 若本次改动含**新迁移**：`journalctl -u tsz-rust -n 50 | grep -i migrat` 确认
-   「database migrations applied」（启动自动迁移,连的是外部 RDS）。
+5. 若本次改动含**新迁移**：在本 session 的 `$candidate_log` 确认
+   「database migrations applied」（候选启动自动迁移，连的是外部 RDS）。
 
 把冒烟结果整理成表格报告给用户。
 
 ### 5.1 发布并验证 API 部署 manifest
 
-只有第 5 节所有 smoke 全部 PASS 后才执行。所有变量均来自上面的严格校验，不接收自由文本：
+只有隔离候选的全部 smoke PASS 后才执行。先建立并验证新 manifest，再终止候选进程、启动
+正式 systemd service；正式服务的 health/ready 通过后才释放锁。所有变量均来自上面的严格
+校验，不接收自由文本：
 
 ```bash
 set -euo pipefail
@@ -480,6 +505,25 @@ ssh tshb-test "set -eu
   python3 /opt/tsz-deploy-tools/backend-deployment-manifest.py verify \
     --manifest /opt/tsz-deploy-manifests/api.json \
     --artifact /opt/tsz-rust/target/release/tsz-rust"
+
+ssh tshb-test "set -eu
+  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
+  test -f /opt/tsz-rust/deploy.lock/candidate_pid
+  recorded_pid=\$(cat /opt/tsz-rust/deploy.lock/candidate_pid)
+  test \"\$recorded_pid\" = '$candidate_pid'
+  kill -TERM \"\$recorded_pid\"
+  stopped=false
+  for attempt in \$(seq 1 30); do
+    if ! kill -0 \"\$recorded_pid\" 2>/dev/null; then stopped=true; break; fi
+    sleep 1
+  done
+  test \"\$stopped\" = true
+  rm -f /opt/tsz-rust/deploy.lock/candidate_pid
+  systemctl start tsz-rust
+  sleep 2
+  systemctl is-active --quiet tsz-rust
+  test \"\$(curl -fsS http://127.0.0.1:8383/healthz)\" = '{\"status\":\"ok\"}'
+  test \"\$(curl -fsS http://127.0.0.1:8383/readyz)\" = '{\"status\":\"ready\"}'"
 
 # 新 manifest 验证完成后才释放服务器锁；再释放同 owner 的本地锁。unique staging 保留供审计。
 ssh tshb-test "set -eu; test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'; \
@@ -509,10 +553,24 @@ test -n "${deploy_backup_dir:-}"   # 为空说明 state 丢失，停下来人工
 test -n "${rollback_target_version:-}" && test -n "${rollback_expected_version:-}"
 [[ "$rollback_target_version" =~ ^[1-9][0-9]*$ ]]
 [[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
-test "$rollback_expected_version" -gt "$rollback_target_version"
+test "$rollback_expected_version" -ge "$rollback_target_version"
 
 rollback_report=$(ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
+  if test -f /opt/tsz-rust/deploy.lock/candidate_pid; then
+    candidate_pid=\$(cat /opt/tsz-rust/deploy.lock/candidate_pid)
+    case \"\$candidate_pid\" in ''|*[!0-9]*) exit 1 ;; esac
+    kill -TERM \"\$candidate_pid\" 2>/dev/null || true
+    for attempt in \$(seq 1 30); do
+      if ! kill -0 \"\$candidate_pid\" 2>/dev/null; then break; fi
+      sleep 1
+    done
+    if kill -0 \"\$candidate_pid\" 2>/dev/null; then
+      echo 'candidate process is still active; refusing database rollback' >&2
+      exit 1
+    fi
+    rm -f /opt/tsz-rust/deploy.lock/candidate_pid
+  fi
   systemctl stop tsz-rust
   if systemctl is-active --quiet tsz-rust; then
     echo 'service is still active; refusing database rollback' >&2

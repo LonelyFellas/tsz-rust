@@ -13,8 +13,14 @@ BEGIN
               FROM lexicon.sentence_translation_slot_rollback_v20260907180000 AS rollback
               WHERE rollback.node_id = node.id
           )
+    ) OR EXISTS (
+        SELECT 1
+        FROM lexicon.sentence_translation_slot_rollback_v20260907180000 AS rollback
+        JOIN lexicon.text_variants AS text ON text.id = rollback.node_id
+        WHERE rollback.node_role <> 'meanings.' || text.field_role || ':'
+            || text.language || ':' || text.dialect
     ) THEN
-        RAISE EXCEPTION 'cannot restore translation slots with repeated bands or new translation nodes'
+        RAISE EXCEPTION 'cannot restore translation slots after repeated, new, or rebanded translations'
             USING ERRCODE = '0A000';
     END IF;
 END

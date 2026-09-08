@@ -51,6 +51,25 @@ class DeploySkillTests(unittest.TestCase):
         self.assertLess(undo, restore)
         self.assertIn("database migration version is outside", self.runbook)
 
+    def test_candidate_is_isolated_until_manifest_is_verified(self) -> None:
+        candidate = self.runbook.index("BIND_IP=127.0.0.1 DEPLOYMENT_SMOKE_ONLY=true")
+        manifest = self.runbook.index("backend-deployment-manifest.py create", candidate)
+        formal_start = self.runbook.index("systemctl start tsz-rust", manifest)
+        self.assertLess(candidate, manifest)
+        self.assertLess(manifest, formal_start)
+        self.assertIn("systemctl stop tsz-rust", self.runbook[:candidate])
+
+    def test_deploy_without_new_migrations_keeps_a_binary_only_rollback(self) -> None:
+        self.assertNotIn('test -n "$rollback_up_versions"', self.runbook)
+        self.assertIn(
+            "rollback_expected_version=${rollback_expected_version:-$rollback_target_version}",
+            self.runbook,
+        )
+        self.assertIn(
+            'test "$rollback_expected_version" -ge "$rollback_target_version"',
+            self.runbook,
+        )
+
     def test_artifact_is_verified_before_any_server_mutation(self) -> None:
         download = self.runbook.index("--name deploy-artifact-download")
         server_lock = self.runbook.index("server_lock_result=")

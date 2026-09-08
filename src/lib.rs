@@ -201,7 +201,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         None => None,
     };
 
-    let addr = format!("0.0.0.0:{}", config.port);
+    let addr = std::net::SocketAddr::new(config.bind_ip, config.port.get());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on {addr}");
 
@@ -244,17 +244,19 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         smart_lexicon_v3_flags: config.smart_lexicon_v3_flags,
     };
 
-    if let Some(generator) = lexicon_content_generator {
-        crate::lexicon::content_completion::run_worker(state.pool.clone(), generator);
+    if !config.deployment_smoke_only {
+        if let Some(generator) = lexicon_content_generator {
+            crate::lexicon::content_completion::run_worker(state.pool.clone(), generator);
+        }
+        crate::speech::preview::run_worker(state.pool.clone());
+        crate::lexicon::audio_assets::run_worker(
+            state.pool.clone(),
+            state
+                .object_storage
+                .get(&"audio".parse().expect("constant storage space is valid"))
+                .ok(),
+        );
     }
-    crate::speech::preview::run_worker(state.pool.clone());
-    crate::lexicon::audio_assets::run_worker(
-        state.pool.clone(),
-        state
-            .object_storage
-            .get(&"audio".parse().expect("constant storage space is valid"))
-            .ok(),
-    );
 
     // 接优雅停机：systemctl stop / 容器停止发 SIGTERM，Ctrl+C 发 SIGINT。
     // 收到信号后停止收新连接、放在途请求跑完再退出，避免请求被硬砍。
