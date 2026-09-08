@@ -4,6 +4,7 @@ pub mod auth;
 pub mod catalog;
 pub mod config;
 pub mod constant;
+pub mod deployment_migrations;
 pub mod error;
 pub mod lexicon;
 pub mod openapi;

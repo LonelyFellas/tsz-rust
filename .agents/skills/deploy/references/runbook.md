@@ -219,6 +219,7 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
      ssh tshb-test 'set -a; . /opt/tsz-rust/.env; set +a; python3 -' \
        < "$tools/deployment_preflight.py"
    )
+   deployment_preflight=$(
    python3 -c '
    import json,sys
    value=json.load(sys.stdin)
@@ -226,9 +227,36 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
    assert set(value)==expected
    print(json.dumps(value,sort_keys=True,separators=(",",":")))
    ' <<<"$deployment_preflight"
+   )
+   printf '%s\n' "$deployment_preflight"
+
+   rollback_target_version=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_migration"])' \
+     <<<"$deployment_preflight")
+   [[ "$rollback_target_version" =~ ^[1-9][0-9]*$ ]]
+   migration_paths=$(git ls-tree -r --name-only "$deploy_sha" -- migrations)
+   candidate_up_versions=$(printf '%s\n' "$migration_paths" \
+     | sed -n 's#^migrations/\([0-9][0-9]*\)_.*\.up\.sql$#\1#p' | sort -n)
+   candidate_down_versions=$(printf '%s\n' "$migration_paths" \
+     | sed -n 's#^migrations/\([0-9][0-9]*\)_.*\.down\.sql$#\1#p' | sort -n)
+   rollback_up_versions=$(printf '%s\n' "$candidate_up_versions" \
+     | awk -v target="$rollback_target_version" '$1 > target')
+   rollback_down_versions=$(printf '%s\n' "$candidate_down_versions" \
+     | awk -v target="$rollback_target_version" '$1 > target')
+   test -n "$rollback_up_versions"
+   test "$rollback_up_versions" = "$rollback_down_versions"
+   test "$(printf '%s\n' "$candidate_up_versions" \
+     | awk -v target="$rollback_target_version" '$1 == target' | wc -l | tr -d ' ')" = 1
+   rollback_expected_version=$(printf '%s\n' "$rollback_up_versions" | tail -1)
+   [[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
+   test "$rollback_expected_version" -gt "$rollback_target_version"
+   printf 'rollback_target_version=%q\nrollback_expected_version=%q\n' \
+     "$rollback_target_version" "$rollback_expected_version" \
+     >> ~/.config/tsz-rust/deploy.lock/state.env
    ```
    这份快照是事实记录，不代表自动要求 entries 为 0；实际 migration 约束仍由 migration
-   自身 fail closed，不能为了让部署通过而在预检中写库或清数据。
+   自身 fail closed，不能为了让部署通过而在预检中写库或清数据。候选版本相对现网新增的
+   每个 migration 都必须有 down migration；部署前数据库版本与候选最高版本写入本 session
+   state，失败回退时只接受这个有界区间。
 4. **现有部署来源核对（动服务器状态之前必做）**：读服务器上的正式 manifest，
    由脚本判定是否与本次目标相同——不要人眼比对两个 40 字符 SHA：
    ```bash
@@ -267,6 +295,10 @@ test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
 test -n "${deploy_sha:-}" && test -n "${deploy_tree:-}"
 test -n "${ci_run_id:-}" && test -n "${ci_run_attempt:-}"
 test -n "${artifact_name:-}" && test -n "${staging:-}" && test -n "${tools:-}"
+test -n "${rollback_target_version:-}" && test -n "${rollback_expected_version:-}"
+[[ "$rollback_target_version" =~ ^[1-9][0-9]*$ ]]
+[[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
+test "$rollback_expected_version" -gt "$rollback_target_version"
 test -s "$staging/tsz-rust" && test -s "$staging/tsz-rust.manifest.json"
 test -s "$tools/deployment_manifest.py" && test -s "$tools/ci_metrics.py"
 
@@ -463,7 +495,10 @@ create 使用同目录临时文件 + 原子 rename；manifest 只包含 Git/CI/�
 
 ## 6. 回退
 
-从本 session 的锁内 state 读回第 4 节记录的精确 `deploy_backup_dir`，不得用通配符猜备份。
+从本 session 的锁内 state 读回第 4 节记录的精确 `deploy_backup_dir`、部署前 migration
+版本与候选最高版本，不得用通配符或人工猜测。先停止所有业务写入，用仍在正式路径上的
+候选二进制把数据库回到部署前版本；只有迁移账本验证通过后才恢复旧二进制与 manifest。
+候选二进制把整个 down 区间放在一个外层事务里，任一数据保护门拒绝时不会留下部分回退。
 本节可能在紧急情况下单独执行，因此代码块自带加载：
 
 ```bash
@@ -471,6 +506,40 @@ set -euo pipefail
 set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
 test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
 test -n "${deploy_backup_dir:-}"   # 为空说明 state 丢失，停下来人工确认备份目录，不要猜
+test -n "${rollback_target_version:-}" && test -n "${rollback_expected_version:-}"
+[[ "$rollback_target_version" =~ ^[1-9][0-9]*$ ]]
+[[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
+test "$rollback_expected_version" -gt "$rollback_target_version"
+
+rollback_report=$(ssh tshb-test "set -eu
+  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
+  systemctl stop tsz-rust
+  if systemctl is-active --quiet tsz-rust; then
+    echo 'service is still active; refusing database rollback' >&2
+    exit 1
+  fi
+  set -a; . /opt/tsz-rust/.env; set +a
+  current_version=\$(psql \"\$DATABASE_URL\" -X -A -t -q -v ON_ERROR_STOP=1 \
+    -c 'SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE')
+  case \"\$current_version\" in ''|*[!0-9]*) exit 1 ;; esac
+  if test \"\$current_version\" -eq '$rollback_target_version'; then
+    printf '{\"previous_version\":%s,\"target_version\":%s,\"current_version\":%s}\n' \
+      \"\$current_version\" '$rollback_target_version' \"\$current_version\"
+  elif test \"\$current_version\" -gt '$rollback_target_version' \
+    && test \"\$current_version\" -le '$rollback_expected_version'; then
+    /opt/tsz-rust/target/release/tsz-rust deploy-undo-migrations \
+      '$rollback_target_version' \"\$current_version\"
+  else
+    echo 'database migration version is outside this deployment rollback range' >&2
+    exit 1
+  fi")
+python3 -c '
+import json,sys
+value=json.load(sys.stdin)
+assert set(value)=={"previous_version","target_version","current_version"}
+assert value["target_version"]==int(sys.argv[1])
+assert value["current_version"]==int(sys.argv[1])
+' "$rollback_target_version" <<<"$rollback_report"
 
 ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
@@ -481,12 +550,12 @@ ssh tshb-test "set -eu
   systemctl restart tsz-rust"
 ```
 
-restore 会先验证备份组，再撤下正式 manifest，以同目录临时文件 + `os.replace` 原子换回二进制，最后才恢复旧 manifest；这避免覆盖运行中二进制的 `Text file busy` 和半恢复错配。第 4 节撤下旧 manifest 后，编译、重启、任一 smoke、create 或 verify 失败都必须执行本节，不得保留“新二进制 + 旧 manifest”。
+restore 会先验证备份组，再撤下正式 manifest，以同目录临时文件 + `os.replace` 原子换回二进制，最后才恢复旧 manifest；这避免覆盖运行中二进制的 `Text file busy` 和半恢复错配。第 4 节撤下旧 manifest 后，编译、重启、任一 smoke、create 或 verify 失败都必须执行本节，不得保留“新二进制 + 旧 manifest”。如果 down migration 因检测到新正文关联、重复译文或音频资产而拒绝，保留服务停止状态与两端锁，不能丢数据后强行恢复旧二进制。
 
 回退后重跑 health/ready/auth smoke；若恢复了 `api.json`，必须执行 `deployment_manifest.py verify`。若旧部署没有 manifest，回退后的来源状态明确为 UNKNOWN/BLOCKED，不能伪造一个 SHA。只有回退 smoke/manifest 全部通过后，才按第 5.1 节相同的 owner 校验顺序释放服务器锁和本地锁；失败时保留锁、state、staging 与 backup 供恢复，绝不自动抢锁。
 
-服务器上没有源码，二进制换回即服务回退。含迁移的改动回退要慎重——
-迁移已作用于 RDS，回退二进制前先确认旧代码兼容新 schema。
+服务器上没有源码；含迁移的发布必须先由候选二进制撤回数据库，再换回旧二进制。只有数据库
+已经处于部署前 migration 版本时，二进制恢复才构成完整回退。
 
 ## 7. 环境变量
 

@@ -36,10 +36,20 @@ class DeploySkillTests(unittest.TestCase):
 
     def test_skill_uses_machine_preflight_and_reports_deploy_timings(self) -> None:
         self.assertIn('< "$tools/deployment_preflight.py"', self.runbook)
+        self.assertIn("rollback_target_version", self.runbook)
+        self.assertIn("rollback_expected_version", self.runbook)
         self.assertIn("--name deploy-artifact-download", self.runbook)
         self.assertIn("--name deploy-binary-rsync", self.runbook)
         self.assertIn("--name deploy-server-build", self.runbook)
         self.assertNotIn("cargo build --release", self.runbook)
+
+    def test_database_rollback_precedes_binary_restore(self) -> None:
+        stop = self.runbook.index("systemctl stop tsz-rust", self.runbook.index("## 6. 回退"))
+        undo = self.runbook.index("deploy-undo-migrations", stop)
+        restore = self.runbook.index("backend-deployment-manifest.py restore", undo)
+        self.assertLess(stop, undo)
+        self.assertLess(undo, restore)
+        self.assertIn("database migration version is outside", self.runbook)
 
     def test_artifact_is_verified_before_any_server_mutation(self) -> None:
         download = self.runbook.index("--name deploy-artifact-download")
