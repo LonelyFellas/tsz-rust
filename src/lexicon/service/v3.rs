@@ -1100,7 +1100,7 @@ impl LexiconService {
                 .map_err(repository_error)?,
             None => None,
         };
-        let (builtin_dictionary, mut suggested_pos) = if let Some(term) = term {
+        let (builtin_dictionary, suggested_pos) = if let Some(term) = term {
             // 内置词典的词性映射可能落在目录里已不存在的编码（如 2026-09-06 下线的介词等六个
             // 非基础种子），与 V2 路径一样只保留 catalog 现存的基本词性，避免建议出无法保存的 pos；
             // 但保持词典给出的词性顺序（首项是词典主词性），不按目录排序重排。
@@ -1225,32 +1225,9 @@ impl LexiconService {
             (BuiltinDictionaryEvidenceV3::NotFound, Vec::new())
         };
         let detection_id = Uuid::now_v7();
-        let (matches, surface_match_page, existing_suggested_pos) = self
-            .detect_v3_surface_warning(actor_id, detection_id, &normalized.key)
-            .await?;
-        for pos in existing_suggested_pos {
-            if !suggested_pos.contains(&pos) {
-                suggested_pos.push(pos);
-            }
-        }
-        let mut tx = self
-            .repository
-            .pool()
-            .begin()
-            .await
-            .map_err(database_error)?;
-        let keys = initial_v3_headword_keys(&WordHeadwordsV2::Unified {
-            common: normalized.display.clone(),
-        })?;
-        // 撞上的空草稿是谁建的都要报出来：管理员据此知道这个词已经有人在建，
-        // 点进去能看（别人的是只读的）。以前只报自己的，撞上别人的就静默建重。
-        let existing_draft_id = self
-            .v3_empty_draft_conflict_in(&mut tx, input.kind, &keys, None)
-            .await?;
-        tx.commit().await.map_err(database_error)?;
         let now = Utc::now();
-        let detection = DetectLexiconSurfaceResponseV3 {
-            existing_draft_id,
+        let mut detection = DetectLexiconSurfaceResponseV3 {
+            existing_draft_id: None,
             schema_version: 3,
             detection_id,
             expires_at: now + Duration::from_std(V3_DETECTION_TTL).expect("five minutes is valid"),
@@ -1260,12 +1237,45 @@ impl LexiconService {
                 surface: normalized.display,
             },
             normalized_surface: normalized.key,
-            requires_acknowledgement: !matches.is_empty(),
-            matches,
-            surface_match_page,
+            requires_acknowledgement: false,
+            matches: Vec::new(),
+            surface_match_page: None,
             builtin_dictionary,
             suggested_pos,
         };
+        // Confirm the complete default creation surface, including dictionary variants.
+        let mut forms = materialize_v3_detection_forms(&detection);
+        let headwords = compatibility_v3_headwords(&detection, &forms)?;
+        apply_confirmed_v3_headwords(&mut forms, &headwords);
+        let keys = initial_v3_headword_keys(&headwords)?;
+        let (matches, surface_match_page, existing_suggested_pos) = self
+            .detect_v3_surface_warning(
+                actor_id,
+                detection_id,
+                &detection.normalized_surface,
+                &forms,
+                &keys,
+            )
+            .await?;
+        for pos in existing_suggested_pos {
+            if !detection.suggested_pos.contains(&pos) {
+                detection.suggested_pos.push(pos);
+            }
+        }
+        let mut tx = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        // Empty drafts are visible across creators, just like the surface matches.
+        detection.existing_draft_id = self
+            .v3_empty_draft_conflict_in(&mut tx, input.kind, &keys, None)
+            .await?;
+        tx.commit().await.map_err(database_error)?;
+        detection.requires_acknowledgement = !matches.is_empty();
+        detection.matches = matches;
+        detection.surface_match_page = surface_match_page;
         self.detections
             .save_v3(actor_id, &detection, V3_DETECTION_RETENTION_TTL)
             .await
@@ -1379,6 +1389,7 @@ impl LexiconService {
                     detection.detection_id,
                     input.kind,
                     &detection.normalized_surface,
+                    &forms,
                     &initial_headword_keys,
                     input.confirmed_surface_match_token.as_deref(),
                 )
