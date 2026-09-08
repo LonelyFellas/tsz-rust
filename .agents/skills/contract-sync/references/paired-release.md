@@ -8,7 +8,7 @@
 按实际涉及的 web、admin、api 列一张表：组件、候选仓库 SHA、PR/目标分支、契约来源、CI run/attempt、当前部署 manifest、下一步。
 准备阶段拿不到线上来源就标为未知；不能把候选版本或历史验收记录填成现网版本。
 
-- 前端改动 PR 进入 main；后端按 feature → dev → main，进入 dev 不等于可部署。
+- 前端改动 PR 进入 main；后端在 dev 上开发后 PR 进 main，进入 dev 不等于可部署。
 - 两仓 SHA 各自独立。前端还要区分 web/admin 的实际部署版本，只更新一个组件时不能把另一个也记为已发。
 - 复用前端 `deploy/provenance.mjs`、后端 `ops/release_artifact_manifest.py` 与 `ops/deployment_manifest.py` 的原生来源证据；不发明第二套 manifest。
 - 后端记录新增 migration、必要开关及其默认值；前端记录 build 时生效的代理/功能开关。仅检查本次依赖，不自动开启所有功能。

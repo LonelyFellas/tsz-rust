@@ -8,12 +8,15 @@ description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或
 本文件是 Claude Code 下后端 ship 的**唯一**流程来源，自带完整规则，不读 `.agents/skills/ship/`
 （那份是给 Codex 的宿主中立版，两边独立维护）。项目约定读 `AGENTS.md`。
 
-分支模型：feature → dev → main。PR 以 **dev** 为 base；合并 main 和部署使用各自授权及流程。
+分支模型：dev → main。功能开发**直接在 dev 上提交**（用户不用 worktree，也不建 feature 分支）；
+PR 以 **main** 为 base、从 dev 发起。合并 main 和部署使用各自授权及流程。
 
 ## 1. 基线与授权
 
 - 检查完整 diff、分支、remotes、已有 PR 和用户改动。fetch 后固定本次 `origin/dev` 基线。
-- 在 main/dev 上时为本次工作建立分支；**不向 main/dev 直接提交或推送**。
+- 在 dev 上直接提交与推送；**绝不向 main 直接提交或推送**。
+- 开 PR 前核对 dev 相对 main 的全部落差：直接在 dev 上做意味着 PR 会**夹带之前未合的提交**，
+  在 PR 正文里说明，或与用户确认是否一并合入。
 - 「提交并推送」「开 PR」「ship」已授权相应交付步骤，**不逐步重复确认**；
   「仅提交」不含 push，「仅审查」不含 commit，实施批准不自动包含交付。
 - 仅审查时交付发现与验证局限，不自动改文件、不刷新 `.sqlx`、不进入提交阶段。
