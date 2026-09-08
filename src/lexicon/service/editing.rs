@@ -148,6 +148,7 @@ impl LexiconService {
         request_id: Uuid,
         entry_id: Uuid,
         input: SaveFormsStepInput,
+        is_super_admin: bool,
     ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
         if input.base_revision < 1 {
             return Err(LexiconServiceError::InvalidField {
@@ -176,6 +177,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, actor_id, is_super_admin)?;
         let current = entry_from_record(record)?;
         ensure_active(&current)?;
         ensure_revision(&current, input.base_revision)?;
@@ -599,6 +601,7 @@ impl LexiconService {
         request_id: Uuid,
         entry_id: Uuid,
         input: SaveMeaningsStepInput,
+        is_super_admin: bool,
     ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
         let SaveMeaningsStepInput {
             base_revision,
@@ -654,6 +657,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, actor_id, is_super_admin)?;
         let current = entry_from_record(record)?;
         ensure_active(&current)?;
         ensure_revision(&current, base_revision)?;

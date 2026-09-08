@@ -219,7 +219,7 @@ pub async fn preview_forms_impact(
     responses(
         (status = 200, description = "保存或完成版本化词形与发音步骤", body = AdminWordAnyEnvelope),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision、stable_node_id_changed、form_reference_conflict、surface warning、策略或下游确认冲突"),
         (status = 410, description = "surface 确认 snapshot 已过期"),
@@ -254,6 +254,7 @@ pub async fn save_forms(
                     path.id,
                     input,
                     state.smart_lexicon_v3_flags.projection,
+                    admin.is_super_admin(),
                 )
                 .await
                 .map_err(map_error)?;
@@ -269,7 +270,13 @@ pub async fn save_forms(
     }
     let input: SaveFormsStepInput = v3_contract::decode_request(input)?;
     let response = service(&state)
-        .save_forms(admin.id, request_id.as_uuid(), path.id, input)
+        .save_forms(
+            admin.id,
+            request_id.as_uuid(),
+            path.id,
+            input,
+            admin.is_super_admin(),
+        )
         .await
         .map_err(map_error)?;
     Ok((
@@ -290,7 +297,7 @@ pub async fn save_forms(
     responses(
         (status = 200, description = "保存或完成版本化词义与例句步骤", body = AdminWordAnyEnvelope),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision 或步骤可达性冲突"),
         (status = 413, description = "请求体超过 8,192,000 字节"),
@@ -318,7 +325,13 @@ pub async fn save_meanings(
                 return Err(v3_storage_unavailable());
             }
             let mut response = service(&state)
-                .save_meanings_v3(admin.id, request_id.as_uuid(), path.id, input)
+                .save_meanings_v3(
+                    admin.id,
+                    request_id.as_uuid(),
+                    path.id,
+                    input,
+                    admin.is_super_admin(),
+                )
                 .await
                 .map_err(map_error)?;
             apply_legacy_bridge_read_flag(
@@ -333,7 +346,13 @@ pub async fn save_meanings(
     }
     let input: SaveMeaningsStepInput = v3_contract::decode_request(input)?;
     let response = service(&state)
-        .save_meanings(admin.id, request_id.as_uuid(), path.id, input)
+        .save_meanings(
+            admin.id,
+            request_id.as_uuid(),
+            path.id,
+            input,
+            admin.is_super_admin(),
+        )
         .await
         .map_err(map_error)?;
     Ok((
@@ -412,7 +431,7 @@ pub async fn validate(
         (status = 201, description = "发布不可变版本化词条", body = AdminWordAnyEnvelope),
         (status = 400, description = "缺少或错误的 Idempotency-Key"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision、surface、policy、visibility 或幂等键冲突"),
         (status = 410, description = "surface 确认 snapshot 已过期"),
@@ -448,6 +467,7 @@ pub async fn publish(
                     idempotency_key,
                     input,
                     !sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+                    admin.is_super_admin(),
                 )
                 .await
                 .map_err(map_error)?;
@@ -471,6 +491,7 @@ pub async fn publish(
             input,
             state.smart_lexicon_v3_flags.read && state.smart_lexicon_v3_flags.projection,
             !sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+            admin.is_super_admin(),
         )
         .await
         .map_err(map_error)?;

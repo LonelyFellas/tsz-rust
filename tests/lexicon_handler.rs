@@ -19051,7 +19051,10 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
-    let other_admin_id = seed_admin(&pool).await;
+    // 「换个人用同一个 token」这一断言要走超管：普通管理员会先撞上草稿归属守卫
+    // （403 entry_edit_forbidden，见 draft_writes_are_restricted_to_their_creator_unless_super_admin），
+    // 根本到不了 token 校验。超管豁免归属、但不豁免 token 的 actor 绑定——正好把这条钉住。
+    let other_admin_id = seed_admin_with_role(&pool, AdminRole::SuperAdmin).await;
     let bearer = token(&state, admin_id);
     let other_bearer = token(&state, other_admin_id);
     seed_dictionary_word(&pool, "harbour").await;
@@ -24488,4 +24491,275 @@ async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) 
         blocked["meta"]["reference_locations"][0]["reference_kind"],
         "text_link"
     );
+}
+
+/// 草稿写权限：从未发布的草稿只有创建者本人与超管能写。
+///
+/// 与 `draft_candidates_are_visible_only_to_their_creator` 是互补的一对——那条守的是
+/// 「别人的草稿不进**引用**候选」，这条守的是「别人的草稿不可**写**」。看得见但改不动，
+/// 是 2026-09-08 定的口径：草稿只表示尚未对 C 端发布，在 admin 内部照常可见。
+#[sqlx::test]
+async fn draft_writes_are_restricted_to_their_creator_unless_super_admin(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner_id = seed_admin(&pool).await;
+    let owner = token(&state, owner_id);
+    let outsider_id = seed_admin(&pool).await;
+    let outsider = token(&state, outsider_id);
+    let super_id = seed_admin_with_role(&pool, AdminRole::SuperAdmin).await;
+    let super_admin = token(&state, super_id);
+
+    let draft = create_v3_with_complete_forms(&state, &pool, &owner).await;
+    let entry_id = draft["word"]["id"].as_str().unwrap().to_string();
+    let revision = draft["word"]["revision"].as_i64().unwrap();
+    let lifecycle_revision = draft["word"]["lifecycle_revision"].as_i64().unwrap();
+
+    // 别人的草稿：改不动。用一个合法的词形保存请求，被挡下的必须是归属而不是内容。
+    let forms_body = json!({
+        "schema_version": 3,
+        "base_revision": revision,
+        "intent": "save",
+        "content": complete_v3_forms_fixture()
+    });
+    let (status, response) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &outsider,
+        None,
+        Some(forms_body.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "普通管理员不得保存他人草稿的词形步：{response}"
+    );
+    assert_eq!(response["code"], "entry_edit_forbidden");
+
+    // 词义步同一条边界。
+    let (status, response) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &outsider,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": revision,
+            "intent": "save",
+            "content": complete_v3_meanings_fixture(
+                draft["word"]["forms"]["pos"][0]["pos_id"].clone()
+            )
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "普通管理员不得保存他人草稿的词义步：{response}"
+    );
+    assert_eq!(response["code"], "entry_edit_forbidden");
+
+    // 生命周期同样收口：归档别人的草稿要被挡下。
+    let lifecycle_body = json!({
+        "base_revision": revision,
+        "base_lifecycle_revision": lifecycle_revision
+    });
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        &outsider,
+        Some(Uuid::now_v7()),
+        Some(lifecycle_body.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "普通管理员不得归档他人的草稿：{response}"
+    );
+    assert_eq!(response["code"], "entry_edit_forbidden");
+
+    // 发布也是写：别人的草稿不能被替他发布。
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &outsider,
+        Some(Uuid::now_v7()),
+        Some(json!({ "schema_version": 3, "base_revision": revision })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "普通管理员不得发布他人的草稿：{response}"
+    );
+    assert_eq!(response["code"], "entry_edit_forbidden");
+
+    // 创建者本人照常可写：同一条草稿、同一个请求，换成本人就该放行。
+    // （正向断言走 archive 而不是再存一次词形——重复保存同样内容会先撞上
+    // confirmed_impact_token 的下游确认流，那与归属无关，会把断言目标搅浑。）
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        &owner,
+        Some(Uuid::now_v7()),
+        Some(lifecycle_body),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "创建者本人应能归档自己的草稿：{response}"
+    );
+    assert_eq!(response["word"]["status"], "archived");
+
+    // 超管不受创建人限制：owner 的另一条草稿，超管照样动得了。
+    let others_draft = create_ready_draft(&state, &pool, &owner, "super-admin-reaches-in").await;
+    let others_id = others_draft["word"]["id"].as_str().unwrap();
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{others_id}/archive"),
+        &super_admin,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": others_draft["word"]["revision"],
+            "base_lifecycle_revision": others_draft["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "超管应能归档他人的草稿：{response}"
+    );
+    assert_eq!(response["word"]["status"], "archived");
+}
+
+/// 收口只针对**从未发布**的草稿：已发布词条仍是全员可编辑的公共资产。
+/// 这条是上面那条的反向断言，防止把限制收过头。
+#[sqlx::test]
+async fn published_entries_stay_writable_by_any_admin(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis);
+    let owner_id = seed_admin(&pool).await;
+    let owner = token(&state, owner_id);
+    let outsider_id = seed_admin(&pool).await;
+    let outsider = token(&state, outsider_id);
+
+    let published = create_and_publish(&state, &pool, &owner, "public-asset").await;
+    let entry_id = published["word"]["id"].as_str().unwrap();
+
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/archive"),
+        &outsider,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": published["word"]["revision"],
+            "base_lifecycle_revision": published["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "已发布词条不受创建人限制，任何管理员都能归档：{response}"
+    );
+    assert_eq!(response["word"]["status"], "archived");
+}
+
+/// 批量入口整批原子：混进一条他人草稿就拒掉整批，且不留下任何副作用——
+/// 既不能归档掉自己那条，也不能把幂等键吃掉（否则重试会拿到一个假的成功）。
+#[sqlx::test]
+async fn lifecycle_batch_rejects_the_whole_batch_when_it_holds_another_admins_draft(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner_id = seed_admin(&pool).await;
+    let owner = token(&state, owner_id);
+    let outsider_id = seed_admin(&pool).await;
+    let outsider = token(&state, outsider_id);
+
+    let foreign = create_v3_with_complete_forms(&state, &pool, &owner).await;
+    let foreign_id = foreign["word"]["id"].as_str().unwrap().to_string();
+    let mine = create_ready_draft(&state, &pool, &outsider, "my-own-draft").await;
+    let mine_id = mine["word"]["id"].as_str().unwrap().to_string();
+
+    let batch = json!({
+        "entries": [
+            {
+                "id": mine_id,
+                "base_revision": mine["word"]["revision"],
+                "base_lifecycle_revision": mine["word"]["lifecycle_revision"]
+            },
+            {
+                "id": foreign_id,
+                "base_revision": foreign["word"]["revision"],
+                "base_lifecycle_revision": foreign["word"]["lifecycle_revision"]
+            }
+        ]
+    });
+    let idempotency_key = Uuid::now_v7();
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/archive-batch"),
+        &outsider,
+        Some(idempotency_key),
+        Some(batch.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "批量里混进他人草稿应拒掉整批：{response}"
+    );
+    assert_eq!(response["code"], "entry_edit_forbidden");
+
+    // 零副作用：自己那条也不能被归档掉。
+    let (status, mine_after) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{mine_id}"),
+        &outsider,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{mine_after}");
+    assert_ne!(
+        mine_after["word"]["status"], "archived",
+        "整批被拒时不得留下部分归档：{mine_after}"
+    );
+
+    // 幂等键未被消费：同键重放仍走完整校验，而不是回放一个假成功。
+    let (status, replay) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/archive-batch"),
+        &outsider,
+        Some(idempotency_key),
+        Some(batch),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "被拒的批量不得登记幂等键：{replay}"
+    );
+    assert_eq!(replay["code"], "entry_edit_forbidden");
 }

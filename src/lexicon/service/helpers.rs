@@ -259,3 +259,24 @@ pub(super) fn invariant_record() -> LexiconServiceError {
         "stored entry shape is invalid",
     ))
 }
+
+/// 草稿态写权限：**从未发布**的草稿只有创建者本人与超管能写。
+///
+/// 「草稿」只表示尚未对 C 端发布——它在 admin 内部对所有管理员照常可见（列表、详情），
+/// 但可见不等于可写。已发布词条（含带未发布修订的）不走这条限制，全员可编辑。
+///
+/// 判定顺序与 `delete_entry_in_transaction` 一致：归属先于其他业务校验，避免把
+/// 「这条处于什么状态」的信息泄露给无权处置它的管理员。
+pub(super) fn ensure_draft_writable(
+    record: &EntryRecord,
+    actor_id: Uuid,
+    is_super_admin: bool,
+) -> Result<(), LexiconServiceError> {
+    if record.current_publication_id.is_none()
+        && !is_super_admin
+        && record.created_by_admin_id != actor_id
+    {
+        return Err(LexiconServiceError::EntryEditForbidden);
+    }
+    Ok(())
+}
