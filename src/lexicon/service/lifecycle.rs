@@ -771,7 +771,6 @@ impl LexiconService {
                     &word.headwords,
                     word.kind,
                     Some(word.id),
-                    actor_id,
                 )
                 .await?;
             for item in &mut headword_items {
@@ -783,7 +782,7 @@ impl LexiconService {
                 }
             }
             let (form_items, form_contexts) = self
-                .form_surface_matches_in_transaction(transaction, word, actor_id)
+                .form_surface_matches_in_transaction(transaction, word)
                 .await?;
             let headword_evidence =
                 LexiconRepository::headword_surface_acknowledgement(transaction, word.id)
@@ -862,7 +861,6 @@ impl LexiconService {
                 transaction,
                 pending,
                 publication_sources,
-                actor_id,
             )
             .await?;
         for mut item in v2_publication_contribution.items {
@@ -890,7 +888,7 @@ impl LexiconService {
         }
         let v3_contribution = if contains_v3 {
             Some(
-                self.v3_restore_surface_contribution(transaction, pending, actor_id)
+                self.v3_restore_surface_contribution(transaction, pending)
                     .await?,
             )
         } else {
@@ -920,7 +918,7 @@ impl LexiconService {
         }
         let v3_page_data = if let Some(contribution) = &v3_contribution {
             Some(
-                self.v3_restore_page_data(transaction, &items, &contribution.page_items, actor_id)
+                self.v3_restore_page_data(transaction, &items, &contribution.page_items)
                     .await?,
             )
         } else {

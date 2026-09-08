@@ -1242,8 +1242,10 @@ impl LexiconService {
         let keys = initial_v3_headword_keys(&WordHeadwordsV2::Unified {
             common: normalized.display.clone(),
         })?;
+        // 撞上的空草稿是谁建的都要报出来：管理员据此知道这个词已经有人在建，
+        // 点进去能看（别人的是只读的）。以前只报自己的，撞上别人的就静默建重。
         let existing_draft_id = self
-            .v3_empty_draft_conflict_in(&mut tx, input.kind, &keys, None, Some(actor_id))
+            .v3_empty_draft_conflict_in(&mut tx, input.kind, &keys, None)
             .await?;
         tx.commit().await.map_err(database_error)?;
         let now = Utc::now();

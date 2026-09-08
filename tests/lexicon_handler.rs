@@ -13297,8 +13297,13 @@ async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
     );
 }
 
+/// 撞名机器对**所有**管理员亮出草稿命中（2026-09-08 口径）。
+///
+/// 此前这里断言的是相反的事：别人的草稿被过滤成空，外人不但看不见，还会静默建出
+/// 第二份同名草稿。放开后撞名回到软确认治理——看得见、要 acknowledge、确认后共存。
+/// 写权限不受影响，仍由 ensure_draft_writable 守着。
 #[sqlx::test]
-async fn surface_machinery_hides_other_admins_drafts(pool: PgPool) {
+async fn surface_machinery_shows_other_admins_drafts(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -13312,7 +13317,7 @@ async fn surface_machinery_hides_other_admins_drafts(pool: PgPool) {
     let owner_forms = create_v3_with_complete_forms(&state, &pool, &owner).await;
     let owner_entry_id = owner_forms["word"]["id"].as_str().unwrap();
 
-    // 检测：别人的未发布草稿不得亮进 surface warning。
+    // 检测：别人的未发布草稿现在会亮进 surface warning。
     let detect_body = json!({
         "schema_version": 3,
         "language": "en",
@@ -13330,15 +13335,20 @@ async fn surface_machinery_hides_other_admins_drafts(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK, "{outsider_detection}");
     assert_eq!(
-        outsider_detection["requires_acknowledgement"], false,
-        "别人的草稿不构成检测确认前提：{outsider_detection}"
+        outsider_detection["requires_acknowledgement"], true,
+        "别人的草稿同样构成检测确认前提：{outsider_detection}"
     );
+    let outsider_items = outsider_detection["surface_match_page"]["items"]
+        .as_array()
+        .expect("外人应看到别人草稿的命中");
     assert!(
-        outsider_detection["surface_match_page"].is_null(),
-        "别人的草稿命中与内容不得进检测页：{outsider_detection}"
+        outsider_items
+            .iter()
+            .all(|item| item["match"]["entry_id"] == owner_entry_id),
+        "命中应指向 owner 的草稿：{outsider_detection}"
     );
 
-    // 正向对照：创建者自己检测必须仍能看到自己的草稿（防空实现全绿）。
+    // 创建者自己检测照旧（防止把过滤改成「谁都看不见」而全绿）。
     let (status, owner_detection) = call(
         &state,
         Method::POST,
@@ -13350,35 +13360,35 @@ async fn surface_machinery_hides_other_admins_drafts(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK, "{owner_detection}");
     assert_eq!(owner_detection["requires_acknowledgement"], true);
-    assert!(
-        owner_detection["surface_match_page"]["items"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()),
-        "创建者应看到自己草稿的命中：{owner_detection}"
-    );
 
-    // 建档：同名草稿共存，无需 acknowledge 一个自己看不见的冲突。
+    // 建档：撞名不是硬拦，acknowledge 之后同名草稿仍可共存。
+    let mut create_input = json!({
+        "schema_version": 3,
+        "detection_id": outsider_detection["detection_id"],
+        "kind": "word"
+    });
+    if let Some(confirm) =
+        outsider_detection["surface_match_page"]["surface_confirmation_token"].as_str()
+    {
+        create_input["confirmed_surface_match_token"] = json!(confirm);
+    }
     let (status, outsider_created) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries"),
         &outsider,
         Some(Uuid::now_v7()),
-        Some(json!({
-            "schema_version": 3,
-            "detection_id": outsider_detection["detection_id"],
-            "kind": "word"
-        })),
+        Some(create_input),
     )
     .await;
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "撞别人隐形草稿的建档应直接放行：{outsider_created}"
+        "确认撞名后应允许共存：{outsider_created}"
     );
-    let outsider_entry_id = outsider_created["word"]["id"].as_str().unwrap();
+    let outsider_entry_id = outsider_created["word"]["id"].as_str().unwrap().to_string();
 
-    // 词形步：impact 预览与保存都不得被别人的草稿词形拦下。
+    // 词形步：impact 预览会亮出别人的草稿词形，保存需带确认。
     let forms_content = complete_v3_forms_fixture();
     let (status, impact) = call(
         &state,
@@ -13395,8 +13405,8 @@ async fn surface_machinery_hides_other_admins_drafts(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK, "{impact}");
     assert!(
-        impact["surface_match_page"].is_null(),
-        "词形步不得亮出别人的草稿词形：{impact}"
+        !impact["surface_match_page"].is_null(),
+        "词形步应亮出别人的草稿词形：{impact}"
     );
     let mut forms_input = json!({
         "schema_version": 3,
@@ -13404,9 +13414,14 @@ async fn surface_machinery_hides_other_admins_drafts(pool: PgPool) {
         "intent": "complete",
         "content": forms_content
     });
-    // 词义连带影响确认是与 surface 无关的既有机制，照常携带。
-    if let Some(impact_token) = impact["confirmation_token"].as_str() {
-        forms_input["confirmed_impact_token"] = json!(impact_token);
+    if let Some(token) = impact["confirmation_token"].as_str() {
+        forms_input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["impact_confirmation_token"].as_str() {
+        forms_input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+        forms_input["confirmed_surface_match_token"] = json!(token);
     }
     let (status, saved) = call(
         &state,
@@ -13420,10 +13435,10 @@ async fn surface_machinery_hides_other_admins_drafts(pool: PgPool) {
     assert_eq!(
         status,
         StatusCode::OK,
-        "词形保存不得要求确认别人的草稿：{saved}"
+        "确认撞名后词形应能保存：{saved}"
     );
 
-    // 过滤是双向的：owner 检测同样看不到 outsider 的草稿。
+    // 可见性是双向的：owner 现在也看得到 outsider 的草稿。
     let (status, owner_redetection) = call(
         &state,
         Method::POST,
@@ -13436,17 +13451,17 @@ async fn surface_machinery_hides_other_admins_drafts(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "{owner_redetection}");
     let owner_items = owner_redetection["surface_match_page"]["items"]
         .as_array()
-        .expect("创建者应仍能看到自己草稿的命中");
+        .expect("创建者应看到命中");
     assert!(
         owner_items
             .iter()
-            .all(|item| item["match"]["entry_id"] == owner_entry_id),
-        "对方草稿对创建者同样隐形：{owner_redetection}"
+            .any(|item| item["match"]["entry_id"] == outsider_entry_id.as_str()),
+        "对方的草稿对 owner 同样可见：{owner_redetection}"
     );
 }
 
 #[sqlx::test]
-async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool) {
+async fn other_admins_drafts_require_acknowledgement_and_then_coexist(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -13460,9 +13475,9 @@ async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool
     let owner_forms = create_v3_with_complete_forms(&state, &pool, &owner).await;
     let owner_entry_id = owner_forms["word"]["id"].as_str().unwrap();
 
-    // outsider 全链手动走且不带任何 surface token（刻意不用会自动 acknowledge 的
-    // create_v3_with_complete_forms——否则词形步证据会覆盖 publish 期重算的集合，
-    // 过滤被整体移除时本测试照样绿，失去判别力）。
+    // outsider 全链手动走。每一步都刻意先不带 surface token，用「被拒 → 带 token 重来」
+    // 证明别人的草稿真的进了重算集合——若直接用会自动 acknowledge 的
+    // create_v3_with_complete_forms，过滤退回旧口径时本测试照样绿，就没有判别力了。
     let (status, outsider_detection) = call(
         &state,
         Method::POST,
@@ -13479,20 +13494,26 @@ async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool
     .await;
     assert_eq!(status, StatusCode::OK, "{outsider_detection}");
     assert!(
-        outsider_detection["surface_match_page"].is_null(),
-        "{outsider_detection}"
+        !outsider_detection["surface_match_page"].is_null(),
+        "检测应亮出 owner 的草稿：{outsider_detection}"
     );
+    let mut create_input = json!({
+        "schema_version": 3,
+        "detection_id": outsider_detection["detection_id"],
+        "kind": "word"
+    });
+    if let Some(token) =
+        outsider_detection["surface_match_page"]["surface_confirmation_token"].as_str()
+    {
+        create_input["confirmed_surface_match_token"] = json!(token);
+    }
     let (status, outsider_created) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries"),
         &outsider,
         Some(Uuid::now_v7()),
-        Some(json!({
-            "schema_version": 3,
-            "detection_id": outsider_detection["detection_id"],
-            "kind": "word"
-        })),
+        Some(create_input),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{outsider_created}");
@@ -13513,8 +13534,8 @@ async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool
     .await;
     assert_eq!(status, StatusCode::OK, "{impact}");
     assert!(
-        impact["surface_match_page"].is_null(),
-        "词形步不得亮出别人的草稿词形：{impact}"
+        !impact["surface_match_page"].is_null(),
+        "词形步应亮出 owner 的草稿词形：{impact}"
     );
     let mut forms_input = json!({
         "schema_version": 3,
@@ -13525,6 +13546,59 @@ async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool
     if let Some(impact_token) = impact["confirmation_token"].as_str() {
         forms_input["confirmed_impact_token"] = json!(impact_token);
     }
+    if let Some(token) = impact["surface_match_page"]["impact_confirmation_token"].as_str() {
+        forms_input["confirmed_impact_token"] = json!(token);
+    }
+
+    // 关键判别：词形步重算的命中集合含 owner 的草稿，不确认就存不进去。
+    // （确认过一次之后发布期不再重复要求，所以判别力必须落在这一步。）
+    let (status, blocked_forms) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{outsider_entry_id}/steps/forms"),
+        &outsider,
+        None,
+        Some(forms_input.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "撞上 owner 的草稿词形，保存必须先确认：{blocked_forms}"
+    );
+    assert_eq!(
+        blocked_forms["code"], "surface_match_acknowledgement_required",
+        "{blocked_forms}"
+    );
+    assert!(
+        blocked_forms["meta"]["surface_match_page"]["surface_confirmation_token"].is_string(),
+        "确认页应签发 surface token：{blocked_forms}"
+    );
+    // 被拒的那次让预览快照作废，重取一份——surface 与 impact 两张票必须同源，
+    // 混用新旧会换来一个 410 surface_match_snapshot_expired。
+    let (status, retry_impact) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{outsider_entry_id}/steps/forms/impact"),
+        &outsider,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": 1,
+            "content": forms_input["content"].clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{retry_impact}");
+    if let Some(token) = retry_impact["confirmation_token"].as_str() {
+        forms_input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = retry_impact["surface_match_page"]["impact_confirmation_token"].as_str() {
+        forms_input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = retry_impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+        forms_input["confirmed_surface_match_token"] = json!(token);
+    }
     let (status, outsider_forms) = call(
         &state,
         Method::PUT,
@@ -13534,11 +13608,7 @@ async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool
         Some(forms_input),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "词形保存不得要求确认别人的草稿：{outsider_forms}"
-    );
+    assert_eq!(status, StatusCode::OK, "确认后词形应能保存：{outsider_forms}");
     let outsider_meanings =
         complete_v3_meanings_fixture(outsider_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
     let (status, outsider_saved) = call(
@@ -13556,6 +13626,8 @@ async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{outsider_saved}");
+
+    // 词形步已确认过这批命中，发布期不再重复要求——同名词条就此共存。
     let (status, outsider_published) = call(
         &state,
         Method::POST,
@@ -13571,7 +13643,7 @@ async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "别人的草稿不构成发布约束，发布不得要求 surface 确认：{outsider_published}"
+        "确认后同名词条应可共存发布：{outsider_published}"
     );
 
     // owner 随后发布：对 outsider 已发布词面的警告照常（已发布内容全员可见）。
@@ -13612,18 +13684,26 @@ async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool
         owner_warning["code"], "surface_match_acknowledgement_required",
         "{owner_warning}"
     );
-    // content_scope 是行级判别：status 是词条级 lifecycle，outsider 词条发布后其
-    // 工作区 draft 行也会报 published，只有 content_scope 能钉住「无草稿行泄露」。
+    // content_scope 是行级判别（status 是词条级 lifecycle，两者不可互替）。
+    // 放开后 outsider 词条的已发布行与其草稿工作区行都会亮给 owner——这里同时钉住
+    // 两种 scope 都在，以及命中确实指向 outsider 那条词条而非张冠李戴。
+    let owner_items = owner_warning["meta"]["surface_match_page"]["items"]
+        .as_array()
+        .expect("发布警告应带命中项");
     assert!(
-        owner_warning["meta"]["surface_match_page"]["items"]
-            .as_array()
-            .is_some_and(|items| !items.is_empty()
-                && items.iter().all(|item| {
-                    item["match"]["status"] == "published"
-                        && item["match"]["content_scope"] == "current_publication"
-                })),
-        "发布警告只得亮出已发布内容：{owner_warning}"
+        owner_items
+            .iter()
+            .all(|item| item["match"]["entry_id"] == outsider_entry_id),
+        "命中应全部指向 outsider 的词条：{owner_warning}"
     );
+    for scope in ["current_publication", "draft"] {
+        assert!(
+            owner_items
+                .iter()
+                .any(|item| item["match"]["content_scope"] == scope),
+            "发布警告应亮出 {scope} 行：{owner_warning}"
+        );
+    }
     // V3 不写 entry_headword_keys，同名多 active 发布由 surface policy 治理：
     // acknowledge 已发布词面后照常共存，过滤不改变这条既有语义。
     let mut confirmed_publish = owner_publish_body;
@@ -13641,8 +13721,12 @@ async fn publish_ignores_other_admins_drafts_and_coexists_after_ack(pool: PgPool
     assert_eq!(status, StatusCode::CREATED, "{owner_publish}");
 }
 
+/// 入站关系预览对所有管理员亮出草稿来源（2026-09-08 口径）。
+///
+/// 末段的「发布后两边各恰一条」是去重条件的守护断言：草稿分支放开后，发布分支
+/// 仍要在存在对应草稿行时让位，既不能双出也不能双失明。
 #[sqlx::test]
-async fn inbound_relation_previews_hide_other_admins_draft_sources(pool: PgPool) {
+async fn inbound_relation_previews_show_other_admins_draft_sources(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -13771,7 +13855,7 @@ async fn inbound_relation_previews_hide_other_admins_draft_sources(pool: PgPool)
             .clone()
     };
 
-    // 外人检测命中 P：入站预览不得亮出 referrer 的未发布草稿。
+    // 外人检测命中 P：入站预览同样亮出 referrer 的未发布草稿。
     let (status, outsider_detection) = call(
         &state,
         Method::POST,
@@ -13783,12 +13867,17 @@ async fn inbound_relation_previews_hide_other_admins_draft_sources(pool: PgPool)
     .await;
     assert_eq!(status, StatusCode::OK, "{outsider_detection}");
     let outsider_context = context_for(&outsider_detection, target_id);
-    assert_eq!(
-        outsider_context["inbound_relations"]["total"], 0,
-        "别人的草稿引用不得进入站预览：{outsider_context}"
+    assert!(
+        outsider_context["inbound_relations"]["previews"]
+            .as_array()
+            .is_some_and(|previews| previews.iter().any(|preview| {
+                preview["source_entry_id"] == referrer_entry_id
+                    && preview["source_status"] == "draft"
+            })),
+        "别人的草稿引用同样进入站预览：{outsider_context}"
     );
 
-    // 创建者自己检测：能看到自己草稿的引用。
+    // 创建者自己检测：看到的与外人一致（防止改成「谁都看不见」而全绿）。
     let (status, referrer_detection) = call(
         &state,
         Method::POST,
@@ -23708,7 +23797,9 @@ async fn empty_draft_bugfix_visibility_race_archive_and_resume(pool: PgPool) {
         Some(json!({"schema_version":3,"detection_id":before["detection_id"],"kind":"word","headwords":{"mode":"unified","common":"harbour"}}))).await;
     assert_eq!(raced["code"], "duplicate_word", "{raced}");
     assert_eq!(raced["meta"]["word_id"], id.to_string());
-    let (_, hidden) = call(
+    // 别人的空草稿同样报出来（2026-09-08 口径）：此前这里是隐形的，外人只会拿到一个
+    // 不说明理由的 duplicate_word，既不知道谁在建，也无从判断该等谁。
+    let (_, visible) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/detections"),
@@ -23717,19 +23808,24 @@ async fn empty_draft_bugfix_visibility_race_archive_and_resume(pool: PgPool) {
         Some(json!({"schema_version":3,"language":"en","kind":"word","surface":"harbour"})),
     )
     .await;
-    assert!(hidden.get("existing_draft_id").is_none(), "{hidden}");
-    assert_eq!(hidden["matches"], json!([]));
+    assert_eq!(visible["existing_draft_id"], id.to_string(), "{visible}");
+    // 空骨架没有词形行，所以照旧没有 surface 命中可亮——报的是「已有人在建」而非命中。
+    assert_eq!(visible["matches"], json!([]));
     let (_, denied) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries"),
         &other,
         Some(Uuid::now_v7()),
-        Some(json!({"schema_version":3,"detection_id":hidden["detection_id"],"kind":"word"})),
+        Some(json!({"schema_version":3,"detection_id":visible["detection_id"],"kind":"word"})),
     )
     .await;
     assert_eq!(denied["code"], "duplicate_word", "{denied}");
-    assert!(denied["meta"].get("word_id").is_none(), "{denied}");
+    assert_eq!(
+        denied["meta"]["word_id"],
+        id.to_string(),
+        "外人也该拿到词条 ID，点进去是只读的：{denied}"
+    );
     // Same surface in another kind must not expose a word draft.
     let (_, phrase) = call(
         &state,
