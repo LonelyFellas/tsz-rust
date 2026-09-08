@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::net::{IpAddr, Ipv4Addr};
 use std::num::{NonZeroU8, NonZeroU16};
 
 use crate::lexicon::content_completion::LexiconGeneratorConfig;
@@ -110,6 +111,11 @@ impl SmartLexiconV3Flags {
 pub struct Config {
     #[serde(default = "default_port")]
     pub port: NonZeroU16,
+    #[serde(default = "default_bind_ip")]
+    pub bind_ip: IpAddr,
+    /// 部署候选在 loopback 上验收时关闭所有后台 worker，避免隔离窗口内产生业务写入。
+    #[serde(default)]
+    pub deployment_smoke_only: bool,
     pub database_url: String,
     pub jwt_secret: String,
     #[serde(default = "default_refresh_ttl_days")]
@@ -166,6 +172,10 @@ fn default_otp_max_attempts() -> NonZeroU8 {
 }
 fn default_port() -> NonZeroU16 {
     NonZeroU16::new(8383).unwrap()
+}
+
+fn default_bind_ip() -> IpAddr {
+    Ipv4Addr::UNSPECIFIED.into()
 }
 
 fn default_cookie_secure() -> bool {
@@ -257,6 +267,8 @@ mod tests {
         let cfg = parse(&input).expect("必填项齐全应能解析");
         // Assert
         assert_eq!(cfg.port.get(), 8383, "省略 PORT 时应回落到默认端口 8383");
+        assert_eq!(cfg.bind_ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert!(!cfg.deployment_smoke_only);
     }
 
     #[test]
@@ -272,11 +284,17 @@ mod tests {
     #[test]
     fn all_fields_parsed_when_present() {
         let mut input = valid_baseline();
-        input.push(("PORT", "9000"));
+        input.extend([
+            ("PORT", "9000"),
+            ("BIND_IP", "127.0.0.1"),
+            ("DEPLOYMENT_SMOKE_ONLY", "true"),
+        ]);
 
         let cfg = parse(&input).expect("字段齐全应能解析");
 
         assert_eq!(cfg.port.get(), 9000);
+        assert_eq!(cfg.bind_ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(cfg.deployment_smoke_only);
         assert_eq!(cfg.database_url, "postgres://localhost/tsz");
         assert_eq!(cfg.jwt_secret, "s3cret");
         assert_eq!(cfg.redis_url, "redis://localhost:6379/0");
