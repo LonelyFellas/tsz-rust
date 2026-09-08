@@ -1,0 +1,4 @@
+interface:
+  display_name: "Assess tsz-rust"
+  short_description: "评估后端改动并产出带验收命令的 spec"
+  default_prompt: "Use $assess to evaluate the requested tsz-rust backend change and produce a spec."

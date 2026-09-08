@@ -2,10 +2,11 @@
 .env
 .env.local
 .DS_Store
-# .claude 下只跟踪可共享的项目配置(skills/launch.json)；
+# .claude 下只跟踪可共享的项目配置(skills/agents/launch.json)；
 # settings.local.json 是个人本地权限、worktrees 是临时目录，保持忽略。
 .claude/*
 !.claude/skills/
+!.claude/agents/
 !.claude/launch.json
 # Python 缓存(ops/ 下的 unittest 会生成)
 __pycache__/
