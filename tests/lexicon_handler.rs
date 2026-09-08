@@ -13432,11 +13432,7 @@ async fn surface_machinery_shows_other_admins_drafts(pool: PgPool) {
         Some(forms_input),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "确认撞名后词形应能保存：{saved}"
-    );
+    assert_eq!(status, StatusCode::OK, "确认撞名后词形应能保存：{saved}");
 
     // 可见性是双向的：owner 现在也看得到 outsider 的草稿。
     let (status, owner_redetection) = call(
@@ -13608,7 +13604,11 @@ async fn other_admins_drafts_require_acknowledgement_and_then_coexist(pool: PgPo
         Some(forms_input),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "确认后词形应能保存：{outsider_forms}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "确认后词形应能保存：{outsider_forms}"
+    );
     let outsider_meanings =
         complete_v3_meanings_fixture(outsider_forms["word"]["forms"]["pos"][0]["pos_id"].clone());
     let (status, outsider_saved) = call(
@@ -24732,11 +24732,7 @@ async fn draft_writes_are_restricted_to_their_creator_unless_super_admin(pool: P
         })),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "超管应能归档他人的草稿：{response}"
-    );
+    assert_eq!(status, StatusCode::OK, "超管应能归档他人的草稿：{response}");
     assert_eq!(response["word"]["status"], "archived");
 }
 

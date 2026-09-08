@@ -857,11 +857,7 @@ impl LexiconService {
             }
         }
         let v2_publication_contribution = self
-            .v2_restore_publication_surface_contribution(
-                transaction,
-                pending,
-                publication_sources,
-            )
+            .v2_restore_publication_surface_contribution(transaction, pending, publication_sources)
             .await?;
         for mut item in v2_publication_contribution.items {
             if visibility_required

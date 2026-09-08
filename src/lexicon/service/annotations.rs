@@ -251,9 +251,7 @@ impl LexiconService {
         updates: &[EntryAnnotationUpdate],
     ) -> Result<(), LexiconServiceError> {
         let groups = self.annotation_groups_in(tx, actor_id, kind, keys).await?;
-        let mut conflict = self
-            .annotation_conflict_in(tx, groups, None)
-            .await?;
+        let mut conflict = self.annotation_conflict_in(tx, groups, None).await?;
         let submitted = updates
             .iter()
             .map(|update| (update.entry_id, update))
@@ -328,9 +326,7 @@ impl LexiconService {
             let other_groups = self
                 .annotation_groups_in(tx, actor_id, kind, &old_keys)
                 .await?;
-            let other = self
-                .annotation_conflict_in(tx, other_groups, None)
-                .await?;
+            let other = self.annotation_conflict_in(tx, other_groups, None).await?;
             if base_keys(tx, update.entry_id).await? != old_keys {
                 return Err(LexiconServiceError::ReferenceConflict);
             }

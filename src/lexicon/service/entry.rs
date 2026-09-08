@@ -1421,8 +1421,8 @@ impl LexiconService {
             .map_err(repository_error)?;
         let inbound = inbound_relation_previews(
             &LexiconRepository::surface_inbound_relations_in_transaction(tx, &entry_ids)
-            .await
-            .map_err(repository_error)?,
+                .await
+                .map_err(repository_error)?,
         )?;
         matches.extend(relation_surface_matches(&matches, &inbound)?);
         let contexts = surface_contexts_from_records(records, &inbound)?;

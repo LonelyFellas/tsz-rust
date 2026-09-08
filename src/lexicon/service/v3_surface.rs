@@ -534,9 +534,7 @@ impl LexiconService {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let material = self
-            .v3_surface_material_in(tx, &keys, None, true)
-            .await?;
+        let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
         let synthetic = material.synthetic_items()?;
         if synthetic.len() != material.matches.len() {
             return Err(invariant_record());
@@ -630,9 +628,7 @@ impl LexiconService {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let matched_entry_contexts = self
-            .v3_surface_contexts_in(tx, &entry_ids)
-            .await?;
+        let matched_entry_contexts = self.v3_surface_contexts_in(tx, &entry_ids).await?;
         Ok(V3SurfaceSnapshotPageData {
             items: page_items,
             matched_entry_contexts,
@@ -879,9 +875,7 @@ impl LexiconService {
             true,
         )
         .await?;
-        let material = self
-            .v3_surface_material_in(tx, &keys, None, true)
-            .await?;
+        let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
         if material.matches.is_empty() {
             let Some(token) = token else {
                 return Ok(None);
@@ -959,9 +953,7 @@ impl LexiconService {
             true,
         )
         .await?;
-        let material = self
-            .v3_surface_material_in(tx, &keys, None, true)
-            .await?;
+        let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
         if material.matches.is_empty() {
             let Some(token) = token else {
                 return Ok(None);
@@ -2035,9 +2027,7 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?;
         }
-        let contexts = self
-            .v3_surface_contexts_in(tx, &entry_ids)
-            .await?;
+        let contexts = self.v3_surface_contexts_in(tx, &entry_ids).await?;
         Ok(V3SurfaceMaterial { matches, contexts })
     }
 
@@ -2098,9 +2088,7 @@ impl LexiconService {
         if records.len() != entry_ids.len() {
             return Err(invariant_record());
         }
-        let mut relation_summaries = self
-            .v3_inbound_relation_summaries_in(tx, entry_ids)
-            .await?;
+        let mut relation_summaries = self.v3_inbound_relation_summaries_in(tx, entry_ids).await?;
         records
             .into_iter()
             .map(|record| {
@@ -2173,12 +2161,10 @@ impl LexiconService {
         tx: &mut Transaction<'_, Postgres>,
         target_entry_ids: &[Uuid],
     ) -> Result<HashMap<Uuid, RelationReferenceSummaryV3>, LexiconServiceError> {
-        let records = LexiconRepository::surface_inbound_relations_in_transaction(
-            tx,
-            target_entry_ids,
-        )
-        .await
-        .map_err(repository_error)?;
+        let records =
+            LexiconRepository::surface_inbound_relations_in_transaction(tx, target_entry_ids)
+                .await
+                .map_err(repository_error)?;
         let references = inbound_relation_previews(&records)?;
         let source_entry_ids = references
             .iter()
