@@ -58,6 +58,7 @@ impl LexiconService {
         input: PublishAdminWordV2Input,
         allow_v3_targets: bool,
         allow_automatic_associations: bool,
+        is_super_admin: bool,
     ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
         if input.base_revision < 1 {
             return Err(LexiconServiceError::InvalidField {
@@ -107,6 +108,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, actor_id, is_super_admin)?;
         let current_publication_id = record.current_publication_id;
         let current_publication_source_revision = record.current_publication_source_revision;
         let current_published_at = record.current_published_at;
@@ -698,7 +700,6 @@ impl LexiconService {
                 &word.headwords,
                 word.kind,
                 Some(word.id),
-                actor_id,
             )
             .await?;
         for item in &mut headword_matches {
@@ -710,7 +711,7 @@ impl LexiconService {
             }
         }
         let (form_matches, form_contexts) = self
-            .form_surface_matches_in_transaction(transaction, word, actor_id)
+            .form_surface_matches_in_transaction(transaction, word)
             .await?;
 
         let headword_evidence =

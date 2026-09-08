@@ -43,6 +43,7 @@ struct VersionedPublication {
 }
 
 impl LexiconService {
+    #[allow(clippy::too_many_arguments)]
     pub async fn publish_v3(
         &self,
         actor_id: Uuid,
@@ -51,6 +52,7 @@ impl LexiconService {
         idempotency_key: Uuid,
         input: PublishAdminWordV3Input,
         allow_automatic_associations: bool,
+        is_super_admin: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         let request_hash = sha256_json(&serde_json::json!({
             "entry_id": entry_id,
@@ -94,6 +96,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, actor_id, is_super_admin)?;
         ensure_locked_v3_entry(&record, input.base_revision)?;
         if word.revision != record.revision {
             return Err(LexiconServiceError::RevisionConflict {

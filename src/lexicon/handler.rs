@@ -398,6 +398,10 @@ fn map_error(error: LexiconServiceError) -> AppError {
             ErrorCode::EntryDeleteForbidden,
             "entry can only be deleted by its creator",
         ),
+        LexiconServiceError::EntryEditForbidden => AppError::forbidden(
+            ErrorCode::EntryEditForbidden,
+            "an unpublished draft can only be edited by its creator or a super admin",
+        ),
         LexiconServiceError::EntryAnnotationForbidden => AppError::forbidden(
             ErrorCode::EntryAnnotationForbidden,
             "only a super admin may edit annotations on entries created by someone else",

@@ -59,7 +59,7 @@ impl LexiconService {
             meanings: next_meanings,
             ..current.clone()
         };
-        let (matches, contexts) = self.form_surface_matches(&proposed_word, actor_id).await?;
+        let (matches, contexts) = self.form_surface_matches(&proposed_word).await?;
         let forms_content_digest = canonical_forms_digest(&input.content)?;
         let policy = if matches.is_empty() {
             None
@@ -148,6 +148,7 @@ impl LexiconService {
         request_id: Uuid,
         entry_id: Uuid,
         input: SaveFormsStepInput,
+        is_super_admin: bool,
     ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
         if input.base_revision < 1 {
             return Err(LexiconServiceError::InvalidField {
@@ -176,6 +177,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, actor_id, is_super_admin)?;
         let current = entry_from_record(record)?;
         ensure_active(&current)?;
         ensure_revision(&current, input.base_revision)?;
@@ -319,7 +321,7 @@ impl LexiconService {
         // used by every surface writer are held. Preview responses are advisory;
         // this lock-held set decides whether acknowledgement is still sufficient.
         let (current_matches, current_contexts) = self
-            .form_surface_matches_in_transaction(&mut transaction, &word, actor_id)
+            .form_surface_matches_in_transaction(&mut transaction, &word)
             .await?;
         let current_policy =
             if current_matches.is_empty() && confirmed_surface_match_token.is_none() {
@@ -599,6 +601,7 @@ impl LexiconService {
         request_id: Uuid,
         entry_id: Uuid,
         input: SaveMeaningsStepInput,
+        is_super_admin: bool,
     ) -> Result<AdminWordV2Envelope, LexiconServiceError> {
         let SaveMeaningsStepInput {
             base_revision,
@@ -654,6 +657,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, actor_id, is_super_admin)?;
         let current = entry_from_record(record)?;
         ensure_active(&current)?;
         ensure_revision(&current, base_revision)?;
@@ -801,7 +805,6 @@ impl LexiconService {
     async fn form_surface_matches(
         &self,
         word: &AdminWordV2,
-        visible_to: Uuid,
     ) -> Result<(Vec<LexiconSurfaceMatchV2>, Vec<MatchedEntryContextV2>), LexiconServiceError> {
         let candidates = form_surface_candidates(word)?;
         let requested = form_surface_lookup_keys(&candidates);
@@ -811,7 +814,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?;
         let matches = form_surface_matches_from_sources(&candidates, &sources)?;
-        let contexts = self.surface_match_contexts(&matches, visible_to).await?;
+        let contexts = self.surface_match_contexts(&matches).await?;
         Ok((matches, contexts))
     }
 
@@ -819,7 +822,6 @@ impl LexiconService {
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         word: &AdminWordV2,
-        visible_to: Uuid,
     ) -> Result<(Vec<LexiconSurfaceMatchV2>, Vec<MatchedEntryContextV2>), LexiconServiceError> {
         let candidates = form_surface_candidates(word)?;
         let requested = form_surface_lookup_keys(&candidates);
@@ -845,13 +847,10 @@ impl LexiconService {
             LexiconRepository::surface_entry_contexts_in_transaction(transaction, &entry_ids)
                 .await
                 .map_err(repository_error)?;
-        let inbound = LexiconRepository::surface_inbound_relations_in_transaction(
-            transaction,
-            &entry_ids,
-            visible_to,
-        )
-        .await
-        .map_err(repository_error)?;
+        let inbound =
+            LexiconRepository::surface_inbound_relations_in_transaction(transaction, &entry_ids)
+                .await
+                .map_err(repository_error)?;
         Ok((
             matches,
             surface_contexts_from_records(records, &inbound_relation_previews(&inbound)?)?,

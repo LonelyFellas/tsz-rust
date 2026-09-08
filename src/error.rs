@@ -76,6 +76,7 @@ pub enum ErrorCode {
     EntryArchived,
     EntryNotDeletable,
     EntryDeleteForbidden,
+    EntryEditForbidden,
     EntryAnnotationForbidden,
     EntryHasInboundPreboundRelations,
     EntryHasInboundPublicationRefs,
@@ -115,7 +116,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 92] = [
+    pub const ALL: [Self; 93] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -181,6 +182,7 @@ impl ErrorCode {
         Self::EntryArchived,
         Self::EntryNotDeletable,
         Self::EntryDeleteForbidden,
+        Self::EntryEditForbidden,
         Self::EntryAnnotationForbidden,
         Self::EntryHasInboundPreboundRelations,
         Self::EntryHasInboundPublicationRefs,
@@ -491,6 +493,11 @@ impl ErrorCode {
             Self::EntryDeleteForbidden => (
                 "entry_delete_forbidden",
                 "Entry can only be deleted by its creator",
+                StatusCode::FORBIDDEN,
+            ),
+            Self::EntryEditForbidden => (
+                "entry_edit_forbidden",
+                "Unpublished drafts can only be edited by their creator",
                 StatusCode::FORBIDDEN,
             ),
             Self::EntryAnnotationForbidden => (

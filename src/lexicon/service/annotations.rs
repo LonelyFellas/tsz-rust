@@ -217,7 +217,6 @@ impl LexiconService {
     async fn annotation_conflict_in(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        actor_id: Uuid,
         groups: Vec<EntryAnnotationGroup>,
         extra: Option<Uuid>,
     ) -> Result<EntryAnnotationConflict, LexiconServiceError> {
@@ -231,7 +230,7 @@ impl LexiconService {
         LexiconRepository::lock_surface_contexts(tx, &ids)
             .await
             .map_err(repository_error)?;
-        let entries = self.v3_surface_contexts_in(tx, &ids, actor_id).await?;
+        let entries = self.v3_surface_contexts_in(tx, &ids).await?;
         Ok(EntryAnnotationConflict {
             reason: Reason::Required,
             entries,
@@ -252,9 +251,7 @@ impl LexiconService {
         updates: &[EntryAnnotationUpdate],
     ) -> Result<(), LexiconServiceError> {
         let groups = self.annotation_groups_in(tx, actor_id, kind, keys).await?;
-        let mut conflict = self
-            .annotation_conflict_in(tx, actor_id, groups, None)
-            .await?;
+        let mut conflict = self.annotation_conflict_in(tx, groups, None).await?;
         let submitted = updates
             .iter()
             .map(|update| (update.entry_id, update))
@@ -329,9 +326,7 @@ impl LexiconService {
             let other_groups = self
                 .annotation_groups_in(tx, actor_id, kind, &old_keys)
                 .await?;
-            let other = self
-                .annotation_conflict_in(tx, actor_id, other_groups, None)
-                .await?;
+            let other = self.annotation_conflict_in(tx, other_groups, None).await?;
             if base_keys(tx, update.entry_id).await? != old_keys {
                 return Err(LexiconServiceError::ReferenceConflict);
             }
@@ -448,7 +443,7 @@ impl LexiconService {
         }
         groups.retain(|group| group.entry_ids.len() > 1);
         let mut conflict = self
-            .annotation_conflict_in(&mut tx, actor_id, groups, Some(id))
+            .annotation_conflict_in(&mut tx, groups, Some(id))
             .await?;
         if base_keys(&mut tx, id).await? != keys {
             return Err(LexiconServiceError::ReferenceConflict);

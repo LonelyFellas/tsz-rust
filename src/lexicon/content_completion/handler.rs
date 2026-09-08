@@ -28,7 +28,7 @@ use crate::{
         (status = 202, description = "生成任务已持久化并等待执行", body = ContentCompletionJobEnvelope),
         (status = 400, description = "Idempotency-Key 非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision 或幂等键冲突"),
         (status = 422, description = "归档词条、scope 不完整或无词性"),
@@ -55,7 +55,7 @@ pub async fn create_content_completion_job(
     let key = super::super::handler::required_idempotency_key(&headers)
         .map_err(super::super::handler::idempotency_key_error)?;
     let response = ContentCompletionRepository::new(state.pool.clone())
-        .create(admin.id, key, path.id, &input)
+        .create(admin.id, key, path.id, &input, admin.is_super_admin())
         .await
         .map_err(map_error)?;
     Ok((StatusCode::ACCEPTED, Json(response)))
@@ -142,6 +142,10 @@ fn map_error(error: ContentCompletionRepositoryError) -> AppError {
         | ContentCompletionRepositoryError::JobNotFound => AppError::not_found_with_code(
             ErrorCode::WordNotFound,
             "word or completion job not found",
+        ),
+        ContentCompletionRepositoryError::EntryEditForbidden => AppError::forbidden(
+            ErrorCode::EntryEditForbidden,
+            "an unpublished draft can only be edited by its creator or a super admin",
         ),
         ContentCompletionRepositoryError::EntryArchived => AppError::unprocessable(
             ErrorCode::EntryArchived,

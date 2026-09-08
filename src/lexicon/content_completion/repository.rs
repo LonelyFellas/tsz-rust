@@ -21,6 +21,8 @@ pub enum ContentCompletionRepositoryError {
     JobNotFound,
     #[error("word is archived")]
     EntryArchived,
+    #[error("unpublished draft can only be edited by its creator")]
+    EntryEditForbidden,
     #[error("revision conflict")]
     RevisionConflict(i64),
     #[error("idempotency conflict")]
@@ -101,6 +103,7 @@ impl ContentCompletionRepository {
         idempotency_key: Uuid,
         entry_id: Uuid,
         input: &CreateContentCompletionJobInput,
+        is_super_admin: bool,
     ) -> Result<ContentCompletionJobEnvelope, ContentCompletionRepositoryError> {
         let request_hash = sha256_json(&(entry_id, input))
             .map_err(ContentCompletionRepositoryError::Serialization)?;
@@ -126,13 +129,14 @@ impl ContentCompletionRepository {
             return self.get(actor_id, entry_id, existing.0).await;
         }
 
-        let row = sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, String, String, Option<String>, Option<String>, Value, Value)>(
+        let row = sqlx::query_as::<_, (i64, Option<DateTime<Utc>>, String, String, Option<String>, Option<String>, Value, Value, Uuid, Option<Uuid>)>(
             r#"
             SELECT entry.revision, entry.archived_at,
                    entry.headword_mode, COALESCE(entry.source_dialect, ''),
                    (SELECT headword FROM lexicon.entry_headwords WHERE entry_id = entry.id AND dialect = 'common'),
                    (SELECT headword FROM lexicon.entry_headwords WHERE entry_id = entry.id AND dialect = COALESCE(entry.source_dialect, 'common') LIMIT 1),
-                   projection.forms, entry.detection_snapshot
+                   projection.forms, entry.detection_snapshot,
+                   entry.created_by_admin_id, entry.current_publication_id
             FROM lexicon.entries entry
             JOIN lexicon.entry_editor_projection projection ON projection.entry_id = entry.id
             WHERE entry.id = $1
@@ -143,6 +147,10 @@ impl ContentCompletionRepository {
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(ContentCompletionRepositoryError::WordNotFound)?;
+        // 从未发布的草稿只有创建者与超管能写；已发布词条不受限。
+        if row.9.is_none() && !is_super_admin && row.8 != actor_id {
+            return Err(ContentCompletionRepositoryError::EntryEditForbidden);
+        }
         if row.1.is_some() {
             return Err(ContentCompletionRepositoryError::EntryArchived);
         }

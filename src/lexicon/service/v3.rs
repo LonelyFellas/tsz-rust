@@ -1242,8 +1242,10 @@ impl LexiconService {
         let keys = initial_v3_headword_keys(&WordHeadwordsV2::Unified {
             common: normalized.display.clone(),
         })?;
+        // 撞上的空草稿是谁建的都要报出来：管理员据此知道这个词已经有人在建，
+        // 点进去能看（别人的是只读的）。以前只报自己的，撞上别人的就静默建重。
         let existing_draft_id = self
-            .v3_empty_draft_conflict_in(&mut tx, input.kind, &keys, None, Some(actor_id))
+            .v3_empty_draft_conflict_in(&mut tx, input.kind, &keys, None)
             .await?;
         tx.commit().await.map_err(database_error)?;
         let now = Utc::now();
@@ -1637,6 +1639,7 @@ impl LexiconService {
         entry_id: Uuid,
         mut input: SaveFormsStepInputV3,
         write_projection: bool,
+        is_super_admin: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         canonicalize_v3_forms(&mut input.content)?;
         let compatibility_source = self.get_v3(entry_id).await?;
@@ -1662,6 +1665,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, actor_id, is_super_admin)?;
         ensure_v3_record_active(&record)?;
         let entry_kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
         ensure_phrase_component_ownership(entry_kind, &input.content)?;
@@ -1940,6 +1944,7 @@ impl LexiconService {
         request_id: Uuid,
         entry_id: Uuid,
         input: SaveMeaningsStepInputV3,
+        is_super_admin: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         let SaveMeaningsStepInputV3 {
             base_revision,
@@ -1986,6 +1991,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, actor_id, is_super_admin)?;
         ensure_v3_record_active(&record)?;
         if record.revision != base_revision {
             return Err(LexiconServiceError::RevisionConflict {

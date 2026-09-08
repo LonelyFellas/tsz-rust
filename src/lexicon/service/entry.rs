@@ -432,7 +432,7 @@ impl LexiconService {
             candidate_headwords: candidate_headwords.clone(),
         };
         let (matches, contexts) = self
-            .headword_surface_matches(&candidate_headwords, entry_kind, None, actor_id)
+            .headword_surface_matches(&candidate_headwords, entry_kind, None)
             .await?;
         let legacy_keys = normalized_headword_keys(&candidate_headwords)?;
         let legacy = self
@@ -454,7 +454,7 @@ impl LexiconService {
             let inbound = inbound_relation_previews(
                 &self
                     .repository
-                    .surface_inbound_relations(&legacy_entry_ids, actor_id)
+                    .surface_inbound_relations(&legacy_entry_ids)
                     .await
                     .map_err(repository_error)?,
             )?;
@@ -839,7 +839,6 @@ impl LexiconService {
                 &input.headwords,
                 word.kind,
                 None,
-                actor_id,
             )
             .await?;
         let projected_exact_entry_ids = current_matches
@@ -1310,15 +1309,14 @@ struct HeadwordSurfaceCandidate {
 }
 
 impl LexiconService {
-    /// V2 命中机器：sources 候选不按创建者过滤（V2 拍板保持现状，见
-    /// `surface_sources` 的 doc），但入站关系预览与 V3 共用一条已按 `visible_to`
-    /// 过滤的 SQL——V2 响应里「草稿词面可见、草稿关系不可见」的不对称是有意的。
+    /// V2 命中机器：sources 候选与入站关系预览都不按创建者过滤。
+    /// 后者与 V3 共用一条 SQL，2026-09-08 随撞名检测一并放开——此前 V2 响应里
+    /// 「草稿词面可见、草稿关系不可见」的不对称也就消失了。
     async fn headword_surface_matches(
         &self,
         headwords: &WordHeadwordsV2,
         entry_kind: EntryKind,
         excluding_entry_id: Option<Uuid>,
-        visible_to: Uuid,
     ) -> Result<(Vec<LexiconSurfaceMatchV2>, Vec<MatchedEntryContextV2>), LexiconServiceError> {
         let candidates = headword_surface_candidates(headwords, entry_kind)?;
         let requested = candidates
@@ -1348,7 +1346,7 @@ impl LexiconService {
         let inbound = inbound_relation_previews(
             &self
                 .repository
-                .surface_inbound_relations(&entry_ids, visible_to)
+                .surface_inbound_relations(&entry_ids)
                 .await
                 .map_err(repository_error)?,
         )?;
@@ -1365,7 +1363,6 @@ impl LexiconService {
     pub(super) async fn surface_match_contexts(
         &self,
         matches: &[LexiconSurfaceMatchV2],
-        visible_to: Uuid,
     ) -> Result<Vec<MatchedEntryContextV2>, LexiconServiceError> {
         let entry_ids = matched_entry_ids(matches);
         let records = self
@@ -1375,7 +1372,7 @@ impl LexiconService {
             .map_err(repository_error)?;
         let inbound = self
             .repository
-            .surface_inbound_relations(&entry_ids, visible_to)
+            .surface_inbound_relations(&entry_ids)
             .await
             .map_err(repository_error)?;
         surface_contexts_from_records(records, &inbound_relation_previews(&inbound)?)
@@ -1387,7 +1384,6 @@ impl LexiconService {
         headwords: &WordHeadwordsV2,
         entry_kind: EntryKind,
         excluding_entry_id: Option<Uuid>,
-        visible_to: Uuid,
     ) -> Result<(Vec<LexiconSurfaceMatchV2>, Vec<MatchedEntryContextV2>), LexiconServiceError> {
         let candidates = headword_surface_candidates(headwords, entry_kind)?;
         let requested = candidates
@@ -1424,11 +1420,9 @@ impl LexiconService {
             .await
             .map_err(repository_error)?;
         let inbound = inbound_relation_previews(
-            &LexiconRepository::surface_inbound_relations_in_transaction(
-                tx, &entry_ids, visible_to,
-            )
-            .await
-            .map_err(repository_error)?,
+            &LexiconRepository::surface_inbound_relations_in_transaction(tx, &entry_ids)
+                .await
+                .map_err(repository_error)?,
         )?;
         matches.extend(relation_surface_matches(&matches, &inbound)?);
         let contexts = surface_contexts_from_records(records, &inbound)?;

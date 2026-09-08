@@ -77,7 +77,7 @@ pub async fn delete_draft(
         (status = 200, description = "词条已归档且 publication 历史保持不变", body = AdminWordAnyEnvelope),
         (status = 400, description = "路径、header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision、幂等键或当前入站引用冲突"),
         (status = 422, description = "revision 取值非法")
@@ -102,6 +102,7 @@ pub async fn archive(
             key,
             input,
             lifecycle_v3_capabilities_enabled(&state),
+            admin.is_super_admin(),
         )
         .await
         .map_err(map_error)?;
@@ -123,7 +124,7 @@ pub async fn archive(
         (status = 200, description = "词条已恢复且 publication 历史保持不变", body = AdminWordAnyEnvelope),
         (status = 400, description = "路径、header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "词条不存在"),
         (status = 409, description = "revision、surface、policy、visibility 或幂等键冲突"),
         (status = 410, description = "surface 确认 snapshot 已过期"),
@@ -150,6 +151,7 @@ pub async fn restore(
             key,
             input,
             lifecycle_v3_capabilities_enabled(&state),
+            admin.is_super_admin(),
         )
         .await
         .map_err(map_error)?;
@@ -218,7 +220,7 @@ pub async fn delete_batch(
         (status = 200, description = "原子批量归档结果", body = EntryLifecycleBatchResponseAny),
         (status = 400, description = "header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "任一词条不存在"),
         (status = 409, description = "任一 revision、幂等键或当前入站引用冲突"),
         (status = 422, description = "批量为空、重复、超限或 revision 非法")
@@ -246,6 +248,7 @@ pub async fn archive_batch(
             key,
             input,
             lifecycle_v3_capabilities_enabled(&state),
+            admin.is_super_admin(),
         )
         .await
         .map_err(map_error)?;
@@ -267,7 +270,7 @@ pub async fn archive_batch(
         (status = 200, description = "原子批量恢复结果", body = EntryLifecycleBatchResponseAny),
         (status = 400, description = "header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "任一词条不存在"),
         (status = 409, description = "任一 revision、surface、policy、visibility 或幂等键冲突"),
         (status = 410, description = "surface 确认 snapshot 已过期"),
@@ -297,6 +300,7 @@ pub async fn restore_batch(
             key,
             input,
             lifecycle_v3_capabilities_enabled(&state),
+            admin.is_super_admin(),
         )
         .await
         .map_err(map_error)?;

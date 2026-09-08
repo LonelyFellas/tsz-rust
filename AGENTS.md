@@ -1,5 +1,18 @@
 # AGENTS.md
 
+## 工作流（阶段 = 会话）
+
+技能链路 `assess → build → ship`，Bug 走 `bugfix → ship`；部署见下节。
+**每个阶段跑完就切新会话**，交接靠 spec / PR 正文——上下文会一路涨到 800k+，
+成本按会话长度平方增长，且模型表现随上下文填满而下降。
+
+- **评估分档**：一句话能说清 diff 就直接做；单模块内且不动 DTO/迁移/OpenAPI/权限
+  写一份 ≤80 行 `design.md`；契约变更、迁移、鉴权、数据约束或需前端配套才写双文档。
+- **spec 结尾必须是一条能跑的验收命令**（通常是 `cargo test --test <target> <case>`）。
+- **发布顺序是 spec 的必填项**：响应新增字段 → **前端先部署**（前端 V3 runtime validator
+  拒绝未声明字段）；改必填/移除字段/收窄枚举 → **后端先部署**；拿不准写「同批发布」。
+- **调研派只读子代理**（Claude 用 `rust-scout` / `contract-auditor`），主上下文只收结论。
+
 ## 部署
 
 - 用户明确要求把 tsz-rust 后端部署到 tshb-test 时，主 Agent 必须把部署执行委派给项目级

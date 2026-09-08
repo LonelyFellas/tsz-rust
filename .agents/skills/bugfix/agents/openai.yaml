@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bugfix tsz-rust"
+  short_description: "复现并最小修复后端问题，沿原路径回归"
+  default_prompt: "Use $bugfix to reproduce and minimally fix the reported tsz-rust backend issue."

@@ -302,6 +302,7 @@ impl LexiconService {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn archive(
         &self,
         actor_id: Uuid,
@@ -310,6 +311,7 @@ impl LexiconService {
         idempotency_key: Uuid,
         input: EntryLifecycleInput,
         allow_v3: bool,
+        is_super_admin: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         let confirmed_surface_match_token = input.confirmed_surface_match_token.clone();
         let response = self
@@ -322,11 +324,13 @@ impl LexiconService {
                 vec![single_target(entry_id, input)],
                 confirmed_surface_match_token.as_deref(),
                 allow_v3,
+                is_super_admin,
             )
             .await?;
         one_word(response)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn restore(
         &self,
         actor_id: Uuid,
@@ -335,6 +339,7 @@ impl LexiconService {
         idempotency_key: Uuid,
         input: EntryLifecycleInput,
         allow_v3: bool,
+        is_super_admin: bool,
     ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
         let confirmed_surface_match_token = input.confirmed_surface_match_token.clone();
         let response = self
@@ -347,6 +352,7 @@ impl LexiconService {
                 vec![single_target(entry_id, input)],
                 confirmed_surface_match_token.as_deref(),
                 allow_v3,
+                is_super_admin,
             )
             .await?;
         one_word(response)
@@ -359,6 +365,7 @@ impl LexiconService {
         idempotency_key: Uuid,
         input: EntryLifecycleBatchInput,
         allow_v3: bool,
+        is_super_admin: bool,
     ) -> Result<EntryLifecycleBatchResponseAny, LexiconServiceError> {
         let confirmed_surface_match_token = input.confirmed_surface_match_token.clone();
         self.transition_lifecycle(
@@ -370,6 +377,7 @@ impl LexiconService {
             input.entries,
             confirmed_surface_match_token.as_deref(),
             allow_v3,
+            is_super_admin,
         )
         .await
     }
@@ -381,6 +389,7 @@ impl LexiconService {
         idempotency_key: Uuid,
         input: EntryLifecycleBatchInput,
         allow_v3: bool,
+        is_super_admin: bool,
     ) -> Result<EntryLifecycleBatchResponseAny, LexiconServiceError> {
         let confirmed_surface_match_token = input.confirmed_surface_match_token.clone();
         self.transition_lifecycle(
@@ -392,6 +401,7 @@ impl LexiconService {
             input.entries,
             confirmed_surface_match_token.as_deref(),
             allow_v3,
+            is_super_admin,
         )
         .await
     }
@@ -407,6 +417,7 @@ impl LexiconService {
         targets: Vec<EntryLifecycleTarget>,
         confirmed_surface_match_token: Option<&str>,
         allow_v3: bool,
+        is_super_admin: bool,
     ) -> Result<EntryLifecycleBatchResponseAny, LexiconServiceError> {
         validate_targets(&targets)?;
         let request_hash = sha256_json(&serde_json::json!({
@@ -462,6 +473,8 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?
                 .ok_or(LexiconServiceError::WordNotFound)?;
+            // 整批原子：一条越权就拒掉整批，与 delete_draft_batch 同口径。
+            ensure_draft_writable(&record, actor_id, is_super_admin)?;
             ensure_lifecycle_schema_capability(record.content_schema_version, allow_v3)?;
             let current = match record.content_schema_version {
                 2 => AdminWordAny::V2(Box::new(entry_from_record(record)?)),
@@ -758,7 +771,6 @@ impl LexiconService {
                     &word.headwords,
                     word.kind,
                     Some(word.id),
-                    actor_id,
                 )
                 .await?;
             for item in &mut headword_items {
@@ -770,7 +782,7 @@ impl LexiconService {
                 }
             }
             let (form_items, form_contexts) = self
-                .form_surface_matches_in_transaction(transaction, word, actor_id)
+                .form_surface_matches_in_transaction(transaction, word)
                 .await?;
             let headword_evidence =
                 LexiconRepository::headword_surface_acknowledgement(transaction, word.id)
@@ -845,12 +857,7 @@ impl LexiconService {
             }
         }
         let v2_publication_contribution = self
-            .v2_restore_publication_surface_contribution(
-                transaction,
-                pending,
-                publication_sources,
-                actor_id,
-            )
+            .v2_restore_publication_surface_contribution(transaction, pending, publication_sources)
             .await?;
         for mut item in v2_publication_contribution.items {
             if visibility_required
@@ -877,7 +884,7 @@ impl LexiconService {
         }
         let v3_contribution = if contains_v3 {
             Some(
-                self.v3_restore_surface_contribution(transaction, pending, actor_id)
+                self.v3_restore_surface_contribution(transaction, pending)
                     .await?,
             )
         } else {
@@ -907,7 +914,7 @@ impl LexiconService {
         }
         let v3_page_data = if let Some(contribution) = &v3_contribution {
             Some(
-                self.v3_restore_page_data(transaction, &items, &contribution.page_items, actor_id)
+                self.v3_restore_page_data(transaction, &items, &contribution.page_items)
                     .await?,
             )
         } else {
