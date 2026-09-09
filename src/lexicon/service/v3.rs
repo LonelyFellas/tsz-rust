@@ -120,6 +120,9 @@ struct V3AuditNodeDelta {
 
 fn blank_v3_pronunciation() -> WordPronunciationV3 {
     WordPronunciationV3 {
+        dict_phonetic_rich: None,
+        voice_profile: None,
+        audio_assets: Vec::new(),
         id: Uuid::now_v7(),
         dict_phonetic: String::new(),
         actual_pron: String::new(),
@@ -136,6 +139,9 @@ fn suggested_v3_pronunciations(
     values
         .iter()
         .map(|value| WordPronunciationV3 {
+            dict_phonetic_rich: None,
+            voice_profile: None,
+            audio_assets: Vec::new(),
             id: Uuid::now_v7(),
             dict_phonetic: value.dict_phonetic.clone(),
             actual_pron: value.actual_pron.clone().unwrap_or_default(),
@@ -296,6 +302,9 @@ fn cloned_v3_pronunciations(values: &[WordPronunciationV3]) -> Vec<WordPronuncia
     values
         .iter()
         .map(|value| WordPronunciationV3 {
+            dict_phonetic_rich: value.dict_phonetic_rich.clone(),
+            voice_profile: value.voice_profile.clone(),
+            audio_assets: value.audio_assets.clone(),
             id: Uuid::now_v7(),
             dict_phonetic: value.dict_phonetic.clone(),
             actual_pron: value.actual_pron.clone(),
@@ -1686,6 +1695,8 @@ impl LexiconService {
                 current_revision: record.revision,
             });
         }
+        normalize_pronunciation_audio_assets(&mut transaction, entry_id, &mut input.content)
+            .await?;
         let current_forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
         let current_form_pos_ids = current_forms
@@ -1811,7 +1822,8 @@ impl LexiconService {
         // 被删掉的词性连同其变体上的音频一起从草稿里消失，引用行必须跟着重建。
         // 漏了这一步，引用行会永久指向已不存在的内容：资产既不会被回收，
         // 又会被这条词条永久「占用」，别的词条再也挂不上。
-        replace_v3_audio_asset_references(&mut transaction, entry_id, &meanings).await?;
+        replace_v3_audio_asset_references(&mut transaction, entry_id, &input.content, &meanings)
+            .await?;
         replace_v3_forms(&mut transaction, entry_id, &input.content, &catalog_parts).await?;
         let now = Utc::now();
         let updated = sqlx::query(
@@ -2218,7 +2230,8 @@ impl LexiconService {
         .await
         .map_err(repository_error)?;
         replace_v3_sense_component_usages(&mut transaction, entry_id, &canonical_content).await?;
-        replace_v3_audio_asset_references(&mut transaction, entry_id, &canonical_content).await?;
+        replace_v3_audio_asset_references(&mut transaction, entry_id, &forms, &canonical_content)
+            .await?;
         let next_revision = record.revision + 1;
         let now = Utc::now();
         let updated = sqlx::query(
@@ -3092,6 +3105,7 @@ const MAX_VARIANT_AUDIO_ASSETS: usize = 8;
 pub(super) async fn replace_v3_audio_asset_references(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
+    forms: &DraftFormsStepContentV3,
     content: &DraftMeaningsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
     sqlx::query(
@@ -3105,7 +3119,10 @@ pub(super) async fn replace_v3_audio_asset_references(
     // 同一段录音可以挂在多个变体上，但草稿引用每个资产只记一行（回收只问「还有没有人引用」），
     // 所以取首次出现的变体作为排障线索。
     let mut inserted = HashSet::new();
-    for (variant_id, asset_ids) in requested_audio_assets(content) {
+    for (variant_id, asset_ids) in requested_audio_assets(content)
+        .into_iter()
+        .chain(requested_pronunciation_audio_assets(forms))
+    {
         for asset_id in asset_ids {
             if !inserted.insert(asset_id) {
                 continue;
@@ -3145,6 +3162,89 @@ fn requested_audio_assets(content: &DraftMeaningsStepContentV3) -> Vec<(Uuid, Ve
         .collect()
 }
 
+pub(super) fn pronunciation_rows(forms: &DraftFormsStepContentV3) -> Vec<&WordPronunciationV3> {
+    forms
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.forms)
+        .flat_map(|form| match &form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => {
+                common.pronunciations.iter().collect::<Vec<_>>()
+            }
+            WordRegionalVariantsV3::UkUs { uk, us } => {
+                uk.pronunciations.iter().chain(&us.pronunciations).collect()
+            }
+        })
+        .collect()
+}
+
+fn pronunciation_rows_mut(forms: &mut DraftFormsStepContentV3) -> Vec<&mut WordPronunciationV3> {
+    forms
+        .pos
+        .iter_mut()
+        .flat_map(|pos| &mut pos.forms)
+        .flat_map(|form| match &mut form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => {
+                common.pronunciations.iter_mut().collect::<Vec<_>>()
+            }
+            WordRegionalVariantsV3::UkUs { uk, us } => uk
+                .pronunciations
+                .iter_mut()
+                .chain(&mut us.pronunciations)
+                .collect(),
+        })
+        .collect()
+}
+
+pub(super) fn requested_pronunciation_audio_assets(
+    forms: &DraftFormsStepContentV3,
+) -> Vec<(Uuid, Vec<Uuid>)> {
+    pronunciation_rows(forms)
+        .into_iter()
+        .filter(|row| !row.audio_assets.is_empty())
+        .map(|row| {
+            (
+                row.id,
+                row.audio_assets.iter().map(|asset| asset.id).collect(),
+            )
+        })
+        .collect()
+}
+
+async fn normalize_pronunciation_audio_assets(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    forms: &mut DraftFormsStepContentV3,
+) -> Result<(), LexiconServiceError> {
+    let requested = requested_pronunciation_audio_assets(forms);
+    let mut issues = validate_requested_audio_assets(tx, entry_id, &requested).await?;
+    for problem in &mut issues {
+        problem.step = PersistedWordStep::Forms;
+        problem.field = "dict_phonetic".into();
+        if let Some(location) = &mut problem.node_location {
+            location.node_role = "forms.pronunciation".into();
+            location.pronunciation_id = Some(problem.node_id);
+        }
+    }
+    if !issues.is_empty() {
+        return Err(v3_validation_failed(issues));
+    }
+    let canonical = load_audio_asset_metadata(tx, &requested).await?;
+    for row in pronunciation_rows_mut(forms) {
+        row.audio_assets = row
+            .audio_assets
+            .iter()
+            .map(|asset| {
+                canonical
+                    .get(&asset.id)
+                    .cloned()
+                    .ok_or_else(invariant_record)
+            })
+            .collect::<Result<_, _>>()?;
+    }
+    Ok(())
+}
+
 /// 校验草稿引用的音频资产：条数、变体内不重复、资产存在、且没有被别的词条占用。
 /// 跨词条引用必须拦住——回收是按「还有没有人引用」判定的，允许共享会让一次删除
 /// 波及另一条词条的历史发布。
@@ -3153,17 +3253,24 @@ async fn validate_audio_assets(
     entry_id: Uuid,
     content: &DraftMeaningsStepContentV3,
 ) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
-    let requested = requested_audio_assets(content);
+    validate_requested_audio_assets(tx, entry_id, &requested_audio_assets(content)).await
+}
+
+async fn validate_requested_audio_assets(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    requested: &[(Uuid, Vec<Uuid>)],
+) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
     if requested.is_empty() {
         return Ok(Vec::new());
     }
     let mut issues = Vec::new();
-    for (variant_id, asset_ids) in &requested {
+    for (variant_id, asset_ids) in requested {
         if asset_ids.len() > MAX_VARIANT_AUDIO_ASSETS {
             issues.push(audio_asset_issue(
                 *variant_id,
                 &format!(
-                    "a grammar variant may reference at most {MAX_VARIANT_AUDIO_ASSETS} audio assets"
+                    "a pronunciation or grammar variant may reference at most {MAX_VARIANT_AUDIO_ASSETS} audio assets"
                 ),
             ));
         }
@@ -3171,7 +3278,7 @@ async fn validate_audio_assets(
         if asset_ids.iter().any(|id| !seen.insert(*id)) {
             issues.push(audio_asset_issue(
                 *variant_id,
-                "a grammar variant must not reference the same audio asset twice",
+                "a pronunciation or grammar variant must not reference the same audio asset twice",
             ));
         }
     }
@@ -3212,7 +3319,7 @@ async fn validate_audio_assets(
         known.insert(id);
     }
 
-    for (variant_id, asset_ids) in &requested {
+    for (variant_id, asset_ids) in requested {
         for asset_id in asset_ids {
             if !known.contains(asset_id) {
                 issues.push(audio_asset_issue(*variant_id, "audio asset does not exist"));
@@ -3252,6 +3359,34 @@ pub(super) async fn restore_audio_assets(
     if requested.is_empty() {
         return Ok(());
     }
+    let canonical = load_audio_asset_metadata(tx, &requested).await?;
+
+    let by_variant = requested.into_iter().collect::<HashMap<_, _>>();
+    for variant in target
+        .pos
+        .iter_mut()
+        .flat_map(|pos| &mut pos.grammar_structures)
+        .flat_map(|grammar| &mut grammar.variants)
+    {
+        variant.audio_assets = by_variant
+            .get(&variant.id)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| canonical.get(id).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    Ok(())
+}
+
+async fn load_audio_asset_metadata(
+    tx: &mut Transaction<'_, Postgres>,
+    requested: &[(Uuid, Vec<Uuid>)],
+) -> Result<HashMap<Uuid, AudioAsset>, LexiconServiceError> {
+    if requested.is_empty() {
+        return Ok(HashMap::new());
+    }
     let unique_ids = requested
         .iter()
         .flat_map(|(_, ids)| ids.iter().copied())
@@ -3288,23 +3423,7 @@ pub(super) async fn restore_audio_assets(
         );
     }
 
-    let by_variant = requested.into_iter().collect::<HashMap<_, _>>();
-    for variant in target
-        .pos
-        .iter_mut()
-        .flat_map(|pos| &mut pos.grammar_structures)
-        .flat_map(|grammar| &mut grammar.variants)
-    {
-        variant.audio_assets = by_variant
-            .get(&variant.id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| canonical.get(id).cloned())
-                    .collect()
-            })
-            .unwrap_or_default();
-    }
-    Ok(())
+    Ok(canonical)
 }
 
 pub(super) fn source_english_texts(pos: &WordPosMeaningsV3) -> Vec<&EnglishTextV3> {
@@ -5085,6 +5204,9 @@ mod tests {
                     spelling: format!("form-{form_id}"),
                     origin: TextOrigin::Manual,
                     pronunciations: vec![WordPronunciationV3 {
+                        dict_phonetic_rich: None,
+                        voice_profile: None,
+                        audio_assets: Vec::new(),
                         id: pronunciation_id,
                         dict_phonetic: "test".to_owned(),
                         actual_pron: "test".to_owned(),

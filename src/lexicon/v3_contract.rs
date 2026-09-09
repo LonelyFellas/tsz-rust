@@ -999,6 +999,33 @@ fn validate_variant(
                 ));
             }
         }
+        if let Some(rich) = &pronunciation.dict_phonetic_rich {
+            let valid = serde_json::to_value(rich)
+                .ok()
+                .and_then(|value| serde_json::from_value::<RichText>(value).ok())
+                .is_some_and(|value| crate::lexicon::rich_text::is_valid(&value));
+            if rich.text() != pronunciation.dict_phonetic || !valid {
+                issues.push(issue(
+                    V3ValidationIssueCode::PhoneticRichTextInvalid,
+                    "dict_phonetic",
+                    pronunciation.id,
+                    "phonetic rich text must match dict_phonetic and contain valid annotations",
+                    pronunciation_location.clone(),
+                ));
+            }
+        }
+        let mut profile_issues = Vec::new();
+        validate_voice_profile(
+            pronunciation.voice_profile.as_ref(),
+            pronunciation.id,
+            &mut profile_issues,
+        );
+        for mut problem in profile_issues {
+            problem.step = PersistedWordStep::Forms;
+            problem.field = "dict_phonetic".into();
+            problem.node_location = Some(pronunciation_location.clone());
+            issues.push(problem);
+        }
         let complete_row = !pronunciation.dict_phonetic.trim().is_empty()
             && !pronunciation.actual_pron.trim().is_empty()
             && pronunciation.style.is_some();
