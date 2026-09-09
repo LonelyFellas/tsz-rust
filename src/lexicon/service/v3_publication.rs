@@ -6,8 +6,8 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::v3::{
-    restore_audio_assets, restore_sense_component_usages, restore_sentence_zh_translations,
-    restore_voice_profiles,
+    restore_audio_assets, restore_sense_component_usages, restore_sense_group_voice,
+    restore_sentence_zh_translations, restore_voice_profiles,
 };
 use super::*;
 use crate::lexicon::dto::{
@@ -259,6 +259,7 @@ impl LexiconService {
         restore_sense_component_usages(&pristine_meanings, &mut canonical_v3_meanings);
         restore_sentence_zh_translations(&pristine_meanings, &mut canonical_v3_meanings);
         restore_voice_profiles(&pristine_meanings, &mut canonical_v3_meanings);
+        restore_sense_group_voice(&pristine_meanings, &mut canonical_v3_meanings);
 
         restore_audio_assets(&mut tx, &pristine_meanings, &mut canonical_v3_meanings).await?;
         super::text_links::restore(&pristine_meanings, &mut canonical_v3_meanings);

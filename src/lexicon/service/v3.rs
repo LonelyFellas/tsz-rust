@@ -2127,6 +2127,7 @@ impl LexiconService {
         copy_sentence_translations(&translation_content, &mut canonical_content)?;
         restore_sense_component_usages(&translation_content, &mut canonical_content);
         restore_voice_profiles(&translation_content, &mut canonical_content);
+        restore_sense_group_voice(&translation_content, &mut canonical_content);
 
         restore_audio_assets(
             &mut transaction,
@@ -5742,5 +5743,50 @@ mod tests {
         assert_eq!(rows[0].1["generated_node_ids"][0], fixed_id(10).to_string());
         assert_eq!(rows[0].1["changed_node_ids"][0], fixed_id(20).to_string());
         assert_eq!(rows[0].1["retired_node_ids"][0], fixed_id(30).to_string());
+    }
+}
+
+/// V2 中间结构不含语义区间语音字段，按稳定 id 恢复 V3 扩展。
+pub(super) fn restore_sense_group_voice(
+    source: &DraftMeaningsStepContentV3,
+    target: &mut DraftMeaningsStepContentV3,
+) {
+    let by_id: HashMap<_, _> = source
+        .sense_groups
+        .iter()
+        .map(|group| (group.id, group))
+        .collect();
+    for group in &mut target.sense_groups {
+        if let Some(original) = by_id.get(&group.id) {
+            group.name_en_rich = original.name_en_rich.clone();
+            group.voice_profile = original.voice_profile.clone();
+        }
+    }
+}
+
+#[cfg(test)]
+mod sense_group_voice_tests {
+    use super::*;
+    #[test]
+    fn sense_group_voice_survives_v2_bridge_and_legacy_omission() {
+        let legacy = serde_json::json!({"sense_groups":[{"id":Uuid::new_v4(),"name_zh":"工作","name_en":"work"}],"pos":[]});
+        let old: DraftMeaningsStepContentV3 = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&old).unwrap(), legacy);
+        let mut raw = legacy;
+        raw["sense_groups"][0]["name_en_rich"] =
+            serde_json::json!({"version":2,"text":"work","annotations":[]});
+        raw["sense_groups"][0]["voice_profile"] =
+            serde_json::json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]});
+        let source: DraftMeaningsStepContentV3 = serde_json::from_value(raw.clone()).unwrap();
+        let bridge: DraftMeaningsStepContent = serde_json::from_value(raw.clone()).unwrap();
+        let mut target: DraftMeaningsStepContentV3 =
+            serde_json::from_value(serde_json::to_value(bridge).unwrap()).unwrap();
+        restore_sense_group_voice(&source, &mut target);
+        assert_eq!(serde_json::to_value(&target).unwrap(), raw);
+        restore_sense_group_voice(&old, &mut target);
+        assert_eq!(
+            serde_json::to_value(&target).unwrap(),
+            serde_json::to_value(old).unwrap()
+        );
     }
 }

@@ -913,6 +913,12 @@ pub struct SenseGroupV3 {
     pub name_zh: String,
     #[schema(max_length = 200)]
     pub name_en: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub name_en_rich: Option<RichTextV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub voice_profile: Option<VoiceProfileV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
