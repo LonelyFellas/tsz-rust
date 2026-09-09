@@ -234,16 +234,7 @@ pub(super) fn valid_level(value: &str) -> bool {
 }
 
 pub(super) fn valid_form_type(value: &str) -> bool {
-    matches!(
-        value,
-        "present_participle"
-            | "past_tense"
-            | "past_participle"
-            | "third_person_singular"
-            | "plural"
-            | "comparative"
-            | "superlative"
-    )
+    value != "base" && crate::lexicon::form_types::valid_code(value)
 }
 
 pub(super) fn unique_node(

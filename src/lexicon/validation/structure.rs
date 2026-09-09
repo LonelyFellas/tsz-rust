@@ -84,7 +84,6 @@ pub fn validate_forms(
                 "词形与音标方言规则无效",
             );
         }
-        let allowed_form_types = crate::lexicon::form_types::allowed_form_types(&pos.pos);
 
         unique_node(
             &mut issues,
@@ -140,7 +139,7 @@ pub fn validate_forms(
                         "派生词形类型无效",
                     );
                 }
-                if !allowed_form_types.contains(&slot.form_type.as_str()) {
+                if !crate::lexicon::form_types::valid_code(&slot.form_type) {
                     issue(
                         &mut issues,
                         PersistedWordStep::Forms,
@@ -563,9 +562,9 @@ fn identity_issue(
 
 fn role_form_type(role: &str) -> Option<WordFormTypeV2> {
     if role == BASE_FORM_ROLE {
-        return Some(WordFormTypeV2::Base);
+        return Some("base".to_owned());
     }
-    WordFormTypeV2::try_from(role.strip_prefix(FORM_SLOT_ROLE_PREFIX)?).ok()
+    crate::lexicon::form_types::parse_code(role.strip_prefix(FORM_SLOT_ROLE_PREFIX)?).ok()
 }
 
 pub(crate) fn validate_node_limit(

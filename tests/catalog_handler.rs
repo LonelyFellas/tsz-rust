@@ -262,7 +262,7 @@ async fn catalog_read_allows_active_admin_but_management_requires_super_admin(po
     )
     .await;
     assert_eq!(status, StatusCode::OK, "普通管理员应能读 catalog：{body}");
-    assert_eq!(body["catalog_version"], 4);
+    assert_eq!(body["catalog_version"], 5);
     let all_form_types = json!([
         "third_person_singular",
         "present_participle",
@@ -645,7 +645,7 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(catalog["catalog_version"], 10);
+    assert_eq!(catalog["catalog_version"], 11);
     assert!(
         catalog["items"]
             .as_array()
@@ -913,4 +913,131 @@ async fn usage_counts_merge_active_drafts_and_all_publications_before_delete(poo
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(bytes.is_empty());
+}
+
+#[sqlx::test]
+async fn form_type_catalog_crud_permissions_revision_and_base_protection(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let root = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let admin = seed_admin(&pool, AdminRole::Admin, false).await;
+    let bearer = token(&state, root, AdminRole::SuperAdmin);
+    let admin_token = token(&state, admin, AdminRole::Admin);
+    let path = "/api/v1/admin/settings/form-types";
+    let input = json!({"code":"custom_variant","name_zh":"自定义词形","short_name_zh":"自定义","name_en":"Custom variant","abbreviation":"custom","full_name_en":"custom variant","sort_order":100});
+    let (status, _, _, _) = call(
+        &state,
+        Method::POST,
+        path,
+        Some(&admin_token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, created, _) = call(
+        &state,
+        Method::POST,
+        path,
+        Some(&bearer),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let (status, _, duplicate, _) = call(
+        &state,
+        Method::POST,
+        path,
+        Some(&bearer),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(duplicate["code"], "form_type_conflict");
+    let mut update = input.clone();
+    update.as_object_mut().unwrap().remove("code");
+    update["base_revision"] = json!(1);
+    update["name_zh"] = json!("新词形名称");
+    let (status, _, saved, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{id}"),
+        Some(&bearer),
+        Some(update.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["code"], "custom_variant");
+    assert_eq!(saved["revision"], 2);
+    let (status, _, conflict, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{id}"),
+        Some(&bearer),
+        Some(update),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["code"], "revision_conflict");
+    let (status, _, catalog, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/catalog"),
+        Some(&admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        catalog["form_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "custom_variant" && f["name_zh"] == "新词形名称")
+    );
+    assert!(catalog["items"].as_array().unwrap().iter().all(|p| {
+        p["allowed_form_types"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("custom_variant"))
+    }));
+    let base = catalog["form_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "base")
+        .unwrap();
+    let (status, _, blocked, _) = call(
+        &state,
+        Method::DELETE,
+        &format!("{path}/{}?base_revision=1", base["id"].as_str().unwrap()),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(blocked["code"], "form_type_required");
+    let (status, _, _, _) = call(
+        &state,
+        Method::DELETE,
+        &format!("{path}/{id}?base_revision=2"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, _, catalog, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/catalog"),
+        Some(&admin_token),
+        None,
+    )
+    .await;
+    assert!(
+        !catalog["form_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "custom_variant")
+    );
 }

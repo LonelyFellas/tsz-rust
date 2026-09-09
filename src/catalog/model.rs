@@ -164,7 +164,7 @@ pub(crate) struct SubPartChanges {
     pub sort_order: i32,
 }
 
-#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct Actor {
     pub id: String,
     pub display_name: String,
@@ -227,6 +227,7 @@ pub struct SubPartOfSpeechConfig {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogResponse {
+    pub form_types: Vec<super::form_types::FormTypeCatalogItem>,
     pub catalog_version: i64,
     pub items: Vec<CatalogPart>,
 }
@@ -269,6 +270,7 @@ pub type PartListResponse = PaginatedResponse<PartOfSpeechConfig>;
 
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct PartRecord {
+    pub allowed_form_types: Vec<String>,
     pub id: Uuid,
     pub code: String,
     pub name_zh: String,
@@ -290,7 +292,7 @@ pub(crate) struct PartRecord {
 
 impl From<PartRecord> for PartOfSpeechConfig {
     fn from(value: PartRecord) -> Self {
-        let allowed_form_types = crate::lexicon::form_types::catalog_form_types(&value.code);
+        let allowed_form_types = value.allowed_form_types;
         let sub_parts_extensible = crate::catalog::rules::is_basic_part_of_speech(&value.code);
         Self {
             id: value.id,
@@ -369,6 +371,7 @@ fn actor(id: Option<Uuid>, display_name: Option<String>) -> Option<Actor> {
 
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct CatalogFlatRecord {
+    pub form_types: sqlx::types::Json<Vec<super::form_types::FormTypeCatalogItem>>,
     pub catalog_version: i64,
     pub part_id: Option<Uuid>,
     pub part_code: Option<String>,

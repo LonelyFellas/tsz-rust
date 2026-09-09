@@ -715,7 +715,6 @@ fn draft_candidate(record: SentenceDiscoveryDraftRecord) -> DraftSentenceTargetC
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexicon::dto::WordFormTypeV3;
 
     fn selected_input(
         source_dialect: Dialect,
@@ -748,7 +747,7 @@ mod tests {
             matched_form_id: Uuid::now_v7(),
             matched_variant_id: Uuid::now_v7(),
             matched_dialect: Dialect::Uk,
-            matched_form_type: WordFormTypeV3::Base,
+            matched_form_type: "base".to_owned(),
             forms: Vec::new(),
             component_usages: Vec::new(),
             matches: Vec::new(),

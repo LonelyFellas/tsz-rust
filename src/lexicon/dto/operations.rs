@@ -108,6 +108,7 @@ pub enum SurfaceMatchCandidateV2 {
         dialect: Dialect,
         pos_id: Uuid,
         pos: String,
+        #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
         form_type: WordFormTypeV2,
     },
 }
@@ -129,6 +130,7 @@ pub enum ExistingSurfaceSourceV2 {
         dialect: Dialect,
         pos_id: Uuid,
         pos: String,
+        #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
         form_type: WordFormTypeV2,
     },
     /// 命中词条的词面被**另一个**词条引用为关联词。
@@ -152,36 +154,8 @@ pub enum ExistingSurfaceSourceV2 {
 
 /// Closed wire enum for every explicitly persisted form surface. Unlike the
 /// catalog's derived-form capability enum this includes the base slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WordFormTypeV2 {
-    Base,
-    ThirdPersonSingular,
-    PresentParticiple,
-    PastTense,
-    PastParticiple,
-    Plural,
-    Comparative,
-    Superlative,
-}
-
-impl TryFrom<&str> for WordFormTypeV2 {
-    type Error = ();
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "base" => Ok(Self::Base),
-            "third_person_singular" => Ok(Self::ThirdPersonSingular),
-            "present_participle" => Ok(Self::PresentParticiple),
-            "past_tense" => Ok(Self::PastTense),
-            "past_participle" => Ok(Self::PastParticiple),
-            "plural" => Ok(Self::Plural),
-            "comparative" => Ok(Self::Comparative),
-            "superlative" => Ok(Self::Superlative),
-            _ => Err(()),
-        }
-    }
-}
+/// Stable catalog code; membership is validated in the write transaction.
+pub type WordFormTypeV2 = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -707,6 +681,7 @@ pub struct SentenceTargetSenseV3 {
 pub struct SentenceTargetCandidateFormV3 {
     pub form_id: Uuid,
     pub variant_id: Uuid,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: WordFormTypeV3,
     pub spelling: String,
     pub dialect: Dialect,
@@ -738,6 +713,7 @@ pub struct PublishedSentenceTargetCandidateV3 {
     pub matched_form_id: Uuid,
     pub matched_variant_id: Uuid,
     pub matched_dialect: Dialect,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub matched_form_type: WordFormTypeV3,
     /// 该词性下全部词形变体的清单，供改选屈折形之外的词形。
     // 上限取词条的共享节点上限 2000：每个词形与每个地区变体各占一个节点，
@@ -1029,6 +1005,7 @@ pub struct DraftNodeLocation {
     /// 所在词形槽位的类型；`base` 表示共享原形。词形之外的节点省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    #[schema(value_type = Option<String>, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: Option<WordFormTypeV2>,
     /// 方言侧；节点角色不带方言时省略。
     #[serde(skip_serializing_if = "Option::is_none")]
