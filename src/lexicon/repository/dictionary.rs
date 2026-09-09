@@ -356,3 +356,19 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 }
+
+impl LexiconRepository {
+    pub(crate) async fn form_types_for_reference(
+        tx: &mut Transaction<'_, Postgres>,
+        codes: &[String],
+    ) -> Result<Vec<String>, LexiconRepositoryError> {
+        let found = sqlx::query_scalar::<_, String>(
+            "SELECT code FROM catalog.form_types WHERE code = ANY($1) ORDER BY code FOR KEY SHARE",
+        )
+        .bind(codes)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
+        Ok(found)
+    }
+}

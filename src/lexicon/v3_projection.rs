@@ -130,7 +130,7 @@ pub(crate) fn presentation_from_native_forms(
     let mut matched_surfaces = Vec::new();
     for pos in &forms.pos {
         for form in &pos.forms {
-            if form.form_type != WordFormTypeV3::Base {
+            if form.form_type != "base" {
                 continue;
             }
             for (variant_id, spelling) in regional_variant_spellings(&form.regional_variants) {
@@ -213,7 +213,7 @@ pub(crate) fn form_variant_sources(
                         &pos.pos,
                         &group_ids,
                         form.id,
-                        form.form_type,
+                        form.form_type.clone(),
                         common.id,
                         V3SurfaceDialect::Common,
                         &common.spelling,
@@ -229,7 +229,7 @@ pub(crate) fn form_variant_sources(
                         &pos.pos,
                         &group_ids,
                         form.id,
-                        form.form_type,
+                        form.form_type.clone(),
                         uk.id,
                         V3SurfaceDialect::Uk,
                         &uk.spelling,
@@ -243,7 +243,7 @@ pub(crate) fn form_variant_sources(
                         &pos.pos,
                         &group_ids,
                         form.id,
-                        form.form_type,
+                        form.form_type.clone(),
                         us.id,
                         V3SurfaceDialect::Us,
                         &us.spelling,
@@ -303,7 +303,7 @@ fn push_variant_sources(
             group_ids: group_ids.to_vec(),
             form_id,
             variant_id,
-            form_type,
+            form_type: form_type.clone(),
             dialect,
             dialect_scope: *dialect_scope,
             surface: normalized.display.clone(),
@@ -343,7 +343,7 @@ mod tests {
     use crate::lexicon::dto::{
         CommonDialectV3, DialectRulesV3, DraftFormsStepContentV3, LegacyHeadwordsCompatibilityV3,
         SourceDialect, TextOrigin, UkDialectV3, UsDialectV3, WordCommonFormVariantV3,
-        WordConcreteFormV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordPosFormsV3,
+        WordConcreteFormV3, WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3,
         WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
     };
 
@@ -356,7 +356,7 @@ mod tests {
     fn common_form(form_id: Uuid, variant_id: Uuid, spelling: &str) -> WordConcreteFormV3 {
         WordConcreteFormV3 {
             id: form_id,
-            form_type: WordFormTypeV3::Base,
+            form_type: "base".to_owned(),
             regional_variants: WordRegionalVariantsV3::Common {
                 common: WordCommonFormVariantV3 {
                     id: variant_id,
@@ -379,7 +379,7 @@ mod tests {
     ) -> WordConcreteFormV3 {
         WordConcreteFormV3 {
             id: form_id,
-            form_type: WordFormTypeV3::Base,
+            form_type: "base".to_owned(),
             regional_variants: WordRegionalVariantsV3::UkUs {
                 uk: WordUkFormVariantV3 {
                     id: uk_variant_id,
@@ -426,7 +426,7 @@ mod tests {
         let second_form_id = id(2);
         let comparative_form_id = id(3);
         let mut comparative = common_form(comparative_form_id, id(33), "more colourful");
-        comparative.form_type = WordFormTypeV3::Comparative;
+        comparative.form_type = "comparative".to_owned();
         let forms = DraftFormsStepContentV3 {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(10),

@@ -4,3 +4,5 @@ pub mod repository;
 pub mod router;
 pub mod rules;
 pub mod service;
+
+pub mod form_types;

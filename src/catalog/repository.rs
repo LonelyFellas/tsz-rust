@@ -13,7 +13,7 @@ mod commands;
 mod query;
 
 const PART_LIST_SQL: &str = r#"
-    SELECT p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
+    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
            p.sort_order, p.revision,
            p.created_by_admin_id, creator.display_name AS created_by_display_name,
            p.updated_by_admin_id, updater.display_name AS updated_by_display_name,
@@ -62,7 +62,7 @@ const PART_LIST_SQL: &str = r#"
 "#;
 
 const PART_BY_ID_SQL: &str = r#"
-    SELECT p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
+    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
            p.sort_order, p.revision,
            p.created_by_admin_id, creator.display_name AS created_by_display_name,
            p.updated_by_admin_id, updater.display_name AS updated_by_display_name,

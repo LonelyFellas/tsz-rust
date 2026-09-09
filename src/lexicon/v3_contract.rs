@@ -16,7 +16,6 @@ use crate::{
         WordDefinitionV3, WordFormTypeV2, WordFormTypeV3, WordRegionalVariantsV3,
         WordSentenceTranslationV3,
     },
-    lexicon::form_types::allowed_form_types,
     lexicon::validation::MAX_ENTRY_NODES,
     lexicon::{normalization::MAX_HEADWORD_CODEPOINTS, rich_text::MAX_RICH_TEXT_CODEPOINTS},
     speech::{MAX_SPEECH_RATE_PERCENT, MIN_SPEECH_RATE_PERCENT},
@@ -210,10 +209,8 @@ pub(crate) fn validate_forms(
                     ),
                 ));
             }
-            let form_type = form_type_name(form.form_type);
-            if form.form_type != WordFormTypeV3::Base
-                && !allowed_form_types(&pos.pos).contains(&form_type)
-            {
+            let form_type = form_type_name(&form.form_type);
+            if form.form_type != "base" && !crate::lexicon::form_types::valid_code(form_type) {
                 issues.push(issue(
                     V3ValidationIssueCode::InvalidFormTypeForPartOfSpeech,
                     "form_type",
@@ -230,7 +227,7 @@ pub(crate) fn validate_forms(
                     ),
                 ));
             }
-            form_types.insert(form.id, form.form_type);
+            form_types.insert(form.id, form.form_type.clone());
             membership_counts.entry(form.id).or_default();
             validate_form_content(form, pos.pos_id, complete, &mut node_roles, &mut issues);
         }
@@ -256,9 +253,10 @@ pub(crate) fn validate_forms(
             );
             // 一组词形变化描述的是同一个词的一套变化范式，没有原形就无从谈起。
             // 与空组同样只在 complete 时拦：草稿允许边录边补，发布前必须补齐。
-            let group_has_base = group.members.iter().any(|membership| {
-                form_types.get(&membership.form_id) == Some(&WordFormTypeV3::Base)
-            });
+            let group_has_base = group
+                .members
+                .iter()
+                .any(|membership| form_types.get(&membership.form_id) == Some(&"base".to_owned()));
             if complete && group.members.is_empty() {
                 issues.push(issue(
                     V3ValidationIssueCode::EmptyFormGroup,
@@ -1085,7 +1083,7 @@ pub(crate) fn v3_issue(issue: &DraftValidationIssue) -> V3DraftValidationIssue {
             variant_id: location.and_then(|location| location.variant_id),
             pronunciation_id: location.and_then(|location| location.pronunciation_id),
             form_type: location
-                .and_then(|location| location.form_type)
+                .and_then(|location| location.form_type.clone())
                 .map(v3_form_type),
             dialect: location.and_then(|location| location.dialect),
         },
@@ -1096,30 +1094,12 @@ pub(crate) fn v3_issues(issues: &[DraftValidationIssue]) -> Vec<V3DraftValidatio
     issues.iter().map(v3_issue).collect()
 }
 
-const fn v3_form_type(value: WordFormTypeV2) -> WordFormTypeV3 {
-    match value {
-        WordFormTypeV2::Base => WordFormTypeV3::Base,
-        WordFormTypeV2::ThirdPersonSingular => WordFormTypeV3::ThirdPersonSingular,
-        WordFormTypeV2::PresentParticiple => WordFormTypeV3::PresentParticiple,
-        WordFormTypeV2::PastTense => WordFormTypeV3::PastTense,
-        WordFormTypeV2::PastParticiple => WordFormTypeV3::PastParticiple,
-        WordFormTypeV2::Plural => WordFormTypeV3::Plural,
-        WordFormTypeV2::Comparative => WordFormTypeV3::Comparative,
-        WordFormTypeV2::Superlative => WordFormTypeV3::Superlative,
-    }
+fn v3_form_type(value: WordFormTypeV2) -> WordFormTypeV3 {
+    value
 }
 
-const fn form_type_name(value: WordFormTypeV3) -> &'static str {
-    match value {
-        WordFormTypeV3::Base => "base",
-        WordFormTypeV3::ThirdPersonSingular => "third_person_singular",
-        WordFormTypeV3::PresentParticiple => "present_participle",
-        WordFormTypeV3::PastTense => "past_tense",
-        WordFormTypeV3::PastParticiple => "past_participle",
-        WordFormTypeV3::Plural => "plural",
-        WordFormTypeV3::Comparative => "comparative",
-        WordFormTypeV3::Superlative => "superlative",
-    }
+fn form_type_name(value: &str) -> &str {
+    value
 }
 
 fn normalize_pronunciation_text(value: &str) -> String {
@@ -1258,7 +1238,7 @@ fn raw_forms_issues(value: &Value) -> Vec<DraftValidationIssue> {
                     V3ValidationIssueCode::InvalidFormTypeForPartOfSpeech,
                     "form_type",
                     form_id,
-                    "form_type must be a Phase 1 catalog enum value",
+                    "form_type must be a valid catalog code",
                     location_for(form_id, pos_id, None, None, Some(form_id), None, None),
                 ));
             }
@@ -1315,17 +1295,7 @@ fn valid_regional_shape(value: Option<&Value>) -> bool {
 }
 
 fn is_known_form_type(value: &str) -> bool {
-    matches!(
-        value,
-        "base"
-            | "third_person_singular"
-            | "present_participle"
-            | "past_tense"
-            | "past_participle"
-            | "plural"
-            | "comparative"
-            | "superlative"
-    )
+    crate::lexicon::form_types::valid_code(value)
 }
 
 fn collect_forbidden_fields(
@@ -1792,10 +1762,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_form_type_fails_closed_with_a_contract_error() {
+    fn invalid_form_type_code_fails_closed_with_a_contract_error() {
         let mut request = valid_request();
         request["content"]["pos"][0]["pos"] = json!("pronoun");
-        request["content"]["pos"][0]["forms"][0]["form_type"] = json!("future_form_type");
+        request["content"]["pos"][0]["forms"][0]["form_type"] = json!("invalid-code");
         let decoded: Result<SaveFormsStepInputV3, AppError> = decode_v3_forms_request(request);
         assert!(decoded.is_err());
     }
@@ -1956,7 +1926,7 @@ mod tests {
         assert!(decode_v3_forms_request::<SaveFormsStepInputV3>(mixed).is_err());
 
         for (field, value) in [
-            ("form_type", json!("custom_inflection")),
+            ("form_type", json!("invalid-inflection")),
             ("sort_order", json!(1)),
             ("headwords", json!({"mode": "unified", "common": "colour"})),
         ] {

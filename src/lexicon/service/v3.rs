@@ -223,7 +223,7 @@ fn materialize_suggested_v3_form(
     };
     WordConcreteFormV3 {
         id: Uuid::now_v7(),
-        form_type: form.form_type,
+        form_type: form.form_type.clone(),
         regional_variants,
     }
 }
@@ -231,7 +231,7 @@ fn materialize_suggested_v3_form(
 fn blank_v3_base_form() -> WordConcreteFormV3 {
     WordConcreteFormV3 {
         id: Uuid::now_v7(),
-        form_type: WordFormTypeV3::Base,
+        form_type: "base".to_owned(),
         regional_variants: WordRegionalVariantsV3::Common {
             common: WordCommonFormVariantV3 {
                 id: Uuid::now_v7(),
@@ -269,10 +269,7 @@ fn materialize_v3_detection_forms(
                 .iter()
                 .map(|form| materialize_suggested_v3_form(form, dialect_rules))
                 .collect::<Vec<_>>();
-            if !forms
-                .iter()
-                .any(|form| form.form_type == WordFormTypeV3::Base)
-            {
+            if !forms.iter().any(|form| form.form_type == "base") {
                 forms.insert(0, blank_v3_base_form());
             }
             let members = forms
@@ -360,7 +357,7 @@ fn cloned_v3_component_usages(values: &[PhraseComponentUsageV3]) -> Vec<PhraseCo
 fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: &WordHeadwordsV2) {
     for pos in &mut forms.pos {
         let has_suggested_base = pos.forms.iter().any(|form| {
-            form.form_type == WordFormTypeV3::Base
+            form.form_type == "base"
                 && match &form.regional_variants {
                     WordRegionalVariantsV3::Common { common } => !common.spelling.is_empty(),
                     WordRegionalVariantsV3::UkUs { uk, us } => {
@@ -432,7 +429,7 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
             }
         }
         for form in &mut pos.forms {
-            if form.form_type != WordFormTypeV3::Base {
+            if form.form_type != "base" {
                 continue;
             }
             match (headwords, &mut form.regional_variants) {
@@ -489,7 +486,7 @@ fn compatibility_v3_headwords(
         .pos
         .iter()
         .flat_map(|pos| &pos.forms)
-        .filter(|form| form.form_type == WordFormTypeV3::Base)
+        .filter(|form| form.form_type == "base")
     {
         match &form.regional_variants {
             WordRegionalVariantsV3::Common { common } if !common.spelling.trim().is_empty() => {
@@ -1179,6 +1176,14 @@ impl LexiconService {
             };
             let mut suggestions =
                 build_dictionary_suggestions(&term.term, &builtin_suggested_pos, &content);
+            let configured_types =
+                sqlx::query_scalar::<_, String>("SELECT code FROM catalog.form_types")
+                    .fetch_all(self.repository.pool())
+                    .await
+                    .map_err(database_error)?;
+            suggestions
+                .forms
+                .retain(|f| configured_types.contains(&f.form_type));
             let has_dialect_pair = regional_pair.is_some() || !content_pairs.is_empty();
             if let Some((uk, us)) = regional_pair {
                 apply_base_dialect_pair(&mut suggestions.forms, &uk, &us);
@@ -2638,7 +2643,7 @@ async fn validate_phrase_components(
             *target_form_id,
             *target_variant_id,
             *target_dialect,
-            *target_form_type,
+            target_form_type.clone(),
             target_headword,
             target_gloss,
         ) {
@@ -2722,17 +2727,19 @@ fn phrase_component_matches_target(
     if !variant_matches {
         return false;
     }
-    let base_is_valid = pos.forms.iter().any(|candidate| {
-        candidate.id == target_base_form_id && candidate.form_type == WordFormTypeV3::Base
-    }) && (target_form_id == target_base_form_id
-        || pos.form_groups.iter().any(|group| {
-            let ids = group
-                .members
-                .iter()
-                .map(|member| member.form_id)
-                .collect::<HashSet<_>>();
-            ids.contains(&target_form_id) && ids.contains(&target_base_form_id)
-        }));
+    let base_is_valid = pos
+        .forms
+        .iter()
+        .any(|candidate| candidate.id == target_base_form_id && candidate.form_type == "base")
+        && (target_form_id == target_base_form_id
+            || pos.form_groups.iter().any(|group| {
+                let ids = group
+                    .members
+                    .iter()
+                    .map(|member| member.form_id)
+                    .collect::<HashSet<_>>();
+                ids.contains(&target_form_id) && ids.contains(&target_base_form_id)
+            }));
     if !base_is_valid {
         return false;
     }
@@ -3002,7 +3009,7 @@ async fn validate_sense_phrase_components(
                     *target_form_id,
                     *target_variant_id,
                     *target_dialect,
-                    *target_form_type,
+                    target_form_type.clone(),
                     target_headword,
                     target_gloss,
                 ) {
@@ -3614,7 +3621,7 @@ pub(super) async fn replace_v3_sense_component_usages(
                     .bind(target_form_id)
                     .bind(target_variant_id)
                     .bind(crate::lexicon::node_identity::dialect_name(*target_dialect))
-                    .bind(v3_form_type_name(*target_form_type))
+                    .bind(v3_form_type_name(target_form_type))
                     .bind(target_headword)
                     .bind(target_gloss)
                     .execute(&mut **tx)
@@ -4117,6 +4124,35 @@ async fn resolve_v3_catalog_parts(
     tx: &mut Transaction<'_, Postgres>,
     content: &DraftFormsStepContentV3,
 ) -> Result<HashMap<String, Uuid>, LexiconServiceError> {
+    let form_codes = content
+        .pos
+        .iter()
+        .flat_map(|p| p.forms.iter().map(|f| f.form_type.clone()))
+        .collect::<Vec<_>>();
+    let configured = LexiconRepository::form_types_for_reference(tx, &form_codes)
+        .await
+        .map_err(repository_error)?;
+    let mut issues = Vec::new();
+    for pos in &content.pos {
+        for form in &pos.forms {
+            if !configured.contains(&form.form_type) {
+                issues.push(sense_component_issue(
+                    V3ValidationIssueCode::InvalidFormTypeForPartOfSpeech,
+                    form.id,
+                    "form_type",
+                    "词形类型不存在或已删除，请刷新配置",
+                    "forms.concrete_form",
+                    pos.pos_id,
+                    vec![pos.pos_id],
+                ));
+            }
+        }
+    }
+    if !issues.is_empty() {
+        return Err(LexiconServiceError::ValidationFailedV3(
+            crate::lexicon::v3_contract::v3_issues(&issues),
+        ));
+    }
     let codes = content
         .pos
         .iter()
@@ -4296,7 +4332,7 @@ async fn replace_v3_forms(
             .bind(form.id)
             .bind(entry_id)
             .bind(pos.pos_id)
-            .bind(v3_form_type_name(form.form_type))
+            .bind(v3_form_type_name(&form.form_type))
             .bind(form_ordinal as i32)
             .execute(&mut **tx)
             .await
@@ -4505,7 +4541,7 @@ async fn insert_v3_variant(
                 .bind(target_form_id)
                 .bind(target_variant_id)
                 .bind(crate::lexicon::node_identity::dialect_name(*target_dialect))
-                .bind(v3_form_type_name(*target_form_type))
+                .bind(v3_form_type_name(target_form_type))
                 .bind(target_headword)
                 .bind(target_gloss)
                 .execute(&mut **tx)
@@ -4650,17 +4686,8 @@ async fn update_v3_step_progress<T: serde::Serialize>(
     .map_err(database_error)
 }
 
-const fn v3_form_type_name(value: WordFormTypeV3) -> &'static str {
-    match value {
-        WordFormTypeV3::Base => "base",
-        WordFormTypeV3::ThirdPersonSingular => "third_person_singular",
-        WordFormTypeV3::PresentParticiple => "present_participle",
-        WordFormTypeV3::PastTense => "past_tense",
-        WordFormTypeV3::PastParticiple => "past_participle",
-        WordFormTypeV3::Plural => "plural",
-        WordFormTypeV3::Comparative => "comparative",
-        WordFormTypeV3::Superlative => "superlative",
-    }
+fn v3_form_type_name(value: &str) -> &str {
+    value
 }
 
 const fn text_origin_name(value: TextOrigin) -> &'static str {
@@ -4810,7 +4837,7 @@ async fn replace_v3_surface_projection(
         .bind(event_offset)
         .bind(source.pos_id)
         .bind(source.pos)
-        .bind(v3_form_type_name(source.form_type))
+        .bind(v3_form_type_name(&source.form_type))
         .bind(source.form_id)
         .bind(source.variant_id)
         .bind(source.group_ids)
@@ -5196,7 +5223,7 @@ mod tests {
     fn common_form(form_id: Uuid, variant_id: Uuid, pronunciation_id: Uuid) -> WordConcreteFormV3 {
         WordConcreteFormV3 {
             id: form_id,
-            form_type: WordFormTypeV3::Base,
+            form_type: "base".to_owned(),
             regional_variants: WordRegionalVariantsV3::Common {
                 common: WordCommonFormVariantV3 {
                     id: variant_id,

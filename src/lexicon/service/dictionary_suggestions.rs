@@ -21,8 +21,7 @@ pub(super) struct DictionarySuggestionResult {
 
 impl DictionarySuggestionResult {
     pub(super) fn retain_base_only(&mut self, content_pair_is_form_evidence: bool) {
-        self.forms
-            .retain(|form| form.form_type == WordFormTypeV3::Base);
+        self.forms.retain(|form| form.form_type == "base");
         self.has_form_evidence = content_pair_is_form_evidence;
         self.has_pronunciations = self.forms.iter().any(suggestion_has_pronunciations);
     }
@@ -40,9 +39,9 @@ pub(super) fn build_dictionary_suggestions(
             let uk = pronunciations(records, pos, Some(headword), SourceDialect::Uk, true);
             let us = pronunciations(records, pos, Some(headword), SourceDialect::Us, true);
             if !uk.is_empty() && !us.is_empty() {
-                uk_us_form(pos, WordFormTypeV3::Base, headword, headword, uk, us)
+                uk_us_form(pos, "base".to_owned(), headword, headword, uk, us)
             } else {
-                common_form(pos, WordFormTypeV3::Base, headword, common)
+                common_form(pos, "base".to_owned(), headword, common)
             }
         })
         .collect::<Vec<_>>();
@@ -82,7 +81,7 @@ pub(super) fn build_dictionary_suggestions(
                 continue;
             }
             for form_type in mapped_form_types(&tags) {
-                let rank = form_type_rank(form_type);
+                let rank = form_type_rank(&form_type);
                 match dialect {
                     SourceDialect::Common => {
                         let key = (pos.clone(), rank, spelling.to_owned(), "common");
@@ -127,7 +126,7 @@ pub(super) fn build_dictionary_suggestions(
         for (uk, us) in entry.uk.into_iter().zip(entry.us) {
             forms.push(uk_us_form(
                 &entry.pos,
-                entry.form_type,
+                entry.form_type.clone(),
                 &uk,
                 &us,
                 pronunciations(records, &entry.pos, Some(&uk), SourceDialect::Uk, false),
@@ -153,10 +152,7 @@ pub(super) fn apply_base_dialect_pair(
     uk_spelling: &str,
     us_spelling: &str,
 ) {
-    for form in forms
-        .iter_mut()
-        .filter(|form| form.form_type == WordFormTypeV3::Base)
-    {
+    for form in forms.iter_mut().filter(|form| form.form_type == "base") {
         set_base_dialect_pair(form, uk_spelling, us_spelling);
     }
 }
@@ -175,7 +171,7 @@ pub(super) fn apply_content_base_dialect_pairs(
     for pair in pairs {
         for form in forms
             .iter_mut()
-            .filter(|form| form.form_type == WordFormTypeV3::Base && form.pos == pair.pos)
+            .filter(|form| form.form_type == "base" && form.pos == pair.pos)
         {
             set_base_dialect_pair(form, &pair.uk, &pair.us);
         }
@@ -529,25 +525,25 @@ fn mapped_form_types(tags: &BTreeSet<String>) -> Vec<WordFormTypeV3> {
     let mut output = Vec::new();
     let has = |tag: &str| tags.contains(tag);
     if has("present") && has("singular") && has("third-person") {
-        output.push(WordFormTypeV3::ThirdPersonSingular);
+        output.push("third_person_singular".to_owned());
     }
     if has("present") && has("participle") {
-        output.push(WordFormTypeV3::PresentParticiple);
+        output.push("present_participle".to_owned());
     }
     if has("past") && !has("participle") {
-        output.push(WordFormTypeV3::PastTense);
+        output.push("past_tense".to_owned());
     }
     if has("past") && has("participle") {
-        output.push(WordFormTypeV3::PastParticiple);
+        output.push("past_participle".to_owned());
     }
     if has("plural") {
-        output.push(WordFormTypeV3::Plural);
+        output.push("plural".to_owned());
     }
     if has("comparative") {
-        output.push(WordFormTypeV3::Comparative);
+        output.push("comparative".to_owned());
     }
     if has("superlative") {
-        output.push(WordFormTypeV3::Superlative);
+        output.push("superlative".to_owned());
     }
     output
 }
@@ -647,16 +643,17 @@ fn uk_us_form(
     }
 }
 
-const fn form_type_rank(form_type: WordFormTypeV3) -> u8 {
+fn form_type_rank(form_type: &str) -> u8 {
     match form_type {
-        WordFormTypeV3::Base => 0,
-        WordFormTypeV3::ThirdPersonSingular => 1,
-        WordFormTypeV3::PresentParticiple => 2,
-        WordFormTypeV3::PastTense => 3,
-        WordFormTypeV3::PastParticiple => 4,
-        WordFormTypeV3::Plural => 5,
-        WordFormTypeV3::Comparative => 6,
-        WordFormTypeV3::Superlative => 7,
+        "base" => 0,
+        "third_person_singular" => 1,
+        "present_participle" => 2,
+        "past_tense" => 3,
+        "past_participle" => 4,
+        "plural" => 5,
+        "comparative" => 6,
+        "superlative" => 7,
+        _ => 8,
     }
 }
 
@@ -673,7 +670,7 @@ fn suggestion_sort_key(
             .iter()
             .position(|pos| pos == &form.pos)
             .unwrap_or(usize::MAX),
-        form_type_rank(form.form_type),
+        form_type_rank(&form.form_type),
         spelling,
     )
 }
