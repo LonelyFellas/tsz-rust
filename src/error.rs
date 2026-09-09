@@ -17,6 +17,11 @@ pub enum ErrorCode {
     InvalidQuery,
     InvalidPathParameter,
     PayloadTooLarge,
+    InvalidFormType,
+    FormTypeNotFound,
+    FormTypeConflict,
+    FormTypeInUse,
+    FormTypeRequired,
     InvalidPartOfSpeech,
     InvalidHeadword,
     UnsupportedLanguage,
@@ -116,13 +121,18 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 93] = [
+    pub const ALL: [Self; 98] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
         Self::InvalidQuery,
         Self::InvalidPathParameter,
         Self::PayloadTooLarge,
+        Self::InvalidFormType,
+        Self::FormTypeNotFound,
+        Self::FormTypeConflict,
+        Self::FormTypeInUse,
+        Self::FormTypeRequired,
         Self::InvalidPartOfSpeech,
         Self::InvalidHeadword,
         Self::UnsupportedLanguage,
@@ -231,6 +241,27 @@ impl ErrorCode {
                 "payload_too_large",
                 "Payload too large",
                 StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            Self::InvalidFormType => (
+                "invalid_form_type",
+                "Invalid form type",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::FormTypeNotFound => (
+                "form_type_not_found",
+                "Form type not found",
+                StatusCode::NOT_FOUND,
+            ),
+            Self::FormTypeConflict => (
+                "form_type_conflict",
+                "Form type conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::FormTypeInUse => ("form_type_in_use", "Form type in use", StatusCode::CONFLICT),
+            Self::FormTypeRequired => (
+                "form_type_required",
+                "Form type required",
+                StatusCode::CONFLICT,
             ),
             Self::InvalidPartOfSpeech => (
                 "invalid_part_of_speech",

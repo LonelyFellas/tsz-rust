@@ -9,7 +9,7 @@ use super::v3::{
 use super::*;
 use crate::lexicon::dto::{
     DraftMeaningsStepContentV3, PhraseComponentUsageV3, RichTextVariantV3, TextLinkV3,
-    WordDefinitionV3, WordFormTypeV3,
+    WordDefinitionV3,
 };
 use crate::lexicon::v3_contract::english_text_variants;
 
@@ -141,7 +141,7 @@ fn target_gloss(target: &AdminWordV3, link: &TextLinkV3) -> Option<String> {
         || !pos
             .forms
             .iter()
-            .any(|f| f.id == link.target_base_form_id && f.form_type == WordFormTypeV3::Base)
+            .any(|f| f.id == link.target_base_form_id && f.form_type == "base")
     {
         return None;
     }

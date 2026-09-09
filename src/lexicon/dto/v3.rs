@@ -179,19 +179,8 @@ pub enum WordEntryKindV3 {
     Phrase,
 }
 
-/// Phase 1 固定词形目录。`base` 与其余值平级且都允许重复。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WordFormTypeV3 {
-    Base,
-    ThirdPersonSingular,
-    PresentParticiple,
-    PastTense,
-    PastParticiple,
-    Plural,
-    Comparative,
-    Superlative,
-}
+/// Stable catalog code; membership is validated in the write transaction.
+pub type WordFormTypeV3 = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -231,6 +220,7 @@ pub enum PhraseComponentUsageV3 {
         target_form_id: Uuid,
         target_variant_id: Uuid,
         target_dialect: Dialect,
+        #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
         target_form_type: WordFormTypeV3,
         #[schema(max_length = 500)]
         target_headword: String,
@@ -245,6 +235,16 @@ pub struct WordPronunciationV3 {
     pub id: Uuid,
     #[schema(max_length = 200)]
     pub dict_phonetic: String,
+    /// 编辑器正文与 dict_phonetic 保持一致；旧记录不输出扩展字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub dict_phonetic_rich: Option<RichTextV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub voice_profile: Option<VoiceProfileV3>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 8)]
+    pub audio_assets: Vec<AudioAsset>,
     #[schema(max_length = 200)]
     pub actual_pron: String,
     /// Draft 可暂未选择；complete/publish 必须有值。
@@ -328,6 +328,7 @@ pub enum WordRegionalVariantsV3 {
 #[serde(deny_unknown_fields)]
 pub struct WordConcreteFormV3 {
     pub id: Uuid,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: WordFormTypeV3,
     pub regional_variants: WordRegionalVariantsV3,
 }
@@ -455,7 +456,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RichTextSpanV3 {
     pub start: usize,
@@ -464,7 +465,7 @@ pub struct RichTextSpanV3 {
     pub kind: RichTextSpanKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RichTextAnnotationV3 {
     Emphasis {
@@ -508,7 +509,7 @@ pub enum RichTextAnnotationV3 {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RichTextV1V3 {
     #[serde(deserialize_with = "deserialize_rich_text_version_1")]
@@ -522,7 +523,7 @@ pub struct RichTextV1V3 {
     pub liaisons: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RichTextV2V3 {
     #[serde(deserialize_with = "deserialize_rich_text_version_2")]
@@ -534,7 +535,7 @@ pub struct RichTextV2V3 {
     pub annotations: Vec<RichTextAnnotationV3>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum RichTextV3 {
     V1(RichTextV1V3),
@@ -1535,6 +1536,7 @@ pub enum V3ValidationIssueCode {
     PhraseComponentTargetUnavailable,
     PhraseComponentTargetNested,
     PhraseComponentTargetStale,
+    PhoneticRichTextInvalid,
     VoiceProfileInvalid,
     AudioAssetInvalid,
 }
@@ -1613,6 +1615,7 @@ impl V3ValidationIssueCode {
             Self::PhraseComponentTargetUnavailable => "phrase_component_target_unavailable",
             Self::PhraseComponentTargetNested => "phrase_component_target_nested",
             Self::PhraseComponentTargetStale => "phrase_component_target_stale",
+            Self::PhoneticRichTextInvalid => "phonetic_rich_text_invalid",
             Self::VoiceProfileInvalid => "voice_profile_invalid",
             Self::AudioAssetInvalid => "audio_asset_invalid",
         }
@@ -1691,6 +1694,7 @@ impl V3ValidationIssueCode {
             "phrase_component_target_unavailable" => Self::PhraseComponentTargetUnavailable,
             "phrase_component_target_nested" => Self::PhraseComponentTargetNested,
             "phrase_component_target_stale" => Self::PhraseComponentTargetStale,
+            "phonetic_rich_text_invalid" => Self::PhoneticRichTextInvalid,
             "voice_profile_invalid" => Self::VoiceProfileInvalid,
             "audio_asset_invalid" => Self::AudioAssetInvalid,
             _ => return None,
@@ -1723,6 +1727,7 @@ pub struct V3DraftNodeLocation {
     pub pronunciation_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    #[schema(value_type = Option<String>, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: Option<WordFormTypeV3>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -1831,6 +1836,7 @@ pub struct FormSurfaceMatchV3 {
     pub group_ids: Vec<Uuid>,
     pub form_id: Uuid,
     pub variant_id: Uuid,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: WordFormTypeV3,
     pub dialect: Dialect,
     pub spelling: String,
@@ -2166,6 +2172,7 @@ pub enum SuggestedRegionalVariantsV3 {
 pub struct SuggestedConcreteFormV3 {
     /// POS ownership is explicit; no suggested form becomes a unique entry-level headword.
     pub pos: String,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: WordFormTypeV3,
     pub regional_variants: SuggestedRegionalVariantsV3,
 }
@@ -2315,6 +2322,7 @@ pub struct RelatedWordMatchV3 {
     pub pos_id: Uuid,
     pub form_id: Uuid,
     pub variant_id: Uuid,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: WordFormTypeV3,
     pub dialect: Dialect,
     pub spelling: String,
@@ -2470,7 +2478,7 @@ mod tests {
             group_ids: vec![Uuid::now_v7()],
             form_id: Uuid::now_v7(),
             variant_id: Uuid::now_v7(),
-            form_type: WordFormTypeV3::Base,
+            form_type: "base".to_owned(),
             dialect: Dialect::Uk,
             spelling: "colour".to_owned(),
         });

@@ -924,9 +924,10 @@ fn form_surface_candidates(
         let dialect = parse_dialect(source.dialect).ok_or_else(invariant_record)?;
         let pos_id = source.pos_id.ok_or_else(invariant_record)?;
         let pos = source.pos.clone().ok_or_else(invariant_record)?;
-        let form_type =
-            WordFormTypeV2::try_from(source.form_type.as_deref().ok_or_else(invariant_record)?)
-                .map_err(|()| invariant_record())?;
+        let form_type = crate::lexicon::form_types::parse_code(
+            source.form_type.as_deref().ok_or_else(invariant_record)?,
+        )
+        .map_err(|()| invariant_record())?;
         let key = crate::lexicon::model::SurfaceLookupKey {
             dialect_scope: source.dialect_scope.to_owned(),
             normalized_surface: source.normalized_surface.clone(),
@@ -1013,7 +1014,7 @@ fn form_surface_match(
         dialect: candidate.dialect,
         pos_id: candidate.pos_id,
         pos: candidate.pos.clone(),
-        form_type: candidate.form_type,
+        form_type: candidate.form_type.clone(),
     };
     let match_id = crate::platform::hash_token(
         &serde_json::to_string(&serde_json::json!({
@@ -1622,7 +1623,7 @@ mod forms_surface_tests {
             dialect: Dialect::Common,
             pos_id: Uuid::now_v7(),
             pos: "noun".to_owned(),
-            form_type: WordFormTypeV2::Plural,
+            form_type: "plural".to_owned(),
             lookup_keys: vec![],
         }
     }
@@ -1673,9 +1674,9 @@ mod forms_surface_tests {
                 SurfaceMatchCandidateV2::Form {
                     candidate_word_id,
                     candidate_node_id,
-                    form_type: WordFormTypeV2::Plural,
+                    form_type,
                     ..
-                } if candidate_word_id == entry_id && candidate_node_id == node_id
+                } if form_type == "plural" && candidate_word_id == entry_id && candidate_node_id == node_id
             ));
         }
     }

@@ -276,7 +276,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
                 (
                     form.form_id,
                     form.variant_id,
-                    form.form_type,
+                    form.form_type.clone(),
                     form.dialect,
                     form.spelling.as_str(),
                     form.base_form_ids.clone(),
@@ -292,7 +292,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
         (
             first_base_id,
             first_base_variant_id,
-            WordFormTypeV3::Base,
+            "base".to_owned(),
             Dialect::Common,
             "hang",
             vec![first_base_id],
@@ -300,7 +300,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
         (
             second_base_id,
             second_base_variant_id,
-            WordFormTypeV3::Base,
+            "base".to_owned(),
             Dialect::Common,
             "hang",
             vec![second_base_id],
@@ -308,7 +308,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
         (
             matched_form_id,
             matched_variant_id,
-            WordFormTypeV3::PastTense,
+            "past_tense".to_owned(),
             Dialect::Common,
             "hung",
             vec![first_base_id, second_base_id],

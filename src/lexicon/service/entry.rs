@@ -125,17 +125,11 @@ pub(super) fn build_suggested_forms(
                         form_type: "base".to_owned(),
                         variants,
                     },
-                    form_groups: if crate::lexicon::form_types::allowed_form_types(&part.code)
-                        .is_empty()
-                    {
-                        Vec::new()
-                    } else {
-                        vec![WordFormGroupV2 {
-                            id: Uuid::now_v7(),
-                            is_regular: true,
-                            slots: Vec::new(),
-                        }]
-                    },
+                    form_groups: vec![WordFormGroupV2 {
+                        id: Uuid::now_v7(),
+                        is_regular: true,
+                        slots: Vec::new(),
+                    }],
                 }
             })
             .collect(),
@@ -1884,7 +1878,7 @@ pub(super) fn existing_surface_match(
             dialect: existing_dialect,
             pos_id: source.pos_id.ok_or_else(invariant_record)?,
             pos: source.pos.clone().ok_or_else(invariant_record)?,
-            form_type: WordFormTypeV2::try_from(
+            form_type: crate::lexicon::form_types::parse_code(
                 source.form_type.as_deref().ok_or_else(invariant_record)?,
             )
             .map_err(|()| invariant_record())?,
@@ -2241,6 +2235,30 @@ impl LexiconService {
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         forms: &DraftFormsStepContent,
     ) -> Result<CatalogContext, LexiconServiceError> {
+        let form_codes = forms
+            .pos
+            .iter()
+            .flat_map(|p| {
+                std::iter::once(p.base_form.form_type.clone()).chain(
+                    p.form_groups
+                        .iter()
+                        .flat_map(|g| g.slots.iter().map(|s| s.form_type.clone())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let configured_form_codes =
+            LexiconRepository::form_types_for_reference(transaction, &form_codes)
+                .await
+                .map_err(repository_error)?;
+        if !form_codes
+            .iter()
+            .all(|code| configured_form_codes.contains(code))
+        {
+            return Err(LexiconServiceError::InvalidField {
+                field: "form_type",
+                message: "form type is not in the catalog",
+            });
+        }
         let codes = forms
             .pos
             .iter()
@@ -2383,7 +2401,7 @@ mod tests {
         let ExistingSurfaceSourceV2::Form { form_type, .. } = base.existing.source else {
             panic!("base slot must remain a form source");
         };
-        assert_eq!(form_type, WordFormTypeV2::Base);
+        assert_eq!(form_type, "base".to_owned());
         assert_eq!(serde_json::to_value(form_type).unwrap(), "base");
     }
 
