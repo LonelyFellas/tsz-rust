@@ -236,14 +236,21 @@ fn resolve_candidates_preserve_base_and_sense_identity_and_draft_safety() {
         &spec,
         &[
             "entry_id",
-            "publication_id",
             "pos_id",
             "base_form_id",
+            "matched_form_id",
             "matches",
             "senses",
         ],
     );
     assert_required(&spec, base_candidate, &["kind", "forms"]);
+    // component-targets/search 带 include_drafts 时会回从未发布的草稿：候选与词义都没有
+    // publication_id，所以它只能是可选属性，缺省即草稿目标。
+    schema_property(&spec, base_candidate, "publication_id");
+    assert!(
+        !required_fields(base_candidate).contains(&"publication_id"),
+        "candidate publication_id must be optional for draft candidates"
+    );
     assert_eq!(
         schema_property(&spec, base_candidate, "kind").get("enum"),
         Some(&serde_json::json!(["word", "phrase"]))
@@ -302,14 +309,12 @@ fn resolve_candidates_preserve_base_and_sense_identity_and_draft_safety() {
     assert_required(
         &spec,
         sense,
-        &[
-            "sense_id",
-            "publication_id",
-            "pos_id",
-            "base_form_id",
-            "level",
-            "gloss",
-        ],
+        &["sense_id", "pos_id", "base_form_id", "level", "gloss"],
+    );
+    schema_property(&spec, sense, "publication_id");
+    assert!(
+        !required_fields(sense).contains(&"publication_id"),
+        "sense publication_id must be optional for draft candidates"
     );
 
     let draft_candidate = component_by_required(
