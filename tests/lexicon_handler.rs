@@ -22372,6 +22372,579 @@ fn component_match_entry_ids(response: &Value) -> HashSet<String> {
         .collect()
 }
 
+/// 指向从未发布草稿目标的已解析成分：没有 `target_publication_id`。
+fn resolved_draft_component_json(target: &Value, dialect: &str, literal: &str) -> Value {
+    let mut component = resolved_component_json(target, Uuid::nil(), dialect, literal);
+    component
+        .as_object_mut()
+        .unwrap()
+        .remove("target_publication_id");
+    component
+}
+
+/// 由已解析成分改成正文关联：去掉成分独有字段，补上句子区间。
+fn text_link_json(component: &Value, segments: Value) -> Value {
+    let mut link = component.clone();
+    for field in [
+        "state",
+        "literal",
+        "target_dialect",
+        "target_form_type",
+        "target_headword",
+        "target_gloss",
+    ] {
+        link.as_object_mut().unwrap().remove(field);
+    }
+    link["source_segments"] = segments;
+    link
+}
+
+/// 挂在 `owner` 首个词义下的例句，正文带人工关联。
+fn sentence_with_text_links_json(owner: &Value, text: &str, text_links: Value) -> Value {
+    json!({
+        "id": Uuid::now_v7(),
+        "level": "B1",
+        "en_text": {
+            "mode": "unified",
+            "common": {
+                "id": Uuid::now_v7(),
+                "origin": "manual",
+                "value": rich_text(text),
+                "text_links": text_links
+            }
+        },
+        "zh_text_id": Uuid::now_v7(),
+        "zh_text": rich_text("测试译文。"),
+        "links": [{
+            "word_id": owner["word"]["id"],
+            "sense_id": owner["word"]["meanings"]["pos"][0]["senses"][0]["id"],
+            "role": "focus"
+        }]
+    })
+}
+
+/// 从未发布的草稿单词 harbour / harbor，另挂复数 harbours / harbors；词形与词义都已保存。
+async fn create_unpublished_harbour_draft_with_plural(
+    state: &AppState,
+    pool: &PgPool,
+    bearer: &str,
+) -> (Value, Uuid) {
+    let word_created = create_v3_with_complete_forms(state, pool, bearer).await;
+    let entry_id = word_created["word"]["id"].as_str().unwrap().to_owned();
+    let mut forms = word_created["word"]["forms"].clone();
+    let plural_id = Uuid::now_v7();
+    forms["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": plural_id,
+            "form_type": "plural",
+            "regional_variants": {
+                "mode": "uk_us",
+                "uk": {
+                    "id": Uuid::now_v7(),
+                    "dialect": "uk",
+                    "spelling": "harbours",
+                    "origin": "manual",
+                    "pronunciations": [{
+                        "id": Uuid::now_v7(),
+                        "dict_phonetic": "/ˈhɑːbəz/",
+                        "actual_pron": "hɑːbəz",
+                        "style": "normal"
+                    }]
+                },
+                "us": {
+                    "id": Uuid::now_v7(),
+                    "dialect": "us",
+                    "spelling": "harbors",
+                    "origin": "manual",
+                    "pronunciations": [{
+                        "id": Uuid::now_v7(),
+                        "dict_phonetic": "/ˈhɑrbərz/",
+                        "actual_pron": "hɑrbərz",
+                        "style": "normal"
+                    }]
+                }
+            }
+        }));
+    forms["pos"][0]["form_groups"][0]["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": Uuid::now_v7(), "form_id": plural_id}));
+    let (_, forms_saved) = save_v3_forms_after_impact(
+        state,
+        bearer,
+        &entry_id,
+        word_created["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    let saved = save_v3_meanings(
+        state,
+        bearer,
+        &forms_saved,
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone()),
+    )
+    .await;
+    (saved, plural_id)
+}
+
+/// 把响应里的词义搬成可写形状，并去掉正文关联上服务端回填的只读字段（写请求禁止带）。
+fn writable_v3_meanings_with_links(word: &Value) -> Value {
+    let mut meanings = writable_v3_meanings(word);
+    for pos in meanings["pos"].as_array_mut().into_iter().flatten() {
+        for sense in pos["senses"].as_array_mut().into_iter().flatten() {
+            for sentence in sense["sentences"].as_array_mut().into_iter().flatten() {
+                let Some(links) = sentence["en_text"]["common"]["text_links"].as_array_mut() else {
+                    continue;
+                };
+                for link in links {
+                    let link = link.as_object_mut().unwrap();
+                    link.remove("target_headword");
+                    link.remove("target_gloss");
+                }
+            }
+        }
+    }
+    meanings
+}
+
+async fn entry_revision(pool: &PgPool, entry_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id = $1")
+        .bind(entry_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// 来源词条**当前发布版本**里某类出引用的锚点：(目标发布版本, 范围, 目标 revision)。
+async fn current_sense_ref_anchors(
+    pool: &PgPool,
+    source_entry_id: Uuid,
+    reference_kind: &str,
+) -> Vec<(Option<Uuid>, String, i64)> {
+    sqlx::query_as(
+        r#"
+        SELECT sense_ref.target_publication_id, sense_ref.target_content_scope, sense_ref.target_revision
+        FROM lexicon.entry_publication_sense_refs sense_ref
+        JOIN lexicon.entries source ON source.current_publication_id = sense_ref.publication_id
+        WHERE sense_ref.entry_id = $1 AND sense_ref.reference_kind = $2
+        ORDER BY sense_ref.target_sense_id
+        "#,
+    )
+    .bind(source_entry_id)
+    .bind(reference_kind)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn current_publication_snapshot(pool: &PgPool, entry_id: Uuid) -> Value {
+    sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id = $1")
+        .bind(current_publication_id(pool, entry_id).await)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn component_target_search_lists_never_published_drafts_by_exact_surface_when_requested(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    // 草稿由一位管理员创建，另一位来搜：草稿候选不按创建者过滤。
+    let author_bearer = token(&state, seed_admin(&pool).await);
+    let bearer = token(&state, seed_admin(&pool).await);
+    let (draft, plural_id) =
+        create_unpublished_harbour_draft_with_plural(&state, &pool, &author_bearer).await;
+    let draft_entry_id = draft["word"]["id"].as_str().unwrap().to_owned();
+    let (phrase_published, _) =
+        create_published_v3_phrase(&state, &pool, &author_bearer, "harbour club", json!([])).await;
+    let phrase_entry_id = phrase_published["word"]["id"].as_str().unwrap().to_owned();
+
+    // 旧调用方（包含匹配、不含草稿）：只有已发布短语，每条候选照旧带 publication_id。
+    let (status, found) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert_eq!(
+        component_match_entry_ids(&found),
+        HashSet::from([phrase_entry_id.clone()]),
+        "{found}"
+    );
+    assert!(
+        found["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|candidate| candidate["publication_id"].is_string()),
+        "不传 include_drafts 时响应形状不变：{found}"
+    );
+
+    // 等值匹配 + 含草稿：harbour club 不再因包含而命中；他人的草稿单词列出，且没有 publication_id。
+    let (status, exact) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "Harbour", "match": "exact", "include_drafts": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{exact}");
+    assert_eq!(
+        component_match_entry_ids(&exact),
+        HashSet::from([draft_entry_id.clone()]),
+        "{exact}"
+    );
+    assert_eq!(
+        exact["total"].as_u64().unwrap(),
+        exact["matches"].as_array().unwrap().len() as u64,
+        "{exact}"
+    );
+    assert_eq!(exact["truncated"], false);
+    // 夹具有两个原形、英美两侧变体，候选按 (原形 × 命中变体) 展开；每条都是草稿形状。
+    for candidate in exact["matches"].as_array().unwrap() {
+        assert!(
+            candidate.get("publication_id").is_none(),
+            "草稿候选不得带 publication_id：{candidate}"
+        );
+        assert_eq!(candidate["kind"], "word");
+        assert_eq!(candidate["matches"], json!([]));
+        assert_eq!(candidate["matched_form_type"], "base");
+        let senses = candidate["senses"].as_array().unwrap();
+        assert!(
+            !senses.is_empty(),
+            "草稿候选也要带词义供级联第三层：{candidate}"
+        );
+        assert!(
+            senses
+                .iter()
+                .all(|sense| sense.get("publication_id").is_none()),
+            "{candidate}"
+        );
+    }
+
+    // 等值匹配、不含草稿：没有任何已发布词面等于 harbour。
+    let (status, none) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "match": "exact"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{none}");
+    assert_eq!(none["matches"], json!([]));
+    assert_eq!(none["total"], 0);
+
+    // 屈折词形按同一套归一化等值命中原形词条，命中词形是复数。
+    let (status, plural) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbours", "match": "exact", "include_drafts": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{plural}");
+    assert_eq!(
+        component_match_entry_ids(&plural),
+        HashSet::from([draft_entry_id.clone()])
+    );
+    assert!(
+        plural["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|candidate| {
+                candidate["matched_form_id"] == json!(plural_id)
+                    && candidate["matched_form_type"] == "plural"
+            }),
+        "{plural}"
+    );
+
+    // 包含匹配 + 含草稿：两者都在；档位先于状态——等于关键字的草稿排在前缀命中的已发布短语前。
+    let (status, both) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "include_drafts": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{both}");
+    let order = both["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| candidate["entry_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(order.first(), Some(&draft_entry_id), "{both}");
+    assert!(order.contains(&phrase_entry_id), "{both}");
+
+    // 游标绑定匹配方式与是否含草稿：换任一开关即失效。
+    let (status, first) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "include_drafts": true, "page_size": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("多条命中、每页一条应有下一页")
+        .to_owned();
+    for body in [
+        json!({"schema_version": 3, "q": "harbour", "match": "exact", "include_drafts": true, "page_size": 1, "cursor": cursor}),
+        json!({"schema_version": 3, "q": "harbour", "page_size": 1, "cursor": cursor}),
+    ] {
+        let (status, rejected) = search_component_targets(&state, &bearer, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["field"], "cursor", "{rejected}");
+    }
+}
+
+#[sqlx::test]
+async fn text_links_may_target_never_published_drafts_and_upgrade_after_the_target_publishes(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let author_bearer = token(&state, seed_admin(&pool).await);
+    let bearer = token(&state, seed_admin(&pool).await);
+    // 目标：另一位管理员的草稿单词 harbour，从未发布。
+    let target = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &author_bearer,
+        &["The harbour is calm."],
+    )
+    .await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    // 宿主：短语草稿，例句里把 harbour 关联到那份草稿。
+    let host =
+        create_v3_phrase_with_sense_components(&state, &bearer, "harbour side", json!([])).await;
+    let host_entry_id = Uuid::parse_str(host["word"]["id"].as_str().unwrap()).unwrap();
+    let link = text_link_json(
+        &resolved_draft_component_json(&target, "uk", "harbour"),
+        json!([{"start": 2, "end": 9, "surface": "harbour"}]),
+    );
+    let mut meanings = writable_v3_meanings(&host);
+    meanings["pos"][0]["senses"][0]["sentences"] = json!([sentence_with_text_links_json(
+        &host,
+        "A harbour sentence.",
+        json!([link])
+    )]);
+    let saved = save_v3_meanings(&state, &bearer, &host, meanings).await;
+    let sentence = &saved["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0];
+    let saved_link = &sentence["en_text"]["common"]["text_links"][0];
+    assert!(
+        saved_link.get("target_publication_id").is_none(),
+        "草稿目标没有发布版本可填：{saved_link}"
+    );
+    assert_eq!(
+        saved_link["target_headword"],
+        target["word"]["presentation"]["label"]
+    );
+    assert_eq!(
+        saved_link["target_gloss"],
+        target["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"]
+    );
+    let association = sentence["associations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|association| association["origin"] == "manual")
+        .expect("人工关联应投影到 associations");
+    assert_eq!(association["target_word_id"], target["word"]["id"]);
+    assert!(
+        association.get("target_publication_id").is_none(),
+        "{association}"
+    );
+
+    // 宿主照常发布：引用记 draft 范围、锚在目标当时的 entry revision，快照里的关联没有发布版本。
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let target_revision = entry_revision(&pool, target_entry_id).await;
+    assert_eq!(
+        current_sense_ref_anchors(&pool, host_entry_id, "text_link").await,
+        vec![(None, "draft".to_owned(), target_revision)]
+    );
+    let snapshot = current_publication_snapshot(&pool, host_entry_id).await;
+    let snapshot_link = &snapshot["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]
+        ["text_links"][0];
+    assert_eq!(snapshot_link["target_word_id"], target["word"]["id"]);
+    assert!(
+        snapshot_link.get("target_publication_id").is_none(),
+        "{snapshot_link}"
+    );
+
+    // 目标发布后，宿主下一次保存由服务端补上目标当前发布版本，再发布即为 publication 范围。
+    let (status, target_published) = publish_ready_v3(&state, &author_bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_publication = current_publication_id(&pool, target_entry_id).await;
+    let resaved = save_v3_meanings(
+        &state,
+        &bearer,
+        &published,
+        writable_v3_meanings_with_links(&published),
+    )
+    .await;
+    let upgraded = &resaved["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]
+        ["text_links"][0];
+    assert_eq!(
+        upgraded["target_publication_id"],
+        json!(target_publication),
+        "{upgraded}"
+    );
+    let (status, republished) = publish_ready_v3(&state, &bearer, &resaved).await;
+    assert_eq!(status, StatusCode::CREATED, "{republished}");
+    assert_eq!(
+        current_sense_ref_anchors(&pool, host_entry_id, "text_link").await,
+        vec![(
+            Some(target_publication),
+            "publication".to_owned(),
+            target_published["word"]["revision"].as_i64().unwrap()
+        )]
+    );
+}
+
+#[sqlx::test]
+async fn text_links_to_draft_targets_reject_saving_after_the_target_sense_disappears(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let author_bearer = token(&state, seed_admin(&pool).await);
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &author_bearer,
+        &["The harbour is calm."],
+    )
+    .await;
+    let host =
+        create_v3_phrase_with_sense_components(&state, &bearer, "harbour side", json!([])).await;
+    let link = text_link_json(
+        &resolved_draft_component_json(&target, "uk", "harbour"),
+        json!([{"start": 2, "end": 9, "surface": "harbour"}]),
+    );
+    let mut meanings = writable_v3_meanings(&host);
+    meanings["pos"][0]["senses"][0]["sentences"] = json!([sentence_with_text_links_json(
+        &host,
+        "A harbour sentence.",
+        json!([link])
+    )]);
+    let saved = save_v3_meanings(&state, &bearer, &host, meanings).await;
+
+    // 目标作者把整套词义换掉：被关联的词义节点从草稿里移除。
+    let replacement =
+        complete_v3_meanings_fixture(target["word"]["forms"]["pos"][0]["pos_id"].clone());
+    save_v3_meanings(&state, &author_bearer, &target, replacement).await;
+
+    // 宿主再保存：草稿目标里已没有这个词义，422 且 issue 锚在 text_links。
+    let (status, problem) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        saved["word"]["id"].as_str().unwrap(),
+        saved["word"]["revision"].as_i64().unwrap(),
+        writable_v3_meanings_with_links(&saved),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert!(
+        problem["field_issues"]
+            .as_array()
+            .is_some_and(|issues| issues.iter().any(|issue| issue["field"] == "text_links")),
+        "{problem}"
+    );
+}
+
+#[sqlx::test]
+async fn phrase_components_may_target_never_published_drafts_and_upgrade_after_the_target_publishes(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let author_bearer = token(&state, seed_admin(&pool).await);
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &author_bearer,
+        &["The harbour is calm."],
+    )
+    .await;
+    let target_entry_id = Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap();
+    let component = resolved_draft_component_json(&target, "uk", "harbour");
+    let saved =
+        create_v3_phrase_with_sense_components(&state, &bearer, "harbour side", json!([component]))
+            .await;
+    let host_entry_id = Uuid::parse_str(saved["word"]["id"].as_str().unwrap()).unwrap();
+    let usage = &saved["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0];
+    assert_eq!(usage["state"], "resolved", "{usage}");
+    assert_eq!(usage["target_word_id"], target["word"]["id"]);
+    assert!(
+        usage.get("target_publication_id").is_none(),
+        "草稿目标没有发布版本可填：{usage}"
+    );
+
+    // 目标作者改了释义文案：草稿目标是活的，宿主重存不被「文案不一致」拒掉，成分文案由服务端刷新。
+    let mut retitled = writable_v3_meanings(&target);
+    retitled["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("码头");
+    let target = save_v3_meanings(&state, &author_bearer, &target, retitled).await;
+    let refreshed = save_v3_meanings(&state, &bearer, &saved, writable_v3_meanings(&saved)).await;
+    let refreshed_usage =
+        &refreshed["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0];
+    assert_eq!(refreshed_usage["target_gloss"], "码头", "{refreshed_usage}");
+    assert!(
+        refreshed_usage.get("target_publication_id").is_none(),
+        "{refreshed_usage}"
+    );
+
+    let (status, published) = publish_ready_v3(&state, &bearer, &refreshed).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let target_revision = entry_revision(&pool, target_entry_id).await;
+    assert_eq!(
+        current_sense_ref_anchors(&pool, host_entry_id, "phrase_component").await,
+        vec![(None, "draft".to_owned(), target_revision)]
+    );
+
+    let (status, target_published) = publish_ready_v3(&state, &author_bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_publication = current_publication_id(&pool, target_entry_id).await;
+    let resaved = save_v3_meanings(
+        &state,
+        &bearer,
+        &published,
+        writable_v3_meanings_with_links(&published),
+    )
+    .await;
+    assert_eq!(
+        resaved["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0]["target_publication_id"],
+        json!(target_publication),
+        "{resaved}"
+    );
+    let (status, republished) = publish_ready_v3(&state, &bearer, &resaved).await;
+    assert_eq!(status, StatusCode::CREATED, "{republished}");
+    assert_eq!(
+        current_sense_ref_anchors(&pool, host_entry_id, "phrase_component").await,
+        vec![(
+            Some(target_publication),
+            "publication".to_owned(),
+            target_published["word"]["revision"].as_i64().unwrap()
+        )]
+    );
+}
+
 #[sqlx::test]
 async fn component_target_search_recovers_after_missing_generation_is_repaired(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();

@@ -148,6 +148,44 @@ impl LexiconService {
         if !issues.is_empty() {
             return Err(v3_validation_failed(issues));
         }
+        // 成分用词可能指向草稿目标：目标事后可能已发布（这里升级并回填发布版本）、加了短语成分
+        // （套娃）或删了词义。只有存在草稿目标时才重跑：发布快照目标不可变，保存时的结论到发布仍成立。
+        if component_usages_have_draft_targets(&word.forms, &word.meanings) {
+            // 词形步的成分校验对保存路径报 400 InvalidField；发布路径的失败是「目标草稿事后变了」，
+            // 与释义级一样落成 422 issue，前端才能按发布问题处理。
+            match super::v3::validate_phrase_components(
+                &mut tx,
+                entry_id,
+                word.kind,
+                &mut word.forms,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(LexiconServiceError::InvalidField { field, message }) => {
+                    return Err(v3_validation_failed(vec![DraftValidationIssue {
+                        step: PersistedWordStep::Forms,
+                        node_id: entry_id,
+                        field: field.to_owned(),
+                        code: "phrase_component_target_stale".to_owned(),
+                        message: message.to_owned(),
+                        reference_location: None,
+                        node_location: None,
+                    }]));
+                }
+                Err(error) => return Err(error),
+            }
+            let component_issues = super::v3::validate_sense_phrase_components(
+                &mut tx,
+                entry_id,
+                word.kind,
+                &mut word.meanings,
+            )
+            .await?;
+            if !component_issues.is_empty() {
+                return Err(v3_validation_failed(component_issues));
+            }
+        }
 
         let reference_resolution = resolve_meaning_references(
             &mut tx,
@@ -835,12 +873,11 @@ fn publication_forms_for_activation(
 }
 
 /// B1 期间成分双源并存（变体级尚未退场，释义级已上线），两侧都要产出发布引用。
-async fn phrase_component_publication_references(
-    tx: &mut Transaction<'_, Postgres>,
+fn all_component_usages(
     forms: &DraftFormsStepContentV3,
     meanings: &DraftMeaningsStepContentV3,
-) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
-    let components = forms
+) -> Vec<PhraseComponentUsageV3> {
+    forms
         .pos
         .iter()
         .flat_map(|pos| &pos.forms)
@@ -860,7 +897,34 @@ async fn phrase_component_publication_references(
                 .flat_map(|pos| &pos.senses)
                 .flat_map(|sense| sense.component_usages.iter().cloned()),
         )
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn component_usages_have_draft_targets(
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+) -> bool {
+    all_component_usages(forms, meanings)
+        .iter()
+        .any(|component| {
+            matches!(
+                component,
+                PhraseComponentUsageV3::Resolved {
+                    target_publication_id: None,
+                    ..
+                }
+            )
+        })
+}
+
+/// 成分用词的发布引用：目标已发布的记 `publication` 范围（锁住那一版发布），仍是草稿的记
+/// `draft` 范围（锁目标词条行、记当时的 entry revision），与关系词的稳定锚点同款。
+async fn phrase_component_publication_references(
+    tx: &mut Transaction<'_, Postgres>,
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
+    let components = all_component_usages(forms, meanings);
     let mut requested = components
         .iter()
         .filter_map(|component| match component {
@@ -875,15 +939,29 @@ async fn phrase_component_publication_references(
         .collect::<Vec<_>>();
     requested.sort_unstable();
     requested.dedup();
-    let target_entry_ids = requested
+    let published = requested
+        .iter()
+        .filter_map(|(entry_id, publication_id, sense_id)| {
+            publication_id.map(|publication_id| (*entry_id, publication_id, *sense_id))
+        })
+        .collect::<Vec<_>>();
+    let drafts = requested
+        .iter()
+        .filter(|(_, publication_id, _)| publication_id.is_none())
+        .map(|(entry_id, _, sense_id)| SenseTargetKey {
+            target_entry_id: *entry_id,
+            target_sense_id: *sense_id,
+        })
+        .collect::<Vec<_>>();
+    let target_entry_ids = published
         .iter()
         .map(|(entry_id, _, _)| *entry_id)
         .collect::<Vec<_>>();
-    let target_publication_ids = requested
+    let target_publication_ids = published
         .iter()
         .map(|(_, publication_id, _)| *publication_id)
         .collect::<Vec<_>>();
-    let target_sense_ids = requested
+    let target_sense_ids = published
         .iter()
         .map(|(_, _, sense_id)| *sense_id)
         .collect::<Vec<_>>();
@@ -900,7 +978,22 @@ async fn phrase_component_publication_references(
         ((entry_id, publication_id, sense_id), revision)
     })
     .collect::<HashMap<_, _>>();
-    if target_revisions.len() != requested.len() {
+    if target_revisions.len() != published.len() {
+        return Err(LexiconServiceError::ReferenceConflict);
+    }
+    let draft_revisions = LexiconRepository::draft_sense_targets_for_publish(tx, &drafts)
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .filter(|record| !record.target_archived && !record.target_removed)
+        .map(|record| {
+            (
+                (record.target_entry_id, record.target_sense_id),
+                record.target_revision,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if draft_revisions.len() != drafts.len() {
         return Err(LexiconServiceError::ReferenceConflict);
     }
     let mut references = Vec::new();
@@ -915,16 +1008,27 @@ async fn phrase_component_publication_references(
         else {
             continue;
         };
-        let target_revision = *target_revisions
-            .get(&(target_word_id, target_publication_id, target_sense_id))
-            .ok_or(LexiconServiceError::ReferenceConflict)?;
+        let (target_content_scope, target_revision) = match target_publication_id {
+            Some(publication_id) => (
+                PublicationTargetContentScope::Publication,
+                *target_revisions
+                    .get(&(target_word_id, publication_id, target_sense_id))
+                    .ok_or(LexiconServiceError::ReferenceConflict)?,
+            ),
+            None => (
+                PublicationTargetContentScope::Draft,
+                *draft_revisions
+                    .get(&(target_word_id, target_sense_id))
+                    .ok_or(LexiconServiceError::ReferenceConflict)?,
+            ),
+        };
         references.push(NewPublicationSenseReference {
             source_node_id: id,
             reference_kind: PublicationSenseReferenceKind::PhraseComponent,
             target_entry_id: target_word_id,
             target_sense_id,
-            target_publication_id: Some(target_publication_id),
-            target_content_scope: PublicationTargetContentScope::Publication,
+            target_publication_id,
+            target_content_scope,
             target_revision,
         });
     }

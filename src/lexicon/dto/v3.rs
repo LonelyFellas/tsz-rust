@@ -213,7 +213,10 @@ pub enum PhraseComponentUsageV3 {
         #[schema(max_length = 200)]
         literal: String,
         target_word_id: Uuid,
-        target_publication_id: Uuid,
+        /// 缺省 = 目标单词还是从未发布的草稿，语义同 `TextLinkV3.target_publication_id`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        target_publication_id: Option<Uuid>,
         target_pos_id: Uuid,
         target_base_form_id: Uuid,
         target_sense_id: Uuid,
@@ -597,7 +600,10 @@ pub struct RichTextVariantV3 {
 #[serde(deny_unknown_fields)]
 pub struct TextLinkViaPhraseV3 {
     pub word_id: Uuid,
-    pub publication_id: Uuid,
+    /// 缺省 = 该短语还是从未发布的草稿，按其当前草稿内容校验成分。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub publication_id: Option<Uuid>,
     pub sense_id: Uuid,
     pub component_id: Uuid,
 }
@@ -609,7 +615,11 @@ pub struct TextLinkV3 {
     #[schema(min_items = 1, max_items = 20)]
     pub source_segments: Vec<SentenceSourceRangeV1>,
     pub target_word_id: Uuid,
-    pub target_publication_id: Uuid,
+    /// 缺省 = 目标是从未发布的草稿：保存 / 发布时按目标当前草稿内容校验，发布引用记 `draft` 范围；
+    /// 目标发布后，宿主下一次保存 / 发布由服务端补上当前发布版本。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_publication_id: Option<Uuid>,
     pub target_pos_id: Uuid,
     pub target_base_form_id: Uuid,
     pub target_form_id: Uuid,

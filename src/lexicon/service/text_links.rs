@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sqlx::{Postgres, Transaction};
 
 use super::v3::{
-    english_text_variants_mut, load_phrase_component_target, source_english_texts,
-    target_english_texts,
+    ComponentTargetScope, ComponentTargetWord, english_text_variants_mut, resolve_component_target,
+    source_english_texts, target_english_texts,
 };
 use super::*;
 use crate::lexicon::dto::{
@@ -124,7 +124,7 @@ pub(crate) fn valid_ranges(variant: &RichTextVariantV3) -> bool {
     true
 }
 
-fn target_gloss(target: &AdminWordV3, link: &TextLinkV3) -> Option<String> {
+fn target_gloss(target: &ComponentTargetWord, link: &TextLinkV3) -> Option<String> {
     let pos = target
         .forms
         .pos
@@ -176,7 +176,7 @@ fn target_gloss(target: &AdminWordV3, link: &TextLinkV3) -> Option<String> {
     )
 }
 
-fn component_matches(phrase: &AdminWordV3, link: &TextLinkV3) -> bool {
+fn component_matches(phrase: &ComponentTargetWord, link: &TextLinkV3) -> bool {
     let Some(via) = &link.via_phrase else {
         return true;
     };
@@ -199,21 +199,32 @@ fn component_matches(phrase: &AdminWordV3, link: &TextLinkV3) -> bool {
         })
 }
 
+/// 同一目标（词条 + 发布版本）上的全部链接：升级判定要看整组，一组只取一次目标。
+#[derive(Default)]
+struct TargetGroup {
+    /// 报错时锚定的正文变体：取组里第一条链接所在的变体。
+    variant_id: Uuid,
+    /// 直接指向该目标的链接。
+    direct: Vec<TextLinkV3>,
+    /// 经该短语成分转关联的链接（目标是短语）。
+    via: Vec<TextLinkV3>,
+}
+
 /// 关联保存在正文变体的 V3 投影/发布快照，引用保护复用 publication_sense_refs。
+/// 目标可以是发布快照，也可以是从未发布的草稿（`target_publication_id` 缺省）：草稿目标发布后
+/// 在这里升级并回填发布版本；仍是草稿的记 `draft` 范围引用，与关系词的稳定锚点同款。
 pub(super) async fn validate_targets(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     content: &mut DraftMeaningsStepContentV3,
 ) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
-    let mut references = Vec::new();
-    let mut seen_refs = HashMap::new();
-    let mut targets = HashMap::new();
     let mut link_ids = HashSet::new();
+    let mut groups = BTreeMap::<(Uuid, Option<Uuid>), TargetGroup>::new();
     for variant in content
         .pos
-        .iter_mut()
-        .flat_map(target_english_texts)
-        .flat_map(english_text_variants_mut)
+        .iter()
+        .flat_map(source_english_texts)
+        .flat_map(english_text_variants)
     {
         if !valid_ranges(variant) {
             return Err(invalid(
@@ -221,7 +232,7 @@ pub(super) async fn validate_targets(
                 "关联词段无效、重叠或超过上限，请重新选择",
             ));
         }
-        for link in &mut variant.text_links {
+        for link in &variant.text_links {
             if !link_ids.insert(link.id) {
                 return Err(invalid(variant.id, "关联标识重复，请重新选择"));
             }
@@ -233,23 +244,68 @@ pub(super) async fn validate_targets(
             {
                 return Err(invalid(variant.id, "不能关联当前正在编辑的词条"));
             }
-            let mut requested = vec![(
-                link.target_word_id,
-                link.target_publication_id,
-                link.target_sense_id,
-            )];
+            let group = groups
+                .entry((link.target_word_id, link.target_publication_id))
+                .or_insert_with(|| TargetGroup {
+                    variant_id: variant.id,
+                    ..TargetGroup::default()
+                });
+            group.direct.push(link.clone());
             if let Some(via) = &link.via_phrase {
-                requested.push((via.word_id, via.publication_id, via.sense_id));
+                groups
+                    .entry((via.word_id, via.publication_id))
+                    .or_insert_with(|| TargetGroup {
+                        variant_id: variant.id,
+                        ..TargetGroup::default()
+                    })
+                    .via
+                    .push(link.clone());
             }
-            for (word_id, publication_id, sense_id) in requested {
-                let key = (word_id, publication_id);
-                if let std::collections::hash_map::Entry::Vacant(entry) = targets.entry(key) {
-                    let target = load_phrase_component_target(tx, word_id, publication_id)
-                        .await?
-                        .ok_or_else(|| invalid(variant.id, "关联目标已不可用，请重新选择"))?;
-                    entry.insert(target);
+        }
+    }
+    let mut targets = HashMap::<(Uuid, Option<Uuid>), ComponentTargetWord>::new();
+    for (key, group) in &groups {
+        let target = resolve_component_target(tx, key.0, key.1, |candidate| {
+            group
+                .direct
+                .iter()
+                .all(|link| target_gloss(candidate, link).is_some())
+                && group
+                    .via
+                    .iter()
+                    .all(|link| component_matches(candidate, link))
+        })
+        .await?
+        .ok_or_else(|| invalid(group.variant_id, "关联目标已不可用，请重新选择"))?;
+        targets.insert(*key, target);
+    }
+
+    let mut references = Vec::new();
+    let mut seen_refs = HashMap::new();
+    for variant in content
+        .pos
+        .iter_mut()
+        .flat_map(target_english_texts)
+        .flat_map(english_text_variants_mut)
+    {
+        for link in &mut variant.text_links {
+            let target = &targets[&(link.target_word_id, link.target_publication_id)];
+            // 草稿目标已发布：回填发布版本，之后与发布目标无异。
+            if link.target_publication_id.is_none() {
+                link.target_publication_id = target.publication_id();
+            }
+            let mut requested = vec![(link.target_word_id, target, link.target_sense_id)];
+            let mut phrase = None;
+            if let Some(via) = &mut link.via_phrase {
+                let phrase_target = &targets[&(via.word_id, via.publication_id)];
+                if via.publication_id.is_none() {
+                    via.publication_id = phrase_target.publication_id();
                 }
-                let target = &targets[&key];
+                requested.push((via.word_id, phrase_target, via.sense_id));
+                phrase = Some(phrase_target);
+            }
+            for (word_id, target, sense_id) in requested {
+                let publication_id = target.publication_id();
                 let reference_key = (variant.id, word_id, sense_id);
                 if let Some(previous) = seen_refs.insert(reference_key, publication_id) {
                     if previous != publication_id {
@@ -259,36 +315,63 @@ pub(super) async fn validate_targets(
                         ));
                     }
                 } else {
+                    let (target_content_scope, target_revision) = match target.scope {
+                        ComponentTargetScope::Publication { revision, .. } => {
+                            (PublicationTargetContentScope::Publication, revision)
+                        }
+                        ComponentTargetScope::Draft { revision } => {
+                            (PublicationTargetContentScope::Draft, revision)
+                        }
+                    };
                     references.push(NewPublicationSenseReference {
                         source_node_id: variant.id,
                         reference_kind: PublicationSenseReferenceKind::TextLink,
                         target_entry_id: word_id,
                         target_sense_id: sense_id,
-                        target_publication_id: Some(publication_id),
-                        target_content_scope: PublicationTargetContentScope::Publication,
-                        target_revision: target.revision,
+                        target_publication_id: publication_id,
+                        target_content_scope,
+                        target_revision,
                     });
                 }
             }
-            let target = &targets[&(link.target_word_id, link.target_publication_id)];
             let gloss = target_gloss(target, link).ok_or_else(|| {
-                invalid(variant.id, "关联词形与词义不属于所选发布版本，请重新选择")
+                invalid(variant.id, "关联的词形或词义已不在目标词条里，请重新选择")
             })?;
-            if let Some(via) = &link.via_phrase
-                && !component_matches(&targets[&(via.word_id, via.publication_id)], link)
+            if let Some(phrase) = phrase
+                && !component_matches(phrase, link)
             {
                 return Err(invalid(variant.id, "短语成分与关联目标不一致，请重新选择"));
             }
-            link.target_headword = Some(target.presentation.label.clone());
+            link.target_headword = Some(target.label.clone());
             link.target_gloss = Some(gloss);
         }
     }
-    let entries: Vec<_> = references.iter().map(|r| r.target_entry_id).collect();
-    let publications: Vec<_> = references
+
+    // 发布范围：锁那一版发布并取 source_revision；草稿范围：锁目标词条行并取 entry revision。
+    let published = references
         .iter()
-        .map(|r| r.target_publication_id.unwrap())
-        .collect();
-    let senses: Vec<_> = references.iter().map(|r| r.target_sense_id).collect();
+        .filter_map(|reference| {
+            reference.target_publication_id.map(|publication_id| {
+                (
+                    reference.target_entry_id,
+                    publication_id,
+                    reference.target_sense_id,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let entries = published
+        .iter()
+        .map(|(entry, _, _)| *entry)
+        .collect::<Vec<_>>();
+    let publications = published
+        .iter()
+        .map(|(_, publication, _)| *publication)
+        .collect::<Vec<_>>();
+    let senses = published
+        .iter()
+        .map(|(_, _, sense)| *sense)
+        .collect::<Vec<_>>();
     let verified = LexiconRepository::phrase_component_publication_targets_for_publish(
         tx,
         &entries,
@@ -297,19 +380,44 @@ pub(super) async fn validate_targets(
     )
     .await
     .map_err(repository_error)?;
-    if verified.len() != references.len() {
+    if verified.len() != published.len() {
         return Err(LexiconServiceError::ReferenceConflict);
     }
     let revisions: HashMap<_, _> = verified
         .into_iter()
-        .map(|(entry, publication, sense, revision)| ((entry, publication, sense), revision))
+        .map(|(entry, publication, sense, revision)| ((entry, Some(publication), sense), revision))
         .collect();
+    let draft_keys = references
+        .iter()
+        .filter(|reference| reference.target_publication_id.is_none())
+        .map(|reference| crate::lexicon::model::SenseTargetKey {
+            target_entry_id: reference.target_entry_id,
+            target_sense_id: reference.target_sense_id,
+        })
+        .collect::<Vec<_>>();
+    let draft_revisions = LexiconRepository::draft_sense_targets_for_publish(tx, &draft_keys)
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .filter(|record| !record.target_archived && !record.target_removed)
+        .map(|record| {
+            (
+                (record.target_entry_id, None, record.target_sense_id),
+                record.target_revision,
+            )
+        })
+        .collect::<HashMap<_, _>>();
     for reference in &mut references {
-        reference.target_revision = revisions[&(
+        let key = (
             reference.target_entry_id,
-            reference.target_publication_id.unwrap(),
+            reference.target_publication_id,
             reference.target_sense_id,
-        )];
+        );
+        reference.target_revision = revisions
+            .get(&key)
+            .or_else(|| draft_revisions.get(&key))
+            .copied()
+            .ok_or_else(|| invalid(reference.source_node_id, "关联目标已不可用，请重新选择"))?;
     }
     Ok(references)
 }
@@ -367,7 +475,7 @@ pub(super) fn apply_manual(meanings: &mut DraftMeaningsStepContentV3) {
                         target_word_id: link.target_word_id,
                         target_sense_id: link.target_sense_id,
                         target_form_slot_id: Some(link.target_form_id),
-                        target_publication_id: Some(link.target_publication_id),
+                        target_publication_id: link.target_publication_id,
                         target_form_variant_id: Some(link.target_variant_id),
                         target_component_usages: vec![],
                         origin: SentenceAssociationOriginV2::Manual,

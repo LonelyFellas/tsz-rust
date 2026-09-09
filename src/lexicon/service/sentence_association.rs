@@ -1,5 +1,6 @@
 use super::*;
 
+use super::v3::ComponentTargetWord;
 use crate::lexicon::{
     dto::{
         DialectVariantRichTextSlotV3, DraftMeaningsStepContentV3, EnglishTextV3,
@@ -544,12 +545,34 @@ impl PublishedAssociationTarget {
     }
 
     fn from_v3(word: AdminWordV3) -> Result<Self, LexiconServiceError> {
+        Self::from_v3_parts(
+            word.id,
+            word.kind,
+            word.presentation.label,
+            &word.forms,
+            &word.meanings,
+        )
+    }
+
+    /// 从未发布的草稿目标：内容来自草稿投影，没有发布版本。
+    pub(super) fn from_component_target(
+        word: ComponentTargetWord,
+    ) -> Result<Self, LexiconServiceError> {
+        Self::from_v3_parts(word.id, word.kind, word.label, &word.forms, &word.meanings)
+    }
+
+    fn from_v3_parts(
+        id: Uuid,
+        kind: WordEntryKindV3,
+        label: String,
+        forms_content: &crate::lexicon::dto::DraftFormsStepContentV3,
+        meanings_content: &DraftMeaningsStepContentV3,
+    ) -> Result<Self, LexiconServiceError> {
         let meanings: DraftMeaningsStepContent = serde_json::from_value(
-            serde_json::to_value(&word.meanings).map_err(serialization_error)?,
+            serde_json::to_value(meanings_content).map_err(serialization_error)?,
         )
         .map_err(serialization_error)?;
-        let pos = word
-            .forms
+        let pos = forms_content
             .pos
             .iter()
             .map(|forms| PublishedAssociationPos {
@@ -597,17 +620,17 @@ impl PublishedAssociationTarget {
                         }
                     })
                     .collect(),
-                senses: association_senses_v3(&word.meanings, &meanings, forms.pos_id),
+                senses: association_senses_v3(meanings_content, &meanings, forms.pos_id),
             })
             .collect();
         Ok(Self {
             schema_version: 3,
-            id: word.id,
-            kind: match word.kind {
+            id,
+            kind: match kind {
                 WordEntryKindV3::Word => EntryKind::Word,
                 WordEntryKindV3::Phrase => EntryKind::Phrase,
             },
-            headword: word.presentation.label,
+            headword: label,
             pos,
         })
     }
@@ -633,7 +656,8 @@ impl PublishedAssociationTarget {
 
     pub(super) fn sentence_discovery_candidates(
         &self,
-        publication_id: Uuid,
+        // 草稿目标没有发布版本，候选与词义的 `publication_id` 都留空。
+        publication_id: Option<Uuid>,
         pos_id: Uuid,
         matched_form_id: Uuid,
         matched_variant_id: Uuid,

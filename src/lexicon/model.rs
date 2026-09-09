@@ -207,6 +207,30 @@ pub(crate) struct SenseTargetKey {
     pub target_sense_id: Uuid,
 }
 
+/// 成分用词 / 正文关联的草稿目标：当前草稿内容、展示词面，以及（若有）当前发布快照。
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct ComponentTargetDraftRecord {
+    pub id: Uuid,
+    pub kind: String,
+    pub revision: i64,
+    pub label: String,
+    pub forms: Value,
+    pub meanings: Value,
+    pub current_publication_id: Option<Uuid>,
+    pub current_snapshot: Option<Value>,
+    pub current_revision: Option<i64>,
+}
+
+/// 发布时核验草稿范围的目标词义：锁目标词条行，带回当时的 entry revision 与可用性。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct DraftSenseTargetRecord {
+    pub target_entry_id: Uuid,
+    pub target_sense_id: Uuid,
+    pub target_revision: i64,
+    pub target_archived: bool,
+    pub target_removed: bool,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct ResolvedSenseTargetRecord {
     pub target_entry_id: Uuid,
@@ -520,7 +544,8 @@ pub(crate) struct SentenceDiscoverySurfaceRecord {
     pub surface: String,
     pub entry_kind: String,
     pub entry_id: Uuid,
-    pub publication_id: Uuid,
+    /// 发布词面带发布版本；草稿词面（`content_scope = 'draft'`）为 None。
+    pub publication_id: Option<Uuid>,
     pub pos_id: Uuid,
     pub pos: String,
     pub matched_form_id: Uuid,

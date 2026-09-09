@@ -339,6 +339,7 @@ use utoipa::{
             crate::lexicon::dto::DraftSentenceTargetCandidateV3,
             crate::lexicon::dto::SentenceTargetRangeResultV3,
             crate::lexicon::dto::SearchComponentTargetsV3Input,
+            crate::lexicon::dto::ComponentTargetMatchV3,
             crate::lexicon::dto::SearchComponentTargetsV3Response,
             crate::lexicon::dto::WordSentenceV3,
             crate::lexicon::dto::WordRelationV3,
