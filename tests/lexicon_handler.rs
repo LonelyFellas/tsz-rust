@@ -22897,7 +22897,20 @@ async fn phrase_components_may_target_never_published_drafts_and_upgrade_after_t
         "草稿目标没有发布版本可填：{usage}"
     );
 
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    // 目标作者改了释义文案：草稿目标是活的，宿主重存不被「文案不一致」拒掉，成分文案由服务端刷新。
+    let mut retitled = writable_v3_meanings(&target);
+    retitled["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("码头");
+    let target = save_v3_meanings(&state, &author_bearer, &target, retitled).await;
+    let refreshed = save_v3_meanings(&state, &bearer, &saved, writable_v3_meanings(&saved)).await;
+    let refreshed_usage =
+        &refreshed["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"][0];
+    assert_eq!(refreshed_usage["target_gloss"], "码头", "{refreshed_usage}");
+    assert!(
+        refreshed_usage.get("target_publication_id").is_none(),
+        "{refreshed_usage}"
+    );
+
+    let (status, published) = publish_ready_v3(&state, &bearer, &refreshed).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let target_revision = entry_revision(&pool, target_entry_id).await;
     assert_eq!(

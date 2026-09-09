@@ -1,5 +1,35 @@
 -- 回退前须先处理 text_link / phrase_component 的 draft 范围引用行，以及两张成分表里
--- target_publication_id 为空的已解析成分，否则 CHECK 会失败。
+-- target_publication_id 为空的已解析成分，否则 CHECK 会失败；这里先给出可读原因。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM lexicon.entry_publication_sense_refs
+        WHERE reference_kind IN ('text_link', 'phrase_component')
+          AND target_content_scope = 'draft'
+    ) THEN
+        RAISE EXCEPTION
+            'cannot restrict draft-scope publication references to relations while text_link / phrase_component references to draft targets exist';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM lexicon.v3_phrase_variant_component_usages
+        WHERE state = 'resolved' AND target_publication_id IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'cannot require target_publication_id on resolved variant component usages while draft-target usages exist';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM lexicon.v3_phrase_sense_component_usages
+        WHERE state = 'resolved' AND target_publication_id IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'cannot require target_publication_id on resolved sense component usages while draft-target usages exist';
+    END IF;
+END
+$$;
+
 ALTER TABLE lexicon.entry_publication_sense_refs
     DROP CONSTRAINT lexicon_publication_sense_refs_context_target_check,
     ADD CONSTRAINT lexicon_publication_sense_refs_context_target_check

@@ -203,7 +203,9 @@ down 反向恢复（前提是没有 `text_link / phrase_component + draft` 行�
 
 ## 5. 回退限制
 
-- 前端可单独回退（不再传 `include_drafts`，已存的草稿关联仍能显示与清除）。
+- 前端**不能**在写入过草稿关联之后单独回退：旧前端的 runtime schema 仍把 `TextLinkV3.target_publication_id`
+  列为必填，含草稿关联的词条会被 `assertRuntimeContract` 拒掉、整条打不开。未写入草稿关联前可单独回退
+  （旧前端只是搜不到草稿）。
 - 后端回退需先处理 `text_link + draft` 的引用行（迁移 down 会撞 CHECK）；宿主草稿里无
   `target_publication_id` 的 link 在旧后端会被 `deny_unknown_fields` 之外的必填校验拒掉 → 回退前
   须确认线上没有此类草稿，或与前端一起回退。
@@ -241,3 +243,19 @@ down 反向恢复（前提是没有 `text_link / phrase_component + draft` 行�
 - 真机验收（本地 dev，2026-09-09）：centre6 例句 `I have a new job.` 关联单词 → 弹层列出 `job / job`
   带「草稿」→ 原形 job（名词）→ 工作；职业 → 保存词义步 200，库里 link 无 `target_publication_id`、
   `target_headword` / `target_gloss` 已回填；重开编辑器点 job 显示「已关联：job / job · 工作；职业（草稿）」。
+
+### 7.1 独立审查后的修正（同日）
+
+- 草稿目标解析（`resolve_component_target` 草稿分支）改走仓库层 `component_target_draft_for_share`：`FOR SHARE OF entry NOWAIT`
+  锁目标词条行，读到的草稿内容与随后记入引用的 `target_revision` 是同一版；目标正在保存时 409（与已发布目标的
+  `phrase_component_publication_targets_for_publish` 同款）。检索用的批量取数 `component_target_drafts` 不加锁（只读事务），
+  坏投影记 warn 后跳过而不是整个检索 500。
+- 成分用词的 `target_headword` / `target_gloss` 文案等值只对**已钉住发布版本**的成分生效；草稿目标是活的，
+  文案改动不再拒掉宿主保存 / 发布，由服务端在写回时刷新（与正文关联同款）。目标发布后的升级 probe 也只看节点结构。
+- 发布路径重跑词形步成分校验时，`InvalidField`（保存路径的 400）改落成 422 `phrase_component_target_stale`
+  issue（step = forms），与释义级一致。
+- down 迁移加 `DO $$ ... RAISE EXCEPTION` 守卫，三张表各一条，给出可读的回退前置条件。
+- 审查记录的后续项（未做）：contains 模式下草稿分支无 trgm 部分索引（前端固定 exact）；contains 模式窗口截断
+  先塞已发布再塞草稿、与「档位优先」排序不一致（exact 模式档位恒 0 不受影响）；发布时的升级只落进快照不回写
+  草稿投影（下次保存才回写）；部署当刻旧游标一律 400 `cursor`；测试缺口：目标进垃圾桶后宿主 422、`kind` 过滤 +
+  `include_drafts`、词形步（变体级）成分指向草稿、草稿短语套娃、`via_phrase.publication_id` 缺省。

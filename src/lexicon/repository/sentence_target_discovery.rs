@@ -1,5 +1,25 @@
 use super::*;
 
+/// 成分用词 / 正文关联草稿目标的取数：当前草稿投影 + 展示词面 + （若有）当前发布快照。
+/// SQL 只由常量片段拼成，绑定值全部走参数。
+const COMPONENT_TARGET_DRAFT_SELECT: &str = r#"
+        SELECT entry.id, entry.kind, entry.revision,
+               COALESCE(presentation.label, '') AS label,
+               projection.forms, projection.meanings,
+               entry.current_publication_id,
+               publication.snapshot AS current_snapshot,
+               publication.source_revision AS current_revision
+        FROM lexicon.entries entry
+        JOIN lexicon.entry_editor_projection projection ON projection.entry_id = entry.id
+        LEFT JOIN lexicon.entry_presentation_projection presentation
+          ON presentation.entry_id = entry.id
+         AND presentation.content_schema_version = 3
+        LEFT JOIN lexicon.entry_publications publication
+          ON publication.id = entry.current_publication_id
+         AND publication.entry_id = entry.id
+         AND publication.content_schema_version = 3
+"#;
+
 impl LexiconRepository {
     pub(crate) async fn sentence_discovery_generation(
         tx: &mut Transaction<'_, Postgres>,
@@ -155,6 +175,50 @@ impl LexiconRepository {
             .fetch_all(&mut **tx)
             .await
             .map_err(LexiconRepositoryError::Database)
+    }
+
+    /// 成分用词 / 正文关联的草稿目标（单条，事务内加共享锁）：与发布时锁目标同款
+    /// `FOR SHARE NOWAIT`，读到的草稿内容与随后记入引用的 entry revision 是同一版；
+    /// 目标正在保存时立即 `TargetPublicationBusy`。归档 / 非 V3 / 非 word-phrase 视为不存在。
+    pub(crate) async fn component_target_draft_for_share(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_id: Uuid,
+    ) -> Result<Option<ComponentTargetDraftRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, ComponentTargetDraftRecord>(sqlx::AssertSqlSafe(format!(
+            "{COMPONENT_TARGET_DRAFT_SELECT}
+            WHERE entry.id = $1
+              AND entry.content_schema_version = 3
+              AND entry.kind IN ('word', 'phrase')
+              AND entry.archived_at IS NULL
+            FOR SHARE OF entry NOWAIT"
+        )))
+        .bind(entry_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_target_publication_lock_error)
+    }
+
+    /// 关键字检索用：批量取从未发布的 V3 草稿目标，不加锁（只读事务）、不按创建者过滤。
+    pub(crate) async fn component_target_drafts(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_ids: &[Uuid],
+    ) -> Result<Vec<ComponentTargetDraftRecord>, LexiconRepositoryError> {
+        if entry_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_as::<_, ComponentTargetDraftRecord>(sqlx::AssertSqlSafe(format!(
+            "{COMPONENT_TARGET_DRAFT_SELECT}
+            WHERE entry.id = ANY($1)
+              AND entry.content_schema_version = 3
+              AND entry.kind IN ('word', 'phrase')
+              AND entry.archived_at IS NULL
+              AND entry.current_publication_id IS NULL
+            ORDER BY entry.id"
+        )))
+        .bind(entry_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
     }
 
     pub(crate) async fn draft_sentence_discovery_targets(

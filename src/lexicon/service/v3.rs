@@ -33,7 +33,7 @@ use crate::lexicon::dto::{
     WordHeadwordsV2, WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3,
     WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
 };
-use crate::lexicon::model::{NodeIdentityRecord, RegionEvidenceRecord};
+use crate::lexicon::model::{ComponentTargetDraftRecord, NodeIdentityRecord, RegionEvidenceRecord};
 
 const V3_CREATE_SCOPE: &str = "lexicon.entry.create.v3";
 const V3_DETECTION_TTL: StdDuration = StdDuration::from_secs(5 * 60);
@@ -2620,11 +2620,7 @@ pub(super) async fn validate_phrase_components(
         }
     }
     for usages in form_component_usage_slots(content) {
-        upgrade_component_targets(usages, |word_id| {
-            targets
-                .get(&(word_id, None))
-                .and_then(ComponentTargetWord::publication_id)
-        });
+        refresh_component_targets(usages, |word_id| targets.get(&(word_id, None)));
     }
     Ok(())
 }
@@ -2672,12 +2668,15 @@ fn resolved_component_key(component: &PhraseComponentUsageV3) -> Option<(Uuid, O
     }
 }
 
-/// 已解析成分是否与目标内容一致（词性 / 词形 / 变体 / 原形同组 / 词义 / 词面 / 释义）。
+/// 已解析成分是否与目标内容一致（词性 / 词形 / 变体 / 原形同组 / 词义）。
+/// 词面 / 释义文案只对已钉住发布版本的成分比对（快照不可变，等值就是客户端没篡改）；
+/// 草稿目标是活的，文案由服务端在写回时刷新，不拿旧文案拒掉宿主。
 fn resolved_component_matches(
     target: &ComponentTargetWord,
     component: &PhraseComponentUsageV3,
 ) -> bool {
     let PhraseComponentUsageV3::Resolved {
+        target_publication_id,
         target_pos_id,
         target_base_form_id,
         target_sense_id,
@@ -2692,6 +2691,7 @@ fn resolved_component_matches(
     else {
         return false;
     };
+    let pinned_text = target_publication_id.is_some();
     phrase_component_matches_target(
         target,
         *target_pos_id,
@@ -2701,36 +2701,67 @@ fn resolved_component_matches(
         *target_variant_id,
         *target_dialect,
         target_form_type.clone(),
-        target_headword,
-        target_gloss,
+        pinned_text.then_some((target_headword.as_str(), target_gloss.as_str())),
     )
 }
 
-/// 草稿目标发布后把成分升级到它的当前发布版本。只在确有可升级项时才取可变引用，
+/// 草稿目标的成分写回：目标已发布就钉上当前发布版本；词面 / 释义文案按解析到的目标内容刷新
+/// （草稿是活的，客户端带来的是选中当刻的文案）。只在确有变化时才取可变引用，
 /// 免得 `PresenceAwareVec` 的 `DerefMut` 把「客户端没发这个字段」误标成显式提交。
-fn upgrade_component_targets(
+fn refresh_component_targets<'a>(
     usages: &mut PresenceAwareVec<PhraseComponentUsageV3>,
-    upgraded_publication: impl Fn(Uuid) -> Option<Uuid>,
+    resolved_target: impl Fn(Uuid) -> Option<&'a ComponentTargetWord>,
 ) {
-    let upgradable = usages.iter().any(|usage| match usage {
-        PhraseComponentUsageV3::Resolved {
+    let refreshed = |usage: &PhraseComponentUsageV3| -> Option<(Option<Uuid>, String, String)> {
+        let PhraseComponentUsageV3::Resolved {
             target_word_id,
             target_publication_id: None,
+            target_pos_id,
+            target_sense_id,
             ..
-        } => upgraded_publication(*target_word_id).is_some(),
-        _ => false,
+        } = usage
+        else {
+            return None;
+        };
+        let target = resolved_target(*target_word_id)?;
+        Some((
+            target.publication_id(),
+            target.label.clone(),
+            component_target_gloss(target, *target_pos_id, *target_sense_id).unwrap_or_default(),
+        ))
+    };
+    let changed = usages.iter().any(|usage| {
+        refreshed(usage).is_some_and(|(publication_id, headword, gloss)| match usage {
+            PhraseComponentUsageV3::Resolved {
+                target_publication_id,
+                target_headword,
+                target_gloss,
+                ..
+            } => {
+                publication_id != *target_publication_id
+                    || headword != *target_headword
+                    || gloss != *target_gloss
+            }
+            PhraseComponentUsageV3::Unresolved { .. } => false,
+        })
     });
-    if !upgradable {
+    if !changed {
         return;
     }
     for usage in usages.iter_mut() {
+        let Some((publication_id, headword, gloss)) = refreshed(usage) else {
+            continue;
+        };
         if let PhraseComponentUsageV3::Resolved {
-            target_word_id,
-            target_publication_id: target_publication_id @ None,
+            target_publication_id,
+            target_headword,
+            target_gloss,
             ..
         } = usage
         {
-            *target_publication_id = upgraded_publication(*target_word_id);
+            *target_publication_id = publication_id;
+            *target_headword = headword;
+            *target_gloss = gloss;
         }
     }
 }
@@ -2768,6 +2799,34 @@ fn phrase_component_resolved_target_ids(word: &ComponentTargetWord) -> Vec<Uuid>
         .collect()
 }
 
+/// 目标词义在成分 / 关联里展示的释义：首条中文定义或中文例句释义，没有就空串。
+fn component_target_gloss(
+    target: &ComponentTargetWord,
+    target_pos_id: Uuid,
+    target_sense_id: Uuid,
+) -> Option<String> {
+    let sense = target
+        .meanings
+        .pos
+        .iter()
+        .find(|meaning_pos| meaning_pos.pos_id == target_pos_id)?
+        .senses
+        .iter()
+        .find(|sense| sense.id == target_sense_id)?;
+    Some(
+        sense
+            .definitions
+            .iter()
+            .find_map(|definition| match definition {
+                WordDefinitionV3::ZhDefinition { content, .. }
+                | WordDefinitionV3::ZhSentence { content, .. } => Some(content.text().to_owned()),
+                WordDefinitionV3::EnDefinition { .. } | WordDefinitionV3::EnSentence { .. } => None,
+            })
+            .unwrap_or_default(),
+    )
+}
+
+/// `expected_text` = Some((词面, 释义)) 时还要求文案等值（钉住发布版本的成分）；None 只查结构。
 #[allow(clippy::too_many_arguments)]
 fn phrase_component_matches_target(
     target: &ComponentTargetWord,
@@ -2778,10 +2837,9 @@ fn phrase_component_matches_target(
     target_variant_id: Uuid,
     target_dialect: Dialect,
     target_form_type: WordFormTypeV3,
-    target_headword: &str,
-    target_gloss: &str,
+    expected_text: Option<(&str, &str)>,
 ) -> bool {
-    if target.label != target_headword {
+    if expected_text.is_some_and(|(headword, _)| target.label != headword) {
         return false;
     }
     let Some(pos) = target
@@ -2825,30 +2883,10 @@ fn phrase_component_matches_target(
     if !base_is_valid {
         return false;
     }
-    let Some(sense) = target
-        .meanings
-        .pos
-        .iter()
-        .find(|meaning_pos| meaning_pos.pos_id == target_pos_id)
-        .and_then(|meaning_pos| {
-            meaning_pos
-                .senses
-                .iter()
-                .find(|sense| sense.id == target_sense_id)
-        })
-    else {
+    let Some(gloss) = component_target_gloss(target, target_pos_id, target_sense_id) else {
         return false;
     };
-    let gloss = sense
-        .definitions
-        .iter()
-        .find_map(|definition| match definition {
-            WordDefinitionV3::ZhDefinition { content, .. }
-            | WordDefinitionV3::ZhSentence { content, .. } => Some(content.text()),
-            WordDefinitionV3::EnDefinition { .. } | WordDefinitionV3::EnSentence { .. } => None,
-        })
-        .unwrap_or_default();
-    gloss == target_gloss
+    expected_text.is_none_or(|(_, expected_gloss)| gloss == expected_gloss)
 }
 
 const fn phrase_component_id(component: &PhraseComponentUsageV3) -> Uuid {
@@ -2912,7 +2950,7 @@ impl ComponentTargetWord {
         })
     }
 
-    fn from_draft_row(row: ComponentTargetDraftRow) -> Result<Self, LexiconServiceError> {
+    fn from_draft_row(row: ComponentTargetDraftRecord) -> Result<Self, LexiconServiceError> {
         let kind = parse_v3_kind(&row.kind).ok_or_else(invariant_record)?;
         let forms = serde_json::from_value(row.forms).map_err(serialization_error)?;
         let mut meanings: DraftMeaningsStepContentV3 =
@@ -2930,38 +2968,6 @@ impl ComponentTargetWord {
         })
     }
 }
-
-#[derive(Debug, sqlx::FromRow)]
-struct ComponentTargetDraftRow {
-    id: Uuid,
-    kind: String,
-    revision: i64,
-    label: String,
-    forms: Value,
-    meanings: Value,
-    current_publication_id: Option<Uuid>,
-    current_snapshot: Option<Value>,
-    current_revision: Option<i64>,
-}
-
-/// 草稿目标的取数：当前草稿内容 + 展示词面 + （若有）当前发布快照。
-const COMPONENT_TARGET_DRAFT_SELECT: &str = r#"
-        SELECT entry.id, entry.kind, entry.revision,
-               COALESCE(presentation.label, '') AS label,
-               projection.forms, projection.meanings,
-               entry.current_publication_id,
-               publication.snapshot AS current_snapshot,
-               publication.source_revision AS current_revision
-        FROM lexicon.entries entry
-        JOIN lexicon.entry_editor_projection projection ON projection.entry_id = entry.id
-        LEFT JOIN lexicon.entry_presentation_projection presentation
-          ON presentation.entry_id = entry.id
-         AND presentation.content_schema_version = 3
-        LEFT JOIN lexicon.entry_publications publication
-          ON publication.id = entry.current_publication_id
-         AND publication.entry_id = entry.id
-         AND publication.content_schema_version = 3
-"#;
 
 /// 取成分用词 / 正文关联的目标（未归档 + V3 + word/phrase）。
 ///
@@ -2997,18 +3003,11 @@ pub(super) async fn resolve_component_target(
             ComponentTargetWord::from_snapshot(snapshot, publication_id, revision)
         }));
     }
-    // SQL 只由常量片段拼成，绑定值走参数。
-    let row = sqlx::query_as::<_, ComponentTargetDraftRow>(sqlx::AssertSqlSafe(format!(
-        "{COMPONENT_TARGET_DRAFT_SELECT}
-        WHERE entry.id = $1
-          AND entry.content_schema_version = 3
-          AND entry.kind IN ('word', 'phrase')
-          AND entry.archived_at IS NULL"
-    )))
-    .bind(target_word_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?;
+    // 目标词条行加共享锁（与发布时锁目标同款）：读到的草稿内容与随后记入引用的 revision
+    // 是同一版；目标正在保存时立即 409，而不是等锁或读到半新半旧。
+    let row = LexiconRepository::component_target_draft_for_share(tx, target_word_id)
+        .await
+        .map_err(repository_error)?;
     let Some(mut row) = row else {
         return Ok(None);
     };
@@ -3030,25 +3029,22 @@ pub(super) async fn load_draft_component_targets(
     tx: &mut Transaction<'_, Postgres>,
     entry_ids: &[Uuid],
 ) -> Result<Vec<ComponentTargetWord>, LexiconServiceError> {
-    if entry_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    sqlx::query_as::<_, ComponentTargetDraftRow>(sqlx::AssertSqlSafe(format!(
-        "{COMPONENT_TARGET_DRAFT_SELECT}
-        WHERE entry.id = ANY($1)
-          AND entry.content_schema_version = 3
-          AND entry.kind IN ('word', 'phrase')
-          AND entry.archived_at IS NULL
-          AND entry.current_publication_id IS NULL
-        ORDER BY entry.id"
-    )))
-    .bind(entry_ids)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(database_error)?
-    .into_iter()
-    .map(ComponentTargetWord::from_draft_row)
-    .collect()
+    // 一份坏投影只该少一条候选，不该让整个检索 500：记日志后跳过。
+    Ok(LexiconRepository::component_target_drafts(tx, entry_ids)
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .filter_map(|row| {
+            let entry_id = row.id;
+            match ComponentTargetWord::from_draft_row(row) {
+                Ok(target) => Some(target),
+                Err(error) => {
+                    tracing::warn!(%entry_id, %error, "skipping unreadable draft component target");
+                    None
+                }
+            }
+        })
+        .collect())
 }
 
 /// 短语套短语只放一层：目标短语自身的成分不得再指向另一个短语。
@@ -3240,11 +3236,8 @@ pub(super) async fn validate_sense_phrase_components(
         }
     }
     for sense in content.pos.iter_mut().flat_map(|pos| &mut pos.senses) {
-        upgrade_component_targets(&mut sense.component_usages, |word_id| {
-            targets
-                .get(&(word_id, None))
-                .and_then(Option::as_ref)
-                .and_then(ComponentTargetWord::publication_id)
+        refresh_component_targets(&mut sense.component_usages, |word_id| {
+            targets.get(&(word_id, None)).and_then(Option::as_ref)
         });
     }
     Ok(issues)

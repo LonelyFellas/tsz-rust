@@ -151,8 +151,30 @@ impl LexiconService {
         // 成分用词可能指向草稿目标：目标事后可能已发布（这里升级并回填发布版本）、加了短语成分
         // （套娃）或删了词义。只有存在草稿目标时才重跑：发布快照目标不可变，保存时的结论到发布仍成立。
         if component_usages_have_draft_targets(&word.forms, &word.meanings) {
-            super::v3::validate_phrase_components(&mut tx, entry_id, word.kind, &mut word.forms)
-                .await?;
+            // 词形步的成分校验对保存路径报 400 InvalidField；发布路径的失败是「目标草稿事后变了」，
+            // 与释义级一样落成 422 issue，前端才能按发布问题处理。
+            match super::v3::validate_phrase_components(
+                &mut tx,
+                entry_id,
+                word.kind,
+                &mut word.forms,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(LexiconServiceError::InvalidField { field, message }) => {
+                    return Err(v3_validation_failed(vec![DraftValidationIssue {
+                        step: PersistedWordStep::Forms,
+                        node_id: entry_id,
+                        field: field.to_owned(),
+                        code: "phrase_component_target_stale".to_owned(),
+                        message: message.to_owned(),
+                        reference_location: None,
+                        node_location: None,
+                    }]));
+                }
+                Err(error) => return Err(error),
+            }
             let component_issues = super::v3::validate_sense_phrase_components(
                 &mut tx,
                 entry_id,
