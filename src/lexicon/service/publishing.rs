@@ -1093,7 +1093,7 @@ pub(super) async fn resolve_meaning_references(
             for relation in &sense.relations {
                 let Some((target_entry_id, target_sense_id)) = relation.bound_target() else {
                     // Unlinked display text is valid in drafts and publications.
-                    if let Some(issue) = pending_relation_issue(relation, mode) {
+                    if let Some(issue) = pending_relation_issue(relation) {
                         issues.push(issue);
                     }
                     continue;
@@ -1382,15 +1382,8 @@ pub(super) fn published_sense_snapshot(
     Ok((headword, published_sense_gloss(sense)))
 }
 
-/// 校验一条待物化关联词。
-///
-/// 词面本身永远要校验——归一化 + 字符集，与主词录入同一把尺子，否则「中文近义词」
-/// 会绕过 headword 校验从关联词这条路溜进词库。
-///
-pub(super) fn pending_relation_issue(
-    relation: &WordRelationV2,
-    mode: ReferenceResolutionMode,
-) -> Option<DraftValidationIssue> {
+/// 校验未绑定关联词的文本存储限制；保存和发布使用相同规则。
+pub(super) fn pending_relation_issue(relation: &WordRelationV2) -> Option<DraftValidationIssue> {
     if relation.pending_target_headword.is_none()
         && relation.prebound_target_word_id.is_none()
         && relation.pending_target_gloss.is_some()
@@ -1425,37 +1418,22 @@ pub(super) fn pending_relation_issue(
             "预绑定已停用，请选择具体词义或使用纯文本",
         ));
     }
-    // 走到这里说明这条关联词没有绑定目标：要么是管理员手敲的一段文本，要么整行还是空的。
-    //
-    // 草稿期随便写——待建词面只是个提醒自己回头处理的备忘，连词条都还不是，拿「合法英文词条名」
-    // 去卡它没有道理；这里只挡存储层面的东西，控制字符与超长。
-    //
-    // 发布则一律拦下。手输文本永远不会物化成真词条，放它随词条发布，等于让线上挂着一条
-    // 指不到任何地方的关联词。发布前必须绑定到具体词条，或者把这一行删掉。
-    let headword = relation.pending_target_headword.as_deref();
-    match mode {
-        ReferenceResolutionMode::Canonicalize => {
-            if headword.is_some_and(|value| {
-                value.chars().any(char::is_control)
-                    || value.chars().count()
-                        > crate::lexicon::normalization::MAX_HEADWORD_CODEPOINTS
-            }) {
-                return Some(reference_issue(
-                    relation.id,
-                    "pending_target_headword",
-                    "relation_pending_headword_invalid",
-                    "待建关联词的词面不能含控制字符，且不超过 200 个字符",
-                ));
-            }
-        }
-        ReferenceResolutionMode::Verify => {
-            return Some(reference_issue(
-                relation.id,
-                "pending_target_headword",
-                "relation_pending_target_unresolved",
-                "关联词必须绑定到具体词条才能发布，请选择词条或删除该行",
-            ));
-        }
+    // 手输关联词是独立展示文本，保存和发布均保留，不创建或自动绑定词条。
+    // 两个阶段只校验存储限制，不要求它是合法英文词条名。
+    if relation
+        .pending_target_headword
+        .as_deref()
+        .is_some_and(|value| {
+            value.chars().any(char::is_control)
+                || value.chars().count() > crate::lexicon::normalization::MAX_HEADWORD_CODEPOINTS
+        })
+    {
+        return Some(reference_issue(
+            relation.id,
+            "pending_target_headword",
+            "relation_pending_headword_invalid",
+            "关联词文本不能含控制字符，且不超过 200 个字符",
+        ));
     }
     None
 }

@@ -13158,7 +13158,7 @@ async fn v3_form_storage_uses_the_authoritative_surface_normalization(pool: PgPo
 }
 
 #[sqlx::test]
-async fn v3_text_relation_round_trips_in_draft_but_blocks_publication(pool: PgPool) {
+async fn v3_text_relation_round_trips_through_publication(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -13199,29 +13199,38 @@ async fn v3_text_relation_round_trips_in_draft_but_blocks_publication(pool: PgPo
     assert_eq!(saved_relation["pending_target_headword"], pending_headword);
     assert_eq!(saved_relation["pending_target_gloss"], pending_gloss);
 
-    // 手输文本不会物化成词条，放它随词条发布就等于线上挂一条指不到任何地方的关联词，
-    // 所以发布必须被拦下，管理员要么绑定具体词条、要么删掉这一行。
-    let (status, problem) = call(
+    let (status, validation) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &format!("{ROOT}/entries/{entry_id}/validate"),
         &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": saved["word"]["revision"]
-        })),
+        None,
+        Some(json!({"schema_version": 3, "base_revision": saved["word"]["revision"]})),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "{validation}");
+    assert_eq!(
+        validation["valid"], true,
+        "文本关联不应阻断发布校验：{validation}"
+    );
+
+    // 纯文本关联允许发布，且不得自动创建或绑定目标词条。
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
     assert_eq!(
         status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "未绑定的文本关联词不该能发布：{problem}"
+        StatusCode::CREATED,
+        "文本关联应允许发布：{published}"
     );
-    assert_eq!(
-        problem["field_issues"][0]["code"],
-        "relation_pending_target_unresolved"
-    );
+    let published_relation = &published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(published_relation, saved_relation);
+    let snapshot_relation: Value = sqlx::query_scalar(
+        "SELECT snapshot->'meanings'->'pos'->0->'senses'->0->'relations'->0 FROM lexicon.entry_publications WHERE entry_id = $1",
+    )
+    .bind(Uuid::parse_str(entry_id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(&snapshot_relation, saved_relation);
 
     let (status, reloaded_source) = call(
         &state,
@@ -13235,7 +13244,7 @@ async fn v3_text_relation_round_trips_in_draft_but_blocks_publication(pool: PgPo
     assert_eq!(
         status,
         StatusCode::OK,
-        "发布被拦后读取 V3 源词条失败：{reloaded_source}"
+        "发布后读取 V3 源词条失败：{reloaded_source}"
     );
     let reloaded_relation =
         &reloaded_source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
@@ -13260,7 +13269,7 @@ async fn v3_text_relation_round_trips_in_draft_but_blocks_publication(pool: PgPo
 }
 
 #[sqlx::test]
-async fn v3_freetext_relation_saves_as_draft_but_is_validated_on_publication(pool: PgPool) {
+async fn v3_freetext_relation_saves_and_publishes(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -13303,31 +13312,16 @@ async fn v3_freetext_relation_saves_as_draft_but_is_validated_on_publication(poo
     );
     assert!(saved_relation["target_word_id"].is_null());
 
-    // 发布要求关联词绑定到具体词条，手输文本在这一步被拦下。
-    let (status, problem) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{entry_id}/publications"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "schema_version": 3,
-            "base_revision": saved["word"]["revision"]
-        })),
-    )
-    .await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
     assert_eq!(
         status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "未绑定的文本关联词不该能发布：{problem}"
+        StatusCode::CREATED,
+        "自由文本关联应允许发布：{published}"
     );
-    let issue = problem["field_issues"]
-        .as_array()
-        .expect("发布失败应带 field_issues")
-        .iter()
-        .find(|issue| issue["node_id"] == json!(relation_id))
-        .expect("issue 应指向那一行关联词");
-    assert_eq!(issue["code"], "relation_pending_target_unresolved");
+    assert_eq!(
+        published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0],
+        *saved_relation
+    );
 }
 
 #[sqlx::test]
@@ -18274,8 +18268,7 @@ async fn v3_publish_with_bound_relations_keeps_sense_phrase_components(pool: PgP
     .await;
     let entry_uuid = Uuid::parse_str(saved["word"]["id"].as_str().unwrap()).unwrap();
 
-    // 带关联词发布应保留释义级成分。关联词必须绑定到具体词条——未绑定的手输文本已不允许
-    // 发布，见 v3_text_relation_round_trips_in_draft_but_blocks_publication。
+    // 已绑定关联词发布应保留释义级成分；纯文本关联另有发布回归覆盖。
     let mut meanings = saved["word"]["meanings"].clone();
     meanings["pos"][0]["senses"][0]["relations"] = json!([{
         "id": Uuid::now_v7(),
@@ -21124,12 +21117,11 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         {"id": src_sentence_b_id, "band": "b1_b2", "content": rich_text("源中阶")},
         {"id": Uuid::now_v7(), "band": "c1_c2", "content": rich_text("源初阶")}
     ]);
-    // 关联词绑定到已发布词条：未绑定的手输文本已不允许发布。
+    // 纯文本关联无需绑定词条即可随内容发布。
     src_meanings["pos"][0]["senses"][0]["relations"] = json!([{
         "id": Uuid::now_v7(),
         "relation": "synonym",
-        "target_word_id": published["word"]["id"],
-        "target_sense_id": published["word"]["meanings"]["pos"][0]["senses"][0]["id"],
+        "pending_target_headword": "handwritten relation",
         "score": "88.00"
     }]);
     let src_saved = save_v3_meanings(&state, &bearer, &source, src_meanings).await;
@@ -21137,7 +21129,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "带绑定关联词的发布必须成功：{src_published}"
+        "带纯文本关联词的发布必须成功：{src_published}"
     );
     assert!(
         first_sentence(&src_published)["zh_translations"][0]["band"].is_string(),
@@ -21155,9 +21147,9 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         "带关联词发布必须保留三档：{src_published}"
     );
     assert_eq!(
-        src_published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"],
-        published["word"]["id"],
-        "绑定关联词应保留目标：{src_published}"
+        src_published["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["pending_target_headword"],
+        "handwritten relation",
+        "纯文本关联应保留文本：{src_published}"
     );
     // 投影也回填了三档
     let projected: Value = sqlx::query_scalar(
@@ -22945,6 +22937,90 @@ async fn v3_detection_drops_suggested_pos_missing_from_catalog(pool: PgPool) {
         detection["builtin_dictionary"]["suggested_pos"],
         json!(["verb", "noun"])
     );
+}
+
+#[sqlx::test]
+async fn v3_derivative_multiple_senses_publish_and_remove_independently(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let target = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
+    let mut target_content =
+        complete_v3_meanings_fixture(target["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let mut second = target_content["pos"][0]["senses"][0].clone();
+    second["id"] = json!(Uuid::now_v7());
+    second["definitions"][0]["id"] = json!(Uuid::now_v7());
+    second["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    second["definitions"][0]["content"] = rich_text("第二个派生词义");
+    target_content["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    let target = save_v3_meanings(&state, &bearer, &target, target_content).await;
+    let (status, target) = publish_ready_v3(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "{target}");
+    let source = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
+    let mut source_content =
+        complete_v3_meanings_fixture(source["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let relations: Vec<Value> = target["word"]["meanings"]["pos"][0]["senses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|sense| {
+            json!({
+                "id": Uuid::now_v7(), "relation": "derivative", "score": "80.00",
+                "target_word_id": target["word"]["id"], "target_sense_id": sense["id"]
+            })
+        })
+        .collect();
+    assert_eq!(relations.len(), 2);
+    source_content["pos"][0]["senses"][0]["relations"] = json!(relations);
+    let saved = save_v3_meanings(&state, &bearer, &source, source_content).await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let entry_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let stored = &reloaded["word"]["meanings"]["pos"][0]["senses"][0]["relations"];
+    assert_eq!(stored.as_array().unwrap().len(), 2);
+    for (index, expected) in relations.iter().enumerate() {
+        assert_eq!(stored[index]["id"], expected["id"]);
+        assert_eq!(
+            stored[index]["target_sense_id"],
+            expected["target_sense_id"]
+        );
+    }
+    assert_ne!(stored[0]["target_gloss"], stored[1]["target_gloss"]);
+    let refs: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publication_sense_refs WHERE publication_id = (SELECT current_publication_id FROM lexicon.entries WHERE id = $1) AND source_node_id = ANY($2)")
+        .bind(entry_id).bind(relations.iter().map(|item| Uuid::parse_str(item["id"].as_str().unwrap()).unwrap()).collect::<Vec<_>>())
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(refs, 2);
+    let mut content = writable_v3_meanings(&reloaded);
+    content["pos"][0]["senses"][0]["relations"] = json!([relations[1]]);
+    let saved = save_v3_meanings(&state, &bearer, &reloaded, content).await;
+    let (status, republished) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{republished}");
+    let remaining = &republished["word"]["meanings"]["pos"][0]["senses"][0]["relations"];
+    assert_eq!(remaining.as_array().unwrap().len(), 1);
+    assert_eq!(remaining[0]["id"], relations[1]["id"]);
+    assert_eq!(
+        remaining[0]["target_sense_id"],
+        relations[1]["target_sense_id"]
+    );
+    let refs: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publication_sense_refs WHERE publication_id = (SELECT current_publication_id FROM lexicon.entries WHERE id = $1) AND source_node_id = ANY($2)")
+        .bind(entry_id).bind(relations.iter().map(|item| Uuid::parse_str(item["id"].as_str().unwrap()).unwrap()).collect::<Vec<_>>())
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(refs, 1);
 }
 
 #[sqlx::test]
