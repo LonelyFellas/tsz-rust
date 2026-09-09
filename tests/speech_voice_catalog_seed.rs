@@ -91,3 +91,147 @@ async fn seed_repairs_drift_but_leaves_disabled_voices_disabled(pool: PgPool) {
     );
     assert!(!davis.enabled, "运维停用的发音人不能被重跑种子悄悄启用");
 }
+
+#[sqlx::test]
+async fn azure_catalog_sync_preserves_identity_and_operator_settings(pool: PgPool) {
+    use tsz_rust::speech::{CatalogVoice, Voice, preview::PreviewRepository};
+    apply_seed(&pool).await;
+    sqlx::query("UPDATE speech.voices SET enabled = false, min_rate_percent = -10 WHERE alias = 'en-us-aria'")
+        .execute(&pool).await.unwrap();
+    let old_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM speech.voices WHERE alias = 'en-us-aria'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let catalog = vec![
+        CatalogVoice {
+            voice: Voice::new("azure", "en-US-AriaNeural", "en-US", ["chat".into()]).unwrap(),
+            gender: "female".into(),
+        },
+        CatalogVoice {
+            voice: Voice::new("azure", "en-GB-RyanNeural", "en-GB", []).unwrap(),
+            gender: "male".into(),
+        },
+    ];
+    let repository = PreviewRepository::new(pool.clone());
+    let (first, second) = tokio::join!(
+        repository.sync_voices(&catalog),
+        repository.sync_voices(&catalog)
+    );
+    assert_eq!(first.unwrap(), ["en-us-aria", "en-gb-ryanneural"]);
+    assert_eq!(second.unwrap(), ["en-us-aria", "en-gb-ryanneural"]);
+    let aria = repository.voice_by_alias("en-us-aria").await.unwrap();
+    assert!(
+        aria.is_none(),
+        "operator-disabled voice must remain unavailable"
+    );
+    let row: (uuid::Uuid, i16, Value) = sqlx::query_as(
+        "SELECT id, min_rate_percent, styles FROM speech.voices WHERE alias = 'en-us-aria'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (old_id, -10, json!(["chat"])));
+    let ryan = repository
+        .voice_by_alias("en-gb-ryanneural")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ryan.voice.provider_voice_id(), "en-GB-RyanNeural");
+    assert_eq!(ryan.voice.locale(), "en-GB");
+    let updated = voice(&pool, "en-gb-ryanneural").await.updated_at;
+    repository.sync_voices(&catalog).await.unwrap();
+    assert_eq!(voice(&pool, "en-gb-ryanneural").await.updated_at, updated);
+    assert_eq!(aliases(&pool).await.len(), 4);
+    repository.sync_voices(&[]).await.unwrap();
+    assert_eq!(
+        aliases(&pool).await.len(),
+        4,
+        "historical rows must not be deleted"
+    );
+}
+
+struct OfflineCatalogProvider;
+
+#[async_trait::async_trait]
+impl tsz_rust::speech::SpeechProvider for OfflineCatalogProvider {
+    fn provider_name(&self) -> &'static str {
+        "azure"
+    }
+    async fn list_voices(
+        &self,
+    ) -> Result<Option<Vec<tsz_rust::speech::CatalogVoice>>, tsz_rust::speech::SpeechError> {
+        panic!("opening the product voice directory must not contact Azure")
+    }
+    async fn synthesize(
+        &self,
+        _: &tsz_rust::speech::SynthesisRequest,
+    ) -> Result<tsz_rust::speech::SynthesizedAudio, tsz_rust::speech::SpeechError> {
+        unreachable!()
+    }
+}
+
+#[sqlx::test]
+async fn product_catalog_reads_locally_when_azure_is_unavailable(pool: PgPool) {
+    use tsz_rust::speech::preview::{PreviewRepository, PreviewService};
+    apply_seed(&pool).await;
+    let repository = PreviewRepository::new(pool.clone());
+    repository.ensure_catalog_voices().await.unwrap();
+    let before = voice(&pool, "en-us-aria").await.updated_at;
+    repository.ensure_catalog_voices().await.unwrap();
+    assert_eq!(voice(&pool, "en-us-aria").await.updated_at, before);
+    assert_eq!(
+        aliases(&pool).await.len(),
+        tsz_rust::speech::catalog_snapshot().len()
+    );
+    let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .unwrap();
+    let service = PreviewService::new(
+        PreviewRepository::new(pool.clone()),
+        redis,
+        Some(std::sync::Arc::new(OfflineCatalogProvider)),
+        None,
+    );
+    let listed = service.list_voices().await.unwrap();
+    assert_eq!(
+        listed.items.len(),
+        tsz_rust::speech::catalog_snapshot().len()
+    );
+    assert_eq!(listed.items.iter().filter(|v| v.is_common).count(), 8);
+    assert_eq!(listed.items[0].alias, "en-gb-sonia");
+    assert_eq!(listed.items[0].display_name, "Sonia 索尼娅");
+    repository
+        .sync_voices(&[tsz_rust::speech::CatalogVoice {
+            voice: tsz_rust::speech::Voice::new("azure", "en-US-JennyNeural", "en-US", []).unwrap(),
+            gender: "female".into(),
+        }])
+        .await
+        .unwrap();
+    let listed = service.list_voices().await.unwrap();
+    assert_eq!(
+        listed.items.len(),
+        tsz_rust::speech::catalog_snapshot().len()
+    );
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|v| v.alias == "en-us-jennyneural" && !v.is_common && v.display_name == "Jenny")
+    );
+    assert!(
+        repository
+            .voice_by_alias("en-us-jennyneural")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    sqlx::query("UPDATE speech.voices SET enabled = false WHERE alias = 'en-us-aria'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        service.list_voices().await.unwrap().items.len(),
+        tsz_rust::speech::catalog_snapshot().len() - 1
+    );
+}

@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::speech::Voice;
+use crate::speech::{CatalogVoice, Voice, catalog_snapshot, product_voices, voice_display_name};
 
 use super::{
     CACHE_TTL_HOURS,
@@ -58,10 +58,12 @@ impl PreviewRepository {
 
     pub async fn list_voices(&self) -> Result<VoiceListResponse, sqlx::Error> {
         let rows = sqlx::query(
-            r#"SELECT alias, locale, gender, styles, min_rate_percent, max_rate_percent,
+            r#"SELECT alias, provider_voice_id, locale, gender, styles, min_rate_percent, max_rate_percent,
                       min_pitch_semitones, max_pitch_semitones
-               FROM speech.voices WHERE enabled ORDER BY alias"#,
+               FROM speech.voices WHERE enabled AND provider = 'azure' AND locale IN ('en-GB', 'en-US')
+               ORDER BY array_position($1, provider_voice_id) NULLS LAST, alias"#,
         )
+        .bind(product_voices().iter().map(|v| v.provider_voice_id.as_str()).collect::<Vec<_>>())
         .fetch_all(&self.pool)
         .await?;
         let items = rows
@@ -71,6 +73,13 @@ impl PreviewRepository {
                 voice_styles.sort();
                 VoiceResponse {
                     alias: row.get("alias"),
+                    display_name: voice_display_name(
+                        &row.get::<String, _>("provider_voice_id"),
+                        &row.get::<String, _>("locale"),
+                    ),
+                    is_common: product_voices()
+                        .iter()
+                        .any(|v| v.provider_voice_id == row.get::<String, _>("provider_voice_id")),
                     locale: row.get("locale"),
                     gender: row.get("gender"),
                     capabilities: VoiceCapabilities {
@@ -84,6 +93,67 @@ impl PreviewRepository {
             })
             .collect();
         Ok(VoiceListResponse { items })
+    }
+
+    /// Startup inserts missing catalog voices without overwriting operator-maintained records.
+    pub async fn ensure_catalog_voices(&self) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
+            .execute(&mut *tx)
+            .await?;
+        for product in catalog_snapshot() {
+            let item = product.catalog_voice();
+            sqlx::query(r#"INSERT INTO speech.voices
+                (id, alias, provider, provider_voice_id, locale, gender, styles, provider_version)
+                SELECT $1,$2,'azure',$3,$4,$5,$6,$7
+                WHERE NOT EXISTS (SELECT 1 FROM speech.voices WHERE provider = 'azure' AND provider_voice_id = $3)
+                ON CONFLICT (alias) DO NOTHING"#)
+                .bind(Uuid::now_v7()).bind(item.alias()).bind(item.voice.provider_voice_id())
+                .bind(item.voice.locale()).bind(&item.gender).bind(serde_json::json!(product.styles))
+                .bind(item.version()).execute(&mut *tx).await?;
+        }
+        tx.commit().await
+    }
+
+    pub async fn sync_voices(&self, voices: &[CatalogVoice]) -> Result<Vec<String>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        // All instances use the same transaction lock; no schema change or process-local race.
+        sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
+            .execute(&mut *tx)
+            .await?;
+        let mut aliases = Vec::with_capacity(voices.len());
+        for item in voices {
+            let existing: Option<String> = sqlx::query_scalar(
+                "SELECT alias FROM speech.voices WHERE provider = $1 AND provider_voice_id = $2 ORDER BY alias LIMIT 1"
+            ).bind(item.voice.provider()).bind(item.voice.provider_voice_id())
+                .fetch_optional(&mut *tx).await?;
+            let styles = serde_json::json!(item.voice.styles().collect::<Vec<_>>());
+            let version = item.version();
+            let alias = if let Some(alias) = existing {
+                sqlx::query(
+                    r#"UPDATE speech.voices SET locale = $2, gender = $3, styles = $4,
+                           provider_version = $5, updated_at = now()
+                       WHERE alias = $1 AND
+                       (locale, gender, styles, provider_version) IS DISTINCT FROM ($2, $3, $4, $5)"#
+                ).bind(&alias).bind(item.voice.locale()).bind(&item.gender)
+                    .bind(&styles).bind(&version).execute(&mut *tx).await?;
+                alias
+            } else {
+                let alias = item.alias();
+                sqlx::query(
+                    r#"INSERT INTO speech.voices
+                       (id, alias, provider, provider_voice_id, locale, gender, styles, provider_version)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"#
+                ).bind(Uuid::now_v7()).bind(&alias).bind(item.voice.provider())
+                    .bind(item.voice.provider_voice_id()).bind(item.voice.locale())
+                    .bind(&item.gender).bind(&styles).bind(&version)
+                    .execute(&mut *tx).await?;
+                alias
+            };
+            aliases.push(alias);
+        }
+        tx.commit().await?;
+        Ok(aliases)
     }
 
     pub async fn voice_by_alias(&self, alias: &str) -> Result<Option<VoiceRecord>, sqlx::Error> {

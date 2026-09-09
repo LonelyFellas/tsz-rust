@@ -1,0 +1,34 @@
+[
+  {
+    "provider_voice_id": "en-GB-SoniaNeural",
+    "display_name": "Sonia 索尼娅"
+  },
+  {
+    "provider_voice_id": "en-GB-LibbyNeural",
+    "display_name": "Libby 莉比"
+  },
+  {
+    "provider_voice_id": "en-GB-RyanNeural",
+    "display_name": "Ryan 瑞恩"
+  },
+  {
+    "provider_voice_id": "en-GB-AlfieNeural",
+    "display_name": "Alfie 阿尔菲"
+  },
+  {
+    "provider_voice_id": "en-US-AriaNeural",
+    "display_name": "Aria 阿丽雅"
+  },
+  {
+    "provider_voice_id": "en-US-AvaNeural",
+    "display_name": "Ava 爱娃"
+  },
+  {
+    "provider_voice_id": "en-US-DavisNeural",
+    "display_name": "Davis 戴维斯"
+  },
+  {
+    "provider_voice_id": "en-US-AndrewNeural",
+    "display_name": "Andrew 安德鲁"
+  }
+]

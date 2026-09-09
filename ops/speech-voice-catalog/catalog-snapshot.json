@@ -1,0 +1,595 @@
+[
+  {
+    "provider_voice_id": "en-GB-AbbiNeural",
+    "locale": "en-GB",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-AdaMultilingualNeural",
+    "locale": "en-GB",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-AlfieNeural",
+    "locale": "en-GB",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-BellaNeural",
+    "locale": "en-GB",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-ElliotNeural",
+    "locale": "en-GB",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-EthanNeural",
+    "locale": "en-GB",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-HollieNeural",
+    "locale": "en-GB",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-LibbyNeural",
+    "locale": "en-GB",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-MaisieNeural",
+    "locale": "en-GB",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-NoahNeural",
+    "locale": "en-GB",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-OliverNeural",
+    "locale": "en-GB",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-OliviaNeural",
+    "locale": "en-GB",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-OllieMultilingualNeural",
+    "locale": "en-GB",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-GB-RyanNeural",
+    "locale": "en-GB",
+    "gender": "male",
+    "styles": [
+      "chat",
+      "cheerful"
+    ]
+  },
+  {
+    "provider_voice_id": "en-GB-SoniaNeural",
+    "locale": "en-GB",
+    "gender": "female",
+    "styles": [
+      "cheerful",
+      "sad"
+    ]
+  },
+  {
+    "provider_voice_id": "en-GB-ThomasNeural",
+    "locale": "en-GB",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AIGenerate1Neural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AIGenerate2Neural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AdamMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AlloyTurboMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AmandaMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AmberNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AnaNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AndrewMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [
+      "empathetic",
+      "relieved"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-AndrewNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AriaNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "angry",
+      "chat",
+      "cheerful",
+      "customerservice",
+      "empathetic",
+      "excited",
+      "friendly",
+      "hopeful",
+      "narration-professional",
+      "newscast-casual",
+      "newscast-formal",
+      "sad",
+      "shouting",
+      "terrified",
+      "unfriendly",
+      "whispering"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-AshleyNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AvaMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-AvaNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "angry",
+      "fearful",
+      "sad"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-BrandonMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-BrandonNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-BrianMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-BrianNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-ChristopherMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-ChristopherNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-CoraMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-CoraNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-DavisMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [
+      "empathetic",
+      "funny",
+      "relieved"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-DavisNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [
+      "angry",
+      "chat",
+      "cheerful",
+      "excited",
+      "friendly",
+      "hopeful",
+      "sad",
+      "shouting",
+      "terrified",
+      "unfriendly",
+      "whispering"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-DerekMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [
+      "empathetic",
+      "excited",
+      "relieved",
+      "shy"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-DustinMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-EchoTurboMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-ElizabethNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-EmmaMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-EmmaNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-EricNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-EvelynMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-GuyNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [
+      "angry",
+      "cheerful",
+      "excited",
+      "friendly",
+      "hopeful",
+      "newscast",
+      "sad",
+      "shouting",
+      "terrified",
+      "unfriendly",
+      "whispering"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-JacobNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-JaneNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "angry",
+      "cheerful",
+      "excited",
+      "friendly",
+      "hopeful",
+      "sad",
+      "shouting",
+      "terrified",
+      "unfriendly",
+      "whispering"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-JasonNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [
+      "angry",
+      "cheerful",
+      "excited",
+      "friendly",
+      "hopeful",
+      "sad",
+      "shouting",
+      "terrified",
+      "unfriendly",
+      "whispering"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-JennyMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-JennyNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "angry",
+      "assistant",
+      "chat",
+      "cheerful",
+      "customerservice",
+      "excited",
+      "friendly",
+      "hopeful",
+      "newscast",
+      "sad",
+      "shouting",
+      "terrified",
+      "unfriendly",
+      "whispering"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-KaiNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [
+      "conversation"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-LewisMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-LolaMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-LunaNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "conversation"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-MichelleNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-MonicaNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-NancyMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "excited",
+      "friendly",
+      "funny",
+      "relieved",
+      "shy"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-NancyNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "angry",
+      "cheerful",
+      "excited",
+      "friendly",
+      "hopeful",
+      "sad",
+      "shouting",
+      "terrified",
+      "unfriendly",
+      "whispering"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-NovaTurboMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-OnyxTurboMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-PhoebeMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "empathetic",
+      "sad",
+      "serious"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-RogerNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-RyanMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-SamuelMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-SaraNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "angry",
+      "cheerful",
+      "excited",
+      "friendly",
+      "hopeful",
+      "sad",
+      "shouting",
+      "terrified",
+      "unfriendly",
+      "whispering"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-SerenaMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [
+      "empathetic",
+      "excited",
+      "friendly",
+      "relieved",
+      "sad",
+      "serious",
+      "shy"
+    ]
+  },
+  {
+    "provider_voice_id": "en-US-ShimmerTurboMultilingualNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-SteffanMultilingualNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-SteffanNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": []
+  },
+  {
+    "provider_voice_id": "en-US-TonyNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [
+      "angry",
+      "cheerful",
+      "excited",
+      "friendly",
+      "hopeful",
+      "sad",
+      "shouting",
+      "terrified",
+      "unfriendly",
+      "whispering"
+    ]
+  }
+]

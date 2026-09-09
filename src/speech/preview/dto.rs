@@ -29,6 +29,8 @@ pub struct VoiceCapabilities {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct VoiceResponse {
     pub alias: String,
+    pub display_name: String,
+    pub is_common: bool,
     pub locale: String,
     pub gender: String,
     pub capabilities: VoiceCapabilities,

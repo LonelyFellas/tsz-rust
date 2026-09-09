@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 use thiserror::Error;
 
-use super::{SynthesisRequest, SynthesizedAudio};
+use super::{CatalogVoice, SynthesisRequest, SynthesizedAudio};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeechErrorKind {
@@ -45,6 +45,11 @@ pub trait SpeechProvider: Send + Sync {
     /// synthesis request timeout; the orchestration layer adds storage/database tail room.
     fn synthesis_timeout(&self) -> Duration {
         Duration::from_secs(15)
+    }
+
+    /// None means this provider has no remote catalog and uses the local directory.
+    async fn list_voices(&self) -> Result<Option<Vec<CatalogVoice>>, SpeechError> {
+        Ok(None)
     }
 
     async fn synthesize(&self, request: &SynthesisRequest)
