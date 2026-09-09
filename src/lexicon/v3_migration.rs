@@ -307,33 +307,16 @@ fn normalize_v3_text(value: &str) -> String {
 }
 
 fn form_type(value: &str) -> Result<WordFormTypeV3, PlanBlocked> {
-    match value {
-        "base" => Ok(WordFormTypeV3::Base),
-        "third_person_singular" => Ok(WordFormTypeV3::ThirdPersonSingular),
-        "present_participle" => Ok(WordFormTypeV3::PresentParticiple),
-        "past_tense" => Ok(WordFormTypeV3::PastTense),
-        "past_participle" => Ok(WordFormTypeV3::PastParticiple),
-        "plural" => Ok(WordFormTypeV3::Plural),
-        "comparative" => Ok(WordFormTypeV3::Comparative),
-        "superlative" => Ok(WordFormTypeV3::Superlative),
-        _ => Err(PlanBlocked::new(
+    crate::lexicon::form_types::parse_code(value).map_err(|()| {
+        PlanBlocked::new(
             "unsupported_v2_form_type",
-            format!("unsupported V2 form_type {value}"),
-        )),
-    }
+            format!("invalid V2 form_type {value}"),
+        )
+    })
 }
 
-const fn form_type_name(value: WordFormTypeV3) -> &'static str {
-    match value {
-        WordFormTypeV3::Base => "base",
-        WordFormTypeV3::ThirdPersonSingular => "third_person_singular",
-        WordFormTypeV3::PresentParticiple => "present_participle",
-        WordFormTypeV3::PastTense => "past_tense",
-        WordFormTypeV3::PastParticiple => "past_participle",
-        WordFormTypeV3::Plural => "plural",
-        WordFormTypeV3::Comparative => "comparative",
-        WordFormTypeV3::Superlative => "superlative",
-    }
+fn form_type_name(value: &str) -> &str {
+    value
 }
 
 const fn origin_name(value: TextOrigin) -> &'static str {
@@ -584,7 +567,7 @@ fn convert_forms(
         counts.concrete_forms += 1;
         let mut forms = vec![WordConcreteFormV3 {
             id: pos.base_form.id,
-            form_type: WordFormTypeV3::Base,
+            form_type: "base".to_owned(),
             regional_variants: convert_regional_variants(
                 &pos.base_form.variants,
                 expected_uk_us,
@@ -1822,7 +1805,7 @@ async fn write_v3_forms(
             .bind(form.id)
             .bind(plan.entry_id)
             .bind(pos.pos_id)
-            .bind(form_type_name(form.form_type))
+            .bind(form_type_name(&form.form_type))
             .bind(form_ordinal as i32)
             .execute(&mut **tx)
             .await?;
@@ -2004,7 +1987,7 @@ async fn replace_v3_surface_projection(
         .bind(event_offset)
         .bind(source.pos_id)
         .bind(&source.pos)
-        .bind(form_type_name(source.form_type))
+        .bind(form_type_name(&source.form_type))
         .bind(source.form_id)
         .bind(source.variant_id)
         .bind(&source.group_ids)
@@ -3991,6 +3974,15 @@ pub async fn rollback(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_form_type_codes_survive_v2_conversion() {
+        assert_eq!(
+            super::form_type("custom_variant").unwrap(),
+            "custom_variant"
+        );
+        assert!(super::form_type("invalid-code").is_err());
+    }
+
     use super::{ApplyFailureCheckpoint, classify_apply_failure_checkpoint};
     use uuid::Uuid;
 

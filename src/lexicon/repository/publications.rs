@@ -211,6 +211,8 @@ impl LexiconRepository {
             .map_err(LexiconRepositoryError::Database)?;
         }
 
+        sqlx::query("INSERT INTO lexicon.entry_publication_form_type_refs(publication_id,entry_id,form_type) SELECT DISTINCT $1,entry_id,form_type FROM lexicon.form_slots WHERE entry_id=$2")
+        .bind(publication_id).bind(word.id).execute(&mut **tx).await.map_err(LexiconRepositoryError::Database)?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.entry_publication_part_of_speech_refs (

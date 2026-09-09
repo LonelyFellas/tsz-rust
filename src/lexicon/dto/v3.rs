@@ -179,19 +179,8 @@ pub enum WordEntryKindV3 {
     Phrase,
 }
 
-/// Phase 1 固定词形目录。`base` 与其余值平级且都允许重复。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WordFormTypeV3 {
-    Base,
-    ThirdPersonSingular,
-    PresentParticiple,
-    PastTense,
-    PastParticiple,
-    Plural,
-    Comparative,
-    Superlative,
-}
+/// Stable catalog code; membership is validated in the write transaction.
+pub type WordFormTypeV3 = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -231,6 +220,7 @@ pub enum PhraseComponentUsageV3 {
         target_form_id: Uuid,
         target_variant_id: Uuid,
         target_dialect: Dialect,
+        #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
         target_form_type: WordFormTypeV3,
         #[schema(max_length = 500)]
         target_headword: String,
@@ -328,6 +318,7 @@ pub enum WordRegionalVariantsV3 {
 #[serde(deny_unknown_fields)]
 pub struct WordConcreteFormV3 {
     pub id: Uuid,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: WordFormTypeV3,
     pub regional_variants: WordRegionalVariantsV3,
 }
@@ -1723,6 +1714,7 @@ pub struct V3DraftNodeLocation {
     pub pronunciation_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    #[schema(value_type = Option<String>, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: Option<WordFormTypeV3>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -1831,6 +1823,7 @@ pub struct FormSurfaceMatchV3 {
     pub group_ids: Vec<Uuid>,
     pub form_id: Uuid,
     pub variant_id: Uuid,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: WordFormTypeV3,
     pub dialect: Dialect,
     pub spelling: String,
@@ -2166,6 +2159,7 @@ pub enum SuggestedRegionalVariantsV3 {
 pub struct SuggestedConcreteFormV3 {
     /// POS ownership is explicit; no suggested form becomes a unique entry-level headword.
     pub pos: String,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: WordFormTypeV3,
     pub regional_variants: SuggestedRegionalVariantsV3,
 }
@@ -2315,6 +2309,7 @@ pub struct RelatedWordMatchV3 {
     pub pos_id: Uuid,
     pub form_id: Uuid,
     pub variant_id: Uuid,
+    #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub form_type: WordFormTypeV3,
     pub dialect: Dialect,
     pub spelling: String,
@@ -2470,7 +2465,7 @@ mod tests {
             group_ids: vec![Uuid::now_v7()],
             form_id: Uuid::now_v7(),
             variant_id: Uuid::now_v7(),
-            form_type: WordFormTypeV3::Base,
+            form_type: "base".to_owned(),
             dialect: Dialect::Uk,
             spelling: "colour".to_owned(),
         });

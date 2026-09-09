@@ -16,6 +16,15 @@ impl CatalogService {
                 ))
             })?;
 
+        let form_types = records
+            .first()
+            .map(|r| r.form_types.0.clone())
+            .unwrap_or_default();
+        let allowed = form_types
+            .iter()
+            .filter(|f| f.code != "base")
+            .map(|f| f.code.clone())
+            .collect::<Vec<_>>();
         let mut items: Vec<CatalogPart> = Vec::new();
         for record in records {
             let Some(part_id) = record.part_id else {
@@ -23,7 +32,7 @@ impl CatalogService {
             };
             if items.last().is_none_or(|item| item.id != part_id) {
                 let code = required(record.part_code, "part code is null")?;
-                let allowed_form_types = crate::lexicon::form_types::catalog_form_types(&code);
+                let allowed_form_types = allowed.clone();
                 let sub_parts_extensible = crate::catalog::rules::is_basic_part_of_speech(&code);
                 items.push(CatalogPart {
                     id: part_id,
@@ -70,6 +79,7 @@ impl CatalogService {
             }
         }
         Ok(CatalogResponse {
+            form_types,
             catalog_version,
             items,
         })

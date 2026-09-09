@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::{
     dto::{
         BuiltinDictionaryEvidenceV3, DetectLexiconSurfaceResponseV3, SourceDialect,
-        SuggestedRegionalVariantsV3, WordFormTypeV3, WordHeadwordsV2,
+        SuggestedRegionalVariantsV3, WordHeadwordsV2,
     },
     normalization::{NormalizedHeadword, normalize_headword, sha256_json},
 };
@@ -60,7 +60,7 @@ fn derive_headwords(detection: &DetectLexiconSurfaceResponseV3) -> anyhow::Resul
     {
         for form in suggested_forms
             .iter()
-            .filter(|form| form.form_type == WordFormTypeV3::Base)
+            .filter(|form| form.form_type == "base")
         {
             match &form.regional_variants {
                 SuggestedRegionalVariantsV3::Common { common }

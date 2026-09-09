@@ -20404,7 +20404,7 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
     assert!(issue["node_location"]["pos_id"].is_string());
 
     let mut unknown_form_type = valid_body.clone();
-    unknown_form_type["content"]["pos"][0]["forms"][0]["form_type"] = json!("future_form_type");
+    unknown_form_type["content"]["pos"][0]["forms"][0]["form_type"] = json!("invalid-form-type");
     let (status, _, response) = call_problem(
         &state,
         Method::PUT,
@@ -20421,7 +20421,7 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
         .unwrap()
         .iter()
         .find(|issue| issue["code"] == "invalid_form_type_for_part_of_speech")
-        .expect("未知 fixed form type 应返回稳定 V3 issue");
+        .expect("非法词形编码应返回稳定 V3 issue");
     assert_eq!(issue["field"], "form_type");
     assert_eq!(issue["node_id"], form_id.to_string());
     assert_eq!(issue["node_location"]["form_id"], form_id.to_string());
@@ -25082,4 +25082,188 @@ async fn lifecycle_batch_rejects_the_whole_batch_when_it_holds_another_admins_dr
         "被拒的批量不得登记幂等键：{replay}"
     );
     assert_eq!(replay["code"], "entry_edit_forbidden");
+}
+
+#[sqlx::test]
+async fn custom_form_type_saves_publishes_and_resolves_with_historical_delete_protection(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin_with_role(&pool, AdminRole::SuperAdmin).await;
+    let bearer = state
+        .admin_token_manager
+        .generate(admin_id, "super_admin")
+        .unwrap();
+    let path = "/api/v1/admin/settings/form-types";
+    let (status,configuration)=call(&state,Method::POST,path,&bearer,None,Some(json!({"code":"custom_variant","name_zh":"自定义词形","short_name_zh":"自定义","name_en":"Custom variant","abbreviation":"custom","full_name_en":"custom variant","sort_order":100}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{configuration}");
+    let ready = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let id = ready["word"]["id"].as_str().unwrap();
+    let mut forms = ready["word"]["forms"].clone();
+    let mut unknown = forms.clone();
+    unknown["pos"][0]["forms"][1]["form_type"] = json!("unregistered_variant");
+    let (status, rejected)=call(&state,Method::PUT,&format!("{ROOT}/entries/{id}/steps/forms"),&bearer,None,Some(json!({"schema_version":3,"base_revision":ready["word"]["revision"],"intent":"save","content":unknown}))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        rejected["field_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["code"] == "invalid_form_type_for_part_of_speech"),
+        "{rejected}"
+    );
+
+    let form_id = forms["pos"][0]["forms"][1]["id"].clone();
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT code FROM catalog.form_types WHERE code='custom_variant' FOR KEY SHARE")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let state2 = state.clone();
+    let bearer2 = bearer.clone();
+    let config_id = configuration["id"].as_str().unwrap().to_owned();
+    let mut deletion = tokio::spawn(async move {
+        call(
+            &state2,
+            Method::DELETE,
+            &format!("/api/v1/admin/settings/form-types/{config_id}?base_revision=1"),
+            &bearer2,
+            None,
+            None,
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut deletion)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE lexicon.v3_concrete_forms SET form_type='custom_variant' WHERE id=$1")
+        .bind(Uuid::parse_str(form_id.as_str().unwrap()).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let (status, blocked) = deletion.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    assert_eq!(blocked["code"], "form_type_in_use");
+
+    forms["pos"][0]["forms"][1]["form_type"] = json!("custom_variant");
+    forms["pos"][0]["forms"][1]["regional_variants"]["uk"]["spelling"] = json!("harbourcustom");
+    forms["pos"][0]["forms"][1]["regional_variants"]["us"]["spelling"] = json!("harborcustom");
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        ready["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    let (status,complete)=call(&state,Method::PUT,&format!("{ROOT}/entries/{id}/steps/meanings"),&bearer,None,Some(json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"complete","content":writable_v3_meanings(&saved)}))).await;
+    assert_eq!(status, StatusCode::OK, "{complete}");
+    let (status, published) = publish_ready_v3(&state, &bearer, &complete).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let (status,found)=call(&state,Method::POST,&format!("{ROOT}/entries/sentence-targets/resolve"),&bearer,None,Some(json!({"schema_version":3,"sentence_text":"harbourcustom","source_dialect":"uk","mode":"all_published_targets","page_size_per_range":20}))).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert!(
+        found["range_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|r| r["published_matches"].as_array().unwrap())
+            .filter(|m| m["entry_id"] == id)
+            .flat_map(|m| m["forms"].as_array().unwrap())
+            .any(|f| f["form_id"] == form_id && f["form_type"] == "custom_variant"),
+        "{found}"
+    );
+    // Remove the draft reference to prove that a historical publication alone protects the code.
+    sqlx::query("UPDATE lexicon.v3_concrete_forms SET form_type='base' WHERE entry_id=$1 AND form_type='custom_variant'").bind(Uuid::parse_str(id).unwrap()).execute(&pool).await.unwrap();
+    let (status, blocked) = call(
+        &state,
+        Method::DELETE,
+        &format!(
+            "{path}/{}?base_revision=1",
+            configuration["id"].as_str().unwrap()
+        ),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    assert_eq!(blocked["code"], "form_type_in_use");
+    let mut rollback = pool.begin().await.unwrap();
+    let error = sqlx::raw_sql(include_str!(
+        "../migrations/20260909100000_add_form_type_catalog.down.sql"
+    ))
+    .execute(&mut *rollback)
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("historical publications"),
+        "{error}"
+    );
+    rollback.rollback().await.unwrap();
+}
+
+#[sqlx::test]
+async fn deleting_unused_builtin_form_type_filters_dictionary_suggestions(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin = seed_admin_with_role(&pool, AdminRole::SuperAdmin).await;
+    let bearer = state
+        .admin_token_manager
+        .generate(admin, "super_admin")
+        .unwrap();
+    seed_dictionary_word(&pool, "harbour").await;
+    let dataset: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status='active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO dictionary.content_imports(dataset_id,input_sha256,source_locator,source_version,record_count,parser_version) VALUES($1,repeat('b',64),'fixture','fixture',1,'forms-sounds-v1')").bind(dataset).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO dictionary.entry_contents(dataset_id,source_key,normalized_term,pos,senses,forms,sounds,source_locator) VALUES($1,'fixture:harbour','harbour','noun','[]',$2,'[]','fixture')")
+        .bind(dataset).bind(json!([{"form":"harbours","tags":["plural"]}])).execute(&pool).await.unwrap();
+    for deleted in [false, true] {
+        if deleted {
+            let id: Uuid =
+                sqlx::query_scalar("SELECT id FROM catalog.form_types WHERE code='plural'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let (status, body) = call(
+                &state,
+                Method::DELETE,
+                &format!("/api/v1/admin/settings/form-types/{id}?base_revision=1"),
+                &bearer,
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        }
+        let (status, detection) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/detections"),
+            &bearer,
+            None,
+            Some(json!({"schema_version":3,"language":"en","kind":"word","surface":"harbour"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detection}");
+        let forms = detection["builtin_dictionary"]["suggested_forms"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            forms.iter().any(|f| f["form_type"] == "plural"),
+            !deleted,
+            "{detection}"
+        );
+        assert!(forms.iter().any(|f| f["form_type"] == "base"));
+    }
 }

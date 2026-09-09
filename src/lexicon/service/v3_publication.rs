@@ -14,7 +14,7 @@ use crate::lexicon::dto::{
     ActivatePublicationV3Input, AdminWordAny, AdminWordAnyEnvelope, AdminWordStatus, AdminWordV2,
     AdminWordV3, DraftFormsStepContentV3, DraftMeaningsStepContent, DraftMeaningsStepContentV3,
     PersistedWordStep, PhraseComponentUsageV3, PublishAdminWordV3Input,
-    SentenceAssociationsStateV2, StepSaveIntent, WordFormTypeV3, WordRegionalVariantsV3,
+    SentenceAssociationsStateV2, StepSaveIntent, WordRegionalVariantsV3,
 };
 use crate::lexicon::model::{
     NewPublicationSenseReference, PublicationSenseReferenceKind, PublicationTargetContentScope,
@@ -1173,6 +1173,8 @@ async fn insert_publication_catalog_refs(
     publication_id: Uuid,
     entry_id: Uuid,
 ) -> Result<(), LexiconServiceError> {
+    sqlx::query("INSERT INTO lexicon.entry_publication_form_type_refs(publication_id,entry_id,form_type) SELECT DISTINCT $1,entry_id,form_type FROM lexicon.v3_concrete_forms WHERE entry_id=$2 UNION SELECT $1,entry_id,target_form_type FROM lexicon.v3_phrase_sense_component_usages WHERE entry_id=$2 AND target_form_type IS NOT NULL UNION SELECT $1,entry_id,target_form_type FROM lexicon.v3_phrase_variant_component_usages WHERE entry_id=$2 AND target_form_type IS NOT NULL")
+        .bind(publication_id).bind(entry_id).execute(&mut **tx).await.map_err(database_error)?;
     sqlx::query(
         r#"
         INSERT INTO lexicon.entry_publication_part_of_speech_refs (
@@ -1476,7 +1478,7 @@ async fn upsert_v3_publication_surface(
     .bind(publication_id)
     .bind(source.pos_id)
     .bind(&source.pos)
-    .bind(v3_form_type_name(source.form_type))
+    .bind(v3_form_type_name(&source.form_type))
     .bind(source.form_id)
     .bind(source.variant_id)
     .bind(&source.group_ids)
@@ -1745,17 +1747,8 @@ async fn insert_v3_command_response(
     .map_err(database_error)
 }
 
-const fn v3_form_type_name(value: WordFormTypeV3) -> &'static str {
-    match value {
-        WordFormTypeV3::Base => "base",
-        WordFormTypeV3::ThirdPersonSingular => "third_person_singular",
-        WordFormTypeV3::PresentParticiple => "present_participle",
-        WordFormTypeV3::PastTense => "past_tense",
-        WordFormTypeV3::PastParticiple => "past_participle",
-        WordFormTypeV3::Plural => "plural",
-        WordFormTypeV3::Comparative => "comparative",
-        WordFormTypeV3::Superlative => "superlative",
-    }
+fn v3_form_type_name(value: &str) -> &str {
+    value
 }
 
 #[cfg(test)]

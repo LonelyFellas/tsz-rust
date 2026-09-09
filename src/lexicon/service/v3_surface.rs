@@ -220,7 +220,7 @@ impl V3SurfaceMaterial {
                                     dialect: item.dialect,
                                     pos_id: item.pos_id,
                                     pos: resolved.pos.clone().ok_or_else(invariant_record)?,
-                                    form_type: v2_form_type(item.form_type),
+                                    form_type: v2_form_type(item.form_type.clone()),
                                 },
                             },
                         )
@@ -1955,7 +1955,7 @@ impl LexiconService {
                             dialect,
                             pos_id: record.pos_id.ok_or_else(invariant_record)?,
                             pos: record.pos.ok_or_else(invariant_record)?,
-                            form_type: WordFormTypeV2::try_from(
+                            form_type: crate::lexicon::form_types::parse_code(
                                 record.form_type.as_deref().ok_or_else(invariant_record)?,
                             )
                             .map_err(|()| invariant_record())?,
@@ -2313,7 +2313,7 @@ fn v2_restore_publication_candidates(
         let form_type = source
             .form_type
             .as_deref()
-            .map(WordFormTypeV2::try_from)
+            .map(crate::lexicon::form_types::parse_code)
             .transpose()
             .map_err(|()| invariant_record())?;
         let key = V3SurfaceQueryKey {
@@ -2333,7 +2333,7 @@ fn v2_restore_publication_candidates(
                 normalized_surface: source.normalized_surface.clone(),
                 pos_id: source.pos_id,
                 pos: source.pos.clone(),
-                form_type,
+                form_type: form_type.clone(),
                 lookup_keys: BTreeSet::new(),
             });
         if candidate.source_kind != source.source_kind
@@ -2374,7 +2374,7 @@ fn v2_restore_publication_candidate_wire(
             dialect: candidate.dialect,
             pos_id: candidate.pos_id.ok_or_else(invariant_record)?,
             pos: candidate.pos.clone().ok_or_else(invariant_record)?,
-            form_type: candidate.form_type.ok_or_else(invariant_record)?,
+            form_type: candidate.form_type.clone().ok_or_else(invariant_record)?,
         }),
         _ => Err(invariant_record()),
     }
@@ -2661,30 +2661,15 @@ async fn current_publication_id(
 }
 
 fn parse_form_type_v3(value: &str) -> Result<WordFormTypeV3, LexiconServiceError> {
-    match value {
-        "base" => Ok(WordFormTypeV3::Base),
-        "third_person_singular" => Ok(WordFormTypeV3::ThirdPersonSingular),
-        "present_participle" => Ok(WordFormTypeV3::PresentParticiple),
-        "past_tense" => Ok(WordFormTypeV3::PastTense),
-        "past_participle" => Ok(WordFormTypeV3::PastParticiple),
-        "plural" => Ok(WordFormTypeV3::Plural),
-        "comparative" => Ok(WordFormTypeV3::Comparative),
-        "superlative" => Ok(WordFormTypeV3::Superlative),
-        _ => Err(invariant_record()),
+    if crate::lexicon::form_types::valid_code(value) {
+        Ok(value.to_owned())
+    } else {
+        Err(invariant_record())
     }
 }
 
-const fn v2_form_type(value: WordFormTypeV3) -> WordFormTypeV2 {
-    match value {
-        WordFormTypeV3::Base => WordFormTypeV2::Base,
-        WordFormTypeV3::ThirdPersonSingular => WordFormTypeV2::ThirdPersonSingular,
-        WordFormTypeV3::PresentParticiple => WordFormTypeV2::PresentParticiple,
-        WordFormTypeV3::PastTense => WordFormTypeV2::PastTense,
-        WordFormTypeV3::PastParticiple => WordFormTypeV2::PastParticiple,
-        WordFormTypeV3::Plural => WordFormTypeV2::Plural,
-        WordFormTypeV3::Comparative => WordFormTypeV2::Comparative,
-        WordFormTypeV3::Superlative => WordFormTypeV2::Superlative,
-    }
+fn v2_form_type(value: WordFormTypeV3) -> WordFormTypeV2 {
+    value
 }
 
 fn parse_v3_dialect(value: &str) -> Result<Dialect, LexiconServiceError> {

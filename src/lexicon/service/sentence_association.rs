@@ -569,20 +569,19 @@ impl PublishedAssociationTarget {
                             .flat_map(|group| &group.members)
                             .filter_map(|member| {
                                 forms.forms.iter().find(|candidate| {
-                                    candidate.id == member.form_id
-                                        && candidate.form_type == WordFormTypeV3::Base
+                                    candidate.id == member.form_id && candidate.form_type == "base"
                                 })
                             })
                             .map(|base| base.id)
                             .collect::<Vec<_>>();
-                        if base_form_ids.is_empty() && form.form_type == WordFormTypeV3::Base {
+                        if base_form_ids.is_empty() && form.form_type == "base" {
                             base_form_ids.push(form.id);
                         }
                         base_form_ids.sort_unstable();
                         base_form_ids.dedup();
                         PublishedAssociationForm {
                             id: form.id,
-                            form_type: v3_form_type_name(form.form_type).to_owned(),
+                            form_type: v3_form_type_name(&form.form_type).to_owned(),
                             base_form_ids,
                             variants: variants
                                 .iter()
@@ -677,7 +676,7 @@ impl PublishedAssociationTarget {
                         SentenceTargetCandidateFormV3 {
                             form_id: candidate_form.id,
                             variant_id: variant.id,
-                            form_type,
+                            form_type: form_type.clone(),
                             spelling: variant.spelling.clone(),
                             dialect: variant.dialect,
                             base_form_ids: if component_targetable {
@@ -709,7 +708,7 @@ impl PublishedAssociationTarget {
                 matched_form_id: form.id,
                 matched_variant_id: variant.id,
                 matched_dialect: variant.dialect,
-                matched_form_type: form_type,
+                matched_form_type: form_type.clone(),
                 forms,
                 component_usages: variant.component_usages.clone(),
                 matches: evidence.iter().cloned().collect(),
@@ -838,32 +837,11 @@ fn v3_form_variants(
 }
 
 fn parse_v3_form_type_name(value: &str) -> Option<WordFormTypeV3> {
-    Some(match value {
-        "base" => WordFormTypeV3::Base,
-        "third_person_singular" => WordFormTypeV3::ThirdPersonSingular,
-        "present_participle" => WordFormTypeV3::PresentParticiple,
-        "past_tense" => WordFormTypeV3::PastTense,
-        "past_participle" => WordFormTypeV3::PastParticiple,
-        "plural" => WordFormTypeV3::Plural,
-        "comparative" => WordFormTypeV3::Comparative,
-        "superlative" => WordFormTypeV3::Superlative,
-        _ => return None,
-    })
+    crate::lexicon::form_types::parse_code(value).ok()
 }
 
-fn v3_form_type_name(form_type: crate::lexicon::dto::WordFormTypeV3) -> &'static str {
-    use crate::lexicon::dto::WordFormTypeV3;
-
-    match form_type {
-        WordFormTypeV3::Base => "base",
-        WordFormTypeV3::ThirdPersonSingular => "third_person_singular",
-        WordFormTypeV3::PresentParticiple => "present_participle",
-        WordFormTypeV3::PastTense => "past_tense",
-        WordFormTypeV3::PastParticiple => "past_participle",
-        WordFormTypeV3::Plural => "plural",
-        WordFormTypeV3::Comparative => "comparative",
-        WordFormTypeV3::Superlative => "superlative",
-    }
+fn v3_form_type_name(form_type: &str) -> &str {
+    form_type
 }
 
 impl LexiconService {

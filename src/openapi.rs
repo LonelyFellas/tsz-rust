@@ -64,6 +64,10 @@ use utoipa::{
         crate::admin::accounts::handler::update_user,
         // catalog 域
         crate::catalog::handler::catalog,
+        crate::catalog::form_types::list,
+        crate::catalog::form_types::create,
+        crate::catalog::form_types::update,
+        crate::catalog::form_types::remove,
         crate::catalog::handler::list_parts,
         crate::catalog::handler::create_part,
         crate::catalog::handler::update_part,
@@ -1549,17 +1553,8 @@ mod tests {
             serde_json::json!([true])
         );
         assert_eq!(
-            schemas["WordFormTypeV2"]["enum"],
-            serde_json::json!([
-                "base",
-                "third_person_singular",
-                "present_participle",
-                "past_tense",
-                "past_participle",
-                "plural",
-                "comparative",
-                "superlative"
-            ])
+            schemas["WordConcreteFormV3"]["properties"]["form_type"]["pattern"],
+            serde_json::json!("^[a-z][a-z0-9_]{0,31}$")
         );
         assert_eq!(
             schemas["SurfaceMatchCategoryV2"]["enum"],
@@ -2169,17 +2164,8 @@ mod tests {
         );
 
         assert_eq!(
-            schemas["WordFormTypeV3"]["enum"],
-            serde_json::json!([
-                "base",
-                "third_person_singular",
-                "present_participle",
-                "past_tense",
-                "past_participle",
-                "plural",
-                "comparative",
-                "superlative"
-            ])
+            schemas["WordConcreteFormV3"]["properties"]["form_type"]["pattern"],
+            serde_json::json!("^[a-z][a-z0-9_]{0,31}$")
         );
         assert_eq!(
             schemas["WordEntryKindV3"]["enum"],
