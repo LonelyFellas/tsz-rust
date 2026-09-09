@@ -12471,6 +12471,58 @@ async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
 /// 音色 / 语速是「这段文本将来怎么合成」的配置，必须跟着词条落库；
 /// V3 → V2 → V3 往返会吞掉它，所以这条一路走到 GET 才算数。
 #[sqlx::test]
+async fn v3_sense_group_voice_editor(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let word =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["A harbour sentence."])
+            .await;
+    assert!(
+        word["word"]["meanings"]["sense_groups"][0]
+            .get("name_en_rich")
+            .is_none()
+    );
+    let mut meanings = word["word"]["meanings"].clone();
+    let text = meanings["sense_groups"][0]["name_en"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let rich = json!({"version":2,"text":text,"annotations":[]});
+    let profile = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]});
+    meanings["sense_groups"][0]["name_en_rich"] = rich.clone();
+    meanings["sense_groups"][0]["voice_profile"] = profile.clone();
+    let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
+    let assert_fields = |body: &Value| {
+        assert_eq!(
+            body["word"]["meanings"]["sense_groups"][0]["name_en_rich"],
+            rich
+        );
+        assert_eq!(
+            body["word"]["meanings"]["sense_groups"][0]["voice_profile"],
+            profile
+        );
+    };
+    assert_fields(&saved);
+    let (status, fetched) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", word["word"]["id"].as_str().unwrap()),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    assert_fields(&fetched);
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    assert_fields(&published);
+}
+
+#[sqlx::test]
 async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

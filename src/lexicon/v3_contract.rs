@@ -428,6 +428,23 @@ pub(crate) fn validate_meanings(
         ));
     }
     for group in &content.sense_groups {
+        if let Some(rich) = &group.name_en_rich {
+            validate_rich_text_limits(rich, group.id, "name_en", &mut issues);
+            let valid = serde_json::to_value(rich)
+                .ok()
+                .and_then(|value| serde_json::from_value::<RichText>(value).ok())
+                .is_some_and(|value| crate::lexicon::rich_text::is_valid(&value));
+            if rich.text() != group.name_en || !valid {
+                issues.push(meanings_issue(
+                    V3ValidationIssueCode::MeaningsStorageUnsafe,
+                    "name_en",
+                    group.id,
+                    "sense group rich text must match name_en and contain valid annotations",
+                ));
+            }
+        }
+        validate_voice_profile(group.voice_profile.as_ref(), group.id, &mut issues);
+
         for (field, value) in [("name_zh", &group.name_zh), ("name_en", &group.name_en)] {
             if value.chars().count() > MAX_HEADWORD_CODEPOINTS {
                 issues.push(meanings_limit_issue(
@@ -2121,6 +2138,8 @@ mod tests {
                 id: Uuid::now_v7(),
                 name_zh: index.to_string(),
                 name_en: index.to_string(),
+                name_en_rich: None,
+                voice_profile: None,
             })
             .collect();
         assert!(has_code(
@@ -2342,5 +2361,37 @@ mod tests {
             request_schema_version(&json!({"schema_version": 3})).unwrap(),
             Some(3)
         );
+    }
+}
+
+#[cfg(test)]
+mod sense_group_voice_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn sense_group_voice_validates_text_and_profile() {
+        let raw = json!({"sense_groups": [{"id": Uuid::new_v4(), "name_zh": "工作", "name_en": "work", "name_en_rich": {"version": 2, "text": "work", "annotations": [{"type":"emphasis", "start":0,"end":4,"level":"core"}]}, "voice_profile": {"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":0}]}}],"pos":[]});
+        let content: DraftMeaningsStepContentV3 = serde_json::from_value(raw.clone()).unwrap();
+        assert!(validate_meanings(&content, StepSaveIntent::Save).is_empty());
+        for (field, invalid) in [
+            ("text", json!("different")),
+            (
+                "annotations",
+                json!([{"type":"emphasis","start":0,"end":100,"level":"core"}]),
+            ),
+        ] {
+            let mut bad = raw.clone();
+            bad["sense_groups"][0]["name_en_rich"][field] = invalid;
+            let content = serde_json::from_value(bad).unwrap();
+            assert!(
+                validate_meanings(&content, StepSaveIntent::Save)
+                    .iter()
+                    .any(|issue| issue.field == "name_en")
+            );
+        }
+        let mut bad = raw;
+        bad["sense_groups"][0]["voice_profile"]["voices"][0]["rate_percent"] = json!(1000);
+        let content = serde_json::from_value(bad).unwrap();
+        assert!(!validate_meanings(&content, StepSaveIntent::Save).is_empty());
     }
 }

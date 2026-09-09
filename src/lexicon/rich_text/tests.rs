@@ -374,3 +374,15 @@ fn adjacent_emphases_of_different_levels_stay_apart() {
         ]
     ));
 }
+
+#[test]
+fn word_internal_liaison_keeps_part_time_anchors() {
+    let raw = serde_json::json!({"version":2,"text":"part-time","annotations":[{"type":"liaison","start":3,"end":6,"start_len":1,"end_len":1}]});
+    let mut content: RichText = serde_json::from_value(raw).unwrap();
+    assert!(is_valid(&content));
+    canonicalize(&mut content).unwrap();
+    let saved = serde_json::to_value(&content).unwrap();
+    assert_eq!(saved["annotations"][0]["start"], 3);
+    assert_eq!(saved["annotations"][0]["end"], 6);
+    assert!(is_valid(&serde_json::from_value(saved).unwrap()));
+}
