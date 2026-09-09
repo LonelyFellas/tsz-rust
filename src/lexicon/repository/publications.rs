@@ -1041,6 +1041,54 @@ impl LexiconRepository {
         .map_err(map_target_publication_lock_error)
     }
 
+    /// 发布时核验草稿范围的目标词义（正文关联与短语成分共用）：目标词条行 `FOR SHARE NOWAIT` 锁住，
+    /// 带回当时的 entry revision；归档 / 词义已从草稿移除由调用方按可用性处理。
+    pub(crate) async fn draft_sense_targets_for_publish(
+        tx: &mut Transaction<'_, Postgres>,
+        targets: &[SenseTargetKey],
+    ) -> Result<Vec<DraftSenseTargetRecord>, LexiconRepositoryError> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let target_entry_ids = targets
+            .iter()
+            .map(|target| target.target_entry_id)
+            .collect::<Vec<_>>();
+        let target_sense_ids = targets
+            .iter()
+            .map(|target| target.target_sense_id)
+            .collect::<Vec<_>>();
+        sqlx::query_as::<_, DraftSenseTargetRecord>(
+            r#"
+            WITH requested AS (
+                SELECT DISTINCT target_entry_id, target_sense_id
+                FROM unnest($1::uuid[], $2::uuid[])
+                    AS target(target_entry_id, target_sense_id)
+            )
+            SELECT requested.target_entry_id,
+                   requested.target_sense_id,
+                   entry.revision AS target_revision,
+                   entry.archived_at IS NOT NULL AS target_archived,
+                   node.removed_from_draft_at IS NOT NULL AS target_removed
+            FROM requested
+            JOIN lexicon.nodes node
+              ON node.id = requested.target_sense_id
+             AND node.entry_id = requested.target_entry_id
+             AND node.node_type = 'sense'
+            JOIN lexicon.entries entry
+              ON entry.id = requested.target_entry_id
+             AND entry.content_schema_version = 3
+            ORDER BY requested.target_entry_id, requested.target_sense_id
+            FOR SHARE OF entry NOWAIT
+            "#,
+        )
+        .bind(target_entry_ids)
+        .bind(target_sense_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(map_target_publication_lock_error)
+    }
+
     pub(crate) async fn phrase_component_publication_targets_for_publish(
         tx: &mut Transaction<'_, Postgres>,
         target_entry_ids: &[Uuid],

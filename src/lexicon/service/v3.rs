@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -24,14 +24,14 @@ use crate::lexicon::dto::{
     DraftMeaningsStepContentV3, DraftNodeLocation, DraftValidationResponseV3, EnglishLanguageV3,
     EnglishTextV3, EntryPresentationV3, FormsImpactItemV3, FormsImpactNodeTypeV3,
     FormsImpactResponseV3, LegacyHeadwordsCompatibilityV3, PhraseComponentUsageV3,
-    PreviewFormsImpactInputV3, PronunciationNormalizationVersionV3, PronunciationStyle,
-    RetiredStableNodeV3, RichTextVariantV3, SaveFormsStepInputV3, SaveMeaningsStepInputV3,
-    SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3, UsDialectV3,
-    V3PublicationBlockCode, V3PublicationCapability, V3RetiredNodeRole, V3ValidationIssueCode,
-    ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3,
-    WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordHeadwordsV2,
-    WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3, WordRegionalVariantsV3,
-    WordUkFormVariantV3, WordUsFormVariantV3,
+    PresenceAwareVec, PreviewFormsImpactInputV3, PronunciationNormalizationVersionV3,
+    PronunciationStyle, RetiredStableNodeV3, RichTextVariantV3, SaveFormsStepInputV3,
+    SaveMeaningsStepInputV3, SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin,
+    UkDialectV3, UsDialectV3, V3PublicationBlockCode, V3PublicationCapability, V3RetiredNodeRole,
+    V3ValidationIssueCode, ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3,
+    WordDefinitionV3, WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3,
+    WordHeadwordsV2, WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3,
+    WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
 };
 use crate::lexicon::model::{NodeIdentityRecord, RegionEvidenceRecord};
 
@@ -1594,8 +1594,13 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
-        validate_phrase_components(&mut validation_tx, entry_id, current.kind, &input.content)
-            .await?;
+        validate_phrase_components(
+            &mut validation_tx,
+            entry_id,
+            current.kind,
+            &mut input.content,
+        )
+        .await?;
         validation_tx.commit().await.map_err(database_error)?;
         let issues =
             crate::lexicon::v3_contract::validate_forms(&input.content, StepSaveIntent::Save);
@@ -1694,7 +1699,8 @@ impl LexiconService {
         ensure_v3_record_active(&record)?;
         let entry_kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
         ensure_phrase_component_ownership(entry_kind, &input.content)?;
-        validate_phrase_components(&mut transaction, entry_id, entry_kind, &input.content).await?;
+        validate_phrase_components(&mut transaction, entry_id, entry_kind, &mut input.content)
+            .await?;
         if record.revision != input.base_revision {
             return Err(LexiconServiceError::RevisionConflict {
                 current_revision: record.revision,
@@ -2037,7 +2043,7 @@ impl LexiconService {
             &mut transaction,
             entry_id,
             compatibility_source.kind,
-            &translation_content,
+            &mut translation_content,
         )
         .await?;
         if !component_issues.is_empty() {
@@ -2521,11 +2527,13 @@ fn ensure_phrase_component_ownership(
     }
 }
 
-async fn validate_phrase_components(
+/// 词形变体级成分用词校验（保存词形步与发布共用）。目标可以是发布快照，也可以是从未发布的
+/// 草稿；草稿目标在目标发布之后会在这里升级并回填 `target_publication_id`。
+pub(super) async fn validate_phrase_components(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     kind: WordEntryKindV3,
-    content: &DraftFormsStepContentV3,
+    content: &mut DraftFormsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
     ensure_phrase_component_ownership(kind, content)?;
     if kind != WordEntryKindV3::Phrase {
@@ -2544,54 +2552,41 @@ async fn validate_phrase_components(
         }
     }
 
-    let components = content
-        .pos
-        .iter()
-        .flat_map(|pos| &pos.forms)
-        .flat_map(|form| match &form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => common.component_usages.clone(),
-            WordRegionalVariantsV3::UkUs { uk, us } => uk
-                .component_usages
-                .iter()
-                .chain(&us.component_usages)
-                .cloned()
-                .collect(),
-        })
-        .collect::<Vec<_>>();
-    let mut targets = HashMap::<(Uuid, Uuid), AdminWordV3>::new();
+    let components = form_component_usages(content).cloned().collect::<Vec<_>>();
+    let mut groups = BTreeMap::<(Uuid, Option<Uuid>), Vec<PhraseComponentUsageV3>>::new();
     for component in &components {
-        let literal = match component {
-            PhraseComponentUsageV3::Unresolved { literal, .. }
-            | PhraseComponentUsageV3::Resolved { literal, .. } => literal,
-        };
-        if literal.trim() != literal || literal.is_empty() || literal.chars().count() > 200 {
+        if !phrase_component_literal_is_valid(phrase_component_literal(component)) {
             return Err(invalid_phrase_component());
         }
-        let PhraseComponentUsageV3::Resolved {
-            target_word_id,
-            target_publication_id,
-            ..
-        } = component
+        let Some((target_word_id, target_publication_id)) = resolved_component_key(component)
         else {
             continue;
         };
-        if *target_word_id == entry_id {
+        if target_word_id == entry_id {
             return Err(LexiconServiceError::InvalidField {
                 field: "component_usages",
                 message: "phrase component must not target the phrase itself",
             });
         }
-        if targets.contains_key(&(*target_word_id, *target_publication_id)) {
-            continue;
-        }
-        let word = load_phrase_component_target(tx, *target_word_id, *target_publication_id)
-            .await?
-            .ok_or_else(invalid_phrase_component)?;
-        targets.insert((*target_word_id, *target_publication_id), word);
+        groups
+            .entry((target_word_id, target_publication_id))
+            .or_default()
+            .push(component.clone());
+    }
+    let mut targets = HashMap::<(Uuid, Option<Uuid>), ComponentTargetWord>::new();
+    for (key, members) in &groups {
+        let target = resolve_component_target(tx, key.0, key.1, |candidate| {
+            members
+                .iter()
+                .all(|member| resolved_component_matches(candidate, member))
+        })
+        .await?
+        .ok_or_else(invalid_phrase_component)?;
+        targets.insert(*key, target);
     }
 
-    // 短语套短语只放一层：目标短语的发布快照里不得再出现短语目标。发布快照不可变，
-    // 所以这条不变式一旦在保存时成立就永久成立，任何成分链最深是 短语→短语→单词。
+    // 短语套短语只放一层：目标短语自己的成分不得再出现短语目标。发布快照不可变，草稿目标
+    // 则可能事后再加短语成分，所以发布路径会再跑一遍本函数。
     let mut nested_target_ids = targets
         .values()
         .filter(|target| target.kind == WordEntryKindV3::Phrase)
@@ -2616,47 +2611,133 @@ async fn validate_phrase_components(
     }
 
     for component in &components {
-        let PhraseComponentUsageV3::Resolved {
-            target_word_id,
-            target_publication_id,
-            target_pos_id,
-            target_base_form_id,
-            target_sense_id,
-            target_form_id,
-            target_variant_id,
-            target_dialect,
-            target_form_type,
-            target_headword,
-            target_gloss,
-            ..
-        } = component
-        else {
+        let Some(key) = resolved_component_key(component) else {
             continue;
         };
-        let target = targets
-            .get(&(*target_word_id, *target_publication_id))
-            .ok_or_else(invalid_phrase_component)?;
-        if !phrase_component_matches_target(
-            target,
-            *target_pos_id,
-            *target_base_form_id,
-            *target_sense_id,
-            *target_form_id,
-            *target_variant_id,
-            *target_dialect,
-            target_form_type.clone(),
-            target_headword,
-            target_gloss,
-        ) {
+        let target = targets.get(&key).ok_or_else(invalid_phrase_component)?;
+        if !resolved_component_matches(target, component) {
             return Err(invalid_phrase_component());
         }
+    }
+    for usages in form_component_usage_slots(content) {
+        upgrade_component_targets(usages, |word_id| {
+            targets
+                .get(&(word_id, None))
+                .and_then(ComponentTargetWord::publication_id)
+        });
     }
     Ok(())
 }
 
+fn form_component_usages(
+    content: &DraftFormsStepContentV3,
+) -> impl Iterator<Item = &PhraseComponentUsageV3> {
+    content
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.forms)
+        .flat_map(|form| match &form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => vec![&common.component_usages],
+            WordRegionalVariantsV3::UkUs { uk, us } => {
+                vec![&uk.component_usages, &us.component_usages]
+            }
+        })
+        .flat_map(|usages| usages.iter())
+}
+
+fn form_component_usage_slots(
+    content: &mut DraftFormsStepContentV3,
+) -> impl Iterator<Item = &mut PresenceAwareVec<PhraseComponentUsageV3>> {
+    content
+        .pos
+        .iter_mut()
+        .flat_map(|pos| &mut pos.forms)
+        .flat_map(|form| match &mut form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => vec![&mut common.component_usages],
+            WordRegionalVariantsV3::UkUs { uk, us } => {
+                vec![&mut uk.component_usages, &mut us.component_usages]
+            }
+        })
+}
+
+/// 已解析成分的目标键：`(词条, 发布版本)`；发布版本缺省即草稿目标。
+fn resolved_component_key(component: &PhraseComponentUsageV3) -> Option<(Uuid, Option<Uuid>)> {
+    match component {
+        PhraseComponentUsageV3::Resolved {
+            target_word_id,
+            target_publication_id,
+            ..
+        } => Some((*target_word_id, *target_publication_id)),
+        PhraseComponentUsageV3::Unresolved { .. } => None,
+    }
+}
+
+/// 已解析成分是否与目标内容一致（词性 / 词形 / 变体 / 原形同组 / 词义 / 词面 / 释义）。
+fn resolved_component_matches(
+    target: &ComponentTargetWord,
+    component: &PhraseComponentUsageV3,
+) -> bool {
+    let PhraseComponentUsageV3::Resolved {
+        target_pos_id,
+        target_base_form_id,
+        target_sense_id,
+        target_form_id,
+        target_variant_id,
+        target_dialect,
+        target_form_type,
+        target_headword,
+        target_gloss,
+        ..
+    } = component
+    else {
+        return false;
+    };
+    phrase_component_matches_target(
+        target,
+        *target_pos_id,
+        *target_base_form_id,
+        *target_sense_id,
+        *target_form_id,
+        *target_variant_id,
+        *target_dialect,
+        target_form_type.clone(),
+        target_headword,
+        target_gloss,
+    )
+}
+
+/// 草稿目标发布后把成分升级到它的当前发布版本。只在确有可升级项时才取可变引用，
+/// 免得 `PresenceAwareVec` 的 `DerefMut` 把「客户端没发这个字段」误标成显式提交。
+fn upgrade_component_targets(
+    usages: &mut PresenceAwareVec<PhraseComponentUsageV3>,
+    upgraded_publication: impl Fn(Uuid) -> Option<Uuid>,
+) {
+    let upgradable = usages.iter().any(|usage| match usage {
+        PhraseComponentUsageV3::Resolved {
+            target_word_id,
+            target_publication_id: None,
+            ..
+        } => upgraded_publication(*target_word_id).is_some(),
+        _ => false,
+    });
+    if !upgradable {
+        return;
+    }
+    for usage in usages.iter_mut() {
+        if let PhraseComponentUsageV3::Resolved {
+            target_word_id,
+            target_publication_id: target_publication_id @ None,
+            ..
+        } = usage
+        {
+            *target_publication_id = upgraded_publication(*target_word_id);
+        }
+    }
+}
+
 /// 目标短语自己的成分指向了谁。**必须同时扫 forms 与 meanings**：
 /// 发布快照不可变，B1 之前存量短语的成分还挂在 forms 上，只看 meanings 会漏掉套娃检测。
-fn phrase_component_resolved_target_ids(word: &AdminWordV3) -> Vec<Uuid> {
+fn phrase_component_resolved_target_ids(word: &ComponentTargetWord) -> Vec<Uuid> {
     let from_forms = word
         .forms
         .pos
@@ -2689,7 +2770,7 @@ fn phrase_component_resolved_target_ids(word: &AdminWordV3) -> Vec<Uuid> {
 
 #[allow(clippy::too_many_arguments)]
 fn phrase_component_matches_target(
-    target: &AdminWordV3,
+    target: &ComponentTargetWord,
     target_pos_id: Uuid,
     target_base_form_id: Uuid,
     target_sense_id: Uuid,
@@ -2700,7 +2781,7 @@ fn phrase_component_matches_target(
     target_headword: &str,
     target_gloss: &str,
 ) -> bool {
-    if target.presentation.label != target_headword {
+    if target.label != target_headword {
         return false;
     }
     let Some(pos) = target
@@ -2788,37 +2869,192 @@ fn phrase_component_literal_is_valid(literal: &str) -> bool {
     literal.trim() == literal && !literal.is_empty() && literal.chars().count() <= 200
 }
 
-/// 成分目标只接受「未归档 + V3 发布」的词条；行不存在或快照不是 V3 都返回 `None`。
-pub(super) async fn load_phrase_component_target(
+/// 成分用词 / 正文关联目标的来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ComponentTargetScope {
+    /// 某一版发布快照；`revision` 是该发布的 `source_revision`。
+    Publication { publication_id: Uuid, revision: i64 },
+    /// 从未发布的草稿当前内容；`revision` 是目标 `entries.revision`。
+    Draft { revision: i64 },
+}
+
+/// 校验成分用词 / 正文关联所需的目标内容，发布快照与草稿投影都能组装成它。
+#[derive(Debug, Clone)]
+pub(super) struct ComponentTargetWord {
+    pub(super) id: Uuid,
+    pub(super) kind: WordEntryKindV3,
+    pub(super) label: String,
+    pub(super) forms: DraftFormsStepContentV3,
+    pub(super) meanings: DraftMeaningsStepContentV3,
+    pub(super) scope: ComponentTargetScope,
+}
+
+impl ComponentTargetWord {
+    pub(super) fn publication_id(&self) -> Option<Uuid> {
+        match self.scope {
+            ComponentTargetScope::Publication { publication_id, .. } => Some(publication_id),
+            ComponentTargetScope::Draft { .. } => None,
+        }
+    }
+
+    fn from_snapshot(snapshot: Value, publication_id: Uuid, revision: i64) -> Option<Self> {
+        let word = serde_json::from_value::<AdminWordV3>(snapshot).ok()?;
+        Some(Self {
+            id: word.id,
+            kind: word.kind,
+            label: word.presentation.label,
+            forms: word.forms,
+            meanings: word.meanings,
+            scope: ComponentTargetScope::Publication {
+                publication_id,
+                revision,
+            },
+        })
+    }
+
+    fn from_draft_row(row: ComponentTargetDraftRow) -> Result<Self, LexiconServiceError> {
+        let kind = parse_v3_kind(&row.kind).ok_or_else(invariant_record)?;
+        let forms = serde_json::from_value(row.forms).map_err(serialization_error)?;
+        let mut meanings: DraftMeaningsStepContentV3 =
+            serde_json::from_value(row.meanings).map_err(serialization_error)?;
+        crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
+        Ok(Self {
+            id: row.id,
+            kind,
+            label: row.label,
+            forms,
+            meanings,
+            scope: ComponentTargetScope::Draft {
+                revision: row.revision,
+            },
+        })
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ComponentTargetDraftRow {
+    id: Uuid,
+    kind: String,
+    revision: i64,
+    label: String,
+    forms: Value,
+    meanings: Value,
+    current_publication_id: Option<Uuid>,
+    current_snapshot: Option<Value>,
+    current_revision: Option<i64>,
+}
+
+/// 草稿目标的取数：当前草稿内容 + 展示词面 + （若有）当前发布快照。
+const COMPONENT_TARGET_DRAFT_SELECT: &str = r#"
+        SELECT entry.id, entry.kind, entry.revision,
+               COALESCE(presentation.label, '') AS label,
+               projection.forms, projection.meanings,
+               entry.current_publication_id,
+               publication.snapshot AS current_snapshot,
+               publication.source_revision AS current_revision
+        FROM lexicon.entries entry
+        JOIN lexicon.entry_editor_projection projection ON projection.entry_id = entry.id
+        LEFT JOIN lexicon.entry_presentation_projection presentation
+          ON presentation.entry_id = entry.id
+         AND presentation.content_schema_version = 3
+        LEFT JOIN lexicon.entry_publications publication
+          ON publication.id = entry.current_publication_id
+         AND publication.entry_id = entry.id
+         AND publication.content_schema_version = 3
+"#;
+
+/// 取成分用词 / 正文关联的目标（未归档 + V3 + word/phrase）。
+///
+/// `target_publication_id` 给定时只认那一版发布快照。未给定即「草稿目标」：目标若已有当前发布
+/// 且 `probe` 认可该快照（引用的节点都在里面），就升级成发布目标——调用方据此回填
+/// `target_publication_id`；否则按当前草稿内容返回。行不存在、已归档、非 V3 都返回 `None`。
+pub(super) async fn resolve_component_target(
     tx: &mut Transaction<'_, Postgres>,
     target_word_id: Uuid,
-    target_publication_id: Uuid,
-) -> Result<Option<AdminWordV3>, LexiconServiceError> {
-    let snapshot = sqlx::query_scalar::<_, Value>(
-        r#"
-        SELECT publication.snapshot
-        FROM lexicon.entries entry
-        JOIN lexicon.entry_publications publication
-          ON publication.id = $2
-         AND publication.entry_id = entry.id
+    target_publication_id: Option<Uuid>,
+    probe: impl Fn(&ComponentTargetWord) -> bool,
+) -> Result<Option<ComponentTargetWord>, LexiconServiceError> {
+    if let Some(publication_id) = target_publication_id {
+        let row = sqlx::query_as::<_, (Value, i64)>(
+            r#"
+            SELECT publication.snapshot, publication.source_revision
+            FROM lexicon.entries entry
+            JOIN lexicon.entry_publications publication
+              ON publication.id = $2
+             AND publication.entry_id = entry.id
+            WHERE entry.id = $1
+              AND publication.content_schema_version = 3
+              AND entry.kind IN ('word', 'phrase')
+              AND entry.archived_at IS NULL
+            "#,
+        )
+        .bind(target_word_id)
+        .bind(publication_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(database_error)?;
+        return Ok(row.and_then(|(snapshot, revision)| {
+            ComponentTargetWord::from_snapshot(snapshot, publication_id, revision)
+        }));
+    }
+    // SQL 只由常量片段拼成，绑定值走参数。
+    let row = sqlx::query_as::<_, ComponentTargetDraftRow>(sqlx::AssertSqlSafe(format!(
+        "{COMPONENT_TARGET_DRAFT_SELECT}
         WHERE entry.id = $1
-          AND publication.content_schema_version = 3
+          AND entry.content_schema_version = 3
           AND entry.kind IN ('word', 'phrase')
-          AND entry.archived_at IS NULL
-        "#,
-    )
+          AND entry.archived_at IS NULL"
+    )))
     .bind(target_word_id)
-    .bind(target_publication_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(database_error)?;
-    Ok(snapshot.and_then(|snapshot| serde_json::from_value::<AdminWordV3>(snapshot).ok()))
+    let Some(mut row) = row else {
+        return Ok(None);
+    };
+    if let (Some(publication_id), Some(snapshot), Some(revision)) = (
+        row.current_publication_id,
+        row.current_snapshot.take(),
+        row.current_revision,
+    ) && let Some(published) =
+        ComponentTargetWord::from_snapshot(snapshot, publication_id, revision)
+        && probe(&published)
+    {
+        return Ok(Some(published));
+    }
+    ComponentTargetWord::from_draft_row(row).map(Some)
+}
+
+/// 关键字检索用：批量取从未发布的 V3 草稿目标，不按创建者过滤。
+pub(super) async fn load_draft_component_targets(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_ids: &[Uuid],
+) -> Result<Vec<ComponentTargetWord>, LexiconServiceError> {
+    if entry_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, ComponentTargetDraftRow>(sqlx::AssertSqlSafe(format!(
+        "{COMPONENT_TARGET_DRAFT_SELECT}
+        WHERE entry.id = ANY($1)
+          AND entry.content_schema_version = 3
+          AND entry.kind IN ('word', 'phrase')
+          AND entry.archived_at IS NULL
+          AND entry.current_publication_id IS NULL
+        ORDER BY entry.id"
+    )))
+    .bind(entry_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?
+    .into_iter()
+    .map(ComponentTargetWord::from_draft_row)
+    .collect()
 }
 
 /// 短语套短语只放一层：目标短语自身的成分不得再指向另一个短语。
 async fn phrase_component_target_is_nested(
     tx: &mut Transaction<'_, Postgres>,
-    target: &AdminWordV3,
+    target: &ComponentTargetWord,
 ) -> Result<bool, LexiconServiceError> {
     if target.kind != WordEntryKindV3::Phrase {
         return Ok(false);
@@ -2873,11 +3109,12 @@ fn sense_component_issue(
 
 /// 释义级成分用词校验。与变体级的 400 `InvalidField` 不同，这里一律落成
 /// node 级 issue（`step = meanings`），词义步才能把错误定位到具体成分。
-async fn validate_sense_phrase_components(
+/// 目标可以是发布快照或从未发布的草稿；草稿目标发布后在这里升级并回填 `target_publication_id`。
+pub(super) async fn validate_sense_phrase_components(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     kind: WordEntryKindV3,
-    content: &DraftMeaningsStepContentV3,
+    content: &mut DraftMeaningsStepContentV3,
 ) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
     let mut issues = Vec::new();
     if kind != WordEntryKindV3::Phrase {
@@ -2899,31 +3136,36 @@ async fn validate_sense_phrase_components(
         return Ok(issues);
     }
 
-    // 目标快照先去重取回，让下面的 issue 收集是纯计算、不再穿插 await。
-    let mut requested = content
+    // 目标先按 (词条, 发布版本) 去重取回，让下面的 issue 收集是纯计算、不再穿插 await。
+    let mut groups = BTreeMap::<(Uuid, Option<Uuid>), Vec<PhraseComponentUsageV3>>::new();
+    for component in content
         .pos
         .iter()
         .flat_map(|pos| &pos.senses)
         .flat_map(|sense| sense.component_usages.iter())
-        .filter_map(|component| match component {
-            PhraseComponentUsageV3::Resolved {
-                target_word_id,
-                target_publication_id,
-                ..
-            } if *target_word_id != entry_id => Some((*target_word_id, *target_publication_id)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    requested.sort_unstable();
-    requested.dedup();
-    let mut targets = HashMap::<(Uuid, Uuid), Option<AdminWordV3>>::new();
-    let mut nested = HashMap::<(Uuid, Uuid), bool>::new();
-    for key in requested {
-        let target = load_phrase_component_target(tx, key.0, key.1).await?;
-        if let Some(target) = target.as_ref() {
-            nested.insert(key, phrase_component_target_is_nested(tx, target).await?);
+    {
+        if let Some((target_word_id, target_publication_id)) = resolved_component_key(component)
+            && target_word_id != entry_id
+        {
+            groups
+                .entry((target_word_id, target_publication_id))
+                .or_default()
+                .push(component.clone());
         }
-        targets.insert(key, target);
+    }
+    let mut targets = HashMap::<(Uuid, Option<Uuid>), Option<ComponentTargetWord>>::new();
+    let mut nested = HashMap::<(Uuid, Option<Uuid>), bool>::new();
+    for (key, members) in &groups {
+        let target = resolve_component_target(tx, key.0, key.1, |candidate| {
+            members
+                .iter()
+                .all(|member| resolved_component_matches(candidate, member))
+        })
+        .await?;
+        if let Some(target) = target.as_ref() {
+            nested.insert(*key, phrase_component_target_is_nested(tx, target).await?);
+        }
+        targets.insert(*key, target);
     }
 
     for pos in &content.pos {
@@ -2960,24 +3202,10 @@ async fn validate_sense_phrase_components(
                         "component literal must be trimmed and 1-200 characters long",
                     ));
                 }
-                let PhraseComponentUsageV3::Resolved {
-                    target_word_id,
-                    target_publication_id,
-                    target_pos_id,
-                    target_base_form_id,
-                    target_sense_id,
-                    target_form_id,
-                    target_variant_id,
-                    target_dialect,
-                    target_form_type,
-                    target_headword,
-                    target_gloss,
-                    ..
-                } = component
-                else {
+                let Some(key) = resolved_component_key(component) else {
                     continue;
                 };
-                if *target_word_id == entry_id {
+                if key.0 == entry_id {
                     issues.push(component_issue(
                         V3ValidationIssueCode::PhraseComponentSelfTarget,
                         "target",
@@ -2985,12 +3213,11 @@ async fn validate_sense_phrase_components(
                     ));
                     continue;
                 }
-                let key = (*target_word_id, *target_publication_id);
                 let Some(target) = targets.get(&key).and_then(Option::as_ref) else {
                     issues.push(component_issue(
                         V3ValidationIssueCode::PhraseComponentTargetUnavailable,
                         "target",
-                        "phrase component target is missing, archived or not a V3 publication",
+                        "phrase component target is missing, archived or not a V3 word",
                     ));
                     continue;
                 };
@@ -3002,26 +3229,23 @@ async fn validate_sense_phrase_components(
                     ));
                     continue;
                 }
-                if !phrase_component_matches_target(
-                    target,
-                    *target_pos_id,
-                    *target_base_form_id,
-                    *target_sense_id,
-                    *target_form_id,
-                    *target_variant_id,
-                    *target_dialect,
-                    target_form_type.clone(),
-                    target_headword,
-                    target_gloss,
-                ) {
+                if !resolved_component_matches(target, component) {
                     issues.push(component_issue(
                         V3ValidationIssueCode::PhraseComponentTargetStale,
                         "target",
-                        "resolved component must match a published word or phrase form and sense",
+                        "resolved component must match the target word or phrase form and sense",
                     ));
                 }
             }
         }
+    }
+    for sense in content.pos.iter_mut().flat_map(|pos| &mut pos.senses) {
+        upgrade_component_targets(&mut sense.component_usages, |word_id| {
+            targets
+                .get(&(word_id, None))
+                .and_then(Option::as_ref)
+                .and_then(ComponentTargetWord::publication_id)
+        });
     }
     Ok(issues)
 }

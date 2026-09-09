@@ -68,15 +68,41 @@ impl LexiconRepository {
     /// 排序下沉到 SQL：词面等于关键字的排最前、以关键字开头的其次、其余按词面。窗口只有
     /// `limit` 行，排序若留在 Rust 侧，点 `me` 时 `acme / came / home …` 会先把窗口占满，
     /// `me` 本身反而进不来。Rust 侧 `component_target_rank` 用同一规则给候选排序。
-    pub(crate) async fn published_component_target_surfaces(
+    /// 关键字检索的词面行。`exact` 为真时 `keyword` 须已是归一化 key，按 `normalized_surface` 等值；
+    /// 否则按 `surface ILIKE '%keyword%'` 包含匹配。`drafts` 为真时查从未发布的 V3 草稿词面
+    /// （`content_scope = 'draft'`，不按创建者过滤，`publication_id` 为 NULL），否则查当前发布词面。
+    pub(crate) async fn component_target_surfaces(
         tx: &mut Transaction<'_, Postgres>,
         dialect_scopes: &[String],
         keyword: &str,
         kind: Option<EntryKind>,
         limit: i64,
+        exact: bool,
+        drafts: bool,
     ) -> Result<Vec<SentenceDiscoverySurfaceRecord>, LexiconRepositoryError> {
         let lowered = keyword.to_lowercase();
-        sqlx::query_as::<_, SentenceDiscoverySurfaceRecord>(
+        let scope_join = if drafts {
+            r#"JOIN lexicon.entries entry
+                  ON entry.id = source.entry_id
+                 AND entry.archived_at IS NULL
+                 AND entry.current_publication_id IS NULL
+                 AND entry.content_schema_version = 3
+                WHERE source.is_deleted = FALSE
+                  AND source.content_scope = 'draft'"#
+        } else {
+            r#"JOIN lexicon.entries entry
+                  ON entry.id = source.entry_id
+                 AND entry.archived_at IS NULL
+                 AND entry.current_publication_id = source.publication_id
+                WHERE source.is_deleted = FALSE
+                  AND source.content_scope = 'current_publication'"#
+        };
+        let match_predicate = if exact {
+            "source.normalized_surface = $3"
+        } else {
+            r"source.surface ILIKE $3 ESCAPE '\'"
+        };
+        let sql = format!(
             r#"
             SELECT matched.*
             FROM (
@@ -93,16 +119,11 @@ impl LexiconRepository {
                        source.dialect_scope,
                        source.event_offset
                 FROM lexicon.surface_sources source
-                JOIN lexicon.entries entry
-                  ON entry.id = source.entry_id
-                 AND entry.archived_at IS NULL
-                 AND entry.current_publication_id = source.publication_id
-                WHERE source.is_deleted = FALSE
-                  AND source.content_scope = 'current_publication'
+                {scope_join}
                   AND source.language = 'en'
                   AND source.normalization_version = $1
                   AND source.dialect_scope = ANY($2::text[])
-                  AND source.surface ILIKE $3 ESCAPE '\'
+                  AND {match_predicate}
                   AND ($4::text IS NULL OR source.entry_kind = $4::text)
                   AND source.pos_id IS NOT NULL
                   AND source.pos IS NOT NULL
@@ -116,18 +137,24 @@ impl LexiconRepository {
                      matched.normalized_surface, matched.entry_id,
                      matched.pos_id, matched.matched_form_id, matched.event_offset
             LIMIT $7
-            "#,
-        )
-        .bind(HEADWORD_NORMALIZATION_VERSION)
-        .bind(dialect_scopes)
-        .bind(format!("%{}%", escape_like_literal(keyword)))
-        .bind(kind.map(kind_string))
-        .bind(&lowered)
-        .bind(format!("{}%", escape_like_literal(&lowered)))
-        .bind(limit)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(LexiconRepositoryError::Database)
+            "#
+        );
+        // SQL 只由上面的常量片段拼成，绑定值全部走参数，没有用户输入进字符串。
+        sqlx::query_as::<_, SentenceDiscoverySurfaceRecord>(sqlx::AssertSqlSafe(sql))
+            .bind(HEADWORD_NORMALIZATION_VERSION)
+            .bind(dialect_scopes)
+            .bind(if exact {
+                keyword.to_owned()
+            } else {
+                format!("%{}%", escape_like_literal(keyword))
+            })
+            .bind(kind.map(kind_string))
+            .bind(&lowered)
+            .bind(format!("{}%", escape_like_literal(&lowered)))
+            .bind(limit)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(LexiconRepositoryError::Database)
     }
 
     pub(crate) async fn draft_sentence_discovery_targets(

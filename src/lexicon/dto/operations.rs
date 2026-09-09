@@ -663,7 +663,10 @@ pub struct SentenceTargetMatchEvidenceV3 {
 #[serde(deny_unknown_fields)]
 pub struct SentenceTargetSenseV3 {
     pub sense_id: Uuid,
-    pub publication_id: Uuid,
+    /// 与候选行同一个发布版本；草稿候选缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub publication_id: Option<Uuid>,
     pub pos_id: Uuid,
     /// 与候选行的 base_form_id 相同：词义挂在词性下而不挂在变化组下，这里只是原样带出，
     /// 改选词形时同样以词形自带的 base_form_ids 为准。
@@ -701,7 +704,11 @@ pub struct SentenceTargetCandidateFormV3 {
 #[serde(deny_unknown_fields)]
 pub struct PublishedSentenceTargetCandidateV3 {
     pub entry_id: Uuid,
-    pub publication_id: Uuid,
+    /// 命中的发布版本。**缺省即草稿候选**（只在 `include_drafts = true` 时出现）：词条从未发布，
+    /// 关联它时 `target_publication_id` 同样留空，保存时按目标当前草稿内容校验。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub publication_id: Option<Uuid>,
     pub pos_id: Uuid,
     /// 命中词形（matched_form_id）所属的原形，标明这条候选的身份：命中词形挂在几个原形下就
     /// 出几条候选，跨组去重。它不表示可用作短语成分——能不能选、配哪个 base，一律以
@@ -803,6 +810,25 @@ pub struct SearchComponentTargetsV3Input {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub cursor: Option<String>,
+    /// 匹配方式。不传或 `contains`：词面包含关键字（旧行为）；`exact`：关键字按词条词面同一套
+    /// 归一化后与 `normalized_surface` 等值，屈折词形（jobs / gave）照样命中原形词条。
+    /// 例句里点一个词做关联时用 `exact`，否则点 `a` 会命中一切含 a 的词条。
+    #[serde(default, rename = "match", skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub match_mode: Option<ComponentTargetMatchV3>,
+    /// 是否把**从未发布**的 V3 草稿词条（不限创建者）也列为候选；草稿候选没有 `publication_id`。
+    /// 已发布词条只按其当前发布版本出现，草稿里未发布的改动不作候选。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schema(default = false)]
+    pub include_drafts: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentTargetMatchV3 {
+    #[default]
+    Contains,
+    Exact,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

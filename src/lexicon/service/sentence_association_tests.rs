@@ -250,7 +250,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
     };
 
     let candidates = target.sentence_discovery_candidates(
-        publication_id,
+        Some(publication_id),
         pos_id,
         matched_form_id,
         matched_variant_id,
@@ -356,7 +356,7 @@ fn v2_target_candidate_forms_carry_no_base_form_ids() {
     };
 
     let candidates = target.sentence_discovery_candidates(
-        publication_id,
+        Some(publication_id),
         pos_id,
         base_form_id,
         variant_id,
@@ -440,7 +440,7 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
     let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true)
         .expect("V3 snapshot with form groups should convert");
     let candidates = target.sentence_discovery_candidates(
-        publication_id,
+        Some(publication_id),
         fixture.pos_id,
         past_id,
         past_variant_id,

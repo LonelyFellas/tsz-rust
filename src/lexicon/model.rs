@@ -207,6 +207,16 @@ pub(crate) struct SenseTargetKey {
     pub target_sense_id: Uuid,
 }
 
+/// 发布时核验草稿范围的目标词义：锁目标词条行，带回当时的 entry revision 与可用性。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct DraftSenseTargetRecord {
+    pub target_entry_id: Uuid,
+    pub target_sense_id: Uuid,
+    pub target_revision: i64,
+    pub target_archived: bool,
+    pub target_removed: bool,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct ResolvedSenseTargetRecord {
     pub target_entry_id: Uuid,
@@ -520,7 +530,8 @@ pub(crate) struct SentenceDiscoverySurfaceRecord {
     pub surface: String,
     pub entry_kind: String,
     pub entry_id: Uuid,
-    pub publication_id: Uuid,
+    /// 发布词面带发布版本；草稿词面（`content_scope = 'draft'`）为 None。
+    pub publication_id: Option<Uuid>,
     pub pos_id: Uuid,
     pub pos: String,
     pub matched_form_id: Uuid,
