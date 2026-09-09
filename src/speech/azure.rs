@@ -1,11 +1,17 @@
-use std::{fmt, time::Duration};
+use std::{
+    fmt,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header};
 
 use super::{
-    SpeechError, SpeechErrorKind, SpeechProvider, SynthesisRequest, SynthesizedAudio, build_ssml,
+    CatalogVoice, SpeechError, SpeechErrorKind, SpeechProvider, SynthesisRequest, SynthesizedAudio,
+    build_ssml,
     config::{SpeechConfigError, valid_region},
     model::PROVIDER_NAME,
 };
@@ -24,6 +30,11 @@ impl fmt::Debug for SecretKey {
     }
 }
 
+struct CachedCatalog {
+    fetched_at: Instant,
+    voices: Vec<CatalogVoice>,
+}
+
 #[derive(Clone)]
 pub struct AzureSpeechProvider {
     client: Client,
@@ -31,6 +42,7 @@ pub struct AzureSpeechProvider {
     key: SecretKey,
     request_timeout: Duration,
     max_response_bytes: usize,
+    catalog: Arc<Mutex<Option<CachedCatalog>>>,
 }
 
 impl fmt::Debug for AzureSpeechProvider {
@@ -85,6 +97,7 @@ impl AzureSpeechProvider {
             key: SecretKey(key),
             request_timeout,
             max_response_bytes,
+            catalog: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -113,6 +126,52 @@ impl SpeechProvider for AzureSpeechProvider {
 
     fn synthesis_timeout(&self) -> Duration {
         self.request_timeout
+    }
+
+    async fn list_voices(&self) -> Result<Option<Vec<CatalogVoice>>, SpeechError> {
+        let mut cache = self.catalog.lock().await;
+        if let Some(cached) = cache.as_ref()
+            && cached.fetched_at.elapsed() < Duration::from_secs(3600)
+        {
+            return Ok(Some(cached.voices.clone()));
+        }
+        let endpoint = format!("{}/voices/list", self.endpoint.trim_end_matches("/v1"));
+        let response = self
+            .client
+            .get(endpoint)
+            .header(SUBSCRIPTION_KEY, &self.key.0)
+            .send()
+            .await
+            .map_err(map_transport_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(map_status(status));
+        }
+        let too_large =
+            || SpeechError::new(SpeechErrorKind::ResponseTooLarge, Some(status.as_u16()));
+        if response
+            .content_length()
+            .is_some_and(|n| n > self.max_response_bytes as u64)
+        {
+            return Err(too_large());
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(map_transport_error)?;
+            if bytes.len().saturating_add(chunk.len()) > self.max_response_bytes {
+                return Err(too_large());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let voices = super::catalog::parse_catalog(&bytes).map_err(|_| {
+            SpeechError::new(SpeechErrorKind::InvalidResponse, Some(status.as_u16()))
+        })?;
+        *cache = Some(CachedCatalog {
+            fetched_at: Instant::now(),
+            voices: voices.clone(),
+        });
+        Ok(Some(voices))
     }
 
     async fn synthesize(

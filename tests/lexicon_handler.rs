@@ -12491,8 +12491,10 @@ async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool)
         "未配置时 voice_profile 不能出现在响应里"
     );
 
-    let grammar_profile = json!({"voice_ids": ["sonia", "ryan"], "rate_percent": -25});
-    let sentence_profile = json!({"voice_ids": ["jenny"], "rate_percent": 0});
+    // A complete catalog exceeds the former 20-item limit; also cover the new boundary.
+    let grammar_profile = json!({"voices": (0..2000).map(|index| json!({"voice_id": format!("voice-{index}"), "enabled": index % 2 == 0, "rate_percent": if index % 2 == 0 { -25 } else { 10 }})).collect::<Vec<_>>()});
+    let sentence_profile =
+        json!({"voices": [{"voice_id":"jenny", "enabled":true, "rate_percent":20}]});
     let mut meanings = word["word"]["meanings"].clone();
     meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
         grammar_profile.clone();
@@ -12546,12 +12548,11 @@ async fn v3_voice_profile_rejects_out_of_range_rate_and_oversized_voice_list(poo
     let pos_id = forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone();
 
     for profile in [
-        json!({"voice_ids": ["sonia"], "rate_percent": 101}),
-        json!({"voice_ids": ["sonia"], "rate_percent": -51}),
-        json!({"voice_ids": ["sonia", "sonia"], "rate_percent": 0}),
-        json!({"voice_ids": [""], "rate_percent": 0}),
-        json!({"voice_ids": (0..21).map(|index| format!("v{index}")).collect::<Vec<_>>(),
-               "rate_percent": 0}),
+        json!({"voices": [{"voice_id":"sonia","enabled":true,"rate_percent":101}]}),
+        json!({"voices": [{"voice_id":"sonia","enabled":true,"rate_percent":-51}]}),
+        json!({"voices": [{"voice_id":"sonia","enabled":true,"rate_percent":0},{"voice_id":"sonia","enabled":false,"rate_percent":10}]}),
+        json!({"voices": [{"voice_id":"","enabled":false,"rate_percent":0}]}),
+        json!({"voices": (0..2001).map(|index| json!({"voice_id":format!("v{index}"),"enabled":false,"rate_percent":0})).collect::<Vec<_>>()}),
     ] {
         let mut meanings = complete_v3_meanings_fixture(pos_id.clone());
         meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
@@ -12583,8 +12584,7 @@ async fn v3_voice_profile_rejects_out_of_range_rate_and_oversized_voice_list(poo
 
     // 已下线的发音人 alias 不做外键式校验：形状合法就存得进去。
     let mut meanings = complete_v3_meanings_fixture(pos_id);
-    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
-        json!({"voice_ids": ["a-voice-that-no-longer-exists"], "rate_percent": 100});
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] = json!({"voices": [{"voice_id":"a-voice-that-no-longer-exists","enabled":false,"rate_percent":100}]});
     let (status, saved) = call(
         &state,
         Method::PUT,

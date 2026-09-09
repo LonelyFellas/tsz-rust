@@ -174,6 +174,9 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     // 放在 bind 之前：迁移未完成不开始收流量，避免 readyz 过早报 ready。
     // 并发安全：sqlx 迁移持有 Postgres advisory lock，多实例同时启动只有一个真正执行。
     sqlx::migrate!("./migrations").run(&pool).await?;
+    speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await?;
     tracing::info!("database migrations applied");
 
     // 预热 dummy_hash 的 OnceLock：它是 not-found 登录分支做时序平衡用的 bcrypt 哈希，

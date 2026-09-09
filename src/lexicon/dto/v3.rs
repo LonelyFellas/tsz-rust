@@ -558,18 +558,23 @@ impl RichTextV3 {
     }
 }
 
-/// 这段文本将来合成语音时用的配置：启用哪几个发音人、语速多少。
-///
-/// `voice_ids` 存的是 `/speech/voices` 的 `alias`。发音人清单来自外部 TTS 供应商，
-/// alias 可能随供应商下线而失效，所以**不做外键式校验**——读到已下线的 alias 原样返回，
-/// 由前端标为失效。`rate_percent` 只按全局区间校验，逐音色的窄区间在合成时才夹取。
+/// 单个音色的 C 端启用选择和独立语速；取消勾选后仍保留语速。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceSettingV3 {
+    pub voice_id: String,
+    pub enabled: bool,
+    #[schema(minimum = -50, maximum = 100)]
+    pub rate_percent: i16,
+}
+
+/// 此段文本的逐音色配置。未出现的音色默认不启用、原速。
+/// voice_id 是目录 alias；历史下线音色仍可保存，不做外键式校验。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceProfileV3 {
-    #[schema(max_items = 20)]
-    pub voice_ids: Vec<String>,
-    #[schema(minimum = -50, maximum = 100)]
-    pub rate_percent: i16,
+    #[schema(max_items = 2000)]
+    pub voices: Vec<VoiceSettingV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

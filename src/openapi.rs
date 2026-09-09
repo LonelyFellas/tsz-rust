@@ -2529,18 +2529,24 @@ mod tests {
         }
         assert_eq!(
             schemas["VoiceProfileV3"]["required"],
-            serde_json::json!(["voice_ids", "rate_percent"])
+            serde_json::json!(["voices"])
+        );
+        assert!(
+            serde_json::from_value::<crate::lexicon::dto::VoiceProfileV3>(
+                serde_json::json!({"voice_ids": ["old"], "rate_percent": 0})
+            )
+            .is_err()
         );
         assert_eq!(
-            schemas["VoiceProfileV3"]["properties"]["voice_ids"]["maxItems"],
-            20
+            schemas["VoiceProfileV3"]["properties"]["voices"]["maxItems"],
+            2000
         );
         assert_eq!(
-            schemas["VoiceProfileV3"]["properties"]["rate_percent"]["minimum"],
+            schemas["VoiceSettingV3"]["properties"]["rate_percent"]["minimum"],
             -50
         );
         assert_eq!(
-            schemas["VoiceProfileV3"]["properties"]["rate_percent"]["maximum"],
+            schemas["VoiceSettingV3"]["properties"]["rate_percent"]["maximum"],
             100
         );
         assert!(

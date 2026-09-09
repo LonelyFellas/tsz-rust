@@ -448,3 +448,102 @@ fn config_is_disabled_by_default_and_enabled_all_or_nothing() {
     assert!(!debug.contains("secret-key"));
     configured.build_provider().unwrap();
 }
+
+#[tokio::test]
+async fn azure_catalog_filters_maps_and_caches_concurrent_requests() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let app = Router::new().route("/cognitiveservices/voices/list", axum::routing::get(
+        move |headers: axum::http::HeaderMap| {
+            let calls = counted.clone();
+            async move {
+                assert_eq!(headers["ocp-apim-subscription-key"], "test-key");
+                calls.fetch_add(1, Ordering::SeqCst);
+                let base = serde_json::json!({"ShortName":"en-GB-RyanNeural", "Locale":"en-GB", "Gender":"Male", "Status":"GA", "VoiceType":"Neural"});
+                let mut rows = vec![base.clone()];
+                let mut styled = base.clone();
+                styled["ShortName"] = "en-US-AriaNeural".into();
+                styled["Locale"] = "en-US".into();
+                styled["Gender"] = "Female".into();
+                styled["StyleList"] = serde_json::json!(["sad", "cheerful", "sad"]);
+                rows.push(styled);
+                for (field, value) in [("Locale", "zh-CN"), ("Locale", "en-AU"), ("Status", "Deprecated"), ("Status", "Preview"), ("Gender", "Unknown"), ("VoiceType", "Standard"), ("ShortName", "en-US-Multi:DragonHDLatestNeural")] {
+                    let mut excluded = base.clone();
+                    excluded[field] = value.into();
+                    rows.push(excluded);
+                }
+                axum::Json(rows)
+            }
+        }
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let provider = AzureSpeechProvider::for_test(
+        format!("http://{address}/cognitiveservices/v1"),
+        Duration::from_secs(1),
+        10000,
+    );
+    let (first, second) = tokio::join!(provider.list_voices(), provider.list_voices());
+    let voices = first.unwrap().unwrap();
+    assert_eq!(voices.len(), 2);
+    assert_eq!(voices[0].voice.provider_voice_id(), "en-GB-RyanNeural");
+    assert_eq!(voices[0].gender, "male");
+    assert_eq!(voices[0].voice.styles().count(), 0);
+    assert_eq!(
+        voices[1].voice.styles().collect::<Vec<_>>(),
+        ["cheerful", "sad"]
+    );
+    assert_eq!(voices[1].gender, "female");
+    assert_eq!(voices[1].version(), second.unwrap().unwrap()[1].version());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn azure_catalog_rejects_bad_responses_without_leaking_body() {
+    for (status, body, limit, expected) in [
+        (
+            StatusCode::UNAUTHORIZED,
+            "secret upstream detail",
+            100,
+            SpeechErrorKind::Authentication,
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate limit",
+            100,
+            SpeechErrorKind::RateLimited,
+        ),
+        (
+            StatusCode::OK,
+            "not-json",
+            100,
+            SpeechErrorKind::InvalidResponse,
+        ),
+        (
+            StatusCode::OK,
+            "[invalid-json-too-long]",
+            4,
+            SpeechErrorKind::ResponseTooLarge,
+        ),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/cognitiveservices/voices/list",
+            axum::routing::get(move || async move { (status, body) }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let provider = AzureSpeechProvider::for_test(
+            format!("http://{address}/cognitiveservices/v1"),
+            Duration::from_secs(1),
+            limit,
+        );
+        let error = provider.list_voices().await.unwrap_err();
+        assert_eq!(error.kind, expected);
+        assert!(!error.to_string().contains(body));
+        server.abort();
+    }
+}
