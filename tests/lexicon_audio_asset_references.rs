@@ -1316,7 +1316,8 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
     let row = &mut forms["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0];
     let text = row["dict_phonetic"].as_str().unwrap().to_owned();
     row["dict_phonetic_rich"] = json!({"version":2,"text":text,"annotations":[{"type":"highlight","start":0,"end":1,"color":"yellow"}]});
-    row["voice_profile"] = json!({"voice_ids":["en-GB-SoniaNeural"],"rate_percent":-10});
+    row["voice_profile"] = json!({"voices":[{"voice_id":"en-GB-SoniaNeural","enabled":true,"rate_percent":-10},{"voice_id":"en-GB-RyanNeural","enabled":false,"rate_percent":25}]});
+    let expected_profile = row["voice_profile"].clone();
     let mut tampered = asset.clone();
     tampered["original_name"] = json!("forged.mp3");
     row["audio_assets"] = json!([tampered]);
@@ -1349,7 +1350,7 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
     let row = &fetched["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"]
         [0];
     assert_eq!(row["dict_phonetic_rich"], expected_rich);
-    assert_eq!(row["voice_profile"]["rate_percent"], -10);
+    assert_eq!(row["voice_profile"], expected_profile);
     let (status, published) = call(
         &state,
         Method::POST,
@@ -1370,6 +1371,11 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
         snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]
             ["dict_phonetic_rich"],
         expected_rich
+    );
+    assert_eq!(
+        snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]
+            ["voice_profile"],
+        expected_profile
     );
     let refs:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='publication'").bind(entry.id).fetch_one(&pool).await.unwrap();
     assert_eq!(refs, 1);
@@ -1410,7 +1416,7 @@ async fn pronunciation_editor_rejects_invalid_annotations_and_profiles(pool: PgP
             "abc",
             "abc",
             json!([]),
-            json!({"voice_ids":[],"rate_percent":101}),
+            json!({"voices":[{"voice_id":"sonia","enabled":false,"rate_percent":101}]}),
             "voice_profile_invalid",
         ),
     ] {

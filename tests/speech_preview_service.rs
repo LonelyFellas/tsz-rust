@@ -109,6 +109,8 @@ async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
 #[sqlx::test]
 async fn voice_listing_hides_provider_identity_and_disabled_rows(pool: PgPool) {
     insert_voice(&pool).await;
+    sqlx::query("UPDATE speech.voices SET provider_voice_id = 'en-US-AvaNeural' WHERE alias = 'en-us-jenny'")
+        .execute(&pool).await.unwrap();
     sqlx::query(
         r#"INSERT INTO speech.voices
            (id, alias, provider, provider_voice_id, locale, gender, provider_version, enabled)

@@ -766,7 +766,7 @@ pub(crate) fn english_text_variants(content: &EnglishTextV3) -> Vec<&RichTextVar
 }
 
 /// 一份配置最多启用这么多个发音人；纯存储上限，与发音人清单本身无关。
-const MAX_VOICE_PROFILE_VOICES: usize = 20;
+const MAX_VOICE_PROFILE_VOICES: usize = 2000;
 /// `speech.voices.alias` 的列约束上限。这里只卡长度不卡格式：alias 由我们自己发放，
 /// 但发音人清单来自外部供应商，硬编码字符集会让以后新增的 alias 存不进来。
 const MAX_VOICE_ID_CODEPOINTS: usize = 64;
@@ -784,21 +784,22 @@ fn validate_voice_profile(
         return;
     };
     let mut seen = HashSet::new();
-    let voices_invalid = profile.voice_ids.len() > MAX_VOICE_PROFILE_VOICES
-        || profile.voice_ids.iter().any(|voice_id| {
+    let voices_invalid = profile.voices.len() > MAX_VOICE_PROFILE_VOICES
+        || profile.voices.iter().any(|voice| {
+            let voice_id = &voice.voice_id;
             voice_id.trim().is_empty()
                 || voice_id.chars().count() > MAX_VOICE_ID_CODEPOINTS
                 || voice_id.contains('\0')
                 || !seen.insert(voice_id.as_str())
+                || !(MIN_SPEECH_RATE_PERCENT..=MAX_SPEECH_RATE_PERCENT)
+                    .contains(&voice.rate_percent)
         });
-    if voices_invalid
-        || !(MIN_SPEECH_RATE_PERCENT..=MAX_SPEECH_RATE_PERCENT).contains(&profile.rate_percent)
-    {
+    if voices_invalid {
         issues.push(meanings_issue(
             V3ValidationIssueCode::VoiceProfileInvalid,
             "voice_profile",
             node_id,
-            "voice profile must list at most 20 distinct non-empty voice ids and a rate within -50..=100",
+            "voice profile must list at most 2000 distinct non-empty voice ids, each with a rate within -50..=100",
         ));
     }
 }

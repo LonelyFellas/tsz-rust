@@ -141,7 +141,7 @@ async fn voice_list_is_public_contract_without_provider_identity(pool: PgPool) {
     sqlx::query(
         r#"INSERT INTO speech.voices
            (id, alias, provider, provider_voice_id, locale, gender, styles, provider_version)
-           VALUES ($1, 'en-us-jenny', 'azure', 'provider-secret-id', 'en-US', 'female', '["chat"]', 'v1')"#,
+           VALUES ($1, 'en-us-jenny', 'azure', 'en-US-AvaNeural', 'en-US', 'female', '["chat"]', 'v1')"#,
     ).bind(Uuid::now_v7()).execute(&pool).await.unwrap();
     let state = AppState::for_test(pool);
     let token = state
@@ -158,7 +158,8 @@ async fn voice_list_is_public_contract_without_provider_identity(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["items"][0]["alias"], "en-us-jenny");
-    assert!(body.to_string().find("provider-secret-id").is_none());
+    assert!(body.to_string().find("en-US-AvaNeural").is_none());
+    assert_eq!(body["items"][0]["display_name"], "Ava 爱娃");
 }
 
 #[sqlx::test]

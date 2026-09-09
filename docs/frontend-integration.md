@@ -1421,48 +1421,29 @@ _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端
 
 其余上限一律未动：标注数仍 500，IPA 音素仍 200 码点，停顿仍 1–5000ms，节点数仍 2000。
 
-**（4）音色 / 语速持久化：新增 `voice_profile`**
+**（4）逐音色选择与语速：`voice_profile`**
 
-产品决策：这两项的语义是「这段文本将来合成语音时的配置」，不是编辑时的试听参数，要落库。
+产品规则：每个音色独立设速，未配置为自身原速 1.00×；勾选只表示未来 C 端音频选择，试听不改变勾选。
 
 ```json
-"VoiceProfileV3": {
-  "type": "object",
-  "required": ["voice_ids", "rate_percent"],
-  "properties": {
-    "voice_ids":    { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
-    "rate_percent": { "type": "integer", "minimum": -50, "maximum": 100 }
-  },
-  "additionalProperties": false
+{
+  "voice_profile": {
+    "voices": [
+      { "voice_id": "en-gb-sonia", "enabled": true, "rate_percent": -25 },
+      { "voice_id": "en-gb-ryanneural", "enabled": false, "rate_percent": 10 }
+    ]
+  }
 }
 ```
 
-**挂在两处**，都与该节点的富文本字段同级、都可选：
+`VoiceProfileV3.voices` 最多 2000 项，`voice_id` 使用目录 alias，必须唯一、非空、最多64码点且不含NUL；
+每项有布尔 `enabled` 和整型 `rate_percent`（-50..100）。未出现的音色不启用、原速。
+取消勾选保留该音色的速度。目录下线的 alias 仍允许保存，试听时再验证音色及能力。
 
-| 挂载点 | 覆盖的界面位置 |
-| --- | --- |
-| `GrammarVariantV3.voice_profile`（与 `content` 同级） | **V3 编辑器 step 3 的语法结构**——`V3MeaningsAndExamplesStep` 里语音编辑器唯一的挂载点 |
-| `RichTextVariantV3.voice_profile`（与 `value` 同级） | 英文释义 / 英文例句的文本变体（`EnglishTextV3` 的 unified `common` 与 uk/us `Ready.variant`） |
-
-> ⚠️ 只挂 `RichTextVariantV3` 是不够的：V3 语法结构走的是 `GrammarVariantV3`，那条路径上根本没有
-> `RichTextVariantV3`。两处都挂才覆盖得到语音编辑器实际编辑的字段。
-
-口径（两条容易做错的）：
-
-- **`voice_ids` 存 `/speech/voices` 的 `alias`**，后端**不做外键式校验**：发音人清单来自外部
-  TTS 供应商，alias 会随供应商下线；拿存量配置去撞当下的清单只会把老词条卡成不可保存。
-  读到已下线的 alias 原样返回，失效由前端在界面上标注。后端只校验形状：至多 20 个、
-  互不重复、非空、单个不超过 64 码点。
-- **`rate_percent` 只按全局区间 `-50..=100` 校验**（对应 0.50×–2.00×），不按单个音色的
-  `VoiceCapabilities.min_rate_percent` / `max_rate_percent`——那是逐音色不同的，而一份配置可以
-  同时启用多个音色。逐音色夹取发生在合成时，前端试听已经是这么做的。
-
-未配置时**该字段不出现在响应里**（与连读宽度同一手法），所以存量词条一个字节都不会变。
-校验失败返回 422，`field_issues` 里是新增的 issue code **`voice_profile_invalid`**
-（`field: "voice_profile"`，`node_id` 是语法结构变体 / 文本变体的稳定 id）。
-
-落库路径已覆盖保存、刷新读回与发布三处：V3 内容在服务端要过一轮 V2 往返，`voice_profile` 会被
-往返吞掉，后端在每个落库点按节点 id 回填（与 `component_usages`、多档 `zh_translations` 同一机制）。
+配置可选地挂在 `WordPronunciationV3`、`GrammarVariantV3`、`RichTextVariantV3`，与富文本正文同级。
+保存、读回与发布保留完整配置，经过 V2 往返时按节点 ID 回填。
+新结构严格拒绝旧 `voice_ids` 和全局 `rate_percent`，按产品要求不做兼容或数据迁移。
+当前没有消费配置自动生成 C 端音频的任务；管理员试听仍走单次合成。
 
 ### 21.3 前端要怎么改
 
@@ -1471,8 +1452,8 @@ _维护约定：auth 相关响应形状变更时同步本文档 §3/§4；后端
 | 1 | 跑 `pnpm --filter @tsz/api-client sync:openapi`，`admin-word-v3.runtime-schema.json` 会同步到四值枚举与两个可选宽度字段 |
 | 2 | `packages/voice-editor/src/editor/next/tokens.ts` 落盘处把硬编码的 `level: "strong"` 改成透传当前 level；读回那侧 `roles.ts` 的 `normalizeGrammarLevel` 已经前向兼容，不用动 |
 | 3 | 同文件 `liaisonRange` 一并写出 `start_len` / `end_len`；`annotationsToMarks` 读回时按宽度还原两端锚点，字段缺席按 1 处理 |
-| 4 | 音色勾选与语速从会话状态改为随 `voice_profile` 落盘：语法结构写 `GrammarVariantV3.voice_profile`，英文文本写 `RichTextVariantV3.voice_profile`；`voice_ids` 用 `VoiceOption.id`（即 `alias`），`rate_percent` 用现在送给试听的那个百分比 |
-| 5 | 读回时 `voice_profile` 缺席＝没配过，按现在的默认值渲染；`voice_ids` 里有不在 `/speech/voices` 清单中的 alias 时在界面上标为失效，不要静默丢弃 |
+| 4 | 音色勾选与语速从会话状态改为随 `voice_profile` 落盘：语法结构写 `GrammarVariantV3.voice_profile`，英文文本写 `RichTextVariantV3.voice_profile`；`voices[].voice_id` 用 `VoiceOption.id`（即 `alias`），`enabled` 表示是否勾选，`rate_percent` 是该音色自己的百分比 |
+| 5 | 读回时 `voice_profile` 缺席＝没配过，按现在的默认值渲染；`voices[].voice_id` 有不在 `/speech/voices` 清单中的 alias 时在界面上标为失效，不要静默丢弃 |
 | 6 | V3 路径的正文长度上限维持 5000，`MAX_RICH_TEXT_CODE_POINTS` 与提示文案都不用改 |
 | 7 | mock / e2e 桩若断言过 liaison 或变体的完整形状，注意 `start_len` / `end_len` / `voice_profile` 在缺省时不出现 |
 
