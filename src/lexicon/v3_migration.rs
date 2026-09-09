@@ -351,6 +351,9 @@ fn convert_pronunciations(
             });
             counts.pronunciations += 1;
             WordPronunciationV3 {
+                dict_phonetic_rich: None,
+                voice_profile: None,
+                audio_assets: Vec::new(),
                 id: pronunciation.id,
                 dict_phonetic: pronunciation.dict_phonetic.clone(),
                 actual_pron: pronunciation.actual_pron.clone(),

@@ -1839,3 +1839,11 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 省略字段仅在正文未改变时保留旧关联；显式 [] 清除。旧客户端改写带关联的正文会被拒绝，避免错位或数据丢失。例句 associations 仍不可写；读回人工结果优先于重叠的自动结果。发布引用新增 text_link 类型，迁移先于前端发布。
 
 完整范围、字段、兼容与验证集中在 tsz 仓库 docs/features/definition-sentence-editor/，上传后端不包含在本次范围内。
+
+## 字典音标发音编辑器
+
+`WordPronunciationV3` 保留 `dict_phonetic` 字符串，新增可选 `dict_phonetic_rich`、`voice_profile` 与 `audio_assets`；未配置时不输出，旧数据无需迁移。富文本正文必须与音标字符串一致，非法标注返回 `phonetic_rich_text_invalid`，错误定位到 forms 的发音行。
+
+词形草稿保存会校验音频资产并使用服务端元数据。词形与词义保存共同重建音频引用，发布快照保留发音编辑数据及录音引用。
+
+配套发布：先部署接受新增字段的前端（兼容阶段关闭 `VITE_VOICE_EDITOR`），再部署后端，最后开启前端编辑器。已有扩展字段的内容不兼容旧版严格 reader，不能直接回滚旧前端。前端接入与验证说明见配套仓库 `docs/features/pos-pronunciation-editor/`。本次无数据库迁移。

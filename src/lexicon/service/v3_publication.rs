@@ -1041,15 +1041,26 @@ async fn insert_v3_publication_audio_references(
     word: &AdminWordV3,
 ) -> Result<(), LexiconServiceError> {
     let mut inserted = HashSet::new();
-    for variant in word
+    let requested = word
         .meanings
         .pos
         .iter()
         .flat_map(|pos| &pos.grammar_structures)
         .flat_map(|grammar| &grammar.variants)
-    {
-        for asset in &variant.audio_assets {
-            if !inserted.insert(asset.id) {
+        .map(|variant| {
+            (
+                variant.id,
+                variant
+                    .audio_assets
+                    .iter()
+                    .map(|asset| asset.id)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .chain(super::v3::requested_pronunciation_audio_assets(&word.forms));
+    for (variant_id, asset_ids) in requested {
+        for asset_id in asset_ids {
+            if !inserted.insert(asset_id) {
                 continue;
             }
             sqlx::query(
@@ -1059,10 +1070,10 @@ async fn insert_v3_publication_audio_references(
                 VALUES ($1, $2, 'publication', $3, $4)
                 "#,
             )
-            .bind(asset.id)
+            .bind(asset_id)
             .bind(word.id)
             .bind(publication_id)
-            .bind(variant.id)
+            .bind(variant_id)
             .execute(&mut **tx)
             .await
             .map_err(database_error)?;

@@ -1293,3 +1293,153 @@ async fn playback_url_opens_up_once_the_asset_is_referenced_by_an_entry(pool: Pg
         "未被引用的资产不得对他人放开：{body}"
     );
 }
+
+#[sqlx::test]
+async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let bearer = bearer(&state, seed_admin(&pool).await);
+    let mut entry = create_entry(&state, &pool, &bearer, "pronunciationeditor").await;
+    let asset = upload_asset(&state, &store, &bearer, "pronunciation.mp3").await;
+    let (_, fetched) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", entry.id),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let mut forms = fetched["word"]["forms"].clone();
+    let row = &mut forms["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0];
+    let text = row["dict_phonetic"].as_str().unwrap().to_owned();
+    row["dict_phonetic_rich"] = json!({"version":2,"text":text,"annotations":[{"type":"highlight","start":0,"end":1,"color":"yellow"}]});
+    row["voice_profile"] = json!({"voice_ids":["en-GB-SoniaNeural"],"rate_percent":-10});
+    let mut tampered = asset.clone();
+    tampered["original_name"] = json!("forged.mp3");
+    row["audio_assets"] = json!([tampered]);
+    let expected_rich = row["dict_phonetic_rich"].clone();
+    let (status, saved) = call(&state, Method::PUT, &format!("{ROOT}/entries/{}/steps/forms",entry.id), &bearer, None, Some(json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":forms}))).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let row = &saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"]
+        [0];
+    assert_eq!(row["audio_assets"][0]["original_name"], "pronunciation.mp3");
+    assert_eq!(row["dict_phonetic_rich"], expected_rich);
+    assert_eq!(draft_reference_count(&pool, entry.id).await, 1);
+    entry.revision = saved["word"]["revision"].as_i64().unwrap();
+    let (status, saved) = call(&state, Method::PUT, &format!("{ROOT}/entries/{}/steps/meanings", entry.id), &bearer, None, Some(json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":complete_meanings(&entry,json!([]))}))).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        draft_reference_count(&pool, entry.id).await,
+        1,
+        "saving meanings must keep forms audio references"
+    );
+    let (status, fetched) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", entry.id),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let row = &fetched["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"]
+        [0];
+    assert_eq!(row["dict_phonetic_rich"], expected_rich);
+    assert_eq!(row["voice_profile"]["rate_percent"], -10);
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{}/publications", entry.id),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"base_revision":saved["word"]["revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let snapshot: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE entry_id=$1")
+            .bind(entry.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]
+            ["dict_phonetic_rich"],
+        expected_rich
+    );
+    let refs:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='publication'").bind(entry.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(refs, 1);
+}
+
+#[sqlx::test]
+async fn pronunciation_editor_rejects_invalid_annotations_and_profiles(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = bearer(&state, seed_admin(&pool).await);
+    let entry = create_entry(&state, &pool, &bearer, "pronunciationinvalid").await;
+    let (_, fetched) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", entry.id),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    for (text, rich_text, annotations, profile, code) in [
+        (
+            "😀a",
+            "😀a",
+            json!([{"type":"highlight","start":0,"end":3,"color":"yellow"}]),
+            Value::Null,
+            "phonetic_rich_text_invalid",
+        ),
+        (
+            "abc",
+            "other",
+            json!([]),
+            Value::Null,
+            "phonetic_rich_text_invalid",
+        ),
+        (
+            "abc",
+            "abc",
+            json!([]),
+            json!({"voice_ids":[],"rate_percent":101}),
+            "voice_profile_invalid",
+        ),
+    ] {
+        let mut forms = fetched["word"]["forms"].clone();
+        let row =
+            &mut forms["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0];
+        row["dict_phonetic"] = json!(text);
+        row["dict_phonetic_rich"] = json!({"version":2,"text":rich_text,"annotations":annotations});
+        if !profile.is_null() {
+            row["voice_profile"] = profile;
+        }
+        let (status, problem)=call(&state,Method::PUT,&format!("{ROOT}/entries/{}/steps/forms",entry.id),&bearer,None,Some(json!({"schema_version":3,"base_revision":entry.revision,"intent":"save","content":forms}))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+        let issue = problem["field_issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|issue| issue["code"] == code)
+            .expect("pronunciation validation issue");
+        assert_eq!(issue["step"], "forms", "{problem}");
+        assert_eq!(issue["field"], "dict_phonetic", "{problem}");
+        assert_eq!(
+            issue["node_location"]["node_role"], "forms.pronunciation",
+            "{problem}"
+        );
+        assert_eq!(
+            issue["node_id"],
+            fetched["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"]
+                [0]["id"]
+        );
+    }
+}

@@ -235,6 +235,16 @@ pub struct WordPronunciationV3 {
     pub id: Uuid,
     #[schema(max_length = 200)]
     pub dict_phonetic: String,
+    /// 编辑器正文与 dict_phonetic 保持一致；旧记录不输出扩展字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub dict_phonetic_rich: Option<RichTextV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub voice_profile: Option<VoiceProfileV3>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 8)]
+    pub audio_assets: Vec<AudioAsset>,
     #[schema(max_length = 200)]
     pub actual_pron: String,
     /// Draft 可暂未选择；complete/publish 必须有值。
@@ -446,7 +456,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RichTextSpanV3 {
     pub start: usize,
@@ -455,7 +465,7 @@ pub struct RichTextSpanV3 {
     pub kind: RichTextSpanKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RichTextAnnotationV3 {
     Emphasis {
@@ -499,7 +509,7 @@ pub enum RichTextAnnotationV3 {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RichTextV1V3 {
     #[serde(deserialize_with = "deserialize_rich_text_version_1")]
@@ -513,7 +523,7 @@ pub struct RichTextV1V3 {
     pub liaisons: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RichTextV2V3 {
     #[serde(deserialize_with = "deserialize_rich_text_version_2")]
@@ -525,7 +535,7 @@ pub struct RichTextV2V3 {
     pub annotations: Vec<RichTextAnnotationV3>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum RichTextV3 {
     V1(RichTextV1V3),
@@ -1526,6 +1536,7 @@ pub enum V3ValidationIssueCode {
     PhraseComponentTargetUnavailable,
     PhraseComponentTargetNested,
     PhraseComponentTargetStale,
+    PhoneticRichTextInvalid,
     VoiceProfileInvalid,
     AudioAssetInvalid,
 }
@@ -1604,6 +1615,7 @@ impl V3ValidationIssueCode {
             Self::PhraseComponentTargetUnavailable => "phrase_component_target_unavailable",
             Self::PhraseComponentTargetNested => "phrase_component_target_nested",
             Self::PhraseComponentTargetStale => "phrase_component_target_stale",
+            Self::PhoneticRichTextInvalid => "phonetic_rich_text_invalid",
             Self::VoiceProfileInvalid => "voice_profile_invalid",
             Self::AudioAssetInvalid => "audio_asset_invalid",
         }
@@ -1682,6 +1694,7 @@ impl V3ValidationIssueCode {
             "phrase_component_target_unavailable" => Self::PhraseComponentTargetUnavailable,
             "phrase_component_target_nested" => Self::PhraseComponentTargetNested,
             "phrase_component_target_stale" => Self::PhraseComponentTargetStale,
+            "phonetic_rich_text_invalid" => Self::PhoneticRichTextInvalid,
             "voice_profile_invalid" => Self::VoiceProfileInvalid,
             "audio_asset_invalid" => Self::AudioAssetInvalid,
             _ => return None,
