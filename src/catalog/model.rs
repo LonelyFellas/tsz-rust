@@ -101,6 +101,15 @@ pub struct CreateSubPartRequest {
 pub struct UpdateSubPartRequest {
     #[schema(minimum = 1)]
     pub base_revision: i64,
+    /// 稳定编码；缺省表示不改。只有还没被词义引用的细分词性能改编码。
+    #[serde(default)]
+    #[schema(
+        min_length = 1,
+        max_length = 32,
+        pattern = "^[A-Z][A-Z0-9_-]{0,31}$",
+        nullable = false
+    )]
+    pub code: Option<String>,
     #[schema(min_length = 1, max_length = 64)]
     pub name_zh: String,
     #[schema(min_length = 1, max_length = 64)]
@@ -156,6 +165,8 @@ pub(crate) struct NewSubPart {
 
 #[derive(Debug)]
 pub(crate) struct SubPartChanges {
+    /// None 表示保持原编码不变。
+    pub code: Option<String>,
     pub name_zh: String,
     pub name_en: String,
     pub short_name_zh: String,

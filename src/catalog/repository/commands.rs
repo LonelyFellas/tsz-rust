@@ -98,15 +98,17 @@ impl CatalogRepository {
         sqlx::query(
             r#"
             UPDATE catalog.sub_parts_of_speech
-            SET name_zh = $4, name_en = $5, short_name_zh = $6, abbreviation = $7,
-                full_name_en = $8, sort_order = $9,
-                revision = revision + 1, updated_by_admin_id = $10, updated_at = now()
+            SET code = COALESCE($4, code),
+                name_zh = $5, name_en = $6, short_name_zh = $7, abbreviation = $8,
+                full_name_en = $9, sort_order = $10,
+                revision = revision + 1, updated_by_admin_id = $11, updated_at = now()
             WHERE part_of_speech_id = $1 AND id = $2 AND revision = $3
             "#,
         )
         .bind(part_id)
         .bind(sub_id)
         .bind(base_revision)
+        .bind(changes.code.as_deref())
         .bind(&changes.name_zh)
         .bind(&changes.name_en)
         .bind(&changes.short_name_zh)

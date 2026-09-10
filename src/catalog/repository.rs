@@ -216,7 +216,6 @@ fn map_sub_part_write_error(error: sqlx::Error) -> CatalogRepositoryError {
     for (constraint, field) in [
         ("catalog_sub_parts_code_unique_idx", "code"),
         ("catalog_sub_parts_name_zh_unique_idx", "name_zh"),
-        ("catalog_sub_parts_name_en_unique_idx", "name_en"),
         ("catalog_sub_parts_full_name_en_unique_idx", "full_name_en"),
     ] {
         if is_unique_violation(&error, constraint) {

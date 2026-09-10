@@ -197,6 +197,7 @@ impl CatalogService {
     ) -> Result<SubPartOfSpeechConfig, CatalogServiceError> {
         validate_revision(request.base_revision)?;
         let changes = SubPartChanges {
+            code: request.code.map(valid_sub_part_code).transpose()?,
             name_zh: normalized_text(request.name_zh, "name_zh", 64)?,
             name_en: normalized_text(request.name_en, "name_en", 64)?,
             short_name_zh: normalized_text(request.short_name_zh, "short_name_zh", 16)?,
@@ -210,6 +211,35 @@ impl CatalogService {
             .begin()
             .await
             .map_err(database_error)?;
+        // 编码是词条引用的口径，改了就等于换了一个细分词性：已被词义引用时不放行。
+        if let Some(code) = &changes.code {
+            let Some((current_revision, current_code)) =
+                CatalogRepository::sub_part_revision(&mut tx, part_id, sub_id, true)
+                    .await
+                    .map_err(map_repository_error)?
+            else {
+                return Err(CatalogServiceError::SubPartNotFound);
+            };
+            // 先判并发版本：过期的提交要如实报 revision_conflict，不能被下面的引用守卫
+            // 盖成「已被引用」——那会让管理员以为只是编码不让改，不去刷新就把过期表单存回来。
+            if current_revision != request.base_revision {
+                return Err(CatalogServiceError::RevisionConflict {
+                    current_revision,
+                    part_of_speech_id: part_id,
+                    code: current_code,
+                });
+            }
+            if &current_code != code {
+                let usage_count = CatalogRepository::sub_part_usage_count(&mut tx, sub_id)
+                    .await
+                    .map_err(map_repository_error)?;
+                if usage_count > 0 {
+                    return Err(CatalogServiceError::SubPartInUse {
+                        usage_count: Some(usage_count),
+                    });
+                }
+            }
+        }
         let updated = CatalogRepository::update_sub_part(
             &mut tx,
             part_id,
