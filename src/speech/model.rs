@@ -9,7 +9,7 @@ use crate::lexicon::{
 };
 
 pub const CACHE_SCHEMA_VERSION: &str = "speech-cache-v1";
-pub const SSML_BUILDER_VERSION: &str = "rich-text-v2-ssml-v1";
+pub const SSML_BUILDER_VERSION: &str = "rich-text-v2-ssml-v2";
 pub const PROVIDER_NAME: &str = "azure";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -24,6 +24,8 @@ pub enum SpeechModelError {
     InvalidPitch,
     #[error("only canonical RichTextV2 can be synthesized")]
     InvalidRichText,
+    #[error("there is nothing left to read in this text")]
+    NothingToSpeak,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

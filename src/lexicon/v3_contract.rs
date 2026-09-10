@@ -529,32 +529,26 @@ pub(crate) fn normalize_sentence_translations(content: &mut DraftMeaningsStepCon
                 if sentence.zh_translations.is_empty() {
                     sentence.zh_translations.push(WordSentenceTranslationV3 {
                         id: sentence.zh_text_id,
-                        band: SentenceTranslationBandV3::from_sentence_level(&sentence.level),
+                        band: SentenceTranslationBandV3::DEFAULT,
                         content: sentence.zh_text.clone(),
                     });
                 }
                 sentence
                     .zh_translations
                     .sort_by_key(|translation| translation.band.display_order());
-                let preferred = SentenceTranslationBandV3::from_sentence_level(&sentence.level);
-                let alias = sentence
-                    .zh_translations
-                    .iter()
-                    .find(|translation| translation.band == preferred)
-                    .or_else(|| {
-                        [
-                            SentenceTranslationBandV3::B1B2,
-                            SentenceTranslationBandV3::C1C2,
-                            SentenceTranslationBandV3::A1A2,
-                        ]
-                        .into_iter()
-                        .find_map(|band| {
-                            sentence
-                                .zh_translations
-                                .iter()
-                                .find(|translation| translation.band == band)
-                        })
-                    });
+                // 例句难度等级与译文风格无关，别名固定按中阶、初阶、高阶的次序挑。
+                let alias = [
+                    SentenceTranslationBandV3::BalancedFluency,
+                    SentenceTranslationBandV3::WordForWord,
+                    SentenceTranslationBandV3::AdaptedCreation,
+                ]
+                .into_iter()
+                .find_map(|band| {
+                    sentence
+                        .zh_translations
+                        .iter()
+                        .find(|translation| translation.band == band)
+                });
                 if let Some(alias) = alias {
                     sentence.zh_text_id = alias.id;
                     sentence.zh_text = alias.content.clone();
@@ -1015,17 +1009,29 @@ fn validate_variant(
                 ));
             }
         }
-        if let Some(rich) = &pronunciation.dict_phonetic_rich {
+        for (field, plain, rich) in [
+            (
+                "dict_phonetic",
+                pronunciation.dict_phonetic.as_str(),
+                pronunciation.dict_phonetic_rich.as_ref(),
+            ),
+            (
+                "actual_pron",
+                pronunciation.actual_pron.as_str(),
+                pronunciation.actual_pron_rich.as_ref(),
+            ),
+        ] {
+            let Some(rich) = rich else { continue };
             let valid = serde_json::to_value(rich)
                 .ok()
                 .and_then(|value| serde_json::from_value::<RichText>(value).ok())
                 .is_some_and(|value| crate::lexicon::rich_text::is_valid(&value));
-            if rich.text() != pronunciation.dict_phonetic || !valid {
+            if rich.text() != plain || !valid {
                 issues.push(issue(
                     V3ValidationIssueCode::PhoneticRichTextInvalid,
-                    "dict_phonetic",
+                    field,
                     pronunciation.id,
-                    "phonetic rich text must match dict_phonetic and contain valid annotations",
+                    "phonetic rich text must match the plain field and contain valid annotations",
                     pronunciation_location.clone(),
                 ));
             }
@@ -2228,14 +2234,14 @@ mod tests {
         assert_eq!(sentence.zh_translations[0].id, legacy_id);
         assert_eq!(
             sentence.zh_translations[0].band,
-            SentenceTranslationBandV3::A1A2
+            SentenceTranslationBandV3::DEFAULT
         );
 
         let sentence = &mut legacy.pos[0].senses[0].sentences[0];
         sentence.zh_translations = vec![
             WordSentenceTranslationV3 {
                 id: Uuid::now_v7(),
-                band: SentenceTranslationBandV3::A1A2,
+                band: SentenceTranslationBandV3::AdaptedCreation,
                 content: serde_json::from_value(json!({
                     "version": 2, "text": "高", "annotations": []
                 }))
@@ -2243,7 +2249,7 @@ mod tests {
             },
             WordSentenceTranslationV3 {
                 id: Uuid::now_v7(),
-                band: SentenceTranslationBandV3::C1C2,
+                band: SentenceTranslationBandV3::WordForWord,
                 content: serde_json::from_value(json!({
                     "version": 2, "text": "初", "annotations": []
                 }))
@@ -2251,7 +2257,7 @@ mod tests {
             },
             WordSentenceTranslationV3 {
                 id: Uuid::now_v7(),
-                band: SentenceTranslationBandV3::B1B2,
+                band: SentenceTranslationBandV3::BalancedFluency,
                 content: serde_json::from_value(json!({
                     "version": 2, "text": "中", "annotations": []
                 }))
@@ -2268,12 +2274,12 @@ mod tests {
                 .map(|translation| translation.band)
                 .collect::<Vec<_>>(),
             vec![
-                SentenceTranslationBandV3::C1C2,
-                SentenceTranslationBandV3::B1B2,
-                SentenceTranslationBandV3::A1A2,
+                SentenceTranslationBandV3::WordForWord,
+                SentenceTranslationBandV3::BalancedFluency,
+                SentenceTranslationBandV3::AdaptedCreation,
             ]
         );
-        assert_eq!(sentence.zh_text.text(), "高");
+        assert_eq!(sentence.zh_text.text(), "中");
         assert!(!has_code(
             &validate_meanings(&legacy, StepSaveIntent::Save),
             V3ValidationIssueCode::SentenceTranslationInvalid
@@ -2316,7 +2322,7 @@ mod tests {
                         "zh_text": {"version": 2, "text": "", "annotations": []},
                         "zh_translations": [{
                             "id": Uuid::now_v7(),
-                            "band": "a1_a2",
+                            "band": "adapted_creation",
                             "content": {"version": 2, "text": "  ", "annotations": []}
                         }],
                         "links": []

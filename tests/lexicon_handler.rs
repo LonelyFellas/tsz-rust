@@ -21061,7 +21061,7 @@ async fn v3_forms_resave_preserves_sentence_translation_node_roles(pool: PgPool)
         stored_roles,
         (
             "meanings.zh_translation".to_owned(),
-            "zh_translation_b1_b2".to_owned(),
+            "zh_translation_balanced_fluency".to_owned(),
             false
         )
     );
@@ -21091,12 +21091,12 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         .unwrap()
         .to_owned();
 
-    // 存三档译文（乱序给，落库后按 c1_c2 → b1_b2 → a1_a2 排）。
+    // 存三档译文（乱序给，落库后按初、中、高排）。
     let mut meanings = word["word"]["meanings"].clone();
     meanings["pos"][0]["senses"][0]["sentences"][0]["zh_translations"] = json!([
-        {"id": Uuid::now_v7(), "band": "a1_a2", "content": rich_text("高阶译文")},
-        {"id": Uuid::now_v7(), "band": "c1_c2", "content": rich_text("初阶译文")},
-        {"id": b_id, "band": "b1_b2", "content": rich_text("中阶译文")}
+        {"id": Uuid::now_v7(), "band": "adapted_creation", "content": rich_text("高阶译文")},
+        {"id": Uuid::now_v7(), "band": "word_for_word", "content": rich_text("初阶译文")},
+        {"id": b_id, "band": "balanced_fluency", "content": rich_text("中阶译文")}
     ]);
     let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
     assert_eq!(
@@ -21120,7 +21120,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         .collect();
     assert_eq!(
         bands,
-        ["c1_c2", "b1_b2", "a1_a2"],
+        ["word_for_word", "balanced_fluency", "adapted_creation"],
         "发布响应必须保留全部三档：{published}"
     );
     assert_eq!(first_sentence(&published)["zh_text_id"], b_id);
@@ -21147,7 +21147,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         .collect();
     assert_eq!(
         snapshot_bands,
-        ["c1_c2", "b1_b2", "a1_a2"],
+        ["word_for_word", "balanced_fluency", "adapted_creation"],
         "发布快照必须固化全部三档，否则下游只能读到 1 档"
     );
 
@@ -21165,9 +21165,9 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         .to_owned();
     let mut src_meanings = source["word"]["meanings"].clone();
     src_meanings["pos"][0]["senses"][0]["sentences"][0]["zh_translations"] = json!([
-        {"id": Uuid::now_v7(), "band": "a1_a2", "content": rich_text("源高阶")},
-        {"id": src_sentence_b_id, "band": "b1_b2", "content": rich_text("源中阶")},
-        {"id": Uuid::now_v7(), "band": "c1_c2", "content": rich_text("源初阶")}
+        {"id": Uuid::now_v7(), "band": "adapted_creation", "content": rich_text("源高阶")},
+        {"id": src_sentence_b_id, "band": "balanced_fluency", "content": rich_text("源中阶")},
+        {"id": Uuid::now_v7(), "band": "word_for_word", "content": rich_text("源初阶")}
     ]);
     // 纯文本关联无需绑定词条即可随内容发布。
     src_meanings["pos"][0]["senses"][0]["relations"] = json!([{
@@ -21195,7 +21195,7 @@ async fn v3_publish_preserves_all_sentence_translation_bands(pool: PgPool) {
         .collect();
     assert_eq!(
         src_bands,
-        ["c1_c2", "b1_b2", "a1_a2"],
+        ["word_for_word", "balanced_fluency", "adapted_creation"],
         "带关联词发布必须保留三档：{src_published}"
     );
     assert_eq!(
@@ -21239,7 +21239,7 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
     let sentence_id = first_sentence(&word)["id"].as_str().unwrap();
     let initial = &first_sentence(&word)["zh_translations"];
     assert_eq!(initial.as_array().unwrap().len(), 1);
-    assert_eq!(initial[0]["band"], "b1_b2");
+    assert_eq!(initial[0]["band"], "balanced_fluency");
 
     let c_id = Uuid::now_v7();
     let b_id = initial[0]["id"].as_str().unwrap().to_owned();
@@ -21247,9 +21247,9 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
     let mut meanings = word["word"]["meanings"].clone();
     let sentence = &mut meanings["pos"][0]["senses"][0]["sentences"][0];
     sentence["zh_translations"] = json!([
-        {"id": a_id, "band": "a1_a2", "content": rich_text("高阶译文")},
-        {"id": c_id, "band": "c1_c2", "content": rich_text("初阶译文")},
-        {"id": b_id, "band": "b1_b2", "content": rich_text("中阶译文")}
+        {"id": a_id, "band": "adapted_creation", "content": rich_text("高阶译文")},
+        {"id": c_id, "band": "word_for_word", "content": rich_text("初阶译文")},
+        {"id": b_id, "band": "balanced_fluency", "content": rich_text("中阶译文")}
     ]);
     let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
     let translations = first_sentence(&saved)["zh_translations"]
@@ -21260,7 +21260,7 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
             .iter()
             .map(|translation| translation["band"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["c1_c2", "b1_b2", "a1_a2"]
+        ["word_for_word", "balanced_fluency", "adapted_creation"]
     );
     assert_eq!(first_sentence(&saved)["zh_text_id"], b_id);
     assert_eq!(first_sentence(&saved)["zh_text"]["text"], "中阶译文");
@@ -21287,9 +21287,9 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
             .map(|(_, role, text)| (role.as_str(), text.as_str()))
             .collect::<Vec<_>>(),
         [
-            ("zh_translation_c1_c2", "初阶译文"),
-            ("zh_translation_b1_b2", "中阶译文"),
-            ("zh_translation_a1_a2", "高阶译文"),
+            ("zh_translation_word_for_word", "初阶译文"),
+            ("zh_translation_balanced_fluency", "中阶译文"),
+            ("zh_translation_adapted_creation", "高阶译文"),
         ]
     );
 
@@ -21308,12 +21308,14 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
         first_sentence(&saved)["zh_translations"]
     );
 
+    // 例句难度等级与译文风格无关：改 level 不该把兼容字段指向另一档译文。
     let mut changed_level_meanings = reloaded["word"]["meanings"].clone();
     changed_level_meanings["pos"][0]["senses"][0]["sentences"][0]["level"] = json!("A1");
     let changed_level = save_v3_meanings(&state, &bearer, &reloaded, changed_level_meanings).await;
+    assert_eq!(first_sentence(&changed_level)["zh_text_id"], b_id);
     assert_eq!(
-        first_sentence(&changed_level)["zh_text_id"],
-        a_id.to_string()
+        first_sentence(&changed_level)["zh_text"]["text"],
+        "中阶译文"
     );
     assert_eq!(
         first_sentence(&changed_level)["zh_translations"],
@@ -21341,8 +21343,8 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
         .as_array()
         .unwrap();
     assert_eq!(cleared_translations.len(), 1);
-    assert_eq!(cleared_translations[0]["id"], a_id.to_string());
-    assert_eq!(cleared_translations[0]["content"]["text"], "高阶译文");
+    assert_eq!(cleared_translations[0]["id"], b_id);
+    assert_eq!(cleared_translations[0]["content"]["text"], "中阶译文");
 }
 
 #[sqlx::test]
@@ -21361,7 +21363,7 @@ async fn v3_sentence_translations_allow_repeated_bands_and_independent_edits(poo
     .await;
     let entry_id = word["word"]["id"].as_str().unwrap();
     let mut meanings = writable_v3_meanings(&word);
-    let rows: Vec<Value> = ["a1_a2", "b1_b2", "c1_c2"].into_iter().flat_map(|band| {
+    let rows: Vec<Value> = ["adapted_creation", "balanced_fluency", "word_for_word"].into_iter().flat_map(|band| {
         (1..=2).map(move |index| json!({"id":Uuid::now_v7(),"band":band,"content":rich_text(&format!("{band} 译文 {index}"))}))
     }).collect();
     meanings["pos"][0]["senses"][0]["sentences"][0]["zh_translations"] = json!(rows);
@@ -21406,7 +21408,7 @@ async fn v3_sentence_translations_allow_repeated_bands_and_independent_edits(poo
         .unwrap();
     translations.retain(|t| t["id"] != alias_id);
     let changed_id = translations[0]["id"].clone();
-    translations[0]["band"] = json!("a1_a2");
+    translations[0]["band"] = json!("adapted_creation");
     translations[0]["content"] = rich_text("独立修改并改成高阶");
     let changed = save_v3_meanings(&state, &bearer, &published, edited).await;
     let after = first_sentence(&changed)["zh_translations"]
