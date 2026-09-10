@@ -191,8 +191,10 @@ pub struct PartOfSpeechConfig {
     pub sort_order: i32,
     pub usage_count: i64,
     pub sub_part_count: i64,
-    /// 按固定基础词性编码派生：仅为 true 时允许挂细分词性。
+    /// 任意基本词性都可以扩展细分词性，恒为 true。
     pub sub_parts_extensible: bool,
+    /// 按固定编码集合派生：该词性下的释义是否必须选中细分词性。
+    pub sub_pos_required: bool,
     pub allowed_form_types: Vec<WordFormTypeWithoutBase>,
     pub default_form_types: Vec<WordFormTypeWithoutBase>,
     pub revision: i64,
@@ -244,8 +246,10 @@ pub struct CatalogPart {
     pub sort_order: i32,
     pub allowed_form_types: Vec<WordFormTypeWithoutBase>,
     pub default_form_types: Vec<WordFormTypeWithoutBase>,
-    /// 与 PartOfSpeechConfig.sub_parts_extensible 同源。
+    /// 与 PartOfSpeechConfig.sub_parts_extensible 同源，恒为 true。
     pub sub_parts_extensible: bool,
+    /// 与 PartOfSpeechConfig.sub_pos_required 同源。
+    pub sub_pos_required: bool,
     pub sub_parts: Vec<CatalogSubPart>,
 }
 
@@ -293,7 +297,7 @@ pub(crate) struct PartRecord {
 impl From<PartRecord> for PartOfSpeechConfig {
     fn from(value: PartRecord) -> Self {
         let allowed_form_types = value.allowed_form_types;
-        let sub_parts_extensible = crate::catalog::rules::is_basic_part_of_speech(&value.code);
+        let sub_pos_required = crate::catalog::rules::requires_sub_pos(&value.code);
         Self {
             id: value.id,
             code: value.code,
@@ -305,7 +309,8 @@ impl From<PartRecord> for PartOfSpeechConfig {
             sort_order: value.sort_order,
             usage_count: value.usage_count,
             sub_part_count: value.sub_part_count,
-            sub_parts_extensible,
+            sub_parts_extensible: true,
+            sub_pos_required,
             default_form_types: allowed_form_types.clone(),
             allowed_form_types,
             revision: value.revision,

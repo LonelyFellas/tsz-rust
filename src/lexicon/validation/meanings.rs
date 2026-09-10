@@ -177,9 +177,9 @@ pub fn validate_meanings(
                     "CEFR 等级无效",
                 );
             }
-            // 只有基础词性才有细分词性可选；非基础词性的释义不填 sub_pos（填了会落到下面的归属校验）。
+            // 只有固定五个词性的释义必填细分词性；其余词性选填（填了会落到下面的归属校验）。
             if sense.sub_pos.is_empty() {
-                if crate::catalog::rules::is_basic_part_of_speech(pos_code) {
+                if crate::catalog::rules::requires_sub_pos(pos_code) {
                     issue(
                         &mut issues,
                         PersistedWordStep::Meanings,

@@ -320,18 +320,24 @@ function refreshOnce(): Promise<boolean> {
 
 1. 内置词典 `suggested_forms.pos[]` 只返回 catalog 已存在的基本 `pos` 编码；供应商词性到平台 code 的映射由后端维护，未知供应商值不能透传；
 2. V1/V2 create/forms save/publish 校验基本 `pos` code 存在；词形与发音分组不保存细分词性；
-3. meanings 中每个 sense 的 `sub_pos`：基础词性（noun/verb/pronoun/adjective/adverb）下必填，保存/发布时校验其存在且属于 `pos_id` 对应的基本 `pos`；非基础词性没有细分词性，`sub_pos` 留空即可，填了会报 `invalid_sub_part_of_speech`（2026-09-06 起）；
+3. meanings 中每个 sense 的 `sub_pos`：`sub_pos_required` 为 true 的词性（noun/verb/pronoun/adjective/adverb）下必填，保存/发布时校验其存在且属于 `pos_id` 对应的基本 `pos`；其余词性选填，填了同样校验归属，不属于当前词性会报 `invalid_sub_part_of_speech`；
 4. 基本词性 usage_count 按 distinct entry 统计当前草稿和所有仍保留 publication 中的引用；
 5. 细分词性 usage_count 按稳定 sense node 去重统计当前草稿和所有仍保留 publication 中的引用；
 6. 配置改名不修改词条 revision；读取词条时由前端 catalog 解析最新名称；
 7. 配置删除与词条保存并发时，数据库约束/事务需保证不会留下悬空 code；
 8. 生产初始化需先 seed 当前 5/13 编码（五个基础词性及其细分词性），再导入或开放词条写入。
-9. 细分词性只能挂在五个基础词性（`noun`/`verb`/`pronoun`/`adjective`/`adverb`）下：管理项与 catalog 项都带
-   `sub_parts_extensible`，前端据此过滤父级、隐藏向导中的子词性字段；后端对非基础父级创建细分词性返回
-   409 `sub_part_of_speech_not_allowed`。基本词性另有必填的 `short_name_zh`（简洁显示，1–16 字唯一）与
-   `full_name_en`（英文全称，1–64 字忽略大小写唯一），创建/修改请求必须携带（2026-09-06 起）。
+9. 任意基本词性都可以扩展细分词性（含管理员自建的），`sub_parts_extensible` 恒为 true。管理项与
+   catalog 项另带 `sub_pos_required`：按固定编码集合（`noun`/`verb`/`pronoun`/`adjective`/`adverb`）
+   派生，只表示该词性下的释义是否必填细分词性，与能不能扩展无关，前端据此计算未填项。基本词性另有
+   必填的 `short_name_zh`（简洁显示，1–16 字唯一）与 `full_name_en`（英文全称，1–64 字忽略大小写唯一），
+   创建/修改请求必须携带（2026-09-06 起）。
    细分词性同样新增必填的 `short_name_zh`、`abbreviation`（同父级允许重复）与 `full_name_en`（同父级忽略大小写唯一）。
    基本词性下仍挂有细分词性时不允许删除：DELETE 返回 409 `part_of_speech_has_sub_parts`，需先删完细分词性（2026-09-06 起）。
+10. 词形变化按基本词性归属（2026-09-10 起）：`FormTypeConfig` / `FormTypeCatalogItem` 带
+    `part_of_speech_id`，原形该字段缺省表示对所有词性通用。列表接口支持 `part_of_speech_id`
+    过滤（原形始终返回）；新建必须指定归属，修改可以改挂，原形不接受该字段。
+    `allowed_form_types` 随之按词性收窄，词条侧不做硬校验，存量词条不受影响。
+    基本词性下仍挂有词形变化时不允许删除：DELETE 返回 409 `part_of_speech_has_form_types`。
 
 基本词性 catalog item 与基本词性管理 item 均额外返回有序的
 `allowed_form_types` / `default_form_types`。两者当前相同，后者供新建表单初始化，前者是服务端

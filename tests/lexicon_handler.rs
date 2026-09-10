@@ -25722,7 +25722,12 @@ async fn custom_form_type_saves_publishes_and_resolves_with_historical_delete_pr
         .generate(admin_id, "super_admin")
         .unwrap();
     let path = "/api/v1/admin/settings/form-types";
-    let (status,configuration)=call(&state,Method::POST,path,&bearer,None,Some(json!({"code":"custom_variant","name_zh":"自定义词形","short_name_zh":"自定义","name_en":"Custom variant","abbreviation":"custom","full_name_en":"custom variant","sort_order":100}))).await;
+    let noun_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (status,configuration)=call(&state,Method::POST,path,&bearer,None,Some(json!({"part_of_speech_id":noun_id,"code":"custom_variant","name_zh":"自定义词形","short_name_zh":"自定义","name_en":"Custom variant","abbreviation":"custom","full_name_en":"custom variant","sort_order":100}))).await;
     assert_eq!(status, StatusCode::CREATED, "{configuration}");
     let ready = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
     let id = ready["word"]["id"].as_str().unwrap();

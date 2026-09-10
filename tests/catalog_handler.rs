@@ -263,18 +263,24 @@ async fn catalog_read_allows_active_admin_but_management_requires_super_admin(po
     .await;
     assert_eq!(status, StatusCode::OK, "普通管理员应能读 catalog：{body}");
     assert_eq!(body["catalog_version"], 5);
-    let all_form_types = json!([
-        "third_person_singular",
-        "present_participle",
-        "past_tense",
-        "past_participle",
-        "plural",
-        "comparative",
-        "superlative"
-    ]);
+    // 词形候选按所属词性收窄：种子把动词的四个时态、名词的复数、形容词的两级各归其主，
+    // 原形对所有词性通用所以不进候选。
+    let form_types_by_pos = json!({
+        "noun": ["plural"],
+        "pronoun": [],
+        "verb": [
+            "third_person_singular",
+            "present_participle",
+            "past_tense",
+            "past_participle"
+        ],
+        "adjective": ["comparative", "superlative"],
+        "adverb": []
+    });
     for item in body["items"].as_array().unwrap() {
-        assert_eq!(item["allowed_form_types"], all_form_types, "{item}");
-        assert_eq!(item["default_form_types"], all_form_types, "{item}");
+        let expected = &form_types_by_pos[item["code"].as_str().unwrap()];
+        assert_eq!(&item["allowed_form_types"], expected, "{item}");
+        assert_eq!(&item["default_form_types"], expected, "{item}");
     }
     assert_eq!(body["items"].as_array().map(Vec::len), Some(5));
     assert_eq!(body["items"][0]["code"], "noun");
@@ -365,8 +371,12 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     assert_eq!(created["short_name_zh"], "小品");
     assert_eq!(created["full_name_en"], "Particle Word");
     assert_eq!(
-        created["sub_parts_extensible"], false,
-        "自建词性不是基础词性，不允许挂细分词性"
+        created["sub_parts_extensible"], true,
+        "任意基本词性都能挂细分词性"
+    );
+    assert_eq!(
+        created["sub_pos_required"], false,
+        "自建词性下的释义选填细分词性"
     );
     assert_eq!(created["revision"], 1);
     assert_eq!(created["usage_count"], 0);
@@ -478,8 +488,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     assert_eq!(stale["meta"]["part_of_speech_id"], part_id);
     assert_eq!(stale["meta"]["code"], "particle");
 
-    // 自建的小品词不是基础词性：创建细分词性必须在写入前被拦下。
-    let (status, _, body, _) = call(
+    // 自建的小品词同样可以扩展细分词性：不再按固定编码集合拦截。
+    let (status, _, own_sub, _) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/{part_id}/sub-parts"),
@@ -495,10 +505,14 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["code"], "sub_part_of_speech_not_allowed");
-    assert_eq!(body["meta"]["part_of_speech_id"], part_id);
-    assert_eq!(body["meta"]["code"], "particle");
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "自建词性挂细分词性失败：{own_sub}"
+    );
+    assert_eq!(own_sub["part_of_speech_id"], part_id);
+    assert_eq!(own_sub["name_zh"], "焦点小品词");
+    let own_sub_id = own_sub["id"].as_str().unwrap().to_owned();
 
     let noun_id: Uuid =
         sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
@@ -625,6 +639,28 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "invalid_query");
 
+    // 放开后新可达的一步：自建词性挂上细分词性就删不掉，必须先清空细分词性。
+    let (status, _, body, _) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/{part_id}?base_revision=2"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "part_of_speech_has_sub_parts");
+
+    let (status, _, _, _) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/{part_id}/sub-parts/{own_sub_id}?base_revision=1"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
     let (status, _, _, bytes) = call(
         &state,
         Method::DELETE,
@@ -645,7 +681,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(catalog["catalog_version"], 11);
+    // 比放开前多两步写操作：自建词性挂细分词性、再把它删掉。
+    assert_eq!(catalog["catalog_version"], 13);
     assert!(
         catalog["items"]
             .as_array()
@@ -903,6 +940,24 @@ async fn usage_counts_merge_active_drafts_and_all_publications_before_delete(poo
         .execute(&pool)
         .await
         .expect("清空剩余细分词性应成功");
+
+    // 名下还挂着词形变化时同样拦下，要求先清空。
+    let (status, _, body, _) = call(
+        &state,
+        Method::DELETE,
+        &format!("{ROOT}/{part_id}?base_revision=2"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "part_of_speech_has_form_types");
+    sqlx::query("DELETE FROM catalog.form_types WHERE part_of_speech_id = $1")
+        .bind(part_id)
+        .execute(&pool)
+        .await
+        .expect("清空剩余词形变化应成功");
+
     let (status, _, _, bytes) = call(
         &state,
         Method::DELETE,
@@ -923,7 +978,12 @@ async fn form_type_catalog_crud_permissions_revision_and_base_protection(pool: P
     let bearer = token(&state, root, AdminRole::SuperAdmin);
     let admin_token = token(&state, admin, AdminRole::Admin);
     let path = "/api/v1/admin/settings/form-types";
-    let input = json!({"code":"custom_variant","name_zh":"自定义词形","short_name_zh":"自定义","name_en":"Custom variant","abbreviation":"custom","full_name_en":"custom variant","sort_order":100});
+    let noun_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let input = json!({"part_of_speech_id":noun_id,"code":"custom_variant","name_zh":"自定义词形","short_name_zh":"自定义","name_en":"Custom variant","abbreviation":"custom","full_name_en":"custom variant","sort_order":100});
     let (status, _, _, _) = call(
         &state,
         Method::POST,
@@ -994,12 +1054,15 @@ async fn form_type_catalog_crud_permissions_revision_and_base_protection(pool: P
             .iter()
             .any(|f| f["code"] == "custom_variant" && f["name_zh"] == "新词形名称")
     );
-    assert!(catalog["items"].as_array().unwrap().iter().all(|p| {
-        p["allowed_form_types"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("custom_variant"))
-    }));
+    // 新建的词形只进它所属词性的候选，不再对所有词性可用。
+    for part in catalog["items"].as_array().unwrap() {
+        let allowed = part["allowed_form_types"].as_array().unwrap();
+        assert_eq!(
+            allowed.contains(&json!("custom_variant")),
+            part["code"] == "noun",
+            "{part}"
+        );
+    }
     let base = catalog["form_types"]
         .as_array()
         .unwrap()

@@ -120,6 +120,13 @@ impl CatalogService {
         if sub_part_count > 0 {
             return Err(CatalogServiceError::PartHasSubParts);
         }
+        // 词形变化同理：外键是 RESTRICT，先给出可读的冲突而不是数据库错误。
+        let form_type_count = CatalogRepository::form_type_count(&mut tx, id)
+            .await
+            .map_err(map_repository_error)?;
+        if form_type_count > 0 {
+            return Err(CatalogServiceError::PartHasFormTypes);
+        }
         CatalogRepository::delete_part(&mut tx, id)
             .await
             .map_err(map_repository_error)?;
@@ -158,18 +165,13 @@ impl CatalogService {
             .begin()
             .await
             .map_err(database_error)?;
-        let Some((_, parent_code)) = CatalogRepository::part_revision(&mut tx, part_id, false)
+        // 父词性必须存在；挂在哪个词性下不再设限，任意基本词性都能扩展细分词性。
+        if CatalogRepository::part_revision(&mut tx, part_id, false)
             .await
             .map_err(map_repository_error)?
-        else {
+            .is_none()
+        {
             return Err(CatalogServiceError::PartNotFound);
-        };
-        // 细分词性只能挂在五个基础词性下；非基础父级在写入前拦下，不依赖前端过滤。
-        if !crate::catalog::rules::is_basic_part_of_speech(&parent_code) {
-            return Err(CatalogServiceError::SubPartNotAllowed {
-                part_of_speech_id: part_id,
-                code: parent_code,
-            });
         }
         CatalogRepository::insert_sub_part(&mut tx, &value)
             .await
