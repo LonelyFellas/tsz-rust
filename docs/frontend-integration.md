@@ -341,18 +341,23 @@ function refreshOnce(): Promise<boolean> {
 
 基本词性 catalog item 与基本词性管理 item 均额外返回有序的
 `allowed_form_types` / `default_form_types`。两者当前相同，后者供新建表单初始化，前者是服务端
-保存和发布的权威能力。2026-09-09 起由全局词形配置目录派生；所有基本词性（包括自定义词性）共用同一份有序列表。初始非原形目录如下，可在配置页新增或删除未引用项：
+保存和发布的权威能力。2026-09-10 起按词性收窄：只含该词性名下的词形变化，原形不进候选（它是必有项）。
+删除基本词性前要先清空它名下的词形变化，前端可直接用 `allowed_form_types.length` 做预判。
+默认种子的分配如下，可在配置页新增、改挂或删除未引用项：
 
 ```json
-[
-  "third_person_singular",
-  "present_participle",
-  "past_tense",
-  "past_participle",
-  "plural",
-  "comparative",
-  "superlative"
-]
+{
+  "noun": ["plural"],
+  "pronoun": [],
+  "verb": [
+    "third_person_singular",
+    "present_participle",
+    "past_tense",
+    "past_participle"
+  ],
+  "adjective": ["comparative", "superlative"],
+  "adverb": []
+}
 ```
 
 `base` 不出现在这两个 non-base 能力数组中，但在 V3 `WordFormTypeV3` 中与其他 concrete form
@@ -364,7 +369,8 @@ POS 与目录中任一合法编码的组合；编码格式为 `^[a-z][a-z0-9_]{0
 词性 catalog 顶层新增 `form_types`，含 id、稳定 code、五个名称字段和 sort_order。业务展示读取最新名称，不把名称复制进词条或发布快照。
 管理使用 `GET/POST /admin/settings/form-types` 与 `PATCH/DELETE /admin/settings/form-types/{id}`，仅超级管理员可用；更新 body / 删除 query 均携带 `base_revision`。
 原形 `base` 可改显示名但不能删除，全部编码创建后不可改。其他项须无草稿、保留发布版本或关联引用才能删除；删除内置项后，词典建议不再输出该编码。
-词形目录错误包括 `invalid_form_type`、`form_type_conflict`、`form_type_not_found`、`form_type_in_use`、`form_type_required`；并发编辑复用 `revision_conflict`。
+词形目录错误包括 `invalid_form_type`、`form_type_conflict`、`form_type_not_found`、`form_type_in_use`、`form_type_required`；
+创建或改挂时归属不存在返回 404 `part_of_speech_not_found`；并发编辑复用 `revision_conflict`。
 V2/V3 wire 类型从固定枚举扩展为目录字符串，前端须同步严格 runtime schema。先部署兼容新编码和旧目录缺字段的前端，再部署后端；历史自定义类型仍被引用时不可回滚旧枚举版本。
 
 V3 Step 2 新增必填 POS 级正式字段：

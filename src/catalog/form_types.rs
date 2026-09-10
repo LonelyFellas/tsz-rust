@@ -152,12 +152,15 @@ fn database_error(error: sqlx::Error) -> AppError {
                 "form type already exists",
             );
         }
-        if db.code().as_deref() == Some("23514") {
-            // 目前只有「原形必须全局、其余必须归属」这一条 CHECK 会走到这里。
+        // 只认归属这一条 CHECK：表上还有触发器与列级检查同样抛 23514，
+        // 一律当成 400 会把「原形不能删」之类的错误吞成错的状态码与字段。
+        if db.code().as_deref() == Some("23514")
+            && db.constraint() == Some("catalog_form_types_base_is_global")
+        {
             return AppError::validation(
                 ErrorCode::InvalidFormType,
                 "part_of_speech_id",
-                "base form type is global",
+                "base form type must not belong to a part of speech",
             );
         }
         if matches!(db.code().as_deref(), Some("23503" | "23001")) {

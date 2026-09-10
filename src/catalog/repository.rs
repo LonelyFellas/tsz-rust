@@ -46,12 +46,7 @@ const PART_LIST_SQL: &str = r#"
                SELECT count(*)::bigint
                FROM catalog.sub_parts_of_speech child
                WHERE child.part_of_speech_id = p.id
-           ) AS sub_part_count,
-           (
-               SELECT count(*)::bigint
-               FROM catalog.form_types form
-               WHERE form.part_of_speech_id = p.id
-           ) AS form_type_count
+           ) AS sub_part_count
     FROM catalog.parts_of_speech p
     LEFT JOIN admins creator ON creator.id = p.created_by_admin_id
     LEFT JOIN admins updater ON updater.id = p.updated_by_admin_id
@@ -100,12 +95,7 @@ const PART_BY_ID_SQL: &str = r#"
                SELECT count(*)::bigint
                FROM catalog.sub_parts_of_speech child
                WHERE child.part_of_speech_id = p.id
-           ) AS sub_part_count,
-           (
-               SELECT count(*)::bigint
-               FROM catalog.form_types form
-               WHERE form.part_of_speech_id = p.id
-           ) AS form_type_count
+           ) AS sub_part_count
     FROM catalog.parts_of_speech p
     LEFT JOIN admins creator ON creator.id = p.created_by_admin_id
     LEFT JOIN admins updater ON updater.id = p.updated_by_admin_id

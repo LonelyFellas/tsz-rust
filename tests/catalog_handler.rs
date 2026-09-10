@@ -381,7 +381,6 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     assert_eq!(created["revision"], 1);
     assert_eq!(created["usage_count"], 0);
     assert_eq!(created["sub_part_count"], 0);
-    assert_eq!(created["form_type_count"], 0);
     assert_eq!(created["created_by"]["id"], admin_id.to_string());
     assert!(created.get("updated_by").is_none());
 
@@ -1079,6 +1078,28 @@ async fn form_type_catalog_crud_permissions_revision_and_base_protection(pool: P
         "原形只能有一个且必须全局：{base_dup}"
     );
     assert_eq!(base_dup["code"], "invalid_form_type");
+
+    // 改原形时不接受归属：这条守卫在 handler 里，撞不到数据库那层。
+    let base_id = catalog["form_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "base")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, _, base_move, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{base_id}"),
+        Some(&bearer),
+        Some(json!({"base_revision":1,"part_of_speech_id":noun_id,"name_zh":"原形","short_name_zh":"原形","name_en":"Base form","abbreviation":"base","full_name_en":"base form","sort_order":0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{base_move}");
+    assert_eq!(base_move["code"], "invalid_form_type");
+    assert_eq!(base_move["field"], "part_of_speech_id");
 
     // 这次把唯一索引从全局改成同一词性内的全部意义：形容词与副词可以各有一个「比较级」。
     let adjective_id: Uuid =

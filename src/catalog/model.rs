@@ -191,8 +191,6 @@ pub struct PartOfSpeechConfig {
     pub sort_order: i32,
     pub usage_count: i64,
     pub sub_part_count: i64,
-    /// 名下的词形变化数量：管理页据此在删除前给出预判。
-    pub form_type_count: i64,
     /// 任意基本词性都可以扩展细分词性，恒为 true。
     pub sub_parts_extensible: bool,
     /// 按固定编码集合派生：该词性下的释义是否必须选中细分词性。
@@ -294,7 +292,6 @@ pub(crate) struct PartRecord {
     pub updated_at: DateTime<Utc>,
     pub usage_count: i64,
     pub sub_part_count: i64,
-    pub form_type_count: i64,
 }
 
 impl From<PartRecord> for PartOfSpeechConfig {
@@ -312,7 +309,6 @@ impl From<PartRecord> for PartOfSpeechConfig {
             sort_order: value.sort_order,
             usage_count: value.usage_count,
             sub_part_count: value.sub_part_count,
-            form_type_count: value.form_type_count,
             sub_parts_extensible: true,
             sub_pos_required,
             default_form_types: allowed_form_types.clone(),
