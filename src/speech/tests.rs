@@ -83,12 +83,8 @@ fn ssml_is_escaped_nested_and_deterministic() {
 }
 
 #[test]
-fn grammar_levels_still_synthesize_as_strong_emphasis() {
-    for level in [
-        RichTextEmphasisLevel::Function,
-        RichTextEmphasisLevel::Core,
-        RichTextEmphasisLevel::Grammar,
-    ] {
+fn spoken_grammar_levels_still_synthesize_as_strong_emphasis() {
+    for level in [RichTextEmphasisLevel::Function, RichTextEmphasisLevel::Core] {
         let content = RichTextV2 {
             version: 2,
             text: "ab".to_owned(),
@@ -104,6 +100,85 @@ fn grammar_levels_still_synthesize_as_strong_emphasis() {
             "{level:?}: {ssml}"
         );
     }
+}
+
+#[test]
+fn part_of_speech_indicators_are_left_out_of_the_ssml() {
+    // 「a job」里的 a 只指示词性，朗读时要当它不存在。
+    let content = RichTextV2 {
+        version: 2,
+        text: "a job".to_owned(),
+        annotations: vec![RichTextAnnotation::Emphasis {
+            start: 0,
+            end: 1,
+            level: RichTextEmphasisLevel::Grammar,
+        }],
+    };
+    let ssml = build_ssml(&request(content)).unwrap();
+    assert!(ssml.contains("> job</prosody>"), "{ssml}");
+    assert!(!ssml.contains("emphasis"), "{ssml}");
+
+    // 挂在词性提示符上的音标会被整段吞掉，否则空标签里的 ph 会被当正文读出来。
+    let with_phoneme = RichTextV2 {
+        version: 2,
+        text: "a job".to_owned(),
+        annotations: vec![
+            RichTextAnnotation::Emphasis {
+                start: 0,
+                end: 1,
+                level: RichTextEmphasisLevel::Grammar,
+            },
+            RichTextAnnotation::Phoneme {
+                start: 0,
+                end: 1,
+                alphabet: RichTextPhonemeAlphabet::Ipa,
+                phoneme: "eɪ".to_owned(),
+            },
+        ],
+    };
+    let ssml = build_ssml(&request(with_phoneme)).unwrap();
+    assert!(!ssml.contains("phoneme"), "{ssml}");
+    assert!(ssml.contains("> job</prosody>"), "{ssml}");
+}
+
+#[test]
+fn dropping_an_indicator_keeps_the_words_apart_and_drops_its_pause() {
+    // 「go to a school」把「 a 」整段标成提示符：空白要留下，否则读成一个词。
+    let content = RichTextV2 {
+        version: 2,
+        text: "go to a school".to_owned(),
+        annotations: vec![
+            RichTextAnnotation::Emphasis {
+                start: 5,
+                end: 8,
+                level: RichTextEmphasisLevel::Grammar,
+            },
+            RichTextAnnotation::Pause {
+                at: 6,
+                duration_ms: 500,
+            },
+        ],
+    };
+    let ssml = build_ssml(&request(content)).unwrap();
+    assert!(ssml.contains("go to  school"), "{ssml}");
+    assert!(!ssml.contains("<break"), "{ssml}");
+}
+
+#[test]
+fn an_all_indicator_text_has_nothing_left_to_read() {
+    let content = RichTextV2 {
+        version: 2,
+        text: "a".to_owned(),
+        annotations: vec![RichTextAnnotation::Emphasis {
+            start: 0,
+            end: 1,
+            level: RichTextEmphasisLevel::Grammar,
+        }],
+    };
+    assert_eq!(
+        build_ssml(&request(content)).unwrap_err(),
+        SpeechModelError::NothingToSpeak
+    );
 }
 
 #[test]
@@ -218,7 +293,7 @@ fn fingerprint_is_stable_for_equivalent_canonical_content_and_versions_options()
     .unwrap();
     assert_ne!(first.fingerprint(), other_locale.fingerprint());
     assert_eq!(CACHE_SCHEMA_VERSION, "speech-cache-v1");
-    assert_eq!(SSML_BUILDER_VERSION, "rich-text-v2-ssml-v1");
+    assert_eq!(SSML_BUILDER_VERSION, "rich-text-v2-ssml-v2");
 }
 
 #[derive(Clone)]

@@ -121,6 +121,7 @@ struct V3AuditNodeDelta {
 fn blank_v3_pronunciation() -> WordPronunciationV3 {
     WordPronunciationV3 {
         dict_phonetic_rich: None,
+        actual_pron_rich: None,
         voice_profile: None,
         audio_assets: Vec::new(),
         id: Uuid::now_v7(),
@@ -140,6 +141,7 @@ fn suggested_v3_pronunciations(
         .iter()
         .map(|value| WordPronunciationV3 {
             dict_phonetic_rich: None,
+            actual_pron_rich: None,
             voice_profile: None,
             audio_assets: Vec::new(),
             id: Uuid::now_v7(),
@@ -300,6 +302,7 @@ fn cloned_v3_pronunciations(values: &[WordPronunciationV3]) -> Vec<WordPronuncia
         .iter()
         .map(|value| WordPronunciationV3 {
             dict_phonetic_rich: value.dict_phonetic_rich.clone(),
+            actual_pron_rich: value.actual_pron_rich.clone(),
             voice_profile: value.voice_profile.clone(),
             audio_assets: value.audio_assets.clone(),
             id: Uuid::now_v7(),
@@ -4942,7 +4945,35 @@ fn canonicalize_v3_forms(content: &mut DraftFormsStepContentV3) -> Result<(), Le
             }
         }
     }
+    strip_forms_phonetic_liaisons(content);
     Ok(())
+}
+
+/// 连读只标在实际发音上。字典音标里的历史连读在保存和发布时一并落掉，不做搬迁：
+/// 两个框的文本常常不一样，错位搬过去比重标更糟。
+fn strip_phonetic_liaisons(pronunciations: &mut [WordPronunciationV3]) {
+    for pronunciation in pronunciations {
+        if let Some(rich) = &mut pronunciation.dict_phonetic_rich {
+            rich.strip_liaisons();
+        }
+    }
+}
+
+/// 发布不走 canonicalize，但快照是不可变的：连读要在冻进去之前落掉。
+pub(crate) fn strip_forms_phonetic_liaisons(content: &mut DraftFormsStepContentV3) {
+    for pos in &mut content.pos {
+        for form in &mut pos.forms {
+            match &mut form.regional_variants {
+                WordRegionalVariantsV3::Common { common } => {
+                    strip_phonetic_liaisons(&mut common.pronunciations);
+                }
+                WordRegionalVariantsV3::UkUs { uk, us } => {
+                    strip_phonetic_liaisons(&mut uk.pronunciations);
+                    strip_phonetic_liaisons(&mut us.pronunciations);
+                }
+            }
+        }
+    }
 }
 
 fn canonicalize_v3_spelling(spelling: &mut String) -> Result<(), LexiconServiceError> {
@@ -5450,6 +5481,7 @@ mod tests {
                     origin: TextOrigin::Manual,
                     pronunciations: vec![WordPronunciationV3 {
                         dict_phonetic_rich: None,
+                        actual_pron_rich: None,
                         voice_profile: None,
                         audio_assets: Vec::new(),
                         id: pronunciation_id,

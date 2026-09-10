@@ -250,6 +250,11 @@ pub struct WordPronunciationV3 {
     pub audio_assets: Vec<AudioAsset>,
     #[schema(max_length = 200)]
     pub actual_pron: String,
+    /// 编辑器正文与 actual_pron 保持一致。连读只标在这里：字典音标那一侧负责
+    /// 喂语音合成，连读是纯展示的标注，两边分工不混。旧记录不输出扩展字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub actual_pron_rich: Option<RichTextV3>,
     /// Draft 可暂未选择；complete/publish 必须有值。
     #[serde(
         default,
@@ -553,6 +558,16 @@ impl RichTextV3 {
         }
     }
 
+    /// 抹掉连读标注。字典音标只负责喂语音合成，连读是展示用的，归实际发音那一侧。
+    pub(crate) fn strip_liaisons(&mut self) {
+        match self {
+            Self::V1(value) => value.liaisons.clear(),
+            Self::V2(value) => value
+                .annotations
+                .retain(|annotation| !matches!(annotation, RichTextAnnotationV3::Liaison { .. })),
+        }
+    }
+
     pub(crate) fn decoration_count(&self) -> usize {
         match self {
             Self::V1(value) => value.spans.len().saturating_add(value.liaisons.len()),
@@ -789,36 +804,37 @@ pub enum WordSentenceAssociationV3 {
     },
 }
 
+/// 译文风格而非难度等级：初阶逐字直译、中阶语句通顺、高阶深层重构。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SentenceTranslationBandV3 {
-    A1A2,
-    B1B2,
-    C1C2,
+    // 别名是改名前的 CEFR 式取值，留给历史快照和部署窗口期的旧前端；
+    // 两侧都上线一轮后可以摘掉。
+    #[serde(alias = "c1_c2")]
+    WordForWord,
+    #[serde(alias = "b1_b2")]
+    BalancedFluency,
+    #[serde(alias = "a1_a2")]
+    AdaptedCreation,
 }
 
 impl SentenceTranslationBandV3 {
-    pub(crate) fn from_sentence_level(level: &str) -> Self {
-        match level {
-            "C1" | "C2" => Self::C1C2,
-            "A1" | "A2" => Self::A1A2,
-            _ => Self::B1B2,
-        }
-    }
+    /// 老数据只有单条译文、拿不到风格时的落点：中阶既不假定逐字也不假定重构。
+    pub(crate) const DEFAULT: Self = Self::BalancedFluency;
 
     pub(crate) const fn display_order(self) -> u8 {
         match self {
-            Self::C1C2 => 0,
-            Self::B1B2 => 1,
-            Self::A1A2 => 2,
+            Self::WordForWord => 0,
+            Self::BalancedFluency => 1,
+            Self::AdaptedCreation => 2,
         }
     }
 
     pub(crate) const fn field_role(self) -> &'static str {
         match self {
-            Self::A1A2 => "zh_translation_a1_a2",
-            Self::B1B2 => "zh_translation_b1_b2",
-            Self::C1C2 => "zh_translation_c1_c2",
+            Self::WordForWord => "zh_translation_word_for_word",
+            Self::BalancedFluency => "zh_translation_balanced_fluency",
+            Self::AdaptedCreation => "zh_translation_adapted_creation",
         }
     }
 }
@@ -2402,6 +2418,54 @@ impl From<RelatedWordResult> for RelatedWordResultAny {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_band_values_still_deserialize_but_never_serialize_back() {
+        for (legacy, expected) in [
+            ("c1_c2", SentenceTranslationBandV3::WordForWord),
+            ("b1_b2", SentenceTranslationBandV3::BalancedFluency),
+            ("a1_a2", SentenceTranslationBandV3::AdaptedCreation),
+        ] {
+            let parsed: SentenceTranslationBandV3 =
+                serde_json::from_value(serde_json::json!(legacy)).unwrap();
+            assert_eq!(parsed, expected, "{legacy}");
+            assert_ne!(
+                serde_json::to_value(parsed).unwrap(),
+                serde_json::json!(legacy),
+                "{legacy} must not round-trip back to the CEFR-style name"
+            );
+        }
+    }
+
+    #[test]
+    fn stripping_liaisons_keeps_the_other_annotations() {
+        let mut rich = RichTextV3::V2(RichTextV2V3 {
+            version: 2,
+            text: "ab".to_owned(),
+            annotations: vec![
+                RichTextAnnotationV3::Liaison {
+                    start: 0,
+                    end: 2,
+                    start_len: 1,
+                    end_len: 1,
+                },
+                RichTextAnnotationV3::Emphasis {
+                    start: 0,
+                    end: 1,
+                    level: RichTextEmphasisLevel::Core,
+                },
+            ],
+        });
+        rich.strip_liaisons();
+        let RichTextV3::V2(value) = &rich else {
+            panic!("expected a v2 rich text");
+        };
+        assert_eq!(value.annotations.len(), 1);
+        assert!(matches!(
+            value.annotations[0],
+            RichTextAnnotationV3::Emphasis { .. }
+        ));
+    }
 
     fn matched_entry_context(created_by: Option<Uuid>) -> MatchedEntryContextV3 {
         MatchedEntryContextV3 {

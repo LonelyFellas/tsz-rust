@@ -1825,7 +1825,7 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 
 ### 同档多条汉语译文（2026-09-07，dev 工作区）
 
-`zh_translations` 支持同一句同档多条，取消“每档一条、每句三条”限制。映射保持高阶 `a1_a2`、中阶 `b1_b2`、低阶 `c1_c2`；每条按稳定 ID 编辑、变档或删除。DTO 的数组 maxItems 为 2000，实际仍受词条总节点与请求体大小限制。`zh_text` / `zh_text_id` 继续提供单条兼容别名，省略数组的旧请求保留现有列表。
+`zh_translations` 支持同一句同档多条，取消“每档一条、每句三条”限制。档位命名见下方「译文档位语义化」一节；每条按稳定 ID 编辑、变档或删除。DTO 的数组 maxItems 为 2000，实际仍受词条总节点与请求体大小限制。`zh_text` / `zh_text_id` 继续提供单条兼容别名，省略数组的旧请求保留现有列表。
 
 必须先应用 `20260907180000_allow_multiple_sentence_translations` migration 和新后端，再使用配套前端写入更多译文。旧前端 runtime 的 maxItems=3 无法读取扩展响应。migration 仅解除分档译文槽位唯一限制，其他字段槽位唯一性保留；已有同档多条或退休译文身份无法还原时 down 明确拒绝。集中设计与验证记录见 tsz 仓库 `docs/features/multiple-sentence-translations/`。
 
@@ -1833,9 +1833,22 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 
 完整范围、字段、兼容与验证集中在 tsz 仓库 docs/features/definition-sentence-editor/，上传后端不包含在本次范围内。
 
+### 译文档位语义化（2026-09-10，dev 工作区）
+
+`SentenceTranslationBandV3` 从 CEFR 式命名改为 `word_for_word`（初阶，逐字直译）、
+`balanced_fluency`（中阶，语句通顺）、`adapted_creation`（高阶，深层重构）。
+初/中/高说的是译文风格，与例句的 `level` 无关，服务端不再按难度等级推导档位；
+拿不到档位时统一落中阶。归属未变：旧 `c1_c2` 即初阶，`a1_a2` 即高阶。
+
+旧取值保留为反序列化别名，序列化只输出新名，用来撑过部署窗口；两侧仍必须同批部署，
+因为前端对响应做严格 schema 校验。迁移 `20260910180000_rename_translation_bands`
+改写 `text_variants.field_role`，并按新档名重建同档多条译文依赖的部分唯一索引。
+
 ## 字典音标发音编辑器
 
-`WordPronunciationV3` 保留 `dict_phonetic` 字符串，新增可选 `dict_phonetic_rich`、`voice_profile` 与 `audio_assets`；未配置时不输出，旧数据无需迁移。富文本正文必须与音标字符串一致，非法标注返回 `phonetic_rich_text_invalid`，错误定位到 forms 的发音行。
+`WordPronunciationV3` 保留 `dict_phonetic` 字符串，新增可选 `dict_phonetic_rich`、`voice_profile`、`audio_assets` 与 `actual_pron_rich`；未配置时不输出，旧数据无需迁移。两个富文本字段的正文必须与各自的纯文本字段一致，非法标注返回 `phonetic_rich_text_invalid`，错误定位到对应字段。
+
+两个框分工不同：字典音标只用于生成语音，实际发音只用于展示。连读因此只标在 `actual_pron_rich` 上，`dict_phonetic_rich` 里的历史连读会在保存和发布时被剥掉，不做搬迁。语法结构里的词性提示符（`emphasis.level = "grammar"`）不参与语音合成，整段连同挂在其上的音标都不进 SSML。
 
 词形草稿保存会校验音频资产并使用服务端元数据。词形与词义保存共同重建音频引用，发布快照保留发音编辑数据及录音引用。
 

@@ -60,6 +60,8 @@ impl LexiconService {
         }))
         .map_err(serialization_error)?;
         let mut word = self.get_v3(entry_id).await?;
+        // 快照冻下来就改不了：字典音标里的历史连读要在这之前落掉。
+        super::v3::strip_forms_phonetic_liaisons(&mut word.forms);
         let mut tx = self
             .repository
             .pool()

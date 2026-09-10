@@ -1,4 +1,4 @@
-use crate::lexicon::dto::{RichTextAnnotation, RichTextPhonemeAlphabet};
+use crate::lexicon::dto::{RichTextAnnotation, RichTextEmphasisLevel, RichTextPhonemeAlphabet};
 
 use super::{SpeechModelError, SynthesisRequest};
 
@@ -20,6 +20,28 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
     output.push_str(&format_signed(request.options().pitch_semitones(), "st"));
     output.push_str("\">");
 
+    // 词性提示符（a job 里的 a）是教学标注，只指示词性，不参与朗读：这一段的字符、
+    // 它自己的 emphasis、以及整段被它盖住的音标都不进 SSML，否则空的 phoneme 标签
+    // 会把 ph 里的音标当正文读出来。
+    let silent = request
+        .content()
+        .annotations
+        .iter()
+        .filter_map(|annotation| match annotation {
+            RichTextAnnotation::Emphasis {
+                start,
+                end,
+                level: RichTextEmphasisLevel::Grammar,
+            } => Some((*start, *end)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let is_silent = |position: usize| {
+        silent
+            .iter()
+            .any(|(start, end)| *start <= position && position < *end)
+    };
+
     let ranges = request
         .content()
         .annotations
@@ -30,8 +52,17 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
                 RichTextAnnotation::Emphasis { .. } | RichTextAnnotation::Phoneme { .. }
             )
         })
+        .filter(|annotation| match annotation {
+            RichTextAnnotation::Emphasis {
+                level: RichTextEmphasisLevel::Grammar,
+                ..
+            } => false,
+            _ => range(annotation)
+                .is_none_or(|(start, end)| (start..end).any(|position| !is_silent(position))),
+        })
         .collect::<Vec<_>>();
     let codepoints = request.content().text.chars().collect::<Vec<_>>();
+    let mut spoken = false;
 
     for position in 0..=codepoints.len() {
         let mut ending = ranges
@@ -54,7 +85,9 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
         }
 
         for annotation in request.content().annotations.iter().filter(|annotation| {
-            matches!(annotation, RichTextAnnotation::Pause { at, .. } if *at == position)
+            // 提示符整段当作不存在，连它自己带的停顿也不该留在朗读里。
+            matches!(annotation, RichTextAnnotation::Pause { at, .. }
+                if *at == position && !is_silent(position))
         }) {
             if let RichTextAnnotation::Pause { duration_ms, .. } = annotation {
                 output.push_str("<break time=\"");
@@ -83,8 +116,18 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
         }
 
         if let Some(character) = codepoints.get(position) {
-            push_text_character(&mut output, *character);
+            // 提示符里的空白照常留下：吞掉它会让两侧的词粘成一个，
+            //「go to a school」标了「 a 」就会读成「go toschool」。
+            if !is_silent(position) || character.is_whitespace() {
+                push_text_character(&mut output, *character);
+                spoken |= !character.is_whitespace();
+            }
         }
+    }
+
+    // 空正文和整段都是提示符是同一回事：没有东西可念，别把空 prosody 送给供应商。
+    if !spoken {
+        return Err(SpeechModelError::NothingToSpeak);
     }
 
     output.push_str("</prosody>");

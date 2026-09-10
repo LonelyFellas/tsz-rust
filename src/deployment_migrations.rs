@@ -55,12 +55,22 @@ pub async fn undo(
              WHERE jsonb_path_exists(forms, '$.**.text_links'::jsonpath)
                 OR jsonb_path_exists(meanings, '$.**.text_links'::jsonpath)
                 OR jsonb_path_exists(forms, '$.**.audio_assets'::jsonpath)
-                OR jsonb_path_exists(meanings, '$.**.audio_assets'::jsonpath))
+                OR jsonb_path_exists(meanings, '$.**.audio_assets'::jsonpath)
+                OR jsonb_path_exists(forms, '$.**.actual_pron_rich'::jsonpath)
+                OR jsonb_path_exists(
+                     meanings,
+                     '$.**.band ? (@ == "word_for_word" || @ == "balanced_fluency"
+                        || @ == "adapted_creation")'::jsonpath))
           + (SELECT count(*)
              FROM lexicon.entry_publications
              WHERE content_schema_version = 3
                AND (jsonb_path_exists(snapshot, '$.**.text_links'::jsonpath)
-                 OR jsonb_path_exists(snapshot, '$.**.audio_assets'::jsonpath)))
+                 OR jsonb_path_exists(snapshot, '$.**.audio_assets'::jsonpath)
+                 OR jsonb_path_exists(snapshot, '$.**.actual_pron_rich'::jsonpath)
+                 OR jsonb_path_exists(
+                      snapshot,
+                      '$.**.band ? (@ == "word_for_word" || @ == "balanced_fluency"
+                         || @ == "adapted_creation")'::jsonpath)))
         "#,
     )
     .fetch_one(&mut *transaction)
@@ -101,7 +111,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20260910120000;
+    const CURRENT_RELEASE_VERSION: i64 = 20260910180000;
 
     #[sqlx::test]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {
@@ -124,6 +134,13 @@ mod tests {
 
     #[sqlx::test]
     async fn translation_slot_migration_restores_active_and_retired_node_identity(pool: PgPool) {
+        // 这一版的数据形态早于 20260910180000 的档位改名，先把 schema 退回旧命名。
+        sqlx::raw_sql(include_str!(
+            "../migrations/20260910180000_rename_translation_bands.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::raw_sql(include_str!(
             "../migrations/20260907180000_allow_multiple_sentence_translations.down.sql"
         ))
@@ -421,26 +438,82 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        // 守卫拦的是「回退后的旧二进制读不了的键」。逐个投影形态各验一遍：
+        // 写错 jsonpath 时守卫会静默返回 0 并放行，没有别的地方会报警。
+        let payloads = [
+            (r#"{}"#, r#"{"pos":[{"text_links":[]}]}"#),
+            (
+                r#"{"pos":[{"forms":[{"regional_variants":{"common":{"pronunciations":[{"actual_pron_rich":{"version":2,"text":"a","annotations":[]}}]}}}]}]}"#,
+                r#"{}"#,
+            ),
+            (
+                r#"{}"#,
+                r#"{"pos":[{"senses":[{"sentences":[{"zh_translations":[{"band":"word_for_word"}]}]}]}]}"#,
+            ),
+            (
+                r#"{}"#,
+                r#"{"pos":[{"senses":[{"sentences":[{"zh_translations":[{"band":"balanced_fluency"}]}]}]}]}"#,
+            ),
+            (
+                r#"{}"#,
+                r#"{"pos":[{"senses":[{"sentences":[{"zh_translations":[{"band":"adapted_creation"}]}]}]}]}"#,
+            ),
+        ];
+        for (forms, meanings) in payloads {
+            sqlx::query(
+                r#"
+                INSERT INTO lexicon.entry_editor_projection (
+                    entry_id, forms, meanings, rebuilt_revision
+                ) VALUES ($1, $2::jsonb, $3::jsonb, 1)
+                ON CONFLICT (entry_id) DO UPDATE
+                    SET forms = EXCLUDED.forms, meanings = EXCLUDED.meanings
+                "#,
+            )
+            .bind(entry_id)
+            .bind(forms)
+            .bind(meanings)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("persisted V3 payloads are not readable"),
+                "forms={forms} meanings={meanings}: {error}"
+            );
+        }
+
+        // 旧档位取值是回退目标能读的，不该被守卫拦下。
         sqlx::query(
             r#"
-            INSERT INTO lexicon.entry_editor_projection (
-                entry_id, forms, meanings, rebuilt_revision
-            ) VALUES ($1, '{}', '{"pos":[{"text_links":[]}]}', 1)
+            UPDATE lexicon.entry_editor_projection
+            SET forms = '{}'::jsonb,
+                meanings = '{"pos":[{"senses":[{"sentences":[{"zh_translations":[{"band":"b1_b2"}]}]}]}]}'::jsonb
+            WHERE entry_id = $1
             "#,
         )
         .bind(entry_id)
         .execute(&pool)
         .await
         .unwrap();
-
-        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("persisted V3 payloads are not readable")
-        );
+        let readable: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM lexicon.entry_editor_projection
+            WHERE jsonb_path_exists(
+                meanings,
+                '$.**.band ? (@ == "word_for_word" || @ == "balanced_fluency"
+                   || @ == "adapted_creation")'::jsonpath)
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(readable, 0);
         let latest: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE",
         )
