@@ -152,7 +152,22 @@ fn database_error(error: sqlx::Error) -> AppError {
                 "form type already exists",
             );
         }
+        if db.code().as_deref() == Some("23514") {
+            // 目前只有「原形必须全局、其余必须归属」这一条 CHECK 会走到这里。
+            return AppError::validation(
+                ErrorCode::InvalidFormType,
+                "part_of_speech_id",
+                "base form type is global",
+            );
+        }
         if matches!(db.code().as_deref(), Some("23503" | "23001")) {
+            // 父词性被并发删掉时撞的是归属外键，语义是「父级不存在」而不是「词形在用」。
+            if db.constraint() == Some("catalog_form_types_part_of_speech_fkey") {
+                return AppError::not_found_with_code(
+                    ErrorCode::PartOfSpeechNotFound,
+                    "part of speech not found",
+                );
+            }
             return AppError::conflict(ErrorCode::FormTypeInUse, None, "form type is in use");
         }
     }
@@ -352,6 +367,7 @@ pub async fn update(
         }
         None
     } else {
+        // CHECK 约束保证非原形一定有归属，这里的兜底只在约束被回退时才可能触发。
         let target = request
             .part_of_speech_id
             .or(current.part_of_speech_id)

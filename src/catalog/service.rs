@@ -192,6 +192,7 @@ fn map_repository_error(error: CatalogRepositoryError) -> CatalogServiceError {
         }
         CatalogRepositoryError::PartInUse => CatalogServiceError::PartInUse { usage_count: None },
         CatalogRepositoryError::PartHasSubParts => CatalogServiceError::PartHasSubParts,
+        CatalogRepositoryError::PartHasFormTypes => CatalogServiceError::PartHasFormTypes,
         CatalogRepositoryError::SubPartInUse => {
             CatalogServiceError::SubPartInUse { usage_count: None }
         }

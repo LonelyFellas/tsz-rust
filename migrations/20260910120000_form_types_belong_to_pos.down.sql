@@ -12,4 +12,6 @@ CREATE UNIQUE INDEX catalog_form_types_short_name_zh_unique_idx ON catalog.form_
 CREATE UNIQUE INDEX catalog_form_types_abbreviation_unique_idx ON catalog.form_types (lower(abbreviation));
 CREATE UNIQUE INDEX catalog_form_types_full_name_en_unique_idx ON catalog.form_types (lower(full_name_en));
 ALTER TABLE catalog.form_types DROP CONSTRAINT catalog_form_types_base_is_global;
+ALTER TABLE catalog.form_types DROP CONSTRAINT catalog_form_types_part_of_speech_fkey;
 ALTER TABLE catalog.form_types DROP COLUMN part_of_speech_id;
+UPDATE catalog.metadata SET version = version + 1, updated_at = now() WHERE id = TRUE;

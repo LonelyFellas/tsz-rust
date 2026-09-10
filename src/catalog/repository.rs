@@ -46,7 +46,12 @@ const PART_LIST_SQL: &str = r#"
                SELECT count(*)::bigint
                FROM catalog.sub_parts_of_speech child
                WHERE child.part_of_speech_id = p.id
-           ) AS sub_part_count
+           ) AS sub_part_count,
+           (
+               SELECT count(*)::bigint
+               FROM catalog.form_types form
+               WHERE form.part_of_speech_id = p.id
+           ) AS form_type_count
     FROM catalog.parts_of_speech p
     LEFT JOIN admins creator ON creator.id = p.created_by_admin_id
     LEFT JOIN admins updater ON updater.id = p.updated_by_admin_id
@@ -95,7 +100,12 @@ const PART_BY_ID_SQL: &str = r#"
                SELECT count(*)::bigint
                FROM catalog.sub_parts_of_speech child
                WHERE child.part_of_speech_id = p.id
-           ) AS sub_part_count
+           ) AS sub_part_count,
+           (
+               SELECT count(*)::bigint
+               FROM catalog.form_types form
+               WHERE form.part_of_speech_id = p.id
+           ) AS form_type_count
     FROM catalog.parts_of_speech p
     LEFT JOIN admins creator ON creator.id = p.created_by_admin_id
     LEFT JOIN admins updater ON updater.id = p.updated_by_admin_id
@@ -161,6 +171,8 @@ pub enum CatalogRepositoryError {
     PartInUse,
     #[error("part of speech still has sub parts")]
     PartHasSubParts,
+    #[error("part of speech still has form types")]
+    PartHasFormTypes,
     #[error("sub part of speech is in use")]
     SubPartInUse,
     #[error("parent part of speech no longer exists")]
@@ -231,6 +243,9 @@ fn map_part_delete_error(error: sqlx::Error) -> CatalogRepositoryError {
     // 细分词性外键已改为 RESTRICT：服务层预检之外的兜底，映射成同一个业务错误。
     if is_foreign_key_violation(&error, "catalog_sub_parts_parent_fkey") {
         return CatalogRepositoryError::PartHasSubParts;
+    }
+    if is_foreign_key_violation(&error, "catalog_form_types_part_of_speech_fkey") {
+        return CatalogRepositoryError::PartHasFormTypes;
     }
     for constraint in [
         "lexicon_entry_pos_catalog_pos_fkey",

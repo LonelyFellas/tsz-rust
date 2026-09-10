@@ -188,8 +188,8 @@ async fn catalog_schema_and_metadata_seed_are_present(pool: PgPool) {
     .expect("查询 catalog.metadata 应成功");
     assert_eq!(
         rows,
-        vec![(true, 5, true)],
-        "词形目录迁移后 metadata 应为唯一一行 version=5"
+        vec![(true, 6, true)],
+        "词形归属迁移后 metadata 应为唯一一行 version=6"
     );
 }
 
