@@ -178,6 +178,19 @@ impl CatalogRepository {
             .map_err(map_part_delete_error)
     }
 
+    pub(crate) async fn form_type_count(
+        tx: &mut Transaction<'_, Postgres>,
+        part_id: Uuid,
+    ) -> Result<i64, CatalogRepositoryError> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM catalog.form_types WHERE part_of_speech_id = $1",
+        )
+        .bind(part_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(CatalogRepositoryError::Database)
+    }
+
     pub(crate) async fn sub_part_count(
         tx: &mut Transaction<'_, Postgres>,
         part_id: Uuid,

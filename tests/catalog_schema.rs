@@ -188,8 +188,8 @@ async fn catalog_schema_and_metadata_seed_are_present(pool: PgPool) {
     .expect("查询 catalog.metadata 应成功");
     assert_eq!(
         rows,
-        vec![(true, 5, true)],
-        "词形目录迁移后 metadata 应为唯一一行 version=5"
+        vec![(true, 6, true)],
+        "词形归属迁移后 metadata 应为唯一一行 version=6"
     );
 }
 
@@ -1420,4 +1420,55 @@ async fn sub_part_display_checks_reject_blank_untrimmed_and_overlong_values(pool
     )
     .await
     .expect("边界长度的展示字段应被接受");
+}
+
+/// 词形归属的两个约束名是错误映射契约：服务层按名字把 23503 映射成 404、
+/// 把 23514 映射成 400，改名会让那两条映射静默退化成 500。
+#[sqlx::test]
+async fn form_type_ownership_constraint_names_are_stable(pool: PgPool) {
+    let noun: Uuid =
+        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
+            .fetch_one(&pool)
+            .await
+            .expect("查询名词应成功");
+
+    // 先清空细分词性，让删除只可能撞到词形归属这一个外键。
+    sqlx::query("DELETE FROM catalog.sub_parts_of_speech WHERE part_of_speech_id = $1")
+        .bind(noun)
+        .execute(&pool)
+        .await
+        .expect("清空名词下的细分词性应成功");
+    let blocked = sqlx::query("DELETE FROM catalog.parts_of_speech WHERE id = $1")
+        .bind(noun)
+        .execute(&pool)
+        .await;
+    assert_db_error(
+        blocked,
+        FOREIGN_KEY_VIOLATION,
+        Some("catalog_form_types_part_of_speech_fkey"),
+        "仍挂有词形变化的基本词性不能删除",
+    );
+
+    let base_with_owner =
+        sqlx::query("UPDATE catalog.form_types SET part_of_speech_id = $1 WHERE code = 'base'")
+            .bind(noun)
+            .execute(&pool)
+            .await;
+    assert_db_error(
+        base_with_owner,
+        CHECK_VIOLATION,
+        Some("catalog_form_types_base_is_global"),
+        "原形不能归属某个基本词性",
+    );
+
+    let orphan =
+        sqlx::query("UPDATE catalog.form_types SET part_of_speech_id = NULL WHERE code = 'plural'")
+            .execute(&pool)
+            .await;
+    assert_db_error(
+        orphan,
+        CHECK_VIOLATION,
+        Some("catalog_form_types_base_is_global"),
+        "非原形必须挂在某个基本词性下",
+    );
 }

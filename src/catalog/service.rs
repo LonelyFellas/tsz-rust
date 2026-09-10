@@ -45,13 +45,10 @@ pub enum CatalogServiceError {
     PartInUse { usage_count: Option<i64> },
     #[error("sub part of speech is in use")]
     SubPartInUse { usage_count: Option<i64> },
-    #[error("part of speech {code} does not allow sub parts")]
-    SubPartNotAllowed {
-        part_of_speech_id: Uuid,
-        code: String,
-    },
     #[error("part of speech still has sub parts")]
     PartHasSubParts,
+    #[error("part of speech still has form types")]
+    PartHasFormTypes,
     #[error("catalog repository failed")]
     Repository(#[source] CatalogRepositoryError),
 }
@@ -195,6 +192,7 @@ fn map_repository_error(error: CatalogRepositoryError) -> CatalogServiceError {
         }
         CatalogRepositoryError::PartInUse => CatalogServiceError::PartInUse { usage_count: None },
         CatalogRepositoryError::PartHasSubParts => CatalogServiceError::PartHasSubParts,
+        CatalogRepositoryError::PartHasFormTypes => CatalogServiceError::PartHasFormTypes,
         CatalogRepositoryError::SubPartInUse => {
             CatalogServiceError::SubPartInUse { usage_count: None }
         }

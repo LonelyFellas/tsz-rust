@@ -13,7 +13,7 @@ mod commands;
 mod query;
 
 const PART_LIST_SQL: &str = r#"
-    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
+    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' AND part_of_speech_id = p.id ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
            p.sort_order, p.revision,
            p.created_by_admin_id, creator.display_name AS created_by_display_name,
            p.updated_by_admin_id, updater.display_name AS updated_by_display_name,
@@ -62,7 +62,7 @@ const PART_LIST_SQL: &str = r#"
 "#;
 
 const PART_BY_ID_SQL: &str = r#"
-    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
+    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' AND part_of_speech_id = p.id ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
            p.sort_order, p.revision,
            p.created_by_admin_id, creator.display_name AS created_by_display_name,
            p.updated_by_admin_id, updater.display_name AS updated_by_display_name,
@@ -161,6 +161,8 @@ pub enum CatalogRepositoryError {
     PartInUse,
     #[error("part of speech still has sub parts")]
     PartHasSubParts,
+    #[error("part of speech still has form types")]
+    PartHasFormTypes,
     #[error("sub part of speech is in use")]
     SubPartInUse,
     #[error("parent part of speech no longer exists")]
@@ -231,6 +233,9 @@ fn map_part_delete_error(error: sqlx::Error) -> CatalogRepositoryError {
     // 细分词性外键已改为 RESTRICT：服务层预检之外的兜底，映射成同一个业务错误。
     if is_foreign_key_violation(&error, "catalog_sub_parts_parent_fkey") {
         return CatalogRepositoryError::PartHasSubParts;
+    }
+    if is_foreign_key_violation(&error, "catalog_form_types_part_of_speech_fkey") {
+        return CatalogRepositoryError::PartHasFormTypes;
     }
     for constraint in [
         "lexicon_entry_pos_catalog_pos_fkey",
