@@ -306,6 +306,8 @@ impl LexiconService {
                     field: "cursor",
                     message: "cursor is invalid",
                 })?;
+            // actor_id 只保证游标不跨管理员复用，不再是可见性过滤：草稿候选现在对
+            // 所有管理员开放，结果集与 actor 无关。
             if cursor.actor_id != actor_id
                 || cursor.q != normalized_q
                 || cursor.kind != query.kind
