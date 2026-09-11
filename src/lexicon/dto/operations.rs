@@ -858,6 +858,7 @@ pub struct RelatedSearchQuery {
 #[serde(rename_all = "snake_case")]
 pub enum RelatedSearchMatchMode {
     Exact,
+    /// 按词匹配：词面里有一个词与关键词完全相同。半截拼写不算命中。
     Contains,
 }
 
