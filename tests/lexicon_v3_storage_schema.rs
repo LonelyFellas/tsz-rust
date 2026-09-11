@@ -189,24 +189,19 @@ async fn insert_entry(
     admin_id: Uuid,
     schema_version: i16,
     kind: &str,
-    headword_mode: Option<&str>,
-    source_dialect: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
     let id = Uuid::now_v7();
     sqlx::query(
         r#"
         INSERT INTO lexicon.entries (
-            id, content_schema_version, language, kind, revision,
-            headword_mode, source_dialect, detection_snapshot,
+            id, content_schema_version, language, kind, revision, detection_snapshot,
             created_by_admin_id, updated_by_admin_id
-        ) VALUES ($1, $2, 'en', $3, 1, $4, $5, '{}', $6, $6)
+        ) VALUES ($1, $2, 'en', $3, 1, '{}', $4, $4)
         "#,
     )
     .bind(id)
     .bind(schema_version)
     .bind(kind)
-    .bind(headword_mode)
-    .bind(source_dialect)
     .bind(admin_id)
     .execute(pool)
     .await?;
@@ -249,9 +244,7 @@ async fn insert_node(
 }
 
 async fn insert_v3_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
-    let entry_id = insert_entry(pool, admin_id, 3, "word", None, None)
-        .await
-        .unwrap();
+    let entry_id = insert_entry(pool, admin_id, 3, "word").await.unwrap();
     sqlx::query(
         r#"
         INSERT INTO lexicon.v3_entry_state (
@@ -269,9 +262,7 @@ async fn insert_v3_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
 #[sqlx::test]
 async fn v3_initial_headwords_shape_is_strict(pool: PgPool) {
     let admin_id = insert_admin(&pool).await;
-    let valid_entry = insert_entry(&pool, admin_id, 3, "word", None, None)
-        .await
-        .unwrap();
+    let valid_entry = insert_entry(&pool, admin_id, 3, "word").await.unwrap();
     sqlx::query(
         r#"
         INSERT INTO lexicon.v3_entry_state (
@@ -295,9 +286,7 @@ async fn v3_initial_headwords_shape_is_strict(pool: PgPool) {
         json!({"mode": "distinguish", "uk": "centre", "us": "center"}),
         json!({"mode": "distinguish", "uk": "centre", "us": "center", "source_dialect": null}),
     ] {
-        let entry_id = insert_entry(&pool, admin_id, 3, "word", None, None)
-            .await
-            .unwrap();
+        let entry_id = insert_entry(&pool, admin_id, 3, "word").await.unwrap();
         let result = sqlx::query(
             r#"
             INSERT INTO lexicon.v3_entry_state (
@@ -332,9 +321,7 @@ async fn v3_initial_headwords_shape_is_strict(pool: PgPool) {
             Some(vec!["us:center", "uk:centre"]),
         ),
     ] {
-        let entry_id = insert_entry(&pool, admin_id, 3, "word", None, None)
-            .await
-            .unwrap();
+        let entry_id = insert_entry(&pool, admin_id, 3, "word").await.unwrap();
         let keys = keys.map(|values| values.into_iter().map(str::to_owned).collect::<Vec<_>>());
         let result = sqlx::query(
             r#"
@@ -635,10 +622,10 @@ async fn insert_valid_common_form(
 }
 
 #[sqlx::test]
-async fn entry_schema_version_controls_kind_and_legacy_headword_shape(pool: PgPool) {
+async fn entry_schema_version_is_frozen_at_v3(pool: PgPool) {
     let admin_id = insert_admin(&pool).await;
 
-    let native_v3 = insert_entry(&pool, admin_id, 3, "word", None, None)
+    let native_v3 = insert_entry(&pool, admin_id, 3, "word")
         .await
         .expect("native V3 word has no legacy headword");
     sqlx::query(
@@ -649,13 +636,13 @@ async fn entry_schema_version_controls_kind_and_legacy_headword_shape(pool: PgPo
     .await
     .unwrap();
 
-    let migrated_v3 = insert_entry(&pool, admin_id, 3, "word", Some("unified"), None).await;
+    let migrated_v3 = insert_entry(&pool, admin_id, 3, "word").await;
     assert!(
         migrated_v3.is_ok(),
         "migrated V3 may retain a read-only bridge"
     );
 
-    let native_v3_phrase = insert_entry(&pool, admin_id, 3, "phrase", None, None)
+    let native_v3_phrase = insert_entry(&pool, admin_id, 3, "phrase")
         .await
         .expect("native V3 phrase has the same aggregate shape as a V3 word");
     sqlx::query(
@@ -666,20 +653,15 @@ async fn entry_schema_version_controls_kind_and_legacy_headword_shape(pool: PgPo
     .await
     .unwrap();
 
-    assert_db_error(
-        insert_entry(&pool, admin_id, 2, "word", None, None).await,
-        CHECK_VIOLATION,
-        "lexicon_entries_versioned_headword_shape_check",
-    );
-    assert_db_error(
-        insert_entry(&pool, admin_id, 4, "word", None, None).await,
-        CHECK_VIOLATION,
-        "lexicon_entries_schema_version_check",
-    );
+    for retired in [2, 4] {
+        assert_db_error(
+            insert_entry(&pool, admin_id, retired, "word").await,
+            CHECK_VIOLATION,
+            "lexicon_entries_schema_version_check",
+        );
+    }
 
-    let invalid_revision_entry = insert_entry(&pool, admin_id, 3, "word", None, None)
-        .await
-        .unwrap();
+    let invalid_revision_entry = insert_entry(&pool, admin_id, 3, "word").await.unwrap();
     let invalid_first_write = sqlx::query(
         "INSERT INTO lexicon.v3_entry_state (entry_id, origin, first_v3_write_revision) VALUES ($1, 'native', 0)",
     )
@@ -690,124 +672,6 @@ async fn entry_schema_version_controls_kind_and_legacy_headword_shape(pool: PgPo
         invalid_first_write,
         CHECK_VIOLATION,
         "lexicon_v3_entry_state_first_write_revision_check",
-    );
-}
-
-#[sqlx::test]
-async fn v2_form_slot_constraints_are_unchanged(pool: PgPool) {
-    let admin_id = insert_admin(&pool).await;
-    let entry_id = insert_entry(&pool, admin_id, 2, "word", Some("unified"), None)
-        .await
-        .unwrap();
-    let noun_id = catalog_pos_id(&pool, "noun").await;
-    let mut tx = pool.begin().await.unwrap();
-    let pos_id = Uuid::now_v7();
-    insert_node(&mut tx, pos_id, entry_id, "pos", None, "forms.pos", false).await;
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.entry_pos (
-            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order
-        ) VALUES ($1, $2, $3, 'unified', 'unified', 0)
-        "#,
-    )
-    .bind(pos_id)
-    .bind(entry_id)
-    .bind(noun_id)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    let group_id = Uuid::now_v7();
-    insert_node(
-        &mut tx,
-        group_id,
-        entry_id,
-        "form_group",
-        Some(pos_id),
-        "forms.form_group",
-        false,
-    )
-    .await;
-    sqlx::query(
-        "INSERT INTO lexicon.form_groups (id, entry_id, entry_pos_id, is_regular, sort_order) VALUES ($1, $2, $3, TRUE, 0)",
-    )
-    .bind(group_id)
-    .bind(entry_id)
-    .bind(pos_id)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    let base_id = Uuid::now_v7();
-    insert_node(
-        &mut tx,
-        base_id,
-        entry_id,
-        "form_slot",
-        Some(pos_id),
-        "forms.base_form",
-        false,
-    )
-    .await;
-    sqlx::query(
-        "INSERT INTO lexicon.form_slots (id, entry_id, entry_pos_id, form_group_id, form_type, sort_order) VALUES ($1, $2, $3, NULL, 'base', 0)",
-    )
-    .bind(base_id)
-    .bind(entry_id)
-    .bind(pos_id)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-
-    let mut duplicate_tx = pool.begin().await.unwrap();
-    let second_base_id = Uuid::now_v7();
-    insert_node(
-        &mut duplicate_tx,
-        second_base_id,
-        entry_id,
-        "form_slot",
-        Some(pos_id),
-        "forms.base_form:duplicate-test",
-        false,
-    )
-    .await;
-    let duplicate = sqlx::query(
-        "INSERT INTO lexicon.form_slots (id, entry_id, entry_pos_id, form_group_id, form_type, sort_order) VALUES ($1, $2, $3, NULL, 'base', 1)",
-    )
-    .bind(second_base_id)
-    .bind(entry_id)
-    .bind(pos_id)
-    .execute(&mut *duplicate_tx)
-    .await;
-    assert_db_error(
-        duplicate,
-        UNIQUE_VIOLATION,
-        "lexicon_form_slots_one_base_idx",
-    );
-
-    let mut shape_tx = pool.begin().await.unwrap();
-    let invalid_slot_id = Uuid::now_v7();
-    insert_node(
-        &mut shape_tx,
-        invalid_slot_id,
-        entry_id,
-        "form_slot",
-        Some(pos_id),
-        "forms.form_slot:plural",
-        false,
-    )
-    .await;
-    let invalid_shape = sqlx::query(
-        "INSERT INTO lexicon.form_slots (id, entry_id, entry_pos_id, form_group_id, form_type, sort_order) VALUES ($1, $2, $3, NULL, 'plural', 1)",
-    )
-    .bind(invalid_slot_id)
-    .bind(entry_id)
-    .bind(pos_id)
-    .execute(&mut *shape_tx)
-    .await;
-    assert_db_error(
-        invalid_shape,
-        CHECK_VIOLATION,
-        "lexicon_form_slots_group_shape_check",
     );
 }
 

@@ -8,14 +8,13 @@ use sqlx::{Postgres, Transaction};
 use super::*;
 use crate::lexicon::{
     dto::{
-        Dialect, DraftMeaningsStepContentV3, EntryKind, ExistingSurfaceMatchV2,
-        ExistingSurfaceSourceV2, FormSurfaceMatchV3, FormsImpactItemV3, LegacySurfaceMatchV3,
-        MatchedEntryContextV3, RelationReferenceCountsV2, RelationReferencePreviewV2,
-        RelationReferencePreviewV3, RelationReferenceSummaryV2, RelationReferenceSummaryV3,
-        SurfaceAttentionLevelV2, SurfaceCanContinueTrue, SurfaceConfirmationReasonV2,
-        SurfaceContentScopeV2, SurfaceMatchCandidateV2, SurfaceMatchCategoryV2, SurfaceMatchItemV3,
-        SurfaceMatchPageV3, SurfaceMatchSeverityV2, WordDefinitionV3, WordFormTypeV2,
-        WordFormTypeV3, WordSenseV3,
+        Dialect, DraftMeaningsStepContentV3, ExistingSurfaceMatchV2, ExistingSurfaceSourceV2,
+        FormSurfaceMatchV3, FormsImpactItemV3, MatchedEntryContextV3, RelationReferenceCountsV2,
+        RelationReferencePreviewV2, RelationReferencePreviewV3, RelationReferenceSummaryV2,
+        RelationReferenceSummaryV3, SurfaceAttentionLevelV2, SurfaceCanContinueTrue,
+        SurfaceConfirmationReasonV2, SurfaceContentScopeV2, SurfaceMatchCandidateV2,
+        SurfaceMatchCategoryV2, SurfaceMatchItemV3, SurfaceMatchPageV3, SurfaceMatchSeverityV2,
+        WordDefinitionV3, WordFormTypeV2, WordFormTypeV3, WordSenseV3,
     },
     repository::SurfaceLockKey,
     surface_snapshot::{
@@ -34,12 +33,9 @@ struct V3SurfaceQueryKey {
 struct V3SurfaceSourceRecord {
     content_schema_version: i16,
     source_kind: String,
-    source_id: String,
-    source_node_id: Option<Uuid>,
     dialect_scope: String,
     normalized_surface: String,
     entry_id: Uuid,
-    entry_headword: String,
     entry_kind: String,
     lifecycle_status: String,
     content_scope: String,
@@ -120,28 +116,6 @@ pub(super) struct V3RestoreSurfaceContribution {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct V2RestorePublicationSurfaceContribution {
-    pub(super) items: Vec<LexiconSurfaceMatchV2>,
-    pub(super) contexts: Vec<MatchedEntryContextV2>,
-}
-
-#[derive(Debug)]
-struct V2RestorePublicationCandidate {
-    entry_id: Uuid,
-    source_id: String,
-    source_kind: &'static str,
-    source_node_id: Option<Uuid>,
-    entry_kind: EntryKind,
-    dialect: Dialect,
-    surface: String,
-    normalized_surface: String,
-    pos_id: Option<Uuid>,
-    pos: Option<String>,
-    form_type: Option<WordFormTypeV2>,
-    lookup_keys: BTreeSet<V3SurfaceQueryKey>,
-}
-
-#[derive(Debug, Default)]
 struct V3RelationSummaryBuilder {
     synonym: u32,
     antonym: u32,
@@ -195,10 +169,6 @@ impl V3SurfaceMaterial {
             .iter()
             .map(|resolved| {
                 let (spelling, dialect, entry_kind, existing) = match &resolved.item {
-                    SurfaceMatchItemV3::LegacyV2(item) => {
-                        let (spelling, dialect) = legacy_surface_and_dialect(&item.existing.source);
-                        (spelling, dialect, item.existing.kind, item.existing.clone())
-                    }
                     SurfaceMatchItemV3::FormVariantV3(item) => {
                         let presentation = presentations
                             .get(&item.entry_id)
@@ -393,20 +363,16 @@ impl LexiconService {
         ))
     }
 
-    /// Build the V3 half of one restore command without issuing a second
-    /// snapshot. The lifecycle service merges this contribution with its V2
-    /// visibility items, then signs exactly one batch-level token.
+    /// Build the surface contribution of one restore command and sign exactly
+    /// one batch-level token from it.
     pub(super) async fn v3_restore_surface_contribution(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        pending: &[(EntryLifecycleTarget, AdminWordAny, bool)],
+        pending: &[(EntryLifecycleTarget, AdminWordV3, bool)],
     ) -> Result<V3RestoreSurfaceContribution, LexiconServiceError> {
         let mut contribution = V3RestoreSurfaceContribution::default();
         let mut hidden_initial_owners = BTreeMap::<(String, String, String), Uuid>::new();
         for (target, word, already_active) in pending {
-            let AdminWordAny::V3(word) = word else {
-                continue;
-            };
             if *already_active {
                 continue;
             }
@@ -509,93 +475,6 @@ impl LexiconService {
         Ok(contribution)
     }
 
-    /// Build collision items for the immutable V2 publication surfaces that
-    /// become visible again during restore. Draft content may have diverged
-    /// from the active publication, so the lifecycle service must merge these
-    /// items with its draft-derived matches before signing the one restore
-    /// snapshot.
-    pub(super) async fn v2_restore_publication_surface_contribution(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        pending: &[(EntryLifecycleTarget, AdminWordAny, bool)],
-        publication_sources: &[crate::lexicon::repository::SurfaceProjectionSource],
-    ) -> Result<V2RestorePublicationSurfaceContribution, LexiconServiceError> {
-        let restoring_ids = pending
-            .iter()
-            .filter_map(|(_, word, already_active)| match (word, already_active) {
-                (AdminWordAny::V2(word), false) => Some(word.id),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let candidates = v2_restore_publication_candidates(publication_sources, &restoring_ids)?;
-        let keys = candidates
-            .iter()
-            .flat_map(|candidate| candidate.lookup_keys.iter().cloned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
-        let synthetic = material.synthetic_items()?;
-        if synthetic.len() != material.matches.len() {
-            return Err(invariant_record());
-        }
-        let mut items = BTreeMap::new();
-        for candidate in &candidates {
-            for (resolved, existing_item) in material.matches.iter().zip(&synthetic) {
-                if existing_item.existing.word_id == candidate.entry_id
-                    || candidate.lookup_keys.is_disjoint(&resolved.matched_keys)
-                {
-                    continue;
-                }
-                let candidate_wire = v2_restore_publication_candidate_wire(candidate)?;
-                let category = v2_restore_publication_match_category(
-                    candidate.source_kind,
-                    candidate.entry_kind,
-                    &existing_item.existing,
-                )?;
-                let match_id = format!(
-                    "restore:{}:v2-publication:{}",
-                    candidate.entry_id,
-                    hash_serializable(&serde_json::json!({
-                        "candidate": candidate_wire,
-                        "existing": existing_item.existing,
-                        "normalization_version":
-                            crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION,
-                    }))?
-                );
-                items
-                    .entry(match_id.clone())
-                    .or_insert_with(|| LexiconSurfaceMatchV2 {
-                        match_id,
-                        match_category: category,
-                        severity: SurfaceMatchSeverityV2::Warning,
-                        attention_level: if category == SurfaceMatchCategoryV2::ExactHeadword {
-                            SurfaceAttentionLevelV2::High
-                        } else {
-                            SurfaceAttentionLevelV2::Normal
-                        },
-                        can_continue: SurfaceCanContinueTrue,
-                        confirmation_reasons: vec![
-                            SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches,
-                        ],
-                        candidate: candidate_wire,
-                        existing: existing_item.existing.clone(),
-                    });
-            }
-        }
-        let items = items.into_values().collect::<Vec<_>>();
-        let matched_entry_ids = items
-            .iter()
-            .map(|item| item.existing.word_id)
-            .collect::<HashSet<_>>();
-        let contexts = material
-            .synthetic_contexts()
-            .into_iter()
-            .filter(|context| matched_entry_ids.contains(&context.word_id))
-            .collect();
-        Ok(V2RestorePublicationSurfaceContribution { items, contexts })
-    }
-
     /// Convert the final mixed V2/V3 synthetic membership into the strict V3
     /// public union. Existing native V3 nodes are reloaded from the authoritative
     /// projection so form/group/variant UUIDs are never guessed from V2 slots.
@@ -689,9 +568,8 @@ impl LexiconService {
         } else {
             None
         };
-        if let Some(record) = record.as_ref()
-            && record.content_schema_version == 3
-        {
+        let record = record.filter(|record| record.content_schema_version == 3);
+        if let Some(record) = record.as_ref() {
             return Ok(SurfaceMatchItemV3::FormVariantV3(FormSurfaceMatchV3 {
                 source_schema_version: 3,
                 entry_id: existing.word_id,
@@ -710,31 +588,7 @@ impl LexiconService {
                 spelling: record.surface.clone(),
             }));
         }
-        if record
-            .as_ref()
-            .is_some_and(|record| record.content_schema_version != 2)
-        {
-            return Err(invariant_record());
-        }
-        let publication_id = match (&existing.source, content_scope) {
-            (_, SurfaceContentScopeV2::Draft) => None,
-            (
-                ExistingSurfaceSourceV2::Relation {
-                    referencing_word_id,
-                    ..
-                },
-                SurfaceContentScopeV2::CurrentPublication,
-            ) => current_publication_id(tx, *referencing_word_id).await?,
-            (_, SurfaceContentScopeV2::CurrentPublication) => record
-                .as_ref()
-                .and_then(|record| record.publication_id)
-                .or(current_publication_id(tx, existing.word_id).await?),
-        };
-        Ok(SurfaceMatchItemV3::LegacyV2(LegacySurfaceMatchV3 {
-            source_schema_version: 2,
-            existing: existing.clone(),
-            publication_id,
-        }))
+        Err(invariant_record())
     }
 
     pub(super) async fn detect_v3_surface_warning(
@@ -796,9 +650,6 @@ impl LexiconService {
             .matches
             .iter()
             .filter(|resolved| match &resolved.item {
-                SurfaceMatchItemV3::LegacyV2(item) => {
-                    item.existing.status != AdminWordStatus::Archived
-                }
                 SurfaceMatchItemV3::FormVariantV3(item) => item.status != AdminWordStatus::Archived,
             })
             .map(|resolved| surface_match_item_entry_id(&resolved.item))
@@ -1446,23 +1297,6 @@ impl LexiconService {
             Some(3) => {
                 serde_json::from_value(target_snapshot.clone()).map_err(serialization_error)?
             }
-            Some(2) => {
-                let target: AdminWordV2 =
-                    serde_json::from_value(target_snapshot.clone()).map_err(serialization_error)?;
-                return self
-                    .confirm_v2_target_activation_surface(
-                        tx,
-                        actor_id,
-                        entry_id,
-                        target_publication_id,
-                        base_revision,
-                        base_lifecycle_revision,
-                        target_snapshot,
-                        &target,
-                        token,
-                    )
-                    .await;
-            }
             Some(version) => {
                 return Err(LexiconServiceError::UnsupportedSchemaVersion(
                     i16::try_from(version).unwrap_or(-1),
@@ -1532,76 +1366,6 @@ impl LexiconService {
         )
         .await
         .map(Some)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn confirm_v2_target_activation_surface(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        actor_id: Uuid,
-        entry_id: Uuid,
-        target_publication_id: Uuid,
-        base_revision: i64,
-        base_lifecycle_revision: i64,
-        target_snapshot: &Value,
-        target: &AdminWordV2,
-        token: Option<&str>,
-    ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
-        if target.id != entry_id {
-            return Err(invariant_record());
-        }
-        let previous_sources = current_v2_publication_sources(tx, entry_id).await?;
-        let proposed_sources = crate::lexicon::repository::surface_projection_sources(target)
-            .map_err(surface_projection_error)?;
-        LexiconRepository::lock_surface_contexts(tx, &[entry_id])
-            .await
-            .map_err(repository_error)?;
-        LexiconRepository::lock_surface_policy_writer(tx)
-            .await
-            .map_err(repository_error)?;
-        let mut lock_keys = current_publication_surface_keys_v3(tx, entry_id).await?;
-        lock_keys.extend(crate::lexicon::repository::surface_lock_keys([
-            proposed_sources.as_slice(),
-        ]));
-        lock_keys.sort();
-        lock_keys.dedup();
-        LexiconRepository::lock_surface_keys(tx, &lock_keys)
-            .await
-            .map_err(repository_error)?;
-        let snapshot_digest = hash_serializable(target_snapshot)?;
-        let command_owner = serde_json::json!({
-            "entry_id": entry_id,
-            "target_publication_id": target_publication_id,
-            "base_revision": base_revision,
-            "base_lifecycle_revision": base_lifecycle_revision,
-            "target_snapshot_digest": snapshot_digest,
-        });
-        let confirmation = self
-            .confirm_visibility_command(
-                tx,
-                actor_id,
-                target,
-                &previous_sources,
-                &proposed_sources,
-                token,
-                SurfaceConsumptionCommand::ActivatePublication,
-                "activate_publication_v3_v2_snapshot",
-                command_owner.clone(),
-            )
-            .await?;
-        if confirmation.is_none()
-            && let Some(token) = token
-        {
-            self.verify_v3_surface_owner(
-                token,
-                actor_id,
-                SurfaceConsumptionCommand::ActivatePublication,
-                serde_json::to_string(&command_owner).map_err(serialization_error)?,
-            )
-            .await?;
-            return Err(LexiconServiceError::SurfaceMatchesChangedWithoutSnapshot);
-        }
-        Ok(confirmation)
     }
 
     async fn lock_v3_publication_surface_set(
@@ -1938,46 +1702,6 @@ impl LexiconService {
                         record.pos,
                     )
                 }
-                2 => {
-                    let dialect = parse_v3_dialect(&record.dialect)?;
-                    let source = match record.source_kind.as_str() {
-                        "headword" => ExistingSurfaceSourceV2::Headword {
-                            source_id: record.source_id,
-                            content_scope,
-                            surface: record.surface,
-                            dialect,
-                        },
-                        "form" => ExistingSurfaceSourceV2::Form {
-                            source_id: record.source_id,
-                            source_node_id: record.source_node_id.ok_or_else(invariant_record)?,
-                            content_scope,
-                            surface: record.surface,
-                            dialect,
-                            pos_id: record.pos_id.ok_or_else(invariant_record)?,
-                            pos: record.pos.ok_or_else(invariant_record)?,
-                            form_type: crate::lexicon::form_types::parse_code(
-                                record.form_type.as_deref().ok_or_else(invariant_record)?,
-                            )
-                            .map_err(|()| invariant_record())?,
-                        },
-                        _ => return Err(invariant_record()),
-                    };
-                    (
-                        SurfaceMatchItemV3::LegacyV2(LegacySurfaceMatchV3 {
-                            source_schema_version: 2,
-                            existing: ExistingSurfaceMatchV2 {
-                                word_id: record.entry_id,
-                                headword: record.entry_headword,
-                                kind: parse_kind(&record.entry_kind)
-                                    .ok_or_else(invariant_record)?,
-                                status,
-                                source,
-                            },
-                            publication_id: record.publication_id,
-                        }),
-                        None,
-                    )
-                }
                 version => return Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
             };
             let matched_key = V3SurfaceQueryKey {
@@ -2026,11 +1750,9 @@ impl LexiconService {
             r#"
             SELECT entry.id AS entry_id, entry.content_schema_version,
                    editor.forms, editor.meanings,
-                   COALESCE(presentation.label, legacy.label) AS label,
-                   COALESCE(presentation.matched_surfaces, legacy.matched_surfaces)
-                       AS matched_surfaces,
-                   COALESCE(presentation.strategy_version, 'legacy_v2_surface_adapter_v1')
-                       AS strategy_version,
+                   presentation.label,
+                   presentation.matched_surfaces,
+                   presentation.strategy_version,
                    entry.updated_at, entry.annotation, entry.annotation_revision,
                    entry.created_by_admin_id AS created_by
             FROM lexicon.entries entry
@@ -2038,29 +1760,8 @@ impl LexiconService {
             LEFT JOIN lexicon.entry_presentation_projection presentation
               ON presentation.entry_id = entry.id
              AND presentation.content_schema_version = 3
-            LEFT JOIN LATERAL (
-                SELECT string_agg(
-                           headword,
-                           ' / '
-                           ORDER BY CASE dialect
-                               WHEN 'common' THEN 0
-                               WHEN 'uk' THEN 1
-                               ELSE 2
-                           END
-                       ) AS label,
-                       array_agg(
-                           headword
-                           ORDER BY CASE dialect
-                               WHEN 'common' THEN 0
-                               WHEN 'uk' THEN 1
-                               ELSE 2
-                           END
-                       ) AS matched_surfaces
-                FROM lexicon.entry_headwords
-                WHERE entry_id = entry.id
-            ) legacy ON TRUE
             WHERE entry.id = ANY($1)
-              AND COALESCE(presentation.label, legacy.label) IS NOT NULL
+              AND presentation.label IS NOT NULL
             ORDER BY entry.id
             "#,
         )
@@ -2161,40 +1862,15 @@ impl LexiconService {
         let presentation_records = sqlx::query_as::<_, V3RelationSourcePresentationRecord>(
             r#"
                 SELECT entry.id AS entry_id,
-                       COALESCE(presentation.label, legacy.label) AS label,
-                       COALESCE(presentation.matched_surfaces, legacy.matched_surfaces)
-                           AS matched_surfaces,
-                       COALESCE(
-                           presentation.strategy_version,
-                           'legacy_v2_surface_adapter_v1'
-                       ) AS strategy_version
+                       presentation.label,
+                       presentation.matched_surfaces,
+                       presentation.strategy_version
                 FROM lexicon.entries entry
                 LEFT JOIN lexicon.entry_presentation_projection presentation
                   ON presentation.entry_id = entry.id
                  AND presentation.content_schema_version = 3
-                LEFT JOIN LATERAL (
-                    SELECT string_agg(
-                               headword,
-                               ' / '
-                               ORDER BY CASE dialect
-                                   WHEN 'common' THEN 0
-                                   WHEN 'uk' THEN 1
-                                   ELSE 2
-                               END
-                           ) AS label,
-                           array_agg(
-                               headword
-                               ORDER BY CASE dialect
-                                   WHEN 'common' THEN 0
-                                   WHEN 'uk' THEN 1
-                                   ELSE 2
-                               END
-                           ) AS matched_surfaces
-                    FROM lexicon.entry_headwords
-                    WHERE entry_id = entry.id
-                ) legacy ON TRUE
                 WHERE entry.id = ANY($1)
-                  AND COALESCE(presentation.label, legacy.label) IS NOT NULL
+                  AND presentation.label IS NOT NULL
                 ORDER BY entry.id
                 "#,
         )
@@ -2267,135 +1943,6 @@ async fn current_publication_surface_keys_v3(
             .collect()
     })
     .map_err(database_error)
-}
-
-async fn current_v2_publication_sources(
-    tx: &mut Transaction<'_, Postgres>,
-    entry_id: Uuid,
-) -> Result<Vec<crate::lexicon::repository::SurfaceProjectionSource>, LexiconServiceError> {
-    let current = sqlx::query_as::<_, (i16, Value)>(
-        r#"
-        SELECT publication.content_schema_version, publication.snapshot
-        FROM lexicon.entries entry
-        JOIN lexicon.entry_publications publication
-          ON publication.id = entry.current_publication_id
-         AND publication.entry_id = entry.id
-        WHERE entry.id = $1
-        "#,
-    )
-    .bind(entry_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    match current {
-        None | Some((3, _)) => Ok(Vec::new()),
-        Some((2, snapshot)) => {
-            let word: AdminWordV2 =
-                serde_json::from_value(snapshot).map_err(serialization_error)?;
-            crate::lexicon::repository::surface_projection_sources(&word)
-                .map_err(surface_projection_error)
-        }
-        Some((version, _)) => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
-    }
-}
-
-fn v2_restore_publication_candidates(
-    sources: &[crate::lexicon::repository::SurfaceProjectionSource],
-    restoring_ids: &HashSet<Uuid>,
-) -> Result<Vec<V2RestorePublicationCandidate>, LexiconServiceError> {
-    let mut candidates = BTreeMap::<(Uuid, String), V2RestorePublicationCandidate>::new();
-    for source in sources
-        .iter()
-        .filter(|source| restoring_ids.contains(&source.entry_id))
-    {
-        let dialect = parse_dialect(source.dialect).ok_or_else(invariant_record)?;
-        let entry_kind = parse_kind(source.entry_kind).ok_or_else(invariant_record)?;
-        let form_type = source
-            .form_type
-            .as_deref()
-            .map(crate::lexicon::form_types::parse_code)
-            .transpose()
-            .map_err(|()| invariant_record())?;
-        let key = V3SurfaceQueryKey {
-            dialect_scope: source.dialect_scope.to_owned(),
-            normalized_surface: source.normalized_surface.clone(),
-        };
-        let candidate = candidates
-            .entry((source.entry_id, source.source_id.clone()))
-            .or_insert_with(|| V2RestorePublicationCandidate {
-                entry_id: source.entry_id,
-                source_id: source.source_id.clone(),
-                source_kind: source.source_kind,
-                source_node_id: source.source_node_id,
-                entry_kind,
-                dialect,
-                surface: source.surface.clone(),
-                normalized_surface: source.normalized_surface.clone(),
-                pos_id: source.pos_id,
-                pos: source.pos.clone(),
-                form_type: form_type.clone(),
-                lookup_keys: BTreeSet::new(),
-            });
-        if candidate.source_kind != source.source_kind
-            || candidate.source_node_id != source.source_node_id
-            || candidate.entry_kind != entry_kind
-            || candidate.dialect != dialect
-            || candidate.surface != source.surface
-            || candidate.normalized_surface != source.normalized_surface
-            || candidate.pos_id != source.pos_id
-            || candidate.pos != source.pos
-            || candidate.form_type != form_type
-        {
-            return Err(invariant_record());
-        }
-        candidate.lookup_keys.insert(key);
-    }
-    Ok(candidates.into_values().collect())
-}
-
-fn v2_restore_publication_candidate_wire(
-    candidate: &V2RestorePublicationCandidate,
-) -> Result<SurfaceMatchCandidateV2, LexiconServiceError> {
-    match candidate.source_kind {
-        "headword" => Ok(SurfaceMatchCandidateV2::Headword {
-            candidate_ref: candidate.source_id.clone(),
-            candidate_word_id: Some(candidate.entry_id),
-            surface: candidate.surface.clone(),
-            normalized_surface: candidate.normalized_surface.clone(),
-            dialect: candidate.dialect,
-            entry_kind: candidate.entry_kind,
-        }),
-        "form" => Ok(SurfaceMatchCandidateV2::Form {
-            candidate_ref: candidate.source_id.clone(),
-            candidate_word_id: candidate.entry_id,
-            candidate_node_id: candidate.source_node_id.ok_or_else(invariant_record)?,
-            surface: candidate.surface.clone(),
-            normalized_surface: candidate.normalized_surface.clone(),
-            dialect: candidate.dialect,
-            pos_id: candidate.pos_id.ok_or_else(invariant_record)?,
-            pos: candidate.pos.clone().ok_or_else(invariant_record)?,
-            form_type: candidate.form_type.clone().ok_or_else(invariant_record)?,
-        }),
-        _ => Err(invariant_record()),
-    }
-}
-
-fn v2_restore_publication_match_category(
-    candidate_kind: &str,
-    candidate_entry_kind: EntryKind,
-    existing: &ExistingSurfaceMatchV2,
-) -> Result<SurfaceMatchCategoryV2, LexiconServiceError> {
-    let existing_is_form = matches!(existing.source, ExistingSurfaceSourceV2::Form { .. });
-    match candidate_kind {
-        "headword" if existing_is_form => Ok(SurfaceMatchCategoryV2::HeadwordForm),
-        "headword" if existing.kind == candidate_entry_kind => {
-            Ok(SurfaceMatchCategoryV2::ExactHeadword)
-        }
-        "headword" => Ok(SurfaceMatchCategoryV2::CrossKindHeadword),
-        "form" if existing_is_form => Ok(SurfaceMatchCategoryV2::FormForm),
-        "form" => Ok(SurfaceMatchCategoryV2::FormHeadword),
-        _ => Err(invariant_record()),
-    }
 }
 
 fn detection_surface_keys(normalized_surface: &str) -> Vec<V3SurfaceQueryKey> {
@@ -2614,22 +2161,7 @@ fn v3_match_id(item: &SurfaceMatchItemV3) -> Result<String, LexiconServiceError>
 
 const fn surface_match_item_entry_id(item: &SurfaceMatchItemV3) -> Uuid {
     match item {
-        SurfaceMatchItemV3::LegacyV2(item) => item.existing.word_id,
         SurfaceMatchItemV3::FormVariantV3(item) => item.entry_id,
-    }
-}
-
-const fn legacy_surface_and_dialect(source: &ExistingSurfaceSourceV2) -> (&str, Dialect) {
-    match source {
-        ExistingSurfaceSourceV2::Headword {
-            surface, dialect, ..
-        }
-        | ExistingSurfaceSourceV2::Form {
-            surface, dialect, ..
-        }
-        | ExistingSurfaceSourceV2::Relation {
-            surface, dialect, ..
-        } => (surface.as_str(), *dialect),
     }
 }
 
@@ -2646,18 +2178,6 @@ const fn surface_content_scope_str(value: SurfaceContentScopeV2) -> &'static str
         SurfaceContentScopeV2::Draft => "draft",
         SurfaceContentScopeV2::CurrentPublication => "current_publication",
     }
-}
-
-async fn current_publication_id(
-    tx: &mut Transaction<'_, Postgres>,
-    entry_id: Uuid,
-) -> Result<Option<Uuid>, LexiconServiceError> {
-    sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
-        .bind(entry_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(database_error)
-        .map(Option::flatten)
 }
 
 fn parse_form_type_v3(value: &str) -> Result<WordFormTypeV3, LexiconServiceError> {

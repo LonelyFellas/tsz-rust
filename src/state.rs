@@ -7,7 +7,6 @@ use uuid::Uuid;
 use crate::{
     auth::{Realm, TokenManager},
     config::SmartLexiconV3Flags,
-    lexicon::content_completion::LexiconContentGenerator,
     lexicon::surface_policy::SurfacePolicyStore,
     otp::{sender::OtpSender, service::OtpService, store::OtpStore},
     platform::storage::StorageRegistry,
@@ -29,7 +28,6 @@ pub struct AppState {
     pub cookie_secure: bool,
     pub object_storage: StorageRegistry,
     pub speech_provider: Option<Arc<dyn SpeechProvider>>,
-    pub lexicon_content_generator: Option<Arc<dyn LexiconContentGenerator>>,
     pub smart_lexicon_v3_flags: SmartLexiconV3Flags,
 }
 
@@ -94,7 +92,6 @@ impl AppState {
             cookie_secure: false,
             object_storage: StorageRegistry::empty(),
             speech_provider: None,
-            lexicon_content_generator: None,
             smart_lexicon_v3_flags: SmartLexiconV3Flags::all_disabled(),
         }
     }
@@ -139,7 +136,6 @@ impl AppState {
             otp_service,
             object_storage: StorageRegistry::empty(),
             speech_provider: None,
-            lexicon_content_generator: None,
             smart_lexicon_v3_flags: SmartLexiconV3Flags::all_disabled(),
         };
         (state, store)
@@ -177,14 +173,13 @@ mod tests {
             .expect("测试数据库 pool 应可惰性创建")
     }
 
-    fn smart_lexicon_v3_flag_values(flags: SmartLexiconV3Flags) -> [bool; 6] {
+    fn smart_lexicon_v3_flag_values(flags: SmartLexiconV3Flags) -> [bool; 5] {
         [
             flags.read,
             flags.create,
             flags.edit,
             flags.publish,
             flags.projection,
-            flags.legacy_bridge_read,
         ]
     }
 
@@ -194,7 +189,7 @@ mod tests {
 
         assert_eq!(
             smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
-            [false; 6]
+            [false; 5]
         );
         assert!(!state.smart_lexicon_v3_flags.draft_relation_prebinding);
     }
@@ -208,7 +203,7 @@ mod tests {
 
         assert_eq!(
             smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
-            [true; 6]
+            [true; 5]
         );
         assert!(state.smart_lexicon_v3_flags.draft_relation_prebinding);
     }
@@ -218,7 +213,6 @@ mod tests {
         let flags = SmartLexiconV3Flags {
             read: true,
             edit: true,
-            legacy_bridge_read: true,
             ..SmartLexiconV3Flags::all_disabled()
         };
         let state = AppState::for_test(lazy_pool()).with_smart_lexicon_v3_flags_for_test(flags);

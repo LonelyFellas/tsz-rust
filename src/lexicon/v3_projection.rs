@@ -11,10 +11,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::lexicon::{
-    dto::{
-        DraftFormsStepContentV3, EntryPresentationV3, LegacyHeadwordsCompatibilityV3,
-        SourceDialect, WordFormTypeV3, WordRegionalVariantsV3,
-    },
+    dto::{DraftFormsStepContentV3, EntryPresentationV3, WordFormTypeV3, WordRegionalVariantsV3},
     normalization::{
         HEADWORD_NORMALIZATION_VERSION, HeadwordNormalizationError, normalize_headword,
     },
@@ -98,28 +95,6 @@ pub(crate) enum V3ProjectionError {
         #[source]
         source: HeadwordNormalizationError,
     },
-}
-
-pub(crate) fn presentation_from_legacy_bridge(
-    _entry_id: Uuid,
-    bridge: &LegacyHeadwordsCompatibilityV3,
-) -> EntryPresentationV3 {
-    let matched_surfaces = match bridge {
-        LegacyHeadwordsCompatibilityV3::Unified { common } => vec![common.clone()],
-        LegacyHeadwordsCompatibilityV3::Distinguish {
-            uk,
-            us,
-            source_dialect,
-        } => match source_dialect {
-            SourceDialect::Uk => vec![uk.clone(), us.clone()],
-            SourceDialect::Us => vec![us.clone(), uk.clone()],
-        },
-    };
-    EntryPresentationV3 {
-        label: matched_surfaces.join(" / "),
-        matched_surfaces,
-        strategy_version: LEGACY_PRESENTATION_STRATEGY_VERSION.to_owned(),
-    }
 }
 
 pub(crate) fn presentation_from_native_forms(
@@ -341,10 +316,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::lexicon::dto::{
-        CommonDialectV3, DialectRulesV3, DraftFormsStepContentV3, LegacyHeadwordsCompatibilityV3,
-        SourceDialect, TextOrigin, UkDialectV3, UsDialectV3, WordCommonFormVariantV3,
-        WordConcreteFormV3, WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3,
-        WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
+        CommonDialectV3, DialectRulesV3, DraftFormsStepContentV3, TextOrigin, UkDialectV3,
+        UsDialectV3, WordCommonFormVariantV3, WordConcreteFormV3, WordFormGroupMemberV3,
+        WordFormGroupV3, WordPosFormsV3, WordRegionalVariantsV3, WordUkFormVariantV3,
+        WordUsFormVariantV3,
     };
 
     use super::*;
@@ -399,25 +374,6 @@ mod tests {
                 },
             },
         }
-    }
-
-    #[test]
-    fn migrated_legacy_presentation_preserves_source_dialect_order() {
-        let presentation = presentation_from_legacy_bridge(
-            id(0x1234_5678_9abc_def0),
-            &LegacyHeadwordsCompatibilityV3::Distinguish {
-                uk: "colour".to_owned(),
-                us: "color".to_owned(),
-                source_dialect: SourceDialect::Us,
-            },
-        );
-
-        assert_eq!(presentation.label, "color / colour");
-        assert_eq!(presentation.matched_surfaces, ["color", "colour"]);
-        assert_eq!(
-            presentation.strategy_version,
-            LEGACY_PRESENTATION_STRATEGY_VERSION
-        );
     }
 
     #[test]

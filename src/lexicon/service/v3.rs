@@ -15,23 +15,22 @@ use super::*;
 use crate::lexicon::audio_assets::dto::{AudioAsset, AudioAssetGender, AudioAssetLocale};
 use crate::lexicon::dto::DraftMeaningsStepContent;
 use crate::lexicon::dto::{
-    AdminWordAny, AdminWordAnyEnvelope, AdminWordDraftAnyEnvelope, AdminWordDraftV3Envelope,
-    AdminWordV3, AdminWordV3Capabilities, AdminWordV3Compatibility, BuiltinDictionaryEvidenceV3,
-    CommonDialectV3, CreateAdminWordV3Input, DetectLexiconSurfaceResponseV3,
-    DetectLexiconSurfaceV3Input, DetectionSurfaceRequestEchoV3, DialectRulesV3,
-    DialectVariantRichTextSlotV3, DictionaryCoverageV3, DictionaryPronunciationEvidenceV3,
-    DictionaryProvenanceV3, DictionaryProviderEvidenceV3, DraftFormsStepContentV3,
-    DraftMeaningsStepContentV3, DraftNodeLocation, DraftValidationResponseV3, EnglishLanguageV3,
-    EnglishTextV3, EntryPresentationV3, FormsImpactItemV3, FormsImpactNodeTypeV3,
-    FormsImpactResponseV3, LegacyHeadwordsCompatibilityV3, PhraseComponentUsageV3,
+    AdminWordDraftV3Envelope, AdminWordV3, AdminWordV3Capabilities, AdminWordV3Envelope,
+    BuiltinDictionaryEvidenceV3, CommonDialectV3, CreateAdminWordV3Input,
+    DetectLexiconSurfaceResponseV3, DetectLexiconSurfaceV3Input, DetectionSurfaceRequestEchoV3,
+    DialectRulesV3, DialectVariantRichTextSlotV3, DictionaryCoverageV3,
+    DictionaryPronunciationEvidenceV3, DictionaryProvenanceV3, DictionaryProviderEvidenceV3,
+    DraftFormsStepContentV3, DraftMeaningsStepContentV3, DraftNodeLocation,
+    DraftValidationResponseV3, EnglishLanguageV3, EnglishTextV3, EntryPresentationV3,
+    FormsImpactItemV3, FormsImpactNodeTypeV3, FormsImpactResponseV3, PhraseComponentUsageV3,
     PresenceAwareVec, PreviewFormsImpactInputV3, PronunciationNormalizationVersionV3,
     PronunciationStyle, RetiredStableNodeV3, RichTextVariantV3, SaveFormsStepInputV3,
     SaveMeaningsStepInputV3, SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin,
-    UkDialectV3, UsDialectV3, V3PublicationBlockCode, V3PublicationCapability, V3RetiredNodeRole,
-    V3ValidationIssueCode, ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3,
-    WordDefinitionV3, WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3,
-    WordHeadwordsV2, WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3,
-    WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
+    UkDialectV3, UsDialectV3, V3PublicationCapability, V3RetiredNodeRole, V3ValidationIssueCode,
+    ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3,
+    WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordHeadwordsV2,
+    WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3, WordRegionalVariantsV3,
+    WordUkFormVariantV3, WordUsFormVariantV3,
 };
 use crate::lexicon::model::{ComponentTargetDraftRecord, NodeIdentityRecord, RegionEvidenceRecord};
 
@@ -85,7 +84,6 @@ fn is_regional_spelling_relation(
 #[derive(Debug, sqlx::FromRow)]
 struct V3EntryStateRecord {
     origin: String,
-    publication_canary_enabled: bool,
     initial_headwords: Option<Value>,
 }
 
@@ -572,36 +570,14 @@ fn surface_detection_basis(
     detection_basis_dialect_for_headwords(normalized_surface, &headwords).ok()
 }
 
-/// 按词条来源分派 detection_snapshot 的两种形状，而不是嗅探 JSON 键：`migrated_v2` 存的是
-/// `WordDetectionSnapshotV2`（`normalized_headword` + `headwords`，另有词典命中方言
-/// `matched_dialect`），原生 v3 存的是 `DetectLexiconSurfaceResponseV3`（`normalized_surface`，
-/// 主词另存在 `v3_entry_state.initial_headwords`）。
-///
-/// 两条路径都优先做逐侧比对，口径与建条时一致；只有 v2 快照缺了比对材料，才退回
-/// `matched_dialect` 这个近似值——它是词典主条的方言，与「原始 surface 命中哪一侧」并不等价。
+/// 原生 V3 的 detection_snapshot 是 `DetectLexiconSurfaceResponseV3`（`normalized_surface`），
+/// 主词另存在 `v3_entry_state.initial_headwords`；逐侧比对的口径与建条时一致。
 ///
 /// 这个字段纯属展示，取不到就不显示——任何一步都不得让读词条本身失败。
 fn stored_detection_basis_dialect(
-    origin: &str,
     detection_snapshot: &Value,
     initial_headwords: Option<&Value>,
 ) -> Option<SourceDialect> {
-    if origin == "migrated_v2" {
-        if let Some(basis) = surface_detection_basis(
-            detection_snapshot.get("normalized_headword"),
-            detection_snapshot.get("headwords"),
-        ) {
-            return basis;
-        }
-        return match detection_snapshot
-            .get("matched_dialect")
-            .and_then(Value::as_str)
-        {
-            Some("uk") => Some(SourceDialect::Uk),
-            Some("us") => Some(SourceDialect::Us),
-            _ => None,
-        };
-    }
     surface_detection_basis(
         detection_snapshot.get("normalized_surface"),
         initial_headwords,
@@ -696,35 +672,13 @@ impl LexiconService {
     pub async fn get_draft_any(
         &self,
         id: Uuid,
-    ) -> Result<AdminWordDraftAnyEnvelope, LexiconServiceError> {
+    ) -> Result<AdminWordDraftV3Envelope, LexiconServiceError> {
         let record = self
             .repository
             .entry_by_id(id)
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        if record.content_schema_version == 2 {
-            let mut word = entry_from_record(record)?;
-            self.hydrate_sentence_associations(&mut word).await?;
-            let retired_stable_slots = self
-                .repository
-                .retired_stable_slots(id)
-                .await
-                .map_err(repository_error)?
-                .into_iter()
-                .map(|record| RetiredStableSlotV2 {
-                    id: record.id,
-                    parent_node_id: record.parent_node_id,
-                    node_role: record.node_role,
-                })
-                .collect();
-            return Ok(AdminWordDraftAnyEnvelope::V2(Box::new(
-                AdminWordDraftV2Envelope {
-                    word,
-                    retired_stable_slots,
-                },
-            )));
-        }
         if record.content_schema_version != 3 {
             return Err(LexiconServiceError::UnsupportedSchemaVersion(
                 record.content_schema_version,
@@ -732,12 +686,10 @@ impl LexiconService {
         }
         let word = self.entry_v3_from_record(record).await?;
         let retired_stable_nodes = self.retired_v3_nodes(id).await?;
-        Ok(AdminWordDraftAnyEnvelope::V3(Box::new(
-            AdminWordDraftV3Envelope {
-                word,
-                retired_stable_nodes,
-            },
-        )))
+        Ok(AdminWordDraftV3Envelope {
+            word,
+            retired_stable_nodes,
+        })
     }
 
     pub async fn get_v3(&self, id: Uuid) -> Result<AdminWordV3, LexiconServiceError> {
@@ -832,7 +784,7 @@ impl LexiconService {
             .await?;
         let state = sqlx::query_as::<_, V3EntryStateRecord>(
             r#"
-            SELECT origin, publication_canary_enabled, initial_headwords
+            SELECT origin, initial_headwords
             FROM lexicon.v3_entry_state
             WHERE entry_id = $1
             "#,
@@ -843,19 +795,11 @@ impl LexiconService {
         .map_err(database_error)?
         .ok_or_else(invariant_record)?;
         let detection_basis_dialect = stored_detection_basis_dialect(
-            &state.origin,
             &record.detection_snapshot,
             state.initial_headwords.as_ref(),
         );
-        let compatibility = if state.origin == "migrated_v2" {
-            Some(AdminWordV3Compatibility {
-                legacy_headwords: legacy_headwords_from_record(&record)?,
-            })
-        } else {
-            None
-        };
         let presentation = self
-            .v3_presentation(record.id, record.revision, &forms, compatibility.as_ref())
+            .v3_presentation(record.id, record.revision, &forms)
             .await?;
         let completed_steps = record
             .completed_steps
@@ -892,11 +836,6 @@ impl LexiconService {
                 text_links: Some(true),
                 publication: match state.origin.as_str() {
                     "native" => V3PublicationCapability::Native,
-                    "migrated_v2" => V3PublicationCapability::MigrationCanary {
-                        whitelisted: state.publication_canary_enabled,
-                        blocked_code: (!state.publication_canary_enabled)
-                            .then_some(V3PublicationBlockCode::MigrationCanaryNotWhitelisted),
-                    },
                     _ => return Err(invariant_record()),
                 },
                 pronunciation_normalization_version:
@@ -909,7 +848,6 @@ impl LexiconService {
             detection_basis_dialect,
             forms,
             meanings,
-            compatibility,
             completed_steps,
             max_reachable_step: max_reachable_step(&record.completed_steps),
             created_by: record.created_by_admin_id,
@@ -926,7 +864,6 @@ impl LexiconService {
         entry_id: Uuid,
         source_revision: i64,
         forms: &DraftFormsStepContentV3,
-        compatibility: Option<&AdminWordV3Compatibility>,
     ) -> Result<EntryPresentationV3, LexiconServiceError> {
         let projected = sqlx::query_as::<_, V3PresentationRecord>(
             r#"
@@ -948,14 +885,6 @@ impl LexiconService {
                 matched_surfaces: projected.matched_surfaces,
                 strategy_version: projected.strategy_version,
             });
-        }
-        if let Some(compatibility) = compatibility {
-            return Ok(
-                crate::lexicon::v3_projection::presentation_from_legacy_bridge(
-                    entry_id,
-                    &compatibility.legacy_headwords,
-                ),
-            );
         }
         crate::lexicon::v3_projection::presentation_from_native_forms(entry_id, forms).map_err(
             |_| {
@@ -1308,7 +1237,7 @@ impl LexiconService {
         idempotency_key: Uuid,
         mut input: CreateAdminWordV3Input,
         write_projection: bool,
-    ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
+    ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         super::annotations::normalize_annotation(&mut input.annotation)?;
         super::annotations::normalize_updates(&mut input.annotation_updates)?;
         let explicit_headwords = input.headwords.is_some();
@@ -1432,9 +1361,9 @@ impl LexiconService {
             r#"
             INSERT INTO lexicon.entries (
                 id, content_schema_version, language, kind, revision, annotation,
-                headword_mode, source_dialect, detection_snapshot,
-                created_by_admin_id, updated_by_admin_id, created_at, updated_at
-            ) VALUES ($1, 3, 'en', $2, 1, $6, NULL, NULL, $3, $4, $4, $5, $5)
+                detection_snapshot, created_by_admin_id, updated_by_admin_id,
+                created_at, updated_at
+            ) VALUES ($1, 3, 'en', $2, 1, $6, $3, $4, $4, $5, $5)
             "#,
         )
         .bind(entry_id)
@@ -1450,8 +1379,8 @@ impl LexiconService {
             r#"
             INSERT INTO lexicon.v3_entry_state (
                 entry_id, content_schema_version, origin,
-                publication_canary_enabled, initial_headwords, initial_headword_keys
-            ) VALUES ($1, 3, 'native', FALSE, $2, $3)
+                initial_headwords, initial_headword_keys
+            ) VALUES ($1, 3, 'native', $2, $3)
             "#,
         )
         .bind(entry_id)
@@ -1531,7 +1460,6 @@ impl LexiconService {
             detection_basis_dialect,
             forms,
             meanings,
-            compatibility: None,
             completed_steps: vec![PersistedWordStep::Basics],
             max_reachable_step: WordCreationStep::Forms,
             created_by: actor_id,
@@ -1541,9 +1469,7 @@ impl LexiconService {
             archived_by: None,
             published_at: None,
         };
-        let envelope = AdminWordAnyEnvelope {
-            word: AdminWordAny::V3(Box::new(word)),
-        };
+        let envelope = AdminWordV3Envelope { word };
         insert_v3_idempotency(
             &mut transaction,
             V3_CREATE_SCOPE,
@@ -1673,7 +1599,7 @@ impl LexiconService {
         mut input: SaveFormsStepInputV3,
         write_projection: bool,
         is_super_admin: bool,
-    ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
+    ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         canonicalize_v3_forms(&mut input.content)?;
         let compatibility_source = self.get_v3(entry_id).await?;
         ensure_v3_active(&compatibility_source)?;
@@ -1920,7 +1846,6 @@ impl LexiconService {
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
-        let migration_batch_id = v3_migration_batch_id(&mut transaction, entry_id).await?;
         if write_projection {
             let presentation = crate::lexicon::v3_projection::presentation_from_native_forms(
                 entry_id,
@@ -1956,7 +1881,7 @@ impl LexiconService {
             "lexicon.entry.forms.save.v3",
             entry_id,
             next_revision,
-            v3_save_audit_metadata(input.intent, migration_batch_id, audit_node_delta),
+            v3_save_audit_metadata(input.intent, audit_node_delta),
         )
         .await?;
         transaction.commit().await.map_err(database_error)?;
@@ -1970,9 +1895,7 @@ impl LexiconService {
             tracing::warn!(%error, snapshot_id = %confirmation.snapshot_id, "saved V3 forms but failed to remove surface confirmation");
         }
         let word = self.get_v3(entry_id).await?;
-        Ok(AdminWordAnyEnvelope {
-            word: AdminWordAny::V3(Box::new(word)),
-        })
+        Ok(AdminWordV3Envelope { word })
     }
 
     pub async fn save_meanings_v3(
@@ -1982,7 +1905,7 @@ impl LexiconService {
         entry_id: Uuid,
         input: SaveMeaningsStepInputV3,
         is_super_admin: bool,
-    ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
+    ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         let SaveMeaningsStepInputV3 {
             base_revision,
             intent,
@@ -2364,7 +2287,6 @@ impl LexiconService {
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
-        let migration_batch_id = v3_migration_batch_id(&mut transaction, entry_id).await?;
         insert_v3_audit(
             &mut transaction,
             actor_id,
@@ -2372,14 +2294,12 @@ impl LexiconService {
             "lexicon.entry.meanings.save.v3",
             entry_id,
             next_revision,
-            v3_save_audit_metadata(intent, migration_batch_id, audit_node_delta),
+            v3_save_audit_metadata(intent, audit_node_delta),
         )
         .await?;
         transaction.commit().await.map_err(database_error)?;
         let word = self.get_v3(entry_id).await?;
-        Ok(AdminWordAnyEnvelope {
-            word: AdminWordAny::V3(Box::new(word)),
-        })
+        Ok(AdminWordV3Envelope { word })
     }
 
     pub async fn validate_v3(
@@ -2441,29 +2361,6 @@ impl LexiconService {
             valid: issues.is_empty(),
             issues: crate::lexicon::v3_contract::v3_issues(&issues),
         })
-    }
-}
-
-fn legacy_headwords_from_record(
-    record: &EntryRecord,
-) -> Result<LegacyHeadwordsCompatibilityV3, LexiconServiceError> {
-    match record.headword_mode.as_deref() {
-        Some("unified") => Ok(LegacyHeadwordsCompatibilityV3::Unified {
-            common: record
-                .common_headword
-                .clone()
-                .ok_or_else(invariant_record)?,
-        }),
-        Some("distinguish") => Ok(LegacyHeadwordsCompatibilityV3::Distinguish {
-            uk: record.uk_headword.clone().ok_or_else(invariant_record)?,
-            us: record.us_headword.clone().ok_or_else(invariant_record)?,
-            source_dialect: match record.source_dialect.as_deref() {
-                Some("uk") => SourceDialect::Uk,
-                Some("us") => SourceDialect::Us,
-                _ => return Err(invariant_record()),
-            },
-        }),
-        _ => Err(invariant_record()),
     }
 }
 
@@ -4253,30 +4150,14 @@ fn v3_audit_node_delta(
     }
 }
 
-fn v3_save_audit_metadata(
-    intent: StepSaveIntent,
-    migration_batch_id: Option<Uuid>,
-    delta: V3AuditNodeDelta,
-) -> Value {
+fn v3_save_audit_metadata(intent: StepSaveIntent, delta: V3AuditNodeDelta) -> Value {
     serde_json::json!({
         "schema_version": 3,
-        "migration_batch_id": migration_batch_id,
         "generated_node_ids": delta.generated_node_ids,
         "changed_node_ids": delta.changed_node_ids,
         "retired_node_ids": delta.retired_node_ids,
         "intent": intent,
     })
-}
-
-async fn v3_migration_batch_id(
-    tx: &mut Transaction<'_, Postgres>,
-    entry_id: Uuid,
-) -> Result<Option<Uuid>, LexiconServiceError> {
-    sqlx::query_scalar("SELECT migration_batch_id FROM lexicon.v3_entry_state WHERE entry_id = $1")
-        .bind(entry_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(database_error)
 }
 
 fn v3_form_node_types(content: &DraftFormsStepContentV3) -> HashMap<Uuid, FormsImpactNodeTypeV3> {
@@ -5270,71 +5151,6 @@ mod tests {
     }
 
     #[test]
-    fn detection_basis_from_v2_snapshot_prefers_the_original_surface_over_the_dictionary_side() {
-        // 词典以英式主条命中，但管理员当初输入的是美式拼写：基准要跟着 surface 走，
-        // 不能被 matched_dialect 这个词典主条方言带偏。
-        let snapshot = json!({
-            "matched_dialect": "uk",
-            "normalized_headword": "center",
-            "headwords": {
-                "mode": "distinguish",
-                "uk": "centre",
-                "us": "center",
-                "source_dialect": "uk"
-            }
-        });
-        assert_eq!(
-            stored_detection_basis_dialect("migrated_v2", &snapshot, None),
-            Some(SourceDialect::Us)
-        );
-    }
-
-    #[test]
-    fn detection_basis_from_v2_snapshot_falls_back_to_matched_dialect_only_without_materials() {
-        // 迁移词条的快照可能只剩词典命中方言，这时才允许用这个近似值。
-        assert_eq!(
-            stored_detection_basis_dialect(
-                "migrated_v2",
-                &json!({ "matched_dialect": "uk" }),
-                None
-            ),
-            Some(SourceDialect::Uk)
-        );
-        assert_eq!(
-            stored_detection_basis_dialect(
-                "migrated_v2",
-                &json!({ "matched_dialect": "us" }),
-                None
-            ),
-            Some(SourceDialect::Us)
-        );
-        // common 命中不指向任何一侧。
-        assert_eq!(
-            stored_detection_basis_dialect(
-                "migrated_v2",
-                &json!({ "matched_dialect": "common" }),
-                None
-            ),
-            None
-        );
-        // 比对材料齐全却没有唯一命中侧，是明确结论，不该被近似值盖掉。
-        let same_spelling = json!({
-            "matched_dialect": "uk",
-            "normalized_headword": "sport",
-            "headwords": {
-                "mode": "distinguish",
-                "uk": "sport",
-                "us": "sport",
-                "source_dialect": "uk"
-            }
-        });
-        assert_eq!(
-            stored_detection_basis_dialect("migrated_v2", &same_spelling, None),
-            None
-        );
-    }
-
-    #[test]
     fn detection_basis_from_v3_snapshot_compares_the_original_surface() {
         let initial = json!({
             "mode": "distinguish",
@@ -5344,7 +5160,6 @@ mod tests {
         });
         assert_eq!(
             stored_detection_basis_dialect(
-                "native",
                 &json!({ "normalized_surface": "center" }),
                 Some(&initial)
             ),
@@ -5352,7 +5167,6 @@ mod tests {
         );
         assert_eq!(
             stored_detection_basis_dialect(
-                "native",
                 &json!({ "normalized_surface": "centre" }),
                 Some(&initial)
             ),
@@ -5361,31 +5175,10 @@ mod tests {
         // 两侧都没命中（拼写后来被改过）就没有基准可言。
         assert_eq!(
             stored_detection_basis_dialect(
-                "native",
                 &json!({ "normalized_surface": "edited" }),
                 Some(&initial)
             ),
             None
-        );
-    }
-
-    #[test]
-    fn detection_basis_dispatches_on_entry_origin_not_on_snapshot_keys() {
-        let initial = json!({
-            "mode": "distinguish",
-            "uk": "centre",
-            "us": "center",
-            "source_dialect": "uk"
-        });
-        // 原生词条即便将来快照里也多出 matched_dialect，仍按 surface 精确比对，
-        // 不会静默降级成 v2 的近似口径。
-        assert_eq!(
-            stored_detection_basis_dialect(
-                "native",
-                &json!({ "matched_dialect": "uk", "normalized_surface": "center" }),
-                Some(&initial)
-            ),
-            Some(SourceDialect::Us)
         );
     }
 
@@ -5399,20 +5192,12 @@ mod tests {
         });
         // v3 路径缺初始主词：算不出来，但不该报错。
         assert_eq!(
-            stored_detection_basis_dialect(
-                "native",
-                &json!({ "normalized_surface": "center" }),
-                None
-            ),
+            stored_detection_basis_dialect(&json!({ "normalized_surface": "center" }), None),
             None
         );
         // 两种形状的线索都没有。
         assert_eq!(
-            stored_detection_basis_dialect("native", &json!({}), Some(&initial)),
-            None
-        );
-        assert_eq!(
-            stored_detection_basis_dialect("migrated_v2", &json!({}), Some(&initial)),
+            stored_detection_basis_dialect(&json!({}), Some(&initial)),
             None
         );
         // 存量主词结构漂移（WordHeadwordsV2 带 deny_unknown_fields）：这个字段只是展示
@@ -5426,24 +5211,10 @@ mod tests {
         });
         assert_eq!(
             stored_detection_basis_dialect(
-                "native",
                 &json!({ "normalized_surface": "center" }),
                 Some(&drifted)
             ),
             None
-        );
-        // v2 快照里的主词漂移时退回近似值，仍然不报错。
-        assert_eq!(
-            stored_detection_basis_dialect(
-                "migrated_v2",
-                &json!({
-                    "matched_dialect": "uk",
-                    "normalized_headword": "center",
-                    "headwords": drifted
-                }),
-                None
-            ),
-            Some(SourceDialect::Uk)
         );
     }
 
@@ -5699,19 +5470,14 @@ mod tests {
         admin_id
     }
 
-    async fn seed_v3_entry(
-        pool: &PgPool,
-        admin_id: Uuid,
-        migration_batch_id: Option<Uuid>,
-    ) -> Uuid {
+    async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
         let entry_id = Uuid::now_v7();
         sqlx::query(
             r#"
             INSERT INTO lexicon.entries (
                 id, content_schema_version, language, kind, revision,
-                headword_mode, source_dialect, detection_snapshot,
-                created_by_admin_id, updated_by_admin_id
-            ) VALUES ($1, 3, 'en', 'word', 1, NULL, NULL, '{}', $2, $2)
+                detection_snapshot, created_by_admin_id, updated_by_admin_id
+            ) VALUES ($1, 3, 'en', 'word', 1, '{}', $2, $2)
             "#,
         )
         .bind(entry_id)
@@ -5719,28 +5485,11 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        if let Some(batch_id) = migration_batch_id {
-            sqlx::query(
-                r#"
-                INSERT INTO lexicon.v3_entry_state (
-                    entry_id, origin, migration_batch_id, source_revision
-                ) VALUES ($1, 'migrated_v2', $2, 1)
-                "#,
-            )
-            .bind(entry_id)
-            .bind(batch_id)
-            .execute(pool)
-            .await
-            .unwrap();
-        } else {
-            sqlx::query(
-                "INSERT INTO lexicon.v3_entry_state (entry_id, origin) VALUES ($1, 'native')",
-            )
+        sqlx::query("INSERT INTO lexicon.v3_entry_state (entry_id, origin) VALUES ($1, 'native')")
             .bind(entry_id)
             .execute(pool)
             .await
             .unwrap();
-        }
         entry_id
     }
 
@@ -5782,16 +5531,15 @@ mod tests {
         assert_eq!(delta.generated_node_ids, vec![fixed_id(40)]);
         assert_eq!(delta.changed_node_ids, vec![fixed_id(20), fixed_id(30)]);
         assert_eq!(delta.retired_node_ids, vec![fixed_id(10)]);
-        let metadata = v3_save_audit_metadata(StepSaveIntent::Complete, Some(fixed_id(9)), delta);
+        let metadata = v3_save_audit_metadata(StepSaveIntent::Complete, delta);
         assert_eq!(metadata["schema_version"], 3);
-        assert_eq!(metadata["migration_batch_id"], fixed_id(9).to_string());
         assert_eq!(metadata["intent"], "complete");
     }
 
     #[sqlx::test]
     async fn retired_v3_variant_slot_rejects_a_replacement_uuid_before_writes(pool: PgPool) {
         let admin_id = seed_admin(&pool).await;
-        let entry_id = seed_v3_entry(&pool, admin_id, None).await;
+        let entry_id = seed_v3_entry(&pool, admin_id).await;
         let proposed_content = two_form_content(false);
         let proposed = v3_form_proposed_nodes(&proposed_content);
         let mut tx = pool.begin().await.unwrap();
@@ -5852,8 +5600,8 @@ mod tests {
         pool: PgPool,
     ) {
         let admin_id = seed_admin(&pool).await;
-        let first_entry_id = seed_v3_entry(&pool, admin_id, None).await;
-        let second_entry_id = seed_v3_entry(&pool, admin_id, None).await;
+        let first_entry_id = seed_v3_entry(&pool, admin_id).await;
+        let second_entry_id = seed_v3_entry(&pool, admin_id).await;
         let first_content = two_form_content(false);
         let second_content = two_form_content(true);
         let mut first_tx = pool.begin().await.unwrap();
@@ -5926,19 +5674,13 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn save_audit_includes_migration_batch_and_retry_is_action_idempotent(pool: PgPool) {
+    async fn save_audit_retry_is_action_idempotent(pool: PgPool) {
         let admin_id = seed_admin(&pool).await;
-        let batch_id = Uuid::now_v7();
-        let entry_id = seed_v3_entry(&pool, admin_id, Some(batch_id)).await;
+        let entry_id = seed_v3_entry(&pool, admin_id).await;
         let request_id = Uuid::now_v7();
         let mut tx = pool.begin().await.unwrap();
-        assert_eq!(
-            v3_migration_batch_id(&mut tx, entry_id).await.unwrap(),
-            Some(batch_id)
-        );
         let metadata = v3_save_audit_metadata(
             StepSaveIntent::Save,
-            Some(batch_id),
             V3AuditNodeDelta {
                 generated_node_ids: vec![fixed_id(10)],
                 changed_node_ids: vec![fixed_id(20)],
@@ -5988,7 +5730,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rows.len(), 2, "同一 action 的重试不得重复审计");
-        assert_eq!(rows[0].1["migration_batch_id"], batch_id.to_string());
         assert_eq!(rows[0].1["generated_node_ids"][0], fixed_id(10).to_string());
         assert_eq!(rows[0].1["changed_node_ids"][0], fixed_id(20).to_string());
         assert_eq!(rows[0].1["retired_node_ids"][0], fixed_id(30).to_string());

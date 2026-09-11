@@ -72,7 +72,7 @@ pub async fn search_component_targets(
     security(("bearer_auth" = [])),
     params(EntryPath),
     responses(
-        (status = 200, description = "版本化 canonical 词条草稿", body = AdminWordDraftAnyEnvelope),
+        (status = 200, description = "版本化 canonical 词条草稿", body = AdminWordDraftV3Envelope),
         (status = 400, description = "词条 ID 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
@@ -91,14 +91,13 @@ pub async fn get(
         .get_draft_any(path.id)
         .await
         .map_err(map_error)?;
-    if matches!(&response, AdminWordDraftAnyEnvelope::V3(_)) && !state.smart_lexicon_v3_flags.read {
+    if !state.smart_lexicon_v3_flags.read {
         return Err(v3_storage_unavailable());
     }
-    apply_draft_legacy_bridge_read_flag(
-        &mut response,
-        state.smart_lexicon_v3_flags.legacy_bridge_read,
+    apply_capability_flags(
+        &mut response.word.capabilities,
+        state.smart_lexicon_v3_flags,
     );
-    apply_draft_sentence_association_flag(&mut response, state.smart_lexicon_v3_flags);
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -125,15 +124,14 @@ pub async fn list_publications(
 ) -> Result<(StatusCode, Json<AdminWordPublicationListResponse>), AppError> {
     require_active_admin(&state, &auth).await?;
     let mut response = service(&state)
-        .publication_history(path.id, state.smart_lexicon_v3_flags.read)
+        .publication_history(path.id)
         .await
         .map_err(map_error)?;
     for publication in &mut response.publications {
-        apply_publication_legacy_bridge_read_flag(
-            publication,
-            state.smart_lexicon_v3_flags.legacy_bridge_read,
+        apply_capability_flags(
+            &mut publication.word.capabilities,
+            state.smart_lexicon_v3_flags,
         );
-        apply_publication_sentence_association_flag(publication, state.smart_lexicon_v3_flags);
     }
     Ok((StatusCode::OK, Json(response)))
 }
@@ -165,17 +163,11 @@ pub async fn get_publication(
         .publication(path.id, path.publication_id)
         .await
         .map_err(map_error)?;
-    if matches!(&response.publication, AdminWordPublicationAny::V3(_))
-        && !state.smart_lexicon_v3_flags.read
-    {
+    if !state.smart_lexicon_v3_flags.read {
         return Err(v3_storage_unavailable());
     }
-    apply_publication_legacy_bridge_read_flag(
-        &mut response.publication,
-        state.smart_lexicon_v3_flags.legacy_bridge_read,
-    );
-    apply_publication_sentence_association_flag(
-        &mut response.publication,
+    apply_capability_flags(
+        &mut response.publication.word.capabilities,
         state.smart_lexicon_v3_flags,
     );
     Ok((StatusCode::OK, Json(response)))
@@ -188,7 +180,7 @@ pub async fn get_publication(
     security(("bearer_auth" = [])),
     params(SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2),
     responses(
-        (status = 200, description = "不可变且可按 schema_version 判别的 surface match snapshot 下一页", body = SurfaceMatchPageAny),
+        (status = 200, description = "不可变且可按 schema_version 判别的 surface match snapshot 下一页", body = SurfaceMatchPageV3),
         (status = 400, description = "snapshot ID 或 cursor 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
@@ -202,7 +194,7 @@ pub async fn surface_match_snapshot_page(
     auth: AdminAuth,
     ApiPath(path): ApiPath<SurfaceMatchSnapshotPathV2>,
     ApiQuery(query): ApiQuery<SurfaceMatchSnapshotQueryV2>,
-) -> Result<(StatusCode, Json<SurfaceMatchPageAny>), AppError> {
+) -> Result<(StatusCode, Json<SurfaceMatchPageV3>), AppError> {
     require_active_admin(&state, &auth).await?;
     let snapshots = crate::lexicon::surface_snapshot::SurfaceSnapshotStore::with_policy_prefix(
         state.redis.clone(),

@@ -221,12 +221,10 @@ API 继续暴露不可修改的稳定 code。
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | UUID PK | 服务端 UUID v7 |
-| `content_schema_version` | SMALLINT | 首期为 `2` |
+| `content_schema_version` | SMALLINT | 恒为 `3`；V2 已于 2026-09-11 下线，见 §20 |
 | `language` | TEXT | 首期为 `en` |
 | `kind` | TEXT | `word` / `phrase` |
 | `revision` | BIGINT | 从 1 开始，每次有效草稿写入加一 |
-| `headword_mode` | TEXT | `unified` / `distinguish` |
-| `source_dialect` | TEXT NULL | distinguish 时为管理员决定的主词侧 `uk` / `us`；不要求等于词典命中方言 |
 | `frequency` | NUMERIC(5,2) NULL | 0–100；是否保留两位精度见 §17 |
 | `detection_snapshot` | JSONB | 创建时采用的不可变检测证据 |
 | `current_publication_id` | UUID NULL | 学习端当前消费的发布版本 |
@@ -595,7 +593,7 @@ HTTP wire 必须把这些稳定内容节点显式带回并原样提交：英语 
 | `entry_id` | UUID FK | 词条 |
 | `publication_number` | INTEGER | 从 1 递增 |
 | `source_revision` | BIGINT | 发布时草稿 revision |
-| `content_schema_version` | SMALLINT | 快照结构版本 |
+| `content_schema_version` | SMALLINT | 快照结构版本，恒为 `3` |
 | `snapshot` | JSONB | canonical 完整词条 |
 | `snapshot_hash` | BYTEA | 快照 SHA-256 |
 | `published_by_admin_id` | UUID FK | 发布人 |
@@ -1139,3 +1137,44 @@ Elasticsearch/OpenSearch，不能提前维护双写系统。
   替换。响应显式返回 provider kind/version，未声称调用外部模型、翻译或 TTS 服务。
 
 以上 HTTP wire、枚举和 Problem Details 以 `docs/openapi.json` 为最终权威。
+
+## 20. V2 内容格式下线（2026-09-11）
+
+V1/V2 词条内容格式整体退场，库与 wire 上只剩 V3。本节是现行口径；上文各阶段小节里凡提到
+V2 聚合、V2 写读路径或 `AdminWordV2` 的地方，都只作历史记录，不再描述当前系统。
+
+### 20.1 wire
+
+- 所有词条命令（detections、entries、steps/forms、steps/meanings、validate、publications、
+  activate）的请求体必须带 `schema_version: 3`。缺字段回 422 `invalid_request_body`，
+  带别的整数回 422 `unsupported_schema_version`。
+- 响应不再是版本联合体：`AdminWordV3Envelope`、`AdminWordDraftV3Envelope`、
+  `AdminWordPublicationV3`、`AdminWordListItemV3`、`SurfaceMatchPageV3`、`FormsImpactResponseV3`、
+  `DraftValidationResponseV3` 各自直接上 wire，JSON 与原来的 V3 分支逐字节一致。
+- `AdminWordV3.compatibility`（`legacy_headwords`）随迁移桥一起删除；
+  `SMART_LEXICON_V3_LEGACY_BRIDGE_READ` 开关不再存在。
+- `SurfaceMatchItemV3` 只剩 `form_variant_v3` 一个判别值，`legacy_v2` 不再被接受。
+- `POST /api/v1/admin/lexicon/dialect-variant-suggestions` 与内容补全三条
+  `content-completion-jobs` 路由一并下线。
+- 错误码 `smart_lexicon_v3_publication_requires_migration_canary` 退役；
+  `SMART_LEXICON_V3_PUBLISH=false` 现在回 503 `smart_lexicon_v3_storage_unavailable`。
+
+### 20.2 库
+
+- `lexicon.entries.content_schema_version` 默认 3、check `= 3`；`headword_mode` 与
+  `source_dialect` 两列删除。
+- V2 专用存储表删除：`entry_headwords`、`entry_headword_keys`、`form_groups`、`form_slots`、
+  `form_variants`、`pronunciations`。
+- V2→V3 迁移账本删除：`v3_migration_batches`、`v3_migration_entries`、`v3_migration_map`；
+  `v3_entry_state` 的 `origin` 只剩 `native`，`migration_batch_id` / `source_publication_id` /
+  `source_revision` / `publication_canary_enabled` 四列一并删除。
+
+### 20.3 刻意保留
+
+- `DraftMeaningsStepContent` 及其 `WordSenseV2` / `WordDefinitionV2` / `WordRelationV2` 等一族
+  **不是 V2 wire 类型**，而是词义校验与存储安全网的内部规范模型：V3 保存与发布都把
+  `DraftMeaningsStepContentV3` 适配成这套结构再喂给 `validate_meanings`。它们已从 OpenAPI 注销，
+  只在进程内存活。改名或改造成 V3 原生类型是独立的重构，不在本次范围。
+- `RichTextV1` / `RichTextV2` 是富文本文档的版本轴，与词条内容格式无关，照常保留。
+- `RelatedSearchResponse::{Legacy,V2}` 是关联词搜索的分页形状版本，与内容格式无关。
+- `SurfaceMatchPageV2` 及其一族仍是 surface snapshot 的内部规范形状，wire 上只出 V3 投影。

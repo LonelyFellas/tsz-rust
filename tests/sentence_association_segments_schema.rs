@@ -19,9 +19,9 @@ async fn insert_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
     sqlx::query(
         r#"
         INSERT INTO lexicon.entries (
-            id, language, kind, revision, headword_mode, detection_snapshot,
+            id, content_schema_version, language, kind, revision, detection_snapshot,
             created_by_admin_id, updated_by_admin_id
-        ) VALUES ($1, 'en', 'word', 1, 'unified', '{}', $2, $2)
+        ) VALUES ($1, 3, 'en', 'word', 1, '{}', $2, $2)
         "#,
     )
     .bind(id)

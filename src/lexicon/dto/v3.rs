@@ -1059,37 +1059,6 @@ pub struct EntryPresentationV3 {
     pub strategy_version: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub enum LegacyHeadwordsCompatibilityV3 {
-    Unified {
-        #[schema(max_length = 200)]
-        common: String,
-    },
-    Distinguish {
-        #[schema(max_length = 200)]
-        uk: String,
-        #[schema(max_length = 200)]
-        us: String,
-        source_dialect: SourceDialect,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AdminWordV3Compatibility {
-    /// 仅迁移事务一次性复制、随后 response-only；不是 V3 canonical 写入字段。
-    #[schema(deprecated)]
-    pub legacy_headwords: LegacyHeadwordsCompatibilityV3,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum V3PublicationBlockCode {
-    Phase2ConsumersNotReady,
-    MigrationCanaryNotWhitelisted,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PronunciationNormalizationVersionV3 {
@@ -1099,16 +1068,7 @@ pub enum PronunciationNormalizationVersionV3 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum V3PublicationCapability {
-    ShadowOnly {
-        blocked_code: V3PublicationBlockCode,
-    },
     Native,
-    MigrationCanary {
-        whitelisted: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        #[schema(nullable = false)]
-        blocked_code: Option<V3PublicationBlockCode>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1172,9 +1132,6 @@ pub struct AdminWordV3 {
     pub forms: DraftFormsStepContentV3,
     /// Phase 1 sense 仍只按 `pos_id` 归属，不含 group/form 可选字段。
     pub meanings: DraftMeaningsStepContentV3,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false, read_only)]
-    pub compatibility: Option<AdminWordV3Compatibility>,
     pub completed_steps: Vec<PersistedWordStep>,
     pub max_reachable_step: WordCreationStep,
     pub created_by: Uuid,
@@ -1192,29 +1149,9 @@ pub struct AdminWordV3 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/AdminWordV2"),
-        ("3" = "#/components/schemas/AdminWordV3")
-    )
-))]
-pub enum AdminWordAny {
-    V2(Box<AdminWordV2>),
-    V3(Box<AdminWordV3>),
-}
-
-impl From<AdminWordV2> for AdminWordAny {
-    fn from(word: AdminWordV2) -> Self {
-        Self::V2(Box::new(word))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct AdminWordAnyEnvelope {
-    pub word: AdminWordAny,
+pub struct AdminWordV3Envelope {
+    pub word: AdminWordV3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1251,16 +1188,9 @@ pub struct RetiredStableNodeV3 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-pub enum AdminWordDraftAnyEnvelope {
-    V2(Box<AdminWordDraftV2Envelope>),
-    V3(Box<AdminWordDraftV3Envelope>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct EntryLifecycleBatchResponseAny {
-    pub words: Vec<AdminWordAny>,
+pub struct EntryLifecycleBatchResponse {
+    pub words: Vec<AdminWordV3>,
     pub affected: usize,
 }
 
@@ -1288,20 +1218,6 @@ pub struct CreateAdminWordV3Input {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/CreateAdminWordV2Input"),
-        ("3" = "#/components/schemas/CreateAdminWordV3Input")
-    )
-))]
-pub enum CreateAdminWordAnyInput {
-    V2(CreateAdminWordV2Input),
-    V3(CreateAdminWordV3Input),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewFormsImpactInputV3 {
     #[serde(deserialize_with = "deserialize_schema_version_3")]
@@ -1310,16 +1226,6 @@ pub struct PreviewFormsImpactInputV3 {
     #[schema(minimum = 1)]
     pub base_revision: i64,
     pub content: DraftFormsStepContentV3,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-#[schema(
-    description = "Legacy V2 body omits schema_version for backward compatibility; V3 requires literal 3. Clients should expose separate V2/V3 methods."
-)]
-pub enum PreviewFormsImpactInputAny {
-    V2(PreviewFormsImpactInputV2),
-    V3(PreviewFormsImpactInputV3),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1341,16 +1247,6 @@ pub struct SaveFormsStepInputV3 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-#[schema(
-    description = "Legacy V2 body omits schema_version for backward compatibility; V3 requires literal 3. Clients should expose separate V2/V3 methods."
-)]
-pub enum SaveFormsStepInputAny {
-    V2(SaveFormsStepInput),
-    V3(SaveFormsStepInputV3),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaveMeaningsStepInputV3 {
     #[serde(deserialize_with = "deserialize_schema_version_3")]
@@ -1364,16 +1260,6 @@ pub struct SaveMeaningsStepInputV3 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-#[schema(
-    description = "Legacy V2 body omits schema_version for backward compatibility; V3 requires literal 3. Clients should expose separate V2/V3 methods."
-)]
-pub enum SaveMeaningsStepInputAny {
-    V2(SaveMeaningsStepInput),
-    V3(SaveMeaningsStepInputV3),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ValidateAdminWordV3Input {
     #[serde(deserialize_with = "deserialize_schema_version_3")]
@@ -1381,16 +1267,6 @@ pub struct ValidateAdminWordV3Input {
     pub schema_version: u8,
     #[schema(minimum = 1)]
     pub base_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-#[schema(
-    description = "Legacy V2 body omits schema_version for backward compatibility; V3 requires literal 3. Clients should expose separate V2/V3 methods."
-)]
-pub enum ValidateAdminWordAnyInput {
-    V2(ValidateAdminWordV2Input),
-    V3(ValidateAdminWordV3Input),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1407,16 +1283,6 @@ pub struct PublishAdminWordV3Input {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-#[schema(
-    description = "Legacy V2 body omits schema_version for backward compatibility; V3 requires literal 3. Clients should expose separate V2/V3 methods."
-)]
-pub enum PublishAdminWordAnyInput {
-    V2(PublishAdminWordV2Input),
-    V3(PublishAdminWordV3Input),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActivatePublicationV3Input {
     #[serde(deserialize_with = "deserialize_schema_version_3")]
@@ -1429,16 +1295,6 @@ pub struct ActivatePublicationV3Input {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub confirmed_surface_match_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-#[schema(
-    description = "Legacy V2 body omits schema_version for backward compatibility; V3 requires literal 3. Clients should expose separate V2/V3 methods."
-)]
-pub enum ActivatePublicationAnyInput {
-    V2(ActivatePublicationInput),
-    V3(ActivatePublicationV3Input),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1483,20 +1339,6 @@ pub struct FormsImpactResponseV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub surface_match_page: Option<SurfaceMatchPageV3>,
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/FormsImpactResponseV2"),
-        ("3" = "#/components/schemas/FormsImpactResponseV3")
-    )
-))]
-pub enum FormsImpactResponseAny {
-    V2(FormsImpactResponseV2),
-    V3(FormsImpactResponseV3),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1819,20 +1661,6 @@ impl From<&DraftValidationIssue> for DraftValidationIssueV2 {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/DraftValidationIssueV2"),
-        ("3" = "#/components/schemas/V3DraftValidationIssue")
-    )
-))]
-pub enum DraftValidationIssueAny {
-    V2(DraftValidationIssueV2),
-    V3(V3DraftValidationIssue),
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DraftValidationResponseV3 {
     #[schema(schema_with = schema_version_3_schema)]
@@ -1840,20 +1668,6 @@ pub struct DraftValidationResponseV3 {
     pub validated_revision: i64,
     pub valid: bool,
     pub issues: Vec<V3DraftValidationIssue>,
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/DraftValidationResponse"),
-        ("3" = "#/components/schemas/DraftValidationResponseV3")
-    )
-))]
-pub enum DraftValidationResponseAny {
-    V2(DraftValidationResponse),
-    V3(DraftValidationResponseV3),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1880,21 +1694,6 @@ pub struct FormSurfaceMatchV3 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct LegacySurfaceMatchV3 {
-    #[serde(deserialize_with = "deserialize_schema_version_2")]
-    #[schema(schema_with = schema_version_2_schema)]
-    pub source_schema_version: u8,
-    /// The real V2 entry/headword/slot identity. No V3 node UUID is synthesized.
-    pub existing: ExistingSurfaceMatchV2,
-    /// Present only when the matched source is the entry's current immutable
-    /// publication projection; draft sources remain `null`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub publication_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(
     tag = "match_kind",
     content = "match",
@@ -1902,7 +1701,6 @@ pub struct LegacySurfaceMatchV3 {
     deny_unknown_fields
 )]
 pub enum SurfaceMatchItemV3 {
-    LegacyV2(LegacySurfaceMatchV3),
     FormVariantV3(FormSurfaceMatchV3),
 }
 
@@ -2027,20 +1825,6 @@ pub enum SurfaceMatchPageV3 {
     TemporarilyDisabled(SurfaceMatchTemporarilyDisabledPageV3),
 }
 
-#[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/SurfaceMatchPageV2"),
-        ("3" = "#/components/schemas/SurfaceMatchPageV3")
-    )
-))]
-pub enum SurfaceMatchPageAny {
-    V2(SurfaceMatchPageV2),
-    V3(SurfaceMatchPageV3),
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordListItemV3 {
@@ -2093,15 +1877,6 @@ pub struct DetectLexiconSurfaceV3Input {
     pub kind: WordEntryKindV3,
     #[schema(max_length = 200)]
     pub surface: String,
-}
-
-/// Detection keeps the pre-versioned V2 headword request as a legacy branch and exposes a
-/// separate form-surface V3 branch; the latter is capability-gated until V3 projections exist.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-pub enum DetectLexiconInputAny {
-    V2(DetectWordInputV2),
-    V3(DetectLexiconSurfaceV3Input),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -2261,36 +2036,6 @@ pub struct DetectLexiconSurfaceResponseV3 {
     pub surface_match_page: Option<SurfaceMatchPageV3>,
 }
 
-#[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/DetectWordResponseV2"),
-        ("3" = "#/components/schemas/DetectLexiconSurfaceResponseV3")
-    )
-))]
-pub enum DetectLexiconResponseAny {
-    V2(Box<DetectWordResponseV2>),
-    V3(Box<DetectLexiconSurfaceResponseV3>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AdminWordPublicationV2 {
-    #[serde(deserialize_with = "deserialize_schema_version_2")]
-    #[schema(schema_with = schema_version_2_schema)]
-    pub schema_version: u8,
-    pub publication_id: Uuid,
-    pub entry_id: Uuid,
-    pub publication_number: i32,
-    pub source_revision: i64,
-    pub word: AdminWordV2,
-    pub published_by_admin_id: Uuid,
-    pub published_at: DateTime<Utc>,
-    pub is_current: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordPublicationV3 {
@@ -2308,49 +2053,15 @@ pub struct AdminWordPublicationV3 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/AdminWordPublicationV2"),
-        ("3" = "#/components/schemas/AdminWordPublicationV3")
-    )
-))]
-pub enum AdminWordPublicationAny {
-    V2(Box<AdminWordPublicationV2>),
-    V3(Box<AdminWordPublicationV3>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordPublicationEnvelope {
-    pub publication: AdminWordPublicationAny,
+    pub publication: AdminWordPublicationV3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordPublicationListResponse {
-    pub publications: Vec<AdminWordPublicationAny>,
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/AdminWordListItem"),
-        ("3" = "#/components/schemas/AdminWordListItemV3")
-    )
-))]
-pub enum AdminWordListItemAny {
-    V2(AdminWordListItem),
-    V3(AdminWordListItemV3),
-}
-
-impl From<AdminWordListItem> for AdminWordListItemAny {
-    fn from(item: AdminWordListItem) -> Self {
-        Self::V2(item)
-    }
+    pub publications: Vec<AdminWordPublicationV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -2393,26 +2104,6 @@ pub struct RelatedWordResultV3 {
     pub presentation: EntryPresentationV3,
     pub matches: Vec<RelatedWordMatchV3>,
     pub senses: Vec<RelatedWordSenseV3>,
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
-#[serde(untagged)]
-#[schema(discriminator(
-    property_name = "schema_version",
-    mapping(
-        ("2" = "#/components/schemas/RelatedWordResult"),
-        ("3" = "#/components/schemas/RelatedWordResultV3")
-    )
-))]
-pub enum RelatedWordResultAny {
-    V2(RelatedWordResult),
-    V3(RelatedWordResultV3),
-}
-
-impl From<RelatedWordResult> for RelatedWordResultAny {
-    fn from(result: RelatedWordResult) -> Self {
-        Self::V2(result)
-    }
 }
 
 #[cfg(test)]
@@ -2522,36 +2213,6 @@ mod tests {
     #[test]
     fn surface_match_item_v3_is_strictly_discriminated_without_synthetic_ids() {
         let entry_id = Uuid::now_v7();
-        let legacy = SurfaceMatchItemV3::LegacyV2(LegacySurfaceMatchV3 {
-            source_schema_version: 2,
-            existing: ExistingSurfaceMatchV2 {
-                word_id: entry_id,
-                headword: "colour".to_owned(),
-                kind: EntryKind::Word,
-                status: AdminWordStatus::Draft,
-                source: ExistingSurfaceSourceV2::Headword {
-                    source_id: "headword:common".to_owned(),
-                    content_scope: SurfaceContentScopeV2::Draft,
-                    surface: "colour".to_owned(),
-                    dialect: Dialect::Common,
-                },
-            },
-            publication_id: None,
-        });
-        let mut legacy_json = serde_json::to_value(&legacy).unwrap();
-        assert_eq!(legacy_json["match_kind"], "legacy_v2");
-        assert_eq!(legacy_json["match"]["source_schema_version"], 2);
-        assert_eq!(
-            legacy_json["match"]["existing"]["word_id"],
-            entry_id.to_string()
-        );
-        assert!(matches!(
-            serde_json::from_value::<SurfaceMatchItemV3>(legacy_json.clone()).unwrap(),
-            SurfaceMatchItemV3::LegacyV2(_)
-        ));
-        legacy_json["match"]["synthetic_form_id"] = serde_json::json!(Uuid::now_v7());
-        assert!(serde_json::from_value::<SurfaceMatchItemV3>(legacy_json).is_err());
-
         let form = SurfaceMatchItemV3::FormVariantV3(FormSurfaceMatchV3 {
             source_schema_version: 3,
             entry_id,
@@ -2574,7 +2235,10 @@ mod tests {
             SurfaceMatchItemV3::FormVariantV3(_)
         ));
         form_json["match_kind"] = serde_json::json!("legacy_v2");
-        assert!(serde_json::from_value::<SurfaceMatchItemV3>(form_json).is_err());
+        assert!(
+            serde_json::from_value::<SurfaceMatchItemV3>(form_json).is_err(),
+            "已下线的 legacy_v2 判别值不得再被接受"
+        );
     }
 }
 

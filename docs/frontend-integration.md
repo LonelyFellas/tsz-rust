@@ -1861,3 +1861,67 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 前端需同步 OpenAPI runtime schema，旧前端的严格校验不接受含新字段的响应。
 新前端向旧 API 写这两个字段也会被拒绝：正式发布前应先拆出前端兼容契约补丁，
 再更新后端，最后启用英文语音编辑入口。本次仅本地实现与验证，未部署。
+
+## V1/V2 词条内容格式下线（2026-09-11）
+
+管理端词条相关的 wire 只剩 V3。这是**破坏性**变更，两侧必须同批部署，且后端先于前端上线
+会让旧向导立刻 422——前端下线 V1/V2 向导的 PR 合入并部署后，本改动才允许上线。
+
+### 请求
+
+八条命令端点（`detections`、`entries`、`entries/{id}/steps/forms/impact`、
+`entries/{id}/steps/forms`、`entries/{id}/steps/meanings`、`entries/{id}/validate`、
+`entries/{id}/publications`、`entries/{id}/publications/{publication_id}/activate`）
+一律要求 `schema_version: 3`：
+
+| 请求体 | 结果 |
+| --- | --- |
+| 不带 `schema_version` | 422 `invalid_request_body`，detail `schema_version is required` |
+| `schema_version: 2` 或别的整数 | 422 `unsupported_schema_version` |
+| `schema_version: "3"` 等非整数 | 422 `invalid_request_body` |
+
+### 响应
+
+版本联合体全部收成单一 V3 类型。**JSON 逐字节不变**，变的只是 OpenAPI 里的 schema 名：
+
+| 原 schema | 现 schema |
+| --- | --- |
+| `AdminWordAnyEnvelope` | `AdminWordV3Envelope` |
+| `AdminWordDraftAnyEnvelope` | `AdminWordDraftV3Envelope` |
+| `EntryLifecycleBatchResponseAny` | `EntryLifecycleBatchResponse` |
+| `DetectLexiconResponseAny` | `DetectLexiconSurfaceResponseV3` |
+| `FormsImpactResponseAny` | `FormsImpactResponseV3` |
+| `DraftValidationResponseAny` | `DraftValidationResponseV3` |
+| `AdminWordPublicationAny` | `AdminWordPublicationV3` |
+| `AdminWordListItemAny` | `AdminWordListItemV3` |
+| `RelatedWordResultAny` | `RelatedWordResultV3` |
+| `SurfaceMatchPageAny` | `SurfaceMatchPageV3` |
+| `DraftValidationIssueAny` | `V3DraftValidationIssue` |
+
+### 移除
+
+- `AdminWordV3.compatibility`（`legacy_headwords`）整块删除，`SMART_LEXICON_V3_LEGACY_BRIDGE_READ`
+  开关不再存在。原生 V3 词条本来就不下发这个字段，前端若没读过它则无感。
+- `SurfaceMatchItemV3` 只剩 `match_kind: "form_variant_v3"`，`legacy_v2` 分支不再被接受。
+- `V3PublicationCapability` 只剩 `{"mode": "native"}`；`shadow_only` / `migration_canary` 退场，
+  `V3PublicationBlockCode` 一并删除。
+- `POST /api/v1/admin/lexicon/dialect-variant-suggestions` 下线（只有 V2 建条向导在调）。
+- `POST|GET /api/v1/admin/lexicon/entries/{id}/content-completion-jobs[...]` 三条路由下线，
+  AI 内容补全整模块退场。
+- 错误码 `smart_lexicon_v3_publication_requires_migration_canary` 退役。
+  `SMART_LEXICON_V3_PUBLISH=false` 现在回 503 `smart_lexicon_v3_storage_unavailable`，不再是 409。
+
+### 前端要做的事
+
+1. 重跑 `pnpm --filter @tsz/api-client sync:openapi`，按上表改 runtime schema 与类型引用。
+2. 删掉 V1/V2 向导、`createV2` / `validateV2` / `publishV2` / `suggestDialectVariants`
+   以及 `decodeAdminWordV2Envelope` 一族。
+3. `endpoints.contract.test.ts` 里对 `AdminWordV2`、`CreateAdminWordV2Input`、
+   `SuggestDialectVariantsResponseV2` 的断言随之删除。
+
+### 数据库
+
+迁移 `20260911140000_drop_lexicon_v2_content_schema`：`entries.content_schema_version` 收紧到
+`= 3` 并删除 `headword_mode` / `source_dialect`；删除六张 V2 存储表与三张 V2→V3 迁移账本表；
+`v3_entry_state.origin` 只剩 `native`。迁移开头会先数残留 V2 行，有就整条失败——库里还有 V2
+数据时这条迁移不该跑。

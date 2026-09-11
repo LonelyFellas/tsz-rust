@@ -5,7 +5,6 @@ use uuid::Uuid;
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct DictionaryTermRecord {
     pub term: String,
-    pub kind: String,
     pub pos: Vec<String>,
     pub region_family: String,
     pub provider_name: String,
@@ -47,15 +46,6 @@ pub(crate) struct DictionaryContentRecord {
     pub sounds: Value,
     pub provider_name: String,
     pub provider_version: String,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct DuplicateRecord {
-    pub entry_id: Uuid,
-    pub headword: String,
-    pub dialect: String,
-    pub is_archived: bool,
-    pub is_published: bool,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -102,25 +92,11 @@ pub struct SurfaceSourceRecord {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct SurfaceEntryContextRecord {
-    pub entry_id: Uuid,
-    pub content_schema_version: i16,
-    pub forms: Value,
-    pub meanings: Value,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct SurfaceInboundRelationRecord {
     pub target_entry_id: Uuid,
     pub source_entry_id: Uuid,
     pub source_node_id: Uuid,
     pub source_status: String,
-    pub source_headword_mode: Option<String>,
-    pub source_dialect: Option<String>,
-    pub source_common_headword: Option<String>,
-    pub source_uk_headword: Option<String>,
-    pub source_us_headword: Option<String>,
     pub source_presentation_label: Option<String>,
     pub draft_relation_type: Option<String>,
     pub source_snapshot: Option<Value>,
@@ -141,26 +117,6 @@ pub(crate) struct FormsSurfaceAcknowledgementRecord {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct HeadwordSurfaceAcknowledgementRecord {
-    pub entry_id: Uuid,
-    pub headwords_content_digest: String,
-    pub match_ids: Vec<String>,
-    pub policy_name: String,
-    pub policy_epoch: i64,
-    pub normalization_version: i32,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct HistoricalPublicationRecord {
-    pub id: Uuid,
-    pub entry_id: Uuid,
-    pub publication_number: i32,
-    pub source_revision: i64,
-    pub snapshot: Value,
-    pub published_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct PublicationReadRecord {
     pub id: Uuid,
     pub entry_id: Uuid,
@@ -176,8 +132,6 @@ pub(crate) struct PublicationReadRecord {
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct IdempotencyRecord {
     pub request_hash: Vec<u8>,
-    pub resource_id: Option<Uuid>,
-    pub response_status: i16,
     pub response_body: Value,
     pub expired: bool,
 }
@@ -190,15 +144,6 @@ pub(crate) struct NodeIdentityRecord {
     pub parent_node_id: Option<Uuid>,
     pub node_role: String,
     pub stable_slot: bool,
-}
-
-/// 一个已退役的稳定槽位：`(entry_id, parent_node_id, node_role)` 的唯一索引不带
-/// `removed_from_draft_at IS NULL`，所以退役之后这个键仍然永久绑定同一个节点 ID。
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct RetiredStableSlotRecord {
-    pub id: Uuid,
-    pub parent_node_id: Uuid,
-    pub node_role: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -248,11 +193,6 @@ pub(crate) struct ResolvedRelationTargetRecord {
     pub target_archived: bool,
     pub target_removed: bool,
     pub content_schema_version: i16,
-    pub headword_mode: Option<String>,
-    pub source_dialect: Option<String>,
-    pub common_headword: Option<String>,
-    pub uk_headword: Option<String>,
-    pub us_headword: Option<String>,
     pub presentation_label: Option<String>,
     pub draft_meanings: Value,
     pub target_publication_id: Option<Uuid>,
@@ -324,16 +264,10 @@ pub(crate) struct EntryRecord {
     pub lifecycle_revision: i64,
     pub annotation: Option<String>,
     pub annotation_revision: i64,
-    pub headword_mode: Option<String>,
-    pub source_dialect: Option<String>,
-    pub frequency: Option<String>,
     pub detection_snapshot: Value,
     pub current_publication_id: Option<Uuid>,
     pub current_publication_source_revision: Option<i64>,
     pub current_published_at: Option<DateTime<Utc>>,
-    pub common_headword: Option<String>,
-    pub uk_headword: Option<String>,
-    pub us_headword: Option<String>,
     pub forms: Value,
     pub meanings: Value,
     pub completed_steps: Vec<String>,
@@ -352,7 +286,6 @@ pub(crate) struct RelatedSearchRecord {
     pub snapshot: Value,
     pub status: String,
     pub status_rank: i16,
-    pub pos_labels: Vec<String>,
     pub sort_headword: String,
     pub total: i64,
 }
@@ -376,13 +309,10 @@ pub(crate) struct ListEntryRecord {
     pub id: Uuid,
     pub content_schema_version: i16,
     pub kind: String,
-    pub source_dialect: Option<String>,
-    pub dialects: Vec<String>,
     pub revision: i64,
     pub lifecycle_revision: i64,
     pub annotation: Option<String>,
     pub annotation_revision: i64,
-    pub headword_spellings: Vec<String>,
     pub forms: Value,
     pub presentation_label: Option<String>,
     pub presentation_surfaces: Option<Vec<String>>,

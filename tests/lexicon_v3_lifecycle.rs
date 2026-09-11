@@ -4,7 +4,6 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode, header},
 };
-use chrono::Utc;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -88,23 +87,15 @@ async fn call(
     (status, body)
 }
 
-async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid, migrated: bool) -> Uuid {
+async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
     let entry_id = Uuid::now_v7();
     let pos_id = Uuid::now_v7();
     let group_id = Uuid::now_v7();
     let membership_id = Uuid::now_v7();
     let form_id = Uuid::now_v7();
     let variant_id = Uuid::now_v7();
-    let label = if migrated {
-        "migrated lifecycle"
-    } else {
-        "native lifecycle"
-    };
-    let surface = if migrated {
-        "migrated-lifecycle"
-    } else {
-        "native-lifecycle"
-    };
+    let label = "native lifecycle";
+    let surface = "native-lifecycle";
     let forms = json!({
         "pos": [{
             "pos_id": pos_id,
@@ -138,33 +129,15 @@ async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid, migrated: bool) -> Uuid {
         r#"
         INSERT INTO lexicon.entries (
             id, content_schema_version, language, kind, revision,
-            headword_mode, source_dialect, detection_snapshot,
-            created_by_admin_id, updated_by_admin_id
-        ) VALUES ($1, 3, 'en', 'word', 1, $2, NULL, '{}', $3, $3)
+            detection_snapshot, created_by_admin_id, updated_by_admin_id
+        ) VALUES ($1, 3, 'en', 'word', 1, '{}', $2, $2)
         "#,
     )
     .bind(entry_id)
-    .bind(migrated.then_some("unified"))
     .bind(admin_id)
     .execute(pool)
     .await
     .unwrap();
-    if migrated {
-        sqlx::query(
-            r#"
-            INSERT INTO lexicon.entry_headwords (
-                id, entry_id, dialect, headword, normalized_headword,
-                normalization_version, origin
-            ) VALUES ($1, $2, 'common', $3, $3, 1, 'manual')
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(entry_id)
-        .bind(label)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
     sqlx::query(
         r#"
         INSERT INTO lexicon.entry_editor_projection (
@@ -193,15 +166,10 @@ async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid, migrated: bool) -> Uuid {
     .unwrap();
     sqlx::query(
         r#"
-        INSERT INTO lexicon.v3_entry_state (
-            entry_id, origin, migration_batch_id, source_revision
-        ) VALUES ($1, $2, $3, $4)
+        INSERT INTO lexicon.v3_entry_state (entry_id, origin) VALUES ($1, 'native')
         "#,
     )
     .bind(entry_id)
-    .bind(if migrated { "migrated_v2" } else { "native" })
-    .bind(migrated.then(Uuid::now_v7))
-    .bind(migrated.then_some(1_i64))
     .execute(pool)
     .await
     .unwrap();
@@ -243,7 +211,7 @@ async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid, migrated: bool) -> Uuid {
 }
 
 async fn seed_v3_empty_skeleton(pool: &PgPool, admin_id: Uuid, surface: &str) -> Uuid {
-    let entry_id = seed_v3_entry(pool, admin_id, false).await;
+    let entry_id = seed_v3_entry(pool, admin_id).await;
     let detection = json!({
         "schema_version": 3,
         "normalized_surface": surface,
@@ -321,239 +289,6 @@ async fn archive_v3_entry(state: &AppState, bearer: &str, entry_id: Uuid) -> Val
     archived
 }
 
-async fn seed_v2_entry(pool: &PgPool, admin_id: Uuid, headword: &str) -> Uuid {
-    let entry_id = Uuid::now_v7();
-    let now = Utc::now();
-    let detection = json!({
-        "detection_id": Uuid::now_v7(),
-        "request": {"language": "en", "headword": headword},
-        "normalized_headword": headword,
-        "entry_kind": "word",
-        "matched_dialect": "common",
-        "builtin_dictionary_status": "matched",
-        "smart_dictionary_status": "clear",
-        "headwords": {"mode": "unified", "common": headword},
-        "suggested_pos": [],
-        "detected_at": now
-    });
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.entries (
-            id, content_schema_version, language, kind, revision,
-            headword_mode, detection_snapshot,
-            created_by_admin_id, updated_by_admin_id
-        ) VALUES ($1, 2, 'en', 'word', 1, 'unified', $2, $3, $3)
-        "#,
-    )
-    .bind(entry_id)
-    .bind(detection)
-    .bind(admin_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.entry_headwords (
-            id, entry_id, dialect, headword, normalized_headword,
-            normalization_version, origin
-        ) VALUES ($1, $2, 'common', $3, $3, 1, 'manual')
-        "#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(entry_id)
-    .bind(headword)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.entry_editor_projection (
-            entry_id, forms, meanings, rebuilt_revision
-        ) VALUES ($1, '{"pos":[]}', '{"sense_groups":[],"pos":[]}', 1)
-        "#,
-    )
-    .bind(entry_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    entry_id
-}
-
-async fn seed_v2_headword_surface(pool: &PgPool, entry_id: Uuid, surface: &str) {
-    for dialect_scope in ["uk", "us"] {
-        sqlx::query(
-            r#"
-            INSERT INTO lexicon.surface_sources (
-                entry_id, source_id, source_kind, language, entry_kind,
-                dialect, dialect_scope, surface, normalized_surface,
-                normalization_version, source_revision, content_scope,
-                content_schema_version
-            ) VALUES (
-                $1, $2, 'headword', 'en', 'word',
-                'common', $3, $4, $4,
-                1, 1, 'draft', 2
-            )
-            "#,
-        )
-        .bind(entry_id)
-        .bind(format!("entry:{entry_id}:headword:common"))
-        .bind(dialect_scope)
-        .bind(surface)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-}
-
-async fn attach_current_publication(
-    pool: &PgPool,
-    entry_id: Uuid,
-    admin_id: Uuid,
-    schema_version: i16,
-    surface: &str,
-) -> Uuid {
-    let publication_id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.entry_publications (
-            id, entry_id, publication_number, source_revision,
-            content_schema_version, snapshot, snapshot_hash,
-            published_by_admin_id, published_at
-        ) VALUES ($1, $2, 1, 1, $3, $4, $5, $6, now())
-        "#,
-    )
-    .bind(publication_id)
-    .bind(entry_id)
-    .bind(schema_version)
-    .bind(json!({"schema_version": schema_version}))
-    .bind(Uuid::now_v7().as_bytes().to_vec())
-    .bind(admin_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE lexicon.entries SET current_publication_id = $2 WHERE id = $1")
-        .bind(entry_id)
-        .bind(publication_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    if schema_version == 2 {
-        for dialect_scope in ["uk", "us"] {
-            sqlx::query(
-                r#"
-                INSERT INTO lexicon.surface_sources (
-                    entry_id, source_id, source_kind, language, entry_kind,
-                    dialect, dialect_scope, surface, normalized_surface,
-                    normalization_version, source_revision, content_scope,
-                    publication_id, content_schema_version
-                ) VALUES (
-                    $1, $2, 'headword', 'en', 'word',
-                    'common', $3, $4, $4,
-                    1, 1, 'current_publication', $5, 2
-                )
-                "#,
-            )
-            .bind(entry_id)
-            .bind(format!("entry:{entry_id}:published-headword:common"))
-            .bind(dialect_scope)
-            .bind(surface)
-            .bind(publication_id)
-            .execute(pool)
-            .await
-            .unwrap();
-        }
-    } else {
-        sqlx::query(
-            r#"
-            INSERT INTO lexicon.surface_sources (
-                entry_id, source_id, source_kind, source_node_id,
-                language, entry_kind, dialect, dialect_scope,
-                surface, normalized_surface, normalization_version,
-                source_revision, is_deleted, content_scope, publication_id,
-                pos_id, pos, form_type, content_schema_version,
-                form_id, variant_id, group_ids, projection_version
-            )
-            SELECT entry_id, source_id, source_kind, source_node_id,
-                   language, entry_kind, dialect, dialect_scope,
-                   $2, $2, normalization_version,
-                   source_revision, FALSE, 'current_publication', $3,
-                   pos_id, pos, form_type, content_schema_version,
-                   form_id, variant_id, group_ids, projection_version
-            FROM lexicon.surface_sources
-            WHERE entry_id = $1
-              AND content_schema_version = 3
-              AND content_scope = 'draft'
-              AND is_deleted = FALSE
-            "#,
-        )
-        .bind(entry_id)
-        .bind(surface)
-        .bind(publication_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-    publication_id
-}
-
-async fn attach_v2_publication_snapshot(
-    pool: &PgPool,
-    entry_id: Uuid,
-    admin_id: Uuid,
-    snapshot: Value,
-    surface: &str,
-) -> Uuid {
-    let publication_id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.entry_publications (
-            id, entry_id, publication_number, source_revision,
-            content_schema_version, snapshot, snapshot_hash,
-            published_by_admin_id, published_at
-        ) VALUES ($1, $2, 1, 1, 2, $3, $4, $5, now())
-        "#,
-    )
-    .bind(publication_id)
-    .bind(entry_id)
-    .bind(snapshot)
-    .bind(Uuid::now_v7().as_bytes().to_vec())
-    .bind(admin_id)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE lexicon.entries SET current_publication_id = $2 WHERE id = $1")
-        .bind(entry_id)
-        .bind(publication_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    for dialect_scope in ["uk", "us"] {
-        sqlx::query(
-            r#"
-            INSERT INTO lexicon.surface_sources (
-                entry_id, source_id, source_kind, language, entry_kind,
-                dialect, dialect_scope, surface, normalized_surface,
-                normalization_version, source_revision, content_scope,
-                publication_id, content_schema_version
-            ) VALUES (
-                $1, $2, 'headword', 'en', 'word',
-                'common', $3, $4, $4,
-                1, 1, 'current_publication', $5, 2
-            )
-            "#,
-        )
-        .bind(entry_id)
-        .bind(format!("entry:{entry_id}:headword:common"))
-        .bind(dialect_scope)
-        .bind(surface)
-        .bind(publication_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-    publication_id
-}
-
 async fn wait_for_lifecycle_row_lock_waiter(pool: &PgPool) {
     for _ in 0..100 {
         let blocked: bool = sqlx::query_scalar(
@@ -610,7 +345,7 @@ async fn v3_single_lifecycle_delete_and_legacy_bridge_are_versioned(pool: PgPool
     );
     let admin_id = seed_admin(&pool).await;
     let bearer = bearer(&state, admin_id);
-    let native_id = seed_v3_entry(&pool, admin_id, false).await;
+    let native_id = seed_v3_entry(&pool, admin_id).await;
 
     let key = Uuid::now_v7();
     let archive_body = json!({"base_revision": 1, "base_lifecycle_revision": 1});
@@ -680,27 +415,21 @@ async fn v3_single_lifecycle_delete_and_legacy_bridge_are_versioned(pool: PgPool
         "archive/restore must preserve canonical V3 projection revisions"
     );
 
-    let migrated_id = seed_v3_entry(&pool, admin_id, true).await;
-    let bridge_off = state
-        .clone()
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags {
-            legacy_bridge_read: false,
-            ..SmartLexiconV3Flags::all_enabled()
-        });
-    let (status, migrated_archived) = call(
-        &bridge_off,
+    let second_id = seed_v3_entry(&pool, admin_id).await;
+    let (status, second_archived) = call(
+        &state,
         Method::POST,
-        &format!("{ROOT}/entries/{migrated_id}/archive"),
+        &format!("{ROOT}/entries/{second_id}/archive"),
         &bearer,
         Some(Uuid::now_v7()),
         Some(json!({"base_revision": 1, "base_lifecycle_revision": 1})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{migrated_archived}");
-    assert_eq!(migrated_archived["word"]["schema_version"], 3);
-    assert!(migrated_archived["word"].get("compatibility").is_none());
+    assert_eq!(status, StatusCode::OK, "{second_archived}");
+    assert_eq!(second_archived["word"]["schema_version"], 3);
+    assert!(second_archived["word"].get("compatibility").is_none());
 
-    let deleted_id = seed_v3_entry(&pool, admin_id, false).await;
+    let deleted_id = seed_v3_entry(&pool, admin_id).await;
     let (status, body) = call(
         &state,
         Method::DELETE,
@@ -737,7 +466,7 @@ async fn v3_single_lifecycle_delete_and_legacy_bridge_are_versioned(pool: PgPool
         "V3 delete must remove presentation and retain only surface tombstones"
     );
 
-    let published_id = seed_v3_entry(&pool, admin_id, false).await;
+    let published_id = seed_v3_entry(&pool, admin_id).await;
     sqlx::query(
         r#"
         INSERT INTO lexicon.entry_publications (
@@ -877,119 +606,13 @@ async fn empty_v3_restore_uses_initial_headword_conflicts_for_single_batch_and_l
 }
 
 #[sqlx::test]
-async fn mixed_v2_v3_batches_are_ordered_atomic_and_idempotent(pool: PgPool) {
-    let state = AppState::for_test_with_smart_lexicon_v3_flags(
-        pool.clone(),
-        SmartLexiconV3Flags::all_enabled(),
-    );
-    let admin_id = seed_admin(&pool).await;
-    let bearer = bearer(&state, admin_id);
-    let v2_id = seed_v2_entry(&pool, admin_id, "legacy-lifecycle").await;
-    let v3_id = seed_v3_entry(&pool, admin_id, false).await;
-    let body = json!({
-        "entries": [
-            {"id": v3_id, "base_revision": 1, "base_lifecycle_revision": 1},
-            {"id": v2_id, "base_revision": 1, "base_lifecycle_revision": 1}
-        ]
-    });
-    let key = Uuid::now_v7();
-    let (status, archived) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/archive-batch"),
-        &bearer,
-        Some(key),
-        Some(body.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{archived}");
-    assert_eq!(archived["affected"], 2);
-    assert_eq!(archived["words"][0]["id"], v3_id.to_string());
-    assert_eq!(archived["words"][0]["schema_version"], 3);
-    assert_eq!(archived["words"][1]["id"], v2_id.to_string());
-    assert_eq!(archived["words"][1]["schema_version"], 2);
-
-    let (status, replayed) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/archive-batch"),
-        &bearer,
-        Some(key),
-        Some(body),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{replayed}");
-    assert_eq!(replayed, archived);
-
-    let (status, restored) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/restore-batch"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "entries": [
-                {"id": v3_id, "base_revision": 1, "base_lifecycle_revision": 2},
-                {"id": v2_id, "base_revision": 1, "base_lifecycle_revision": 2}
-            ]
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{restored}");
-    assert_eq!(restored["affected"], 2);
-    assert!(
-        restored["words"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|word| { word["status"] == "draft" && word["lifecycle_revision"] == 3 })
-    );
-
-    let atomic_v2 = seed_v2_entry(&pool, admin_id, "atomic-legacy").await;
-    let atomic_v3 = seed_v3_entry(&pool, admin_id, false).await;
-    let (status, problem) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/archive-batch"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({
-            "entries": [
-                {"id": atomic_v2, "base_revision": 1, "base_lifecycle_revision": 1},
-                {"id": atomic_v3, "base_revision": 9, "base_lifecycle_revision": 1}
-            ]
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
-    let states: Vec<(Uuid, i64, bool)> = sqlx::query_as(
-        r#"
-        SELECT id, lifecycle_revision, archived_at IS NOT NULL
-        FROM lexicon.entries
-        WHERE id = ANY($1)
-        ORDER BY id
-        "#,
-    )
-    .bind(vec![atomic_v2, atomic_v3])
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(states.len(), 2);
-    assert!(
-        states
-            .iter()
-            .all(|(_, revision, archived)| *revision == 1 && !archived)
-    );
-}
-
-#[sqlx::test]
 async fn v3_restore_requires_one_snapshot_then_audits_and_replays(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = bearer(&state, admin_id);
-    let target_id = seed_v3_entry(&pool, admin_id, false).await;
+    let target_id = seed_v3_entry(&pool, admin_id).await;
     let (status, archived) = call(
         &state,
         Method::POST,
@@ -1000,7 +623,7 @@ async fn v3_restore_requires_one_snapshot_then_audits_and_replays(pool: PgPool) 
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{archived}");
-    let collision_id = seed_v3_entry(&pool, admin_id, false).await;
+    let collision_id = seed_v3_entry(&pool, admin_id).await;
 
     let restore_body = json!({"base_revision": 1, "base_lifecycle_revision": 2});
     let key = Uuid::now_v7();
@@ -1087,7 +710,7 @@ async fn v3_restore_stale_candidate_and_policy_epoch_fail_without_writes(pool: P
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = bearer(&state, admin_id);
-    let target_id = seed_v3_entry(&pool, admin_id, false).await;
+    let target_id = seed_v3_entry(&pool, admin_id).await;
     let (status, archived) = call(
         &state,
         Method::POST,
@@ -1098,7 +721,7 @@ async fn v3_restore_stale_candidate_and_policy_epoch_fail_without_writes(pool: P
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{archived}");
-    seed_v3_entry(&pool, admin_id, false).await;
+    seed_v3_entry(&pool, admin_id).await;
     let restore_body = json!({"base_revision": 1, "base_lifecycle_revision": 2});
     let key = Uuid::now_v7();
     let (status, required) = call(
@@ -1115,7 +738,7 @@ async fn v3_restore_stale_candidate_and_policy_epoch_fail_without_writes(pool: P
         .as_str()
         .unwrap();
 
-    seed_v3_entry(&pool, admin_id, false).await;
+    seed_v3_entry(&pool, admin_id).await;
     let mut stale_body = restore_body.clone();
     stale_body["confirmed_surface_match_token"] = json!(stale_token);
     let (status, changed) = call(
@@ -1166,374 +789,6 @@ async fn v3_restore_stale_candidate_and_policy_epoch_fail_without_writes(pool: P
 }
 
 #[sqlx::test]
-async fn mixed_restore_uses_one_v3_union_token_and_commits_atomically(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = bearer(&state, admin_id);
-    let v2_id = seed_v2_entry(&pool, admin_id, "mixed-restore").await;
-    let v3_id = seed_v3_entry(&pool, admin_id, false).await;
-    let archive_body = json!({
-        "entries": [
-            {"id": v2_id, "base_revision": 1, "base_lifecycle_revision": 1},
-            {"id": v3_id, "base_revision": 1, "base_lifecycle_revision": 1}
-        ]
-    });
-    let (status, archived) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/archive-batch"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(archive_body),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{archived}");
-
-    let v2_collision = seed_v2_entry(&pool, admin_id, "mixed-restore").await;
-    seed_v2_headword_surface(&pool, v2_collision, "mixed-restore").await;
-    let v3_collision = seed_v3_entry(&pool, admin_id, false).await;
-    let restore_body = json!({
-        "entries": [
-            {"id": v2_id, "base_revision": 1, "base_lifecycle_revision": 2},
-            {"id": v3_id, "base_revision": 1, "base_lifecycle_revision": 2}
-        ]
-    });
-    let key = Uuid::now_v7();
-    let (status, required) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/restore-batch"),
-        &bearer,
-        Some(key),
-        Some(restore_body.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{required}");
-    assert_eq!(required["code"], "surface_match_acknowledgement_required");
-    let page = &required["meta"]["surface_match_page"];
-    assert_eq!(page["schema_version"], 3);
-    let items = page["items"].as_array().unwrap();
-    assert!(
-        items.iter().any(|item| {
-            item["match_kind"] == "legacy_v2"
-                && item["match"]["source_schema_version"] == 2
-                && item["match"]["existing"]["word_id"] == v2_collision.to_string()
-        }),
-        "{required}"
-    );
-    assert!(
-        items.iter().any(|item| {
-            item["match_kind"] == "form_variant_v3"
-                && item["match"]["source_schema_version"] == 3
-                && item["match"]["entry_id"] == v3_collision.to_string()
-        }),
-        "{required}"
-    );
-    let token = page["surface_confirmation_token"].as_str().unwrap();
-    let before: Vec<(Uuid, i64, bool)> = sqlx::query_as(
-        r#"
-        SELECT id, lifecycle_revision, archived_at IS NOT NULL
-        FROM lexicon.entries WHERE id = ANY($1) ORDER BY id
-        "#,
-    )
-    .bind(vec![v2_id, v3_id])
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert!(
-        before
-            .iter()
-            .all(|(_, revision, archived)| *revision == 2 && *archived)
-    );
-
-    let mut confirmed_body = restore_body;
-    confirmed_body["confirmed_surface_match_token"] = json!(token);
-    let (status, restored) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/restore-batch"),
-        &bearer,
-        Some(key),
-        Some(confirmed_body),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{restored}");
-    assert_eq!(restored["affected"], 2);
-    assert_eq!(restored["words"][0]["id"], v2_id.to_string());
-    assert_eq!(restored["words"][1]["id"], v3_id.to_string());
-    let after: Vec<(Uuid, i64, bool)> = sqlx::query_as(
-        r#"
-        SELECT id, lifecycle_revision, archived_at IS NOT NULL
-        FROM lexicon.entries WHERE id = ANY($1) ORDER BY id
-        "#,
-    )
-    .bind(vec![v2_id, v3_id])
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert!(
-        after
-            .iter()
-            .all(|(_, revision, archived)| *revision == 3 && !*archived)
-    );
-    for entry_id in [v2_id, v3_id] {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM audit.admin_actions WHERE resource_id = $1 AND action = 'lexicon.surface_warning.acknowledge_command'",
-        )
-        .bind(entry_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(count, 1);
-    }
-}
-
-#[sqlx::test]
-async fn migrated_v3_restore_preserves_v2_and_v3_current_publications(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = bearer(&state, admin_id);
-
-    for schema_version in [2_i16, 3_i16] {
-        let target_id = seed_v3_entry(&pool, admin_id, true).await;
-        let publication_surface = format!("migrated-published-v{schema_version}");
-        let publication_id = attach_current_publication(
-            &pool,
-            target_id,
-            admin_id,
-            schema_version,
-            &publication_surface,
-        )
-        .await;
-        let (status, archived) = call(
-            &state,
-            Method::POST,
-            &format!("{ROOT}/entries/{target_id}/archive"),
-            &bearer,
-            Some(Uuid::now_v7()),
-            Some(json!({"base_revision": 1, "base_lifecycle_revision": 1})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{archived}");
-        assert_eq!(archived["word"]["published_revision"], 1);
-
-        let collision = seed_v2_entry(&pool, admin_id, &publication_surface).await;
-        seed_v2_headword_surface(&pool, collision, &publication_surface).await;
-        let restore_body = json!({"base_revision": 1, "base_lifecycle_revision": 2});
-        let key = Uuid::now_v7();
-        let (status, required) = call(
-            &state,
-            Method::POST,
-            &format!("{ROOT}/entries/{target_id}/restore"),
-            &bearer,
-            Some(key),
-            Some(restore_body.clone()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{required}");
-        assert_eq!(required["meta"]["surface_match_page"]["schema_version"], 3);
-        assert!(
-            required["meta"]["surface_match_page"]["items"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| {
-                    item["match_kind"] == "legacy_v2"
-                        && item["match"]["existing"]["word_id"] == collision.to_string()
-                })),
-            "schema {schema_version}: {required}"
-        );
-        let token = required["meta"]["surface_match_page"]["surface_confirmation_token"]
-            .as_str()
-            .unwrap();
-        let mut confirmed = restore_body;
-        confirmed["confirmed_surface_match_token"] = json!(token);
-        let (status, restored) = call(
-            &state,
-            Method::POST,
-            &format!("{ROOT}/entries/{target_id}/restore"),
-            &bearer,
-            Some(key),
-            Some(confirmed),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{restored}");
-        assert_eq!(restored["word"]["status"], "published");
-        assert_eq!(restored["word"]["published_revision"], 1);
-        let current: (Uuid, i16, i64) = sqlx::query_as(
-            r#"
-            SELECT entry.current_publication_id,
-                   publication.content_schema_version,
-                   entry.lifecycle_revision
-            FROM lexicon.entries entry
-            JOIN lexicon.entry_publications publication
-              ON publication.id = entry.current_publication_id
-            WHERE entry.id = $1
-            "#,
-        )
-        .bind(target_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(current, (publication_id, schema_version, 3));
-    }
-}
-
-#[sqlx::test]
-async fn v2_restore_includes_current_publication_when_draft_surface_differs(pool: PgPool) {
-    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = bearer(&state, admin_id);
-    let target_id = seed_v2_entry(&pool, admin_id, "draft-only-surface").await;
-    let (status, draft) = call(
-        &state,
-        Method::GET,
-        &format!("{ROOT}/entries/{target_id}"),
-        &bearer,
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{draft}");
-    let mut publication_snapshot = draft["word"].clone();
-    publication_snapshot["headwords"]["common"] = json!("published-only-surface");
-    let publication_id = attach_v2_publication_snapshot(
-        &pool,
-        target_id,
-        admin_id,
-        publication_snapshot,
-        "published-only-surface",
-    )
-    .await;
-    let (status, archived) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{target_id}/archive"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({"base_revision": 1, "base_lifecycle_revision": 1})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{archived}");
-
-    let collision = seed_v2_entry(&pool, admin_id, "published-only-surface").await;
-    seed_v2_headword_surface(&pool, collision, "published-only-surface").await;
-    let restore_body = json!({"base_revision": 1, "base_lifecycle_revision": 2});
-    let key = Uuid::now_v7();
-    let (status, required) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{target_id}/restore"),
-        &bearer,
-        Some(key),
-        Some(restore_body.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{required}");
-    assert_eq!(required["code"], "surface_match_acknowledgement_required");
-    assert_eq!(required["meta"]["surface_match_page"]["schema_version"], 2);
-    assert!(
-        required["meta"]["surface_match_page"]["items"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| {
-                item["candidate"]["candidate_word_id"] == target_id.to_string()
-                    && item["existing"]["word_id"] == collision.to_string()
-            })),
-        "{required}"
-    );
-    let token = required["meta"]["surface_match_page"]["surface_confirmation_token"]
-        .as_str()
-        .unwrap();
-    let mut confirmed = restore_body;
-    confirmed["confirmed_surface_match_token"] = json!(token);
-    let (status, restored) = call(
-        &state,
-        Method::POST,
-        &format!("{ROOT}/entries/{target_id}/restore"),
-        &bearer,
-        Some(key),
-        Some(confirmed),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{restored}");
-    assert_eq!(restored["word"]["schema_version"], 2);
-    assert_eq!(restored["word"]["status"], "published");
-    let current_publication: Uuid =
-        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
-            .bind(target_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(current_publication, publication_id);
-}
-
-#[sqlx::test]
-async fn v3_lifecycle_flags_fail_closed_without_affecting_v2(pool: PgPool) {
-    let admin_id = seed_admin(&pool).await;
-    let base = AppState::for_test_with_smart_lexicon_v3_flags(
-        pool.clone(),
-        SmartLexiconV3Flags::all_enabled(),
-    );
-    let bearer = bearer(&base, admin_id);
-    let v3_id = seed_v3_entry(&pool, admin_id, false).await;
-    for flags in [
-        SmartLexiconV3Flags {
-            read: false,
-            ..SmartLexiconV3Flags::all_enabled()
-        },
-        SmartLexiconV3Flags {
-            edit: false,
-            ..SmartLexiconV3Flags::all_enabled()
-        },
-        SmartLexiconV3Flags {
-            projection: false,
-            ..SmartLexiconV3Flags::all_enabled()
-        },
-    ] {
-        let state = base.clone().with_smart_lexicon_v3_flags_for_test(flags);
-        let (status, problem) = call(
-            &state,
-            Method::POST,
-            &format!("{ROOT}/entries/{v3_id}/archive"),
-            &bearer,
-            Some(Uuid::now_v7()),
-            Some(json!({"base_revision": 1, "base_lifecycle_revision": 1})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{problem}");
-        assert_eq!(problem["code"], "smart_lexicon_v3_storage_unavailable");
-    }
-    let unchanged: (i64, bool) = sqlx::query_as(
-        "SELECT lifecycle_revision, archived_at IS NOT NULL FROM lexicon.entries WHERE id = $1",
-    )
-    .bind(v3_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(unchanged, (1, false));
-
-    let v2_id = seed_v2_entry(&pool, admin_id, "flags-do-not-block-v2").await;
-    let disabled = base
-        .clone()
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_disabled());
-    let (status, archived) = call(
-        &disabled,
-        Method::POST,
-        &format!("{ROOT}/entries/{v2_id}/archive"),
-        &bearer,
-        Some(Uuid::now_v7()),
-        Some(json!({"base_revision": 1, "base_lifecycle_revision": 1})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{archived}");
-    assert_eq!(archived["word"]["schema_version"], 2);
-}
-
-#[sqlx::test]
 async fn v3_lifecycle_locks_surface_context_before_the_entry_row(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let state = AppState::for_test_with_smart_lexicon_v3_flags(
@@ -1541,7 +796,7 @@ async fn v3_lifecycle_locks_surface_context_before_the_entry_row(pool: PgPool) {
         SmartLexiconV3Flags::all_enabled(),
     );
     let bearer = bearer(&state, admin_id);
-    let entry_id = seed_v3_entry(&pool, admin_id, false).await;
+    let entry_id = seed_v3_entry(&pool, admin_id).await;
 
     let mut context_gate = pool.begin().await.unwrap();
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -1585,62 +840,6 @@ async fn v3_lifecycle_locks_surface_context_before_the_entry_row(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn v2_to_v3_race_is_rechecked_after_the_entry_row_lock(pool: PgPool) {
-    let admin_id = seed_admin(&pool).await;
-    let state = AppState::for_test_with_smart_lexicon_v3_flags(
-        pool.clone(),
-        SmartLexiconV3Flags::all_disabled(),
-    );
-    let bearer = bearer(&state, admin_id);
-    let entry_id = seed_v2_entry(&pool, admin_id, "lifecycle-race").await;
-
-    let mut migration = pool.begin().await.unwrap();
-    sqlx::query("UPDATE lexicon.entries SET updated_at = updated_at WHERE id = $1")
-        .bind(entry_id)
-        .execute(&mut *migration)
-        .await
-        .unwrap();
-
-    let request_state = state.clone();
-    let request_bearer = bearer.clone();
-    let request = tokio::spawn(async move {
-        call(
-            &request_state,
-            Method::POST,
-            &format!("{ROOT}/entries/{entry_id}/archive"),
-            &request_bearer,
-            Some(Uuid::now_v7()),
-            Some(json!({"base_revision": 1, "base_lifecycle_revision": 1})),
-        )
-        .await
-    });
-
-    wait_for_lifecycle_row_lock_waiter(&pool).await;
-    sqlx::query("UPDATE lexicon.entries SET content_schema_version = 3 WHERE id = $1")
-        .bind(entry_id)
-        .execute(&mut *migration)
-        .await
-        .unwrap();
-    migration.commit().await.unwrap();
-
-    let (status, problem) = request.await.unwrap();
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{problem}");
-    assert_eq!(problem["code"], "smart_lexicon_v3_storage_unavailable");
-    let stored: (i16, i64, bool) = sqlx::query_as(
-        r#"
-        SELECT content_schema_version, lifecycle_revision, archived_at IS NOT NULL
-        FROM lexicon.entries
-        WHERE id = $1
-        "#,
-    )
-    .bind(entry_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(stored, (3, 1, false));
-}
-
-#[sqlx::test]
 async fn v3_lifecycle_reads_the_projection_committed_under_the_entry_lock(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let state = AppState::for_test_with_smart_lexicon_v3_flags(
@@ -1648,7 +847,7 @@ async fn v3_lifecycle_reads_the_projection_committed_under_the_entry_lock(pool: 
         SmartLexiconV3Flags::all_enabled(),
     );
     let bearer = bearer(&state, admin_id);
-    let entry_id = seed_v3_entry(&pool, admin_id, false).await;
+    let entry_id = seed_v3_entry(&pool, admin_id).await;
 
     let mut writer = pool.begin().await.unwrap();
     sqlx::query(

@@ -51,20 +51,6 @@ pub(super) fn relation_target_entry_ids(meanings: &DraftMeaningsStepContent) -> 
     entry_ids
 }
 
-pub(super) fn normalized_headword_keys(
-    headwords: &WordHeadwordsV2,
-) -> Result<Vec<String>, LexiconServiceError> {
-    match headwords {
-        WordHeadwordsV2::Unified { common } => Ok(vec![
-            normalize_headword(common).map_err(map_headword_error)?.key,
-        ]),
-        WordHeadwordsV2::Distinguish { uk, us, .. } => Ok(vec![
-            normalize_headword(uk).map_err(map_headword_error)?.key,
-            normalize_headword(us).map_err(map_headword_error)?.key,
-        ]),
-    }
-}
-
 pub(super) fn map_dictionary_pos(values: &[String]) -> Vec<String> {
     let mut output = Vec::new();
     for value in values {
@@ -100,14 +86,6 @@ pub(super) fn family_dialect(family: &str) -> Option<Dialect> {
     }
 }
 
-pub(super) fn parse_kind(value: &str) -> Option<EntryKind> {
-    match value {
-        "word" => Some(EntryKind::Word),
-        "phrase" => Some(EntryKind::Phrase),
-        _ => None,
-    }
-}
-
 pub(super) fn parse_v3_kind(value: &str) -> Option<WordEntryKindV3> {
     match value {
         "word" => Some(WordEntryKindV3::Word),
@@ -127,23 +105,6 @@ pub(super) const fn entry_kind_from_v3(kind: WordEntryKindV3) -> EntryKind {
     match kind {
         WordEntryKindV3::Word => EntryKind::Word,
         WordEntryKindV3::Phrase => EntryKind::Phrase,
-    }
-}
-
-pub(super) fn parse_source_dialect(value: &str) -> Option<SourceDialect> {
-    match value {
-        "uk" => Some(SourceDialect::Uk),
-        "us" => Some(SourceDialect::Us),
-        _ => None,
-    }
-}
-
-pub(super) fn parse_dialect(value: &str) -> Option<Dialect> {
-    match value {
-        "common" => Some(Dialect::Common),
-        "uk" => Some(Dialect::Uk),
-        "us" => Some(Dialect::Us),
-        _ => None,
     }
 }
 
@@ -221,7 +182,6 @@ pub(super) fn surface_projection_error(_error: HeadwordNormalizationError) -> Le
 
 pub(super) fn repository_error(error: LexiconRepositoryError) -> LexiconServiceError {
     match error {
-        LexiconRepositoryError::DuplicateHeadword => LexiconServiceError::DuplicateWord,
         LexiconRepositoryError::TargetPublicationBusy => LexiconServiceError::ReferenceConflict,
         LexiconRepositoryError::ReferenceTargetChanged => LexiconServiceError::ReferenceConflict,
         LexiconRepositoryError::SurfaceContextBusy => LexiconServiceError::ReferenceConflict,
@@ -235,23 +195,6 @@ pub(super) fn database_error(error: sqlx::Error) -> LexiconServiceError {
 
 pub(super) fn serialization_error(error: serde_json::Error) -> LexiconServiceError {
     LexiconServiceError::Repository(LexiconRepositoryError::Serialization(error))
-}
-
-/// Existing projection/association writers are intentionally V2-only until their C2 V3 mapping
-/// exists. Check the snapshot discriminator first so a V3/unknown snapshot fails closed with the
-/// public unsupported-schema error instead of surfacing as an opaque serialization failure.
-pub(super) fn v2_publication_snapshot(
-    snapshot: serde_json::Value,
-) -> Result<AdminWordV2, LexiconServiceError> {
-    let version = snapshot
-        .get("schema_version")
-        .and_then(serde_json::Value::as_i64)
-        .and_then(|value| i16::try_from(value).ok())
-        .unwrap_or(-1);
-    if version != 2 {
-        return Err(LexiconServiceError::UnsupportedSchemaVersion(version));
-    }
-    serde_json::from_value(snapshot).map_err(serialization_error)
 }
 
 pub(super) fn invariant_record() -> LexiconServiceError {

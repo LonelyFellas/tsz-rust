@@ -109,9 +109,9 @@ async fn seed_lexicon_usage(
     sqlx::query(
         r#"
         INSERT INTO lexicon.entries (
-            id, language, kind, headword_mode, detection_snapshot,
+            id, content_schema_version, language, kind, detection_snapshot,
             created_by_admin_id, updated_by_admin_id
-        ) VALUES ($1, 'en', 'word', 'unified', '{}'::jsonb, $2, $2)
+        ) VALUES ($1, 3, 'en', 'word', '{}'::jsonb, $2, $2)
         "#,
     )
     .bind(entry_id)
@@ -167,7 +167,7 @@ async fn seed_lexicon_usage(
             INSERT INTO lexicon.entry_publications (
                 id, entry_id, publication_number, source_revision,
                 content_schema_version, snapshot, snapshot_hash, published_by_admin_id
-            ) VALUES ($1, $2, $3, $3, 2, '{}'::jsonb, $4, $5)
+            ) VALUES ($1, $2, $3, $3, 3, '{}'::jsonb, $4, $5)
             "#,
         )
         .bind(publication_id)

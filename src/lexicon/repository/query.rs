@@ -258,31 +258,8 @@ impl LexiconRepository {
             SELECT entry.id,
                    entry.content_schema_version,
                    entry.kind,
-                   entry.source_dialect,
-                   -- 并列拼写一律「管理员主词侧在前」，与词条详情、建稿第 4 步保持一致；
-                   -- source_dialect 为 NULL（unified）时回落到 common → uk → us。
-                   COALESCE((
-                       SELECT array_agg(headword.dialect ORDER BY CASE
-                           WHEN headword.dialect = 'common' THEN 0
-                           WHEN headword.dialect = entry.source_dialect THEN 1
-                           WHEN headword.dialect = 'uk' THEN 2
-                           ELSE 3 END)
-                       FROM lexicon.entry_headwords headword
-                       WHERE headword.entry_id = entry.id
-                   ), ARRAY[]::text[]) AS dialects,
                    entry.revision,
                    entry.lifecycle_revision, entry.annotation, entry.annotation_revision,
-                   -- 每侧拼写与上面的 dialects 同序；展示用的并列串由 service 按序拼接，
-                   -- 免得两个聚合各写一遍排序规则、日后又各改各的。
-                   COALESCE((
-                       SELECT array_agg(headword.headword ORDER BY CASE
-                           WHEN headword.dialect = 'common' THEN 0
-                           WHEN headword.dialect = entry.source_dialect THEN 1
-                           WHEN headword.dialect = 'uk' THEN 2
-                           ELSE 3 END)
-                       FROM lexicon.entry_headwords headword
-                       WHERE headword.entry_id = entry.id
-                   ), ARRAY[]::text[]) AS headword_spellings,
                    editor.forms,
                    presentation.label AS presentation_label,
                    presentation.matched_surfaces AS presentation_surfaces,
@@ -368,10 +345,6 @@ impl LexiconRepository {
                   )
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
                    OR EXISTS (
-                       SELECT 1 FROM lexicon.entry_headwords h
-                       WHERE h.entry_id = entry.id AND h.headword ILIKE '%' || $1 || '%'
-                   )
-                   OR EXISTS (
                        SELECT 1 FROM lexicon.surface_sources surface
                        WHERE surface.entry_id = entry.id
                          AND surface.content_schema_version = 3
@@ -446,10 +419,6 @@ impl LexiconRepository {
                     )
                   )
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
-                   OR EXISTS (
-                       SELECT 1 FROM lexicon.entry_headwords h
-                       WHERE h.entry_id = entry.id AND h.headword ILIKE '%' || $1 || '%'
-                   )
                    OR EXISTS (
                        SELECT 1 FROM lexicon.surface_sources surface
                        WHERE surface.entry_id = entry.id
@@ -607,15 +576,7 @@ impl LexiconRepository {
                 SELECT deduped.target_id,
                        deduped.source_id,
                        deduped.kind,
-                       COALESCE((
-                           SELECT string_agg(headword.headword, ' / ' ORDER BY CASE
-                               WHEN headword.dialect = 'common' THEN 0
-                               WHEN headword.dialect = source.source_dialect THEN 1
-                               WHEN headword.dialect = 'uk' THEN 2
-                               ELSE 3 END)
-                           FROM lexicon.entry_headwords headword
-                           WHERE headword.entry_id = source.id
-                       ), '') AS source_headword,
+                       COALESCE(source_presentation.label, '') AS source_headword,
                        CASE
                            WHEN source.archived_at IS NOT NULL THEN 'archived'
                            WHEN source.current_publication_id IS NOT NULL THEN 'published'
@@ -623,6 +584,9 @@ impl LexiconRepository {
                        END AS source_status
                   FROM deduped
                   JOIN lexicon.entries source ON source.id = deduped.source_id
+                  LEFT JOIN lexicon.entry_presentation_projection source_presentation
+                    ON source_presentation.entry_id = source.id
+                   AND source_presentation.content_schema_version = 3
             ),
             ranked AS (
                 SELECT enriched.*,
