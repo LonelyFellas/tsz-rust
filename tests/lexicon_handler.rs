@@ -23796,6 +23796,14 @@ async fn v3_derivative_multiple_senses_publish_and_remove_independently(pool: Pg
     assert_eq!(refs, 1);
 }
 
+/// 按 code 取形状问题的 field，不靠 field_issues 的位置——夹具以后多出别的问题时，
+/// 位置依赖会以「field 不相等」误报，而不是指出夹具变了。
+fn shape_issue_field(body: &Value) -> Option<&str> {
+    body["field_issues"].as_array()?.iter().find_map(|issue| {
+        (issue["code"] == "relation_target_shape_invalid").then(|| issue["field"].as_str())?
+    })
+}
+
 /// 半绑定关系必须在保存时就被拒，不能留到前端重开词条时炸开。
 ///
 /// `bound_target()` 是 zip，给了词条没给词义时它返回 None，这种形状因此曾被当成
@@ -23828,7 +23836,8 @@ async fn v3_relations_reject_half_bound_target_shapes(pool: PgPool) {
         "给了词条没给词义应被拒：{rejected}"
     );
     assert_eq!(
-        rejected["field_issues"][0]["field"], "target_sense_id",
+        shape_issue_field(&rejected),
+        Some("target_sense_id"),
         "缺的是词义，field 要指向它：{rejected}"
     );
 
@@ -23870,6 +23879,11 @@ async fn v3_relations_reject_half_bound_target_shapes(pool: PgPool) {
     assert!(
         has_issue(&rejected, "relation_target_shape_invalid"),
         "给了词义没给词条应被拒：{rejected}"
+    );
+    assert_eq!(
+        shape_issue_field(&rejected),
+        Some("target_word_id"),
+        "缺的是词条，field 要指向它：{rejected}"
     );
 }
 
