@@ -463,6 +463,24 @@ pub(crate) fn validate_meanings(
             }
         }
         for sense in &pos.senses {
+            for relation in &sense.relations {
+                // 半绑定（给了目标词条没给目标词义，或反之）不满足库层
+                // lexicon_relations_target_shape_check 的任何一支，此前一路放行到写入，
+                // 约束错误被兜底成不透明的 500。这条必须落在两个 intent 都生效的地方：
+                // 用户点「保存草稿」走的是 save，而 semantic_issues 只在 complete 时回出。
+                if relation.target_word_id.is_some() != relation.target_sense_id.is_some() {
+                    issues.push(meanings_issue(
+                        V3ValidationIssueCode::RelationTargetShapeInvalid,
+                        if relation.target_sense_id.is_none() {
+                            "target_sense_id"
+                        } else {
+                            "target_word_id"
+                        },
+                        relation.id,
+                        "relation target must provide both entry and sense, or neither",
+                    ));
+                }
+            }
             for definition in &sense.definitions {
                 match definition {
                     WordDefinitionV3::ZhDefinition { id, content, .. }

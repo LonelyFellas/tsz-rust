@@ -434,6 +434,26 @@ pub fn validate_meanings(
                         "关联词类型无效",
                     );
                 }
+                // 半绑定（给了词条没给词义，或反之）从未真正落库，但此前一路放行到写入，
+                // 才被库层 lexicon_relations_target_shape_check 拒掉，回给前端一个不透明的
+                // 500。根因是 bound_target() 为 zip，这种形状下返回 None，于是被当成「未绑定」。
+                // 只走这一份的是 V2 路径（V2 发布/校验与 V2 步骤保存）。V3 的保存被
+                // v3_contract::validate_meanings 提前拦下；V3 发布与 validate 端点两份都跑，
+                // 同码重复回出，banner 按文案去重，可接受。
+                if relation.target_word_id.is_some() != relation.target_sense_id.is_some() {
+                    issue(
+                        &mut issues,
+                        PersistedWordStep::Meanings,
+                        relation.id,
+                        if relation.target_sense_id.is_none() {
+                            "target_sense_id"
+                        } else {
+                            "target_word_id"
+                        },
+                        "relation_target_shape_invalid",
+                        "关联词要么同时给出目标词条与目标词义，要么只留待关联词面",
+                    );
+                }
                 if relation.bound_target().is_some()
                     && (relation.prebound_target_word_id.is_some()
                         || relation.prebinding_state.is_some()
