@@ -111,7 +111,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20260910180000;
+    const CURRENT_RELEASE_VERSION: i64 = 20260910200000;
 
     #[sqlx::test]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {
@@ -348,6 +348,54 @@ mod tests {
             audio_reference_table.as_deref(),
             Some("lexicon.v3_audio_asset_references")
         );
+    }
+
+    #[sqlx::test]
+    async fn deployment_undo_reports_duplicate_sub_pos_name_en(pool: PgPool) {
+        // 放开 name_en 唯一后管理员就该能填重复的正式英文；回退要给出可读原因而不是裸 23505。
+        let noun: Uuid =
+            sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO catalog.sub_parts_of_speech (
+                id, part_of_speech_id, code, name_zh, name_en,
+                short_name_zh, abbreviation, full_name_en, sort_order
+            ) VALUES (
+                $1, $2, 'N-UNCOUNT-MASS', '不可数物质名词', 'N-UNCOUNT',
+                '不可数名词', 'n.', 'uncountable material noun', 200
+            )
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(noun)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE catalog.sub_parts_of_speech SET name_en = 'N-UNCOUNT' WHERE code = 'N-PROPER'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+            .await
+            .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("duplicate name_en"),
+            "回退失败原因应指名重复的正式英文：{rendered}"
+        );
+        let latest: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(latest, CURRENT_RELEASE_VERSION, "守卫失败时账本不应回退");
     }
 
     #[sqlx::test]

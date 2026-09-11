@@ -167,7 +167,8 @@ REFERENCES catalog.parts_of_speech(id) ON DELETE RESTRICT
 - `name_zh`、`name_en`：服务端 trim 后长度 1–64；数据库 CHECK 同时保证已 trim 且长度合法；
 - `code` 全局唯一；
 - 同一基本词性下 `name_zh` 唯一；
-- 同一基本词性下 `name_en` 忽略大小写唯一；
+- `name_en` 不唯一（2026-09-10 改）：正式英文只是展示名，Collins 式的 N-UNCOUNT 会在
+  「不可数物质名词」「不可数抽象名词」这类更细的划分上正当重复，代码文本由 `code` 承载；
 - `sort_order` 接受完整的 PostgreSQL `INTEGER`（有符号 32 位整数）值域并允许重复；读取时按
   `sort_order, created_at, id` 稳定排序。
 
@@ -179,9 +180,6 @@ ON catalog.sub_parts_of_speech (code);
 
 CREATE UNIQUE INDEX catalog_sub_parts_name_zh_unique_idx
 ON catalog.sub_parts_of_speech (part_of_speech_id, name_zh);
-
-CREATE UNIQUE INDEX catalog_sub_parts_name_en_unique_idx
-ON catalog.sub_parts_of_speech (part_of_speech_id, lower(name_en));
 
 CREATE INDEX catalog_sub_parts_order_idx
 ON catalog.sub_parts_of_speech (part_of_speech_id, sort_order, created_at, id);
@@ -403,9 +401,10 @@ POST 成功返回 201 和完整 `PartOfSpeechConfig`；PATCH 成功返回 200，
 类型错误或小于 1 返回 400 `invalid_query`，过期 revision 返回 409，不能删除其他管理员刚修改过
 的配置。
 
-PATCH 不接受 `code`。所有写 DTO 使用 `#[serde(deny_unknown_fields)]`（或等价严格解析），因此
-PATCH 携带 `code`、创建人、usage 等只读/未知字段时返回 422 `invalid_request_body`，不能静默
-忽略。语法正确但字段值违反 code 或字符串长度规则时返回 400 `invalid_part_of_speech`。
+基本词性的 PATCH 不接受 `code`（细分词性是例外，见 6.3）。所有写 DTO 使用
+`#[serde(deny_unknown_fields)]`（或等价严格解析），因此 PATCH 携带自己 DTO 里没有的字段——
+基本词性的 `code`、以及两者的创建人、usage 等只读字段——时返回 422 `invalid_request_body`，
+不能静默忽略。语法正确但字段值违反 code 或字符串长度规则时返回 400 `invalid_part_of_speech`。
 
 ### 6.3 细分词性管理
 
@@ -436,8 +435,10 @@ DELETE /api/v1/admin/settings/parts-of-speech/{id}/sub-parts/{sub_id}?base_revis
 }
 ```
 
-修改请求同样带 `base_revision`，并且不接受 `code` 或 `part_of_speech_id`，首期不支持移动到
-另一个基本词性。
+修改请求同样带 `base_revision`，不接受 `part_of_speech_id`，不支持移动到另一个基本词性。
+`code` 可选（2026-09-10 改）：缺省表示不改，携带且与现值不同的时候只在该细分词性还没有被
+词义引用时放行，已被引用返回 409 `sub_part_of_speech_in_use` 并带 `meta.usage_count`。
+`code` 是代码文本的落点，管理员在词性配置里自己填，不再由展示字段派生。
 
 POST 成功返回 201 和完整 `SubPartOfSpeechConfig`；PATCH 成功返回 200 和新 revision 的完整
 记录。DELETE 同样要求正整数 `base_revision` 查询参数，成功返回 204 空 body。细分词性写 DTO 同样
@@ -614,7 +615,6 @@ DELETE 语句触发 `23503` 后当前事务已经失败，不能继续在同一�
 | `catalog_parts_of_speech_abbreviation_unique_idx` | `part_of_speech_conflict`     | `abbreviation` |
 | `catalog_sub_parts_code_unique_idx`               | `sub_part_of_speech_conflict` | `code`         |
 | `catalog_sub_parts_name_zh_unique_idx`            | `sub_part_of_speech_conflict` | `name_zh`      |
-| `catalog_sub_parts_name_en_unique_idx`            | `sub_part_of_speech_conflict` | `name_en`      |
 
 `src/platform/db.rs` 保留“识别 SQLSTATE + 精确 constraint name、由各领域决定业务映射”的边界，
 在现有 `23505` helper 之外补充已知 `23503` 判断。客户端只能按 `status`、`code`、`field` 和

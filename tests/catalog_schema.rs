@@ -763,12 +763,6 @@ async fn sub_part_unique_values_use_fixed_index_names(pool: PgPool) {
             "Unique Sub Two",
             "catalog_sub_parts_name_zh_unique_idx",
         ),
-        (
-            "UNIQUE-EN",
-            "唯一细分中文三",
-            "countable NOUN",
-            "catalog_sub_parts_name_en_unique_idx",
-        ),
     ];
 
     for (code, name_zh, name_en, expected_index) in cases {
@@ -780,6 +774,32 @@ async fn sub_part_unique_values_use_fixed_index_names(pool: PgPool) {
             "细分词性重复值应命中固定唯一索引",
         );
     }
+}
+
+#[sqlx::test]
+async fn sub_part_name_en_may_repeat_under_the_same_parent(pool: PgPool) {
+    // 正式英文不再是代码文本：N-UNCOUNT 这类 Collins 编码在更细的划分上正当重复。
+    let noun = part_id(&pool, "noun").await;
+    insert_sub_values(
+        &pool,
+        noun,
+        "N-UNCOUNT-MASS",
+        "不可数物质名词",
+        "N-UNCOUNT",
+        0,
+    )
+    .await
+    .expect("首条正式英文应插入成功");
+    insert_sub_values(
+        &pool,
+        noun,
+        "N-UNCOUNT-ABSTRACT",
+        "不可数抽象名词",
+        "N-UNCOUNT",
+        0,
+    )
+    .await
+    .expect("同一基本词性下正式英文允许重复");
 }
 
 #[sqlx::test]
@@ -1188,7 +1208,6 @@ async fn all_fixed_catalog_indexes_exist(pool: PgPool) {
             "catalog_parts_of_speech_name_zh_unique_idx",
             "catalog_parts_of_speech_order_idx",
             "catalog_sub_parts_code_unique_idx",
-            "catalog_sub_parts_name_en_unique_idx",
             "catalog_sub_parts_name_zh_unique_idx",
             "catalog_sub_parts_order_idx",
         ][..],
@@ -1204,11 +1223,10 @@ async fn all_fixed_catalog_indexes_exist(pool: PgPool) {
         "catalog_parts_of_speech_name_zh_unique_idx".to_owned(),
         "catalog_parts_of_speech_order_idx".to_owned(),
         "catalog_sub_parts_code_unique_idx".to_owned(),
-        "catalog_sub_parts_name_en_unique_idx".to_owned(),
         "catalog_sub_parts_name_zh_unique_idx".to_owned(),
         "catalog_sub_parts_order_idx".to_owned(),
     ];
-    assert_eq!(actual, expected, "设计中固定名称的 9 个索引必须全部存在");
+    assert_eq!(actual, expected, "设计中固定名称的 8 个索引必须全部存在");
 }
 
 // ===== 基本词性：简洁显示 / 英文全称（2026-09-06 新增列） =====

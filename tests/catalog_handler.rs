@@ -1252,3 +1252,228 @@ async fn form_type_catalog_crud_permissions_revision_and_base_protection(pool: P
             .any(|f| f["code"] == "custom_variant")
     );
 }
+
+#[sqlx::test]
+async fn sub_part_code_carries_the_code_text_and_freezes_once_referenced(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin_id = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let bearer = token(&state, admin_id, AdminRole::SuperAdmin);
+    let noun_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let path = format!("{ROOT}/{noun_id}/sub-parts");
+
+    // 代码文本落在编码上，正式英文只是展示名：两条更细的划分可以共用 N-UNCOUNT。
+    let (status, _, mass, _) = call(
+        &state,
+        Method::POST,
+        &path,
+        Some(&bearer),
+        Some(json!({
+            "code": "N-UNCOUNT-MASS",
+            "name_zh": "不可数物质名词",
+            "name_en": "N-UNCOUNT",
+            "short_name_zh": "不可数名词",
+            "abbreviation": "n.",
+            "full_name_en": "uncountable material noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "创建物质名词失败：{mass}");
+    let mass_id = mass["id"].as_str().unwrap().to_owned();
+
+    let (status, _, abstract_noun, _) = call(
+        &state,
+        Method::POST,
+        &path,
+        Some(&bearer),
+        Some(json!({
+            "code": "N-UNCOUNT-ABSTRACT",
+            "name_zh": "不可数抽象名词",
+            "name_en": "N-UNCOUNT",
+            "short_name_zh": "不可数名词",
+            "abbreviation": "n.",
+            "full_name_en": "uncountable abstract noun",
+            "sort_order": 20
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "同一基本词性下正式英文应允许重复：{abstract_noun}"
+    );
+
+    // 父级对不上时先落 404，不能被新加的编码守卫改写成别的错误码。
+    let other_part: Uuid =
+        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'verb'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (status, _, wrong_parent, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{ROOT}/{other_part}/sub-parts/{mass_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 1,
+            "code": "N-MASS",
+            "name_zh": "不可数物质名词",
+            "name_en": "N-UNCOUNT",
+            "short_name_zh": "不可数名词",
+            "abbreviation": "n.",
+            "full_name_en": "uncountable material noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "错误父级应 404：{wrong_parent}"
+    );
+    assert_eq!(wrong_parent["code"], "sub_part_of_speech_not_found");
+
+    let (status, _, updated, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{mass_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 1,
+            "code": "N-MASS",
+            "name_zh": "不可数物质名词",
+            "name_en": "N-UNCOUNT",
+            "short_name_zh": "不可数名词",
+            "abbreviation": "n.",
+            "full_name_en": "uncountable material noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "未被引用时应能改编码：{updated}");
+    assert_eq!(updated["code"], "N-MASS");
+    assert_eq!(updated["revision"], 2);
+
+    // 省略 code 表示不改：其余字段照常更新，编码保持原值。
+    let (status, _, kept, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{mass_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 2,
+            "name_zh": "不可数物质名词",
+            "name_en": "N-UNCOUNT",
+            "short_name_zh": "物质",
+            "abbreviation": "n.",
+            "full_name_en": "uncountable material noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "省略编码应放行：{kept}");
+    assert_eq!(kept["code"], "N-MASS", "省略 code 不应改动编码");
+    assert_eq!(kept["short_name_zh"], "物质");
+    assert_eq!(kept["revision"], 3);
+
+    // 编码撞车仍然是 409，字段指向 code。
+    let (status, _, conflict, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{mass_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 3,
+            "code": "N-UNCOUNT-ABSTRACT",
+            "name_zh": "不可数物质名词",
+            "name_en": "N-UNCOUNT",
+            "short_name_zh": "不可数名词",
+            "abbreviation": "n.",
+            "full_name_en": "uncountable material noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "编码撞车应 409：{conflict}");
+    assert_eq!(conflict["code"], "sub_part_of_speech_conflict");
+    assert_eq!(conflict["field"], "code");
+
+    let mass_uuid: Uuid = mass_id.parse().unwrap();
+    seed_lexicon_usage(&pool, admin_id, noun_id, mass_uuid, 0, true).await;
+
+    let (status, _, blocked, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{mass_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 3,
+            "code": "N-UNCOUNT-MASS",
+            "name_zh": "不可数物质名词",
+            "name_en": "N-UNCOUNT",
+            "short_name_zh": "不可数名词",
+            "abbreviation": "n.",
+            "full_name_en": "uncountable material noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "被词义引用后不应能改编码：{blocked}"
+    );
+    assert_eq!(blocked["code"], "sub_part_of_speech_in_use");
+    assert_eq!(blocked["meta"]["usage_count"], 1);
+
+    // 过期 revision 撞上引用守卫时，如实报并发冲突，不能报成「已被引用」。
+    let (status, _, stale, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{mass_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 1,
+            "code": "N-UNCOUNT-MASS",
+            "name_zh": "不可数物质名词",
+            "name_en": "N-UNCOUNT",
+            "short_name_zh": "物质",
+            "abbreviation": "n.",
+            "full_name_en": "uncountable material noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "过期 revision 应 409：{stale}"
+    );
+    assert_eq!(stale["code"], "revision_conflict");
+    assert_eq!(stale["meta"]["current_revision"], 3);
+
+    // 编码没变时照常放行，其余展示字段仍可改。
+    let (status, _, renamed, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{mass_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 3,
+            "code": "N-MASS",
+            "name_zh": "不可数物质名词",
+            "name_en": "N-UNCOUNT",
+            "short_name_zh": "物质名词",
+            "abbreviation": "n.",
+            "full_name_en": "uncountable material noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "编码不变时应放行：{renamed}");
+    assert_eq!(renamed["short_name_zh"], "物质名词");
+}
