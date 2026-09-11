@@ -13376,8 +13376,13 @@ async fn v3_freetext_relation_saves_and_publishes(pool: PgPool) {
     );
 }
 
+/// 关联词候选对**所有**管理员亮出草稿（2026-09-11 口径）：草稿能被别人引用。
+///
+/// 此前这里断言的是相反的事：外人搜别人的草稿只得到空结果。放开后关联词搜索与撞名
+/// 机器一致，看得见也绑得上；写权限不受影响，仍由 ensure_draft_writable 守着。
+/// 例句发现（sentence-targets/resolve）不在本次放开范围，草稿候选仍只对创建者可见。
 #[sqlx::test]
-async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
+async fn relation_draft_candidates_open_up_while_discovery_stays_creator_only(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -13397,11 +13402,16 @@ async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
     let (status, outsider_search) =
         call(&state, Method::GET, &search_path, &outsider, None, None).await;
     assert_eq!(status, StatusCode::OK, "{outsider_search}");
-    assert!(
-        outsider_search["results"]
-            .as_array()
-            .is_some_and(Vec::is_empty),
-        "别人的未发布草稿不得进入关联词候选：{outsider_search}"
+    let outsider_results = outsider_search["results"].as_array().unwrap();
+    assert_eq!(
+        outsider_results.len(),
+        1,
+        "别人的未发布草稿也应进入关联词候选：{outsider_search}"
+    );
+    assert_eq!(outsider_results[0]["entry_id"], owner_entry_id);
+    assert_eq!(
+        outsider_results[0]["status"], "draft",
+        "跨创建者候选仍应标成草稿：{outsider_search}"
     );
 
     let (status, owner_search) = call(&state, Method::GET, &search_path, &owner, None, None).await;
@@ -13414,7 +13424,7 @@ async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
     );
     assert_eq!(owner_results[0]["entry_id"], owner_entry_id);
 
-    // 例句发现的草稿候选走同一条边界：别人的未发布草稿不可见。
+    // 例句发现的草稿候选不跟着放开：别人的未发布草稿仍不可见。
     let discovery_body = json!({
         "schema_version": 3,
         "sentence_text": "The harbour is calm.",
