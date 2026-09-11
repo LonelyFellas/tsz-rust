@@ -351,10 +351,36 @@ jobs:
 
     steps:
       # 裸镜像什么都没有：checkout 要 git，aws-lc-sys 要 cmake 与 C 工具链。
+      #
+      # 容器自带的源是 archive.ubuntu.com，从 Azure 上的 runner 出网时快慢全看运气：
+      # 同一组包实测 20s / 607s / 跑满 30min 被超时掐掉（run 34596418228 attempt 1）。
+      # 宿主机镜像本身并不用它——actions/runner-images 的 configure-apt-sources.sh
+      # 把源换成 azure.archive.ubuntu.com(priority:1) 并按优先级回退，容器不继承那份配置，
+      # 所以这里照搬同一套。Acquire::Retries/Timeout 让卡死的连接尽快重试而不是干等，
+      # 步骤级 timeout-minutes 则保证真出问题时几分钟就失败，不吃掉整个 job 的 30 分钟预算。
       - name: Install build dependencies
+        timeout-minutes: 8
         run: |
-          apt-get update
+          set -eu
+          # 与 runner-images 同一份优先级表：azure 优先，失败按顺序回退。
+          # apt 2.4 自带 /usr/lib/apt/methods/mirror+file，容器里不需要额外装包。
+          {
+            printf 'http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n'
+            printf 'http://archive.ubuntu.com/ubuntu/\tpriority:2\n'
+            printf 'http://security.ubuntu.com/ubuntu/\tpriority:3\n'
+          } > /etc/apt/apt-mirrors.txt
+          sed -i \
+            -e 's|http://archive\.ubuntu\.com/ubuntu/|mirror+file:/etc/apt/apt-mirrors.txt|g' \
+            -e 's|http://security\.ubuntu\.com/ubuntu/|mirror+file:/etc/apt/apt-mirrors.txt|g' \
+            /etc/apt/sources.list
+          # 基础镜像换了源格式（例如改用 deb822）时 sed 会静默失配，退回慢源且无人察觉。
+          if grep -qE '^deb .*(archive|security)\.ubuntu\.com' /etc/apt/sources.list; then
+            echo '替换 apt 源失败：sources.list 仍指向默认源' >&2
+            exit 1
+          fi
+          apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update
           apt-get install -y --no-install-recommends \
+            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 \
             ca-certificates curl git python3 build-essential pkg-config cmake
 
       - name: Check out repository
