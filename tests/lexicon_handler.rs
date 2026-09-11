@@ -378,6 +378,59 @@ fn complete_v3_forms_fixture() -> Value {
     })
 }
 
+/// 单词性、单原形的最小 V3 词形内容，词面可指定。
+fn v3_forms_fixture_for(surface: &str) -> Value {
+    let form_id = Uuid::now_v7();
+    json!({
+        "pos": [{
+            "pos_id": Uuid::now_v7(),
+            "pos": "noun",
+            // 两侧同拼，所以 spelling_mode 是 unified；写成 distinguish 只是恰好被放行，
+            // 会让后来者照抄出现实中不存在的形状。
+            "dialect_rules": {
+                "spelling_mode": "unified",
+                "phonetic_mode": "distinguish"
+            },
+            "forms": [{
+                "id": form_id,
+                "form_type": "base",
+                "regional_variants": {
+                    "mode": "uk_us",
+                    "uk": {
+                        "id": Uuid::now_v7(),
+                        "dialect": "uk",
+                        "spelling": surface,
+                        "origin": "manual",
+                        "pronunciations": [{
+                            "id": Uuid::now_v7(),
+                            "dict_phonetic": "/test/",
+                            "actual_pron": "test",
+                            "style": "normal"
+                        }]
+                    },
+                    "us": {
+                        "id": Uuid::now_v7(),
+                        "dialect": "us",
+                        "spelling": surface,
+                        "origin": "manual",
+                        "pronunciations": [{
+                            "id": Uuid::now_v7(),
+                            "dict_phonetic": "/test/",
+                            "actual_pron": "test",
+                            "style": "normal"
+                        }]
+                    }
+                }
+            }],
+            "form_groups": [{
+                "id": Uuid::now_v7(),
+                "is_regular": true,
+                "members": [{"id": Uuid::now_v7(), "form_id": form_id}]
+            }]
+        }]
+    })
+}
+
 fn complete_v3_meanings_fixture(pos_id: Value) -> Value {
     let sense_group_id = Uuid::now_v7();
     let grammar_id = Uuid::now_v7();
@@ -13376,8 +13429,13 @@ async fn v3_freetext_relation_saves_and_publishes(pool: PgPool) {
     );
 }
 
+/// 关联词候选对**所有**管理员亮出草稿（2026-09-11 口径）：草稿能被别人引用。
+///
+/// 此前这里断言的是相反的事：外人搜别人的草稿只得到空结果。放开后关联词搜索与撞名
+/// 机器一致，看得见也绑得上；写权限不受影响，仍由 ensure_draft_writable 守着。
+/// 例句发现（sentence-targets/resolve）不在本次放开范围，草稿候选仍只对创建者可见。
 #[sqlx::test]
-async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
+async fn relation_draft_candidates_open_up_while_discovery_stays_creator_only(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -13397,11 +13455,16 @@ async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
     let (status, outsider_search) =
         call(&state, Method::GET, &search_path, &outsider, None, None).await;
     assert_eq!(status, StatusCode::OK, "{outsider_search}");
-    assert!(
-        outsider_search["results"]
-            .as_array()
-            .is_some_and(Vec::is_empty),
-        "别人的未发布草稿不得进入关联词候选：{outsider_search}"
+    let outsider_results = outsider_search["results"].as_array().unwrap();
+    assert_eq!(
+        outsider_results.len(),
+        1,
+        "别人的未发布草稿也应进入关联词候选：{outsider_search}"
+    );
+    assert_eq!(outsider_results[0]["entry_id"], owner_entry_id);
+    assert_eq!(
+        outsider_results[0]["status"], "draft",
+        "跨创建者候选仍应标成草稿：{outsider_search}"
     );
 
     let (status, owner_search) = call(&state, Method::GET, &search_path, &owner, None, None).await;
@@ -13414,7 +13477,7 @@ async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
     );
     assert_eq!(owner_results[0]["entry_id"], owner_entry_id);
 
-    // 例句发现的草稿候选走同一条边界：别人的未发布草稿不可见。
+    // 例句发现的草稿候选不跟着放开：别人的未发布草稿仍不可见。
     let discovery_body = json!({
         "schema_version": 3,
         "sentence_text": "The harbour is calm.",
@@ -13460,6 +13523,89 @@ async fn draft_candidates_are_visible_only_to_their_creator(pool: PgPool) {
             .any(|candidate| candidate["entry_id"] == owner_entry_id),
         "创建者应在发现候选中看到自己的草稿：{owner_discovery}"
     );
+}
+
+/// 别人的草稿不只是能被搜到，还要真能绑成关联词并跟着发布。
+///
+/// 搜索侧由 `relation_draft_candidates_open_up_while_discovery_stays_creator_only` 守着；
+/// 这条守写入与发布侧：写入面没有 creator 谓词是「可引用」成立的前提，一旦有人给
+/// `resolve_relation_targets` 加上过滤，功能会静默失效而搜索那条测试照常绿。
+#[sqlx::test]
+async fn an_outsider_binds_and_publishes_a_relation_to_another_admins_draft_sense(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner = token(&state, seed_admin(&pool).await);
+    let outsider = token(&state, seed_admin(&pool).await);
+
+    // owner 的草稿：存了词义，但始终不发布。
+    let target = create_v3_with_complete_forms(&state, &pool, &owner).await;
+    let target_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let mut target_content =
+        complete_v3_meanings_fixture(target["word"]["forms"]["pos"][0]["pos_id"].clone());
+    // source 自己的释义同样来自这个夹具（「港口」），目标释义必须换成独有串，
+    // 否则回填断言无法自证读的是别人的草稿。
+    target_content["pos"][0]["senses"][0]["definitions"][0]["content"] =
+        rich_text("别人草稿的港口");
+    let target_sense_id = target_content["pos"][0]["senses"][0]["id"].clone();
+    save_v3_meanings(&state, &owner, &target, target_content).await;
+
+    // outsider 另起一个词面建词条：同形词要走标注确认，而标注只有创建者能改，
+    // 会把这条用例卡在与本次改动无关的那道门上。
+    let source_id = create_legacy_v3_empty_skeleton(&state, &outsider, "wharf").await;
+    let (_, source) = save_v3_forms_after_impact(
+        &state,
+        &outsider,
+        &source_id.to_string(),
+        1,
+        "complete",
+        v3_forms_fixture_for("wharf"),
+    )
+    .await;
+    let relation_id = Uuid::now_v7();
+    let mut content =
+        complete_v3_meanings_fixture(source["word"]["forms"]["pos"][0]["pos_id"].clone());
+    content["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": relation_id,
+        "relation": "derivative",
+        "score": "80.00",
+        "target_word_id": target_id,
+        "target_sense_id": target_sense_id
+    }]);
+    let saved = save_v3_meanings(&state, &outsider, &source, content).await;
+    let relation = &saved["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0];
+    assert_eq!(
+        relation["target_sense_id"], target_sense_id,
+        "别人的草稿词义应能被绑定：{saved}"
+    );
+    assert_eq!(
+        relation["target_status"], "draft",
+        "目标仍是草稿，状态要如实标出：{saved}"
+    );
+    assert_eq!(
+        relation["target_gloss"], "别人草稿的港口",
+        "服务端应回填目标草稿的词义快照：{saved}"
+    );
+
+    // 发布引用方：引用落在草稿作用域，且不带发布号。
+    let (status, published) = publish_ready_v3(&state, &outsider, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let (scope, publication_id) = sqlx::query_as::<_, (String, Option<Uuid>)>(
+        "SELECT target_content_scope::text, target_publication_id
+         FROM lexicon.entry_publication_sense_refs
+         WHERE source_node_id = $1
+           AND entry_id = $2
+           AND reference_kind = 'relation'",
+    )
+    .bind(relation_id)
+    .bind(Uuid::parse_str(saved["word"]["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .expect("发布后应留下一条指向草稿词义的引用行");
+    assert_eq!(scope, "draft");
+    assert_eq!(publication_id, None);
 }
 
 /// 撞名机器对**所有**管理员亮出草稿命中（2026-09-08 口径）。
@@ -25446,9 +25592,9 @@ async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) 
 
 /// 草稿写权限：从未发布的草稿只有创建者本人与超管能写。
 ///
-/// 与 `draft_candidates_are_visible_only_to_their_creator` 是互补的一对——那条守的是
-/// 「别人的草稿不进**引用**候选」，这条守的是「别人的草稿不可**写**」。看得见但改不动，
-/// 是 2026-09-08 定的口径：草稿只表示尚未对 C 端发布，在 admin 内部照常可见。
+/// 与 `relation_draft_candidates_open_up_while_discovery_stays_creator_only` 是互补的
+/// 一对——那条守的是「别人的草稿**能**进关联词候选」，这条守的是「别人的草稿不可**写**」。
+/// 看得见、能引用，但改不动。
 #[sqlx::test]
 async fn draft_writes_are_restricted_to_their_creator_unless_super_admin(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
