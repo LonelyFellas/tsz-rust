@@ -13,8 +13,8 @@ use crate::{
             SurfaceConfirmationReasonV2, SurfaceContinuationDisabledV2,
             SurfaceContinuationEnabledV2, SurfaceMatchEnabledNextPageV2,
             SurfaceMatchEnabledNextPageV3, SurfaceMatchEnabledTerminalPageV2,
-            SurfaceMatchEnabledTerminalPageV3, SurfaceMatchItemV3, SurfaceMatchPageAny,
-            SurfaceMatchPageBaseV2, SurfaceMatchPageBaseV3, SurfaceMatchPageV2, SurfaceMatchPageV3,
+            SurfaceMatchEnabledTerminalPageV3, SurfaceMatchItemV3, SurfaceMatchPageBaseV2,
+            SurfaceMatchPageBaseV3, SurfaceMatchPageV2, SurfaceMatchPageV3,
             SurfaceMatchTemporarilyDisabledPageV2, SurfaceMatchTemporarilyDisabledPageV3,
             SurfacePolicyBlockCodeV2, SurfacePolicyNameV2,
         },
@@ -377,7 +377,7 @@ impl SurfaceSnapshotStore {
         actor_id: Uuid,
         snapshot_id: Uuid,
         cursor: &str,
-    ) -> Result<SurfaceMatchPageAny, SurfaceSnapshotError> {
+    ) -> Result<SurfaceMatchPageV3, SurfaceSnapshotError> {
         let next_cursor = generate_token_plaintext();
         let terminal_token = generate_token_plaintext();
         let terminal_impact_token = Uuid::now_v7();
@@ -1185,15 +1185,12 @@ pub(crate) fn surface_page_v3(
     }
 }
 
+/// 快照里始终带着 V3 page data；缺了说明快照是旧二进制写的，按结构损坏处理。
 fn surface_page_any(
     page: SurfaceMatchPageV2,
     owner_bundle: &Value,
-) -> Result<SurfaceMatchPageAny, SurfaceSnapshotError> {
-    if owner_bundle.get(V3_SURFACE_PAGE_DATA_KEY).is_some() {
-        surface_page_v3(page, owner_bundle).map(SurfaceMatchPageAny::V3)
-    } else {
-        Ok(SurfaceMatchPageAny::V2(page))
-    }
+) -> Result<SurfaceMatchPageV3, SurfaceSnapshotError> {
+    surface_page_v3(page, owner_bundle)
 }
 
 fn surface_page_base_v3(
@@ -1246,7 +1243,6 @@ fn surface_page_base_v3(
 
 const fn surface_match_item_entry_id(item: &SurfaceMatchItemV3) -> Uuid {
     match item {
-        SurfaceMatchItemV3::LegacyV2(item) => item.existing.word_id,
         SurfaceMatchItemV3::FormVariantV3(item) => item.entry_id,
     }
 }
@@ -2180,27 +2176,7 @@ mod tests {
             items: (0..2)
                 .map(|index| V3SurfaceSnapshotItem {
                     match_id: format!("match-{index:02}"),
-                    item: serde_json::from_value(if index == 0 {
-                        json!({
-                            "match_kind": "legacy_v2",
-                            "match": {
-                                "source_schema_version": 2,
-                                "existing": {
-                                    "word_id": Uuid::from_u128(0x1000 + index),
-                                    "headword": "workspace",
-                                    "kind": "word",
-                                    "status": "draft",
-                                    "source": {
-                                        "source_kind": "headword",
-                                        "source_id": "headword:common",
-                                        "content_scope": "draft",
-                                        "surface": "workspace",
-                                        "dialect": "common"
-                                    }
-                                }
-                            }
-                        })
-                    } else {
+                    item: serde_json::from_value({
                         json!({
                             "match_kind": "form_variant_v3",
                             "match": {
@@ -2268,7 +2244,7 @@ mod tests {
         assert_eq!(first.page.items.len(), 1);
         assert!(matches!(
             first.page.items[0],
-            SurfaceMatchItemV3::LegacyV2(_)
+            SurfaceMatchItemV3::FormVariantV3(_)
         ));
         assert_eq!(first.page.matched_entry_contexts.len(), 1);
         assert_eq!(first.next_cursor, "cursor-1");

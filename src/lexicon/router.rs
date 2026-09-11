@@ -13,10 +13,6 @@ pub fn router() -> Router<AppState> {
             get(handler::surface_match_snapshot_page),
         )
         .route(
-            "/dialect-variant-suggestions",
-            axum::routing::post(handler::suggest_dialect_variants),
-        )
-        .route(
             "/entries/{id}/annotation",
             axum::routing::patch(handler::commands::update_annotation),
         )
@@ -84,22 +80,6 @@ pub fn router() -> Router<AppState> {
         .route(
             "/entries/component-targets/search",
             axum::routing::post(handler::search_component_targets),
-        )
-        .route(
-            "/entries/{id}/content-completion-jobs",
-            axum::routing::post(
-                crate::lexicon::content_completion::handler::create_content_completion_job,
-            ),
-        )
-        .route(
-            "/entries/{id}/content-completion-jobs/{job_id}",
-            get(crate::lexicon::content_completion::handler::get_content_completion_job),
-        )
-        .route(
-            "/entries/{id}/content-completion-jobs/{job_id}/retries",
-            axum::routing::post(
-                crate::lexicon::content_completion::handler::retry_content_completion_job,
-            ),
         )
         .route(
             "/entries/{id}/validate",

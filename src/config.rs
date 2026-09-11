@@ -2,7 +2,6 @@ use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::{NonZeroU8, NonZeroU16};
 
-use crate::lexicon::content_completion::LexiconGeneratorConfig;
 use crate::platform::storage::ObjectStorageConfig;
 use crate::speech::AzureSpeechConfig;
 
@@ -38,12 +37,6 @@ pub struct SmartLexiconV3Flags {
         deserialize_with = "deserialize_explicit_bool"
     )]
     pub projection: bool,
-    #[serde(
-        default,
-        rename = "smart_lexicon_v3_legacy_bridge_read",
-        deserialize_with = "deserialize_explicit_bool"
-    )]
-    pub legacy_bridge_read: bool,
     #[serde(
         default,
         rename = "smart_lexicon_v3_sentence_associations",
@@ -84,7 +77,6 @@ impl SmartLexiconV3Flags {
             edit: true,
             publish: true,
             projection: true,
-            legacy_bridge_read: true,
             sentence_associations: true,
             sentence_target_discovery: true,
             draft_relation_prebinding: true,
@@ -99,7 +91,6 @@ impl SmartLexiconV3Flags {
             edit: false,
             publish: false,
             projection: false,
-            legacy_bridge_read: false,
             sentence_associations: false,
             sentence_target_discovery: false,
             draft_relation_prebinding: false,
@@ -146,8 +137,6 @@ pub struct Config {
     pub object_storage: ObjectStorageConfig,
     #[serde(skip)]
     pub azure_speech: Option<AzureSpeechConfig>,
-    #[serde(skip)]
-    pub lexicon_generator: Option<LexiconGeneratorConfig>,
 }
 
 fn default_refresh_ttl_days() -> u64 {
@@ -200,12 +189,9 @@ impl Config {
             .map_err(|error| envy::Error::Custom(error.to_string()))?;
         let azure_speech = AzureSpeechConfig::from_pairs(pairs.iter().cloned())
             .map_err(|error| envy::Error::Custom(error.to_string()))?;
-        let lexicon_generator = LexiconGeneratorConfig::from_pairs(pairs.iter().cloned())
-            .map_err(envy::Error::Custom)?;
         let mut cfg: Self = envy::from_iter(pairs)?;
         cfg.object_storage = object_storage;
         cfg.azure_speech = azure_speech;
-        cfg.lexicon_generator = lexicon_generator;
         // 两把密钥相同 = per-realm 隔离塌一半,启动即失败(admin-design.md §13)
         if cfg.admin_jwt_secret == cfg.jwt_secret {
             return Err(envy::Error::Custom(
@@ -248,14 +234,13 @@ mod tests {
         Config::from_pairs(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())))
     }
 
-    fn smart_lexicon_v3_flag_values(flags: SmartLexiconV3Flags) -> [bool; 6] {
+    fn smart_lexicon_v3_flag_values(flags: SmartLexiconV3Flags) -> [bool; 5] {
         [
             flags.read,
             flags.create,
             flags.edit,
             flags.publish,
             flags.projection,
-            flags.legacy_bridge_read,
         ]
     }
 
@@ -299,33 +284,6 @@ mod tests {
         assert_eq!(cfg.jwt_secret, "s3cret");
         assert_eq!(cfg.redis_url, "redis://localhost:6379/0");
         assert_eq!(cfg.admin_jwt_secret, "adm1n-s3cret");
-    }
-
-    #[test]
-    fn qwen_lexicon_generator_is_attached_only_with_explicit_complete_configuration() {
-        let mut input = valid_baseline();
-        input.extend([
-            ("LEXICON_GENERATOR_PROVIDER", "qwen"),
-            ("QWEN_LEXICON_API_KEY", "secret"),
-            ("QWEN_LEXICON_MODEL", "qwen3.8-max"),
-        ]);
-
-        let cfg = parse(&input).expect("完整千问配置应接入应用配置");
-
-        assert!(matches!(
-            cfg.lexicon_generator,
-            Some(LexiconGeneratorConfig::Qwen(_))
-        ));
-    }
-
-    #[test]
-    fn qwen_lexicon_generator_rejects_missing_selected_configuration() {
-        let mut input = valid_baseline();
-        input.push(("LEXICON_GENERATOR_PROVIDER", "qwen"));
-
-        let error = parse(&input).expect_err("选择千问但没有凭据和模型应启动失败");
-
-        assert!(error.to_string().contains("qwen lexicon generator"));
     }
 
     #[test]
@@ -507,7 +465,7 @@ mod tests {
 
         assert_eq!(
             smart_lexicon_v3_flag_values(cfg.smart_lexicon_v3_flags),
-            [false; 6],
+            [false; 5],
             "未配置时六项 V3 能力必须全部关闭"
         );
         assert!(
@@ -530,7 +488,6 @@ mod tests {
             ("SMART_LEXICON_V3_EDIT", "true"),
             ("SMART_LEXICON_V3_PUBLISH", "true"),
             ("SMART_LEXICON_V3_PROJECTION", "true"),
-            ("SMART_LEXICON_V3_LEGACY_BRIDGE_READ", "true"),
             ("SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS", "true"),
             ("SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY", "true"),
             ("SMART_LEXICON_V3_DRAFT_RELATION_PREBINDING", "true"),
@@ -539,7 +496,7 @@ mod tests {
         let enabled = parse(&enabled).expect("显式 true 应能解析");
         assert_eq!(
             smart_lexicon_v3_flag_values(enabled.smart_lexicon_v3_flags),
-            [true; 6]
+            [true; 5]
         );
         assert!(enabled.smart_lexicon_v3_flags.sentence_associations);
         assert!(enabled.smart_lexicon_v3_flags.sentence_target_discovery);
@@ -552,7 +509,6 @@ mod tests {
             ("SMART_LEXICON_V3_EDIT", "false"),
             ("SMART_LEXICON_V3_PUBLISH", "false"),
             ("SMART_LEXICON_V3_PROJECTION", "false"),
-            ("SMART_LEXICON_V3_LEGACY_BRIDGE_READ", "false"),
             ("SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS", "false"),
             ("SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY", "false"),
             ("SMART_LEXICON_V3_DRAFT_RELATION_PREBINDING", "false"),
@@ -562,7 +518,7 @@ mod tests {
 
         assert_eq!(
             smart_lexicon_v3_flag_values(disabled.smart_lexicon_v3_flags),
-            [false; 6]
+            [false; 5]
         );
         assert!(!disabled.smart_lexicon_v3_flags.sentence_associations);
         assert!(!disabled.smart_lexicon_v3_flags.sentence_target_discovery);

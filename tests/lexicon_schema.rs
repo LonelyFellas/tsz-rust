@@ -39,9 +39,9 @@ async fn insert_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
     sqlx::query(
         r#"
         INSERT INTO lexicon.entries (
-            id, language, kind, revision, headword_mode, detection_snapshot,
+            id, content_schema_version, language, kind, revision, detection_snapshot,
             created_by_admin_id, updated_by_admin_id
-        ) VALUES ($1, 'en', 'word', 1, 'unified', '{}', $2, $2)
+        ) VALUES ($1, 3, 'en', 'word', 1, '{}', $2, $2)
         "#,
     )
     .bind(id)
@@ -143,52 +143,6 @@ async fn insert_publication_node(
     .execute(pool)
     .await
     .unwrap();
-}
-
-#[sqlx::test]
-async fn headword_keys_are_unique_per_language_kind_and_dialect_scope(pool: PgPool) {
-    let admin_id = insert_admin(&pool).await;
-    let first = insert_entry(&pool, admin_id).await;
-    let second = insert_entry(&pool, admin_id).await;
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.entry_headword_keys (
-            entry_id, language, kind, dialect_scope, normalized_headword, normalization_version
-        ) VALUES ($1, 'en', 'word', 'uk', 'colour', 1)
-        "#,
-    )
-    .bind(first)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let duplicate = sqlx::query(
-        r#"
-        INSERT INTO lexicon.entry_headword_keys (
-            entry_id, language, kind, dialect_scope, normalized_headword, normalization_version
-        ) VALUES ($1, 'en', 'word', 'uk', 'colour', 1)
-        "#,
-    )
-    .bind(second)
-    .execute(&pool)
-    .await;
-    assert_db_error(
-        duplicate,
-        UNIQUE_VIOLATION,
-        "lexicon_entry_headword_keys_unique_idx",
-    );
-
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.entry_headword_keys (
-            entry_id, language, kind, dialect_scope, normalized_headword, normalization_version
-        ) VALUES ($1, 'en', 'word', 'us', 'colour', 1)
-        "#,
-    )
-    .bind(second)
-    .execute(&pool)
-    .await
-    .expect("同一规范词头在另一方言 scope 中可独立存在");
 }
 
 #[sqlx::test]

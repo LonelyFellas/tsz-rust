@@ -3,90 +3,6 @@ use super::*;
 // --- detection ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DetectWordInputV2 {
-    pub language: String,
-    pub headword: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct DetectionRequestEcho {
-    pub language: String,
-    pub headword: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[schema(deprecated)]
-pub struct DuplicateWordMatchV2 {
-    pub word_id: Uuid,
-    pub headword: String,
-    pub dialect: Dialect,
-    pub status: AdminWordStatus,
-    #[serde(default = "default_duplicate_match_category")]
-    #[schema(required = true)]
-    pub match_category: SurfaceMatchCategoryV2,
-    /// 与 warning 分支 `matched_entry_contexts[].inbound_relations` 同构，
-    /// `previews` 同样最多 5 条。duplicate 分支没有 `surface_match_page` 可挂上下文，
-    /// 缺了它前端就提示不出「这条空壳词条是 XX 的同义词」。
-    // 与 match_category 同理，兼容缺字段的历史 Redis 快照：退化成「没有词条引用它」，
-    // 前端按约定整项略去。这条是部署细节，不进对外契约的 description。
-    #[serde(default)]
-    #[schema(required = true)]
-    pub inbound_relations: RelationReferenceSummaryV2,
-}
-
-const fn default_duplicate_match_category() -> SurfaceMatchCategoryV2 {
-    // 兼容部署前最长存活 65 分钟的 Redis detection 快照。duplicate 分支只在 legacy
-    // exact-headword 索引命中、而投影表尚未追平时触发，历史记录唯一可能的类别就是它。
-    SurfaceMatchCategoryV2::ExactHeadword
-}
-
-#[cfg(test)]
-mod duplicate_word_match_tests {
-    use super::*;
-
-    #[test]
-    fn legacy_redis_duplicate_without_inbound_relations_degrades_to_no_reference() {
-        let duplicate: DuplicateWordMatchV2 = serde_json::from_value(serde_json::json!({
-            "word_id": Uuid::now_v7(),
-            "headword": "legacy",
-            "dialect": "common",
-            "status": "draft",
-            "match_category": "exact_headword"
-        }))
-        .unwrap();
-        assert_eq!(duplicate.inbound_relations.total, 0);
-        assert!(duplicate.inbound_relations.previews.is_empty());
-        assert!(!duplicate.inbound_relations.truncated);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SmartDictionaryResultV2 {
-    Clear {
-        #[schema(max_items = 0)]
-        duplicates: Vec<DuplicateWordMatchV2>,
-    },
-    #[schema(deprecated)]
-    Duplicate {
-        #[schema(min_items = 1)]
-        duplicates: Vec<DuplicateWordMatchV2>,
-    },
-    Warning {
-        #[schema(max_items = 0)]
-        duplicates: Vec<DuplicateWordMatchV2>,
-        surface_match_page: Box<SurfaceMatchPageV2>,
-        #[schema(max_items = 0)]
-        matched_entry_contexts: Vec<MatchedEntryContextV2>,
-    },
-    Unavailable {
-        #[schema(max_items = 0)]
-        duplicates: Vec<DuplicateWordMatchV2>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "candidate_type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SurfaceMatchCandidateV2 {
     Headword {
@@ -434,141 +350,12 @@ pub struct SurfaceMatchSnapshotQueryV2 {
     pub cursor: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct DictionaryProviderV2 {
-    pub name: String,
-    pub version: String,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DictionaryCoverageStateV2 {
     Complete,
     Partial,
     Missing,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct DictionaryCoverageV2 {
-    pub forms: DictionaryCoverageStateV2,
-    pub pronunciations: DictionaryCoverageStateV2,
-    pub meanings: DictionaryCoverageStateV2,
-    pub examples: DictionaryCoverageStateV2,
-    pub frequency: DictionaryCoverageStateV2,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct DictionaryProvenanceV2 {
-    pub forms: Option<DictionaryProviderV2>,
-    pub pronunciations: Option<DictionaryProviderV2>,
-    pub meanings: Option<DictionaryProviderV2>,
-    pub examples: Option<DictionaryProviderV2>,
-    pub frequency: Option<DictionaryProviderV2>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "status", rename_all = "snake_case")]
-#[allow(clippy::large_enum_variant)] // wire shape stays flat and backward-compatible
-pub enum BuiltinDictionaryResultV2 {
-    Matched {
-        provider: DictionaryProviderV2,
-        headwords: WordHeadwordsV2,
-        suggested_forms: Box<DraftFormsStepContent>,
-        suggested_meanings: Box<DraftMeaningsStepContent>,
-        suggested_frequency: Option<String>,
-        coverage: DictionaryCoverageV2,
-        provenance: DictionaryProvenanceV2,
-    },
-    NotFound,
-    Unavailable {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        retry_after_seconds: Option<u32>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct DetectWordResponseV2 {
-    #[serde(deserialize_with = "deserialize_schema_version_2")]
-    #[schema(schema_with = schema_version_2_schema)]
-    pub schema_version: u8,
-    pub detection_id: Uuid,
-    pub expires_at: DateTime<Utc>,
-    pub request: DetectionRequestEcho,
-    pub normalized_headword: String,
-    pub entry_kind: EntryKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub matched_dialect: Option<Dialect>,
-    pub builtin_dictionary: BuiltinDictionaryResultV2,
-    pub smart_dictionary: SmartDictionaryResultV2,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CreateAdminWordV2Input {
-    #[serde(deserialize_with = "deserialize_schema_version_2")]
-    #[schema(schema_with = schema_version_2_schema)]
-    pub schema_version: u8,
-    pub detection_id: Uuid,
-    /// matched 检测返回的英美主词仅作为建议；管理员可切换模式、编辑非空拼写并决定
-    /// `source_dialect`。检测过期、消费、幂等及最终主词 surface 确认仍由服务端校验。
-    pub headwords: WordHeadwordsV2,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub confirmed_surface_match_token: Option<String>,
-}
-
-// --- dialect suggestion ---
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DialectSuggestionFieldKind {
-    Form,
-    Definition,
-    Example,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-pub enum DialectVariantSuggestionItemV2 {
-    Form {
-        client_id: String,
-        field_kind: DialectSuggestionFieldKind,
-        value: String,
-    },
-    RichText {
-        client_id: String,
-        field_kind: DialectSuggestionFieldKind,
-        value: RichText,
-    },
-}
-
-impl DialectVariantSuggestionItemV2 {
-    pub fn client_id(&self) -> &str {
-        match self {
-            Self::Form { client_id, .. } | Self::RichText { client_id, .. } => client_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SuggestDialectVariantsInputV2 {
-    pub source_dialect: SourceDialect,
-    pub target_dialect: SourceDialect,
-    pub items: Vec<DialectVariantSuggestionItemV2>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct DialectSuggestionProviderV2 {
-    pub kind: String,
-    pub version: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SuggestDialectVariantsResponseV2 {
-    pub provider: DialectSuggestionProviderV2,
-    pub suggestions: Vec<DialectVariantSuggestionItemV2>,
 }
 
 // --- editor ---
@@ -859,110 +646,6 @@ pub enum StepSaveIntent {
     Complete,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SaveFormsStepInput {
-    #[schema(minimum = 1)]
-    pub base_revision: i64,
-    pub intent: StepSaveIntent,
-    #[serde(default)]
-    #[schema(nullable = false)]
-    pub confirmed_impact_token: Option<Uuid>,
-    #[serde(default)]
-    #[schema(nullable = false)]
-    pub confirmed_surface_match_token: Option<String>,
-    pub content: DraftFormsStepContent,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SaveMeaningsStepInput {
-    #[schema(minimum = 1)]
-    pub base_revision: i64,
-    pub intent: StepSaveIntent,
-    pub content: DraftMeaningsStepContent,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PreviewFormsImpactInputV2 {
-    #[schema(minimum = 1)]
-    pub base_revision: i64,
-    pub content: DraftFormsStepContent,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum FormsImpactNodeType {
-    Pos,
-    GrammarStructure,
-    TextVariant,
-    Sense,
-    Definition,
-    Sentence,
-    Relation,
-}
-
-impl FormsImpactNodeType {
-    pub(crate) fn from_internal(value: &str) -> Self {
-        match value {
-            "pos" => Self::Pos,
-            "grammar_structure" => Self::GrammarStructure,
-            "text_variant" => Self::TextVariant,
-            "sense" => Self::Sense,
-            "definition" => Self::Definition,
-            "sentence" => Self::Sentence,
-            "relation" => Self::Relation,
-            _ => unreachable!("forms impact emitted unsupported node type: {value}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct FormsImpactItemV2 {
-    pub node_id: Uuid,
-    pub node_type: FormsImpactNodeType,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct FormsImpactResponseV2 {
-    #[schema(schema_with = schema_version_2_schema)]
-    pub schema_version: u8,
-    pub base_revision: i64,
-    pub requires_confirmation: bool,
-    pub affected: Vec<FormsImpactItemV2>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub confirmation_token: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub surface_match_page: Option<SurfaceMatchPageV2>,
-}
-
-#[cfg(test)]
-mod forms_impact_node_type_tests {
-    use super::FormsImpactNodeType;
-
-    #[test]
-    fn internal_types_serialize_to_the_documented_wire_values() {
-        for value in [
-            "pos",
-            "grammar_structure",
-            "text_variant",
-            "sense",
-            "definition",
-            "sentence",
-            "relation",
-        ] {
-            assert_eq!(
-                serde_json::to_value(FormsImpactNodeType::from_internal(value)).unwrap(),
-                value
-            );
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DraftValidationIssue {
     pub step: PersistedWordStep,
@@ -1041,44 +724,6 @@ pub struct DraftNodeLocation {
     pub ancestor_node_ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct DraftValidationResponse {
-    #[schema(schema_with = schema_version_2_schema)]
-    pub schema_version: u8,
-    pub validated_revision: i64,
-    pub valid: bool,
-    pub issues: Vec<DraftValidationIssue>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ValidateAdminWordV2Input {
-    #[schema(minimum = 1)]
-    pub base_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PublishAdminWordV2Input {
-    #[schema(minimum = 1)]
-    pub base_revision: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub confirmed_surface_match_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ActivatePublicationInput {
-    #[schema(minimum = 1)]
-    pub base_revision: i64,
-    #[schema(minimum = 1)]
-    pub base_lifecycle_revision: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub confirmed_surface_match_token: Option<String>,
-}
-
 // --- lifecycle ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1119,12 +764,6 @@ pub struct EntryLifecycleBatchInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub confirmed_surface_match_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct EntryLifecycleBatchResponse {
-    pub words: Vec<AdminWordV2>,
-    pub affected: usize,
 }
 
 /// 一条词条被谁引用的预览项。`source_kind` 说明引用来自哪一类内容，
@@ -1222,12 +861,6 @@ pub enum RelatedSearchMatchMode {
     Contains,
 }
 
-#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
-pub struct RelatedWordSense {
-    pub sense_id: Uuid,
-    pub gloss: String,
-}
-
 /// 一侧词头的结构化形式。`headword` 是把这些拼写按同一顺序拼成的展示串，
 /// 想按管理员方言偏好重排就读这个数组——**不要切分 `" / "`**，短语词条的拼写里可能有斜杠。
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
@@ -1237,29 +870,15 @@ pub struct HeadwordVariant {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
-pub struct RelatedWordResult {
-    #[schema(schema_with = schema_version_2_schema)]
-    pub schema_version: u8,
-    pub word_id: Uuid,
-    pub headword: String,
-    pub kind: EntryKind,
-    pub dialects: Vec<Dialect>,
-    /// 每侧拼写，与 `dialects` 同序；`headword` 即本数组按序拼接。
-    pub headword_variants: Vec<HeadwordVariant>,
-    pub pos_labels: Vec<String>,
-    pub senses: Vec<RelatedWordSense>,
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelatedSearchLegacyResponse {
-    pub results: Vec<RelatedWordResultAny>,
+    pub results: Vec<RelatedWordResultV3>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelatedSearchV2Response {
-    pub results: Vec<RelatedWordResultAny>,
+    pub results: Vec<RelatedWordResultV3>,
     pub total: u64,
     #[schema(required = true, nullable = true)]
     pub next_cursor: Option<String>,
@@ -1273,49 +892,6 @@ pub enum RelatedSearchResponse {
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct AdminWordListItem {
-    /// Whether another visible active entry shares any base/headword prototype.
-    pub annotation_visible: bool,
-    #[serde(default)]
-    #[schema(required = true)]
-    pub annotation: Option<String>,
-    #[serde(default = "crate::lexicon::dto::default_annotation_revision")]
-    #[schema(required = true, minimum = 1)]
-    pub annotation_revision: i64,
-    #[schema(schema_with = schema_version_2_schema)]
-    pub schema_version: u8,
-    pub id: Uuid,
-    /// 并列拼写按管理员主词侧在前拼接，与 `dialects` 同序。
-    pub headword: String,
-    pub kind: EntryKind,
-    pub dialects: Vec<Dialect>,
-    /// 每侧拼写，与 `dialects` 同序；`headword` 即本数组按序拼接。
-    pub headword_variants: Vec<HeadwordVariant>,
-    /// 管理员主词侧；`mode = unified` 的词条没有主词侧，字段整体省略。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub source_dialect: Option<SourceDialect>,
-    pub revision: i64,
-    pub lifecycle_revision: i64,
-    pub gloss: String,
-    pub pos_list: Vec<String>,
-    pub levels: Vec<String>,
-    pub status: AdminWordStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub published_revision: Option<i64>,
-    pub has_unpublished_changes: bool,
-    pub max_reachable_step: WordCreationStep,
-    pub created_by_name: String,
-    /// 创建人 admin id；前端按「仅本人可删」判定归属时使用。
-    pub created_by: Uuid,
-    /// 被引用汇总；`total = 0` 即无人引用，可安全清理。
-    pub reference_summary: EntryReferenceSummary,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordListPage {
     pub page: u32,
@@ -1326,7 +902,7 @@ pub struct AdminWordListPage {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordListResponse {
-    pub words: Vec<AdminWordListItemAny>,
+    pub words: Vec<AdminWordListItemV3>,
     pub page: AdminWordListPage,
 }
 

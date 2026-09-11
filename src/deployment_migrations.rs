@@ -111,7 +111,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20260910200000;
+    const CURRENT_RELEASE_VERSION: i64 = 20260911140000;
 
     #[sqlx::test]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {
@@ -165,9 +165,8 @@ mod tests {
             r#"
             INSERT INTO lexicon.entries (
                 id, content_schema_version, language, kind, revision,
-                headword_mode, detection_snapshot,
-                created_by_admin_id, updated_by_admin_id
-            ) VALUES ($1, 3, 'en', 'word', 1, NULL, '{}', $2, $2)
+                detection_snapshot, created_by_admin_id, updated_by_admin_id
+            ) VALUES ($1, 3, 'en', 'word', 1, '{}', $2, $2)
             "#,
         )
         .bind(entry_id)
@@ -301,9 +300,8 @@ mod tests {
             r#"
             INSERT INTO lexicon.entries (
                 id, content_schema_version, language, kind, revision,
-                headword_mode, detection_snapshot,
-                created_by_admin_id, updated_by_admin_id
-            ) VALUES ($1, 3, 'en', 'word', 1, NULL, '{}', $2, $2)
+                detection_snapshot, created_by_admin_id, updated_by_admin_id
+            ) VALUES ($1, 3, 'en', 'word', 1, '{}', $2, $2)
             "#,
         )
         .bind(entry_id)
@@ -476,9 +474,8 @@ mod tests {
             r#"
             INSERT INTO lexicon.entries (
                 id, content_schema_version, language, kind, revision,
-                headword_mode, detection_snapshot,
-                created_by_admin_id, updated_by_admin_id
-            ) VALUES ($1, 3, 'en', 'word', 1, NULL, '{}', $2, $2)
+                detection_snapshot, created_by_admin_id, updated_by_admin_id
+            ) VALUES ($1, 3, 'en', 'word', 1, '{}', $2, $2)
             "#,
         )
         .bind(entry_id)

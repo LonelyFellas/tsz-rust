@@ -6,38 +6,29 @@ use uuid::Uuid;
 use crate::{
     lexicon::{
         dto::{
-            AdminWordAny, AdminWordV2, AdminWordV2Envelope, Dialect, DialectVariantSlotV2,
-            DraftMeaningsStepContent, EnglishTextV2, EntryKind, RichText, TextOrigin,
-            WordDefinitionV2, WordHeadwordsV2,
+            Dialect, DialectVariantSlotV2, DraftMeaningsStepContent, EnglishTextV2, EntryKind,
+            RichText, TextOrigin, WordDefinitionV2,
         },
         model::{
             CatalogPartRecord, CatalogSubPartRecord, ComponentTargetDraftRecord,
             DictionaryCandidateRecord, DictionaryContentRecord, DictionaryTermRecord,
-            DraftSenseTargetRecord, DuplicateRecord, EntryRecord, EntryReferenceRow,
-            FormsSurfaceAcknowledgementRecord, HistoricalPublicationRecord, IdempotencyRecord,
-            InboundSenseReferenceRecord, ListEntryRecord, ListFilter, NewPublicationSenseReference,
-            NewSentenceAssociation, NodeIdentityRecord, PublicationReadRecord,
-            PublishedEntrySnapshotRecord, PublishedFormSurfaceRecord, RegionEvidenceRecord,
-            RegionSurfaceRecord, RelatedSearchFilter, RelatedSearchRecord,
-            ResolvedRelationTargetRecord, ResolvedSenseTargetRecord, RetiredStableSlotRecord,
-            SenseTargetKey, SentenceAssociationRecord, SentenceAssociationScanRecord,
-            SentenceDiscoveryDraftRecord, SentenceDiscoverySurfaceRecord, StatsRecord,
-            SurfaceEntryContextRecord, SurfaceInboundRelationRecord, SurfaceLookupKey,
-            SurfaceSourceRecord,
+            DraftSenseTargetRecord, EntryRecord, EntryReferenceRow,
+            FormsSurfaceAcknowledgementRecord, IdempotencyRecord, InboundSenseReferenceRecord,
+            ListEntryRecord, ListFilter, NewSentenceAssociation, NodeIdentityRecord,
+            PublicationReadRecord, PublishedEntrySnapshotRecord, PublishedFormSurfaceRecord,
+            RegionEvidenceRecord, RegionSurfaceRecord, RelatedSearchFilter, RelatedSearchRecord,
+            ResolvedRelationTargetRecord, ResolvedSenseTargetRecord, SenseTargetKey,
+            SentenceAssociationRecord, SentenceAssociationScanRecord, SentenceDiscoveryDraftRecord,
+            SentenceDiscoverySurfaceRecord, StatsRecord, SurfaceInboundRelationRecord,
         },
         node_identity::{
-            BASE_FORM_ROLE, FORM_GROUP_ROLE, GRAMMAR_STRUCTURE_ROLE, POS_ROLE, PRONUNCIATION_ROLE,
-            RELATION_ROLE, SENSE_GROUP_ROLE, SENSE_ROLE, SENTENCE_ROLE, definition_role,
-            form_slot_role, form_variant_role, text_variant_role,
+            GRAMMAR_STRUCTURE_ROLE, RELATION_ROLE, SENSE_GROUP_ROLE, SENSE_ROLE, SENTENCE_ROLE,
+            definition_role, text_variant_role,
         },
-        normalization::{
-            HEADWORD_NORMALIZATION_VERSION, HeadwordNormalizationError, normalize_headword,
-            sha256_json,
-        },
-        provenance::headword_origin,
+        normalization::{HEADWORD_NORMALIZATION_VERSION, sha256_json},
         sentence_association::association_form_source_kinds,
     },
-    platform::{is_foreign_key_violation, is_unique_violation},
+    platform::is_foreign_key_violation,
 };
 
 mod dictionary;
@@ -54,15 +45,10 @@ mod surfaces;
 
 use entries::*;
 use projections::*;
-pub(crate) use surface_writes::{
-    SurfaceContentScope, SurfaceLockKey, SurfaceProjectionSource, surface_lock_keys,
-    surface_projection_sources,
-};
+pub(crate) use surface_writes::{SurfaceLockKey, SurfaceProjectionSource, surface_lock_keys};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LexiconRepositoryError {
-    #[error("headword already exists")]
-    DuplicateHeadword,
     #[error("lexicon invariant violated: {0}")]
     Invariant(&'static str),
     #[error("a referenced publication is being changed; retry the command")]

@@ -437,9 +437,9 @@ pub fn validate_meanings(
                 // 半绑定（给了词条没给词义，或反之）从未真正落库，但此前一路放行到写入，
                 // 才被库层 lexicon_relations_target_shape_check 拒掉，回给前端一个不透明的
                 // 500。根因是 bound_target() 为 zip，这种形状下返回 None，于是被当成「未绑定」。
-                // 只走这一份的是 V2 路径（V2 发布/校验与 V2 步骤保存）。V3 的保存被
-                // v3_contract::validate_meanings 提前拦下；V3 发布与 validate 端点两份都跑，
-                // 同码重复回出，banner 按文案去重，可接受。
+                // V3 的保存被 v3_contract::validate_meanings 提前拦下；发布与 validate 端点
+                // 两份都跑，同码重复回出，banner 按文案去重，可接受。V2 路径已下线，
+                // 这里不再是任何路径的唯一拦截点。
                 if relation.target_word_id.is_some() != relation.target_sense_id.is_some() {
                     issue(
                         &mut issues,

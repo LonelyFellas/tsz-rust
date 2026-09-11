@@ -76,7 +76,6 @@ pub enum ErrorCode {
     ValidationFailed,
     SmartLexiconV3StorageUnavailable,
     SmartLexiconV3DetectionUnavailable,
-    SmartLexiconV3PublicationRequiresMigrationCanary,
     DownstreamConfirmationRequired,
     EntryArchived,
     EntryNotDeletable,
@@ -122,7 +121,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 99] = [
+    pub const ALL: [Self; 98] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -188,7 +187,6 @@ impl ErrorCode {
         Self::ValidationFailed,
         Self::SmartLexiconV3StorageUnavailable,
         Self::SmartLexiconV3DetectionUnavailable,
-        Self::SmartLexiconV3PublicationRequiresMigrationCanary,
         Self::DownstreamConfirmationRequired,
         Self::EntryArchived,
         Self::EntryNotDeletable,
@@ -507,11 +505,6 @@ impl ErrorCode {
                 "Smart Lexicon V3 surface detection unavailable",
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
-            Self::SmartLexiconV3PublicationRequiresMigrationCanary => (
-                "smart_lexicon_v3_publication_requires_migration_canary",
-                "Smart Lexicon V3 publication requires an approved migration canary",
-                StatusCode::CONFLICT,
-            ),
             Self::DownstreamConfirmationRequired => (
                 "downstream_confirmation_required",
                 "Downstream confirmation required",
@@ -714,7 +707,7 @@ pub struct ProblemDetails {
     /// 多字段/多节点校验问题；智能词库等复杂表单按稳定 node_id 定位。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
-    pub field_issues: Option<Vec<crate::lexicon::dto::DraftValidationIssueAny>>,
+    pub field_issues: Option<Vec<crate::lexicon::dto::V3DraftValidationIssue>>,
     /// 领域错误的结构化上下文；客户端不得解析 detail 文案。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -756,7 +749,7 @@ pub struct ProblemMeta {
     pub reference_locations: Option<Vec<ProblemReferenceLocation>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
-    pub surface_match_page: Option<crate::lexicon::dto::SurfaceMatchPageAny>,
+    pub surface_match_page: Option<crate::lexicon::dto::SurfaceMatchPageV3>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub current_policy_name: Option<crate::lexicon::dto::SurfacePolicyNameV2>,
@@ -891,29 +884,11 @@ impl AppError {
         self
     }
 
-    pub fn with_field_issues(
-        mut self,
-        issues: &[crate::lexicon::dto::DraftValidationIssue],
-    ) -> Self {
-        self.response.field_issues = Some(
-            issues
-                .iter()
-                .map(|issue| crate::lexicon::dto::DraftValidationIssueAny::V2(issue.into()))
-                .collect(),
-        );
-        self
-    }
-
     pub fn with_v3_field_issues(
         mut self,
         issues: Vec<crate::lexicon::dto::V3DraftValidationIssue>,
     ) -> Self {
-        self.response.field_issues = Some(
-            issues
-                .into_iter()
-                .map(crate::lexicon::dto::DraftValidationIssueAny::V3)
-                .collect(),
-        );
+        self.response.field_issues = Some(issues);
         self
     }
 
@@ -1117,25 +1092,5 @@ mod tests {
         assert_eq!(body["status"], 422);
         assert_eq!(body["code"], "invalid_request_body");
         assert!(body.get("error").is_none());
-    }
-
-    #[tokio::test]
-    async fn v2_field_issues_are_versioned_in_the_actual_problem_payload() {
-        let issue = crate::lexicon::dto::DraftValidationIssue {
-            step: crate::lexicon::dto::PersistedWordStep::Forms,
-            node_id: uuid::Uuid::nil(),
-            field: "content".to_owned(),
-            code: "legacy_validation".to_owned(),
-            message: "legacy validation failed".to_owned(),
-            reference_location: None,
-            node_location: None,
-        };
-        let (_, body) = response_json(
-            AppError::unprocessable(ErrorCode::ValidationFailed, "validation failed")
-                .with_field_issues(&[issue]),
-        )
-        .await;
-        assert_eq!(body["field_issues"][0]["schema_version"], 2);
-        assert_eq!(body["field_issues"][0]["code"], "legacy_validation");
     }
 }

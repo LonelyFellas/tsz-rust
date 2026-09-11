@@ -23,7 +23,6 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
         "users_schema",
     ),
     "lexicon": (
-        "content_completion_handler",
         "dictionary_schema",
         "lexicon_*",
         "sentence_*",

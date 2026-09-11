@@ -11,8 +11,8 @@ use super::v3::{
 };
 use super::*;
 use crate::lexicon::dto::{
-    ActivatePublicationV3Input, AdminWordAny, AdminWordAnyEnvelope, AdminWordStatus, AdminWordV2,
-    AdminWordV3, DraftFormsStepContentV3, DraftMeaningsStepContent, DraftMeaningsStepContentV3,
+    ActivatePublicationV3Input, AdminWordStatus, AdminWordV3, AdminWordV3Envelope,
+    DraftFormsStepContentV3, DraftMeaningsStepContent, DraftMeaningsStepContentV3,
     PersistedWordStep, PhraseComponentUsageV3, PublishAdminWordV3Input,
     SentenceAssociationsStateV2, StepSaveIntent, WordRegionalVariantsV3,
 };
@@ -26,9 +26,6 @@ const V3_ACTIVATE_SCOPE: &str = "lexicon.publication.activate.v3";
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct V3PublicationState {
     origin: String,
-    migration_batch_id: Option<Uuid>,
-    source_publication_id: Option<Uuid>,
-    publication_canary_enabled: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -53,7 +50,7 @@ impl LexiconService {
         input: PublishAdminWordV3Input,
         allow_automatic_associations: bool,
         is_super_admin: bool,
-    ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
+    ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         let request_hash = sha256_json(&serde_json::json!({
             "entry_id": entry_id,
             "input": input,
@@ -80,7 +77,7 @@ impl LexiconService {
             tx.commit().await.map_err(database_error)?;
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
-        lock_v3_migration_entry(&mut tx, entry_id).await?;
+        lock_v3_publication_entry(&mut tx, entry_id).await?;
         preflight_v3_publication_eligibility(&mut tx, entry_id).await?;
 
         let verified_surface = self
@@ -332,8 +329,7 @@ impl LexiconService {
             word.lifecycle_revision,
         )
         .await?;
-        insert_v3_publish_event(&mut tx, entry_id, &publication, state.source_publication_id)
-            .await?;
+        insert_v3_publish_event(&mut tx, entry_id, &publication).await?;
         let response = v3_envelope(word);
         if let Some(confirmation) = verified_surface.as_ref() {
             LexiconRepository::insert_command_surface_confirmation_audits(
@@ -361,7 +357,6 @@ impl LexiconService {
             serde_json::json!({
                 "publication_id": publication.id,
                 "publication_number": publication.publication_number,
-                "source_v2_publication_id": state.source_publication_id,
             }),
             &response,
         )
@@ -379,7 +374,7 @@ impl LexiconService {
         publication_id: Uuid,
         idempotency_key: Uuid,
         input: ActivatePublicationV3Input,
-    ) -> Result<AdminWordAnyEnvelope, LexiconServiceError> {
+    ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         let request_hash = sha256_json(&serde_json::json!({
             "entry_id": entry_id,
             "publication_id": publication_id,
@@ -405,7 +400,7 @@ impl LexiconService {
             tx.commit().await.map_err(database_error)?;
             return serde_json::from_value(existing.response_body).map_err(serialization_error);
         }
-        lock_v3_migration_entry(&mut tx, entry_id).await?;
+        lock_v3_publication_entry(&mut tx, entry_id).await?;
         preflight_v3_publication_eligibility(&mut tx, entry_id).await?;
 
         let publication = versioned_publication(&mut tx, entry_id, publication_id)
@@ -589,10 +584,8 @@ async fn remove_verified_surface_confirmation(
     }
 }
 
-fn v3_envelope(word: AdminWordV3) -> AdminWordAnyEnvelope {
-    AdminWordAnyEnvelope {
-        word: AdminWordAny::V3(Box::new(word)),
-    }
+fn v3_envelope(word: AdminWordV3) -> AdminWordV3Envelope {
+    AdminWordV3Envelope { word }
 }
 
 async fn lock_v3_idempotency(
@@ -635,8 +628,7 @@ async fn v3_publication_state_for_update(
 ) -> Result<V3PublicationState, LexiconServiceError> {
     sqlx::query_as::<_, V3PublicationState>(
         r#"
-        SELECT origin, migration_batch_id, source_publication_id,
-               publication_canary_enabled
+        SELECT origin
         FROM lexicon.v3_entry_state
         WHERE entry_id = $1
         FOR UPDATE
@@ -649,14 +641,14 @@ async fn v3_publication_state_for_update(
     .ok_or_else(invariant_record)
 }
 
+/// 发布前先确认词条来源仍是原生 V3；别的取值说明库里混进了本版本不认识的 provenance。
 async fn preflight_v3_publication_eligibility(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
 ) -> Result<(), LexiconServiceError> {
     let state = sqlx::query_as::<_, V3PublicationState>(
         r#"
-        SELECT origin, migration_batch_id, source_publication_id,
-               publication_canary_enabled
+        SELECT origin
         FROM lexicon.v3_entry_state
         WHERE entry_id = $1
         "#,
@@ -665,120 +657,32 @@ async fn preflight_v3_publication_eligibility(
     .fetch_optional(&mut **tx)
     .await
     .map_err(database_error)?
-    .ok_or(LexiconServiceError::V3PublicationRequiresMigrationCanary)?;
-    match state.origin.as_str() {
-        "native" => ensure_native_publication_state(&state),
-        "migrated_v2" => preflight_migration_canary(tx, entry_id).await,
-        _ => Err(invariant_record()),
-    }
+    .ok_or_else(invariant_record)?;
+    ensure_native_publication_state(&state)
 }
 
-async fn preflight_migration_canary(
-    tx: &mut Transaction<'_, Postgres>,
-    entry_id: Uuid,
-) -> Result<(), LexiconServiceError> {
-    let eligible: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM lexicon.v3_entry_state state
-            JOIN lexicon.v3_migration_batches batch
-              ON batch.id = state.migration_batch_id
-            JOIN lexicon.v3_migration_entries migration
-              ON migration.batch_id = batch.id
-             AND migration.entry_id = state.entry_id
-            WHERE state.entry_id = $1
-              AND state.origin = 'migrated_v2'
-              AND state.publication_canary_enabled = TRUE
-              AND state.source_publication_id IS NOT NULL
-              AND migration.source_current_publication_id = state.source_publication_id
-              AND batch.status = 'verified'
-              AND migration.status = 'verified'
-        )
-        "#,
-    )
-    .bind(entry_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    if eligible {
-        Ok(())
-    } else {
-        Err(LexiconServiceError::V3PublicationRequiresMigrationCanary)
-    }
-}
-
-async fn lock_v3_migration_entry(
+async fn lock_v3_publication_entry(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
 ) -> Result<(), LexiconServiceError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("lexicon.v3-migration.entry:{entry_id}"))
+        .bind(format!("lexicon.v3-publication.entry:{entry_id}"))
         .execute(&mut **tx)
         .await
         .map_err(database_error)?;
     Ok(())
 }
 
-async fn ensure_migration_canary(
-    tx: &mut Transaction<'_, Postgres>,
-    entry_id: Uuid,
-    state: &V3PublicationState,
-) -> Result<(), LexiconServiceError> {
-    let (Some(batch_id), Some(source_publication_id)) =
-        (state.migration_batch_id, state.source_publication_id)
-    else {
-        return Err(LexiconServiceError::V3PublicationRequiresMigrationCanary);
-    };
-    if state.origin != "migrated_v2" || !state.publication_canary_enabled {
-        return Err(LexiconServiceError::V3PublicationRequiresMigrationCanary);
-    }
-    let verified = sqlx::query_as::<_, (String, String, Option<Uuid>)>(
-        r#"
-        SELECT batch.status, migration.status,
-               migration.source_current_publication_id
-        FROM lexicon.v3_migration_batches batch
-        JOIN lexicon.v3_migration_entries migration
-          ON migration.batch_id = batch.id
-        WHERE batch.id = $1 AND migration.entry_id = $2
-        FOR SHARE OF batch, migration
-        "#,
-    )
-    .bind(batch_id)
-    .bind(entry_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(database_error)?;
-    if verified.is_some_and(
-        |(batch_status, entry_status, migration_source_publication_id)| {
-            batch_status == "verified"
-                && entry_status == "verified"
-                && migration_source_publication_id == Some(source_publication_id)
-        },
-    ) {
-        Ok(())
-    } else {
-        Err(LexiconServiceError::V3PublicationRequiresMigrationCanary)
-    }
-}
-
 async fn ensure_v3_publication_eligibility(
-    tx: &mut Transaction<'_, Postgres>,
-    entry_id: Uuid,
+    _tx: &mut Transaction<'_, Postgres>,
+    _entry_id: Uuid,
     state: &V3PublicationState,
 ) -> Result<(), LexiconServiceError> {
-    match state.origin.as_str() {
-        "native" => ensure_native_publication_state(state),
-        "migrated_v2" => ensure_migration_canary(tx, entry_id, state).await,
-        _ => Err(invariant_record()),
-    }
+    ensure_native_publication_state(state)
 }
 
 fn ensure_native_publication_state(state: &V3PublicationState) -> Result<(), LexiconServiceError> {
-    if state.migration_batch_id.is_none()
-        && state.source_publication_id.is_none()
-        && !state.publication_canary_enabled
-    {
+    if state.origin == "native" {
         Ok(())
     } else {
         Err(invariant_record())
@@ -852,9 +756,6 @@ fn publication_meanings_for_reference_validation(
     publication: &VersionedPublication,
 ) -> Result<DraftMeaningsStepContent, LexiconServiceError> {
     match publication.content_schema_version {
-        2 => serde_json::from_value::<AdminWordV2>(publication.snapshot.clone())
-            .map(|word| word.meanings)
-            .map_err(serialization_error),
         3 => serde_json::from_value::<AdminWordV3>(publication.snapshot.clone())
             .map_err(serialization_error)
             .and_then(|word| v3_meanings_to_v2(&word.meanings)),
@@ -866,7 +767,6 @@ fn publication_forms_for_activation(
     publication: &VersionedPublication,
 ) -> Result<Option<DraftFormsStepContentV3>, LexiconServiceError> {
     match publication.content_schema_version {
-        2 => Ok(None),
         3 => serde_json::from_value::<AdminWordV3>(publication.snapshot.clone())
             .map(|word| Some(word.forms))
             .map_err(serialization_error),
@@ -1457,37 +1357,6 @@ async fn replace_current_publication_surfaces_from_snapshot(
     publication: &VersionedPublication,
 ) -> Result<(), LexiconServiceError> {
     match publication.content_schema_version {
-        2 => {
-            let word: AdminWordV2 = serde_json::from_value(publication.snapshot.clone())
-                .map_err(serialization_error)?;
-            let sources = crate::lexicon::repository::surface_projection_sources(&word)
-                .map_err(|_| invariant_record())?;
-            let event_offset = retire_current_publication_surfaces(
-                tx,
-                publication.entry_id,
-                publication.source_revision,
-            )
-            .await?;
-            for source in sources {
-                upsert_v2_publication_surface(
-                    tx,
-                    &source,
-                    publication.id,
-                    publication.source_revision,
-                    event_offset,
-                )
-                .await?;
-            }
-            insert_surface_projection_event(
-                tx,
-                publication.entry_id,
-                publication.id,
-                publication.source_revision,
-                event_offset,
-                publication.content_schema_version,
-            )
-            .await
-        }
         3 => {
             let word: AdminWordV3 = serde_json::from_value(publication.snapshot.clone())
                 .map_err(serialization_error)?;
@@ -1607,78 +1476,6 @@ async fn upsert_v3_publication_surface(
     .map_err(database_error)
 }
 
-async fn upsert_v2_publication_surface(
-    tx: &mut Transaction<'_, Postgres>,
-    source: &crate::lexicon::repository::SurfaceProjectionSource,
-    publication_id: Uuid,
-    source_revision: i64,
-    event_offset: i64,
-) -> Result<(), LexiconServiceError> {
-    sqlx::query(
-        r#"
-        INSERT INTO lexicon.surface_sources (
-            entry_id, source_id, source_kind, source_node_id, language,
-            entry_kind, dialect, dialect_scope, surface, normalized_surface,
-            normalization_version, source_revision, event_offset, is_deleted,
-            content_scope, publication_id, pos_id, pos, form_type,
-            content_schema_version, form_id, variant_id, group_ids,
-            projection_version, updated_at
-        ) VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9, $10,
-            $11, $12, $13, FALSE,
-            'current_publication', $14, $15, $16, $17,
-            2, NULL, NULL, NULL,
-            NULL, now()
-        )
-        ON CONFLICT (source_id, content_scope, dialect_scope, normalization_version)
-        DO UPDATE SET
-            entry_id = EXCLUDED.entry_id,
-            source_kind = EXCLUDED.source_kind,
-            source_node_id = EXCLUDED.source_node_id,
-            language = EXCLUDED.language,
-            entry_kind = EXCLUDED.entry_kind,
-            dialect = EXCLUDED.dialect,
-            surface = EXCLUDED.surface,
-            normalized_surface = EXCLUDED.normalized_surface,
-            source_revision = EXCLUDED.source_revision,
-            event_offset = EXCLUDED.event_offset,
-            is_deleted = FALSE,
-            publication_id = EXCLUDED.publication_id,
-            pos_id = EXCLUDED.pos_id,
-            pos = EXCLUDED.pos,
-            form_type = EXCLUDED.form_type,
-            content_schema_version = 2,
-            form_id = NULL,
-            variant_id = NULL,
-            group_ids = NULL,
-            projection_version = NULL,
-            updated_at = now()
-        "#,
-    )
-    .bind(source.entry_id)
-    .bind(&source.source_id)
-    .bind(source.source_kind)
-    .bind(source.source_node_id)
-    .bind(&source.language)
-    .bind(source.entry_kind)
-    .bind(source.dialect)
-    .bind(source.dialect_scope)
-    .bind(&source.surface)
-    .bind(&source.normalized_surface)
-    .bind(source.normalization_version)
-    .bind(source_revision)
-    .bind(event_offset)
-    .bind(publication_id)
-    .bind(source.pos_id)
-    .bind(&source.pos)
-    .bind(&source.form_type)
-    .execute(&mut **tx)
-    .await
-    .map(|_| ())
-    .map_err(database_error)
-}
-
 async fn insert_surface_projection_event(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
@@ -1720,11 +1517,6 @@ fn ensure_publication_snapshot_identity(
     entry_id: Uuid,
 ) -> Result<(), LexiconServiceError> {
     let snapshot_entry_id = match publication.content_schema_version {
-        2 => {
-            serde_json::from_value::<AdminWordV2>(publication.snapshot.clone())
-                .map_err(serialization_error)?
-                .id
-        }
         3 => {
             serde_json::from_value::<AdminWordV3>(publication.snapshot.clone())
                 .map_err(serialization_error)?
@@ -1743,7 +1535,6 @@ async fn insert_v3_publish_event(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     publication: &VersionedPublication,
-    source_v2_publication_id: Option<Uuid>,
 ) -> Result<(), LexiconServiceError> {
     sqlx::query(
         r#"
@@ -1764,7 +1555,6 @@ async fn insert_v3_publish_event(
         "publication_id": publication.id,
         "publication_number": publication.publication_number,
         "content_schema_version": 3,
-        "source_v2_publication_id": source_v2_publication_id,
     }))
     .bind(publication.published_at)
     .execute(&mut **tx)
@@ -1821,7 +1611,7 @@ async fn insert_v3_command_response(
     response_status: i16,
     action: &str,
     metadata: Value,
-    response: &AdminWordAnyEnvelope,
+    response: &AdminWordV3Envelope,
 ) -> Result<(), LexiconServiceError> {
     sqlx::query(
         r#"
@@ -1835,10 +1625,7 @@ async fn insert_v3_command_response(
     .bind(actor_id)
     .bind(action)
     .bind(entry_id)
-    .bind(match &response.word {
-        AdminWordAny::V2(word) => word.revision,
-        AdminWordAny::V3(word) => word.revision,
-    })
+    .bind(response.word.revision)
     .bind(request_id)
     .bind(metadata)
     .execute(&mut **tx)
@@ -1874,30 +1661,18 @@ mod eligibility_tests {
     use super::*;
 
     #[test]
-    fn native_publication_requires_absent_migration_provenance() {
-        let native = V3PublicationState {
-            origin: "native".to_owned(),
-            migration_batch_id: None,
-            source_publication_id: None,
-            publication_canary_enabled: false,
-        };
-        assert!(ensure_native_publication_state(&native).is_ok());
-
-        for invalid in [
-            V3PublicationState {
-                migration_batch_id: Some(Uuid::now_v7()),
-                ..native.clone()
-            },
-            V3PublicationState {
-                source_publication_id: Some(Uuid::now_v7()),
-                ..native.clone()
-            },
-            V3PublicationState {
-                publication_canary_enabled: true,
-                ..native.clone()
-            },
-        ] {
-            assert!(ensure_native_publication_state(&invalid).is_err());
-        }
+    fn only_native_provenance_may_publish() {
+        assert!(
+            ensure_native_publication_state(&V3PublicationState {
+                origin: "native".to_owned(),
+            })
+            .is_ok()
+        );
+        assert!(
+            ensure_native_publication_state(&V3PublicationState {
+                origin: "migrated_v2".to_owned(),
+            })
+            .is_err()
+        );
     }
 }

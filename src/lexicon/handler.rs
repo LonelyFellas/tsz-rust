@@ -14,25 +14,18 @@ use crate::{
     lexicon::{
         detection_store::DetectionStore,
         dto::{
-            ActivatePublicationAnyInput, ActivatePublicationInput, ActivatePublicationV3Input,
-            AdminWordAny, AdminWordAnyEnvelope, AdminWordDraftAnyEnvelope, AdminWordListQuery,
-            AdminWordListResponse, AdminWordPublicationAny, AdminWordPublicationEnvelope,
-            AdminWordPublicationListResponse, AdminWordStats, AdminWordV3Capabilities,
-            CreateAdminWordAnyInput, CreateAdminWordV2Input, CreateAdminWordV3Input,
-            DeleteDraftInput, DetectLexiconInputAny, DetectLexiconResponseAny,
-            DetectLexiconSurfaceV3Input, DetectWordInputV2, DraftValidationResponseAny,
-            EntryDeleteBatchInput, EntryDeleteBatchResponse, EntryLifecycleBatchInput,
-            EntryLifecycleBatchResponseAny, EntryLifecycleInput, EntryPath, FormsImpactResponseAny,
-            PreviewFormsImpactInputAny, PreviewFormsImpactInputV2, PreviewFormsImpactInputV3,
-            PublicationPath, PublishAdminWordAnyInput, PublishAdminWordV2Input,
+            ActivatePublicationV3Input, AdminWordDraftV3Envelope, AdminWordListQuery,
+            AdminWordListResponse, AdminWordPublicationEnvelope, AdminWordPublicationListResponse,
+            AdminWordStats, AdminWordV3Capabilities, AdminWordV3Envelope, CreateAdminWordV3Input,
+            DeleteDraftInput, DetectLexiconSurfaceResponseV3, DetectLexiconSurfaceV3Input,
+            DraftValidationResponseV3, EntryDeleteBatchInput, EntryDeleteBatchResponse,
+            EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput, EntryPath,
+            FormsImpactResponseV3, PreviewFormsImpactInputV3, PublicationPath,
             PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
-            ResolveSentenceTargetsV3Input, ResolveSentenceTargetsV3Response, SaveFormsStepInput,
-            SaveFormsStepInputAny, SaveFormsStepInputV3, SaveMeaningsStepInput,
-            SaveMeaningsStepInputAny, SaveMeaningsStepInputV3, SearchComponentTargetsV3Input,
-            SearchComponentTargetsV3Response, StepSaveIntent, SuggestDialectVariantsInputV2,
-            SuggestDialectVariantsResponseV2, SurfaceMatchPageAny, SurfaceMatchSnapshotPathV2,
-            SurfaceMatchSnapshotQueryV2, ValidateAdminWordAnyInput, ValidateAdminWordV2Input,
-            ValidateAdminWordV3Input,
+            ResolveSentenceTargetsV3Input, ResolveSentenceTargetsV3Response, SaveFormsStepInputV3,
+            SaveMeaningsStepInputV3, SearchComponentTargetsV3Input,
+            SearchComponentTargetsV3Response, StepSaveIntent, SurfaceMatchPageV3,
+            SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2, ValidateAdminWordV3Input,
         },
         impact_store::ImpactStore,
         repository::LexiconRepository,
@@ -51,7 +44,7 @@ pub(crate) mod query;
 
 pub use commands::{
     activate_publication, create, detect, preview_forms_impact, publish, save_forms, save_meanings,
-    suggest_dialect_variants, validate,
+    validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
 pub use query::{
@@ -99,20 +92,6 @@ fn v3_detection_unavailable() -> AppError {
     )
 }
 
-fn v3_publication_requires_migration_canary() -> AppError {
-    AppError::conflict(
-        ErrorCode::SmartLexiconV3PublicationRequiresMigrationCanary,
-        None,
-        "Phase 1 only permits server-whitelisted migrated V3 entries to publish",
-    )
-}
-
-fn apply_legacy_bridge_read_flag(response: &mut AdminWordAnyEnvelope, enabled: bool) {
-    if !enabled && let AdminWordAny::V3(word) = &mut response.word {
-        word.compatibility = None;
-    }
-}
-
 fn sentence_association_enabled(flags: SmartLexiconV3Flags) -> bool {
     flags.read && flags.edit && flags.projection && flags.sentence_associations
 }
@@ -129,62 +108,6 @@ fn apply_capability_flags(capabilities: &mut AdminWordV3Capabilities, flags: Sma
     capabilities.sentence_target_discovery = Some(sentence_target_discovery_enabled(flags));
     capabilities.draft_relation_prebinding = Some(false);
     capabilities.sense_component_usages = Some(true);
-}
-
-fn apply_sentence_association_flag(
-    response: &mut AdminWordAnyEnvelope,
-    flags: SmartLexiconV3Flags,
-) {
-    if let AdminWordAny::V3(word) = &mut response.word {
-        apply_capability_flags(&mut word.capabilities, flags);
-    }
-}
-
-fn apply_lifecycle_batch_legacy_bridge_read_flag(
-    response: &mut EntryLifecycleBatchResponseAny,
-    enabled: bool,
-) {
-    if enabled {
-        return;
-    }
-    for word in &mut response.words {
-        if let AdminWordAny::V3(word) = word {
-            word.compatibility = None;
-        }
-    }
-}
-
-fn apply_draft_legacy_bridge_read_flag(response: &mut AdminWordDraftAnyEnvelope, enabled: bool) {
-    if !enabled && let AdminWordDraftAnyEnvelope::V3(envelope) = response {
-        envelope.word.compatibility = None;
-    }
-}
-
-fn apply_draft_sentence_association_flag(
-    response: &mut AdminWordDraftAnyEnvelope,
-    flags: SmartLexiconV3Flags,
-) {
-    if let AdminWordDraftAnyEnvelope::V3(envelope) = response {
-        apply_capability_flags(&mut envelope.word.capabilities, flags);
-    }
-}
-
-fn apply_publication_sentence_association_flag(
-    publication: &mut AdminWordPublicationAny,
-    flags: SmartLexiconV3Flags,
-) {
-    if let AdminWordPublicationAny::V3(publication) = publication {
-        apply_capability_flags(&mut publication.word.capabilities, flags);
-    }
-}
-
-fn apply_publication_legacy_bridge_read_flag(
-    publication: &mut AdminWordPublicationAny,
-    enabled: bool,
-) {
-    if !enabled && let AdminWordPublicationAny::V3(publication) = publication {
-        publication.word.compatibility = None;
-    }
 }
 
 fn map_error(error: LexiconServiceError) -> AppError {
@@ -240,31 +163,13 @@ fn map_error(error: LexiconServiceError) -> AppError {
         LexiconServiceError::DetectionExpired => {
             AppError::gone(ErrorCode::DetectionExpired, "detection expired")
         }
-        LexiconServiceError::SurfaceMatchAcknowledgementRequired(page) => AppError::conflict(
-            ErrorCode::SurfaceMatchAcknowledgementRequired,
-            None,
-            "surface match acknowledgement is required",
-        )
-        .with_meta(ProblemMeta {
-            surface_match_page: Some(SurfaceMatchPageAny::V2(*page)),
-            ..ProblemMeta::default()
-        }),
         LexiconServiceError::SurfaceMatchAcknowledgementRequiredV3(page) => AppError::conflict(
             ErrorCode::SurfaceMatchAcknowledgementRequired,
             None,
             "surface match acknowledgement is required",
         )
         .with_meta(ProblemMeta {
-            surface_match_page: Some(SurfaceMatchPageAny::V3(*page)),
-            ..ProblemMeta::default()
-        }),
-        LexiconServiceError::SurfaceMatchesChanged(page) => AppError::conflict(
-            ErrorCode::SurfaceMatchesChanged,
-            None,
-            "surface matches changed since confirmation",
-        )
-        .with_meta(ProblemMeta {
-            surface_match_page: Some(SurfaceMatchPageAny::V2(*page)),
+            surface_match_page: Some(*page),
             ..ProblemMeta::default()
         }),
         LexiconServiceError::SurfaceMatchesChangedV3(page) => AppError::conflict(
@@ -273,7 +178,7 @@ fn map_error(error: LexiconServiceError) -> AppError {
             "surface matches changed since confirmation",
         )
         .with_meta(ProblemMeta {
-            surface_match_page: Some(SurfaceMatchPageAny::V3(*page)),
+            surface_match_page: Some(*page),
             ..ProblemMeta::default()
         }),
         LexiconServiceError::SurfaceMatchesChangedWithoutSnapshot => AppError::conflict(
@@ -295,26 +200,6 @@ fn map_error(error: LexiconServiceError) -> AppError {
             current_policy_epoch: Some(policy.epoch),
             ..ProblemMeta::default()
         }),
-        LexiconServiceError::ExactHeadwordCreationTemporarilyDisabled(page) => AppError::conflict(
-            ErrorCode::ExactHeadwordCreationTemporarilyDisabled,
-            None,
-            "exact headword creation is temporarily disabled",
-        )
-        .with_meta(ProblemMeta {
-            surface_match_page: Some(SurfaceMatchPageAny::V2(*page)),
-            ..ProblemMeta::default()
-        }),
-        LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabled(page) => {
-            AppError::conflict(
-                ErrorCode::MultipleActiveExactHeadwordPublicationsNotEnabled,
-                None,
-                "multiple active exact headword publications are not enabled",
-            )
-            .with_meta(ProblemMeta {
-                surface_match_page: Some(SurfaceMatchPageAny::V2(*page)),
-                ..ProblemMeta::default()
-            })
-        }
         LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabledV3(page) => {
             AppError::conflict(
                 ErrorCode::MultipleActiveExactHeadwordPublicationsNotEnabled,
@@ -322,7 +207,7 @@ fn map_error(error: LexiconServiceError) -> AppError {
                 "multiple active exact headword publications are not enabled",
             )
             .with_meta(ProblemMeta {
-                surface_match_page: Some(SurfaceMatchPageAny::V3(*page)),
+                surface_match_page: Some(*page),
                 ..ProblemMeta::default()
             })
         }
@@ -471,18 +356,11 @@ fn map_error(error: LexiconServiceError) -> AppError {
             None,
             "the form operation would break an existing reference",
         ),
-        LexiconServiceError::V3PublicationRequiresMigrationCanary => {
-            v3_publication_requires_migration_canary()
-        }
         LexiconServiceError::StepNotReachable => AppError::conflict(
             ErrorCode::StepNotReachable,
             None,
             "previous step is incomplete",
         ),
-        LexiconServiceError::ValidationFailed(issues) => {
-            AppError::unprocessable(ErrorCode::ValidationFailed, "draft validation failed")
-                .with_field_issues(&issues)
-        }
         LexiconServiceError::ValidationFailedV3(issues) => {
             AppError::unprocessable(ErrorCode::ValidationFailed, "V3 draft validation failed")
                 .with_v3_field_issues(issues)

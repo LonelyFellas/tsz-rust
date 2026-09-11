@@ -21,7 +21,9 @@ use crate::{
     speech::{MAX_SPEECH_RATE_PERCENT, MIN_SPEECH_RATE_PERCENT},
 };
 
-pub(crate) fn request_schema_version(value: &Value) -> Result<Option<u8>, AppError> {
+/// V3 是唯一受支持的内容格式。缺 `schema_version` 的历史请求体与 `schema_version: 2`
+/// 都在这里被拒，两者用不同的错误码区分「没带版本」和「带了不受支持的版本」。
+pub(crate) fn require_schema_version_3(value: &Value) -> Result<(), AppError> {
     let Some(raw) = value.get("schema_version") else {
         return Err(AppError::unprocessable(
             ErrorCode::InvalidRequestBody,
@@ -31,11 +33,11 @@ pub(crate) fn request_schema_version(value: &Value) -> Result<Option<u8>, AppErr
     let Some(number) = raw.as_number() else {
         return Err(AppError::unprocessable(
             ErrorCode::InvalidRequestBody,
-            "schema_version must be integer 2 or 3",
+            "schema_version must be integer 3",
         ));
     };
     match number.as_u64() {
-        Some(version @ (2 | 3)) => Ok(Some(version as u8)),
+        Some(3) => Ok(()),
         Some(_) => Err(AppError::unprocessable(
             ErrorCode::UnsupportedSchemaVersion,
             "unsupported schema_version",
@@ -46,16 +48,9 @@ pub(crate) fn request_schema_version(value: &Value) -> Result<Option<u8>, AppErr
         )),
         _ => Err(AppError::unprocessable(
             ErrorCode::InvalidRequestBody,
-            "schema_version must be integer 2 or 3",
+            "schema_version must be integer 3",
         )),
     }
-}
-
-pub(crate) fn request_schema_version_or_legacy(value: &Value) -> Result<Option<u8>, AppError> {
-    if value.get("schema_version").is_none() {
-        return Ok(None);
-    }
-    request_schema_version(value)
 }
 
 pub(crate) fn decode_request<T: DeserializeOwned>(value: Value) -> Result<T, AppError> {
@@ -2364,27 +2359,19 @@ mod tests {
     #[test]
     fn schema_version_shape_and_unknown_integers_fail_with_distinct_codes() {
         for raw in [json!("3"), json!(null), json!(true), json!(3.0)] {
-            let error = request_schema_version(&json!({"schema_version": raw}))
+            let error = require_schema_version_3(&json!({"schema_version": raw}))
                 .expect_err("non-integer schema version must fail");
             assert_eq!(error.code(), ErrorCode::InvalidRequestBody);
         }
-        for raw in [json!(-1), json!(256), json!(1), json!(4)] {
+        for raw in [json!(-1), json!(256), json!(1), json!(2), json!(4)] {
             let value = json!({"schema_version": raw});
-            let error = request_schema_version(&value).expect_err("unknown version must fail");
+            let error = require_schema_version_3(&value).expect_err("unknown version must fail");
             assert_eq!(error.code(), ErrorCode::UnsupportedSchemaVersion);
         }
-        let error = request_schema_version(&json!({}))
+        let error = require_schema_version_3(&json!({}))
             .expect_err("missing schema version must fail strict parsing");
         assert_eq!(error.code(), ErrorCode::InvalidRequestBody);
-        assert_eq!(request_schema_version_or_legacy(&json!({})).unwrap(), None);
-        assert_eq!(
-            request_schema_version(&json!({"schema_version": 2})).unwrap(),
-            Some(2)
-        );
-        assert_eq!(
-            request_schema_version(&json!({"schema_version": 3})).unwrap(),
-            Some(3)
-        );
+        require_schema_version_3(&json!({"schema_version": 3})).expect("V3 是唯一受支持的版本");
     }
 }
 

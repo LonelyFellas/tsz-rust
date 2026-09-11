@@ -69,7 +69,7 @@ fn decode_related_search_cursor(encoded: &str, key: &[u8]) -> Result<RelatedSear
 
 fn related_search_response(
     v2: bool,
-    results: Vec<RelatedWordResultAny>,
+    results: Vec<RelatedWordResultV3>,
     total: u64,
     next_cursor: Option<String>,
 ) -> RelatedSearchResponse {
@@ -172,7 +172,6 @@ impl LexiconService {
     pub async fn publication_history(
         &self,
         entry_id: Uuid,
-        include_v3: bool,
     ) -> Result<AdminWordPublicationListResponse, LexiconServiceError> {
         let records = self
             .repository
@@ -183,12 +182,7 @@ impl LexiconService {
         let publications = records
             .into_iter()
             .map(publication_from_record)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|publication| {
-                include_v3 || matches!(publication, AdminWordPublicationAny::V2(_))
-            })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(AdminWordPublicationListResponse { publications })
     }
 
@@ -205,45 +199,6 @@ impl LexiconService {
             .ok_or(LexiconServiceError::PublicationNotFound)?;
         Ok(AdminWordPublicationEnvelope {
             publication: publication_from_record(record)?,
-        })
-    }
-
-    pub async fn get(&self, id: Uuid) -> Result<AdminWordV2Envelope, LexiconServiceError> {
-        let record = self
-            .repository
-            .entry_by_id(id)
-            .await
-            .map_err(repository_error)?
-            .ok_or(LexiconServiceError::WordNotFound)?;
-        let mut word = entry_from_record(record)?;
-        self.hydrate_sentence_associations(&mut word).await?;
-        Ok(AdminWordV2Envelope { word })
-    }
-
-    /// 编辑器打开草稿走这里：除词条本体外还带上已退役的稳定槽位身份。
-    ///
-    /// 命令类接口只回 [`AdminWordV2Envelope`]，因为提交方自己就知道刚退役了什么；
-    /// 刷新和换设备才需要服务端把身份补回来。
-    pub async fn get_draft(
-        &self,
-        id: Uuid,
-    ) -> Result<AdminWordDraftV2Envelope, LexiconServiceError> {
-        let word = self.get(id).await?.word;
-        let retired_stable_slots = self
-            .repository
-            .retired_stable_slots(id)
-            .await
-            .map_err(repository_error)?
-            .into_iter()
-            .map(|record| RetiredStableSlotV2 {
-                id: record.id,
-                parent_node_id: record.parent_node_id,
-                node_role: record.node_role,
-            })
-            .collect();
-        Ok(AdminWordDraftV2Envelope {
-            word,
-            retired_stable_slots,
         })
     }
 
@@ -408,43 +363,13 @@ impl LexiconService {
         let last_status_rank = records.last().map(|record| record.status_rank);
         let results = records
             .into_iter()
-            .map(|record| match record.content_schema_version {
-                2 => {
-                    let word: AdminWordV2 =
-                        serde_json::from_value(record.snapshot).map_err(serialization_error)?;
-                    let headword_variants = ordered_headword_sides(&word.headwords)
-                        .into_iter()
-                        .map(|(dialect, headword)| HeadwordVariant {
-                            dialect,
-                            headword: headword.to_owned(),
-                        })
-                        .collect::<Vec<_>>();
-                    let dialects = headword_variants
-                        .iter()
-                        .map(|variant| variant.dialect)
-                        .collect();
-                    let senses = word
-                        .meanings
-                        .pos
-                        .iter()
-                        .flat_map(|pos| &pos.senses)
-                        .map(|sense| RelatedWordSense {
-                            sense_id: sense.id,
-                            gloss: published_sense_gloss(sense),
-                        })
-                        .collect();
-                    Ok(RelatedWordResultAny::V2(RelatedWordResult {
-                        schema_version: 2,
-                        word_id: word.id,
-                        headword: published_word_headword(&word),
-                        kind: word.kind,
-                        dialects,
-                        headword_variants,
-                        pos_labels: record.pos_labels,
-                        senses,
-                    }))
+            .map(|record| {
+                if record.content_schema_version != 3 {
+                    return Err(LexiconServiceError::UnsupportedSchemaVersion(
+                        record.content_schema_version,
+                    ));
                 }
-                3 => {
+                {
                     let (entry_id, kind, presentation, forms, meanings, status) = if record.status
                         == "draft"
                     {
@@ -490,7 +415,7 @@ impl LexiconService {
                             gloss: related_v3_sense_gloss(sense),
                         })
                         .collect();
-                    Ok(RelatedWordResultAny::V3(RelatedWordResultV3 {
+                    Ok(RelatedWordResultV3 {
                         schema_version: 3,
                         entry_id,
                         kind,
@@ -498,20 +423,14 @@ impl LexiconService {
                         presentation,
                         matches,
                         senses,
-                    }))
+                    })
                 }
-                version => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
             })
             .collect::<Result<Vec<_>, LexiconServiceError>>()?;
         let consumed = cursor.consumed + results.len() as u64;
         let next_cursor = (v2 && !results.is_empty() && consumed < total).then(|| {
             let last = results.last().expect("non-empty page has a last result");
-            let (last_kind, last_word_id) = match last {
-                RelatedWordResultAny::V2(result) => (result.kind, result.word_id),
-                RelatedWordResultAny::V3(result) => {
-                    (entry_kind_from_v3(result.kind), result.entry_id)
-                }
-            };
+            let (last_kind, last_word_id) = (entry_kind_from_v3(last.kind), last.entry_id);
             let next = RelatedSearchCursor {
                 total,
                 consumed,
@@ -614,21 +533,6 @@ impl LexiconService {
         let words = records
             .into_iter()
             .map(|record| {
-                // 方言与拼写按同一排序键成对取回；先配对再解析，
-                // 解析失败的方言会连着它那一侧拼写一起丢掉，两个数组不会错位。
-                let headword_variants = record
-                    .dialects
-                    .iter()
-                    .zip(record.headword_spellings)
-                    .filter_map(|(dialect, headword)| {
-                        parse_dialect(dialect).map(|dialect| HeadwordVariant { dialect, headword })
-                    })
-                    .collect::<Vec<_>>();
-                let headword = headword_variants
-                    .iter()
-                    .map(|variant| variant.headword.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" / ");
                 let status = if record.is_archived {
                     AdminWordStatus::Archived
                 } else if record.is_published {
@@ -636,43 +540,13 @@ impl LexiconService {
                 } else {
                     AdminWordStatus::Draft
                 };
-                match record.content_schema_version {
-                    2 => Ok(AdminWordListItem {
-                        schema_version: 2,
-                        id: record.id,
-                        headword,
-                        kind: parse_kind(&record.kind).unwrap_or(EntryKind::Word),
-                        source_dialect: record
-                            .source_dialect
-                            .as_deref()
-                            .and_then(parse_source_dialect),
-                        dialects: headword_variants
-                            .iter()
-                            .map(|variant| variant.dialect)
-                            .collect(),
-                        headword_variants,
-                        revision: record.revision,
-                        lifecycle_revision: record.lifecycle_revision,
-                        annotation_visible: annotation_visible_ids.contains(&record.id),
-                        annotation: record.annotation,
-                        annotation_revision: record.annotation_revision,
-                        gloss: record.gloss,
-                        pos_list: record.pos_list,
-                        levels: record.levels,
-                        status,
-                        published_revision: record.published_revision,
-                        has_unpublished_changes: record.has_unpublished_changes,
-                        max_reachable_step: max_reachable_step(&record.completed_steps),
-                        created_by_name: record.created_by_name,
-                        created_by: record.created_by,
-                        reference_summary: reference_summaries
-                            .remove(&record.id)
-                            .unwrap_or_default(),
-                        created_at: record.created_at,
-                        updated_at: record.updated_at,
-                    }
-                    .into()),
-                    3 => {
+                if record.content_schema_version != 3 {
+                    return Err(LexiconServiceError::UnsupportedSchemaVersion(
+                        record.content_schema_version,
+                    ));
+                }
+                {
+                    {
                         let presentation = match (
                             record.presentation_label,
                             record.presentation_surfaces,
@@ -685,15 +559,6 @@ impl LexiconService {
                                     strategy_version,
                                 }
                             }
-                            _ if !headword_variants.is_empty() => {
-                                let bridge = legacy_bridge_from_list(
-                                    &headword_variants,
-                                    record.source_dialect.as_deref(),
-                                )?;
-                                crate::lexicon::v3_projection::presentation_from_legacy_bridge(
-                                    record.id, &bridge,
-                                )
-                            }
                             _ => {
                                 let forms: DraftFormsStepContentV3 =
                                     serde_json::from_value(record.forms)
@@ -704,7 +569,7 @@ impl LexiconService {
                                 .map_err(|_| invariant_record())?
                             }
                         };
-                        Ok(AdminWordListItemAny::V3(AdminWordListItemV3 {
+                        Ok(AdminWordListItemV3 {
                             schema_version: 3,
                             id: record.id,
                             kind: parse_v3_kind(&record.kind).ok_or_else(invariant_record)?,
@@ -729,9 +594,8 @@ impl LexiconService {
                                 .unwrap_or_default(),
                             created_at: record.created_at,
                             updated_at: record.updated_at,
-                        }))
+                        })
                     }
-                    version => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
                 }
             })
             .collect::<Result<Vec<_>, LexiconServiceError>>()?;
@@ -761,44 +625,24 @@ impl LexiconService {
 
 fn publication_from_record(
     record: PublicationReadRecord,
-) -> Result<AdminWordPublicationAny, LexiconServiceError> {
-    match record.content_schema_version {
-        2 => {
-            let word: AdminWordV2 =
-                serde_json::from_value(record.snapshot).map_err(serialization_error)?;
-            Ok(AdminWordPublicationAny::V2(Box::new(
-                AdminWordPublicationV2 {
-                    schema_version: 2,
-                    publication_id: record.id,
-                    entry_id: record.entry_id,
-                    publication_number: record.publication_number,
-                    source_revision: record.source_revision,
-                    word,
-                    published_by_admin_id: record.published_by_admin_id,
-                    published_at: record.published_at,
-                    is_current: record.is_current,
-                },
-            )))
-        }
-        3 => {
-            let word: AdminWordV3 =
-                serde_json::from_value(record.snapshot).map_err(serialization_error)?;
-            Ok(AdminWordPublicationAny::V3(Box::new(
-                AdminWordPublicationV3 {
-                    schema_version: 3,
-                    publication_id: record.id,
-                    entry_id: record.entry_id,
-                    publication_number: record.publication_number,
-                    source_revision: record.source_revision,
-                    word,
-                    published_by_admin_id: record.published_by_admin_id,
-                    published_at: record.published_at,
-                    is_current: record.is_current,
-                },
-            )))
-        }
-        version => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
+) -> Result<AdminWordPublicationV3, LexiconServiceError> {
+    if record.content_schema_version != 3 {
+        return Err(LexiconServiceError::UnsupportedSchemaVersion(
+            record.content_schema_version,
+        ));
     }
+    let word: AdminWordV3 = serde_json::from_value(record.snapshot).map_err(serialization_error)?;
+    Ok(AdminWordPublicationV3 {
+        schema_version: 3,
+        publication_id: record.id,
+        entry_id: record.entry_id,
+        publication_number: record.publication_number,
+        source_revision: record.source_revision,
+        word,
+        published_by_admin_id: record.published_by_admin_id,
+        published_at: record.published_at,
+        is_current: record.is_current,
+    })
 }
 
 /// V3 列表行的方言摘要，按词性**当前**的拼写设置聚合：任一词性区分英美 → `[uk, us]`，
@@ -813,190 +657,6 @@ fn v3_list_dialects(pos_spelling_modes: &[String]) -> Vec<Dialect> {
     } else {
         vec![Dialect::Common]
     }
-}
-
-fn legacy_bridge_from_list(
-    variants: &[HeadwordVariant],
-    source_dialect: Option<&str>,
-) -> Result<LegacyHeadwordsCompatibilityV3, LexiconServiceError> {
-    if let Some(common) = variants
-        .iter()
-        .find(|variant| variant.dialect == Dialect::Common)
-    {
-        return Ok(LegacyHeadwordsCompatibilityV3::Unified {
-            common: common.headword.clone(),
-        });
-    }
-    let uk = variants
-        .iter()
-        .find(|variant| variant.dialect == Dialect::Uk)
-        .ok_or_else(invariant_record)?;
-    let us = variants
-        .iter()
-        .find(|variant| variant.dialect == Dialect::Us)
-        .ok_or_else(invariant_record)?;
-    Ok(LegacyHeadwordsCompatibilityV3::Distinguish {
-        uk: uk.headword.clone(),
-        us: us.headword.clone(),
-        source_dialect: match source_dialect {
-            Some("uk") => SourceDialect::Uk,
-            Some("us") => SourceDialect::Us,
-            _ => return Err(invariant_record()),
-        },
-    })
-}
-
-// --- dialect suggestion ---
-
-impl LexiconService {
-    pub async fn suggest_dialect_variants(
-        &self,
-        input: SuggestDialectVariantsInputV2,
-    ) -> Result<SuggestDialectVariantsResponseV2, LexiconServiceError> {
-        validate_request(&input)?;
-
-        let keys = evidence_keys(&input.items);
-        let surfaces = self
-            .repository
-            .region_surfaces(&keys)
-            .await
-            .map_err(repository_error)?;
-        let source_surfaces = surfaces
-            .into_iter()
-            .filter(|surface| {
-                family_matches_source_dialect(&surface.region_family, input.source_dialect)
-            })
-            .collect::<Vec<_>>();
-        let target_keys = source_surfaces
-            .iter()
-            .flat_map(|surface| &surface.targets)
-            .filter_map(|target| normalize_headword(target).ok().map(|value| value.key))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut candidates = self
-            .repository
-            .dictionary_candidates(&target_keys)
-            .await
-            .map_err(repository_error)?;
-        candidates.sort_by(|left, right| {
-            left.normalized_term
-                .cmp(&right.normalized_term)
-                .then_with(|| left.term.cmp(&right.term))
-        });
-        let candidate_by_key = candidates
-            .into_iter()
-            .filter(|candidate| {
-                family_matches_source_dialect(&candidate.region_family, input.target_dialect)
-            })
-            .map(|candidate| (candidate.normalized_term, candidate.term))
-            .collect::<HashMap<_, _>>();
-        let mut replacements = HashMap::new();
-        for surface in source_surfaces {
-            let counterpart = surface.targets.iter().find_map(|target| {
-                normalize_headword(target)
-                    .ok()
-                    .and_then(|normalized| candidate_by_key.get(&normalized.key))
-            });
-            if let Some(counterpart) = counterpart {
-                replacements.insert(surface.normalized_term, counterpart.clone());
-            }
-        }
-
-        let provider = DictionaryRegionRulesProvider;
-        let suggestions = input
-            .items
-            .iter()
-            .filter_map(|item| provider.suggest(item, &replacements))
-            .collect();
-        Ok(SuggestDialectVariantsResponseV2 {
-            provider: DialectSuggestionProviderV2 {
-                kind: provider.kind().to_owned(),
-                version: provider.version().to_owned(),
-            },
-            suggestions,
-        })
-    }
-}
-
-fn validate_request(input: &SuggestDialectVariantsInputV2) -> Result<(), LexiconServiceError> {
-    if input.source_dialect == input.target_dialect {
-        return Err(semantic(
-            "target_dialect",
-            "target_dialect must differ from source_dialect",
-        ));
-    }
-    if input.items.is_empty() || input.items.len() > 100 {
-        return Err(semantic(
-            "items",
-            "items must contain between 1 and 100 values",
-        ));
-    }
-    let mut client_ids = std::collections::HashSet::new();
-    for item in &input.items {
-        let client_id = item.client_id();
-        if client_id.trim().is_empty() || client_id.chars().count() > 100 {
-            return Err(semantic(
-                "items.client_id",
-                "client_id must contain between 1 and 100 characters",
-            ));
-        }
-        if !client_ids.insert(client_id) {
-            return Err(semantic(
-                "items.client_id",
-                "client_id must be unique within one request",
-            ));
-        }
-        match item {
-            DialectVariantSuggestionItemV2::Form {
-                field_kind, value, ..
-            } => {
-                if *field_kind != DialectSuggestionFieldKind::Form {
-                    return Err(semantic(
-                        "items.field_kind",
-                        "string values require field_kind form",
-                    ));
-                }
-                if value.trim().is_empty() || value.chars().count() > 200 {
-                    return Err(semantic(
-                        "items.value",
-                        "form values must contain between 1 and 200 characters",
-                    ));
-                }
-                normalize_headword(value)
-                    .map_err(|_| semantic("items.value", "form value is not valid text"))?;
-            }
-            DialectVariantSuggestionItemV2::RichText {
-                field_kind, value, ..
-            } => {
-                if !matches!(
-                    field_kind,
-                    DialectSuggestionFieldKind::Definition | DialectSuggestionFieldKind::Example
-                ) {
-                    return Err(semantic(
-                        "items.field_kind",
-                        "rich text values require definition or example field_kind",
-                    ));
-                }
-                let mut canonical = value.clone();
-                if crate::lexicon::rich_text::canonicalize(&mut canonical).is_err() {
-                    return Err(semantic("items.value", "rich text value is invalid"));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn semantic(field: &'static str, message: &'static str) -> LexiconServiceError {
-    LexiconServiceError::UnprocessableField { field, message }
-}
-
-fn family_matches_source_dialect(family: &str, dialect: SourceDialect) -> bool {
-    matches!(
-        (family_dialect(family), dialect),
-        (Some(Dialect::Uk), SourceDialect::Uk) | (Some(Dialect::Us), SourceDialect::Us)
-    )
 }
 
 /// 把展开的引用行折叠成按 target 分组的汇总。

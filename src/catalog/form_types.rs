@@ -115,8 +115,7 @@ SELECT to_jsonb(f) || jsonb_build_object(
     'created_by', jsonb_build_object('id', coalesce(creator.id::text, 'system'), 'display_name', coalesce(creator.display_name, '系统')),
     'updated_by', CASE WHEN updater.id IS NULL THEN NULL ELSE jsonb_build_object('id',updater.id::text,'display_name',updater.display_name) END,
     'usage_count', (SELECT count(*) FROM (
-        SELECT entry_id FROM lexicon.form_slots WHERE form_type = f.code
-        UNION SELECT entry_id FROM lexicon.v3_concrete_forms WHERE form_type = f.code
+        SELECT entry_id FROM lexicon.v3_concrete_forms WHERE form_type = f.code
         UNION SELECT entry_id FROM lexicon.entry_publication_form_type_refs WHERE form_type = f.code
         UNION SELECT entry_id FROM lexicon.sentence_associations WHERE resolved_form_type = f.code
         UNION SELECT entry_id FROM lexicon.v3_phrase_sense_component_usages WHERE target_form_type = f.code

@@ -61,7 +61,7 @@ fn v3_fixture(form_count: usize) -> V3Fixture {
             "strategy_version": "sentence-association-test-v1"
         },
         "capabilities": {
-            "publication": {"mode": "migration_canary", "whitelisted": true},
+            "publication": {"mode": "native"},
             "pronunciation_normalization_version": "nfkc_trim_lower_v1"
         },
         "forms": {
@@ -210,7 +210,6 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
     };
 
     let target = PublishedAssociationTarget {
-        schema_version: 3,
         id: Uuid::now_v7(),
         kind: EntryKind::Word,
         headword: "hang".to_owned(),
@@ -316,78 +315,6 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
     ];
     assert_eq!(inventory(first), expected);
     assert_eq!(inventory(second), expected);
-}
-
-#[test]
-fn v2_target_candidate_forms_carry_no_base_form_ids() {
-    // 短语成分只接受 V3 发布的目标，V2 目标的词形一律不给可搭配的原形：调用方按「为空不可选」
-    // 一条规则处理即可。候选行自身的 base_form_id 仍要有值——它是候选的身份（发现结果按它分组），
-    // 只是不表示可用作成分。
-    let publication_id = Uuid::now_v7();
-    let pos_id = Uuid::now_v7();
-    let base_form_id = Uuid::now_v7();
-    let variant_id = Uuid::now_v7();
-    let target = PublishedAssociationTarget {
-        schema_version: 2,
-        id: Uuid::now_v7(),
-        kind: EntryKind::Word,
-        headword: "location".to_owned(),
-        pos: vec![PublishedAssociationPos {
-            id: pos_id,
-            pos: "noun".to_owned(),
-            forms: vec![PublishedAssociationForm {
-                id: base_form_id,
-                form_type: "base".to_owned(),
-                base_form_ids: vec![base_form_id],
-                variants: vec![PublishedAssociationVariant {
-                    id: variant_id,
-                    dialect: Dialect::Common,
-                    spelling: "location".to_owned(),
-                    component_usages: Vec::new(),
-                }],
-            }],
-            senses: vec![PublishedAssociationSense {
-                id: Uuid::now_v7(),
-                level: "A1".to_owned(),
-                gloss: "位置".to_owned(),
-                component_usages: Vec::new(),
-            }],
-        }],
-    };
-
-    let candidates = target.sentence_discovery_candidates(
-        Some(publication_id),
-        pos_id,
-        base_form_id,
-        variant_id,
-        Some(SentenceTargetMatchEvidenceV3 {
-            surface: "location".to_owned(),
-            normalized_surface: "location".to_owned(),
-            match_kind: SentenceTargetMatchKindV3::Word,
-        }),
-    );
-
-    let [candidate] = candidates.as_slice() else {
-        panic!("V2 目标应展开成一条候选，实际 {}", candidates.len());
-    };
-    assert_eq!(
-        candidate.base_form_id, base_form_id,
-        "候选行身份仍取自 V2 的唯一原形"
-    );
-    assert_eq!(
-        candidate.forms.len(),
-        1,
-        "词形清单本身照常给出，空的只是 base_form_ids：{:?}",
-        candidate.forms
-    );
-    assert!(
-        candidate
-            .forms
-            .iter()
-            .all(|form| form.base_form_ids.is_empty()),
-        "V2 目标的词形不给可搭配的原形：{:?}",
-        candidate.forms
-    );
 }
 
 #[test]

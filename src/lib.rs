@@ -192,18 +192,6 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         .map(|speech| speech.build_provider())
         .transpose()?
         .map(|provider| Arc::new(provider) as Arc<dyn speech::SpeechProvider>);
-    let lexicon_content_generator = match config.lexicon_generator.clone() {
-        Some(crate::lexicon::content_completion::LexiconGeneratorConfig::OpenAi(config)) => Some(
-            Arc::new(crate::lexicon::content_completion::OpenAiContentGenerator::new(config)?)
-                as Arc<dyn crate::lexicon::content_completion::LexiconContentGenerator>,
-        ),
-        Some(crate::lexicon::content_completion::LexiconGeneratorConfig::Qwen(config)) => Some(
-            Arc::new(crate::lexicon::content_completion::QwenContentGenerator::new(config)?)
-                as Arc<dyn crate::lexicon::content_completion::LexiconContentGenerator>,
-        ),
-        None => None,
-    };
-
     let addr = std::net::SocketAddr::new(config.bind_ip, config.port.get());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on {addr}");
@@ -243,14 +231,10 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         cookie_secure: config.cookie_secure,
         object_storage,
         speech_provider,
-        lexicon_content_generator: lexicon_content_generator.clone(),
         smart_lexicon_v3_flags: config.smart_lexicon_v3_flags,
     };
 
     if !config.deployment_smoke_only {
-        if let Some(generator) = lexicon_content_generator {
-            crate::lexicon::content_completion::run_worker(state.pool.clone(), generator);
-        }
         crate::speech::preview::run_worker(state.pool.clone());
         crate::lexicon::audio_assets::run_worker(
             state.pool.clone(),

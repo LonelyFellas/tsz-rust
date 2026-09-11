@@ -1,4 +1,5 @@
 use super::*;
+use crate::lexicon::dto::AdminWordV3;
 
 impl LexiconRepository {
     pub(crate) async fn lifecycle_schema_versions(
@@ -65,53 +66,6 @@ impl LexiconRepository {
         .map_err(LexiconRepositoryError::Database)
     }
 
-    pub(crate) async fn lifecycle_v2_publication_surface_evidence(
-        tx: &mut Transaction<'_, Postgres>,
-        entry_ids: &[Uuid],
-    ) -> Result<Vec<serde_json::Value>, LexiconRepositoryError> {
-        if entry_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        sqlx::query_scalar(
-            r#"
-            SELECT jsonb_build_object(
-                'entry_id', source.entry_id,
-                'publication_id', source.publication_id,
-                'source_id', source.source_id,
-                'source_kind', source.source_kind,
-                'source_node_id', source.source_node_id,
-                'language', source.language,
-                'entry_kind', source.entry_kind,
-                'dialect', source.dialect,
-                'dialect_scope', source.dialect_scope,
-                'surface', source.surface,
-                'normalized_surface', source.normalized_surface,
-                'normalization_version', source.normalization_version,
-                'source_revision', source.source_revision,
-                'event_offset', source.event_offset,
-                'content_scope', source.content_scope,
-                'pos_id', source.pos_id,
-                'pos', source.pos,
-                'form_type', source.form_type,
-                'content_schema_version', source.content_schema_version
-            )
-            FROM lexicon.surface_sources source
-            JOIN lexicon.entries entry ON entry.id = source.entry_id
-            WHERE source.entry_id = ANY($1)
-              AND source.content_schema_version = 2
-              AND source.content_scope = 'current_publication'
-              AND source.publication_id = entry.current_publication_id
-              AND source.is_deleted = FALSE
-            ORDER BY source.entry_id, source.source_id, source.dialect_scope,
-                     source.normalization_version, source.event_offset
-            "#,
-        )
-        .bind(entry_ids)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(LexiconRepositoryError::Database)
-    }
-
     pub(crate) async fn retire_v3_draft_surface_projection(
         tx: &mut Transaction<'_, Postgres>,
         entry_id: Uuid,
@@ -173,29 +127,18 @@ impl LexiconRepository {
 
     pub(crate) async fn transition_lifecycle(
         tx: &mut Transaction<'_, Postgres>,
-        word: &AdminWordAny,
+        word: &AdminWordV3,
         actor_id: Uuid,
         request_id: Uuid,
     ) -> Result<(), LexiconRepositoryError> {
-        let (id, revision, lifecycle_revision, status, updated_at, published_revision) = match word
-        {
-            AdminWordAny::V2(word) => (
-                word.id,
-                word.revision,
-                word.lifecycle_revision,
-                word.status,
-                word.updated_at,
-                word.published_revision,
-            ),
-            AdminWordAny::V3(word) => (
-                word.id,
-                word.revision,
-                word.lifecycle_revision,
-                word.status,
-                word.updated_at,
-                word.published_revision,
-            ),
-        };
+        let (id, revision, lifecycle_revision, status, updated_at, published_revision) = (
+            word.id,
+            word.revision,
+            word.lifecycle_revision,
+            word.status,
+            word.updated_at,
+            word.published_revision,
+        );
         let archived = matches!(status, crate::lexicon::dto::AdminWordStatus::Archived);
         let updated = sqlx::query(
             r#"

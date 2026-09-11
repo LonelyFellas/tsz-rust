@@ -82,7 +82,6 @@ use utoipa::{
         crate::lexicon::handler::query::stats,
         crate::lexicon::handler::commands::detect,
         crate::lexicon::handler::query::surface_match_snapshot_page,
-        crate::lexicon::handler::commands::suggest_dialect_variants,
         crate::lexicon::handler::commands::create,
         crate::lexicon::handler::commands::update_annotation,
         crate::lexicon::handler::lifecycle::archive_batch,
@@ -102,9 +101,6 @@ use utoipa::{
         crate::lexicon::handler::commands::activate_publication,
         crate::lexicon::handler::query::resolve_sentence_targets,
         crate::lexicon::handler::query::search_component_targets,
-        crate::lexicon::content_completion::handler::create_content_completion_job,
-        crate::lexicon::content_completion::handler::get_content_completion_job,
-        crate::lexicon::content_completion::handler::retry_content_completion_job,
         crate::lexicon::audio_assets::handler::create_audio_upload,
         crate::lexicon::audio_assets::handler::confirm_audio_asset,
         crate::lexicon::audio_assets::handler::audio_asset_url,
@@ -180,9 +176,6 @@ use utoipa::{
             crate::lexicon::dto::SourceDialect,
             crate::lexicon::dto::TextOrigin,
             crate::lexicon::dto::WordHeadwordsV2,
-            crate::lexicon::dto::DetectWordInputV2,
-            crate::lexicon::dto::DetectionRequestEcho,
-            crate::lexicon::dto::DuplicateWordMatchV2,
             crate::lexicon::dto::SurfaceMatchCandidateV2,
             crate::lexicon::dto::ExistingSurfaceSourceV2,
             crate::lexicon::dto::SurfaceContentScopeV2,
@@ -191,34 +184,12 @@ use utoipa::{
             crate::lexicon::dto::SurfaceAttentionLevelV2,
             crate::lexicon::dto::SurfaceMatchSeverityV2,
             crate::lexicon::dto::ExistingSurfaceMatchV2,
-            crate::lexicon::dto::LexiconSurfaceMatchV2,
             crate::lexicon::dto::RelationTypeV2,
             crate::lexicon::dto::RelationReferenceCountsV2,
             crate::lexicon::dto::RelationReferencePreviewV2,
             crate::lexicon::dto::RelationReferenceSummaryV2,
-            crate::lexicon::dto::MatchedEntryContextV2,
             crate::lexicon::dto::SurfacePolicyNameV2,
             crate::lexicon::dto::SurfacePolicyBlockCodeV2,
-            crate::lexicon::dto::SurfaceContinuationEnabledV2,
-            crate::lexicon::dto::SurfaceContinuationDisabledV2,
-            crate::lexicon::dto::SurfaceMatchPageBaseV2,
-            crate::lexicon::dto::SurfaceMatchEnabledNextPageV2,
-            crate::lexicon::dto::SurfaceMatchEnabledTerminalPageV2,
-            crate::lexicon::dto::SurfaceMatchTemporarilyDisabledPageV2,
-            crate::lexicon::dto::SurfaceMatchPageV2,
-            crate::lexicon::dto::SmartDictionaryResultV2,
-            crate::lexicon::dto::BuiltinDictionaryResultV2,
-            crate::lexicon::dto::DetectWordResponseV2,
-            crate::lexicon::dto::CreateAdminWordV2Input,
-            crate::lexicon::dto::PronunciationStyle,
-            crate::lexicon::dto::WordPronunciationV2,
-            crate::lexicon::dto::WordFormVariantV2,
-            crate::lexicon::dto::WordBaseFormSlotV2,
-            crate::lexicon::dto::WordDerivedFormSlotV2,
-            crate::lexicon::dto::WordFormGroupV2,
-            crate::lexicon::dto::DialectRulesV2,
-            crate::lexicon::dto::WordPosFormsV2,
-            crate::lexicon::dto::DraftFormsStepContent,
             crate::lexicon::dto::RichTextSpan,
             crate::lexicon::dto::RichTextSpanKind,
             crate::lexicon::dto::RichTextEmphasisLevel,
@@ -227,62 +198,20 @@ use utoipa::{
             crate::lexicon::dto::RichTextAnnotation,
             crate::lexicon::dto::RichTextV1,
             crate::lexicon::dto::RichTextV2,
-            crate::lexicon::dto::RichText,
-            crate::lexicon::dto::TextVariantV2<crate::lexicon::dto::RichText>,
-            crate::lexicon::dto::DialectVariantSlotV2<crate::lexicon::dto::RichText>,
-            crate::lexicon::dto::EnglishTextV2,
-            crate::lexicon::dto::GrammarVariantV2,
-            crate::lexicon::dto::GrammarStructureV2,
-            crate::lexicon::dto::WordDefinitionV2,
-            crate::lexicon::dto::WordSentenceLinkV2,
-            crate::lexicon::dto::SentenceSourceRangeV1,
-            crate::lexicon::dto::SentenceAssociationOriginV2,
-            crate::lexicon::dto::SentenceAssociationStateV1,
-            crate::lexicon::dto::SentenceAssociationsStateV2,
-            crate::lexicon::dto::WordSentenceAssociationV2,
-            crate::lexicon::dto::WordSentenceV2,
-            crate::lexicon::dto::WordRelationV2,
-            crate::lexicon::dto::WordSenseV2,
-            crate::lexicon::dto::SenseGroupV2,
-            crate::lexicon::dto::WordPosMeaningsV2,
-            crate::lexicon::dto::DraftMeaningsStepContent,
-            crate::lexicon::dto::WordDetectionSnapshotV2,
-            crate::lexicon::dto::WordDetectionSnapshotSmartDictionaryV2,
-            crate::lexicon::dto::DetectionSurfaceWarningAuditV2,
-            crate::lexicon::dto::DetectionSurfaceMatchPreviewV2,
             crate::lexicon::dto::PersistedWordStep,
             crate::lexicon::dto::WordCreationStep,
             crate::lexicon::dto::AdminWordStatus,
-            crate::lexicon::dto::AdminWordV2,
-            crate::lexicon::dto::AdminWordV2Envelope,
-            crate::lexicon::dto::RetiredStableSlotV2,
-            crate::lexicon::dto::AdminWordDraftV2Envelope,
-            crate::lexicon::dto::AdminWordListItem,
             crate::lexicon::dto::AdminWordListPage,
             crate::lexicon::dto::AdminWordListResponse,
-            crate::lexicon::dto::RelatedWordSense,
-            crate::lexicon::dto::RelatedWordResult,
-            crate::lexicon::dto::HeadwordVariant,
             crate::lexicon::dto::RelatedSearchMatchMode,
             crate::lexicon::dto::RelatedSearchLegacyResponse,
             crate::lexicon::dto::RelatedSearchV2Response,
             crate::lexicon::dto::RelatedSearchResponse,
             crate::lexicon::dto::AdminWordStats,
             crate::lexicon::dto::StepSaveIntent,
-            crate::lexicon::dto::SaveFormsStepInput,
-            crate::lexicon::dto::SaveMeaningsStepInput,
-            crate::lexicon::dto::PreviewFormsImpactInputV2,
-            crate::lexicon::dto::FormsImpactItemV2,
-            crate::lexicon::dto::FormsImpactResponseV2,
-            crate::lexicon::dto::DraftValidationIssue,
-            crate::lexicon::dto::DraftValidationIssueV2,
-            crate::lexicon::dto::DraftValidationIssueAny,
+            crate::lexicon::dto::V3DraftValidationIssue,
             crate::lexicon::dto::DraftReferenceLocation,
             crate::lexicon::dto::DraftNodeLocation,
-            crate::lexicon::dto::DraftValidationResponse,
-            crate::lexicon::dto::ValidateAdminWordV2Input,
-            crate::lexicon::dto::PublishAdminWordV2Input,
-            crate::lexicon::dto::ActivatePublicationInput,
             crate::lexicon::dto::DeleteDraftInput,
             crate::lexicon::dto::EntryLifecycleInput,
             crate::lexicon::dto::EntryLifecycleTarget,
@@ -353,45 +282,28 @@ use utoipa::{
             crate::lexicon::dto::WordPosMeaningsWritableV3,
             crate::lexicon::dto::DraftMeaningsStepContentWritableV3,
             crate::lexicon::dto::EntryPresentationV3,
-            crate::lexicon::dto::LegacyHeadwordsCompatibilityV3,
-            crate::lexicon::dto::AdminWordV3Compatibility,
-            crate::lexicon::dto::V3PublicationBlockCode,
             crate::lexicon::dto::V3PublicationCapability,
             crate::lexicon::dto::PronunciationNormalizationVersionV3,
             crate::lexicon::dto::AdminWordV3Capabilities,
             crate::lexicon::dto::AdminWordV3,
-            crate::lexicon::dto::AdminWordAny,
-            crate::lexicon::dto::AdminWordAnyEnvelope,
+            crate::lexicon::dto::AdminWordV3Envelope,
             crate::lexicon::dto::AdminWordDraftV3Envelope,
             crate::lexicon::dto::V3RetiredNodeRole,
             crate::lexicon::dto::RetiredStableNodeV3,
-            crate::lexicon::dto::AdminWordDraftAnyEnvelope,
-            crate::lexicon::dto::EntryLifecycleBatchResponseAny,
             crate::lexicon::dto::CreateAdminWordV3Input,
-            crate::lexicon::dto::CreateAdminWordAnyInput,
             crate::lexicon::dto::PreviewFormsImpactInputV3,
-            crate::lexicon::dto::PreviewFormsImpactInputAny,
             crate::lexicon::dto::SaveFormsStepInputV3,
-            crate::lexicon::dto::SaveFormsStepInputAny,
             crate::lexicon::dto::SaveMeaningsStepInputV3,
-            crate::lexicon::dto::SaveMeaningsStepInputAny,
             crate::lexicon::dto::ValidateAdminWordV3Input,
-            crate::lexicon::dto::ValidateAdminWordAnyInput,
             crate::lexicon::dto::PublishAdminWordV3Input,
-            crate::lexicon::dto::PublishAdminWordAnyInput,
             crate::lexicon::dto::ActivatePublicationV3Input,
-            crate::lexicon::dto::ActivatePublicationAnyInput,
             crate::lexicon::dto::FormsImpactResponseV3,
             crate::lexicon::dto::FormsImpactNodeTypeV3,
             crate::lexicon::dto::FormsImpactItemV3,
-            crate::lexicon::dto::FormsImpactResponseAny,
             crate::lexicon::dto::V3ValidationIssueCode,
             crate::lexicon::dto::V3DraftNodeLocation,
-            crate::lexicon::dto::V3DraftValidationIssue,
             crate::lexicon::dto::DraftValidationResponseV3,
-            crate::lexicon::dto::DraftValidationResponseAny,
             crate::lexicon::dto::FormSurfaceMatchV3,
-            crate::lexicon::dto::LegacySurfaceMatchV3,
             crate::lexicon::dto::SurfaceMatchItemV3,
             crate::lexicon::dto::RelationReferencePreviewV3,
             crate::lexicon::dto::RelationReferenceSummaryV3,
@@ -401,9 +313,7 @@ use utoipa::{
             crate::lexicon::dto::SurfaceMatchEnabledTerminalPageV3,
             crate::lexicon::dto::SurfaceMatchTemporarilyDisabledPageV3,
             crate::lexicon::dto::SurfaceMatchPageV3,
-            crate::lexicon::dto::SurfaceMatchPageAny,
             crate::lexicon::dto::DetectLexiconSurfaceV3Input,
-            crate::lexicon::dto::DetectLexiconInputAny,
             crate::lexicon::dto::DetectionSurfaceRequestEchoV3,
             crate::lexicon::dto::DictionaryProviderEvidenceV3,
             crate::lexicon::dto::DictionaryCoverageV3,
@@ -416,37 +326,13 @@ use utoipa::{
             crate::lexicon::dto::SuggestedConcreteFormV3,
             crate::lexicon::dto::BuiltinDictionaryEvidenceV3,
             crate::lexicon::dto::DetectLexiconSurfaceResponseV3,
-            crate::lexicon::dto::DetectLexiconResponseAny,
-            crate::lexicon::dto::AdminWordPublicationV2,
             crate::lexicon::dto::AdminWordPublicationV3,
-            crate::lexicon::dto::AdminWordPublicationAny,
             crate::lexicon::dto::AdminWordPublicationEnvelope,
             crate::lexicon::dto::AdminWordPublicationListResponse,
             crate::lexicon::dto::AdminWordListItemV3,
-            crate::lexicon::dto::AdminWordListItemAny,
             crate::lexicon::dto::RelatedWordMatchV3,
             crate::lexicon::dto::RelatedWordSenseV3,
             crate::lexicon::dto::RelatedWordResultV3,
-            crate::lexicon::dto::RelatedWordResultAny,
-            crate::lexicon::dto::DialectSuggestionFieldKind,
-            crate::lexicon::dto::DialectVariantSuggestionItemV2,
-            crate::lexicon::dto::SuggestDialectVariantsInputV2,
-            crate::lexicon::dto::DialectSuggestionProviderV2,
-            crate::lexicon::dto::SuggestDialectVariantsResponseV2,
-            crate::lexicon::content_completion::dto::ContentCompletionScope,
-            crate::lexicon::content_completion::dto::ContentCompletionFillPolicy,
-            crate::lexicon::content_completion::dto::ContentCompletionJobStatus,
-            crate::lexicon::content_completion::dto::ContentCompletionPartitionStatus,
-            crate::lexicon::content_completion::dto::CreateContentCompletionJobInput,
-            crate::lexicon::content_completion::dto::RetryContentCompletionJobInput,
-            crate::lexicon::content_completion::dto::ContentCompletionDictionaryProvenance,
-            crate::lexicon::content_completion::dto::ContentCompletionGenerationProvenance,
-            crate::lexicon::content_completion::dto::ContentCompletionEvidenceKind,
-            crate::lexicon::content_completion::dto::ContentCompletionFieldOrigins,
-            crate::lexicon::content_completion::dto::ContentCompletionProvenance,
-            crate::lexicon::content_completion::dto::ContentCompletionPartition,
-            crate::lexicon::content_completion::dto::ContentCompletionJob,
-            crate::lexicon::content_completion::dto::ContentCompletionJobEnvelope,
             crate::lexicon::audio_assets::dto::AudioAssetLocale,
             crate::lexicon::audio_assets::dto::AudioAssetGender,
             crate::lexicon::audio_assets::dto::CreateAudioUploadRequest,
@@ -478,10 +364,8 @@ use utoipa::{
 )]
 pub struct ApiDoc;
 
-/// `utoipa` represents a flattened Rust enum as `allOf(base, oneOf(...))`.
-/// That shape cannot make both the base and variant objects closed without
-/// accidentally rejecting one another's fields. Replace only this aggregate
-/// with two complete, closed branches so OpenAPI mirrors serde's strict union.
+/// Utoipa emits internally tagged enum branches as open objects. Close the
+/// tagged unions that stay on the wire so OpenAPI mirrors serde's strict union.
 struct DetectionSnapshotSchemaAddon;
 
 impl Modify for DetectionSnapshotSchemaAddon {
@@ -490,28 +374,7 @@ impl Modify for DetectionSnapshotSchemaAddon {
             .components
             .as_mut()
             .expect("derived OpenAPI must contain components");
-
-        let smart_dictionary = components
-            .schemas
-            .get("WordDetectionSnapshotSmartDictionaryV2")
-            .cloned()
-            .expect("smart dictionary snapshot union must be registered");
-        let mut smart_dictionary_json =
-            serde_json::to_value(smart_dictionary).expect("snapshot union schema must serialize");
-        for branch in smart_dictionary_json["oneOf"]
-            .as_array_mut()
-            .expect("snapshot union must have oneOf branches")
-        {
-            branch["additionalProperties"] = serde_json::json!(false);
-        }
-        components.schemas.insert(
-            "WordDetectionSnapshotSmartDictionaryV2".to_owned(),
-            serde_json::from_value(smart_dictionary_json)
-                .expect("closed snapshot union schema must deserialize"),
-        );
-
         for name in [
-            "SmartDictionaryResultV2",
             "SurfaceMatchCandidateV2",
             "ExistingSurfaceSourceV2",
             "SurfaceMatchItemV3",
@@ -529,67 +392,36 @@ impl Modify for DetectionSnapshotSchemaAddon {
                     .unwrap_or_else(|_| panic!("closed schema {name} must deserialize")),
             );
         }
-
-        let aggregate = components
-            .schemas
-            .get("WordDetectionSnapshotV2")
-            .cloned()
-            .expect("word detection snapshot must be registered");
-        let aggregate_json =
-            serde_json::to_value(aggregate).expect("word detection snapshot schema must serialize");
-        let base = aggregate_json["allOf"]
-            .as_array()
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|item| item["properties"]["detection_id"].is_object())
-            })
-            .cloned()
-            .expect("flattened snapshot schema must contain its base object");
-
-        let mut clear = base.clone();
-        close_detection_snapshot_branch(&mut clear, "clear", false);
-        let mut warning = base;
-        close_detection_snapshot_branch(&mut warning, "warning", true);
-        let strict = serde_json::json!({
-            "oneOf": [clear, warning],
-            "discriminator": {"propertyName": "smart_dictionary_status"}
-        });
-        components.schemas.insert(
-            "WordDetectionSnapshotV2".to_owned(),
-            serde_json::from_value::<RefOr<Schema>>(strict)
-                .expect("strict word detection snapshot schema must deserialize"),
-        );
-
-        let page_base = component_schema_json(components, "SurfaceMatchPageBaseV2");
-        let mut complete_pages = Vec::new();
-        for name in [
-            "SurfaceMatchEnabledNextPageV2",
-            "SurfaceMatchEnabledTerminalPageV2",
-            "SurfaceMatchTemporarilyDisabledPageV2",
-        ] {
-            let flattened = component_schema_json(components, name);
-            let extension = flattened["allOf"]
-                .as_array()
-                .and_then(|items| items.iter().find(|item| item["properties"].is_object()))
-                .cloned()
-                .expect("flattened surface page must contain variant fields");
-            let complete = complete_surface_page_branch(&page_base, &extension);
-            components.schemas.insert(
-                name.to_owned(),
-                serde_json::from_value(complete.clone())
-                    .expect("closed surface page branch must deserialize"),
-            );
-            complete_pages.push(complete);
-        }
-        components.schemas.insert(
-            "SurfaceMatchPageV2".to_owned(),
-            serde_json::from_value::<RefOr<Schema>>(serde_json::json!({
-                "oneOf": complete_pages
-            }))
-            .expect("complete surface page union must deserialize"),
-        );
     }
+}
+
+fn complete_surface_page_branch(
+    base: &serde_json::Value,
+    extension: &serde_json::Value,
+) -> serde_json::Value {
+    let mut complete = base.clone();
+    complete["additionalProperties"] = serde_json::json!(false);
+    complete["properties"]
+        .as_object_mut()
+        .expect("surface page base properties must be an object")
+        .extend(
+            extension["properties"]
+                .as_object()
+                .expect("surface page extension properties must be an object")
+                .clone(),
+        );
+    let required = complete["required"]
+        .as_array_mut()
+        .expect("surface page base required fields must be an array");
+    for field in extension["required"]
+        .as_array()
+        .expect("surface page extension required fields must be an array")
+    {
+        if !required.contains(field) {
+            required.push(field.clone());
+        }
+    }
+    complete
 }
 
 fn component_schema_json(
@@ -623,12 +455,10 @@ impl Modify for SmartLexiconV3SchemaAddon {
             ("EnglishTextV3", "mode"),
             ("WordDefinitionV3", "definition_mode"),
             ("RichTextAnnotationV3", "type"),
-            ("LegacyHeadwordsCompatibilityV3", "mode"),
             ("SuggestedRegionalVariantsV3", "mode"),
             ("BuiltinDictionaryEvidenceV3", "status"),
             ("ResolveSentenceTargetsV3Input", "mode"),
             ("PhraseComponentUsageV3", "state"),
-            ("WordSentenceAssociationV2", "state"),
             ("WordSentenceAssociationV3", "state"),
         ] {
             let mut union = component_schema_json(components, name);
@@ -767,55 +597,6 @@ impl Modify for SmartLexiconV3SchemaAddon {
             }))
             .expect("complete V3 surface page union must deserialize"),
         );
-    }
-}
-
-fn complete_surface_page_branch(
-    base: &serde_json::Value,
-    extension: &serde_json::Value,
-) -> serde_json::Value {
-    let mut complete = base.clone();
-    complete["additionalProperties"] = serde_json::json!(false);
-    complete["properties"]
-        .as_object_mut()
-        .expect("surface page base properties must be an object")
-        .extend(
-            extension["properties"]
-                .as_object()
-                .expect("surface page extension properties must be an object")
-                .clone(),
-        );
-    let required = complete["required"]
-        .as_array_mut()
-        .expect("surface page base required fields must be an array");
-    for field in extension["required"]
-        .as_array()
-        .expect("surface page extension required fields must be an array")
-    {
-        if !required.contains(field) {
-            required.push(field.clone());
-        }
-    }
-    complete
-}
-
-fn close_detection_snapshot_branch(branch: &mut serde_json::Value, status: &str, warning: bool) {
-    branch["additionalProperties"] = serde_json::json!(false);
-    branch["properties"]["smart_dictionary_status"] = serde_json::json!({
-        "type": "string",
-        "enum": [status]
-    });
-    branch["properties"]["surface_warning"] = if warning {
-        serde_json::json!({"$ref": "#/components/schemas/DetectionSurfaceWarningAuditV2"})
-    } else {
-        serde_json::json!({"type": "null"})
-    };
-    let required = branch["required"]
-        .as_array_mut()
-        .expect("snapshot base required fields must be an array");
-    required.push(serde_json::json!("smart_dictionary_status"));
-    if warning {
-        required.push(serde_json::json!("surface_warning"));
     }
 }
 
@@ -1054,9 +835,9 @@ mod tests {
             json["components"]["securitySchemes"]["bearer_auth"]["scheme"],
             "bearer"
         );
-        let admin_word_required = json["components"]["schemas"]["AdminWordV2"]["required"]
+        let admin_word_required = json["components"]["schemas"]["AdminWordV3"]["required"]
             .as_array()
-            .expect("AdminWordV2 应声明必填响应字段");
+            .expect("AdminWordV3 应声明必填响应字段");
         assert!(
             admin_word_required
                 .iter()
@@ -1388,7 +1169,7 @@ mod tests {
 
         assert_eq!(
             path["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/SurfaceMatchPageAny"
+            "#/components/schemas/SurfaceMatchPageV3"
         );
         for status in ["400", "401", "403", "410", "503"] {
             assert_eq!(
@@ -1404,170 +1185,6 @@ mod tests {
             })
         }));
 
-        let statuses = schemas["SmartDictionaryResultV2"]["oneOf"]
-            .as_array()
-            .unwrap();
-        for status in ["clear", "duplicate", "warning", "unavailable"] {
-            assert!(statuses.iter().any(|branch| {
-                branch["properties"]["status"]["enum"]
-                    .as_array()
-                    .is_some_and(|values| values.iter().any(|value| value == status))
-            }));
-        }
-        let warning = statuses
-            .iter()
-            .find(|branch| branch["properties"]["status"]["enum"][0] == "warning")
-            .unwrap();
-        for field in [
-            "duplicates",
-            "surface_match_page",
-            "matched_entry_contexts",
-            "status",
-        ] {
-            assert!(
-                warning["required"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|required| required == field)
-            );
-        }
-        assert_eq!(warning["properties"]["duplicates"]["maxItems"], 0);
-        assert_eq!(schemas["DuplicateWordMatchV2"]["deprecated"], true);
-        // duplicate 与 warning 两条路径的信息量必须一致：前者也要带命中原因。
-        assert!(
-            schemas["DuplicateWordMatchV2"]["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|field| field == "match_category")
-        );
-        assert_eq!(
-            schemas["DuplicateWordMatchV2"]["properties"]["match_category"]["$ref"],
-            "#/components/schemas/SurfaceMatchCategoryV2"
-        );
-        // 被引用上下文同理：duplicate 分支没有 surface_match_page 可挂
-        // matched_entry_contexts，摘要必须直接挂在命中项上。
-        assert!(
-            schemas["DuplicateWordMatchV2"]["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|field| field == "inbound_relations")
-        );
-        assert_eq!(
-            schemas["DuplicateWordMatchV2"]["properties"]["inbound_relations"]["$ref"],
-            "#/components/schemas/RelationReferenceSummaryV2"
-        );
-
-        let snapshot_union = schemas["WordDetectionSnapshotSmartDictionaryV2"]["oneOf"]
-            .as_array()
-            .expect("persisted smart dictionary status must be a union");
-        assert_eq!(snapshot_union.len(), 2);
-        let clear = snapshot_union
-            .iter()
-            .find(|branch| branch["properties"]["smart_dictionary_status"]["enum"][0] == "clear")
-            .unwrap();
-        assert_eq!(clear["properties"]["surface_warning"]["type"], "null");
-        assert_eq!(clear["additionalProperties"], false);
-        let persisted_warning = snapshot_union
-            .iter()
-            .find(|branch| branch["properties"]["smart_dictionary_status"]["enum"][0] == "warning")
-            .unwrap();
-        assert!(
-            persisted_warning["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|field| field == "surface_warning")
-        );
-        assert_eq!(persisted_warning["additionalProperties"], false);
-
-        let aggregate_snapshot = schemas["WordDetectionSnapshotV2"]["oneOf"]
-            .as_array()
-            .expect("persisted detection snapshot must expose complete strict branches");
-        assert_eq!(aggregate_snapshot.len(), 2);
-        for branch in aggregate_snapshot {
-            assert_eq!(branch["additionalProperties"], false);
-            assert!(branch["properties"]["detection_id"].is_object());
-            assert!(branch["properties"]["smart_dictionary_status"].is_object());
-        }
-        let aggregate_clear = aggregate_snapshot
-            .iter()
-            .find(|branch| branch["properties"]["smart_dictionary_status"]["enum"][0] == "clear")
-            .unwrap();
-        assert_eq!(
-            aggregate_clear["properties"]["surface_warning"]["type"],
-            "null"
-        );
-        assert!(
-            !aggregate_clear["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|field| field == "surface_warning")
-        );
-        assert_eq!(
-            schemas["DetectionSurfaceWarningAuditV2"]["properties"]["acknowledged"]["enum"],
-            serde_json::json!([true])
-        );
-        let preview_required = schemas["DetectionSurfaceMatchPreviewV2"]["required"]
-            .as_array()
-            .expect("warning preview context fields must be required");
-        for field in [
-            "existing_word_id",
-            "existing_kind",
-            "existing_status",
-            "existing_dialect",
-            "pos_labels",
-            "gloss_previews",
-        ] {
-            assert!(preview_required.iter().any(|required| required == field));
-        }
-        assert!(
-            schemas["AdminWordListItem"]["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|field| field == "dialects")
-        );
-        assert_eq!(
-            schemas["DetectionSurfaceWarningAuditV2"]["additionalProperties"],
-            false
-        );
-
-        let page_variants = schemas["SurfaceMatchPageV2"]["oneOf"].as_array().unwrap();
-        assert_eq!(page_variants.len(), 3);
-        for branch in page_variants {
-            assert_eq!(branch["additionalProperties"], false);
-            assert!(branch["properties"]["snapshot_id"].is_object());
-            assert!(branch["properties"]["continuation_policy"].is_object());
-            assert!(branch["allOf"].is_null());
-        }
-        let terminal_page = page_variants
-            .iter()
-            .find(|branch| branch["properties"]["surface_confirmation_token"].is_object())
-            .expect("enabled terminal page must be present");
-        assert_eq!(terminal_page["properties"]["next_cursor"]["type"], "null");
-        assert_eq!(
-            schemas["LexiconSurfaceMatchV2"]["properties"]["can_continue"]["enum"],
-            serde_json::json!([true])
-        );
-        assert_eq!(
-            schemas["WordConcreteFormV3"]["properties"]["form_type"]["pattern"],
-            serde_json::json!("^[a-z][a-z0-9_]{0,31}$")
-        );
-        assert_eq!(
-            schemas["SurfaceMatchCategoryV2"]["enum"],
-            serde_json::json!([
-                "exact_headword",
-                "cross_kind_headword",
-                "headword_form",
-                "form_headword",
-                "form_form",
-                "headword_relation"
-            ])
-        );
         let relation_source = schemas["ExistingSurfaceSourceV2"]["oneOf"]
             .as_array()
             .unwrap()
@@ -1593,19 +1210,8 @@ mod tests {
             relation_source["properties"]["relation_type"]["$ref"],
             "#/components/schemas/RelationTypeV2"
         );
-        assert_eq!(
-            schemas["SurfaceMatchPageBaseV2"]["properties"]["items"]["minItems"],
-            1
-        );
-        assert_eq!(
-            schemas["SurfaceMatchPageBaseV2"]["properties"]["items"]["maxItems"],
-            50
-        );
         for schema_name in [
-            "SurfaceMatchPageBaseV2",
-            "LexiconSurfaceMatchV2",
             "ExistingSurfaceMatchV2",
-            "MatchedEntryContextV2",
             "RelationReferencePreviewV2",
             "RelationReferenceSummaryV2",
         ] {
@@ -1626,19 +1232,7 @@ mod tests {
             relation_preview["properties"]["source_status"]["$ref"],
             "#/components/schemas/AdminWordStatus"
         );
-        for schema_name in [
-            "SurfaceMatchEnabledNextPageV2",
-            "SurfaceMatchEnabledTerminalPageV2",
-            "SurfaceMatchTemporarilyDisabledPageV2",
-        ] {
-            assert_eq!(schemas[schema_name]["additionalProperties"], false);
-            assert!(schemas[schema_name]["allOf"].is_null());
-        }
-        for schema_name in [
-            "SmartDictionaryResultV2",
-            "SurfaceMatchCandidateV2",
-            "ExistingSurfaceSourceV2",
-        ] {
+        for schema_name in ["SurfaceMatchCandidateV2", "ExistingSurfaceSourceV2"] {
             for branch in schemas[schema_name]["oneOf"].as_array().unwrap() {
                 assert_eq!(
                     branch["additionalProperties"], false,
@@ -1646,32 +1240,6 @@ mod tests {
                 );
             }
         }
-
-        assert!(
-            schemas["CreateAdminWordV2Input"]["properties"]["confirmed_surface_match_token"]
-                .is_object()
-        );
-        let save_forms = &schemas["SaveFormsStepInput"];
-        assert_eq!(save_forms["additionalProperties"], false);
-        assert!(save_forms["properties"]["confirmed_surface_match_token"].is_object());
-        assert_eq!(
-            save_forms["properties"]["confirmed_impact_token"]["format"],
-            "uuid"
-        );
-        assert!(
-            schemas["SaveMeaningsStepInput"]["properties"]["confirmed_surface_match_token"]
-                .is_null(),
-            "surface token 只能属于 Forms save"
-        );
-        assert!(
-            schemas["SaveMeaningsStepInput"]["properties"]["confirmed_impact_token"].is_null(),
-            "impact token 只能属于 Forms save"
-        );
-        assert!(schemas["FormsImpactResponseV2"]["properties"]["surface_match_page"].is_object());
-        assert_eq!(
-            terminal_page["properties"]["impact_confirmation_token"]["format"],
-            "uuid"
-        );
         assert!(
             json["paths"]["/api/v1/admin/lexicon/entries/{id}/steps/forms"]["put"]
                 ["responses"]["410"]
@@ -1691,41 +1259,18 @@ mod tests {
         ] {
             assert!(problem_meta[field].is_object(), "ProblemMeta 缺少 {field}");
         }
-
-        let error_codes = schemas["ErrorCode"]["enum"].as_array().unwrap();
-        for code in [
-            "surface_match_acknowledgement_required",
-            "surface_matches_changed",
-            "surface_match_snapshot_expired",
-            "surface_policy_changed",
-            "exact_headword_creation_temporarily_disabled",
-            "multiple_active_exact_headword_publications_not_enabled",
-        ] {
-            assert!(error_codes.iter().any(|value| value == code));
-        }
     }
 
     #[test]
-    fn problem_details_field_issues_use_the_versioned_draft_issue_union() {
+    fn problem_details_field_issues_use_the_v3_draft_issue_schema() {
         let json = serde_json::to_value(ApiDoc::openapi()).unwrap();
         assert_eq!(
             json["components"]["schemas"]["ProblemDetails"]["properties"]["field_issues"]["items"]
                 ["$ref"],
-            "#/components/schemas/DraftValidationIssueAny"
+            "#/components/schemas/V3DraftValidationIssue"
         );
         let schemas = &json["components"]["schemas"];
-        assert_eq!(
-            schemas["DraftValidationIssueAny"]["discriminator"]["propertyName"],
-            "schema_version"
-        );
-        assert_eq!(
-            schemas["DraftValidationIssueAny"]["oneOf"],
-            serde_json::json!([
-                {"$ref": "#/components/schemas/DraftValidationIssueV2"},
-                {"$ref": "#/components/schemas/V3DraftValidationIssue"}
-            ])
-        );
-        let issue = &schemas["DraftValidationIssueV2"];
+        let issue = &schemas["V3DraftValidationIssue"];
         for field in [
             "schema_version",
             "step",
@@ -1733,21 +1278,19 @@ mod tests {
             "field",
             "code",
             "message",
-            "reference_location",
-            "node_location",
         ] {
             assert!(
                 issue["properties"][field].is_object(),
-                "DraftValidationIssue 应稳定暴露 {field}"
+                "V3DraftValidationIssue 应稳定暴露 {field}"
             );
         }
         assert_eq!(
-            schemas["V3DraftValidationIssue"]["properties"]["code"]["$ref"],
+            issue["properties"]["code"]["$ref"],
             "#/components/schemas/V3ValidationIssueCode"
         );
         assert_eq!(
             schemas["ProblemMeta"]["properties"]["surface_match_page"]["$ref"],
-            "#/components/schemas/SurfaceMatchPageAny"
+            "#/components/schemas/SurfaceMatchPageV3"
         );
     }
 
@@ -2139,29 +1682,12 @@ mod tests {
         let schemas = &json["components"]["schemas"];
 
         assert_eq!(
-            schemas["AdminWordV2"]["properties"]["schema_version"]["enum"],
-            serde_json::json!([2])
-        );
-        assert_eq!(
             schemas["AdminWordV3"]["properties"]["schema_version"]["enum"],
             serde_json::json!([3])
         );
-        assert_eq!(
-            schemas["AdminWordAny"]["oneOf"],
-            serde_json::json!([
-                {"$ref": "#/components/schemas/AdminWordV2"},
-                {"$ref": "#/components/schemas/AdminWordV3"}
-            ])
-        );
-        assert_eq!(
-            schemas["AdminWordAny"]["discriminator"],
-            serde_json::json!({
-                "propertyName": "schema_version",
-                "mapping": {
-                    "2": "#/components/schemas/AdminWordV2",
-                    "3": "#/components/schemas/AdminWordV3"
-                }
-            })
+        assert!(
+            schemas["AdminWordV2"].is_null(),
+            "V2 内容格式已下线，spec 里不应再有 AdminWordV2"
         );
 
         assert_eq!(
@@ -2192,7 +1718,7 @@ mod tests {
         let surface_match_branches = schemas["SurfaceMatchItemV3"]["oneOf"]
             .as_array()
             .expect("V3 surface match must be a oneOf union");
-        assert_eq!(surface_match_branches.len(), 2);
+        assert_eq!(surface_match_branches.len(), 1);
         assert_eq!(
             surface_match_branches
                 .iter()
@@ -2202,7 +1728,7 @@ mod tests {
                         .unwrap()
                 })
                 .collect::<std::collections::BTreeSet<_>>(),
-            ["form_variant_v3", "legacy_v2"].into_iter().collect()
+            ["form_variant_v3"].into_iter().collect()
         );
         assert!(surface_match_branches.iter().all(|branch| {
             branch["additionalProperties"] == false
@@ -2210,10 +1736,6 @@ mod tests {
                     .as_array()
                     .is_some_and(|required| required.iter().any(|field| field == "match_kind"))
         }));
-        assert_eq!(
-            schemas["LegacySurfaceMatchV3"]["additionalProperties"],
-            false
-        );
         assert_eq!(schemas["FormSurfaceMatchV3"]["additionalProperties"], false);
         assert_eq!(
             schemas["FormSurfaceMatchV3"]["properties"]["entry_kind"]["$ref"],
@@ -2226,9 +1748,9 @@ mod tests {
         );
         for schema in [
             "AdminWordV3",
-            "AdminWordAnyEnvelope",
+            "AdminWordV3Envelope",
             "AdminWordDraftV3Envelope",
-            "EntryLifecycleBatchResponseAny",
+            "EntryLifecycleBatchResponse",
             "WordConcreteFormV3",
             "WordFormGroupMemberV3",
             "WordFormGroupV3",
@@ -2251,7 +1773,6 @@ mod tests {
             "FormsImpactItemV3",
             "FormsImpactResponseV3",
             "DraftValidationResponseV3",
-            "AdminWordPublicationV2",
             "AdminWordPublicationV3",
             "AdminWordPublicationEnvelope",
             "AdminWordPublicationListResponse",
@@ -2377,10 +1898,6 @@ mod tests {
                 "{field} must remain available in a bound relation response"
             );
         }
-        assert_eq!(
-            schemas["WordRelationV2"]["properties"]["pending_target_gloss"]["maxLength"],
-            5000
-        );
         for (name, branches) in [
             ("WordRelationV3", response_relations),
             ("WordRelationWritableV3", writable_relations),
@@ -2397,57 +1914,6 @@ mod tests {
                 }),
                 "{name} must retain the optional pending gloss contract"
             );
-        }
-        assert_eq!(
-            schemas["WordSentenceAssociationV2"]["discriminator"]["propertyName"],
-            "state"
-        );
-        let association_v2_branches = schemas["WordSentenceAssociationV2"]["oneOf"]
-            .as_array()
-            .expect("V2 associations must be a strict linked/pending union");
-        for (state, required, forbidden) in [
-            (
-                "linked",
-                [
-                    "target_word_id",
-                    "target_sense_id",
-                    "target_headword",
-                    "target_gloss",
-                    "resolved_pos",
-                ]
-                .as_slice(),
-                ["pending_target_kind", "pending_target_headword"].as_slice(),
-            ),
-            (
-                "pending",
-                [
-                    "pending_target_kind",
-                    "pending_target_headword",
-                    "normalized_pending_target_headword",
-                ]
-                .as_slice(),
-                ["target_word_id", "target_sense_id"].as_slice(),
-            ),
-        ] {
-            let branch = association_v2_branches
-                .iter()
-                .find(|branch| branch["properties"]["state"]["enum"][0] == state)
-                .unwrap_or_else(|| panic!("missing V2 association {state} branch"));
-            let branch_required = branch["required"]
-                .as_array()
-                .expect("V2 association branch must declare required fields");
-            for field in required {
-                assert!(
-                    branch_required.iter().any(|value| value == field),
-                    "V2 association {state} branch must require {field}"
-                );
-            }
-            for field in forbidden {
-                assert!(
-                    branch["properties"][field].is_null(),
-                    "V2 association {state} branch must not expose {field}"
-                );
-            }
         }
         assert_eq!(
             schemas["WordSentenceAssociationV3"]["discriminator"]["propertyName"],
@@ -2556,9 +2022,9 @@ mod tests {
                 .is_some_and(|codes| codes.iter().any(|code| code == "voice_profile_invalid")),
             "ErrorCode 目录应冻结 voice_profile_invalid"
         );
-        assert_eq!(
-            schemas["AdminWordV3Compatibility"]["properties"]["legacy_headwords"]["$ref"],
-            "#/components/schemas/LegacyHeadwordsCompatibilityV3"
+        assert!(
+            schemas["AdminWordV3"]["properties"]["compatibility"].is_null(),
+            "legacy headword 兼容字段已随 V2 下线"
         );
         assert_eq!(
             schemas["RelatedWordResultV3"]["properties"]["senses"]["items"]["$ref"],
@@ -2676,22 +2142,18 @@ mod tests {
         assert_eq!(
             paths["/api/v1/admin/lexicon/detections"]["post"]["requestBody"]["content"]["application/json"]
                 ["schema"]["$ref"],
-            "#/components/schemas/DetectLexiconInputAny"
+            "#/components/schemas/DetectLexiconSurfaceV3Input"
         );
         assert_eq!(
             paths["/api/v1/admin/lexicon/detections"]["post"]["responses"]["200"]["content"]["application/json"]
                 ["schema"]["$ref"],
-            "#/components/schemas/DetectLexiconResponseAny"
-        );
-        assert_eq!(
-            schemas["DetectLexiconResponseAny"]["discriminator"]["propertyName"],
-            "schema_version"
+            "#/components/schemas/DetectLexiconSurfaceResponseV3"
         );
         assert!(
-            schemas["DetectWordResponseV2"]["required"]
+            schemas["DetectLexiconSurfaceResponseV3"]["required"]
                 .as_array()
                 .is_some_and(|required| required.iter().any(|field| field == "schema_version")),
-            "discriminator 的 V2 response branch 必须要求 literal schema_version=2"
+            "检测响应必须要求 literal schema_version=3"
         );
         let v3_detection = &schemas["DetectLexiconSurfaceResponseV3"]["properties"];
         assert_eq!(
@@ -2724,37 +2186,37 @@ mod tests {
             (
                 "post",
                 "/api/v1/admin/lexicon/entries",
-                "CreateAdminWordAnyInput",
+                "CreateAdminWordV3Input",
             ),
             (
                 "post",
                 "/api/v1/admin/lexicon/entries/{id}/steps/forms/impact",
-                "PreviewFormsImpactInputAny",
+                "PreviewFormsImpactInputV3",
             ),
             (
                 "put",
                 "/api/v1/admin/lexicon/entries/{id}/steps/forms",
-                "SaveFormsStepInputAny",
+                "SaveFormsStepInputV3",
             ),
             (
                 "put",
                 "/api/v1/admin/lexicon/entries/{id}/steps/meanings",
-                "SaveMeaningsStepInputAny",
+                "SaveMeaningsStepInputV3",
             ),
             (
                 "post",
                 "/api/v1/admin/lexicon/entries/{id}/validate",
-                "ValidateAdminWordAnyInput",
+                "ValidateAdminWordV3Input",
             ),
             (
                 "post",
                 "/api/v1/admin/lexicon/entries/{id}/publications",
-                "PublishAdminWordAnyInput",
+                "PublishAdminWordV3Input",
             ),
             (
                 "post",
                 "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/activate",
-                "ActivatePublicationAnyInput",
+                "ActivatePublicationV3Input",
             ),
         ] {
             assert_eq!(
@@ -2764,19 +2226,17 @@ mod tests {
             );
         }
         for schema in [
-            "PreviewFormsImpactInputAny",
-            "SaveFormsStepInputAny",
-            "SaveMeaningsStepInputAny",
-            "ValidateAdminWordAnyInput",
-            "PublishAdminWordAnyInput",
-            "ActivatePublicationAnyInput",
+            "PreviewFormsImpactInputV3",
+            "SaveFormsStepInputV3",
+            "SaveMeaningsStepInputV3",
+            "ValidateAdminWordV3Input",
+            "PublishAdminWordV3Input",
+            "ActivatePublicationV3Input",
         ] {
-            assert!(schemas[schema]["discriminator"].is_null());
-            assert!(
-                schemas[schema]["description"]
-                    .as_str()
-                    .is_some_and(|description| description.contains("V2 body omits schema_version")),
-                "{schema} 必须公开说明 legacy V2 body 是兼容例外"
+            assert_eq!(
+                schemas[schema]["properties"]["schema_version"]["enum"],
+                serde_json::json!([3]),
+                "{schema} 必须要求 literal schema_version=3"
             );
         }
 
@@ -2785,43 +2245,43 @@ mod tests {
                 "post",
                 "/api/v1/admin/lexicon/entries",
                 "201",
-                "AdminWordAnyEnvelope",
+                "AdminWordV3Envelope",
             ),
             (
                 "get",
                 "/api/v1/admin/lexicon/entries/{id}",
                 "200",
-                "AdminWordDraftAnyEnvelope",
+                "AdminWordDraftV3Envelope",
             ),
             (
                 "post",
                 "/api/v1/admin/lexicon/entries/{id}/archive",
                 "200",
-                "AdminWordAnyEnvelope",
+                "AdminWordV3Envelope",
             ),
             (
                 "post",
                 "/api/v1/admin/lexicon/entries/{id}/restore",
                 "200",
-                "AdminWordAnyEnvelope",
+                "AdminWordV3Envelope",
             ),
             (
                 "post",
                 "/api/v1/admin/lexicon/entries/archive-batch",
                 "200",
-                "EntryLifecycleBatchResponseAny",
+                "EntryLifecycleBatchResponse",
             ),
             (
                 "post",
                 "/api/v1/admin/lexicon/entries/restore-batch",
                 "200",
-                "EntryLifecycleBatchResponseAny",
+                "EntryLifecycleBatchResponse",
             ),
             (
                 "get",
                 "/api/v1/admin/lexicon/surface-match-snapshots/{snapshot_id}",
                 "200",
-                "SurfaceMatchPageAny",
+                "SurfaceMatchPageV3",
             ),
         ] {
             assert_eq!(
@@ -2832,15 +2292,15 @@ mod tests {
         }
         assert_eq!(
             schemas["AdminWordListResponse"]["properties"]["words"]["items"]["$ref"],
-            "#/components/schemas/AdminWordListItemAny"
+            "#/components/schemas/AdminWordListItemV3"
         );
         assert_eq!(
             schemas["RelatedSearchV2Response"]["properties"]["results"]["items"]["$ref"],
-            "#/components/schemas/RelatedWordResultAny"
+            "#/components/schemas/RelatedWordResultV3"
         );
         assert_eq!(
-            schemas["AdminWordPublicationAny"]["discriminator"]["propertyName"],
-            "schema_version"
+            schemas["AdminWordPublicationV3"]["properties"]["schema_version"]["enum"],
+            serde_json::json!([3])
         );
         for (path, schema) in [
             (
@@ -2862,28 +2322,11 @@ mod tests {
                 "#/components/schemas/ProblemDetails"
             );
         }
-        for (schema, v2, v3) in [
-            (
-                "FormsImpactResponseAny",
-                "FormsImpactResponseV2",
-                "FormsImpactResponseV3",
-            ),
-            (
-                "DraftValidationResponseAny",
-                "DraftValidationResponse",
-                "DraftValidationResponseV3",
-            ),
-        ] {
+        for schema in ["FormsImpactResponseV3", "DraftValidationResponseV3"] {
             assert_eq!(
-                schemas[schema]["discriminator"]["propertyName"],
-                "schema_version"
-            );
-            assert_eq!(
-                schemas[schema]["oneOf"],
-                serde_json::json!([
-                    {"$ref": format!("#/components/schemas/{v2}")},
-                    {"$ref": format!("#/components/schemas/{v3}")}
-                ])
+                schemas[schema]["properties"]["schema_version"]["enum"],
+                serde_json::json!([3]),
+                "{schema} 必须声明 literal schema_version=3"
             );
         }
 
@@ -2917,7 +2360,6 @@ mod tests {
             "form_reference_conflict",
             "smart_lexicon_v3_storage_unavailable",
             "smart_lexicon_v3_detection_unavailable",
-            "smart_lexicon_v3_publication_requires_migration_canary",
         ] {
             assert!(
                 schemas["ErrorCode"]["enum"]

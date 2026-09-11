@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tsz_rust::lexicon::{
     dto::{
         LexiconSurfaceMatchV2, MatchedEntryContextV2, SurfaceConfirmationReasonV2,
-        SurfaceMatchPageAny, SurfaceMatchPageV2, SurfacePolicyNameV2,
+        SurfaceMatchItemV3, SurfaceMatchPageV2, SurfaceMatchPageV3, SurfacePolicyNameV2,
     },
     surface_policy::SurfacePolicyStore,
     surface_snapshot::{
@@ -75,10 +75,54 @@ fn matched_context(index: usize) -> MatchedEntryContextV2 {
     .expect("fixture context 应能反序列化")
 }
 
+/// 快照的 owner bundle 必须带 V3 页数据：页面投影只认这一种形状，缺了就是结构损坏。
 fn owner_bundle() -> Value {
     json!({
         "detection_id": Uuid::from_u128(0xd37ec710),
-        "canonical_detection": {"headword": "workspace"}
+        "canonical_detection": {"headword": "workspace"},
+        "v3_surface_page_data": {
+            "items": (0..3)
+                .map(|index: usize| json!({
+                    "match_id": format!("match-{index:02}"),
+                    "item": {
+                        "match_kind": "form_variant_v3",
+                        "match": {
+                            "source_schema_version": 3,
+                            "entry_id": Uuid::from_u128(0x1000 + index as u128),
+                            "entry_kind": "word",
+                            "status": "draft",
+                            "content_scope": "draft",
+                            "pos_id": Uuid::from_u128(0x2000 + index as u128),
+                            "group_ids": [Uuid::from_u128(0x3000 + index as u128)],
+                            "form_id": Uuid::from_u128(0x4000 + index as u128),
+                            "variant_id": Uuid::from_u128(0x5000 + index as u128),
+                            "form_type": "base",
+                            "dialect": "common",
+                            "spelling": "workspace"
+                        }
+                    }
+                }))
+                .collect::<Vec<_>>(),
+            "matched_entry_contexts": (0..3)
+                .map(|index: usize| json!({
+                    "entry_id": Uuid::from_u128(0x1000 + index as u128),
+                    "presentation": {
+                        "label": "workspace",
+                        "matched_surfaces": ["workspace"],
+                        "strategy_version": "surface_summary_v1"
+                    },
+                    "pos_labels": ["noun"],
+                    "gloss_previews": [format!("gloss-{index}")],
+                    "updated_at": "2026-09-02T00:00:00Z",
+                    "inbound_relations": {
+                        "total": 0,
+                        "by_type": {"synonym": 0, "antonym": 0, "derivative": 0},
+                        "previews": [],
+                        "truncated": false
+                    }
+                }))
+                .collect::<Vec<_>>()
+        }
     })
 }
 
@@ -98,27 +142,42 @@ fn binding(actor_id: Uuid, policy_epoch: u64) -> SurfaceConfirmationBinding {
     }
 }
 
-fn page_of(page: &SurfaceMatchPageAny) -> &SurfaceMatchPageV2 {
+fn next_cursor(page: &SurfaceMatchPageV3) -> String {
     match page {
-        SurfaceMatchPageAny::V2(page) => page,
-        SurfaceMatchPageAny::V3(_) => panic!("V2 owner bundle 不该投影成 V3 页"),
+        SurfaceMatchPageV3::EnabledNext(page) => page.next_cursor.clone(),
+        _ => panic!("expected a non-terminal page, got {page:?}"),
     }
 }
 
-fn next_cursor(page: &SurfaceMatchPageV2) -> String {
+fn v2_next_cursor(page: &SurfaceMatchPageV2) -> String {
     match page {
         SurfaceMatchPageV2::EnabledNext(page) => page.next_cursor.clone(),
         _ => panic!("expected a non-terminal page, got {page:?}"),
     }
 }
 
-fn match_ids(page: &SurfaceMatchPageV2) -> Vec<String> {
+/// V3 页不带 match_id，用条目身份代替：fixture 里 entry_id 与 match-NN 一一对应。
+fn entry_ids(page: &SurfaceMatchPageV3) -> Vec<Uuid> {
+    let items = match page {
+        SurfaceMatchPageV3::EnabledNext(page) => &page.page.items,
+        SurfaceMatchPageV3::EnabledTerminal(page) => &page.page.items,
+        SurfaceMatchPageV3::TemporarilyDisabled(page) => &page.page.items,
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            SurfaceMatchItemV3::FormVariantV3(item) => item.entry_id,
+        })
+        .collect()
+}
+
+fn v2_entry_ids(page: &SurfaceMatchPageV2) -> Vec<Uuid> {
     let items = match page {
         SurfaceMatchPageV2::EnabledNext(page) => &page.page.items,
         SurfaceMatchPageV2::EnabledTerminal(page) => &page.page.items,
         SurfaceMatchPageV2::TemporarilyDisabled(page) => &page.page.items,
     };
-    items.iter().map(|item| item.match_id.clone()).collect()
+    items.iter().map(|item| item.existing.word_id).collect()
 }
 
 #[tokio::test]
@@ -151,27 +210,29 @@ async fn paging_to_the_terminal_page_signs_a_token_without_corrupting_the_snapsh
         .await
         .expect("快照应能创建");
 
-    let mut seen = match_ids(&created.page);
+    let mut seen = v2_entry_ids(&created.page);
     let second = store
-        .page(actor, created.snapshot_id, &next_cursor(&created.page))
+        .page(actor, created.snapshot_id, &v2_next_cursor(&created.page))
         .await
         .expect("第二页不该因为首页回写把快照写坏而失败");
-    seen.extend(match_ids(page_of(&second)));
+    seen.extend(entry_ids(&second));
     let third = store
-        .page(actor, created.snapshot_id, &next_cursor(page_of(&second)))
+        .page(actor, created.snapshot_id, &next_cursor(&second))
         .await
         .expect("末页不该因为第二页回写把快照写坏而失败");
-    seen.extend(match_ids(page_of(&third)));
+    seen.extend(entry_ids(&third));
 
     seen.sort();
     assert_eq!(
         seen,
-        vec!["match-00", "match-01", "match-02"],
+        (0..3)
+            .map(|index: u128| Uuid::from_u128(0x1000 + index))
+            .collect::<Vec<_>>(),
         "三页合起来必须不重不漏地覆盖全部候选"
     );
 
-    let token = match page_of(&third) {
-        SurfaceMatchPageV2::EnabledTerminal(page) => page.surface_confirmation_token.clone(),
+    let token = match &third {
+        SurfaceMatchPageV3::EnabledTerminal(page) => page.surface_confirmation_token.clone(),
         other => panic!("末页必须签发确认令牌，实际拿到 {other:?}"),
     };
 

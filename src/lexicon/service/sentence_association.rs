@@ -65,169 +65,6 @@ fn lookup_scopes(dialect: Dialect) -> &'static [&'static str] {
     }
 }
 
-/// 把库里的关联挂回词条，并判定每条例句的 `associations_state`。
-///
-/// 判据是「这一侧正文的指纹是不是解析时那一份」：一致才敢把区间交给前端，
-/// 否则区间指的是一份已经被改掉的正文。整条例句所有存在的侧都一致才算 `resolved`，
-/// 只要有一侧对不上就整条按未解析处理——`associations` 恒为空数组，
-/// 前端据此提示「正文已修改，关联将在重新发布后重新解析」。
-pub(super) fn apply_sentence_associations(
-    meanings: &mut DraftMeaningsStepContent,
-    associations: Vec<SentenceAssociationRecord>,
-    scans: Vec<SentenceAssociationScanRecord>,
-) {
-    let scanned = scans
-        .into_iter()
-        .filter(|scan| scan.resolver_version == RESOLVER_VERSION)
-        .filter_map(|scan| {
-            let dialect = dialect_from_name(&scan.source_dialect)?;
-            Some(((scan.sentence_id, dialect), scan.text_hash))
-        })
-        .collect::<HashMap<_, _>>();
-    let mut by_sentence: HashMap<Uuid, Vec<SentenceAssociationRecord>> = HashMap::new();
-    for association in associations {
-        by_sentence
-            .entry(association.sentence_id)
-            .or_default()
-            .push(association);
-    }
-
-    for pos in &mut meanings.pos {
-        for sense in &mut pos.senses {
-            for sentence in &mut sense.sentences {
-                let present = present_variants(&sentence.en_text);
-                let resolved = !present.is_empty()
-                    && present.iter().all(|(dialect, text)| {
-                        scanned
-                            .get(&(sentence.id, *dialect))
-                            .is_some_and(|hash| hash == &text_hash(text))
-                    });
-                if !resolved {
-                    sentence.associations = Vec::new();
-                    sentence.associations_state = SentenceAssociationsStateV2::Unresolved;
-                    continue;
-                }
-                let mut rows = by_sentence.remove(&sentence.id).unwrap_or_default();
-                // 只挂这条例句现在还有的方言侧。某一侧被改成 missing 之后、下一次发布
-                // prune 之前，库里仍留着那一侧的历史关联，挂上去就是在给前端一份它
-                // 根本渲染不出来的正文的位置。
-                rows.retain(|row| {
-                    dialect_from_name(&row.source_dialect).is_some_and(|dialect| {
-                        present.iter().any(|(candidate, _)| *candidate == dialect)
-                    })
-                });
-                rows.sort_by(|left, right| {
-                    left.source_dialect
-                        .cmp(&right.source_dialect)
-                        .then(left.range_start.cmp(&right.range_start))
-                });
-                sentence.associations = rows.into_iter().filter_map(association_wire).collect();
-                sentence.associations_state = SentenceAssociationsStateV2::Resolved;
-            }
-        }
-    }
-}
-
-fn present_variants(en_text: &EnglishTextV2) -> Vec<(Dialect, &str)> {
-    match en_text {
-        EnglishTextV2::Unified { common } => vec![(Dialect::Common, common.value.text())],
-        EnglishTextV2::Distinguish { uk, us, .. } => [(Dialect::Uk, uk), (Dialect::Us, us)]
-            .into_iter()
-            .filter_map(|(dialect, slot)| match slot {
-                DialectVariantSlotV2::Ready { variant } => Some((dialect, variant.value.text())),
-                DialectVariantSlotV2::Missing => None,
-            })
-            .collect(),
-    }
-}
-
-fn association_wire(record: SentenceAssociationRecord) -> Option<WordSentenceAssociationV2> {
-    if record.segment_count != 1 {
-        tracing::warn!(
-            association_id = %record.id,
-            sentence_id = %record.sentence_id,
-            segment_count = record.segment_count,
-            "refused to project a segmented association into the V2 source_range contract"
-        );
-        return None;
-    }
-    // 这三项都由库层 CHECK 保证，走到 None 说明数据坏了或迁移出了问题。
-    // 静默少一条关联和「这个词本来就没关联」在界面上一模一样，排查时没有任何线索，
-    // 所以至少留一条日志。
-    let (Some(source_dialect), Ok(start), Ok(end)) = (
-        dialect_from_name(&record.source_dialect),
-        usize::try_from(record.range_start),
-        usize::try_from(record.range_end),
-    ) else {
-        tracing::warn!(
-            association_id = %record.id,
-            sentence_id = %record.sentence_id,
-            source_dialect = %record.source_dialect,
-            "dropped a sentence association row that violates its column constraints"
-        );
-        return None;
-    };
-    let source_range = SentenceSourceRangeV1 {
-        start,
-        end,
-        surface: record.surface,
-    };
-    let origin = match record.origin.as_str() {
-        "manual" => SentenceAssociationOriginV2::Manual,
-        _ => SentenceAssociationOriginV2::Auto,
-    };
-    match record.state.as_str() {
-        "linked" => Some(WordSentenceAssociationV2::Linked {
-            id: record.id,
-            source_dialect,
-            source_range,
-            target_word_id: record.target_entry_id?,
-            target_sense_id: record.target_sense_id?,
-            target_form_slot_id: record.target_form_slot_id,
-            origin,
-            target_headword: record.target_headword_snapshot?,
-            target_gloss: record.target_gloss_snapshot?,
-            resolved_pos: record.resolved_pos?,
-            resolved_form_type: record.resolved_form_type,
-        }),
-        "pending" => {
-            let pending_target_kind = match record.pending_target_kind.as_deref() {
-                Some("word") => EntryKind::Word,
-                Some("phrase") => EntryKind::Phrase,
-                Some(kind) => {
-                    tracing::warn!(
-                        association_id = %record.id,
-                        sentence_id = %record.sentence_id,
-                        pending_target_kind = %kind,
-                        "dropped a sentence association row with an unknown pending target kind"
-                    );
-                    return None;
-                }
-                None => return None,
-            };
-            Some(WordSentenceAssociationV2::Pending {
-                id: record.id,
-                source_dialect,
-                source_range,
-                origin,
-                pending_target_kind,
-                pending_target_headword: record.pending_target_headword?,
-                normalized_pending_target_headword: record.normalized_pending_target_headword?,
-                pending_target_gloss: record.pending_target_gloss,
-            })
-        }
-        _ => {
-            tracing::warn!(
-                association_id = %record.id,
-                sentence_id = %record.sentence_id,
-                state = %record.state,
-                "dropped a sentence association row with an unknown state"
-            );
-            None
-        }
-    }
-}
-
 fn association_wire_v3(record: SentenceAssociationRecord) -> Option<WordSentenceAssociationV3> {
     let source_dialect = dialect_from_name(&record.source_dialect)?;
     let source_segments =
@@ -455,7 +292,6 @@ struct PublishedAssociationPos {
 /// resolver 与人工编辑器就不会把某个 schema 的聚合 DTO 当成唯一事实来源。
 #[derive(Debug)]
 pub(super) struct PublishedAssociationTarget {
-    schema_version: i16,
     id: Uuid,
     kind: EntryKind,
     headword: String,
@@ -463,87 +299,6 @@ pub(super) struct PublishedAssociationTarget {
 }
 
 impl PublishedAssociationTarget {
-    fn from_v2(word: AdminWordV2) -> Self {
-        let mut pos: Vec<PublishedAssociationPos> =
-            word.forms
-                .pos
-                .iter()
-                .map(|forms| {
-                    let mut slots = Vec::new();
-                    slots.push(PublishedAssociationForm {
-                        id: forms.base_form.id,
-                        form_type: forms.base_form.form_type.clone(),
-                        base_form_ids: vec![forms.base_form.id],
-                        variants: forms
-                            .base_form
-                            .variants
-                            .iter()
-                            .map(|variant| PublishedAssociationVariant {
-                                id: variant.id,
-                                dialect: variant.dialect,
-                                spelling: variant.spelling.clone(),
-                                component_usages: Vec::new(),
-                            })
-                            .collect(),
-                    });
-                    slots.extend(forms.form_groups.iter().flat_map(|group| &group.slots).map(
-                        |slot| {
-                            PublishedAssociationForm {
-                                id: slot.id,
-                                form_type: slot.form_type.clone(),
-                                base_form_ids: vec![forms.base_form.id],
-                                variants: slot
-                                    .variants
-                                    .iter()
-                                    .map(|variant| PublishedAssociationVariant {
-                                        id: variant.id,
-                                        dialect: variant.dialect,
-                                        spelling: variant.spelling.clone(),
-                                        component_usages: Vec::new(),
-                                    })
-                                    .collect(),
-                            }
-                        },
-                    ));
-                    PublishedAssociationPos {
-                        id: forms.pos_id,
-                        pos: forms.pos.clone(),
-                        forms: slots,
-                        senses: association_senses(&word.meanings, forms.pos_id),
-                    }
-                })
-                .collect();
-        if pos.is_empty() && word.kind == EntryKind::Phrase {
-            pos = word
-                .meanings
-                .pos
-                .iter()
-                .map(|meanings| PublishedAssociationPos {
-                    id: meanings.pos_id,
-                    pos: "phrase".to_owned(),
-                    forms: Vec::new(),
-                    senses: meanings
-                        .senses
-                        .iter()
-                        .map(|sense| PublishedAssociationSense {
-                            id: sense.id,
-                            level: sense.level.clone(),
-                            gloss: published_sense_gloss(sense),
-                            component_usages: Vec::new(),
-                        })
-                        .collect(),
-                })
-                .collect();
-        }
-        Self {
-            schema_version: 2,
-            id: word.id,
-            kind: word.kind,
-            headword: published_word_headword(&word),
-            pos,
-        }
-    }
-
     fn from_v3(word: AdminWordV3) -> Result<Self, LexiconServiceError> {
         Self::from_v3_parts(
             word.id,
@@ -624,7 +379,6 @@ impl PublishedAssociationTarget {
             })
             .collect();
         Ok(Self {
-            schema_version: 3,
             id,
             kind: match kind {
                 WordEntryKindV3::Word => EntryKind::Word,
@@ -645,7 +399,6 @@ impl PublishedAssociationTarget {
             .and_then(|value| i16::try_from(value).ok())
             .unwrap_or(-1);
         match version {
-            2 => Ok(Self::from_v2(v2_publication_snapshot(snapshot)?)),
             3 if allow_v3 => {
                 Self::from_v3(serde_json::from_value(snapshot).map_err(serialization_error)?)
             }
@@ -685,9 +438,6 @@ impl PublishedAssociationTarget {
         let Some(form_type) = parse_v3_form_type_name(&form.form_type) else {
             return Vec::new();
         };
-        // 短语成分只接受 V3 发布的目标（validate_phrase_components 只查 content_schema_version = 3），
-        // V2 目标的词形一律给空列表：调用方按「为空不可选」处理即可，不必另辨版本。
-        let component_targetable = self.schema_version == 3;
         let mut candidate_forms =
             pos.forms
                 .iter()
@@ -703,7 +453,7 @@ impl PublishedAssociationTarget {
                             form_type: form_type.clone(),
                             spelling: variant.spelling.clone(),
                             dialect: variant.dialect,
-                            base_form_ids: if component_targetable {
+                            base_form_ids: if true {
                                 candidate_form.base_form_ids.clone()
                             } else {
                                 Vec::new()
@@ -869,41 +619,6 @@ fn v3_form_type_name(form_type: &str) -> &str {
 }
 
 impl LexiconService {
-    /// 读取路径回填：`associations` 不进编辑器投影，也不进发布快照，只有库表一份真相，
-    /// 返回词条时按 `entry_id` 一次查出挂回去。
-    ///
-    /// 写路径必须**在写幂等响应体之前**调用，否则同一个幂等键重放时返回的响应会缺字段。
-    /// 新建草稿（必然未解析）与归档/恢复批量命令不回填：前者默认值就是对的，
-    /// 后者不碰例句，响应也不用于渲染例句编辑区。
-    pub(super) async fn hydrate_sentence_associations(
-        &self,
-        word: &mut AdminWordV2,
-    ) -> Result<(), LexiconServiceError> {
-        let associations =
-            LexiconRepository::sentence_associations(self.repository.pool(), word.id)
-                .await
-                .map_err(repository_error)?;
-        let scans = LexiconRepository::sentence_association_scans(self.repository.pool(), word.id)
-            .await
-            .map_err(repository_error)?;
-        apply_sentence_associations(&mut word.meanings, associations, scans);
-        Ok(())
-    }
-
-    pub(super) async fn hydrate_sentence_associations_in(
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        word: &mut AdminWordV2,
-    ) -> Result<(), LexiconServiceError> {
-        let associations = LexiconRepository::sentence_associations(&mut **tx, word.id)
-            .await
-            .map_err(repository_error)?;
-        let scans = LexiconRepository::sentence_association_scans(&mut **tx, word.id)
-            .await
-            .map_err(repository_error)?;
-        apply_sentence_associations(&mut word.meanings, associations, scans);
-        Ok(())
-    }
-
     pub(super) async fn hydrate_v3_sentence_associations_in(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         entry_id: Uuid,

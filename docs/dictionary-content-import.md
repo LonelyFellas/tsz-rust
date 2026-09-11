@@ -86,18 +86,12 @@ ORDER BY pos, source_key;
 未导入正文、词头未命中或目标词性没有正文时，worker 将该分区标记为
 `missing/source_not_found`，不会让模型仅凭通用知识生成词义。
 
-## 千问生成配置
+## 千问生成配置（已下线）
 
-导入正文后，显式选择千问并配置支持 JSON Schema 结构化输出的模型：
+词条内容生成（`content_completion`）已于 2026-09-11 随 V2 内容格式一并下线：worker、三条
+`content-completion-jobs` 路由、`content_completion_jobs` / `content_completion_partitions` 两张表
+与 `LEXICON_GENERATOR_PROVIDER` / `QWEN_LEXICON_*` 配置全部移除。它读的是 V2 形状的
+`entry_editor_projection`，遇到 V3 内容本来就已经反序列化失败，实际不可用。
 
-```dotenv
-LEXICON_GENERATOR_PROVIDER=qwen
-QWEN_LEXICON_API_KEY=replace-with-secret-manager-value
-QWEN_LEXICON_MODEL=qwen3.8-max
-# QWEN_LEXICON_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-# QWEN_LEXICON_TIMEOUT_SECONDS=90
-```
-
-`API_KEY` 与 `MODEL` 必须同时存在；半配置或选择了 `qwen` 却缺少配置时应用启动失败。
-任务 provenance 只记录 `provider=qwen`、模型名和提示版本，不保存密钥。请求只发送目标词条、
-对应 Kaikki 来源正文和输出约束；worker 不会在千问失败时静默切换 provider 或生成模板内容。
+本文其余部分（Kaikki 正文导入）不受影响，导入的 `dictionary.entry_contents` 仍是词形/发音
+建议的来源。
