@@ -2208,6 +2208,147 @@ async fn v3_complete_forms_require_pos_and_recompute_meanings_completion(pool: P
 }
 
 #[sqlx::test]
+async fn v3_draft_without_any_form_stays_listed(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+
+    // 内置词典没收录的短语：建出来只有管理员确认过的词面摘要，没有任何词性与词形。
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": "phrase",
+            "surface": "a piece of cake"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+
+    let (status, created) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": "phrase",
+            "headwords": { "mode": "unified", "common": "a piece of cake" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let entry_id = created["word"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        created["word"]["forms"]["pos"],
+        json!([]),
+        "词典没收录时不应凭空补词性：{created}"
+    );
+
+    let (status, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?page=1&page_size=20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(
+        list["page"]["total"], 1,
+        "还没填词形的在途草稿必须留在列表里，否则管理员建完就找不回：{list}"
+    );
+    assert_eq!(list["words"][0]["id"], json!(entry_id), "{list}");
+    assert_eq!(
+        list["words"][0]["presentation"]["label"],
+        json!("a piece of cake"),
+        "列表按管理员确认过的词面显示：{list}"
+    );
+
+    // 翻到空页时总数走的是另一条 count 查询，口径必须与主查询一致。
+    let (status, empty_page) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?page=9&page_size=20"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{empty_page}");
+    assert_eq!(empty_page["words"], json!([]), "{empty_page}");
+    assert_eq!(
+        empty_page["page"]["total"], list["page"]["total"],
+        "空页回退的总数要与主查询一致：{empty_page}"
+    );
+}
+
+#[sqlx::test]
+async fn related_search_matches_whole_words_only(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    for surface in ["a piece of cake", "apple pie"] {
+        let (entry_id, forms) = create_v3_phrase_draft(&state, &bearer, surface).await;
+        save_v3_forms_after_impact(&state, &bearer, &entry_id, 1, "save", forms).await;
+    }
+
+    let search = |q: &str| {
+        let path = format!(
+            "{ROOT}/entries/related-search?q={}&page_size=20&include_drafts=true",
+            q.replace(' ', "%20")
+        );
+        let bearer = bearer.clone();
+        let state = &state;
+        async move {
+            let (status, body) = call(state, Method::GET, &path, &bearer, None, None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let mut labels = body["results"]
+                .as_array()
+                .expect("结果必须是数组")
+                .iter()
+                .map(|item| {
+                    item["presentation"]["label"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            labels.sort();
+            labels
+        }
+    };
+
+    // 半截拼写不算词：ap 既不是 apple 也不是 pie。
+    assert!(search("ap").await.is_empty(), "半截拼写不该命中任何词条");
+    // 完整单词命中含它的短语。
+    assert_eq!(search("apple").await, vec!["apple pie".to_owned()]);
+    // 短语里的独立单词同样算数。
+    assert_eq!(search("a").await, vec!["a piece of cake".to_owned()]);
+    // 关键词本身是短语时按整条词面比，否则它反而搜不到自己。
+    assert_eq!(
+        search("a piece of cake").await,
+        vec!["a piece of cake".to_owned()]
+    );
+}
+
+#[sqlx::test]
 async fn v3_empty_variant_shells_save_without_surfaces_but_cannot_complete(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

@@ -95,7 +95,13 @@ fn include_related_v3_match(
         .key;
     let is_match = match match_mode {
         RelatedSearchMatchMode::Exact => normalized_spelling == normalized_q,
-        RelatedSearchMatchMode::Contains => normalized_spelling.contains(normalized_q),
+        // 与 SQL 一侧同口径：整条词面相同，或按空格切词后有一个词与关键词相同。
+        RelatedSearchMatchMode::Contains => {
+            normalized_spelling == normalized_q
+                || normalized_spelling
+                    .split(' ')
+                    .any(|token| token == normalized_q)
+        }
     };
     if is_match {
         matches.push(candidate);

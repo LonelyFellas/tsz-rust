@@ -26,7 +26,6 @@ impl LexiconRepository {
         &self,
         filter: &RelatedSearchFilter<'_>,
     ) -> Result<Vec<RelatedSearchRecord>, LexiconRepositoryError> {
-        let pattern = format!("%{}%", escape_like_literal(filter.q));
         sqlx::query_as::<_, RelatedSearchRecord>(
             r#"
             WITH searchable_entry AS (
@@ -100,7 +99,7 @@ impl LexiconRepository {
                   ON presentation.entry_id = entry.id
                  AND presentation.content_schema_version = 3
                  AND presentation.source_revision = entry.revision
-                WHERE $12::boolean
+                WHERE $11::boolean
                   AND entry.content_schema_version = 3
                   AND entry.current_publication_id IS NULL
                   AND entry.archived_at IS NULL
@@ -133,10 +132,9 @@ impl LexiconRepository {
                    sort_headword,
                    count(*) OVER() AS total
             FROM searchable_entry
-            WHERE ($11::boolean OR content_schema_version = 2)
-              AND ($2::text IS NULL OR kind = $2)
-              AND CASE WHEN $3 THEN
-                    EXISTS (
+            WHERE ($10::boolean OR content_schema_version = 2)
+              AND ($1::text IS NULL OR kind = $1)
+              AND EXISTS (
                         SELECT 1
                         FROM lexicon.surface_sources surface
                         WHERE surface.entry_id = searchable_entry.id
@@ -161,10 +159,26 @@ impl LexiconRepository {
                                   AND surface.source_kind = 'form_variant')
                           )
                           AND surface.is_deleted = FALSE
-                          AND surface.normalized_surface = $5
+                          -- 两档共用上面整段词面可见性条件，只有这里不同：exact 只认整条
+                          -- 词面相同；另一档按词匹配——整条词面相同，或按空格切开后有一个词
+                          -- 与关键词完全相同（连字符不拆，well-known 算一个词）。关键词本身
+                          -- 是短语时走前一半，「give up」要能搜到「give up」。半截拼写搜不到。
+                          AND CASE
+                                WHEN $2 THEN surface.normalized_surface = $4
+                                ELSE surface.normalized_surface = $4
+                                    OR EXISTS (
+                                        SELECT 1
+                                        FROM unnest(
+                                            string_to_array(
+                                                surface.normalized_surface, ' '
+                                            )
+                                        ) AS token
+                                        WHERE token = $4
+                                    )
+                              END
                     )
-                  ELSE
-                    EXISTS (
+              -- 按词匹配那一路把完全相同的那条让给 exact 档，免得同一条出现两次。
+              AND NOT EXISTS (
                         SELECT 1
                         FROM lexicon.surface_sources surface
                         WHERE surface.entry_id = searchable_entry.id
@@ -189,50 +203,20 @@ impl LexiconRepository {
                                   AND surface.source_kind = 'form_variant')
                           )
                           AND surface.is_deleted = FALSE
-                          AND surface.normalized_surface LIKE $1 ESCAPE '\'
+                          AND $3
+                          AND surface.normalized_surface = $4
                     )
-                  END
-              AND (NOT $4 OR NOT (
-                    EXISTS (
-                        SELECT 1
-                        FROM lexicon.surface_sources surface
-                        WHERE surface.entry_id = searchable_entry.id
-                          AND surface.content_schema_version = searchable_entry.content_schema_version
-                          AND (
-                              (
-                                  searchable_entry.status = 'published'
-                                  AND surface.publication_id = searchable_entry.publication_id
-                                  AND surface.content_scope = 'current_publication'
-                              )
-                              OR (
-                                  searchable_entry.status = 'draft'
-                                  AND surface.publication_id IS NULL
-                                  AND surface.content_scope = 'draft'
-                                  AND surface.source_revision = searchable_entry.source_revision
-                              )
-                          )
-                          AND (
-                              (searchable_entry.content_schema_version = 2
-                                  AND surface.source_kind = 'headword')
-                              OR (searchable_entry.content_schema_version = 3
-                                  AND surface.source_kind = 'form_variant')
-                          )
-                          AND surface.is_deleted = FALSE
-                          AND surface.normalized_surface = $5
-                    )
-                  ))
-              AND ($6::text IS NULL OR (
+              AND ($5::text IS NULL OR (
                     kind,
                     sort_headword COLLATE "C",
                     status_rank,
                     id
-                  ) > ($6, $7 COLLATE "C", $8, $9)
+                  ) > ($5, $6 COLLATE "C", $7, $8)
               )
             ORDER BY kind ASC, sort_headword COLLATE "C" ASC, status_rank ASC, id ASC
-            LIMIT $10
+            LIMIT $9
             "#,
         )
-        .bind(pattern)
         .bind(filter.kind.map(kind_string))
         .bind(filter.exact)
         .bind(filter.exclude_exact)
@@ -342,6 +326,20 @@ impl LexiconRepository {
                           AND visible_surface.source_kind = 'form_variant'
                           AND visible_surface.is_deleted = FALSE
                     )
+                    -- V3 建条必然先落一条只有词面摘要的草稿，词形要到第 2 步才填。
+                    -- 只认 form_variant 词面的话，内置词典没收录的词一建完就从列表消失，
+                    -- 管理员只能靠重新检测同一词面找回。展示投影里留有管理员确认过的
+                    -- 词面摘要（matched_surfaces）的，按在途草稿照常列出；空拼写骨架的
+                    -- 摘要是空的、label 退化成「未命名词条」，仍然不算词库行。
+                    OR EXISTS (
+                        SELECT 1
+                        FROM lexicon.entry_presentation_projection draft_label
+                        WHERE draft_label.entry_id = entry.id
+                          AND draft_label.source_revision = entry.revision
+                          AND COALESCE(
+                              array_length(draft_label.matched_surfaces, 1), 0
+                          ) > 0
+                    )
                   )
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
                    OR EXISTS (
@@ -351,6 +349,14 @@ impl LexiconRepository {
                          AND surface.is_deleted = FALSE
                          AND surface.source_revision = entry.revision
                          AND surface.surface ILIKE '%' || $1 || '%'
+                   )
+                   -- 还没填词形的在途草稿没有词面记录可匹配，按展示投影里的词面摘要找。
+                   OR EXISTS (
+                       SELECT 1 FROM lexicon.entry_presentation_projection draft_label
+                       WHERE draft_label.entry_id = entry.id
+                         AND draft_label.source_revision = entry.revision
+                         AND array_to_string(draft_label.matched_surfaces, ' ')
+                             ILIKE '%' || $1 || '%'
                    ))
               AND ($2::text IS NULL OR EXISTS (
                    SELECT 1 FROM lexicon.text_variants v
@@ -397,7 +403,14 @@ impl LexiconRepository {
             SELECT count(*)::bigint
             FROM lexicon.entries entry
             JOIN admins creator ON creator.id = entry.created_by_admin_id
-            WHERE (
+            -- 列表主查询对编辑投影是 INNER JOIN，没有投影行的词条根本不会出现在
+            -- 结果里；这里不带同样的条件，翻到空页时回退算出的总数会比实际多。
+            WHERE EXISTS (
+                    SELECT 1
+                    FROM lexicon.entry_editor_projection editor
+                    WHERE editor.entry_id = entry.id
+                  )
+              AND (
                     ($6::text IS NULL AND entry.archived_at IS NULL)
                     OR ($6 = 'draft' AND entry.archived_at IS NULL AND entry.current_publication_id IS NULL)
                     OR ($6 = 'published' AND entry.archived_at IS NULL AND entry.current_publication_id IS NOT NULL)
@@ -417,6 +430,20 @@ impl LexiconRepository {
                           AND visible_surface.source_kind = 'form_variant'
                           AND visible_surface.is_deleted = FALSE
                     )
+                    -- V3 建条必然先落一条只有词面摘要的草稿，词形要到第 2 步才填。
+                    -- 只认 form_variant 词面的话，内置词典没收录的词一建完就从列表消失，
+                    -- 管理员只能靠重新检测同一词面找回。展示投影里留有管理员确认过的
+                    -- 词面摘要（matched_surfaces）的，按在途草稿照常列出；空拼写骨架的
+                    -- 摘要是空的、label 退化成「未命名词条」，仍然不算词库行。
+                    OR EXISTS (
+                        SELECT 1
+                        FROM lexicon.entry_presentation_projection draft_label
+                        WHERE draft_label.entry_id = entry.id
+                          AND draft_label.source_revision = entry.revision
+                          AND COALESCE(
+                              array_length(draft_label.matched_surfaces, 1), 0
+                          ) > 0
+                    )
                   )
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
                    OR EXISTS (
@@ -426,6 +453,14 @@ impl LexiconRepository {
                          AND surface.is_deleted = FALSE
                          AND surface.source_revision = entry.revision
                          AND surface.surface ILIKE '%' || $1 || '%'
+                   )
+                   -- 还没填词形的在途草稿没有词面记录可匹配，按展示投影里的词面摘要找。
+                   OR EXISTS (
+                       SELECT 1 FROM lexicon.entry_presentation_projection draft_label
+                       WHERE draft_label.entry_id = entry.id
+                         AND draft_label.source_revision = entry.revision
+                         AND array_to_string(draft_label.matched_surfaces, ' ')
+                             ILIKE '%' || $1 || '%'
                    ))
               AND ($2::text IS NULL OR EXISTS (
                    SELECT 1 FROM lexicon.text_variants v
