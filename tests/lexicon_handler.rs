@@ -385,8 +385,10 @@ fn v3_forms_fixture_for(surface: &str) -> Value {
         "pos": [{
             "pos_id": Uuid::now_v7(),
             "pos": "noun",
+            // 两侧同拼，所以 spelling_mode 是 unified；写成 distinguish 只是恰好被放行，
+            // 会让后来者照抄出现实中不存在的形状。
             "dialect_rules": {
-                "spelling_mode": "distinguish",
+                "spelling_mode": "unified",
                 "phonetic_mode": "distinguish"
             },
             "forms": [{
@@ -13541,8 +13543,12 @@ async fn an_outsider_binds_and_publishes_a_relation_to_another_admins_draft_sens
     // owner 的草稿：存了词义，但始终不发布。
     let target = create_v3_with_complete_forms(&state, &pool, &owner).await;
     let target_id = target["word"]["id"].as_str().unwrap().to_owned();
-    let target_content =
+    let mut target_content =
         complete_v3_meanings_fixture(target["word"]["forms"]["pos"][0]["pos_id"].clone());
+    // source 自己的释义同样来自这个夹具（「港口」），目标释义必须换成独有串，
+    // 否则回填断言无法自证读的是别人的草稿。
+    target_content["pos"][0]["senses"][0]["definitions"][0]["content"] =
+        rich_text("别人草稿的港口");
     let target_sense_id = target_content["pos"][0]["senses"][0]["id"].clone();
     save_v3_meanings(&state, &owner, &target, target_content).await;
 
@@ -13579,7 +13585,7 @@ async fn an_outsider_binds_and_publishes_a_relation_to_another_admins_draft_sens
         "目标仍是草稿，状态要如实标出：{saved}"
     );
     assert_eq!(
-        relation["target_gloss"], "港口",
+        relation["target_gloss"], "别人草稿的港口",
         "服务端应回填目标草稿的词义快照：{saved}"
     );
 
@@ -13589,9 +13595,12 @@ async fn an_outsider_binds_and_publishes_a_relation_to_another_admins_draft_sens
     let (scope, publication_id) = sqlx::query_as::<_, (String, Option<Uuid>)>(
         "SELECT target_content_scope::text, target_publication_id
          FROM lexicon.entry_publication_sense_refs
-         WHERE source_node_id = $1",
+         WHERE source_node_id = $1
+           AND entry_id = $2
+           AND reference_kind = 'relation'",
     )
     .bind(relation_id)
+    .bind(Uuid::parse_str(saved["word"]["id"].as_str().unwrap()).unwrap())
     .fetch_one(&pool)
     .await
     .expect("发布后应留下一条指向草稿词义的引用行");

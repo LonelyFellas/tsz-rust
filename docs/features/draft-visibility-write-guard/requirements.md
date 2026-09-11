@@ -56,7 +56,7 @@
 
 - **引用类入口维持现有的创建者过滤**（`related-search` 那条已于 2026-09-11 推翻，见文末补记）：
   - ~~`related-search` 草稿分支（`repository/query.rs:108`）~~
-  - `sentence-targets/resolve`（`repository/sentence_target_discovery.rs:152`）
+  - `sentence-targets/resolve`（`repository/sentence_target_discovery.rs` 的 `component_target_drafts` 之后那段草稿候选查询）
 - 成分目标 `component-targets/search`：维持只搜已发布。
 - V2 侧 surface-match：维持现状（2026-09-01 已拍板 V2 不做，生产无 V2 数据包袱）。
 - 词面唯一 / 同名绑定 `bind-existing`：维持跨管理员可用（词面唯一、同名即同词，
@@ -190,7 +190,9 @@ record.current_publication_id.is_none()
 3. B 对 A 的**已发布**词条执行同样操作 → 成功（口径 #1 的反向断言，防收过头）。
 4. B 对**自己**的草稿 → 成功。
 5. 被拒的批量请求，其幂等键未被消费（同键重放仍走正常校验）。
-6. `sentence-targets/resolve` 里 B 仍搜不到 A 的草稿（既有断言保持绿）。
+6. `sentence-targets/resolve` 里 B 仍搜不到 A 的草稿。守这一条的是
+   `relation_draft_candidates_open_up_while_discovery_stays_creator_only`，
+   它同时承载「关联词搜索放开」与「例句发现不放开」两半。
    `related-search` 已于 2026-09-11 放开，见文末补记。
 7. 撞名检测：B 建档撞 A 的草稿 → 拿到警告材料并可 acknowledge；撞无词形草稿的 409
    带出真实原因。
