@@ -23796,6 +23796,83 @@ async fn v3_derivative_multiple_senses_publish_and_remove_independently(pool: Pg
     assert_eq!(refs, 1);
 }
 
+/// 半绑定关系必须在保存时就被拒，不能留到前端重开词条时炸开。
+///
+/// `bound_target()` 是 zip，给了词条没给词义时它返回 None，这种形状因此曾被当成
+/// 「未绑定」放行；而前端解析这个形状会直接抛错，表现是编辑器白屏而非一条校验提示。
+#[sqlx::test]
+async fn v3_relations_reject_half_bound_target_shapes(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
+    let source = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
+    let source_id = source["word"]["id"].as_str().unwrap();
+    let target_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let base_revision = source["word"]["revision"].as_i64().unwrap();
+    let content = complete_v3_meanings_fixture(source["word"]["forms"]["pos"][0]["pos_id"].clone());
+
+    // 有词条没词义。
+    let mut only_word = content.clone();
+    only_word["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(), "relation": "derivative", "score": "80.00",
+        "target_word_id": target_id
+    }]);
+    let only_word_for_save = only_word.clone();
+    let (status, rejected) =
+        save_v3_meanings_raw(&state, &bearer, source_id, base_revision, only_word).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        has_issue(&rejected, "relation_target_shape_invalid"),
+        "给了词条没给词义应被拒：{rejected}"
+    );
+    assert_eq!(
+        rejected["field_issues"][0]["field"], "target_sense_id",
+        "缺的是词义，field 要指向它：{rejected}"
+    );
+
+    // 点「保存草稿」走的是 save 意图，而 semantic_issues 只在 complete 时回出，
+    // 这条路径此前一路写到库层、撞 CHECK、兜底成 500。它才是用户实际会走的那条。
+    let (status, rejected_on_save) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{source_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": base_revision,
+            "intent": "save",
+            "content": only_word_for_save
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "保存草稿也要拒掉半绑定，不能兜底成 500：{rejected_on_save}"
+    );
+    assert!(
+        has_issue(&rejected_on_save, "relation_target_shape_invalid"),
+        "{rejected_on_save}"
+    );
+
+    // 有词义没词条。
+    let mut only_sense = content;
+    only_sense["pos"][0]["senses"][0]["relations"] = json!([{
+        "id": Uuid::now_v7(), "relation": "derivative", "score": "80.00",
+        "target_sense_id": Uuid::now_v7()
+    }]);
+    let (status, rejected) =
+        save_v3_meanings_raw(&state, &bearer, source_id, base_revision, only_sense).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        has_issue(&rejected, "relation_target_shape_invalid"),
+        "给了词义没给词条应被拒：{rejected}"
+    );
+}
+
 #[sqlx::test]
 async fn v3_relations_require_explicit_sense_binding_and_keep_same_name_text(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
