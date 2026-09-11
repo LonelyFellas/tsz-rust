@@ -2,7 +2,6 @@ pub mod handler;
 pub mod model;
 pub mod repository;
 pub mod router;
-pub mod rules;
 pub mod service;
 
 pub mod form_types;

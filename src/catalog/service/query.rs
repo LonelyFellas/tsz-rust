@@ -28,7 +28,6 @@ impl CatalogService {
             };
             if items.last().is_none_or(|item| item.id != part_id) {
                 let code = required(record.part_code, "part code is null")?;
-                let sub_pos_required = crate::catalog::rules::requires_sub_pos(&code);
                 // 词形候选按词性收窄：原形对所有词性通用，此处不进候选（它是必有项）。
                 let allowed_form_types = form_types
                     .iter()
@@ -50,7 +49,8 @@ impl CatalogService {
                     default_form_types: allowed_form_types.clone(),
                     allowed_form_types,
                     sub_parts_extensible: true,
-                    sub_pos_required,
+                    // 细分词性在下面逐行追加，数量要等这一轮走完才知道，统一在循环后回填。
+                    sub_pos_required: false,
                     sub_parts: Vec::new(),
                 });
             }
@@ -79,6 +79,10 @@ impl CatalogService {
                         sort_order: required(record.sub_sort_order, "sub part sort_order is null")?,
                     });
             }
+        }
+        // 配了细分词性才必填；一个都没配还要求选中，这条词性的词义就永远发不出去。
+        for item in &mut items {
+            item.sub_pos_required = !item.sub_parts.is_empty();
         }
         Ok(CatalogResponse {
             form_types,

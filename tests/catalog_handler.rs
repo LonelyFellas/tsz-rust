@@ -376,7 +376,7 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     );
     assert_eq!(
         created["sub_pos_required"], false,
-        "自建词性下的释义选填细分词性"
+        "刚建出来还没配细分词性，释义选填"
     );
     assert_eq!(created["revision"], 1);
     assert_eq!(created["usage_count"], 0);
@@ -513,6 +513,41 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     assert_eq!(own_sub["part_of_speech_id"], part_id);
     assert_eq!(own_sub["name_zh"], "焦点小品词");
     let own_sub_id = own_sub["id"].as_str().unwrap().to_owned();
+
+    // 配了细分词性，这条自建词性的释义就该必填：必填与否只看配了没有，不认编码。
+    let (_, _, list, _) = call(&state, Method::GET, ROOT, Some(&bearer), None).await;
+    let particle = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == part_id)
+        .expect("自建词性应在管理列表里")
+        .clone();
+    assert_eq!(particle["sub_part_count"], 1);
+    assert_eq!(
+        particle["sub_pos_required"], true,
+        "配了细分词性就该必填：{particle}"
+    );
+    // 向导读的是 catalog 这条路径，两边必须一致。
+    let (_, _, catalog, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/catalog"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    let catalog_particle = catalog["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == part_id)
+        .expect("自建词性应在 catalog 里")
+        .clone();
+    assert_eq!(
+        catalog_particle["sub_pos_required"], true,
+        "catalog 与管理列表口径必须一致：{catalog_particle}"
+    );
 
     let noun_id: Uuid =
         sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
@@ -660,6 +695,44 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // 删空之后必须回到选填。仍然必填的话下拉里一个候选都没有，这条词性的词义就永远发不出去。
+    let (_, _, list, _) = call(&state, Method::GET, ROOT, Some(&bearer), None).await;
+    let particle = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == part_id)
+        .expect("自建词性应在管理列表里")
+        .clone();
+    assert_eq!(particle["sub_part_count"], 0);
+    assert_eq!(
+        particle["sub_pos_required"], false,
+        "细分词性删空后必须回到选填：{particle}"
+    );
+    let (_, _, catalog, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/catalog"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    let catalog_particle = catalog["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == part_id)
+        .expect("自建词性应在 catalog 里")
+        .clone();
+    assert!(
+        catalog_particle["sub_parts"].as_array().unwrap().is_empty(),
+        "细分词性应已删空：{catalog_particle}"
+    );
+    assert_eq!(
+        catalog_particle["sub_pos_required"], false,
+        "catalog 与管理列表口径必须一致：{catalog_particle}"
+    );
 
     let (status, _, _, bytes) = call(
         &state,
