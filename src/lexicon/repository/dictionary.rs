@@ -209,7 +209,7 @@ impl LexiconRepository {
         }
         sqlx::query_as::<_, CatalogPartRecord>(
             r#"
-            SELECT id, code
+            SELECT id, code, kind
             FROM catalog.parts_of_speech
             WHERE code = ANY($1)
             ORDER BY sort_order, id
@@ -233,7 +233,7 @@ impl LexiconRepository {
         }
         sqlx::query_as::<_, CatalogPartRecord>(
             r#"
-            SELECT id, code
+            SELECT id, code, kind
             FROM catalog.parts_of_speech
             WHERE code = ANY($1)
             ORDER BY sort_order, id

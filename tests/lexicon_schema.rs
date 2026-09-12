@@ -71,8 +71,8 @@ async fn insert_pos_node(pool: &PgPool, entry_id: Uuid, part_id: Uuid) -> Uuid {
     sqlx::query(
         r#"
         INSERT INTO lexicon.entry_pos (
-            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order
-        ) VALUES ($1, $2, $3, 'unified', 'unified', 0)
+            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 'unified', 'unified', 0, (SELECT kind FROM lexicon.entries WHERE id = $2))
         "#,
     )
     .bind(node_id)
@@ -162,8 +162,8 @@ async fn relational_nodes_cannot_cross_entry_boundaries(pool: PgPool) {
     let crossed = sqlx::query(
         r#"
         INSERT INTO lexicon.entry_pos (
-            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order
-        ) VALUES ($1, $2, $3, 'unified', 'unified', 0)
+            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 'unified', 'unified', 0, (SELECT kind FROM lexicon.entries WHERE id = $2))
         "#,
     )
     .bind(node_id)

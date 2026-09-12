@@ -188,8 +188,8 @@ async fn catalog_schema_and_metadata_seed_are_present(pool: PgPool) {
     .expect("查询 catalog.metadata 应成功");
     assert_eq!(
         rows,
-        vec![(true, 6, true)],
-        "词形归属迁移后 metadata 应为唯一一行 version=6"
+        vec![(true, 7, true)],
+        "词性 kind 迁移后 metadata 应为唯一一行 version=7"
     );
 }
 
@@ -1488,5 +1488,194 @@ async fn form_type_ownership_constraint_names_are_stable(pool: PgPool) {
         CHECK_VIOLATION,
         Some("catalog_form_types_base_is_global"),
         "非原形必须挂在某个基本词性下",
+    );
+}
+
+// ===== 基本词性 kind 维度（2026-09-12 新增列） =====
+
+/// `display` 依次是 name_zh / name_en / abbreviation / short_name_zh / full_name_en。
+async fn insert_part_with_kind(
+    pool: &PgPool,
+    kind: &str,
+    code: &str,
+    display: [&str; 5],
+) -> Result<Uuid, sqlx::Error> {
+    let [name_zh, name_en, abbreviation, short_name_zh, full_name_en] = display;
+    let id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO catalog.parts_of_speech (
+            id, kind, code, name_zh, name_en, abbreviation, short_name_zh, full_name_en, sort_order
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 500)
+        "#,
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(code)
+    .bind(name_zh)
+    .bind(name_en)
+    .bind(abbreviation)
+    .bind(short_name_zh)
+    .bind(full_name_en)
+    .execute(pool)
+    .await?;
+    Ok(id)
+}
+
+#[sqlx::test]
+async fn parts_of_speech_kind_constraints(pool: PgPool) {
+    let non_word: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM catalog.parts_of_speech WHERE kind <> 'word'")
+            .fetch_one(&pool)
+            .await
+            .expect("查询种子 kind 应成功");
+    assert_eq!(non_word, 0, "存量种子全部应回填为 word");
+
+    // 五个展示字段与单词侧的「名词」完全同名，但 kind 不同就能建。
+    let phrase_noun = insert_part_with_kind(
+        &pool,
+        "phrase",
+        "phrase_noun",
+        ["名词", "NOUN", "n.", "名词", "noun"],
+    )
+    .await
+    .expect("短语侧应能再建一个「名词」");
+
+    // 同一 kind 内展示名仍撞固定名索引。
+    let same_kind = insert_part_with_kind(
+        &pool,
+        "phrase",
+        "phrase_noun_two",
+        ["名词", "Other", "o.", "其他", "other"],
+    )
+    .await;
+    assert_db_error(
+        same_kind,
+        UNIQUE_VIOLATION,
+        Some("catalog_parts_of_speech_name_zh_unique_idx"),
+        "同 kind 内中文名重复应命中固定索引",
+    );
+
+    // code 仍是全局唯一：单词侧不能占用短语侧已用的 code。
+    let word_takes_phrase_code = insert_part_with_kind(
+        &pool,
+        "word",
+        "phrase_noun",
+        ["别的中文", "Another", "a.", "别的", "another"],
+    )
+    .await;
+    assert_db_error(
+        word_takes_phrase_code,
+        UNIQUE_VIOLATION,
+        Some("catalog_parts_of_speech_code_unique_idx"),
+        "code 跨 kind 仍应全局唯一",
+    );
+
+    // 短语词性的 code 必须住在 phrase_ 命名空间里。
+    let unprefixed = insert_part_with_kind(
+        &pool,
+        "phrase",
+        "phrasal_verb",
+        [
+            "短语动词",
+            "PHRASAL VERB",
+            "phr.v.",
+            "短语动词",
+            "phrasal verb",
+        ],
+    )
+    .await;
+    assert_db_error(
+        unprefixed,
+        CHECK_VIOLATION,
+        Some("catalog_parts_of_speech_phrase_code_check"),
+        "短语词性 code 缺 phrase_ 前缀应被 CHECK 拒绝",
+    );
+
+    let kind_value = insert_part_with_kind(
+        &pool,
+        "idiom",
+        "phrase_idiom",
+        ["习语", "IDIOM", "id.", "习语", "idiom"],
+    )
+    .await;
+    assert_db_error(
+        kind_value,
+        CHECK_VIOLATION,
+        Some("catalog_parts_of_speech_kind_check"),
+        "kind 只接受 word / phrase",
+    );
+
+    let id_kind_key: Option<String> = sqlx::query_scalar(
+        "SELECT conname::text FROM pg_constraint WHERE conname = 'catalog_parts_of_speech_id_kind_key'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("查询约束应成功");
+    assert!(
+        id_kind_key.is_some(),
+        "(id, kind) 唯一约束是复合外键的靶子，必须存在"
+    );
+
+    // 词条侧：单词词条挂短语词性被复合外键拦下（外键名是错误映射契约）。
+    let admin_id = insert_admin(&pool).await;
+    let entry_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.entries (
+            id, content_schema_version, language, kind, detection_snapshot,
+            created_by_admin_id, updated_by_admin_id
+        ) VALUES ($1, 3, 'en', 'word', '{}'::jsonb, $2, $2)
+        "#,
+    )
+    .bind(entry_id)
+    .bind(admin_id)
+    .execute(&pool)
+    .await
+    .expect("插入单词词条应成功");
+    let pos_node_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.nodes (id, entry_id, node_type) VALUES ($1, $2, 'pos')")
+        .bind(pos_node_id)
+        .bind(entry_id)
+        .execute(&pool)
+        .await
+        .expect("插入 pos 节点应成功");
+    let crossed = sqlx::query(
+        r#"
+        INSERT INTO lexicon.entry_pos (
+            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 'unified', 'unified', 0, 'word')
+        "#,
+    )
+    .bind(pos_node_id)
+    .bind(entry_id)
+    .bind(phrase_noun)
+    .execute(&pool)
+    .await;
+    assert_db_error(
+        crossed,
+        FOREIGN_KEY_VIOLATION,
+        Some("lexicon_entry_pos_catalog_pos_fkey"),
+        "单词词条不能挂短语词性",
+    );
+
+    // 词形变化只认 word 词性。
+    let form_type_on_phrase = sqlx::query(
+        r#"
+        INSERT INTO catalog.form_types (
+            id, part_of_speech_id, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en
+        ) VALUES ($1, $2, 'phrase_form', '短语词形', 'Phrase form', '短语词形', 'pf', 'phrase form')
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(phrase_noun)
+    .execute(&pool)
+    .await;
+    assert_db_error(
+        form_type_on_phrase,
+        FOREIGN_KEY_VIOLATION,
+        Some("catalog_form_types_part_of_speech_fkey"),
+        "词形变化不能挂到短语词性下",
     );
 }

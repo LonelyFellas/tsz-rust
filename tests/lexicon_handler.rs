@@ -5364,11 +5364,8 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     assert_eq!(read_back["word"]["schema_version"], 3);
     assert_eq!(read_back["word"]["kind"], "phrase");
 
-    let mut forms = complete_v3_forms_fixture();
-    for form in forms["pos"][0]["forms"].as_array_mut().unwrap() {
-        form["regional_variants"]["uk"]["spelling"] = json!("native phrase");
-        form["regional_variants"]["us"]["spelling"] = json!("native phrase");
-    }
+    seed_phrase_noun(&pool).await;
+    let mut forms = phrase_forms_fixture("native phrase");
     let uk_component_id = Uuid::now_v7();
     let us_component_id = Uuid::now_v7();
     forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] = json!([{
@@ -5564,7 +5561,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
             "schema_version": 3,
             "base_revision": forms_saved["word"]["revision"],
             "intent": "complete",
-            "content": complete_v3_meanings_fixture(pos_id)
+            "content": phrase_meanings_fixture(pos_id)
         })),
     )
     .await;
@@ -5888,12 +5885,8 @@ async fn create_v3_phrase_draft(state: &AppState, bearer: &str, surface: &str) -
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let entry_id = created["word"]["id"].as_str().unwrap().to_owned();
-    let mut forms = complete_v3_forms_fixture();
-    for form in forms["pos"][0]["forms"].as_array_mut().unwrap() {
-        form["regional_variants"]["uk"]["spelling"] = json!(surface);
-        form["regional_variants"]["us"]["spelling"] = json!(surface);
-    }
-    (entry_id, forms)
+    seed_phrase_noun(&state.pool).await;
+    (entry_id, phrase_forms_fixture(surface))
 }
 
 async fn create_published_v3_phrase(
@@ -5919,7 +5912,7 @@ async fn create_published_v3_phrase(
             "base_revision": forms_saved["word"]["revision"],
             "intent": "complete",
             "content":
-                complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone())
+                phrase_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone())
         })),
     )
     .await;
@@ -6078,11 +6071,7 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
     assert_eq!(status, StatusCode::CREATED, "{outer_created}");
     let outer_entry_id = outer_created["word"]["id"].as_str().unwrap();
 
-    let mut cycle_forms = complete_v3_forms_fixture();
-    for form in cycle_forms["pos"][0]["forms"].as_array_mut().unwrap() {
-        form["regional_variants"]["uk"]["spelling"] = json!("double phrase");
-        form["regional_variants"]["us"]["spelling"] = json!("double phrase");
-    }
+    let mut cycle_forms = phrase_forms_fixture("double phrase");
     cycle_forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] = json!([{
         "id": Uuid::now_v7(),
         "state": "resolved",
@@ -6124,6 +6113,7 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
     );
 
     let mut outer_forms = complete_v3_forms_fixture();
+    outer_forms["pos"][0]["pos"] = json!(PHRASE_NOUN);
     for form in outer_forms["pos"][0]["forms"].as_array_mut().unwrap() {
         form["regional_variants"]["uk"]["spelling"] = json!("double phrase");
         form["regional_variants"]["us"]["spelling"] = json!("double phrase");
@@ -6154,7 +6144,7 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
             "schema_version": 3,
             "base_revision": outer_forms_saved["word"]["revision"],
             "intent": "complete",
-            "content": complete_v3_meanings_fixture(
+            "content": phrase_meanings_fixture(
                 outer_forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone()
             )
         })),
@@ -6200,11 +6190,7 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
     .await;
     assert_eq!(status, StatusCode::CREATED, "{third_created}");
     let third_entry_id = third_created["word"]["id"].as_str().unwrap();
-    let mut third_forms = complete_v3_forms_fixture();
-    for form in third_forms["pos"][0]["forms"].as_array_mut().unwrap() {
-        form["regional_variants"]["uk"]["spelling"] = json!("third phrase");
-        form["regional_variants"]["us"]["spelling"] = json!("third phrase");
-    }
+    let mut third_forms = phrase_forms_fixture("third phrase");
     third_forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
         json!([resolved_component_json(
             &outer_published,
@@ -6443,7 +6429,7 @@ async fn create_v3_phrase_with_sense_components(
     let (_, forms_saved) =
         save_v3_forms_after_impact(state, bearer, &entry_id, 1, "complete", forms).await;
     let mut meanings =
-        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+        phrase_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
     meanings["pos"][0]["senses"][0]["component_usages"] = component_usages;
     save_v3_meanings(state, bearer, &forms_saved, meanings).await
 }
@@ -6922,7 +6908,7 @@ async fn v3_sense_phrase_component_issues_cover_the_closed_code_catalog(pool: Pg
     .await;
     let victim_revision = victim_forms_saved["word"]["revision"].as_i64().unwrap();
     let victim_pos_id = victim_forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone();
-    let base_meanings = complete_v3_meanings_fixture(victim_pos_id.clone());
+    let base_meanings = phrase_meanings_fixture(victim_pos_id.clone());
     let victim_sense_id = base_meanings["pos"][0]["senses"][0]["id"].clone();
     let with_components = |usages: Value| {
         let mut meanings = base_meanings.clone();
@@ -7213,7 +7199,7 @@ async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool)
         save_v3_forms_after_impact(&state, &bearer, &entry_id, 1, "complete", forms).await;
     let entry_uuid = Uuid::parse_str(&entry_id).unwrap();
     let mut meanings =
-        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+        phrase_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
 
     let first_component =
         resolved_component_json(&target_published, target_publication_id, "uk", "split");
@@ -7226,7 +7212,7 @@ async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool)
     let second_sense_id = Uuid::now_v7();
     let second_sense = json!({
         "id": second_sense_id,
-        "sub_pos": "N-COUNT",
+        "sub_pos": "",
         "level": "A1",
         "sense_group_id": meanings["sense_groups"][0]["id"],
         "frequency": "100",
@@ -7347,7 +7333,7 @@ async fn v3_sense_component_capability_is_always_on(pool: PgPool) {
     );
 
     let mut meanings =
-        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+        phrase_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
     meanings["pos"][0]["senses"][0]["component_usages"] = json!([{
         "id": Uuid::now_v7(),
         "state": "unresolved",
@@ -12254,4 +12240,198 @@ async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) 
         blocked["meta"]["reference_locations"][0]["reference_kind"],
         "text_link"
     );
+}
+
+/// 词形步保存（save 意图）并带上 impact 端点给的确认 token；只关心 kind 校验，不走 complete。
+async fn save_v3_forms_draft(
+    state: &AppState,
+    bearer: &str,
+    entry_id: &str,
+    base_revision: i64,
+    content: Value,
+) -> (StatusCode, Value) {
+    let (status, impact) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": base_revision,
+            "content": content.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    let mut forms_input = json!({
+        "schema_version": 3,
+        "base_revision": base_revision,
+        "intent": "save",
+        "content": content
+    });
+    if let Some(token) = impact["confirmation_token"].as_str() {
+        forms_input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["impact_confirmation_token"].as_str() {
+        forms_input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+        forms_input["confirmed_surface_match_token"] = json!(token);
+    }
+    call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        bearer,
+        None,
+        Some(forms_input),
+    )
+    .await
+}
+
+async fn create_v3_skeleton(state: &AppState, bearer: &str, kind: &str, surface: &str) -> String {
+    let (status, detection) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "language": "en",
+            "kind": kind,
+            "surface": surface
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let (status, created) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries"),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version": 3,
+            "detection_id": detection["detection_id"],
+            "kind": kind,
+            "headwords": { "mode": "unified", "common": surface }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    created["word"]["id"].as_str().unwrap().to_owned()
+}
+
+#[sqlx::test]
+async fn v3_entry_pos_must_match_entry_kind(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    sqlx::query(
+        r#"
+        INSERT INTO catalog.parts_of_speech (
+            id, kind, code, name_zh, name_en, abbreviation, short_name_zh, full_name_en, sort_order
+        ) VALUES ($1, 'phrase', 'phrase_noun', '名词', 'NOUN', 'n.', '名词', 'noun', 10)
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await
+    .expect("插入短语名词应成功");
+
+    // 短语词条挂单词词性：拦在词形保存，问题锚在 pos 节点上。
+    let phrase_id = create_v3_skeleton(&state, &bearer, "phrase", "a piece of cake").await;
+    let mut content = v3_forms_fixture_for("a piece of cake");
+    let pos_id = content["pos"][0]["pos_id"].clone();
+    let (status, body) = save_v3_forms_draft(&state, &bearer, &phrase_id, 1, content.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        has_issue(&body, "part_of_speech_kind_mismatch"),
+        "应报 part_of_speech_kind_mismatch：{body}"
+    );
+    let issue = body["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "part_of_speech_kind_mismatch")
+        .unwrap();
+    assert_eq!(issue["node_id"], pos_id);
+    assert_eq!(issue["field"], "pos");
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_pos WHERE entry_id = $1")
+            .bind(Uuid::parse_str(&phrase_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, 0, "校验失败不得写入 entry_pos");
+
+    // 改选短语词性后保存成功，entry_pos 记下词条 kind。
+    content["pos"][0]["pos"] = json!("phrase_noun");
+    let (status, body) = save_v3_forms_draft(&state, &bearer, &phrase_id, 1, content).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entry_kinds: Vec<String> =
+        sqlx::query_scalar("SELECT entry_kind FROM lexicon.entry_pos WHERE entry_id = $1")
+            .bind(Uuid::parse_str(&phrase_id).unwrap())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(entry_kinds, vec!["phrase".to_owned()]);
+
+    // 反向同样拦：单词词条挂短语词性。
+    seed_dictionary_word(&pool, "harbour").await;
+    let word_id = create_v3_skeleton(&state, &bearer, "word", "harbour").await;
+    let mut content = v3_forms_fixture_for("harbour");
+    content["pos"][0]["pos"] = json!("phrase_noun");
+    let (status, body) = save_v3_forms_draft(&state, &bearer, &word_id, 1, content).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        has_issue(&body, "part_of_speech_kind_mismatch"),
+        "单词词条挂短语词性也应报 part_of_speech_kind_mismatch：{body}"
+    );
+}
+
+// ===== 短语词条只能挂短语词性（2026-09-12 起）；测试库没有短语词性种子，用到时补一个 =====
+
+const PHRASE_NOUN: &str = "phrase_noun";
+
+async fn seed_phrase_noun(pool: &PgPool) {
+    sqlx::query(
+        r#"
+        INSERT INTO catalog.parts_of_speech (
+            id, kind, code, name_zh, name_en, abbreviation, short_name_zh, full_name_en, sort_order
+        ) VALUES ($1, 'phrase', $2, '名词', 'NOUN', 'n.', '名词', 'noun', 10)
+        ON CONFLICT (code) DO NOTHING
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(PHRASE_NOUN)
+    .execute(pool)
+    .await
+    .expect("补短语名词种子应成功");
+}
+
+/// 与 complete_v3_forms_fixture 同形，只是挂短语词性、两侧拼写换成短语本身。
+fn phrase_forms_fixture(surface: &str) -> Value {
+    let mut forms = complete_v3_forms_fixture();
+    forms["pos"][0]["pos"] = json!(PHRASE_NOUN);
+    for form in forms["pos"][0]["forms"].as_array_mut().unwrap() {
+        form["regional_variants"]["uk"]["spelling"] = json!(surface);
+        form["regional_variants"]["us"]["spelling"] = json!(surface);
+    }
+    forms
+}
+
+/// 短语名词下没配细分词性，词义的 sub_pos 留空（空串表示不选）。
+fn phrase_meanings_fixture(pos_id: Value) -> Value {
+    let mut meanings = complete_v3_meanings_fixture(pos_id);
+    for sense in meanings["pos"][0]["senses"].as_array_mut().unwrap() {
+        sense["sub_pos"] = json!("");
+    }
+    meanings
 }

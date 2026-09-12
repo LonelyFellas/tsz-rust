@@ -1356,7 +1356,8 @@ impl LexiconService {
         )
         .await?;
         let meanings = DraftMeaningsStepContentV3::default();
-        let catalog_parts = resolve_v3_catalog_parts(&mut transaction, &forms).await?;
+        let catalog_parts =
+            resolve_v3_catalog_parts(&mut transaction, &forms, v3_kind_string(input.kind)).await?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.entries (
@@ -1679,7 +1680,8 @@ impl LexiconService {
                 ));
             }
         }
-        let catalog_parts = resolve_v3_catalog_parts(&mut transaction, &input.content).await?;
+        let catalog_parts =
+            resolve_v3_catalog_parts(&mut transaction, &input.content, &record.kind).await?;
         let next_revision = record.revision + 1;
         let surface_confirmation = if write_projection {
             Some(
@@ -2008,7 +2010,7 @@ impl LexiconService {
         }
         let validation_forms = v3_meaning_validation_forms(&forms);
         let catalog = self
-            .catalog_context_for_reference(&mut transaction, &validation_forms)
+            .catalog_context_for_reference(&mut transaction, &validation_forms, &record.kind)
             .await?;
         let rich_text_is_safe = canonicalize_meanings(&mut relational_meanings);
         let mut affected_contexts = relation_target_entry_ids(&current_relational_meanings);
@@ -2336,7 +2338,11 @@ impl LexiconService {
             .await
             .map_err(database_error)?;
         let catalog = self
-            .catalog_context_for_reference(&mut transaction, &validation_forms)
+            .catalog_context_for_reference(
+                &mut transaction,
+                &validation_forms,
+                v3_kind_string(word.kind),
+            )
             .await?;
         issues.extend(validate_meanings(
             entry_id,
@@ -4225,6 +4231,7 @@ fn v3_form_node_types(content: &DraftFormsStepContentV3) -> HashMap<Uuid, FormsI
 async fn resolve_v3_catalog_parts(
     tx: &mut Transaction<'_, Postgres>,
     content: &DraftFormsStepContentV3,
+    entry_kind: &str,
 ) -> Result<HashMap<String, Uuid>, LexiconServiceError> {
     let form_codes = content
         .pos
@@ -4263,6 +4270,16 @@ async fn resolve_v3_catalog_parts(
     let parts = LexiconRepository::catalog_parts_for_reference(tx, &codes)
         .await
         .map_err(repository_error)?;
+    let issues = part_of_speech_kind_issues(
+        entry_kind,
+        &parts,
+        content.pos.iter().map(|pos| (pos.pos_id, pos.pos.as_str())),
+    );
+    if !issues.is_empty() {
+        return Err(LexiconServiceError::ValidationFailedV3(
+            crate::lexicon::v3_contract::v3_issues(&issues),
+        ));
+    }
     let mapped = parts
         .into_iter()
         .map(|part| (part.code, part.id))
@@ -4364,8 +4381,8 @@ async fn replace_v3_forms(
             r#"
             INSERT INTO lexicon.entry_pos (
                 id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode,
-                sort_order, content_schema_version
-            ) VALUES ($1, $2, $3, $4, $5, $6, 3)
+                sort_order, content_schema_version, entry_kind
+            ) VALUES ($1, $2, $3, $4, $5, $6, 3, (SELECT kind FROM lexicon.entries WHERE id = $2))
             ON CONFLICT (id) DO UPDATE
             SET spelling_mode = EXCLUDED.spelling_mode,
                 phonetic_mode = EXCLUDED.phonetic_mode,

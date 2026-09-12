@@ -9,8 +9,8 @@ impl CatalogRepository {
             r#"
             INSERT INTO catalog.parts_of_speech (
                 id, code, name_zh, name_en, abbreviation, short_name_zh, full_name_en,
-                sort_order, created_by_admin_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                sort_order, created_by_admin_id, kind
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(value.id)
@@ -22,6 +22,7 @@ impl CatalogRepository {
         .bind(&value.full_name_en)
         .bind(value.sort_order)
         .bind(value.actor_id)
+        .bind(value.kind.as_str())
         .execute(&mut **tx)
         .await
         .map(|_| ())

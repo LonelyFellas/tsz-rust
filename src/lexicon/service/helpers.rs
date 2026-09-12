@@ -223,3 +223,34 @@ pub(super) fn ensure_draft_writable(
     }
     Ok(())
 }
+
+/// 单词词条只能挂单词词性、短语词条只能挂短语词性；不一致的每个 pos 节点各报一条，
+/// 锚在 forms 步的 pos 节点上。迁移前建的短语词条可能还挂着单词词性，这里是它们被拦下的地方。
+pub(super) fn part_of_speech_kind_issues<'a>(
+    entry_kind: &str,
+    parts: &[crate::lexicon::model::CatalogPartRecord],
+    pos: impl Iterator<Item = (Uuid, &'a str)>,
+) -> Vec<DraftValidationIssue> {
+    let message = if entry_kind == "phrase" {
+        "该词性属于单词目录，短语词条请改选短语词性"
+    } else {
+        "该词性属于短语目录，单词词条请改选单词词性"
+    };
+    pos.filter(|(_, code)| {
+        parts
+            .iter()
+            .any(|part| part.code == *code && part.kind != entry_kind)
+    })
+    .map(|(pos_id, _)| DraftValidationIssue {
+        step: PersistedWordStep::Forms,
+        node_id: pos_id,
+        field: "pos".to_owned(),
+        code: crate::lexicon::dto::V3ValidationIssueCode::PartOfSpeechKindMismatch
+            .as_str()
+            .to_owned(),
+        message: message.to_owned(),
+        reference_location: None,
+        node_location: None,
+    })
+    .collect()
+}

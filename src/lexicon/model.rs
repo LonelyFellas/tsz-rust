@@ -52,6 +52,8 @@ pub(crate) struct DictionaryContentRecord {
 pub(crate) struct CatalogPartRecord {
     pub id: Uuid,
     pub code: String,
+    /// `word` / `phrase`，与 `lexicon.entries.kind` 同一组字面量。
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

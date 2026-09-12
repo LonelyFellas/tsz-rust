@@ -8,9 +8,11 @@ impl CatalogService {
         actor_id: Uuid,
         request: CreatePartRequest,
     ) -> Result<PartOfSpeechConfig, CatalogServiceError> {
+        let kind = request.kind.unwrap_or(EntryKind::Word);
         let value = NewPart {
             id: Uuid::now_v7(),
-            code: valid_part_code(request.code)?,
+            kind,
+            code: valid_part_code_for_kind(request.code, kind)?,
             name_zh: normalized_text(request.name_zh, "name_zh", 64)?,
             name_en: normalized_text(request.name_en, "name_en", 64)?,
             abbreviation: normalized_text(request.abbreviation, "abbreviation", 16)?,

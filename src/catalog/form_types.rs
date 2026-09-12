@@ -201,21 +201,25 @@ fn text(value: String, field: &'static str, max: usize) -> Result<String, AppErr
 }
 
 /// 词形变化必须挂在已存在的基本词性下；不存在时给出和词性接口一致的 404。
+/// 短语没有词形变化：挂到短语词性上是 400，数据库复合外键兜底。
 async fn require_part(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<(), AppError> {
-    let exists =
-        sqlx::query_scalar::<_, bool>("SELECT true FROM catalog.parts_of_speech WHERE id = $1")
+    let kind =
+        sqlx::query_scalar::<_, String>("SELECT kind FROM catalog.parts_of_speech WHERE id = $1")
             .bind(id)
             .fetch_optional(&mut **tx)
             .await
-            .map_err(database_error)?
-            .is_some();
-    if exists {
-        Ok(())
-    } else {
-        Err(AppError::not_found_with_code(
+            .map_err(database_error)?;
+    match kind.as_deref() {
+        Some("word") => Ok(()),
+        Some(_) => Err(AppError::validation(
+            ErrorCode::InvalidFormType,
+            "part_of_speech_id",
+            "form types belong to word parts of speech only",
+        )),
+        None => Err(AppError::not_found_with_code(
             ErrorCode::PartOfSpeechNotFound,
             "part of speech not found",
-        ))
+        )),
     }
 }
 

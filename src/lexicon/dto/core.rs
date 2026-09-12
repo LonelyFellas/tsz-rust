@@ -9,6 +9,24 @@ pub enum EntryKind {
     Phrase,
 }
 
+impl EntryKind {
+    /// 数据库里 `kind` 列的字面量；catalog 与 lexicon 两侧共用同一组取值。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Word => "word",
+            Self::Phrase => "phrase",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "word" => Some(Self::Word),
+            "phrase" => Some(Self::Phrase),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Dialect {

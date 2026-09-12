@@ -4,13 +4,15 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::api::{PaginatedResponse, PaginationMeta};
-use crate::lexicon::form_types::WordFormTypeWithoutBase;
+use crate::lexicon::{dto::EntryKind, form_types::WordFormTypeWithoutBase};
 
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct PartListQuery {
     /// code、中文名、英文名、缩写、简洁显示或英文全称的忽略大小写字面子串。
     pub q: Option<String>,
+    /// 只看单词或短语一侧的基本词性；缺省两侧都返回。
+    pub kind: Option<EntryKind>,
     #[param(default = 1, minimum = 1)]
     pub page: Option<u32>,
     #[param(default = 10, minimum = 1, maximum = 100)]
@@ -40,6 +42,11 @@ pub struct SubPartPath {
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePartRequest {
+    /// 单词或短语一侧；缺省 word（旧前端不发这个字段）。创建后不可修改。
+    /// 短语词性的 code 必须以 `phrase_` 开头。
+    #[serde(default)]
+    #[schema(nullable = false)]
+    pub kind: Option<EntryKind>,
     #[schema(min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]
     pub code: String,
     #[schema(min_length = 1, max_length = 64)]
@@ -129,6 +136,7 @@ pub struct UpdateSubPartRequest {
 #[derive(Debug)]
 pub(crate) struct NewPart {
     pub id: Uuid,
+    pub kind: EntryKind,
     pub code: String,
     pub name_zh: String,
     pub name_en: String,
@@ -193,6 +201,8 @@ impl Actor {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PartOfSpeechConfig {
     pub id: Uuid,
+    /// 单词或短语一侧；两侧的展示名互不冲突，code 仍全局唯一。
+    pub kind: EntryKind,
     pub code: String,
     pub name_zh: String,
     pub name_en: String,
@@ -248,6 +258,8 @@ pub struct CatalogResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogPart {
     pub id: Uuid,
+    /// 与 PartOfSpeechConfig.kind 同源；词条创编按词条 kind 过滤可选词性。
+    pub kind: EntryKind,
     pub code: String,
     pub name_zh: String,
     pub name_en: String,
@@ -287,6 +299,7 @@ pub type PartListResponse = PaginatedResponse<PartOfSpeechConfig>;
 pub(crate) struct PartRecord {
     pub allowed_form_types: Vec<String>,
     pub id: Uuid,
+    pub kind: String,
     pub code: String,
     pub name_zh: String,
     pub name_en: String,
@@ -312,6 +325,8 @@ impl From<PartRecord> for PartOfSpeechConfig {
         let sub_pos_required = value.sub_part_count > 0;
         Self {
             id: value.id,
+            // catalog_parts_of_speech_kind_check 保证只会是这两个字面量。
+            kind: EntryKind::parse(&value.kind).unwrap_or(EntryKind::Word),
             code: value.code,
             name_zh: value.name_zh,
             name_en: value.name_en,
@@ -392,6 +407,7 @@ pub(crate) struct CatalogFlatRecord {
     pub catalog_version: i64,
     pub part_id: Option<Uuid>,
     pub part_code: Option<String>,
+    pub part_kind: Option<String>,
     pub part_name_zh: Option<String>,
     pub part_name_en: Option<String>,
     pub part_abbreviation: Option<String>,

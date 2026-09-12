@@ -6,6 +6,7 @@ use crate::{
         CatalogFlatRecord, NewPart, NewSubPart, PartChanges, PartListFilter, PartRecord,
         SubPartChanges, SubPartRecord,
     },
+    lexicon::dto::EntryKind,
     platform::{is_foreign_key_violation, is_unique_violation},
 };
 
@@ -13,7 +14,7 @@ mod commands;
 mod query;
 
 const PART_LIST_SQL: &str = r#"
-    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' AND part_of_speech_id = p.id ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
+    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' AND part_of_speech_id = p.id ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.kind, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
            p.sort_order, p.revision,
            p.created_by_admin_id, creator.display_name AS created_by_display_name,
            p.updated_by_admin_id, updater.display_name AS updated_by_display_name,
@@ -50,19 +51,20 @@ const PART_LIST_SQL: &str = r#"
     FROM catalog.parts_of_speech p
     LEFT JOIN admins creator ON creator.id = p.created_by_admin_id
     LEFT JOIN admins updater ON updater.id = p.updated_by_admin_id
-    WHERE $1::text IS NULL
+    WHERE ($4::text IS NULL OR p.kind = $4)
+      AND ($1::text IS NULL
        OR strpos(lower(p.code), lower($1)) > 0
        OR strpos(lower(p.name_zh), lower($1)) > 0
        OR strpos(lower(p.name_en), lower($1)) > 0
        OR strpos(lower(p.abbreviation), lower($1)) > 0
        OR strpos(lower(p.short_name_zh), lower($1)) > 0
-       OR strpos(lower(p.full_name_en), lower($1)) > 0
+       OR strpos(lower(p.full_name_en), lower($1)) > 0)
     ORDER BY p.sort_order, p.created_at, p.id
     LIMIT $2 OFFSET $3
 "#;
 
 const PART_BY_ID_SQL: &str = r#"
-    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' AND part_of_speech_id = p.id ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
+    SELECT ARRAY(SELECT code FROM catalog.form_types WHERE code <> 'base' AND part_of_speech_id = p.id ORDER BY sort_order,created_at,id) AS allowed_form_types, p.id, p.kind, p.code, p.name_zh, p.name_en, p.abbreviation, p.short_name_zh, p.full_name_en,
            p.sort_order, p.revision,
            p.created_by_admin_id, creator.display_name AS created_by_display_name,
            p.updated_by_admin_id, updater.display_name AS updated_by_display_name,

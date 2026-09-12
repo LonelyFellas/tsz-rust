@@ -72,7 +72,8 @@ WHERE id = TRUE;
 | 字段                  | 类型        | 约束与说明                                                 |
 | --------------------- | ----------- | ---------------------------------------------------------- |
 | `id`                  | UUID        | PK，服务端生成 UUID v7                                     |
-| `code`                | TEXT        | NOT NULL，由固定名字的唯一索引保证唯一，创建后不可修改     |
+| `kind`                | TEXT        | NOT NULL，`word` / `phrase`，默认 `word`，创建后不可修改；2026-09-12 新增 |
+| `code`                | TEXT        | NOT NULL，由固定名字的唯一索引保证全局唯一，创建后不可修改；短语词性必须以 `phrase_` 开头 |
 | `name_zh`             | TEXT        | NOT NULL                                                   |
 | `name_en`             | TEXT        | NOT NULL                                                   |
 | `abbreviation`        | TEXT        | NOT NULL                                                   |
@@ -91,12 +92,16 @@ WHERE id = TRUE;
 - `name_zh`、`name_en`：服务端 trim 后长度 1–64；数据库 CHECK 同时保证已 trim 且长度合法；
 - `abbreviation`：服务端 trim 后长度 1–16；数据库 CHECK 同时保证已 trim 且长度合法；
 - `short_name_zh`：服务端 trim 后长度 1–16；`full_name_en`：trim 后 1–64；数据库 CHECK 同样保证；
-- `code` 全局唯一；
-- `name_zh` 全局唯一；
-- `name_en` 忽略大小写后全局唯一；
-- `abbreviation` 忽略大小写后全局唯一；
-- `short_name_zh` 全局唯一（`catalog_parts_of_speech_short_name_zh_unique_idx`）；
-- `full_name_en` 忽略大小写后全局唯一（`catalog_parts_of_speech_full_name_en_unique_idx`）；
+- `code` 全局唯一（跨 kind）；短语词性的 `code` 以 `phrase_` 开头（CHECK `catalog_parts_of_speech_phrase_code_check`）；
+- 以下五个展示字段自 2026-09-12 起只在**同一 kind 内**唯一，短语侧可以再建一个「名词」
+  （索引改为 `(kind, …)` 复合索引，名字不变，详见 `docs/features/phrase-parts-of-speech`）：
+  - `name_zh`；
+  - `name_en` 忽略大小写；
+  - `abbreviation` 忽略大小写；
+  - `short_name_zh`（`catalog_parts_of_speech_short_name_zh_unique_idx`）；
+  - `full_name_en` 忽略大小写（`catalog_parts_of_speech_full_name_en_unique_idx`）；
+- `(id, kind)` 另有唯一约束 `catalog_parts_of_speech_id_kind_key`，是 `lexicon.entry_pos` 与
+  `catalog.form_types` 复合外键的引用目标：单词词条只能挂单词词性，词形变化只能挂单词词性；
 - `sort_order` 接受完整的 PostgreSQL `INTEGER`（有符号 32 位整数）值域并允许重复；读取时按
   `sort_order, created_at, id` 稳定排序。负数用于把项目排到默认项之前，不属于业务校验错误。
 
@@ -685,6 +690,8 @@ lexicon.entry_publication_sub_part_of_speech_refs
 - 种子的名称、父级和 sort_order 与 §3 完全一致；
 - code、名称和缩写唯一约束；
 - 唯一索引使用 §2 固定名字，能够稳定映射冲突字段；
+- `kind` 维度：展示名在 kind 内唯一、code 跨 kind 唯一、短语 code 前缀 CHECK、entry_pos / form_types 复合外键
+  （`catalog_schema::parts_of_speech_kind_constraints`）；
 - 非法 code 被 CHECK 拒绝；
 - 未 trim、空白、超长名称/缩写被 CHECK 拒绝；
 - 细分词性不能引用不存在的基本词性；
