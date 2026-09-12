@@ -32,6 +32,7 @@ async fn admin(pool: &PgPool) -> Uuid {
 async fn entry(pool: &PgPool, owner: Uuid, name: &str) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,revision,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word',1,'{}',$2,$2)").bind(id).bind(owner).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.entry_editor_projection(entry_id,forms,meanings,rebuilt_revision) VALUES($1,'{\"pos\":[]}','{\"sense_groups\":[],\"pos\":[]}',1)").bind(id).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO lexicon.v3_entry_state(entry_id,origin,initial_headwords,initial_headword_keys) VALUES($1,'native',$2,$3)").bind(id).bind(json!({"mode":"unified","common":name})).bind(vec![format!("uk:{name}"),format!("us:{name}")]).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO lexicon.entry_presentation_projection(entry_id,content_schema_version,source_revision,label,matched_surfaces,strategy_version) VALUES($1,3,1,$2,ARRAY[$2]::text[],'test')").bind(id).bind(name).execute(pool).await.unwrap();
     id
@@ -50,7 +51,8 @@ async fn call(
     let mut req = Request::builder()
         .method(method)
         .uri(path)
-        .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header("Idempotency-Key", Uuid::now_v7().to_string());
     let body = if let Some(body) = body {
         req = req.header(header::CONTENT_TYPE, "application/json");
         Body::from(body.to_string())
@@ -513,4 +515,122 @@ async fn rollback_refuses_to_erase_new_shared_content(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn shared_references_block_single_and_batch_archive_until_explicitly_unlinked(pool: PgPool) {
+    let owner = admin(&pool).await;
+    // Earlier rows would be archived first by the sorted batch if the transaction were not atomic.
+    let plain = entry(&pool, owner, "plain").await;
+    let source = entry(&pool, owner, "origin").await;
+    let target = entry(&pool, owner, "wonderful").await;
+    let redis_url = std::env::var("TEST_REDIS_URL")
+        .or_else(|_| std::env::var("REDIS_URL"))
+        .expect("isolated Redis URL");
+    let redis = deadpool_redis::Config::from_url(redis_url)
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(tsz_rust::config::SmartLexiconV3Flags::all_enabled());
+    let (status, saved) = call(
+        &state,
+        owner,
+        Method::POST,
+        ROOT,
+        Some(json!({"source_entry_id":source,"content":content(target)})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let sentence_id = saved["id"].as_str().unwrap();
+    let (status, _) = call(
+        &state,
+        owner,
+        Method::POST,
+        &format!("{ROOT}/{sentence_id}/collections"),
+        Some(json!({"base_revision":1,"entry_id":target,"annotation_ids":[]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let archive_path = format!("/api/v1/admin/lexicon/entries/{target}/archive");
+    let archive_input = json!({"base_revision":1,"base_lifecycle_revision":1});
+    let (status, problem) = call(
+        &state,
+        owner,
+        Method::POST,
+        &archive_path,
+        Some(archive_input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
+    assert_eq!(problem["code"], "reference_conflict");
+    let (status, problem) = call(&state, owner, Method::POST, "/api/v1/admin/lexicon/entries/archive-batch", Some(json!({"entries":[{"id":plain,"base_revision":1,"base_lifecycle_revision":1},{"id":source,"base_revision":1,"base_lifecycle_revision":1},{"id":target,"base_revision":1,"base_lifecycle_revision":1}]}))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
+    let archived: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.entries WHERE archived_at IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        archived, 0,
+        "batch including the source still cannot strand independently published sentences"
+    );
+    let mut updated_content = saved["content"].clone();
+    updated_content["sentence"]["level"] = json!("C1");
+    let (status, updated) = call(
+        &state,
+        owner,
+        Method::PUT,
+        &format!("{ROOT}/{sentence_id}"),
+        Some(json!({"base_revision":2,"content":updated_content})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let (status, _) = call(
+        &state,
+        owner,
+        Method::DELETE,
+        &format!("{ROOT}/{sentence_id}/collections/{target}"),
+        Some(json!({"base_revision":3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Removing collection alone does not remove the sentence's explicit linked target.
+    let (status, _) = call(
+        &state,
+        owner,
+        Method::POST,
+        &archive_path,
+        Some(archive_input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    updated_content["annotations"] = json!([]);
+    let (status, _) = call(
+        &state,
+        owner,
+        Method::PUT,
+        &format!("{ROOT}/{sentence_id}"),
+        Some(json!({"base_revision":4,"content":updated_content})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, archived) = call(
+        &state,
+        owner,
+        Method::POST,
+        &archive_path,
+        Some(archive_input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    let (status, retained) = call(
+        &state,
+        owner,
+        Method::GET,
+        &format!("{ROOT}/{sentence_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retained["content"]["sentence"]["level"], "C1");
 }

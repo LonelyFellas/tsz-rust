@@ -336,6 +336,11 @@ fn map_error(error: LexiconServiceError) -> AppError {
             ),
             ..ProblemMeta::default()
         }),
+        LexiconServiceError::EntryHasInboundSharedSentenceRefs => AppError::conflict(
+            ErrorCode::ReferenceConflict,
+            None,
+            "词条被共享例句标注，请先在多维例句库解除对应标注，再移入垃圾桶。",
+        ),
         LexiconServiceError::ReferenceConflict => AppError::conflict(
             ErrorCode::ReferenceConflict,
             None,

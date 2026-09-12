@@ -563,6 +563,12 @@ impl LexiconService {
                 continue;
             }
             if target_state == TargetState::Archived {
+                // Shared sentences remain published even when their source word is in this batch.
+                let shared_reference: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a JOIN lexicon.shared_sentences s ON s.id=a.sentence_id WHERE a.target_entry_id=$1 AND s.deleted_at IS NULL)")
+                    .bind(current.id).fetch_one(&mut *transaction).await.map_err(database_error)?;
+                if shared_reference {
+                    return Err(LexiconServiceError::EntryHasInboundSharedSentenceRefs);
+                }
                 let references = LexiconRepository::active_inbound_sense_refs(
                     &mut transaction,
                     current.id,
