@@ -323,10 +323,8 @@ impl PublishedAssociationTarget {
         forms_content: &crate::lexicon::dto::DraftFormsStepContentV3,
         meanings_content: &DraftMeaningsStepContentV3,
     ) -> Result<Self, LexiconServiceError> {
-        let meanings: DraftMeaningsStepContent = serde_json::from_value(
-            serde_json::to_value(meanings_content).map_err(serialization_error)?,
-        )
-        .map_err(serialization_error)?;
+        let meanings =
+            crate::lexicon::service::v3_publication::v3_meanings_to_v2(meanings_content)?;
         let pos = forms_content
             .pos
             .iter()

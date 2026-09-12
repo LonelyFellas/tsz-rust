@@ -1950,10 +1950,8 @@ impl LexiconService {
             ));
         }
         let mut translation_content = content.clone();
-        let mut relational_meanings: DraftMeaningsStepContent =
-            serde_json::from_value(serde_json::to_value(content).map_err(serialization_error)?)
-                .map_err(serialization_error)?;
-        crate::lexicon::sentence_association::clear_sentence_associations(&mut relational_meanings);
+        let mut relational_meanings =
+            crate::lexicon::service::v3_publication::v3_meanings_to_v2(&content)?;
         let mut transaction = self
             .repository
             .pool()
@@ -2340,11 +2338,8 @@ impl LexiconService {
             &word.meanings,
         ));
         let validation_forms = v3_meaning_validation_forms(&word.forms);
-        let mut relational_meanings: DraftMeaningsStepContent = serde_json::from_value(
-            serde_json::to_value(&word.meanings).map_err(serialization_error)?,
-        )
-        .map_err(serialization_error)?;
-        crate::lexicon::sentence_association::clear_sentence_associations(&mut relational_meanings);
+        let mut relational_meanings =
+            crate::lexicon::service::v3_publication::v3_meanings_to_v2(&word.meanings)?;
         let mut transaction = self
             .repository
             .pool()
@@ -3807,9 +3802,9 @@ fn forms_impact_v3(
         .collect::<Vec<_>>();
     let mut proposed_meanings = current_meanings.clone();
     reconcile_v3_meanings_after_forms(&mut proposed_meanings, proposed);
-    let proposed_meaning_ids = v3_meaning_node_types(&proposed_meanings)?;
+    let proposed_meaning_ids = v3_meaning_node_types(&proposed_meanings);
     affected.extend(
-        v3_meaning_node_types(current_meanings)?
+        v3_meaning_node_types(current_meanings)
             .into_iter()
             .filter_map(|(id, node_type)| {
                 (!proposed_meaning_ids.contains_key(&id)).then_some(FormsImpactItemV3 {
@@ -3842,37 +3837,78 @@ fn reconcile_v3_meanings_after_forms(
     });
 }
 
+/// 英文富文本下挂的文本变体节点：unified 一个 common，distinguish 每个就位的方言一个。
+fn push_v3_english_text_nodes(
+    types: &mut HashMap<Uuid, FormsImpactNodeTypeV3>,
+    value: &EnglishTextV3,
+) {
+    match value {
+        EnglishTextV3::Unified { common } => {
+            types.insert(common.id, FormsImpactNodeTypeV3::TextVariant);
+        }
+        EnglishTextV3::Distinguish { uk, us, .. } => {
+            for slot in [uk, us] {
+                if let DialectVariantRichTextSlotV3::Ready { variant } = slot {
+                    types.insert(variant.id, FormsImpactNodeTypeV3::TextVariant);
+                }
+            }
+        }
+    }
+}
+
+/// 词义步各节点的 id 与类型，直接按 V3 结构算。
+///
+/// 这里曾经把 V3 词义经 JSON 往返成 V2 内部模型，再复用 `proposed_nodes`。但 V3 的例句关联
+/// （`WordSentenceAssociationV3`）比 V2 侧多出 `association_schema_version`、`source_segments`
+/// 等字段，而 V2 那个结构带 `deny_unknown_fields`——词义里只要有一条已解析的关联，往返就会
+/// 直接失败成 500（禅道 BUG #6）。关联本来就不参与节点计算，V3 独有的释义级成分当年也得靠
+/// `v3_component_proposed_nodes` 单独补回来，索性不再绕 V2。
+///
+/// 节点集合与原先按 V2 形状算出来的保持一致：`sense_groups` 由词形保存保留、不进影响清单；
+/// 例句的 `zh_translations` 在 V2 形状里没有对应物，同样不产生节点。
 fn v3_meaning_node_types(
     content: &DraftMeaningsStepContentV3,
-) -> Result<HashMap<Uuid, FormsImpactNodeTypeV3>, LexiconServiceError> {
-    let relational: DraftMeaningsStepContent =
-        serde_json::from_value(serde_json::to_value(content).map_err(serialization_error)?)
-            .map_err(serialization_error)?;
-    let mut types = proposed_nodes(&DraftFormsStepContent::default(), &relational)
-        .into_iter()
-        .filter(|node| node.step == PersistedWordStep::Meanings)
-        .filter_map(|node| {
-            let node_type = match node.node_type {
-                "grammar_structure" => FormsImpactNodeTypeV3::GrammarStructure,
-                "text_variant" => FormsImpactNodeTypeV3::TextVariant,
-                "sense" => FormsImpactNodeTypeV3::Sense,
-                "definition" => FormsImpactNodeTypeV3::Definition,
-                "sentence" => FormsImpactNodeTypeV3::Sentence,
-                "relation" => FormsImpactNodeTypeV3::Relation,
-                // sense groups are top-level and are retained by forms saves.
-                "sense_group" => return None,
-                _ => return None,
-            };
-            Some((node.id, node_type))
-        })
-        .collect::<HashMap<_, _>>();
-    // 释义级成分在 V2 形状里不存在，词性被删时同样要出现在影响清单上。
+) -> HashMap<Uuid, FormsImpactNodeTypeV3> {
+    let mut types = HashMap::new();
+    for pos in &content.pos {
+        for grammar in &pos.grammar_structures {
+            types.insert(grammar.id, FormsImpactNodeTypeV3::GrammarStructure);
+            for variant in &grammar.variants {
+                types.insert(variant.id, FormsImpactNodeTypeV3::TextVariant);
+            }
+        }
+        for sense in &pos.senses {
+            types.insert(sense.id, FormsImpactNodeTypeV3::Sense);
+            for definition in &sense.definitions {
+                match definition {
+                    WordDefinitionV3::ZhDefinition { id, content_id, .. }
+                    | WordDefinitionV3::ZhSentence { id, content_id, .. } => {
+                        types.insert(*id, FormsImpactNodeTypeV3::Definition);
+                        types.insert(*content_id, FormsImpactNodeTypeV3::TextVariant);
+                    }
+                    WordDefinitionV3::EnDefinition { id, content, .. }
+                    | WordDefinitionV3::EnSentence { id, content, .. } => {
+                        types.insert(*id, FormsImpactNodeTypeV3::Definition);
+                        push_v3_english_text_nodes(&mut types, content);
+                    }
+                }
+            }
+            for sentence in &sense.sentences {
+                types.insert(sentence.id, FormsImpactNodeTypeV3::Sentence);
+                push_v3_english_text_nodes(&mut types, &sentence.en_text);
+                types.insert(sentence.zh_text_id, FormsImpactNodeTypeV3::TextVariant);
+            }
+            for relation in &sense.relations {
+                types.insert(relation.id, FormsImpactNodeTypeV3::Relation);
+            }
+        }
+    }
     types.extend(
         v3_component_proposed_nodes(content)
             .into_iter()
             .map(|node| (node.id, FormsImpactNodeTypeV3::PhraseComponentUsage)),
     );
-    Ok(types)
+    types
 }
 
 fn v3_form_node_ids(content: &DraftFormsStepContentV3) -> Vec<Uuid> {
@@ -5160,6 +5196,92 @@ mod tests {
 
     fn fixed_id(value: u128) -> Uuid {
         Uuid::from_u128(value)
+    }
+
+    /// 禅道 BUG #6：例句带一条已解析的关联时，词义节点计算不能再炸。
+    ///
+    /// 关联是读取时按例句 text_link 推导出来的，V3 的关联结构比 V2 内部模型多几个字段，
+    /// 而 V2 那个结构带 deny_unknown_fields。以前这里走 JSON 往返，词条只要有 text_link，
+    /// 词形步的影响预览就 500。
+    #[test]
+    fn meaning_nodes_survive_a_linked_sentence_association() {
+        let pos_id = Uuid::new_v4();
+        let sense_id = Uuid::new_v4();
+        let sentence_id = Uuid::new_v4();
+        let en_variant_id = Uuid::new_v4();
+        let zh_text_id = Uuid::new_v4();
+        let association_id = Uuid::new_v4();
+        let raw = serde_json::json!({
+            "sense_groups": [],
+            "pos": [{
+                "pos_id": pos_id,
+                "grammar_structures": [],
+                "senses": [{
+                    "id": sense_id,
+                    "sub_pos": "",
+                    "level": "A1",
+                    "depends_on_context": false,
+                    "definitions": [],
+                    "relations": [],
+                    "sentences": [{
+                        "id": sentence_id,
+                        "level": "A1",
+                        "en_text": {
+                            "mode": "unified",
+                            "common": {
+                                "id": en_variant_id,
+                                "value": {"version": 2, "text": "I have a new job.", "annotations": []},
+                                "origin": "manual"
+                            }
+                        },
+                        "zh_text_id": zh_text_id,
+                        "zh_text": {"version": 2, "text": "", "annotations": []},
+                        "links": [],
+                        "associations": [{
+                            "state": "linked",
+                            "id": association_id,
+                            "association_schema_version": 3,
+                            "source_dialect": "common",
+                            "source_segments": [{"start": 13, "end": 16, "surface": "job"}],
+                            "target_word_id": Uuid::new_v4(),
+                            "target_sense_id": Uuid::new_v4(),
+                            "target_component_usages": [],
+                            "origin": "manual",
+                            "target_headword": "job",
+                            "target_gloss": "",
+                            "resolved_pos": ""
+                        }],
+                        "associations_state": "resolved"
+                    }]
+                }]
+            }]
+        });
+        let content: DraftMeaningsStepContentV3 =
+            serde_json::from_value(raw).expect("V3 词义应能解析");
+
+        let types = v3_meaning_node_types(&content);
+
+        assert_eq!(types.get(&sense_id), Some(&FormsImpactNodeTypeV3::Sense));
+        assert_eq!(
+            types.get(&sentence_id),
+            Some(&FormsImpactNodeTypeV3::Sentence)
+        );
+        assert_eq!(
+            types.get(&en_variant_id),
+            Some(&FormsImpactNodeTypeV3::TextVariant)
+        );
+        assert_eq!(
+            types.get(&zh_text_id),
+            Some(&FormsImpactNodeTypeV3::TextVariant)
+        );
+        // 关联本身不是节点，不进影响清单。
+        assert_eq!(types.get(&association_id), None);
+        // 语义区间由词形保存保留，同样不进。
+        assert_eq!(types.len(), 4, "{types:?}");
+
+        // 同一份内容转 V2 内部模型也不能再失败（validate / 发布走这条）。
+        crate::lexicon::service::v3_publication::v3_meanings_to_v2(&content)
+            .expect("剥掉关联后应能转成 V2 内部模型");
     }
 
     #[test]
