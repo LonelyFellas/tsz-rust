@@ -132,6 +132,8 @@ pub enum LexiconServiceError {
     EntryHasInboundPreboundRelations,
     #[error("entry has inbound publication references")]
     EntryHasInboundPublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
+    #[error("entry has active shared sentence annotations and cannot be archived")]
+    EntryHasInboundSharedSentenceRefs,
     #[error("entry has unavailable outbound publication references")]
     EntryHasUnavailablePublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
     #[error("a referenced publication is changing")]

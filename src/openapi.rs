@@ -33,6 +33,14 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::lexicon::shared_sentences::list,
+        crate::lexicon::shared_sentences::get,
+        crate::lexicon::shared_sentences::create,
+        crate::lexicon::shared_sentences::update,
+        crate::lexicon::shared_sentences::delete,
+        crate::lexicon::shared_sentences::collect,
+        crate::lexicon::shared_sentences::uncollect,
+
         // auth 域
         crate::auth::handler::login,
         crate::auth::handler::login_otp,

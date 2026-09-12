@@ -1925,3 +1925,19 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 `= 3` 并删除 `headword_mode` / `source_dialect`；删除六张 V2 存储表与三张 V2→V3 迁移账本表；
 `v3_entry_state.origin` 只剩 `native`。迁移开头会先数残留 V2 行，有就整条失败——库里还有 V2
 数据时这条迁移不该跑。
+
+## 独立多维例句（2026-09-12）
+
+共享例句独立于词条草稿及词条发布内容；当前例句通过收录关系读取，不嵌回 meanings。前端例句编辑器点“完成”立即保存并对后台可见，取消外层词条不会撤销。没有新增审核、独立发布按钮或题目生成。
+
+- `GET /api/v1/admin/lexicon/sentences`：关键词（ID/正文/创建人）、等级、创建时间与分页；`entry_id` 查询正式收录，`candidates=true` 查询可能收录的标注例句。
+- `POST /api/v1/admin/lexicon/sentences`：必须给出有权编辑的真实 `source_entry_id`；正文、句内标注与该词条收录在单事务完成。`content.sentence.id` 是客户端稳定 UUID，同 UUID 同创建内容重试返回已有例句，不创建副本；内容不同返回 409。
+- `GET/PUT/DELETE /api/v1/admin/lexicon/sentences/{id}`：详情、共享修改、整体删除。修改与删除带 `base_revision`；引用集合变化也推进 revision，过期确认返回 409。
+- `POST /api/v1/admin/lexicon/sentences/{id}/collections`：明确指定 `entry_id` 收录；`annotation_ids` 只包含用户勾选的 pending 标记，事务内验证候选、绑定具体词条并收录。已有 linked 目标用空数组，不重新定目标。
+- `DELETE /api/v1/admin/lexicon/sentences/{id}/collections/{entry_id}`：只解除该词条收录，保留例句和其他引用。
+
+句内片段采用 Unicode 码点偏移，支持非连续且不重叠的多段片段。`linked` 只接受具体词条 UUID（可为草稿）；`pending` 保留词条类型、待关联文字、释义/上下文和位置。规范化词面及已有词形只用于发现候选，不按拼写自动绑定或自动创建词条。同名词条通过其区分标签和不同 UUID 人工选择。
+
+所有端点核实活跃管理员；创建和收录沿用未发布词条的创建人/超管写权限，共享例句作为已发布内容由活跃管理员维护。数据库结构迁移成对提供，已有共享数据时禁止直接回退删除结构。无旧数据回填或兼容窗口，新前后端须配套切换；本次不包含部署操作。
+
+共享引用与词条归档：被活跃共享例句标注的具体词条须先解除对应标注，才能移入垃圾桶；单条和批量归档均返回 409 `reference_conflict` 并提示处理方法。批次包含例句来源词条也不豁免，因为共享例句独立发布。只移除收录不会删除句内标注。

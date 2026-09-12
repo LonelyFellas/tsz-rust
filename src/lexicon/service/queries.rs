@@ -536,6 +536,15 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?,
         );
+        let sentence_counts: Vec<(Uuid, i64)> = sqlx::query_as("SELECT target_entry_id,count(DISTINCT sentence_id) FROM lexicon.shared_sentence_annotations WHERE target_entry_id=ANY($1) GROUP BY target_entry_id")
+            .bind(&entry_ids).fetch_all(self.repository.pool()).await.map_err(database_error)?;
+        for (target, count) in sentence_counts {
+            let summary = reference_summaries.entry(target).or_default();
+            summary.total = summary
+                .total
+                .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+            summary.truncated = summary.total as usize > summary.previews.len();
+        }
         let words = records
             .into_iter()
             .map(|record| {
