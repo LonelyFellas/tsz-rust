@@ -256,6 +256,11 @@ impl LexiconService {
         {
             return Err(LexiconServiceError::EntryHasInboundPreboundRelations);
         }
+        let sentence_reference: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations WHERE target_entry_id=$1)")
+            .bind(entry_id).fetch_one(&mut **transaction).await.map_err(database_error)?;
+        if sentence_reference {
+            return Err(LexiconServiceError::EntryNotDeletable);
+        }
         LexiconRepository::retire_v3_draft_surface_projection(
             transaction,
             entry_id,

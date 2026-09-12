@@ -7,6 +7,24 @@ use crate::{
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/sentences",
+            get(super::shared_sentences::list).post(super::shared_sentences::create),
+        )
+        .route(
+            "/sentences/{id}",
+            get(super::shared_sentences::get)
+                .put(super::shared_sentences::update)
+                .delete(super::shared_sentences::delete),
+        )
+        .route(
+            "/sentences/{id}/collections",
+            axum::routing::post(super::shared_sentences::collect),
+        )
+        .route(
+            "/sentences/{id}/collections/{entry_id}",
+            axum::routing::delete(super::shared_sentences::uncollect),
+        )
         .route("/detections", axum::routing::post(handler::detect))
         .route(
             "/surface-match-snapshots/{snapshot_id}",

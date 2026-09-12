@@ -771,7 +771,10 @@ fn meanings_node_count(content: &DraftMeaningsStepContentV3) -> usize {
             .sum::<usize>()
 }
 
-fn validate_english_text_limits(content: &EnglishTextV3, issues: &mut Vec<DraftValidationIssue>) {
+pub(crate) fn validate_english_text_limits(
+    content: &EnglishTextV3,
+    issues: &mut Vec<DraftValidationIssue>,
+) {
     for variant in english_text_variants(content) {
         validate_rich_text_limits(&variant.value, variant.id, "value", issues);
         validate_voice_profile(variant.voice_profile.as_ref(), variant.id, issues);

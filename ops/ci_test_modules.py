@@ -26,6 +26,7 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
         "dictionary_schema",
         "lexicon_*",
         "sentence_*",
+        "shared_sentences",
     ),
     "platform": (
         "catalog_*",

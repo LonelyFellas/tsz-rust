@@ -22,3 +22,5 @@ pub mod v3_initial_headword_backfill;
 pub(crate) mod v3_projection;
 pub mod validation;
 mod visibility;
+
+pub mod shared_sentences;
