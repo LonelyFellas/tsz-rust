@@ -213,6 +213,7 @@ impl LexiconService {
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         forms: &DraftFormsStepContent,
+        entry_kind: &str,
     ) -> Result<CatalogContext, LexiconServiceError> {
         let form_codes = forms
             .pos
@@ -243,10 +244,24 @@ impl LexiconService {
             .iter()
             .map(|part| part.pos.clone())
             .collect::<Vec<_>>();
-        // 只为拿 FOR KEY SHARE 锁：引用期间这些词性不得被删，返回行本身没有消费方。
-        LexiconRepository::catalog_parts_for_reference(transaction, &codes)
+        // 拿 FOR KEY SHARE 锁（引用期间这些词性不得被删），顺带核对词性维度：
+        // 迁移前建的短语词条可能还挂着单词词性，完成 / 发布前必须改选。
+        let parts = LexiconRepository::catalog_parts_for_reference(transaction, &codes)
             .await
             .map_err(repository_error)?;
+        let issues = part_of_speech_kind_issues(
+            entry_kind,
+            &parts,
+            forms
+                .pos
+                .iter()
+                .map(|part| (part.pos_id, part.pos.as_str())),
+        );
+        if !issues.is_empty() {
+            return Err(LexiconServiceError::ValidationFailedV3(
+                crate::lexicon::v3_contract::v3_issues(&issues),
+            ));
+        }
         let sub_parts = LexiconRepository::catalog_sub_parts_for_reference(transaction)
             .await
             .map_err(repository_error)?;

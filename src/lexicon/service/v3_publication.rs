@@ -120,7 +120,7 @@ impl LexiconService {
         ));
         let validation_forms = v3_meaning_validation_forms(&word.forms);
         let catalog = self
-            .catalog_context_for_reference(&mut tx, &validation_forms)
+            .catalog_context_for_reference(&mut tx, &validation_forms, &record.kind)
             .await?;
         let mut relational_meanings = v3_meanings_to_v2(&word.meanings)?;
         crate::lexicon::sentence_association::clear_sentence_associations(&mut relational_meanings);

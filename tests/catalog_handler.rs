@@ -133,8 +133,8 @@ async fn seed_lexicon_usage(
     sqlx::query(
         r#"
         INSERT INTO lexicon.entry_pos (
-            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order
-        ) VALUES ($1, $2, $3, 'unified', 'unified', 0)
+            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 'unified', 'unified', 0, (SELECT kind FROM lexicon.entries WHERE id = $2))
         "#,
     )
     .bind(pos_node_id)
@@ -262,7 +262,7 @@ async fn catalog_read_allows_active_admin_but_management_requires_super_admin(po
     )
     .await;
     assert_eq!(status, StatusCode::OK, "普通管理员应能读 catalog：{body}");
-    assert_eq!(body["catalog_version"], 6);
+    assert_eq!(body["catalog_version"], 7);
     // 词形候选按所属词性收窄：种子把动词的四个时态、名词的复数、形容词的两级各归其主，
     // 原形对所有词性通用所以不进候选。
     let form_types_by_pos = json!({
@@ -754,8 +754,8 @@ async fn part_and_sub_part_lifecycle_is_transactional_and_revision_safe(pool: Pg
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    // 比放开前多两步写操作：自建词性挂细分词性、再把它删掉。
-    assert_eq!(catalog["catalog_version"], 14);
+    // 比放开前多两步写操作：自建词性挂细分词性、再把它删掉；kind 迁移又让基线加一。
+    assert_eq!(catalog["catalog_version"], 15);
     assert!(
         catalog["items"]
             .as_array()
@@ -1549,4 +1549,305 @@ async fn sub_part_code_carries_the_code_text_and_freezes_once_referenced(pool: P
     .await;
     assert_eq!(status, StatusCode::OK, "编码不变时应放行：{renamed}");
     assert_eq!(renamed["short_name_zh"], "物质名词");
+}
+
+#[sqlx::test]
+async fn phrase_parts_of_speech_live_in_their_own_kind(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin_id = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let bearer = token(&state, admin_id, AdminRole::SuperAdmin);
+
+    // 旧前端不发 kind：缺省就是单词词性。
+    let (status, _, legacy, _) = call(
+        &state,
+        Method::POST,
+        ROOT,
+        Some(&bearer),
+        Some(json!({
+            "code": "particle",
+            "name_zh": "小品词",
+            "name_en": "PARTICLE",
+            "abbreviation": "part.",
+            "short_name_zh": "小品词",
+            "full_name_en": "particle",
+            "sort_order": 60
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{legacy}");
+    assert_eq!(legacy["kind"], "word");
+
+    // 短语侧可以再建一个展示名完全相同的「名词」，只有 code 要住进 phrase_ 命名空间。
+    let phrase_input = json!({
+        "kind": "phrase",
+        "code": "phrase_noun",
+        "name_zh": "名词",
+        "name_en": "NOUN",
+        "abbreviation": "n.",
+        "short_name_zh": "名词",
+        "full_name_en": "noun",
+        "sort_order": 10
+    });
+    let (status, _, phrase_noun, _) = call(
+        &state,
+        Method::POST,
+        ROOT,
+        Some(&bearer),
+        Some(phrase_input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase_noun}");
+    assert_eq!(phrase_noun["kind"], "phrase");
+    assert_eq!(phrase_noun["code"], "phrase_noun");
+    assert_eq!(phrase_noun["sub_pos_required"], false);
+    let phrase_noun_id = phrase_noun["id"].as_str().unwrap().to_owned();
+
+    let mut unprefixed = phrase_input.clone();
+    unprefixed["code"] = json!("phrasal_verb");
+    unprefixed["name_zh"] = json!("短语动词");
+    let (status, _, body, _) =
+        call(&state, Method::POST, ROOT, Some(&bearer), Some(unprefixed)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_part_of_speech");
+    assert_eq!(body["field"], "code");
+
+    // 同 kind 内展示名照旧冲突：单词侧已有「名词」。
+    let mut same_kind = phrase_input.clone();
+    same_kind["kind"] = json!("word");
+    same_kind["code"] = json!("noun_again");
+    let (status, _, body, _) =
+        call(&state, Method::POST, ROOT, Some(&bearer), Some(same_kind)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "part_of_speech_conflict");
+    assert_eq!(body["field"], "name_zh");
+
+    // kind 与 code 一样创建后不可改：PATCH 带上就是 422。
+    let (status, _, body, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{ROOT}/{phrase_noun_id}"),
+        Some(&bearer),
+        Some(json!({
+            "base_revision": 1,
+            "kind": "word",
+            "name_zh": "名词",
+            "name_en": "NOUN",
+            "abbreviation": "n.",
+            "short_name_zh": "名词",
+            "full_name_en": "noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "invalid_request_body");
+
+    // 列表按 kind 过滤；不带 kind 两侧都返回。
+    let (status, _, phrases, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}?kind=phrase&page_size=100"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{phrases}");
+    let phrase_codes: Vec<&str> = phrases["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(phrase_codes, vec!["phrase_noun"]);
+    let (status, _, words, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}?kind=word&page_size=100"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{words}");
+    assert!(
+        words["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] == "word"),
+        "kind=word 不应混进短语词性：{words}"
+    );
+    assert_eq!(words["pagination"]["total"], 6, "五个种子 + 小品词");
+    let (status, _, all, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}?page_size=100"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    assert_eq!(all["pagination"]["total"], 7);
+
+    // catalog 每项都带 kind，词条创编据此按词条 kind 过滤。
+    let (status, _, catalog, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/catalog"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let items = catalog["items"].as_array().unwrap();
+    assert!(
+        items
+            .iter()
+            .all(|item| item["kind"] == "word" || item["kind"] == "phrase")
+    );
+    let catalog_phrase = items
+        .iter()
+        .find(|item| item["code"] == "phrase_noun")
+        .expect("catalog 应包含短语名词");
+    assert_eq!(catalog_phrase["kind"], "phrase");
+    assert_eq!(catalog_phrase["name_zh"], "名词");
+    assert_eq!(
+        catalog_phrase["allowed_form_types"],
+        json!([]),
+        "短语词性下没有词形变化"
+    );
+
+    // 细分词性从父级继承 kind，不需要额外字段。
+    let (status, _, sub, _) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/{phrase_noun_id}/sub-parts"),
+        Some(&bearer),
+        Some(json!({
+            "code": "PHR-N-COUNT",
+            "name_zh": "可数名词短语",
+            "name_en": "Countable noun phrase",
+            "short_name_zh": "可数",
+            "abbreviation": "n.",
+            "full_name_en": "countable noun phrase",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{sub}");
+    let (status, _, catalog, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/catalog"),
+        Some(&bearer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let catalog_phrase = catalog["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == "phrase_noun")
+        .expect("catalog 应包含短语名词");
+    assert_eq!(
+        catalog_phrase["sub_pos_required"], true,
+        "配了细分词性就必填"
+    );
+    assert_eq!(catalog_phrase["sub_parts"][0]["code"], "PHR-N-COUNT");
+}
+
+#[sqlx::test]
+async fn form_types_reject_phrase_parts_of_speech(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin_id = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let bearer = token(&state, admin_id, AdminRole::SuperAdmin);
+    let path = "/api/v1/admin/settings/form-types";
+
+    let (status, _, phrase_noun, _) = call(
+        &state,
+        Method::POST,
+        ROOT,
+        Some(&bearer),
+        Some(json!({
+            "kind": "phrase",
+            "code": "phrase_noun",
+            "name_zh": "名词",
+            "name_en": "NOUN",
+            "abbreviation": "n.",
+            "short_name_zh": "名词",
+            "full_name_en": "noun",
+            "sort_order": 10
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase_noun}");
+    let phrase_noun_id = phrase_noun["id"].as_str().unwrap().to_owned();
+    let noun_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    let mut input = json!({
+        "part_of_speech_id": phrase_noun_id,
+        "code": "phrase_variant",
+        "name_zh": "短语词形",
+        "short_name_zh": "短语词形",
+        "name_en": "Phrase variant",
+        "abbreviation": "pv",
+        "full_name_en": "phrase variant",
+        "sort_order": 100
+    });
+    let (status, _, body, _) = call(
+        &state,
+        Method::POST,
+        path,
+        Some(&bearer),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_form_type");
+    assert_eq!(body["field"], "part_of_speech_id");
+
+    // 不存在的词性仍是 404，与词性接口一致。
+    input["part_of_speech_id"] = json!(Uuid::now_v7());
+    let (status, _, body, _) = call(
+        &state,
+        Method::POST,
+        path,
+        Some(&bearer),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "part_of_speech_not_found");
+
+    // 建在名词下没问题，改挂到短语词性同样 400。
+    input["part_of_speech_id"] = json!(noun_id);
+    let (status, _, created, _) = call(
+        &state,
+        Method::POST,
+        path,
+        Some(&bearer),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let mut update = input.clone();
+    update.as_object_mut().unwrap().remove("code");
+    update["base_revision"] = json!(1);
+    update["part_of_speech_id"] = json!(phrase_noun_id);
+    let (status, _, body, _) = call(
+        &state,
+        Method::PATCH,
+        &format!("{path}/{id}"),
+        Some(&bearer),
+        Some(update),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_form_type");
+    assert_eq!(body["field"], "part_of_speech_id");
 }

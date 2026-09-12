@@ -13,6 +13,7 @@ use crate::{
         },
         repository::{CatalogRepository, CatalogRepositoryError},
     },
+    lexicon::dto::EntryKind,
 };
 
 mod commands;
@@ -83,6 +84,19 @@ fn valid_part_code(value: String) -> Result<String, CatalogServiceError> {
     } else {
         Err(invalid_part("code", "invalid part of speech code"))
     }
+}
+
+/// 短语词性的 code 住在 `phrase_` 命名空间里，单词词性不许占用它（数据库 CHECK 同口径）：
+/// V3 词条、发布快照与细分词性父级映射都按 code 引用词性，code 不能按 kind 重名。
+fn valid_part_code_for_kind(value: String, kind: EntryKind) -> Result<String, CatalogServiceError> {
+    let value = valid_part_code(value)?;
+    if value.starts_with("phrase_") != (kind == EntryKind::Phrase) {
+        return Err(invalid_part(
+            "code",
+            "the phrase_ code prefix belongs to phrase parts of speech only",
+        ));
+    }
+    Ok(value)
 }
 
 fn valid_sub_part_code(value: String) -> Result<String, CatalogServiceError> {

@@ -356,8 +356,8 @@ async fn insert_v3_pos(
         r#"
         INSERT INTO lexicon.entry_pos (
             id, entry_id, part_of_speech_id, content_schema_version,
-            spelling_mode, phonetic_mode, sort_order
-        ) VALUES ($1, $2, $3, 3, 'unified', 'unified', $4)
+            spelling_mode, phonetic_mode, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 3, 'unified', 'unified', $4, (SELECT kind FROM lexicon.entries WHERE id = $2))
         "#,
     )
     .bind(id)
@@ -1041,8 +1041,8 @@ async fn v3_sibling_ordinals_are_unique(pool: PgPool) {
         r#"
         INSERT INTO lexicon.entry_pos (
             id, entry_id, part_of_speech_id, content_schema_version,
-            spelling_mode, phonetic_mode, sort_order
-        ) VALUES ($1, $2, $3, 3, 'unified', 'unified', 0)
+            spelling_mode, phonetic_mode, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 3, 'unified', 'unified', 0, (SELECT kind FROM lexicon.entries WHERE id = $2))
         "#,
     )
     .bind(duplicate_pos_id)

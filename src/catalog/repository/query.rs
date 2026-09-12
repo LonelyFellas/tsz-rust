@@ -7,7 +7,8 @@ impl CatalogRepository {
             r#"
             SELECT m.version AS catalog_version,
                    (SELECT coalesce(jsonb_agg(to_jsonb(f) ORDER BY f.sort_order,f.created_at,f.id),'[]') FROM catalog.form_types f) AS form_types,
-                   p.id AS part_id, p.code AS part_code, p.name_zh AS part_name_zh,
+                   p.id AS part_id, p.code AS part_code, p.kind AS part_kind,
+                   p.name_zh AS part_name_zh,
                    p.name_en AS part_name_en, p.abbreviation AS part_abbreviation,
                    p.short_name_zh AS part_short_name_zh, p.full_name_en AS part_full_name_en,
                    p.sort_order AS part_sort_order,
@@ -30,7 +31,9 @@ impl CatalogRepository {
     pub(crate) async fn list_parts(
         &self,
         filter: &PartListFilter,
+        kind: Option<EntryKind>,
     ) -> Result<(Vec<PartRecord>, i64), CatalogRepositoryError> {
+        let kind = kind.map(EntryKind::as_str);
         let mut tx = self
             .pool
             .begin()
@@ -45,16 +48,18 @@ impl CatalogRepository {
             r#"
             SELECT count(*)
             FROM catalog.parts_of_speech p
-            WHERE $1::text IS NULL
+            WHERE ($2::text IS NULL OR p.kind = $2)
+              AND ($1::text IS NULL
                OR strpos(lower(p.code), lower($1)) > 0
                OR strpos(lower(p.name_zh), lower($1)) > 0
                OR strpos(lower(p.name_en), lower($1)) > 0
                OR strpos(lower(p.abbreviation), lower($1)) > 0
                OR strpos(lower(p.short_name_zh), lower($1)) > 0
-               OR strpos(lower(p.full_name_en), lower($1)) > 0
+               OR strpos(lower(p.full_name_en), lower($1)) > 0)
             "#,
         )
         .bind(filter.q.as_deref())
+        .bind(kind)
         .fetch_one(&mut *tx)
         .await
         .map_err(CatalogRepositoryError::Database)?;
@@ -63,6 +68,7 @@ impl CatalogRepository {
             .bind(filter.q.as_deref())
             .bind(filter.limit())
             .bind(filter.offset())
+            .bind(kind)
             .fetch_all(&mut *tx)
             .await
             .map_err(CatalogRepositoryError::Database)?;

@@ -111,7 +111,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20260911140000;
+    const CURRENT_RELEASE_VERSION: i64 = 20260912150000;
 
     #[sqlx::test]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {
@@ -386,6 +386,39 @@ mod tests {
         assert!(
             rendered.contains("duplicate name_en"),
             "回退失败原因应指名重复的正式英文：{rendered}"
+        );
+        let latest: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(latest, CURRENT_RELEASE_VERSION, "守卫失败时账本不应回退");
+    }
+
+    #[sqlx::test]
+    async fn deployment_undo_refuses_while_phrase_parts_of_speech_exist(pool: PgPool) {
+        // 删 kind 列会把短语词性静默变成单词词性：有短语词性时回退要报出 code，账本不动。
+        sqlx::query(
+            r#"
+            INSERT INTO catalog.parts_of_speech (
+                id, kind, code, name_zh, name_en, abbreviation,
+                short_name_zh, full_name_en, sort_order
+            ) VALUES ($1, 'phrase', 'phrase_noun', '名词', 'NOUN', 'n.', '名词', 'noun', 10)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+            .await
+            .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("phrase_noun"),
+            "回退失败原因应指名短语词性的 code：{rendered}"
         );
         let latest: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE",
