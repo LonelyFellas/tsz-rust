@@ -240,6 +240,8 @@ fn map_part_delete_error(error: sqlx::Error) -> CatalogRepositoryError {
     }
     for constraint in [
         "lexicon_entry_pos_catalog_pos_fkey",
+        // kind 配对外键：正常路径撞不到（服务层预检先报 in_use），并发删除时兜底成同一个业务错误。
+        "lexicon_entry_pos_catalog_kind_fkey",
         "lexicon_senses_catalog_sub_pos_fkey",
         "lexicon_publication_pos_refs_catalog_fkey",
         "lexicon_publication_sub_pos_refs_catalog_fkey",

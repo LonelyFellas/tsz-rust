@@ -25,7 +25,7 @@ CREATE UNIQUE INDEX catalog_parts_of_speech_name_zh_unique_idx
 
 -- 3. 词条侧：entries 给出 (id, kind) 二元组；entry_pos 记下词条 kind 并用两条复合外键锁死。
 ALTER TABLE lexicon.entries ADD CONSTRAINT lexicon_entries_id_kind_key UNIQUE (id, kind);
-ALTER TABLE lexicon.entry_pos ADD COLUMN entry_kind TEXT;
+ALTER TABLE lexicon.entry_pos ADD COLUMN entry_kind TEXT;  -- 回填后 NOT NULL
 UPDATE lexicon.entry_pos pos SET entry_kind = e.kind FROM lexicon.entries e WHERE e.id = pos.entry_id;
 ALTER TABLE lexicon.entry_pos
     ALTER COLUMN entry_kind SET NOT NULL,
@@ -53,9 +53,18 @@ UPDATE catalog.metadata SET version = version + 1, updated_at = now() WHERE id =
 
 要点：
 
-- **`NOT VALID`** 只豁免迁移时已存在的行；之后 INSERT 与改动键列的 UPDATE 都会检查，
-  被引用侧（删词性）的 RESTRICT 也照常生效。本地库已有 1 条短语词条挂着 2 个单词词性，
-  测试服同样有存量；不豁免就得先清数据。存量行由 §5 的应用层校验在下次编辑/发布时拦下。
+- **单列的 `lexicon_entry_pos_catalog_pos_fkey` 原样保留，不改成复合外键。** 复合外键对存量错配行
+  （`(part_id, 'phrase')` 匹配不到 `(part_id, 'word')`）视同没有引用，删词性会在数据库层直接放行、
+  留下悬空引用，也让该约束名到 `part_of_speech_in_use` 的错误映射失效（实测证实）。引用保护由单列外键
+  无条件承担，kind 配对交给新增的 `lexicon_entry_pos_catalog_kind_fkey`，后者才带 `NOT VALID`。
+- **`NOT VALID`** 只豁免迁移时已存在的行；之后 INSERT 与改动键列的 UPDATE 都会检查。本地库已有 1 条
+  短语词条挂着 2 个单词词性，测试服同样有存量；不豁免就得先清数据。存量行由 §5 的应用层校验在
+  下次编辑 / 完成 / 发布时拦下。部署后可用下面这条查出还剩多少：
+  ```sql
+  SELECT count(*) FROM lexicon.entry_pos pos
+  JOIN catalog.parts_of_speech p ON p.id = pos.part_of_speech_id
+  WHERE pos.entry_kind <> p.kind;
+  ```
 - `entry_pos.entry_kind` 不给默认值：直接写 SQL 的地方（含 5 处测试 fixture，见 §6）必须显式给，
   避免静默错标。V3 写入用子查询 `(SELECT kind FROM lexicon.entries WHERE id = $2)` 取值，不改签名。
 - `form_types` 的 `to_jsonb(f)` 会多出 `part_of_speech_kind` 键；`FormTypeCatalogItem` /

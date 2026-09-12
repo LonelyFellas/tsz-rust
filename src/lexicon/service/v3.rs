@@ -1390,7 +1390,14 @@ impl LexiconService {
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
-        replace_v3_forms(&mut transaction, entry_id, &forms, &catalog_parts).await?;
+        replace_v3_forms(
+            &mut transaction,
+            entry_id,
+            &forms,
+            &catalog_parts,
+            v3_kind_string(input.kind),
+        )
+        .await?;
         sqlx::query(
             r#"
             INSERT INTO lexicon.entry_editor_projection (
@@ -1766,7 +1773,14 @@ impl LexiconService {
         // 又会被这条词条永久「占用」，别的词条再也挂不上。
         replace_v3_audio_asset_references(&mut transaction, entry_id, &input.content, &meanings)
             .await?;
-        replace_v3_forms(&mut transaction, entry_id, &input.content, &catalog_parts).await?;
+        replace_v3_forms(
+            &mut transaction,
+            entry_id,
+            &input.content,
+            &catalog_parts,
+            &record.kind,
+        )
+        .await?;
         let now = Utc::now();
         let updated = sqlx::query(
             r#"
@@ -4295,6 +4309,8 @@ async fn replace_v3_forms(
     entry_id: Uuid,
     content: &DraftFormsStepContentV3,
     catalog_parts: &HashMap<String, Uuid>,
+    // entry_kind 与 resolve_v3_catalog_parts 校验时用的是同一个值：校验哪个 kind，就写哪个 kind。
+    entry_kind: &str,
 ) -> Result<(), LexiconServiceError> {
     sqlx::query(
         r#"
@@ -4382,7 +4398,7 @@ async fn replace_v3_forms(
             INSERT INTO lexicon.entry_pos (
                 id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode,
                 sort_order, content_schema_version, entry_kind
-            ) VALUES ($1, $2, $3, $4, $5, $6, 3, (SELECT kind FROM lexicon.entries WHERE id = $2))
+            ) VALUES ($1, $2, $3, $4, $5, $6, 3, $7)
             ON CONFLICT (id) DO UPDATE
             SET spelling_mode = EXCLUDED.spelling_mode,
                 phonetic_mode = EXCLUDED.phonetic_mode,
@@ -4398,6 +4414,7 @@ async fn replace_v3_forms(
         .bind(pos.dialect_rules.spelling_mode.as_str())
         .bind(pos.dialect_rules.phonetic_mode.as_str())
         .bind(pos_ordinal as i32)
+        .bind(entry_kind)
         .execute(&mut **tx)
         .await
         .map_err(database_error)?;

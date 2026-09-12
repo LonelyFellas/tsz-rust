@@ -24,12 +24,9 @@ ALTER TABLE catalog.form_types
         ON DELETE RESTRICT,
     DROP COLUMN part_of_speech_kind;
 
+-- 单列的 lexicon_entry_pos_catalog_pos_fkey 上行时没动过，这里也不用重建。
 ALTER TABLE lexicon.entry_pos
-    DROP CONSTRAINT lexicon_entry_pos_catalog_pos_fkey,
-    ADD CONSTRAINT lexicon_entry_pos_catalog_pos_fkey
-        FOREIGN KEY (part_of_speech_id)
-        REFERENCES catalog.parts_of_speech(id)
-        ON DELETE RESTRICT,
+    DROP CONSTRAINT lexicon_entry_pos_catalog_kind_fkey,
     DROP CONSTRAINT lexicon_entry_pos_entry_kind_fkey,
     DROP CONSTRAINT lexicon_entry_pos_entry_kind_check,
     DROP COLUMN entry_kind;

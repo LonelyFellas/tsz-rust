@@ -28,7 +28,9 @@ impl CatalogService {
             };
             if items.last().is_none_or(|item| item.id != part_id) {
                 let code = required(record.part_code, "part code is null")?;
-                let kind = part_kind(&required(record.part_kind, "part kind is null")?)?;
+                // catalog_parts_of_speech_kind_check 保证只会是这两个字面量，与 PartRecord 同口径。
+                let kind = EntryKind::parse(&required(record.part_kind, "part kind is null")?)
+                    .unwrap_or(EntryKind::Word);
                 // 词形候选按词性收窄：原形对所有词性通用，此处不进候选（它是必有项）。
                 let allowed_form_types = form_types
                     .iter()
@@ -108,6 +110,7 @@ impl CatalogService {
             ));
         }
         let kind = query.kind;
+
         let q = query.q.and_then(|value| {
             let value = value.trim();
             (!value.is_empty()).then(|| value.to_owned())

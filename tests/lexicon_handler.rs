@@ -12363,6 +12363,8 @@ async fn v3_entry_pos_must_match_entry_kind(pool: PgPool) {
         .unwrap();
     assert_eq!(issue["node_id"], pos_id);
     assert_eq!(issue["field"], "pos");
+    assert_eq!(issue["node_location"]["node_role"], "forms.pos");
+    assert_eq!(issue["node_location"]["pos_id"], pos_id);
     let stored: i64 =
         sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_pos WHERE entry_id = $1")
             .bind(Uuid::parse_str(&phrase_id).unwrap())
@@ -12371,10 +12373,12 @@ async fn v3_entry_pos_must_match_entry_kind(pool: PgPool) {
             .unwrap();
     assert_eq!(stored, 0, "校验失败不得写入 entry_pos");
 
-    // 改选短语词性后保存成功，entry_pos 记下词条 kind。
-    content["pos"][0]["pos"] = json!("phrase_noun");
-    let (status, body) = save_v3_forms_draft(&state, &bearer, &phrase_id, 1, content).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // 改选短语词性后保存成功，entry_pos 记下词条 kind。词形步走 complete，
+    // 好让后面的词义 complete 校验可达。
+    content["pos"][0]["pos"] = json!(PHRASE_NOUN);
+    let (_, body) =
+        save_v3_forms_after_impact(&state, &bearer, &phrase_id, 1, "complete", content).await;
+    assert_eq!(body["word"]["kind"], "phrase", "{body}");
     let entry_kinds: Vec<String> =
         sqlx::query_scalar("SELECT entry_kind FROM lexicon.entry_pos WHERE entry_id = $1")
             .bind(Uuid::parse_str(&phrase_id).unwrap())
@@ -12382,6 +12386,64 @@ async fn v3_entry_pos_must_match_entry_kind(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(entry_kinds, vec!["phrase".to_owned()]);
+
+    // 存量词条（迁移前建的短语词条挂着单词词性）由 complete 与发布路径兜住：
+    // 直接把草稿里存的 pos 编码改成单词词性，模拟 NOT VALID 豁免下来的那批数据。
+    let phrase_uuid = Uuid::parse_str(&phrase_id).unwrap();
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id = $1")
+        .bind(phrase_uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE lexicon.entry_editor_projection
+         SET forms = replace(forms::text, $2, $3)::jsonb
+         WHERE entry_id = $1",
+    )
+    .bind(phrase_uuid)
+    .bind(PHRASE_NOUN)
+    .bind("noun")
+    .execute(&pool)
+    .await
+    .expect("把草稿里的短语词性改回单词词性应成功");
+    let pos_id_after: Value = sqlx::query_scalar::<_, Value>(
+        "SELECT forms -> 'pos' -> 0 -> 'pos_id'
+         FROM lexicon.entry_editor_projection WHERE entry_id = $1",
+    )
+    .bind(phrase_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (status, body) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{phrase_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": revision,
+            "intent": "complete",
+            "content": phrase_meanings_fixture(pos_id_after.clone())
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        has_issue(&body, "part_of_speech_kind_mismatch"),
+        "存量错配词条在 complete 校验时也必须被拦下：{body}"
+    );
+    let issue = body["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "part_of_speech_kind_mismatch")
+        .unwrap();
+    assert_eq!(
+        issue["node_location"]["pos_id"], pos_id_after,
+        "问题要能定位到出错的词性，否则前端只能归进「无位置」分组：{body}"
+    );
 
     // 反向同样拦：单词词条挂短语词性。
     seed_dictionary_word(&pool, "harbour").await;

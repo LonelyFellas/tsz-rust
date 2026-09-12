@@ -1557,19 +1557,19 @@ async fn parts_of_speech_kind_constraints(pool: PgPool) {
         "同 kind 内中文名重复应命中固定索引",
     );
 
-    // code 仍是全局唯一：单词侧不能占用短语侧已用的 code。
-    let word_takes_phrase_code = insert_part_with_kind(
+    // code 没有按 kind 收敛，仍是全局唯一。
+    let duplicate_code = insert_part_with_kind(
         &pool,
-        "word",
+        "phrase",
         "phrase_noun",
         ["别的中文", "Another", "a.", "别的", "another"],
     )
     .await;
     assert_db_error(
-        word_takes_phrase_code,
+        duplicate_code,
         UNIQUE_VIOLATION,
         Some("catalog_parts_of_speech_code_unique_idx"),
-        "code 跨 kind 仍应全局唯一",
+        "code 仍应全局唯一",
     );
 
     // 短语词性的 code 必须住在 phrase_ 命名空间里。
@@ -1618,6 +1618,35 @@ async fn parts_of_speech_kind_constraints(pool: PgPool) {
         "(id, kind) 唯一约束是复合外键的靶子，必须存在"
     );
 
+    // 单词词性不许占用 phrase_ 前缀：命名空间是双向保留的。
+    let word_squatter = insert_part_with_kind(
+        &pool,
+        "word",
+        "phrase_squat",
+        ["占位词", "SQUAT", "sq.", "占位", "squat"],
+    )
+    .await;
+    assert_db_error(
+        word_squatter,
+        CHECK_VIOLATION,
+        Some("catalog_parts_of_speech_phrase_code_check"),
+        "单词词性不能占用 phrase_ 前缀",
+    );
+
+    // 引用保护仍由单列外键无条件承担：复合外键对存量错配行视同没有引用，
+    // 换成复合外键会让删词性在数据库层直接放行并留下悬空引用。
+    let single_column_fkey: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'lexicon_entry_pos_catalog_pos_fkey'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("查询引用外键定义应成功");
+    assert_eq!(
+        single_column_fkey,
+        "FOREIGN KEY (part_of_speech_id) REFERENCES catalog.parts_of_speech(id) ON DELETE RESTRICT",
+        "in-use 保护必须是单列外键，不能收窄成带 kind 的复合外键"
+    );
+
     // 词条侧：单词词条挂短语词性被复合外键拦下（外键名是错误映射契约）。
     let admin_id = insert_admin(&pool).await;
     let entry_id = Uuid::now_v7();
@@ -1656,8 +1685,39 @@ async fn parts_of_speech_kind_constraints(pool: PgPool) {
     assert_db_error(
         crossed,
         FOREIGN_KEY_VIOLATION,
-        Some("lexicon_entry_pos_catalog_pos_fkey"),
+        Some("lexicon_entry_pos_catalog_kind_fkey"),
         "单词词条不能挂短语词性",
+    );
+
+    // 模拟迁移留下的存量错配行：kind 配对外键 NOT VALID 豁免它们，但删词性仍必须被拦住。
+    sqlx::query(
+        "ALTER TABLE lexicon.entry_pos DROP CONSTRAINT lexicon_entry_pos_catalog_kind_fkey",
+    )
+    .execute(&pool)
+    .await
+    .expect("为模拟存量行临时去掉 kind 配对外键应成功");
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.entry_pos (
+            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 'unified', 'unified', 0, 'word')
+        "#,
+    )
+    .bind(pos_node_id)
+    .bind(entry_id)
+    .bind(phrase_noun)
+    .execute(&pool)
+    .await
+    .expect("模拟存量错配行应能插入");
+    let blocked = sqlx::query("DELETE FROM catalog.parts_of_speech WHERE id = $1")
+        .bind(phrase_noun)
+        .execute(&pool)
+        .await;
+    assert_db_error(
+        blocked,
+        FOREIGN_KEY_VIOLATION,
+        Some("lexicon_entry_pos_catalog_pos_fkey"),
+        "存量错配行仍须挡住删除词性，否则会留下悬空引用",
     );
 
     // 词形变化只认 word 词性。

@@ -250,7 +250,21 @@ pub(super) fn part_of_speech_kind_issues<'a>(
             .to_owned(),
         message: message.to_owned(),
         reference_location: None,
-        node_location: None,
+        // 前端按 node_location.pos_id 把问题归到对应的词性位置，省掉就只能落进「无位置」分组。
+        node_location: Some(crate::lexicon::dto::DraftNodeLocation {
+            node_role: "forms.pos".to_owned(),
+            pos: None,
+            pos_id: Some(pos_id),
+            form_group_index: None,
+            form_group_id: None,
+            membership_id: None,
+            form_id: None,
+            variant_id: None,
+            pronunciation_id: None,
+            form_type: None,
+            dialect: None,
+            ancestor_node_ids: vec![pos_id],
+        }),
     })
     .collect()
 }

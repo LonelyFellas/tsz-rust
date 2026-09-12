@@ -27,8 +27,8 @@
 1. `catalog.parts_of_speech` 新增 `kind TEXT NOT NULL`，取值 `word` / `phrase`；存量行全部为 `word`。
    创建后不可修改（与 `code` 同口径）。
 2. 展示字段（`name_zh` / `name_en` / `abbreviation` / `short_name_zh` / `full_name_en`）的唯一性
-   从全局收敛到**同一 kind 内**：短语侧可以再建一个「名词」。`code` **保持全局唯一**，短语词性的
-   `code` 必须以 `phrase_` 开头（原因见 design §7）。
+   从全局收敛到**同一 kind 内**：短语侧可以再建一个「名词」。`code` **保持全局唯一**，且 `phrase_`
+   前缀与短语 kind **双向绑定**：短语词性的 code 必须带它，单词词性不许占用它（原因见 design §7）。
 3. 单词词条不能挂短语词性，短语词条不能挂单词词性——数据库复合外键兜底，V3 create / edit /
    complete 校验给出可读的 `field_issues`（新问题码 `part_of_speech_kind_mismatch`）。
 4. 词形变化只能挂在 `word` 词性下：POST/PATCH form-types 指向短语词性返回 400
@@ -37,14 +37,16 @@
    - `POST /admin/settings/parts-of-speech` 请求新增可选 `kind`，缺省 `word`（旧前端不受影响）；
    - `GET /admin/settings/parts-of-speech` 新增可选查询 `kind` 过滤；
    - `PartOfSpeechConfig` 与 `CatalogPart` 响应新增 `kind`；细分词性与词形变化响应不变。
-6. 存量短语词条（已挂单词词性的）**不清、不改数据**：迁移用 `NOT VALID` 外键豁免存量行；
-   这些词条下次编辑词形或发布时被第 3 条校验拦下，管理员改选短语词性即可。
+6. 存量短语词条（已挂单词词性的）**不清、不改数据**：kind 配对外键用 `NOT VALID` 豁免存量行，
+   而承担引用保护的单列外键保持不动，删词性照样被拦；这些词条下次编辑词形、完成或发布时被
+   第 3 条校验拦下，管理员改选短语词性即可。
 7. 不给短语基本词性预置种子（杨老师未定清单，需要时另起迁移加）。
 
 ## 约束
 
 - 六个唯一索引名与 `lexicon_entry_pos_catalog_pos_fkey` / `catalog_form_types_part_of_speech_fkey`
-  是数据库错误映射契约，重建时**名字原样保留**。
+  是数据库错误映射契约，重建时**名字原样保留**；新增的 `lexicon_entry_pos_catalog_kind_fkey` 也要进
+  `map_part_delete_error` 的 in-use 映射，否则并发删除会退化成 500。
 - 细分词性 `code` 仍全局唯一（`catalog_sub_parts_code_unique_idx` 不动）：V3 词义按
   细分词性 code 解析父级（`sub_part_parents: code → part_code`），改成 kind 内唯一会让映射二义。
   代价是短语侧细分词性的编码不能与单词侧重名（如用 `PHR-N-COUNT`），管理员填编码时会收到 409。
