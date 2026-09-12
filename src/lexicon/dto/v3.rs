@@ -839,12 +839,38 @@ impl SentenceTranslationBandV3 {
     }
 }
 
+/// 译文语言。现阶段只开放汉语，结构为将来的多语言译文预留。
+///
+/// 真要放开第二种语言时，第一步是新开迁移放宽
+/// `lexicon_text_variants_language_check`，否则新枚举值要到写库那一刻才撞 23514。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub enum TranslationLanguageV3 {
+    #[serde(rename = "zh")]
+    Zh,
+}
+
+impl TranslationLanguageV3 {
+    /// 请求缺省 `language` 时的落点：旧前端不发该字段，一律按汉语处理。
+    pub(crate) const DEFAULT: Self = Self::Zh;
+
+    /// `lexicon.text_variants.language` 的语言码。
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::Zh => "zh",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordSentenceTranslationV3 {
     pub id: Uuid,
     pub band: SentenceTranslationBandV3,
     pub content: RichTextV3,
+    /// 缺省按汉语处理，因而在 spec 上非必填——前端先于后端部署时靠这一点解析旧响应。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub language: Option<TranslationLanguageV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -2126,6 +2152,49 @@ mod tests {
                 "{legacy} must not round-trip back to the CEFR-style name"
             );
         }
+    }
+
+    #[test]
+    fn sentence_translation_language_rejects_unknown_value() {
+        // 未开放的语言必须在反序列化时就被拒，否则一路落库才撞
+        // `lexicon_text_variants_language_check`（23514），错误面目全非。
+        let translation = |language: serde_json::Value| {
+            serde_json::json!({
+                "id": Uuid::now_v7(),
+                "band": "balanced_fluency",
+                "content": {"version": 2, "text": "译文", "annotations": []},
+                "language": language,
+            })
+        };
+        assert!(
+            serde_json::from_value::<WordSentenceTranslationV3>(translation(serde_json::json!(
+                "fr"
+            )))
+            .is_err()
+        );
+        let parsed = serde_json::from_value::<WordSentenceTranslationV3>(translation(
+            serde_json::json!("zh"),
+        ))
+        .expect("汉语是当前唯一开放的取值");
+        assert_eq!(parsed.language, Some(TranslationLanguageV3::Zh));
+        assert_eq!(TranslationLanguageV3::Zh.code(), "zh");
+
+        // 旧前端不发 language：必须能解析，并且序列化回去时不留 null。
+        let absent = serde_json::from_value::<WordSentenceTranslationV3>(serde_json::json!({
+            "id": Uuid::now_v7(),
+            "band": "balanced_fluency",
+            "content": {"version": 2, "text": "译文", "annotations": []},
+        }))
+        .expect("缺省 language 必须可解析");
+        assert_eq!(absent.language, None);
+        assert!(
+            !serde_json::to_value(&absent)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("language"),
+            "缺省的 language 不上 wire——spec 声明了 nullable = false，null 会被前端拒收"
+        );
     }
 
     #[test]

@@ -63,7 +63,7 @@
 后端：
 
 ```
-cargo test --locked --all-features --test lexicon_v3_contract sentence_translation_language
+cargo test --locked --all-features --lib sentence_translation_language
 ```
 
 前端：
