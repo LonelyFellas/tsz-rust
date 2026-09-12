@@ -123,7 +123,6 @@ impl LexiconService {
             .catalog_context_for_reference(&mut tx, &validation_forms, &record.kind)
             .await?;
         let mut relational_meanings = v3_meanings_to_v2(&word.meanings)?;
-        crate::lexicon::sentence_association::clear_sentence_associations(&mut relational_meanings);
         let rich_text_is_safe = canonicalize_meanings(&mut relational_meanings);
         let semantic_issues = validate_meanings(
             entry_id,
@@ -732,7 +731,14 @@ async fn versioned_publication(
     .map_err(database_error)
 }
 
-fn v3_meanings_to_v2(
+/// 把 V3 词义转成 V2 内部模型。
+///
+/// 例句关联必须在转换**之前**剥掉：`WordSentenceAssociationV3` 比 V2 侧多出
+/// `association_schema_version`、`source_segments` 等字段，而 `WordSentenceAssociationV2` 带
+/// `deny_unknown_fields`——词义里只要有一条已解析的关联，往返就会失败成 500（禅道 BUG #6）。
+/// 关联是读取时按例句 text_link 推导出来的投影，这些消费方都不需要它，所以一律从这里走，
+/// 不要在转换之后再补 `clear_sentence_associations`。
+pub(super) fn v3_meanings_to_v2(
     meanings: &DraftMeaningsStepContentV3,
 ) -> Result<DraftMeaningsStepContent, LexiconServiceError> {
     let mut meanings = meanings.clone();

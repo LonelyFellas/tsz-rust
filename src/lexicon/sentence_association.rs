@@ -5,10 +5,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::lexicon::{
-    dto::{DraftMeaningsStepContent, DraftMeaningsStepContentV3, SentenceAssociationsStateV2},
-    normalization::normalize_headword,
-};
+use crate::lexicon::normalization::normalize_headword;
 
 /// 口径版本。切词规则、停用词表、词性闸、歧义策略任一变更都要 +1：
 /// 已解析过的例句会因为版本对不上，在各自下次发布时自然重算，不需要数据迁移。
@@ -99,40 +96,6 @@ pub(crate) fn is_stopword(normalized: &str) -> bool {
 /// 词形类型能力对所有 POS 开放后，这里仍保留原有实词范围；自定义 POS fail closed 不关联。
 pub(crate) fn associable_pos(part_of_speech: &str) -> bool {
     matches!(part_of_speech, "noun" | "verb" | "adjective" | "adverb")
-}
-
-/// 清空只读投影。两处都要用：草稿保存时客户端可能把读到的关联原样回传，
-/// 发布快照则是历史存档，不该把一份按 entry 单独维护的数据跟着冻进去。
-pub(crate) fn clear_sentence_associations(meanings: &mut DraftMeaningsStepContent) {
-    for pos in &mut meanings.pos {
-        for sense in &mut pos.senses {
-            for sentence in &mut sense.sentences {
-                sentence.associations = Vec::new();
-                sentence.associations_state = SentenceAssociationsStateV2::Unresolved;
-            }
-        }
-    }
-}
-
-/// 把 V3 词义转成 V2 内部模型，转换前先剥掉例句关联。
-///
-/// `WordSentenceAssociationV3` 比 V2 侧多出 `association_schema_version`、`source_segments`
-/// 等字段，而 `WordSentenceAssociationV2` 带 `deny_unknown_fields`——词义里只要有一条已解析的
-/// 关联，直接往返就会失败成 500（禅道 BUG #6）。关联是读取时按例句 text_link 推导出来的投影，
-/// 这些消费方都不需要它，统一从这里走。
-pub(crate) fn v3_meanings_to_relational(
-    content: &DraftMeaningsStepContentV3,
-) -> Result<DraftMeaningsStepContent, serde_json::Error> {
-    let mut stripped = content.clone();
-    for pos in &mut stripped.pos {
-        for sense in &mut pos.senses {
-            for sentence in &mut sense.sentences {
-                sentence.associations = Vec::new();
-                sentence.associations_state = SentenceAssociationsStateV2::Unresolved;
-            }
-        }
-    }
-    serde_json::from_value(serde_json::to_value(&stripped)?)
 }
 
 /// 正文指纹。正文没变就不重算关联，管理员的事后修正因此能活过下一次发布。

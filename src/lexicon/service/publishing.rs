@@ -345,8 +345,7 @@ pub(super) fn published_sense_snapshot(
             let word: AdminWordV3 =
                 serde_json::from_value(record.snapshot.clone()).map_err(serialization_error)?;
             let meanings =
-                crate::lexicon::sentence_association::v3_meanings_to_relational(&word.meanings)
-                    .map_err(serialization_error)?;
+                crate::lexicon::service::v3_publication::v3_meanings_to_v2(&word.meanings)?;
             (word.presentation.label, meanings)
         }
         version => return Err(LexiconServiceError::UnsupportedSchemaVersion(version)),

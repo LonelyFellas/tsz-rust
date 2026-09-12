@@ -1950,10 +1950,8 @@ impl LexiconService {
             ));
         }
         let mut translation_content = content.clone();
-        let mut relational_meanings: DraftMeaningsStepContent =
-            serde_json::from_value(serde_json::to_value(content).map_err(serialization_error)?)
-                .map_err(serialization_error)?;
-        crate::lexicon::sentence_association::clear_sentence_associations(&mut relational_meanings);
+        let mut relational_meanings =
+            crate::lexicon::service::v3_publication::v3_meanings_to_v2(&content)?;
         let mut transaction = self
             .repository
             .pool()
@@ -2341,8 +2339,7 @@ impl LexiconService {
         ));
         let validation_forms = v3_meaning_validation_forms(&word.forms);
         let mut relational_meanings =
-            crate::lexicon::sentence_association::v3_meanings_to_relational(&word.meanings)
-                .map_err(serialization_error)?;
+            crate::lexicon::service::v3_publication::v3_meanings_to_v2(&word.meanings)?;
         let mut transaction = self
             .repository
             .pool()
@@ -5283,7 +5280,7 @@ mod tests {
         assert_eq!(types.len(), 4, "{types:?}");
 
         // 同一份内容转 V2 内部模型也不能再失败（validate / 发布走这条）。
-        crate::lexicon::sentence_association::v3_meanings_to_relational(&content)
+        crate::lexicon::service::v3_publication::v3_meanings_to_v2(&content)
             .expect("剥掉关联后应能转成 V2 内部模型");
     }
 

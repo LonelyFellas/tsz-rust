@@ -324,8 +324,7 @@ impl PublishedAssociationTarget {
         meanings_content: &DraftMeaningsStepContentV3,
     ) -> Result<Self, LexiconServiceError> {
         let meanings =
-            crate::lexicon::sentence_association::v3_meanings_to_relational(meanings_content)
-                .map_err(serialization_error)?;
+            crate::lexicon::service::v3_publication::v3_meanings_to_v2(meanings_content)?;
         let pos = forms_content
             .pos
             .iter()
