@@ -344,10 +344,9 @@ pub(super) fn published_sense_snapshot(
         3 => {
             let word: AdminWordV3 =
                 serde_json::from_value(record.snapshot.clone()).map_err(serialization_error)?;
-            let meanings: DraftMeaningsStepContent = serde_json::from_value(
-                serde_json::to_value(word.meanings).map_err(serialization_error)?,
-            )
-            .map_err(serialization_error)?;
+            let meanings =
+                crate::lexicon::sentence_association::v3_meanings_to_relational(&word.meanings)
+                    .map_err(serialization_error)?;
             (word.presentation.label, meanings)
         }
         version => return Err(LexiconServiceError::UnsupportedSchemaVersion(version)),

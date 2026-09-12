@@ -6,7 +6,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::lexicon::{
-    dto::{DraftMeaningsStepContent, SentenceAssociationsStateV2},
+    dto::{DraftMeaningsStepContent, DraftMeaningsStepContentV3, SentenceAssociationsStateV2},
     normalization::normalize_headword,
 };
 
@@ -112,6 +112,27 @@ pub(crate) fn clear_sentence_associations(meanings: &mut DraftMeaningsStepConten
             }
         }
     }
+}
+
+/// 把 V3 词义转成 V2 内部模型，转换前先剥掉例句关联。
+///
+/// `WordSentenceAssociationV3` 比 V2 侧多出 `association_schema_version`、`source_segments`
+/// 等字段，而 `WordSentenceAssociationV2` 带 `deny_unknown_fields`——词义里只要有一条已解析的
+/// 关联，直接往返就会失败成 500（禅道 BUG #6）。关联是读取时按例句 text_link 推导出来的投影，
+/// 这些消费方都不需要它，统一从这里走。
+pub(crate) fn v3_meanings_to_relational(
+    content: &DraftMeaningsStepContentV3,
+) -> Result<DraftMeaningsStepContent, serde_json::Error> {
+    let mut stripped = content.clone();
+    for pos in &mut stripped.pos {
+        for sense in &mut pos.senses {
+            for sentence in &mut sense.sentences {
+                sentence.associations = Vec::new();
+                sentence.associations_state = SentenceAssociationsStateV2::Unresolved;
+            }
+        }
+    }
+    serde_json::from_value(serde_json::to_value(&stripped)?)
 }
 
 /// 正文指纹。正文没变就不重算关联，管理员的事后修正因此能活过下一次发布。
