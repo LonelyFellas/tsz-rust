@@ -2035,9 +2035,24 @@ mod tests {
             "ProblemDetails",
             "ProblemMeta",
             "ProblemReferenceLocation",
+            "WordSentenceTranslationV3",
         ] {
             assert_eq!(schemas[schema]["additionalProperties"], false);
         }
+        // 译文语言必须是可选字段：前端先于后端部署那一版还读不到 `language`，
+        // 一旦进了 required，旧响应会被前端的 V3 运行时校验整条拒收。
+        assert_eq!(
+            schemas["WordSentenceTranslationV3"]["properties"]["language"]["$ref"],
+            "#/components/schemas/TranslationLanguageV3"
+        );
+        assert!(
+            !schemas["WordSentenceTranslationV3"]["required"]
+                .as_array()
+                .expect("译文必须声明 required")
+                .iter()
+                .any(|field| field == "language"),
+            "WordSentenceTranslationV3.language 必须是可选字段"
+        );
         let pronunciation = &schemas["WordPronunciationV3"];
         assert!(
             !pronunciation["required"]

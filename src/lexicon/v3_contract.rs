@@ -11,10 +11,10 @@ use crate::{
         Dialect, DialectModeV3, DialectRulesV3, DialectVariantRichTextSlotV3,
         DraftFormsStepContentV3, DraftMeaningsStepContentV3, DraftNodeLocation,
         DraftValidationIssue, EnglishTextV3, PersistedWordStep, RichText, RichTextV3,
-        RichTextVariantV3, SentenceTranslationBandV3, StepSaveIntent, V3DraftNodeLocation,
-        V3DraftValidationIssue, V3ValidationIssueCode, VoiceProfileV3, WordConcreteFormV3,
-        WordDefinitionV3, WordFormTypeV2, WordFormTypeV3, WordRegionalVariantsV3,
-        WordSentenceTranslationV3,
+        RichTextVariantV3, SentenceTranslationBandV3, StepSaveIntent, TranslationLanguageV3,
+        V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode, VoiceProfileV3,
+        WordConcreteFormV3, WordDefinitionV3, WordFormTypeV2, WordFormTypeV3,
+        WordRegionalVariantsV3, WordSentenceTranslationV3,
     },
     lexicon::validation::MAX_ENTRY_NODES,
     lexicon::{normalization::MAX_HEADWORD_CODEPOINTS, rich_text::MAX_RICH_TEXT_CODEPOINTS},
@@ -544,7 +544,17 @@ pub(crate) fn normalize_sentence_translations(content: &mut DraftMeaningsStepCon
                         id: sentence.zh_text_id,
                         band: SentenceTranslationBandV3::DEFAULT,
                         content: sentence.zh_text.clone(),
+                        language: Some(TranslationLanguageV3::DEFAULT),
                     });
+                }
+                // 历史 JSONB 与旧前端的请求都不带 language，在这里补成汉语：读路径因此恒有值，
+                // 写路径落库前仓储层也拿到确定值。
+                // 走 `&mut` 的 IntoIterator 而不是 `iter_mut()`：后者经 DerefMut 会把
+                // `present` 翻成 true，这里不该改动 presence 语义。
+                for translation in &mut sentence.zh_translations {
+                    translation
+                        .language
+                        .get_or_insert(TranslationLanguageV3::DEFAULT);
                 }
                 sentence
                     .zh_translations
@@ -2259,6 +2269,7 @@ mod tests {
                     "version": 2, "text": "高", "annotations": []
                 }))
                 .unwrap(),
+                language: None,
             },
             WordSentenceTranslationV3 {
                 id: Uuid::now_v7(),
@@ -2267,6 +2278,7 @@ mod tests {
                     "version": 2, "text": "初", "annotations": []
                 }))
                 .unwrap(),
+                language: None,
             },
             WordSentenceTranslationV3 {
                 id: Uuid::now_v7(),
@@ -2275,6 +2287,7 @@ mod tests {
                     "version": 2, "text": "中", "annotations": []
                 }))
                 .unwrap(),
+                language: None,
             },
         ]
         .into();
@@ -2304,6 +2317,113 @@ mod tests {
             .zh_translations
             .push(duplicate);
         assert!(validate_meanings(&legacy, StepSaveIntent::Save).is_empty());
+    }
+
+    /// 例句一条译文的请求体；`language` 由调用方决定带不带。
+    fn meanings_request_with_translation(language: Option<&str>) -> Value {
+        let mut translation = json!({
+            "id": Uuid::now_v7(),
+            "band": "balanced_fluency",
+            "content": {"version": 2, "text": "中阶译文", "annotations": []}
+        });
+        if let Some(language) = language {
+            translation["language"] = json!(language);
+        }
+        json!({
+            "schema_version": 3,
+            "base_revision": 1,
+            "intent": "save",
+            "content": {
+                "sense_groups": [],
+                "pos": [{
+                    "pos_id": Uuid::now_v7(),
+                    "grammar_structures": [],
+                    "senses": [{
+                        "id": Uuid::now_v7(),
+                        "sub_pos": "",
+                        "level": "A1",
+                        "depends_on_context": false,
+                        "definitions": [],
+                        "sentences": [{
+                            "id": Uuid::now_v7(),
+                            "level": "A1",
+                            "en_text": {
+                                "mode": "unified",
+                                "common": {
+                                    "id": Uuid::now_v7(),
+                                    "origin": "manual",
+                                    "value": {"version": 2, "text": "Example.", "annotations": []}
+                                }
+                            },
+                            "zh_text_id": Uuid::now_v7(),
+                            "zh_text": {"version": 2, "text": "中阶译文", "annotations": []},
+                            "zh_translations": [translation],
+                            "links": []
+                        }],
+                        "relations": []
+                    }]
+                }]
+            }
+        })
+    }
+
+    fn only_translation(content: &DraftMeaningsStepContentV3) -> &WordSentenceTranslationV3 {
+        &content.pos[0].senses[0].sentences[0].zh_translations[0]
+    }
+
+    #[test]
+    fn sentence_translation_language_defaults_to_zh_when_absent() {
+        // 部署第 3 步之前的前端不发 language：请求不能被拒，规范化后按汉语处理。
+        let mut input: crate::lexicon::dto::SaveMeaningsStepInputV3 =
+            decode_v3_meanings_request(meanings_request_with_translation(None))
+                .expect("缺省 language 的请求必须能解码");
+        assert_eq!(only_translation(&input.content).language, None);
+        normalize_sentence_translations(&mut input.content);
+        assert_eq!(
+            only_translation(&input.content).language,
+            Some(TranslationLanguageV3::Zh)
+        );
+
+        // 历史 JSONB 同样没有这个字段，读路径靠同一个规范化点补上。
+        let mut stored: DraftMeaningsStepContentV3 =
+            serde_json::from_value(meanings_request_with_translation(None)["content"].clone())
+                .unwrap();
+        stored.pos[0].senses[0].sentences[0].zh_translations.clear();
+        normalize_sentence_translations(&mut stored);
+        assert_eq!(
+            only_translation(&stored).language,
+            Some(TranslationLanguageV3::Zh),
+            "由 zh_text 兜底补出的那条译文也要带语言"
+        );
+    }
+
+    #[test]
+    fn sentence_translation_language_round_trips() {
+        let mut input: crate::lexicon::dto::SaveMeaningsStepInputV3 =
+            decode_v3_meanings_request(meanings_request_with_translation(Some("zh")))
+                .expect("带 language 的请求必须能解码");
+        assert_eq!(
+            only_translation(&input.content).language,
+            Some(TranslationLanguageV3::Zh)
+        );
+        normalize_sentence_translations(&mut input.content);
+        assert_eq!(
+            only_translation(&input.content).language,
+            Some(TranslationLanguageV3::Zh)
+        );
+        assert_eq!(
+            serde_json::to_value(only_translation(&input.content)).unwrap()["language"],
+            json!("zh"),
+            "响应与发布快照都靠这一步把语言写出去"
+        );
+
+        assert!(
+            decode_v3_meanings_request::<crate::lexicon::dto::SaveMeaningsStepInputV3>(
+                meanings_request_with_translation(Some("fr"))
+            )
+            .is_err(),
+            "未开放的语言必须在解码时被拒，而不是落库时撞 CHECK"
+        );
     }
 
     #[test]

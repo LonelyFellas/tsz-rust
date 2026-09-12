@@ -8632,9 +8632,9 @@ async fn v3_forms_resave_preserves_sentence_translation_node_roles(pool: PgPool)
     );
     let translation_id =
         Uuid::parse_str(first_sentence(&repeated)["zh_text_id"].as_str().unwrap()).unwrap();
-    let stored_roles: (String, String, bool) = sqlx::query_as(
+    let stored_roles: (String, String, bool, String) = sqlx::query_as(
         r#"
-        SELECT node.node_role, translation.field_role, node.stable_slot
+        SELECT node.node_role, translation.field_role, node.stable_slot, translation.language
         FROM lexicon.nodes node
         JOIN lexicon.text_variants translation ON translation.id = node.id
         WHERE node.entry_id = $1::uuid AND node.id = $2::uuid
@@ -8650,7 +8650,8 @@ async fn v3_forms_resave_preserves_sentence_translation_node_roles(pool: PgPool)
         (
             "meanings.zh_translation".to_owned(),
             "zh_translation_balanced_fluency".to_owned(),
-            false
+            false,
+            "zh".to_owned()
         )
     );
 }
@@ -8834,10 +8835,12 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
     let a_id = Uuid::now_v7();
     let mut meanings = word["word"]["meanings"].clone();
     let sentence = &mut meanings["pos"][0]["senses"][0]["sentences"][0];
+    // 首档别名那条显式带 language（走 UPDATE 路径），另两档省略（走 INSERT 路径），
+    // 两条路径都必须把 zh 写进 text_variants.language。
     sentence["zh_translations"] = json!([
         {"id": a_id, "band": "adapted_creation", "content": rich_text("高阶译文")},
         {"id": c_id, "band": "word_for_word", "content": rich_text("初阶译文")},
-        {"id": b_id, "band": "balanced_fluency", "content": rich_text("中阶译文")}
+        {"id": b_id, "band": "balanced_fluency", "content": rich_text("中阶译文"), "language": "zh"}
     ]);
     let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
     let translations = first_sentence(&saved)["zh_translations"]
@@ -8850,12 +8853,18 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
             .collect::<Vec<_>>(),
         ["word_for_word", "balanced_fluency", "adapted_creation"]
     );
+    assert!(
+        translations
+            .iter()
+            .all(|translation| translation["language"] == "zh"),
+        "请求缺省 language 的那几档，响应也要补成汉语：{saved}"
+    );
     assert_eq!(first_sentence(&saved)["zh_text_id"], b_id);
     assert_eq!(first_sentence(&saved)["zh_text"]["text"], "中阶译文");
 
-    let stored: Vec<(Uuid, String, String)> = sqlx::query_as(
+    let stored: Vec<(Uuid, String, String, String)> = sqlx::query_as(
         r#"
-        SELECT id, field_role, plain_text
+        SELECT id, field_role, plain_text, language
         FROM lexicon.text_variants
         WHERE entry_id = $1::uuid
           AND owner_node_id = $2::uuid
@@ -8872,12 +8881,12 @@ async fn v3_sentence_translations_save_three_bands_and_round_trip(pool: PgPool) 
     assert_eq!(
         stored
             .iter()
-            .map(|(_, role, text)| (role.as_str(), text.as_str()))
+            .map(|(_, role, text, language)| (role.as_str(), text.as_str(), language.as_str()))
             .collect::<Vec<_>>(),
         [
-            ("zh_translation_word_for_word", "初阶译文"),
-            ("zh_translation_balanced_fluency", "中阶译文"),
-            ("zh_translation_adapted_creation", "高阶译文"),
+            ("zh_translation_word_for_word", "初阶译文", "zh"),
+            ("zh_translation_balanced_fluency", "中阶译文", "zh"),
+            ("zh_translation_adapted_creation", "高阶译文", "zh"),
         ]
     );
 
@@ -8958,8 +8967,8 @@ async fn v3_sentence_translations_allow_repeated_bands_and_independent_edits(poo
     let saved = save_v3_meanings(&state, &bearer, &word, meanings).await;
     let expected = first_sentence(&saved)["zh_translations"].clone();
     assert_eq!(expected.as_array().unwrap().len(), 6);
-    let stored: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, plain_text FROM lexicon.text_variants WHERE owner_node_id = $1::uuid AND field_role LIKE 'zh_translation_%' ORDER BY sort_order"
+    let stored: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, plain_text, language FROM lexicon.text_variants WHERE owner_node_id = $1::uuid AND field_role LIKE 'zh_translation_%' ORDER BY sort_order"
     ).bind(first_sentence(&saved)["id"].as_str().unwrap()).fetch_all(&pool).await.unwrap();
     assert_eq!(
         stored,
@@ -8969,9 +8978,11 @@ async fn v3_sentence_translations_allow_repeated_bands_and_independent_edits(poo
             .iter()
             .map(|t| (
                 Uuid::parse_str(t["id"].as_str().unwrap()).unwrap(),
-                t["content"]["text"].as_str().unwrap().to_owned()
+                t["content"]["text"].as_str().unwrap().to_owned(),
+                t["language"].as_str().unwrap().to_owned()
             ))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "六条译文的语言列都要跟 wire 上的 language 一致"
     );
     let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");

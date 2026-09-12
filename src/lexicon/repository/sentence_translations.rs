@@ -48,11 +48,14 @@ impl LexiconRepository {
                         .ok_or(LexiconRepositoryError::Invariant(
                             "V3 sentence translation alias is missing from canonical list",
                         ))?;
+                    // 首档别名沿用 `zh_text` 建行时的语言，所以这条 UPDATE 必须自己改
+                    // `language`；漏掉的话，将来第一条译文换语言会静默留在旧值。
                     let updated = sqlx::query(
                         r#"
                         UPDATE lexicon.text_variants
                         SET field_role = $3,
-                            sort_order = $4
+                            sort_order = $4,
+                            language = $6
                         WHERE id = $1
                           AND entry_id = $2
                           AND owner_node_id = $5
@@ -64,6 +67,7 @@ impl LexiconRepository {
                     .bind(primary.band.field_role())
                     .bind(primary_index as i32)
                     .bind(sentence.id)
+                    .bind(translation_language(primary))
                     .execute(&mut **tx)
                     .await
                     .map_err(map_entry_write_error)?;
@@ -102,7 +106,7 @@ impl LexiconRepository {
                             entry_id,
                             sentence.id,
                             translation.band.field_role(),
-                            "zh",
+                            translation_language(translation),
                             Dialect::Common,
                             &content,
                             TextOrigin::Manual,
@@ -115,4 +119,14 @@ impl LexiconRepository {
         }
         Ok(())
     }
+}
+
+/// 规范化保证了 `language` 恒有值；这里的兜底只是不让仓储层依赖调用顺序。
+fn translation_language(
+    translation: &crate::lexicon::dto::WordSentenceTranslationV3,
+) -> &'static str {
+    translation
+        .language
+        .unwrap_or(crate::lexicon::dto::TranslationLanguageV3::DEFAULT)
+        .code()
 }
