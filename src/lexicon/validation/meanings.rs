@@ -9,6 +9,12 @@ pub fn validate_meanings(
 ) -> Vec<DraftValidationIssue> {
     let mut issues = Vec::new();
     let mut node_types = HashMap::new();
+    // 配了细分词性的基本词性，其释义才必填细分词性。一个都没配还要求选中，这条词性的
+    // 词义就永远发不出去，而管理员在界面上看到的是一个空下拉，没有任何解法。
+    let pos_with_sub_parts = sub_part_parents
+        .values()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     let sense_group_ids = content
         .sense_groups
         .iter()
@@ -177,9 +183,9 @@ pub fn validate_meanings(
                     "CEFR 等级无效",
                 );
             }
-            // 只有固定五个词性的释义必填细分词性；其余词性选填（填了会落到下面的归属校验）。
+            // 该词性配了细分词性时释义才必填；没配的选填（填了会落到下面的归属校验）。
             if sense.sub_pos.is_empty() {
-                if crate::catalog::rules::requires_sub_pos(pos_code) {
+                if pos_with_sub_parts.contains(pos_code) {
                     issue(
                         &mut issues,
                         PersistedWordStep::Meanings,
@@ -569,31 +575,49 @@ mod tests {
         .unwrap()
     }
 
-    fn sub_pos_required_issues(pos: &str) -> usize {
+    /// `sub_parts` 是「细分词性编码 -> 所属基本词性编码」，与目录下发的形状一致。
+    fn sub_pos_required_issues(pos: &str, sub_parts: &[(&str, &str)]) -> usize {
         let pos_id = Uuid::now_v7();
         let headwords = WordHeadwordsV2::Distinguish {
             uk: "high".to_owned(),
             us: "high".to_owned(),
             source_dialect: SourceDialect::Uk,
         };
+        let parents = sub_parts
+            .iter()
+            .map(|(sub, parent)| ((*sub).to_owned(), (*parent).to_owned()))
+            .collect::<HashMap<_, _>>();
         validate_meanings(
             Uuid::now_v7(),
             &forms(pos, pos_id),
             &meanings_without_sub_pos(pos_id),
             &headwords,
-            &HashMap::new(),
+            &parents,
         )
         .into_iter()
         .filter(|issue| issue.code == "sub_pos_required")
         .count()
     }
 
-    /// 细分词性只在基础词性下存在：基础词性的释义必须选，非基础词性没有可选项，不能因此拦住完成。
+    /// 必填与否只看该词性下配了细分词性没有，不认任何固定编码集合。
     #[test]
-    fn sub_pos_is_required_only_under_basic_parts_of_speech() {
-        assert_eq!(sub_pos_required_issues("noun"), 1);
-        assert_eq!(sub_pos_required_issues("verb"), 1);
-        assert_eq!(sub_pos_required_issues("particle"), 0);
-        assert_eq!(sub_pos_required_issues("preposition"), 0);
+    fn sub_pos_is_required_when_the_part_of_speech_has_sub_parts() {
+        assert_eq!(sub_pos_required_issues("noun", &[("N-COUNT", "noun")]), 1);
+        assert_eq!(sub_pos_required_issues("verb", &[("V-T", "verb")]), 1);
+        // 管理员自建的词性同样算数：配了就必填，不再因为编码不在白名单里被放过。
+        assert_eq!(
+            sub_pos_required_issues("particle", &[("PART", "particle")]),
+            1
+        );
+    }
+
+    /// 该词性下一个细分词性都没有时不能必填，否则这条词性的词义永远发不出去。
+    #[test]
+    fn sub_pos_is_not_required_without_sub_parts() {
+        // 名词曾经因为编码在白名单里而恒为必填：细分词性被删空后就锁死了。
+        assert_eq!(sub_pos_required_issues("noun", &[]), 0);
+        assert_eq!(sub_pos_required_issues("preposition", &[]), 0);
+        // 别的词性配了细分词性，不影响本词性。
+        assert_eq!(sub_pos_required_issues("noun", &[("V-T", "verb")]), 0);
     }
 }

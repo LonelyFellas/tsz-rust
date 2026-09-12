@@ -204,7 +204,7 @@ pub struct PartOfSpeechConfig {
     pub sub_part_count: i64,
     /// 任意基本词性都可以扩展细分词性，恒为 true。
     pub sub_parts_extensible: bool,
-    /// 按固定编码集合派生：该词性下的释义是否必须选中细分词性。
+    /// 按该词性下配置了多少细分词性派生：配了就必须选中，没配就不必填。
     pub sub_pos_required: bool,
     pub allowed_form_types: Vec<WordFormTypeWithoutBase>,
     pub default_form_types: Vec<WordFormTypeWithoutBase>,
@@ -308,7 +308,8 @@ pub(crate) struct PartRecord {
 impl From<PartRecord> for PartOfSpeechConfig {
     fn from(value: PartRecord) -> Self {
         let allowed_form_types = value.allowed_form_types;
-        let sub_pos_required = crate::catalog::rules::requires_sub_pos(&value.code);
+        // 配了细分词性才谈得上必填；一个都没配时要求选中，会让这条词性的词义永远发不出去。
+        let sub_pos_required = value.sub_part_count > 0;
         Self {
             id: value.id,
             code: value.code,
