@@ -19,13 +19,13 @@ description: 将 tsz-rust 当前 GitHub main 的成功 CI 制品部署到 tshb-t
 
 ## 核心门禁
 
-- 干净本地 main 的 HEAD 必须等于 GitHub 当前 origin/main；锁内记录 SHA、tree 与 session。
+- 使用本次独立的干净部署 checkout，其 main HEAD 必须等于 GitHub 当前 origin/main；锁内记录 checkout、SHA、tree 与 session。原开发工作区的无关改动不阻断部署。
 - 精确 SHA 最新 CI 必须成功，skipped/neutral、失败、无记录、异常或未知结果均不放行。
 - 使用目标提交携带的 CI 门禁工具；等待时保留句柄和原始退出码，最长等待按工具设置，持续提供必要进展。main 前进须释放尚未进入服务器阶段的本 session 锁，再从新 SHA 重走。
 - 任意服务器写入前验证 CI run/attempt、制品唯一性/有效期/哈希/manifest、SSH、只读数据库预检、当前部署来源，以及完整 smoke 所需凭据可用且不输出。
 - 本地和远端锁 owner 必须属于同一 session；跨调用状态存入锁内 state，不能假设 shell 变量仍在。
-- 服务器无 Git checkout，不同步源码、不现场编译；只安装精确 CI 二进制，不改 .env、数据库或前端。
-- 成组备份二进制与 manifest，再原子替换；撤下正式 manifest 后的失败按手册回退。涉及迁移时先核对旧二进制兼容新 schema；不能凭空承诺数据库自动回退。
+- 服务器无 Git checkout，不同步源码、不现场编译；只安装精确 CI 二进制，不改 .env 或前端，不执行无关数据库操作；本次迁移及其有界恢复按下条执行。
+- 成组备份二进制与 manifest，再原子替换；撤下正式 manifest 后的失败按手册回退。涉及迁移时先验证本次 down 区间可安全撤回并记录证据，或明确已批准的人工恢复方案。只有已验证安全的区间才允许自动 down；否则失败时保留服务停止、锁与现场并请求恢复决定，不自动改库或换回不兼容二进制。
 - health、ready、auth 全链路和制品 verify 全部通过才算成功；禁止只凭服务 active、退出码 0 或 JSON 中的 SHA 判定。
 - 不抢占/删除其他 session 的锁、不手工补造 manifest，不在失败后盲目重跑整次发布。
 

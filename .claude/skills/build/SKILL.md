@@ -8,14 +8,11 @@ description: 按已确认的 spec 实现 tsz-rust 后端改动，向验收命令
 本文件是 Claude Code 下后端 build 的**唯一**流程来源。项目约定读 `AGENTS.md`。
 **本技能不提交、不推送、不开 PR、不部署**——那是 [ship](../ship/SKILL.md) 和 deploy。
 
-## 1. 开工前装好验收回路
+## 1. 明确验收回路
 
-1. 读 spec（`docs/features/<slug>/design.md`，跨仓功能可能在前端仓）。**这是本会话的主要输入。**
-2. 取出验收命令先跑一次记下基线（通常是红的）。挂成 `/goal` 条件让每轮自动复检。
-   没有可跑命令的 spec 是缺陷——退回 [assess](../assess/SKILL.md) 补上。
-3. 确认分支与工作区。**用户在 `dev` 上开发且工作区常有未提交改动——一律保留，不清空、不 stash。**
-4. 确认测试依赖：本地 Postgres / Redis 的连接与隔离。
-   **不要用「先启动试试」来诊断未知数据库**——后端启动会自动跑迁移。
+读取已有 spec 或任务描述；免 spec 档不补造文档。验收可以是可执行命令与预期，或明确的人工步骤与判据。
+按风险取得最低成本的基线，此后代码或输入变化时定向复检，不因回合推进而重复运行。
+保留用户工作区改动，不清空、不 stash。仅测试需要 Postgres/Redis 时核实连接与隔离；后端启动会执行迁移，不能用「先启动试试」诊断未知数据库。
 
 ## 2. 实施
 
@@ -34,7 +31,7 @@ description: 按已确认的 spec 实现 tsz-rust 后端改动，向验收命令
   它只生成 `docs/openapi.json`，不启动服务。
 
 **spec 没说清的**：常规实现细节自行判断并说明；影响验收标准或范围的停下问。
-需要补调研派 [rust-scout](../../agents/rust-scout.md)，契约存疑派 [contract-auditor](../../agents/contract-auditor.md)。
+补调研先限定范围；有独立并行收益时再使用只读子代理。
 
 ## 3. 边实现边测
 
@@ -51,29 +48,22 @@ description: 按已确认的 spec 实现 tsz-rust 后端改动，向验收命令
 - 新增测试 target 时**记得登记进 CI 分区清单**，否则 CI 不会跑它。
 - 需要数据库的测试先核实连接选择逻辑与隔离，避免 Redis fallback 命中共享实例。
 
-## 4. 迭代只跑受影响检查
+## 4. 统一安排检查
 
-用 `cargo test --locked --all-features --lib` 或 `--test <target>` 圈定范围。
-**完整三件套留到交付前统一跑一次，不在实现过程中反复全量运行**：
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
-```
-
-clippy 已包含编译检查，不为同一状态额外重复 `cargo check`。
-耗时命令用可继续读取的会话句柄，保存真实退出码，不因工具提前返回而误判完成。
+迭代用 `--lib`、`--test <target>` 或相关契约检查验证风险；数据库集成测试按影响范围选择，只有跨模块风险或明确要求时才全量运行。
+紧接已授权 ship 时，原生 hooks 承接其覆盖的 clippy 与单元测试，不提前手工重复；fmt 和 hooks 未覆盖的必要检查补一次即可。
+没有紧接 ship 时，对代码改动运行 fmt、clippy 与受影响测试。复用同一输入的有效结果；clippy 已含编译检查，不重复 `cargo check`。
+耗时命令保留会话句柄与真实退出码，数据库测试先核实隔离。
 
 ## 5. 收尾核对
 
-1. 验收命令跑绿，保留实际输出作为证据。
-2. 派 [spec-verifier](../../agents/spec-verifier.md)，给它 spec 路径和本次 diff，逐条核对验收标准覆盖。
+1. 完成选定的命令或人工验收，保留实际证据。
+2. 派 [spec-verifier](../../agents/spec-verifier.md)，给它 spec 或任务描述中的验收标准、已有验证证据和本次 diff，逐条核对验收标准覆盖。
 3. 核对生成物同步到位：`docs/openapi.json`、`.sqlx`、迁移 up/down、CI 分区清单。
 4. 无法验证的（需前端配合、依赖未就绪）明确标注，不写成已通过。
 
 ## 6. 交接
 
 交付实际结果、验证证据、迁移与发布顺序、未就绪依赖和工作区状态。
-用户已要求提交/推送/PR 时才进入 [ship](../ship/SKILL.md)，**建议开新会话做审查**。
+用户已要求提交/推送/PR 时才进入 [ship](../ship/SKILL.md)，在当前会话连续推进。
 需要前端配套时说明发布顺序，但**不自动授权前端改动或任何部署**。

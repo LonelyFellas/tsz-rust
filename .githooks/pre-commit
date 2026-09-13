@@ -1,14 +1,38 @@
 #!/bin/sh
-# 提交前门禁（两道，任一失败都拦下提交）：
-#   1) 刷新 sqlx 离线缓存并纳入本次提交 —— 保证 .sqlx 与代码同步，离线/CI 编译不会撞 "no cached data"。
-#      覆盖面（--all-targets --all-features）与下方 clippy 对齐：clippy 能编到的 query! 缓存里都得有。
-#      ⚠️ 本步需连 DATABASE_URL（sqlx-cli 自动读 .env）——本地 Docker 库必须在跑，否则本步失败、提交被拦。
-#   2) clippy 门禁：任何警告都拦截提交（-D warnings 把警告升级为错误）。
+# 规则文档不需要数据库/编译检查；SQLx 仅随查询或构建输入变化刷新。
+# 其他提交保留 Clippy；无法判断变更范围时执行完整门禁。
 set -e
 
-echo "▶ pre-commit (1/2): cargo sqlx prepare -- --all-targets --all-features"
-cargo sqlx prepare -- --all-targets --all-features
-git add -A .sqlx
+check_scope=$(python3 - <<'PY_SCOPE'
+import subprocess
 
-echo "▶ pre-commit (2/2): cargo clippy --all-targets -- -D warnings"
+paths = subprocess.check_output(
+    ["git", "diff", "--cached", "--name-only", "--no-renames", "-z"]
+).split(b"\0")[:-1]
+rule_doc = lambda path: path == b"AGENTS.md" or (
+    path.startswith((b".agents/skills/", b".claude/skills/"))
+    and path.endswith(b".md")
+)
+sqlx_input = lambda path: (
+    path.endswith((b".rs", b".sql"))
+    or path.rsplit(b"/", 1)[-1] in (b"Cargo.toml", b"Cargo.lock", b"rust-toolchain", b"rust-toolchain.toml")
+    or path.startswith((b".cargo/", b"migrations/"))
+)
+print("docs" if paths and all(map(rule_doc, paths)) else
+      "sqlx" if not paths or any(map(sqlx_input, paths)) else "clippy")
+PY_SCOPE
+) || check_scope=sqlx
+
+if [ "$check_scope" = docs ]; then
+    echo "▶ pre-commit: 仅规则文档，无需 SQLx/Clippy 检查"
+    exit 0
+fi
+
+if [ "$check_scope" = sqlx ]; then
+    echo "▶ pre-commit: cargo sqlx prepare -- --all-targets --all-features"
+    cargo sqlx prepare -- --all-targets --all-features
+    git add -A .sqlx
+fi
+
+echo "▶ pre-commit: cargo clippy --all-targets --all-features -- -D warnings"
 cargo clippy --all-targets --all-features -- -D warnings
