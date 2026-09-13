@@ -298,7 +298,58 @@ pub(super) struct PublishedAssociationTarget {
     pos: Vec<PublishedAssociationPos>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct PublishedAssociationCandidateKey {
+    pub entry_id: Uuid,
+    pub publication_id: Option<Uuid>,
+    pub pos_id: Uuid,
+    pub base_form_id: Uuid,
+    pub matched_variant_id: Uuid,
+}
+
 impl PublishedAssociationTarget {
+    pub(super) fn headword(&self) -> &str {
+        &self.headword
+    }
+
+    /// 只生成分页与计数所需的稳定身份，不克隆该词性下的全部 forms / senses。
+    pub(super) fn sentence_discovery_candidate_keys(
+        &self,
+        publication_id: Option<Uuid>,
+        pos_id: Uuid,
+        matched_form_id: Uuid,
+        matched_variant_id: Uuid,
+    ) -> Vec<PublishedAssociationCandidateKey> {
+        let Some(pos) = self.pos.iter().find(|pos| pos.id == pos_id) else {
+            return Vec::new();
+        };
+        let Some(form) = pos.forms.iter().find(|form| {
+            form.id == matched_form_id
+                || form.variants.iter().any(|variant| {
+                    variant.id == matched_form_id || variant.id == matched_variant_id
+                })
+        }) else {
+            return Vec::new();
+        };
+        let Some(variant) = form
+            .variants
+            .iter()
+            .find(|variant| variant.id == matched_variant_id || variant.id == matched_form_id)
+        else {
+            return Vec::new();
+        };
+        form.base_form_ids
+            .iter()
+            .map(|base_form_id| PublishedAssociationCandidateKey {
+                entry_id: self.id,
+                publication_id,
+                pos_id,
+                base_form_id: *base_form_id,
+                matched_variant_id: variant.id,
+            })
+            .collect()
+    }
+
     fn from_v3(word: AdminWordV3) -> Result<Self, LexiconServiceError> {
         Self::from_v3_parts(
             word.id,

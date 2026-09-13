@@ -482,6 +482,12 @@ pub(crate) struct SentenceDiscoverySurfaceRecord {
     pub event_offset: i64,
 }
 
+#[derive(Debug, Clone, Copy, sqlx::FromRow)]
+pub(crate) struct ComponentTargetEntryMatchRecord {
+    pub entry_id: Uuid,
+    pub match_rank: i32,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct SentenceDiscoveryDraftRecord {
     pub entry_id: Uuid,

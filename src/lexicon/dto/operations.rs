@@ -590,10 +590,13 @@ pub struct SearchComponentTargetsV3Input {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, minimum = 1, maximum = 200)]
     pub page_size: Option<u32>,
+    /// 已知目标词条时直接限定该词条；仍校验词面、类型、发布/草稿与归档状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub entry_id: Option<Uuid>,
     /// 上一页返回的 `next_cursor`。绑定 discovery generation 与本次 `q` / `kind`：凡是写
     /// `surface_sources` 的变动（发布、词形步保存等）或换了关键字/kind 后即失效（400
-    /// `invalid_query`，`field = "cursor"`）。归档只写 `entries.archived_at`、不推进 generation，
-    /// 翻页期间被归档的词条只是从后续页消失，不会让游标失效。
+    /// `invalid_query`，`field = "cursor"`）。游标同时绑定可用词条集合，归档导致结果集变化时也失效。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub cursor: Option<String>,
@@ -628,10 +631,9 @@ pub struct SearchComponentTargetsV3Response {
     /// `matches` 恒为空数组——没有「命中了句子里的哪一段」可言，后端不构造假证据。
     /// 顺序：词面等于 `q` 的词条最前，以 `q` 开头的其次，其余按 headword；同一词条的候选相邻。
     pub matches: Vec<PublishedSentenceTargetCandidateV3>,
-    /// 本次扫描窗口内命中的候选总数（跨所有页）；撞了窗口上限时它是下界，不是全库命中数。
+    /// 完整匹配集的候选总数（跨所有页，同一词条可能有多条词形候选）。
     pub total: u64,
-    /// 还有未返回的候选：有下一页（同时给出 `next_cursor`），或触到了后端的扫描行/词条数上限
-    /// （此时没有 `next_cursor`，只能换更具体的关键字）。
+    /// 还有未返回的候选；为 true 时同时给出 `next_cursor`。
     pub truncated: bool,
     /// 还有下一页时返回；下一页用相同的 `q` / `kind` / `page_size` 携带此值。
     #[serde(default, skip_serializing_if = "Option::is_none")]

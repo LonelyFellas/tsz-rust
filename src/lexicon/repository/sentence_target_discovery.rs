@@ -1,4 +1,5 @@
 use super::*;
+use crate::lexicon::model::ComponentTargetEntryMatchRecord;
 
 /// 成分用词 / 正文关联草稿目标的取数：当前草稿投影 + 展示词面 + （若有）当前发布快照。
 /// SQL 只由常量片段拼成，绑定值全部走参数。
@@ -82,12 +83,81 @@ impl LexiconRepository {
 
     /// 关键字检索短语成分目标：与 `published_sentence_discovery_surfaces` 共用同一套
     /// 「只看当前发布、未归档」的过滤，只把词面等值换成对 `surface` 的大小写不敏感包含匹配。
-    /// 前置通配符用不上 `surface_sources` 上的 btree 索引，代价靠 `current_publication`
-    /// 分片与 `limit` 框住。
-    ///
-    /// 排序下沉到 SQL：词面等于关键字的排最前、以关键字开头的其次、其余按词面。窗口只有
-    /// `limit` 行，排序若留在 Rust 侧，点 `me` 时 `acme / came / home …` 会先把窗口占满，
-    /// `me` 本身反而进不来。Rust 侧 `component_target_rank` 用同一规则给候选排序。
+    /// 返回完整匹配集的词条身份与最佳匹配档位。每条记录很小；service 只按批读取
+    /// 这些词条的词面与快照，并且只为当前页物化富候选 DTO。
+    pub(crate) async fn component_target_entry_matches(
+        tx: &mut Transaction<'_, Postgres>,
+        dialect_scopes: &[String],
+        keyword: &str,
+        kind: Option<EntryKind>,
+        entry_id: Option<Uuid>,
+        exact: bool,
+        drafts: bool,
+    ) -> Result<Vec<ComponentTargetEntryMatchRecord>, LexiconRepositoryError> {
+        let lowered = keyword.to_lowercase();
+        let scope_join = if drafts {
+            r#"JOIN lexicon.entries entry
+                  ON entry.id = source.entry_id
+                 AND entry.archived_at IS NULL
+                 AND entry.current_publication_id IS NULL
+                 AND entry.content_schema_version = 3
+                WHERE source.is_deleted = FALSE
+                  AND source.content_scope = 'draft'"#
+        } else {
+            r#"JOIN lexicon.entries entry
+                  ON entry.id = source.entry_id
+                 AND entry.archived_at IS NULL
+                 AND entry.current_publication_id = source.publication_id
+                WHERE source.is_deleted = FALSE
+                  AND source.content_scope = 'current_publication'"#
+        };
+        let match_predicate = if exact {
+            "source.normalized_surface = $3"
+        } else {
+            r"source.surface ILIKE $3 ESCAPE '\'"
+        };
+        let sql = format!(
+            r#"
+            SELECT source.entry_id,
+                   MIN(CASE
+                         WHEN source.normalized_surface = $5 THEN 0
+                         WHEN source.normalized_surface LIKE $6 ESCAPE '\' THEN 1
+                         ELSE 2
+                       END)::int4 AS match_rank
+            FROM lexicon.surface_sources source
+            {scope_join}
+              AND source.language = 'en'
+              AND source.normalization_version = $1
+              AND source.dialect_scope = ANY($2::text[])
+              AND {match_predicate}
+              AND ($4::text IS NULL OR source.entry_kind = $4::text)
+              AND ($7::uuid IS NULL OR source.entry_id = $7)
+              AND source.pos_id IS NOT NULL
+              AND source.pos IS NOT NULL
+              AND COALESCE(source.form_id, source.source_node_id) IS NOT NULL
+            GROUP BY source.entry_id
+            ORDER BY match_rank, source.entry_id
+            "#
+        );
+        sqlx::query_as::<_, ComponentTargetEntryMatchRecord>(sqlx::AssertSqlSafe(sql))
+            .bind(HEADWORD_NORMALIZATION_VERSION)
+            .bind(dialect_scopes)
+            .bind(if exact {
+                keyword.to_owned()
+            } else {
+                format!("%{}%", escape_like_literal(keyword))
+            })
+            .bind(kind.map(kind_string))
+            .bind(&lowered)
+            .bind(format!("{}%", escape_like_literal(&lowered)))
+            .bind(entry_id)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(LexiconRepositoryError::Database)
+    }
+
+    /// 返回一个有界词条批次的去重词面标识。排序按等于、前缀、其余词面，与 service 的
+    /// 匹配等级一致；event_offset 只取最小值，因为它不参与关键字候选身份。
     /// 关键字检索的词面行。`exact` 为真时 `keyword` 须已是归一化 key，按 `normalized_surface` 等值；
     /// 否则按 `surface ILIKE '%keyword%'` 包含匹配。`drafts` 为真时查从未发布的 V3 草稿词面
     /// （`content_scope = 'draft'`，不按创建者过滤，`publication_id` 为 NULL），否则查当前发布词面。
@@ -96,7 +166,7 @@ impl LexiconRepository {
         dialect_scopes: &[String],
         keyword: &str,
         kind: Option<EntryKind>,
-        limit: i64,
+        entry_ids: &[Uuid],
         exact: bool,
         drafts: bool,
     ) -> Result<Vec<SentenceDiscoverySurfaceRecord>, LexiconRepositoryError> {
@@ -126,7 +196,7 @@ impl LexiconRepository {
             r#"
             SELECT matched.*
             FROM (
-                SELECT DISTINCT
+                SELECT
                        source.normalized_surface,
                        source.surface,
                        source.entry_kind,
@@ -137,7 +207,7 @@ impl LexiconRepository {
                        COALESCE(source.form_id, source.source_node_id) AS matched_form_id,
                        source.source_node_id AS matched_variant_id,
                        source.dialect_scope,
-                       source.event_offset
+                       MIN(source.event_offset) AS event_offset
                 FROM lexicon.surface_sources source
                 {scope_join}
                   AND source.language = 'en'
@@ -145,9 +215,14 @@ impl LexiconRepository {
                   AND source.dialect_scope = ANY($2::text[])
                   AND {match_predicate}
                   AND ($4::text IS NULL OR source.entry_kind = $4::text)
+                  AND source.entry_id = ANY($7::uuid[])
                   AND source.pos_id IS NOT NULL
                   AND source.pos IS NOT NULL
                   AND COALESCE(source.form_id, source.source_node_id) IS NOT NULL
+                GROUP BY source.normalized_surface, source.surface, source.entry_kind,
+                         source.entry_id, source.publication_id, source.pos_id, source.pos,
+                         COALESCE(source.form_id, source.source_node_id), source.source_node_id,
+                         source.dialect_scope
             ) matched
             ORDER BY CASE
                          WHEN matched.normalized_surface = $5 THEN 0
@@ -156,7 +231,6 @@ impl LexiconRepository {
                      END,
                      matched.normalized_surface, matched.entry_id,
                      matched.pos_id, matched.matched_form_id, matched.event_offset
-            LIMIT $7
             "#
         );
         // SQL 只由上面的常量片段拼成，绑定值全部走参数，没有用户输入进字符串。
@@ -171,7 +245,7 @@ impl LexiconRepository {
             .bind(kind.map(kind_string))
             .bind(&lowered)
             .bind(format!("{}%", escape_like_literal(&lowered)))
-            .bind(limit)
+            .bind(entry_ids)
             .fetch_all(&mut **tx)
             .await
             .map_err(LexiconRepositoryError::Database)
