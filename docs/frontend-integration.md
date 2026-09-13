@@ -329,7 +329,7 @@ function refreshOnce(): Promise<boolean> {
 9. 任意基本词性都可以扩展细分词性（含管理员自建的），`sub_parts_extensible` 恒为 true。管理项与
    catalog 项另带 `sub_pos_required`：按固定编码集合（`noun`/`verb`/`pronoun`/`adjective`/`adverb`）
    派生，只表示该词性下的释义是否必填细分词性，与能不能扩展无关，前端据此计算未填项。基本词性另有
-   必填的 `short_name_zh`（简洁显示，1–16 字唯一）与 `full_name_en`（英文全称，1–64 字忽略大小写唯一），
+   必填的 `short_name_zh`（简洁显示，1–16 字唯一）与 `full_name_en`（英文全称，1–200 字忽略大小写唯一，2026-09-13 起由 64 放宽），
    创建/修改请求必须携带（2026-09-06 起）。
    细分词性同样新增必填的 `short_name_zh`、`abbreviation`（同父级允许重复）与 `full_name_en`（同父级忽略大小写唯一）。
    基本词性下仍挂有细分词性时不允许删除：DELETE 返回 409 `part_of_speech_has_sub_parts`，需先删完细分词性（2026-09-06 起）。

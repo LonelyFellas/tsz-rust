@@ -81,7 +81,7 @@ pub struct CreateFormTypeRequest {
     pub abbreviation: String,
     #[schema(min_length = 1, max_length = 16)]
     pub short_name_zh: String,
-    #[schema(min_length = 1, max_length = 64)]
+    #[schema(min_length = 1, max_length = 200)]
     pub full_name_en: String,
     pub sort_order: i32,
 }
@@ -99,7 +99,7 @@ pub struct UpdateFormTypeRequest {
     pub abbreviation: String,
     #[schema(min_length = 1, max_length = 16)]
     pub short_name_zh: String,
-    #[schema(min_length = 1, max_length = 64)]
+    #[schema(min_length = 1, max_length = 200)]
     pub full_name_en: String,
     pub sort_order: i32,
 }
@@ -312,7 +312,7 @@ pub async fn create(
     sqlx::query("INSERT INTO catalog.form_types(id,part_of_speech_id,code,name_zh,name_en,short_name_zh,abbreviation,full_name_en,sort_order,created_by_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
         .bind(id).bind(request.part_of_speech_id).bind(request.code).bind(text(request.name_zh,"name_zh",64)?).bind(text(request.name_en,"name_en",64)?)
         .bind(text(request.short_name_zh,"short_name_zh",16)?).bind(text(request.abbreviation,"abbreviation",16)?)
-        .bind(text(request.full_name_en,"full_name_en",64)?).bind(request.sort_order).bind(admin.id)
+        .bind(text(request.full_name_en,"full_name_en",200)?).bind(request.sort_order).bind(admin.id)
         .execute(&mut *tx).await.map_err(database_error)?;
     bump(&mut tx).await?;
     let value = config(&mut tx, id).await?;
@@ -390,7 +390,7 @@ pub async fn update(
     sqlx::query("UPDATE catalog.form_types SET part_of_speech_id=$9,name_zh=$2,name_en=$3,short_name_zh=$4,abbreviation=$5,full_name_en=$6,sort_order=$7,updated_by_admin_id=$8,updated_at=now(),revision=revision+1 WHERE id=$1")
         .bind(path.id).bind(text(request.name_zh,"name_zh",64)?).bind(text(request.name_en,"name_en",64)?)
         .bind(text(request.short_name_zh,"short_name_zh",16)?).bind(text(request.abbreviation,"abbreviation",16)?)
-        .bind(text(request.full_name_en,"full_name_en",64)?).bind(request.sort_order).bind(admin.id).bind(part_of_speech_id)
+        .bind(text(request.full_name_en,"full_name_en",200)?).bind(request.sort_order).bind(admin.id).bind(part_of_speech_id)
         .execute(&mut *tx).await.map_err(database_error)?;
     bump(&mut tx).await?;
     let value = config(&mut tx, path.id).await?;

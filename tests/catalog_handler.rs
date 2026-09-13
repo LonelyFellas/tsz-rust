@@ -1851,3 +1851,95 @@ async fn form_types_reject_phrase_parts_of_speech(pool: PgPool) {
     assert_eq!(body["code"], "invalid_form_type");
     assert_eq!(body["field"], "part_of_speech_id");
 }
+
+#[sqlx::test]
+async fn full_name_en_limit_is_200_characters_for_parts_sub_parts_and_form_types(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin_id = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let bearer = token(&state, admin_id, AdminRole::SuperAdmin);
+    let noun_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'noun'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    // 去空白后正好 200 字是上边界。数据库 CHECK 没跟着放宽时，200 字会在写入时变成 500。
+    let longest = "f".repeat(200);
+    let too_long = "f".repeat(201);
+    let cases = [
+        (
+            ROOT.to_owned(),
+            json!({"code":"long_full_name","name_zh":"长全称","name_en":"Long full name","abbreviation":"lfn.","short_name_zh":"长全称","sort_order":0}),
+            "invalid_part_of_speech",
+        ),
+        (
+            format!("{ROOT}/{noun_id}/sub-parts"),
+            json!({"code":"N-LONG-FULL","name_zh":"长全称细分","name_en":"Long full sub","abbreviation":"lfs.","short_name_zh":"长细分","sort_order":0}),
+            "invalid_part_of_speech",
+        ),
+        (
+            "/api/v1/admin/settings/form-types".to_owned(),
+            json!({"part_of_speech_id":noun_id,"code":"long_full_variant","name_zh":"长全称词形","name_en":"Long full variant","abbreviation":"lfv","short_name_zh":"长词形","sort_order":0}),
+            "invalid_form_type",
+        ),
+    ];
+    for (path, base, invalid_code) in cases {
+        let mut input = base.clone();
+        input["full_name_en"] = json!(too_long);
+        let (status, _, body, _) = call(
+            &state,
+            Method::POST,
+            &path,
+            Some(&bearer),
+            Some(input.clone()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{path} 创建时 201 字应被拒绝：{body}"
+        );
+        assert_eq!(body["code"], invalid_code);
+        assert_eq!(body["field"], "full_name_en");
+
+        input["full_name_en"] = json!(format!("  {longest}  "));
+        let (status, _, created, _) =
+            call(&state, Method::POST, &path, Some(&bearer), Some(input)).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{path} 创建时 200 字应被接受：{created}"
+        );
+        assert_eq!(created["full_name_en"], longest.as_str());
+
+        let item = format!("{path}/{}", created["id"].as_str().unwrap());
+        let mut update = base;
+        update.as_object_mut().unwrap().remove("code");
+        update["base_revision"] = json!(1);
+        update["full_name_en"] = json!(too_long);
+        let (status, _, body, _) = call(
+            &state,
+            Method::PATCH,
+            &item,
+            Some(&bearer),
+            Some(update.clone()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{item} 修改时 201 字应被拒绝：{body}"
+        );
+        assert_eq!(body["code"], invalid_code);
+        assert_eq!(body["field"], "full_name_en");
+
+        update["full_name_en"] = json!(longest);
+        let (status, _, updated, _) =
+            call(&state, Method::PATCH, &item, Some(&bearer), Some(update)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{item} 修改时 200 字应被接受：{updated}"
+        );
+        assert_eq!(updated["full_name_en"], longest.as_str());
+    }
+}
