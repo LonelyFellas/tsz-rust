@@ -373,6 +373,9 @@ POS 与目录中任一合法编码的组合；编码格式为 `^[a-z][a-z0-9_]{0
 创建或改挂时归属不存在返回 404 `part_of_speech_not_found`；并发编辑复用 `revision_conflict`。
 V2/V3 wire 类型从固定枚举扩展为目录字符串，前端须同步严格 runtime schema。先部署兼容新编码和旧目录缺字段的前端，再部署后端；历史自定义类型仍被引用时不可回滚旧枚举版本。
 
+> **已被取代（2026-09-13，TASK#45）**：`dialect_rules` 已从词性下沉到变化组，且一形只能一组。
+> 本段保留作历史记录，现行契约见文末「变化组独立英美配置与专用组」。
+
 V3 Step 2 新增必填 POS 级正式字段：
 
 ```json
@@ -1238,7 +1241,8 @@ resolve 在这张卡片里已不再使用。将来若嫌结果多要加搜索框
 
 V3 的「方言」在数据上有两个来源：建条 step 1 的英美选择只是 `v3_entry_state.initial_headwords`
 里的**一次性快照**（建条后不再更新，仅用于 `detection_basis_dialect` 展示与 surface 校验）；
-真正决定词形结构与发布内容的是**各词性**的 `dialect_rules.spelling_mode`（`entry_pos.spelling_mode`），
+真正决定词形结构与发布内容的是**各词性**的 `dialect_rules.spelling_mode`（`entry_pos.spelling_mode`；
+2026-09-13 TASK#45 起改为**各变化组**的 `dialect_rules.spelling_mode`，见文末），
 词形步可随时改，且只在建条那一刻按词典建议灌过一次。两者可分叉（例：建条选通用、后来在词性页
 改成英美的 `colour up`）。列表摘要以后者为准。
 
@@ -1968,3 +1972,57 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 响应仍为 `SharedSentenceList`。人工认领复用原 PUT，保留例句和 annotation ID，只替换明确选择的 target；带原 revision，当前词条上下文同时带 context entry/sense。多条旧 EntryOnly 必须一起补全，不能隐式删掉其他标注来保存。自动新建或发布词条不会猜选词义。
 
 新前端依赖这些参数实际生效，部署顺序为后端先、前端后；旧前端继续兼容新后端。没有新增表、迁移或写端点。配套需求与设计位于 tsz 的 `docs/features/sentence-management/`。
+
+## 变化组独立英美配置与专用组（TASK#45，2026-09-13，后端已实现）
+
+> **破坏性契约：前后端同批发布，测试服先清库。** 需求与前端逐文件改动清单见
+> `docs/features/form-group-dialect-scope/requirements.md` 与 `design.md` §6；本节只列 wire 变化。
+
+### 契约变化
+
+| 位置 | 变化 |
+| --- | --- |
+| `WordPosFormsV3.dialect_rules` | **删除**。请求里再带会被当作未知字段拒绝（422 `invalid_request_body`）。 |
+| `WordFormGroupV3.dialect_rules` | **新增必填**，类型仍是 `DialectRulesV3`，合法组合仍是 UU / UD / DD。组内词形按本组规则校验，组与组互不影响。 |
+| `WordFormGroupV3.scope` | **新增必填**，`FormGroupScopeV3 = "general" \| "dedicated"`。新建组默认 `general`。 |
+| `WordSenseV3.form_group_id`、`WordSenseWritableV3.form_group_id` | **新增可选**。缺省表示使用本词性的通用组；只能指向同词性下 `scope = dedicated` 的组。未绑定时响应省略该键，不输出 `null`。 |
+| 组员 membership | 一个词形只能属于一个组。第二个组再引用同一词形返回 `form_group_membership_invalid`，定位在后出现的 membership。 |
+
+新建词条时，词典建议推出的规则写进初始组（唯一的一组，`scope = general`）。第 1 步确认「区分英美」时，
+后端改写该词性所有组的规则并转换词形。
+
+### 校验码
+
+| code | 何时报 | step | node_id | field |
+| --- | --- | --- | --- | --- |
+| `dialect_rules_invalid`（定位改变） | 词形步保存 | `forms` | 组 id，`node_location.form_group_id` 同值 | `dialect_rules` |
+| `sense_form_group_invalid`（新） | 词义步保存（两个 intent）、validate、发布 | `meanings` | 词义 id | `form_group_id` |
+| `dedicated_form_group_unused`（新） | 词义步 complete、validate、发布 | `forms` | 组 id，`node_location.form_group_id` 同值 | `scope` |
+| `sense_form_group_required`（新） | 词义步 complete、validate、发布 | `meanings` | 词义 id | `form_group_id` |
+
+词义步草稿保存只卡结构性错误。词形步保存不做这两条完成检查，专用组可以先建、到第 3 步再绑。
+
+完成状态会跟着失效：第 2 步把组改成专用、新增没人绑定的专用组、删掉唯一的通用组，或第 3 步草稿保存清掉绑定后，
+响应里的 `completed_steps` 不再包含 `meanings`。
+
+### 影响预览
+
+第 2 步删掉专用组或把它改回通用时，绑定它的词义会自动改回通用。`preview-forms-impact` 在 `affected`
+里用 `node_type: "sense"`、`reason: "form_group_binding_cleared"` 报出这些词义，且
+`requires_confirmation: true`。确认后保存，响应里的 `meanings` 已经清掉了绑定。
+
+### 列表方言列
+
+`AdminWordListItemV3.dialects` 形状不变，聚合来源改为该词条所有变化组的 `spelling_mode`：
+任一组为 `distinguish` 时是 `["uk", "us"]`，否则是 `["common"]`，还没有组时是 `[]`。
+
+### 发布顺序
+
+1. 后端合 main。
+2. 前端 `sync:openapi`，按 design §6 改完后合 main。
+3. 测试服先清库（`TRUNCATE lexicon.*` 加两张词性表，`dictionary` 与 `metadata` 不动）。
+   库里还有 V3 词条时，迁移 `20260913200000_form_group_dialect_scope` 会直接报错。
+4. 先部署后端，再部署前端。
+
+部署回退时，守卫把「词性上缺 `dialect_rules`」和词义上的 `form_group_id` 视为回退版本读不了的形状。
+库里已有新形状数据就拒绝回退，需要先清库。

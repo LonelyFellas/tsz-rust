@@ -354,8 +354,28 @@ pub struct WordFormGroupV3 {
     pub id: Uuid,
     /// 仅保留 V2 迁移元数据，不表达 base/derived 父子关系。
     pub is_regular: bool,
+    /// 通用组服务本词性下没有绑定专用组的词义；专用组只服务绑定了它的词义。
+    pub scope: FormGroupScopeV3,
+    /// 组内词形按本组规则校验，组与组互不影响。
+    pub dialect_rules: DialectRulesV3,
     #[schema(max_items = 2000)]
     pub members: Vec<WordFormGroupMemberV3>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FormGroupScopeV3 {
+    General,
+    Dedicated,
+}
+
+impl FormGroupScopeV3 {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Dedicated => "dedicated",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -408,7 +428,6 @@ impl DialectRulesV3 {
 pub struct WordPosFormsV3 {
     pub pos_id: Uuid,
     pub pos: String,
-    pub dialect_rules: DialectRulesV3,
     #[schema(max_items = 2000)]
     pub forms: Vec<WordConcreteFormV3>,
     #[schema(max_items = 2000)]
@@ -940,6 +959,10 @@ pub struct WordSenseV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sense_group_id: Option<Uuid>,
+    /// 缺省 = 通用：使用本词性的通用变化组；只能指向同词性下 `scope = dedicated` 的组。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub form_group_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub frequency: Option<String>,
@@ -1041,6 +1064,10 @@ pub struct WordSenseWritableV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sense_group_id: Option<Uuid>,
+    /// 缺省 = 通用：使用本词性的通用变化组；只能指向同词性下 `scope = dedicated` 的组。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub form_group_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub frequency: Option<String>,
@@ -1445,6 +1472,9 @@ pub enum V3ValidationIssueCode {
     PhoneticRichTextInvalid,
     VoiceProfileInvalid,
     AudioAssetInvalid,
+    SenseFormGroupInvalid,
+    DedicatedFormGroupUnused,
+    SenseFormGroupRequired,
 }
 
 impl V3ValidationIssueCode {
@@ -1525,6 +1555,9 @@ impl V3ValidationIssueCode {
             Self::PhoneticRichTextInvalid => "phonetic_rich_text_invalid",
             Self::VoiceProfileInvalid => "voice_profile_invalid",
             Self::AudioAssetInvalid => "audio_asset_invalid",
+            Self::SenseFormGroupInvalid => "sense_form_group_invalid",
+            Self::DedicatedFormGroupUnused => "dedicated_form_group_unused",
+            Self::SenseFormGroupRequired => "sense_form_group_required",
         }
     }
 
@@ -1605,6 +1638,9 @@ impl V3ValidationIssueCode {
             "phonetic_rich_text_invalid" => Self::PhoneticRichTextInvalid,
             "voice_profile_invalid" => Self::VoiceProfileInvalid,
             "audio_asset_invalid" => Self::AudioAssetInvalid,
+            "sense_form_group_invalid" => Self::SenseFormGroupInvalid,
+            "dedicated_form_group_unused" => Self::DedicatedFormGroupUnused,
+            "sense_form_group_required" => Self::SenseFormGroupRequired,
             _ => return None,
         })
     }

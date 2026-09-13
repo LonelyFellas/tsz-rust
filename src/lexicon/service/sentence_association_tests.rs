@@ -68,10 +68,6 @@ fn v3_fixture(form_count: usize) -> V3Fixture {
             "pos": [{
                 "pos_id": pos_id,
                 "pos": "noun",
-                "dialect_rules": {
-                    "spelling_mode": "unified",
-                    "phonetic_mode": "unified"
-                },
                 "forms": forms,
                 "form_groups": []
             }]
@@ -351,6 +347,8 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
         json!({
             "id": Uuid::now_v7(),
             "is_regular": is_regular,
+            "scope": "general",
+            "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
             "members": members
                 .iter()
                 .map(|form_id| json!({"id": Uuid::now_v7(), "form_id": form_id}))

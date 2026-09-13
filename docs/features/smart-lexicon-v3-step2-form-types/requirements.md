@@ -155,3 +155,7 @@ latest contract：
 - 2026-08-27：`base` 与其他 concrete form 同级，均属于当前词条聚合及对应 POS。
 - 2026-08-27：地区模式按 POS 统一；同一 POS 的全部 concrete forms 共用 common 或 uk_us。
 - 2026-08-27：批准正式 V3 `dialect_rules`；合法状态为 UU、UD、DD，DU 非法。
+- 2026-09-13（TASK#45，反转上面两条旧决定）：地区模式不再按 POS 统一，`dialect_rules` 从
+  `WordPosFormsV3` 下沉到 `WordFormGroupV3`，组内词形按本组规则校验，合法组合仍为 UU / UD / DD；
+  同一 form 不再允许被多个 group 共享（一形一组）。变化组新增必填 `scope`（`general` / `dedicated`），
+  词义可通过 `form_group_id` 绑定同词性的专用组。详见 `docs/features/form-group-dialect-scope/`。

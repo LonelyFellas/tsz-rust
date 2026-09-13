@@ -322,8 +322,8 @@ pub(crate) struct ListEntryRecord {
     pub gloss: String,
     pub pos_list: Vec<String>,
     pub levels: Vec<String>,
-    /// 各词性 `spelling_mode` 去重集合；legacy 行为空。
-    pub pos_spelling_modes: Vec<String>,
+    /// 该词条全部变化组 `spelling_mode` 的去重集合；还没有变化组时为空。
+    pub form_group_spelling_modes: Vec<String>,
     pub is_published: bool,
     pub published_revision: Option<i64>,
     pub has_unpublished_changes: bool,

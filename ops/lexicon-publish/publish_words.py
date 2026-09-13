@@ -459,17 +459,19 @@ def build_forms(spec: dict[str, Any]) -> dict[str, Any]:
         forms = [_concrete_form("base", pos["spelling"], pos["pronunciation"])]
         for extra in pos["extra_forms"]:
             forms.append(_concrete_form(extra["form_type"], extra["spelling"], extra["pronunciation"]))
-        # 一个词性一组：complete 要求每组非空且含 base，每个词形至少属于一组。
+        # 一个词性一个通用组：complete 要求每组非空且含 base，每个词形恰好属于一组；
+        # 英美配置挂在组上，所以组内词形共用这一份规则。
         group = {
             "id": new_id(),
             "is_regular": True,
+            "scope": "general",
+            "dialect_rules": _dialect_rules(pos["spelling"]),
             "members": [{"id": new_id(), "form_id": form["id"]} for form in forms],
         }
         pos_blocks.append(
             {
                 "pos_id": pos["pos_id"],
                 "pos": pos["pos"],
-                "dialect_rules": _dialect_rules(pos["spelling"]),
                 "forms": forms,
                 "form_groups": [group],
             }

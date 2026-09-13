@@ -57,6 +57,8 @@ pub async fn undo(
                 OR jsonb_path_exists(forms, '$.**.audio_assets'::jsonpath)
                 OR jsonb_path_exists(meanings, '$.**.audio_assets'::jsonpath)
                 OR jsonb_path_exists(forms, '$.**.actual_pron_rich'::jsonpath)
+                OR jsonb_path_exists(forms, '$.pos[*] ? (!(exists (@.dialect_rules)))'::jsonpath)
+                OR jsonb_path_exists(meanings, '$.**.senses[*].form_group_id'::jsonpath)
                 OR jsonb_path_exists(
                      meanings,
                      '$.**.band ? (@ == "word_for_word" || @ == "balanced_fluency"
@@ -67,6 +69,8 @@ pub async fn undo(
                AND (jsonb_path_exists(snapshot, '$.**.text_links'::jsonpath)
                  OR jsonb_path_exists(snapshot, '$.**.audio_assets'::jsonpath)
                  OR jsonb_path_exists(snapshot, '$.**.actual_pron_rich'::jsonpath)
+                 OR jsonb_path_exists(snapshot, '$.forms.pos[*] ? (!(exists (@.dialect_rules)))'::jsonpath)
+                 OR jsonb_path_exists(snapshot, '$.**.senses[*].form_group_id'::jsonpath)
                  OR jsonb_path_exists(
                       snapshot,
                       '$.**.band ? (@ == "word_for_word" || @ == "balanced_fluency"
@@ -111,7 +115,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20260913170000;
+    const CURRENT_RELEASE_VERSION: i64 = 20260913200000;
 
     #[sqlx::test]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {
@@ -561,6 +565,15 @@ mod tests {
             (
                 r#"{}"#,
                 r#"{"pos":[{"senses":[{"sentences":[{"zh_translations":[{"band":"word_for_word"}]}]}]}]}"#,
+            ),
+            (
+                // 英美配置已下沉到组：词性上缺 dialect_rules 就是回退版本读不了的形状，词性下还没有组也一样。
+                r#"{"pos":[{"form_groups":[]}]}"#,
+                r#"{}"#,
+            ),
+            (
+                r#"{}"#,
+                r#"{"pos":[{"senses":[{"form_group_id":"019d2a80-0000-7000-8000-000000000001"}]}]}"#,
             ),
             (
                 r#"{}"#,

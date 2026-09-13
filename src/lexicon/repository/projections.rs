@@ -101,8 +101,8 @@ pub(super) async fn insert_meanings(
                 r#"
                 INSERT INTO lexicon.senses (
                     id, entry_id, entry_pos_id, sub_part_of_speech_id, sense_group_id,
-                    level, frequency, depends_on_context, sort_order
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7::numeric, $8, $9)
+                    form_group_id, level, frequency, depends_on_context, sort_order
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::numeric, $9, $10)
                 "#,
             )
             .bind(sense.id)
@@ -110,6 +110,7 @@ pub(super) async fn insert_meanings(
             .bind(pos_meanings.pos_id)
             .bind(sub_part_id)
             .bind(sense.sense_group_id)
+            .bind(sense.form_group_id)
             .bind(&sense.level)
             .bind(sense.frequency.as_deref())
             .bind(sense.depends_on_context)

@@ -316,10 +316,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::lexicon::dto::{
-        CommonDialectV3, DialectRulesV3, DraftFormsStepContentV3, TextOrigin, UkDialectV3,
-        UsDialectV3, WordCommonFormVariantV3, WordConcreteFormV3, WordFormGroupMemberV3,
-        WordFormGroupV3, WordPosFormsV3, WordRegionalVariantsV3, WordUkFormVariantV3,
-        WordUsFormVariantV3,
+        CommonDialectV3, DialectRulesV3, DraftFormsStepContentV3, FormGroupScopeV3, TextOrigin,
+        UkDialectV3, UsDialectV3, WordCommonFormVariantV3, WordConcreteFormV3,
+        WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3, WordRegionalVariantsV3,
+        WordUkFormVariantV3, WordUsFormVariantV3,
     };
 
     use super::*;
@@ -387,7 +387,6 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(10),
                 pos: "adjective".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![
                     comparative,
                     common_form(first_form_id, id(11), "Color"),
@@ -396,6 +395,8 @@ mod tests {
                 form_groups: vec![WordFormGroupV3 {
                     id: id(40),
                     is_regular: false,
+                    scope: FormGroupScopeV3::General,
+                    dialect_rules: DialectRulesV3::UNIFIED,
                     members: vec![
                         WordFormGroupMemberV3 {
                             id: id(41),
@@ -452,7 +453,6 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(500),
                 pos: "noun".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![
                     common_form(blank_common_form_id, blank_common_variant_id, "   "),
                     uk_us_form(
@@ -466,6 +466,8 @@ mod tests {
                 form_groups: vec![WordFormGroupV3 {
                     id: group_id,
                     is_regular: false,
+                    scope: FormGroupScopeV3::General,
+                    dialect_rules: DialectRulesV3::UNIFIED,
                     members: vec![
                         WordFormGroupMemberV3 {
                             id: id(507),
@@ -503,11 +505,12 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(600),
                 pos: "verb".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(form_id, id(602), "\t\n")],
                 form_groups: vec![WordFormGroupV3 {
                     id: id(603),
                     is_regular: true,
+                    scope: FormGroupScopeV3::General,
+                    dialect_rules: DialectRulesV3::UNIFIED,
                     members: vec![WordFormGroupMemberV3 {
                         id: id(604),
                         form_id,
@@ -534,11 +537,12 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(700),
                 pos: "noun".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(form_id, variant_id, "bad\0surface")],
                 form_groups: vec![WordFormGroupV3 {
                     id: id(703),
                     is_regular: false,
+                    scope: FormGroupScopeV3::General,
+                    dialect_rules: DialectRulesV3::UNIFIED,
                     members: vec![WordFormGroupMemberV3 {
                         id: id(704),
                         form_id,
@@ -576,12 +580,13 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id,
                 pos: "noun".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(form_id, variant_id, "Workspaces")],
                 form_groups: vec![
                     WordFormGroupV3 {
                         id: first_group_id,
                         is_regular: true,
+                        scope: FormGroupScopeV3::General,
+                        dialect_rules: DialectRulesV3::UNIFIED,
                         members: vec![WordFormGroupMemberV3 {
                             id: id(106),
                             form_id,
@@ -590,6 +595,8 @@ mod tests {
                     WordFormGroupV3 {
                         id: second_group_id,
                         is_regular: false,
+                        scope: FormGroupScopeV3::General,
+                        dialect_rules: DialectRulesV3::UNIFIED,
                         members: vec![WordFormGroupMemberV3 {
                             id: id(107),
                             form_id,
@@ -633,7 +640,6 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(201),
                 pos: "noun".to_owned(),
-                dialect_rules: DialectRulesV3::DISTINGUISH,
                 forms: vec![uk_us_form(
                     form_id,
                     uk_variant_id,
@@ -644,6 +650,8 @@ mod tests {
                 form_groups: vec![WordFormGroupV3 {
                     id: group_id,
                     is_regular: true,
+                    scope: FormGroupScopeV3::General,
+                    dialect_rules: DialectRulesV3::DISTINGUISH,
                     members: vec![WordFormGroupMemberV3 {
                         id: id(206),
                         form_id,
@@ -672,7 +680,6 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(300),
                 pos: "noun".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(orphan_form_id, id(303), "orphan")],
                 form_groups: Vec::new(),
             }],
@@ -690,11 +697,12 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: id(300),
                 pos: "noun".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![common_form(orphan_form_id, id(303), "orphan")],
                 form_groups: vec![WordFormGroupV3 {
                     id: id(304),
                     is_regular: false,
+                    scope: FormGroupScopeV3::General,
+                    dialect_rules: DialectRulesV3::UNIFIED,
                     members: vec![WordFormGroupMemberV3 {
                         id: id(305),
                         form_id: cross_pos_form_id,

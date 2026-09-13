@@ -118,6 +118,11 @@ impl LexiconService {
             &word.forms,
             &word.meanings,
         ));
+        issues.extend(crate::lexicon::v3_contract::validate_sense_form_groups(
+            &word.forms,
+            &word.meanings,
+            StepSaveIntent::Complete,
+        ));
         let validation_forms = v3_meaning_validation_forms(&word.forms);
         let catalog = self
             .catalog_context_for_reference(&mut tx, &validation_forms, &record.kind)

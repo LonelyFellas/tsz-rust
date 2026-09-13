@@ -355,9 +355,8 @@ async fn insert_v3_pos(
     sqlx::query(
         r#"
         INSERT INTO lexicon.entry_pos (
-            id, entry_id, part_of_speech_id, content_schema_version,
-            spelling_mode, phonetic_mode, sort_order, entry_kind
-        ) VALUES ($1, $2, $3, 3, 'unified', 'unified', $4, (SELECT kind FROM lexicon.entries WHERE id = $2))
+            id, entry_id, part_of_speech_id, content_schema_version, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 3, $4, (SELECT kind FROM lexicon.entries WHERE id = $2))
         "#,
     )
     .bind(id)
@@ -390,8 +389,9 @@ async fn insert_v3_group(
     sqlx::query(
         r#"
         INSERT INTO lexicon.v3_form_groups (
-            id, entry_id, entry_pos_id, is_regular, ordinal
-        ) VALUES ($1, $2, $3, TRUE, $4)
+            id, entry_id, entry_pos_id, is_regular, ordinal,
+            scope, spelling_mode, phonetic_mode
+        ) VALUES ($1, $2, $3, TRUE, $4, 'general', 'unified', 'unified')
         "#,
     )
     .bind(id)
@@ -404,93 +404,135 @@ async fn insert_v3_group(
     id
 }
 
-#[sqlx::test]
-async fn v3_dialect_rules_migration_installs_latest_contract_on_fresh_data(pool: PgPool) {
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260827100000_add_lexicon_v3_dialect_rules.down.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260827100000_add_lexicon_v3_dialect_rules.up.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql(include_str!(
-        "../migrations/20260829110000_require_fresh_v3_dialect_contract.up.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let admin_id = insert_admin(&pool).await;
-    let entry_id = insert_v3_entry(&pool, admin_id).await;
-    let catalog_id = catalog_pos_id(&pool, "noun").await;
-    let mut tx = pool.begin().await.unwrap();
-    let pos_id = insert_v3_pos(&mut tx, entry_id, catalog_id, 0).await;
-    tx.commit().await.unwrap();
-    let forms = json!({
-        "pos": [{
-            "pos_id": pos_id,
-            "pos": "noun",
-            "dialect_rules": {
-                "spelling_mode": "unified",
-                "phonetic_mode": "unified"
-            },
-            "forms": [],
-            "form_groups": []
-        }]
-    });
+async fn insert_v3_sense(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    pos_id: Uuid,
+    form_group_id: Option<Uuid>,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    insert_node(
+        tx,
+        id,
+        entry_id,
+        "sense",
+        Some(pos_id),
+        "meanings.sense",
+        false,
+    )
+    .await;
     sqlx::query(
         r#"
-        INSERT INTO lexicon.entry_editor_projection (
-            entry_id, forms, meanings, rebuilt_revision
-        ) VALUES ($1, $2, '{}', 1)
+        INSERT INTO lexicon.senses (
+            id, entry_id, entry_pos_id, form_group_id, level, depends_on_context, sort_order
+        ) VALUES ($1, $2, $3, $4, 'A1', FALSE, 0)
         "#,
     )
+    .bind(id)
     .bind(entry_id)
-    .bind(&forms)
-    .execute(&pool)
+    .bind(pos_id)
+    .bind(form_group_id)
+    .execute(&mut **tx)
     .await
     .unwrap();
+    id
+}
 
-    let modes: (String, String) =
-        sqlx::query_as("SELECT spelling_mode, phonetic_mode FROM lexicon.entry_pos WHERE id = $1")
-            .bind(pos_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(modes, ("unified".to_owned(), "unified".to_owned()));
-    let stored_forms: serde_json::Value =
-        sqlx::query_scalar("SELECT forms FROM lexicon.entry_editor_projection WHERE entry_id = $1")
-            .bind(entry_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(stored_forms, forms);
+#[sqlx::test]
+async fn v3_form_group_rules_scope_and_sense_binding_are_enforced(pool: PgPool) {
+    let admin_id = insert_admin(&pool).await;
+    let entry_id = insert_v3_entry(&pool, admin_id).await;
+    let noun_id = catalog_pos_id(&pool, "noun").await;
+    let verb_id = catalog_pos_id(&pool, "verb").await;
+    let mut tx = pool.begin().await.unwrap();
+    let noun_pos = insert_v3_pos(&mut tx, entry_id, noun_id, 0).await;
+    let verb_pos = insert_v3_pos(&mut tx, entry_id, verb_id, 1).await;
+    let noun_group = insert_v3_group(&mut tx, entry_id, noun_pos, 0).await;
+    let verb_group = insert_v3_group(&mut tx, entry_id, verb_pos, 0).await;
+    insert_valid_common_form(&mut tx, entry_id, noun_pos, noun_group, "base", 0, 0).await;
+    insert_valid_common_form(&mut tx, entry_id, verb_pos, verb_group, "base", 0, 0).await;
+    tx.commit().await.unwrap();
 
-    let invalid_du = sqlx::query(
-        "UPDATE lexicon.entry_pos SET spelling_mode = 'distinguish', phonetic_mode = 'unified' WHERE id = $1",
+    let invalid_modes = sqlx::query(
+        "UPDATE lexicon.v3_form_groups SET spelling_mode = 'distinguish', phonetic_mode = 'unified' WHERE id = $1",
     )
-    .bind(pos_id)
+    .bind(noun_group)
     .execute(&pool)
     .await;
     assert_db_error(
-        invalid_du,
+        invalid_modes,
         CHECK_VIOLATION,
-        "lexicon_entry_pos_versioned_modes_check",
+        "lexicon_v3_form_groups_modes_check",
     );
-    let missing_rules =
-        sqlx::query("UPDATE lexicon.entry_pos SET spelling_mode = NULL WHERE id = $1")
-            .bind(pos_id)
+    let invalid_scope =
+        sqlx::query("UPDATE lexicon.v3_form_groups SET scope = 'shared' WHERE id = $1")
+            .bind(noun_group)
             .execute(&pool)
             .await;
     assert_db_error(
-        missing_rules,
+        invalid_scope,
         CHECK_VIOLATION,
-        "lexicon_entry_pos_versioned_modes_check",
+        "lexicon_v3_form_groups_scope_check",
+    );
+
+    // 词形保存先写词义、再重建组：绑定检查延迟到提交，组晚于词义写入也成立。
+    let mut deferred_tx = pool.begin().await.unwrap();
+    let dedicated_group = Uuid::now_v7();
+    let bound_sense =
+        insert_v3_sense(&mut deferred_tx, entry_id, noun_pos, Some(dedicated_group)).await;
+    insert_node(
+        &mut deferred_tx,
+        dedicated_group,
+        entry_id,
+        "form_group",
+        Some(noun_pos),
+        "forms.form_group",
+        false,
+    )
+    .await;
+    sqlx::query(
+        r#"
+        INSERT INTO lexicon.v3_form_groups (
+            id, entry_id, entry_pos_id, is_regular, ordinal,
+            scope, spelling_mode, phonetic_mode
+        ) VALUES ($1, $2, $3, FALSE, 1, 'dedicated', 'unified', 'distinguish')
+        "#,
+    )
+    .bind(dedicated_group)
+    .bind(entry_id)
+    .bind(noun_pos)
+    .execute(&mut *deferred_tx)
+    .await
+    .unwrap();
+    deferred_tx.commit().await.unwrap();
+    let stored: Option<Uuid> =
+        sqlx::query_scalar("SELECT form_group_id FROM lexicon.senses WHERE id = $1")
+            .bind(bound_sense)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(dedicated_group));
+
+    // 组被删掉而绑定没清：不级联删词义，提交时拒绝。
+    let mut dangling_tx = pool.begin().await.unwrap();
+    sqlx::query("DELETE FROM lexicon.v3_form_groups WHERE id = $1")
+        .bind(dedicated_group)
+        .execute(&mut *dangling_tx)
+        .await
+        .unwrap();
+    assert_db_error(
+        dangling_tx.commit().await,
+        FOREIGN_KEY_VIOLATION,
+        "lexicon_senses_form_group_fkey",
+    );
+
+    // 复合外键锁死同一词性：名词词义不能绑动词的组。
+    let mut crossed_tx = pool.begin().await.unwrap();
+    insert_v3_sense(&mut crossed_tx, entry_id, noun_pos, Some(verb_group)).await;
+    assert_db_error(
+        crossed_tx.commit().await,
+        FOREIGN_KEY_VIOLATION,
+        "lexicon_senses_form_group_fkey",
     );
 }
 
@@ -676,7 +718,7 @@ async fn entry_schema_version_is_frozen_at_v3(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn v3_allows_duplicate_form_types_multiple_bases_and_cross_group_membership(pool: PgPool) {
+async fn v3_allows_duplicate_form_types_and_multiple_bases_but_one_group_per_form(pool: PgPool) {
     let admin_id = insert_admin(&pool).await;
     let entry_id = insert_v3_entry(&pool, admin_id).await;
     let noun_id = catalog_pos_id(&pool, "noun").await;
@@ -686,7 +728,7 @@ async fn v3_allows_duplicate_form_types_multiple_bases_and_cross_group_membershi
     let second_group = insert_v3_group(&mut tx, entry_id, pos_id, 1).await;
     let (first_base, _, _) =
         insert_valid_common_form(&mut tx, entry_id, pos_id, first_group, "base", 0, 0).await;
-    insert_v3_membership(&mut tx, entry_id, pos_id, second_group, first_base, 0).await;
+    insert_valid_common_form(&mut tx, entry_id, pos_id, second_group, "base", 4, 0).await;
     insert_valid_common_form(&mut tx, entry_id, pos_id, first_group, "base", 1, 1).await;
     insert_valid_common_form(&mut tx, entry_id, pos_id, first_group, "plural", 2, 2).await;
     insert_valid_common_form(&mut tx, entry_id, pos_id, first_group, "plural", 3, 3).await;
@@ -705,8 +747,37 @@ async fn v3_allows_duplicate_form_types_multiple_bases_and_cross_group_membershi
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(base_count, 2);
-    assert_eq!(first_base_memberships, 2);
+    assert_eq!(base_count, 3);
+    assert_eq!(first_base_memberships, 1);
+
+    // 英美配置挂在组上，一形只能一组：跨组再挂同一词形被唯一键拒绝。
+    let mut crossed_tx = pool.begin().await.unwrap();
+    let crossed_id = Uuid::now_v7();
+    insert_node(
+        &mut crossed_tx,
+        crossed_id,
+        entry_id,
+        "group_membership",
+        Some(second_group),
+        "forms.group_membership",
+        false,
+    )
+    .await;
+    let crossed = sqlx::query(
+        "INSERT INTO lexicon.v3_group_memberships (id, entry_id, entry_pos_id, form_group_id, form_id, ordinal) VALUES ($1, $2, $3, $4, $5, 1)",
+    )
+    .bind(crossed_id)
+    .bind(entry_id)
+    .bind(pos_id)
+    .bind(second_group)
+    .bind(first_base)
+    .execute(&mut *crossed_tx)
+    .await;
+    assert_db_error(
+        crossed,
+        UNIQUE_VIOLATION,
+        "lexicon_v3_group_memberships_form_key",
+    );
 }
 
 #[sqlx::test]
@@ -722,8 +793,7 @@ async fn v3_membership_rejects_same_group_duplicate_and_cross_pos_reference(pool
     let verb_group = insert_v3_group(&mut tx, entry_id, verb_pos, 0).await;
     let (noun_form, _, _) =
         insert_valid_common_form(&mut tx, entry_id, noun_pos, noun_group, "base", 0, 0).await;
-    let (verb_form, _, _) =
-        insert_valid_common_form(&mut tx, entry_id, verb_pos, verb_group, "base", 0, 0).await;
+    insert_valid_common_form(&mut tx, entry_id, verb_pos, verb_group, "base", 0, 0).await;
     tx.commit().await.unwrap();
 
     let mut duplicate_tx = pool.begin().await.unwrap();
@@ -751,10 +821,12 @@ async fn v3_membership_rejects_same_group_duplicate_and_cross_pos_reference(pool
     assert_db_error(
         duplicate,
         UNIQUE_VIOLATION,
-        "lexicon_v3_group_memberships_group_form_key",
+        "lexicon_v3_group_memberships_form_key",
     );
 
+    // 一形一组的唯一键先于外键生效：跨词性引用要用一个还没进任何组的动词词形，才测得到外键。
     let mut crossed_tx = pool.begin().await.unwrap();
+    let verb_form = insert_v3_form(&mut crossed_tx, entry_id, verb_pos, "base", 1).await;
     let crossed_id = Uuid::now_v7();
     insert_node(
         &mut crossed_tx,
@@ -1040,9 +1112,8 @@ async fn v3_sibling_ordinals_are_unique(pool: PgPool) {
     let duplicate_pos = sqlx::query(
         r#"
         INSERT INTO lexicon.entry_pos (
-            id, entry_id, part_of_speech_id, content_schema_version,
-            spelling_mode, phonetic_mode, sort_order, entry_kind
-        ) VALUES ($1, $2, $3, 3, 'unified', 'unified', 0, (SELECT kind FROM lexicon.entries WHERE id = $2))
+            id, entry_id, part_of_speech_id, content_schema_version, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 3, 0, (SELECT kind FROM lexicon.entries WHERE id = $2))
         "#,
     )
     .bind(duplicate_pos_id)
@@ -1103,7 +1174,7 @@ async fn v3_sibling_ordinals_are_unique(pool: PgPool) {
     )
     .await;
     let duplicate_group = sqlx::query(
-        "INSERT INTO lexicon.v3_form_groups (id, entry_id, entry_pos_id, is_regular, ordinal) VALUES ($1, $2, $3, TRUE, 0)",
+        "INSERT INTO lexicon.v3_form_groups (id, entry_id, entry_pos_id, is_regular, ordinal, scope, spelling_mode, phonetic_mode) VALUES ($1, $2, $3, TRUE, 0, 'general', 'unified', 'unified')",
     )
     .bind(duplicate_group_id)
     .bind(second_entry)

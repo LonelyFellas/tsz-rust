@@ -255,15 +255,10 @@ fn complete_v3_forms_fixture() -> Value {
     let shared_form_id = Uuid::now_v7();
     let alternate_base_id = Uuid::now_v7();
     let first_group_id = Uuid::now_v7();
-    let second_group_id = Uuid::now_v7();
     json!({
         "pos": [{
             "pos_id": noun_pos_id,
             "pos": "noun",
-            "dialect_rules": {
-                "spelling_mode": "distinguish",
-                "phonetic_mode": "distinguish"
-            },
             "forms": [{
                 "id": shared_form_id,
                 "form_type": "base",
@@ -325,17 +320,16 @@ fn complete_v3_forms_fixture() -> Value {
                     }
                 }
             }],
+            // 一形一组：两个原形挂在同一个通用组里（旧 fixture 让第 2 组共用第一个原形，现已不合法）。
             "form_groups": [{
                 "id": first_group_id,
                 "is_regular": true,
+                "scope": "general",
+                "dialect_rules": {"spelling_mode": "distinguish", "phonetic_mode": "distinguish"},
                 "members": [
                     {"id": Uuid::now_v7(), "form_id": shared_form_id},
                     {"id": Uuid::now_v7(), "form_id": alternate_base_id}
                 ]
-            }, {
-                "id": second_group_id,
-                "is_regular": false,
-                "members": [{"id": Uuid::now_v7(), "form_id": shared_form_id}]
             }]
         }]
     })
@@ -350,10 +344,6 @@ fn v3_forms_fixture_for(surface: &str) -> Value {
             "pos": "noun",
             // 两侧同拼，所以 spelling_mode 是 unified；写成 distinguish 只是恰好被放行，
             // 会让后来者照抄出现实中不存在的形状。
-            "dialect_rules": {
-                "spelling_mode": "unified",
-                "phonetic_mode": "distinguish"
-            },
             "forms": [{
                 "id": form_id,
                 "form_type": "base",
@@ -388,6 +378,8 @@ fn v3_forms_fixture_for(surface: &str) -> Value {
             "form_groups": [{
                 "id": Uuid::now_v7(),
                 "is_regular": true,
+                "scope": "general",
+                "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "distinguish"},
                 "members": [{"id": Uuid::now_v7(), "form_id": form_id}]
             }]
         }]
@@ -1181,7 +1173,7 @@ async fn step_content_body_limit_is_raised_bounded_and_scoped_per_route(pool: Pg
 }
 
 #[sqlx::test]
-async fn v3_persists_all_three_pos_dialect_rule_combinations(pool: PgPool) {
+async fn v3_persists_all_three_group_dialect_rule_combinations(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -1232,10 +1224,6 @@ async fn v3_persists_all_three_pos_dialect_rule_combinations(pool: PgPool) {
         "pos": [{
             "pos_id": uu_pos_id,
             "pos": "noun",
-            "dialect_rules": {
-                "spelling_mode": "unified",
-                "phonetic_mode": "unified"
-            },
             "forms": [{
                 "id": uu_form_id,
                 "form_type": "base",
@@ -1258,15 +1246,13 @@ async fn v3_persists_all_three_pos_dialect_rule_combinations(pool: PgPool) {
             "form_groups": [{
                 "id": Uuid::now_v7(),
                 "is_regular": true,
+                "scope": "general",
+                "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
                 "members": [{"id": Uuid::now_v7(), "form_id": uu_form_id}]
             }]
         }, {
             "pos_id": ud_pos_id,
             "pos": "verb",
-            "dialect_rules": {
-                "spelling_mode": "unified",
-                "phonetic_mode": "distinguish"
-            },
             "forms": [{
                 "id": ud_form_id,
                 "form_type": "base",
@@ -1301,15 +1287,13 @@ async fn v3_persists_all_three_pos_dialect_rule_combinations(pool: PgPool) {
             "form_groups": [{
                 "id": Uuid::now_v7(),
                 "is_regular": true,
+                "scope": "general",
+                "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "distinguish"},
                 "members": [{"id": Uuid::now_v7(), "form_id": ud_form_id}]
             }]
         }, {
             "pos_id": dd_pos_id,
             "pos": "adjective",
-            "dialect_rules": {
-                "spelling_mode": "distinguish",
-                "phonetic_mode": "distinguish"
-            },
             "forms": [{
                 "id": dd_form_id,
                 "form_type": "base",
@@ -1344,6 +1328,8 @@ async fn v3_persists_all_three_pos_dialect_rule_combinations(pool: PgPool) {
             "form_groups": [{
                 "id": Uuid::now_v7(),
                 "is_regular": false,
+                "scope": "general",
+                "dialect_rules": {"spelling_mode": "distinguish", "phonetic_mode": "distinguish"},
                 "members": [{"id": Uuid::now_v7(), "form_id": dd_form_id}]
             }]
         }]
@@ -1371,7 +1357,13 @@ async fn v3_persists_all_three_pos_dialect_rule_combinations(pool: PgPool) {
         dd_pos_id.to_string()
     );
     let stored: Vec<(String, String)> = sqlx::query_as(
-        "SELECT spelling_mode, phonetic_mode FROM lexicon.entry_pos WHERE entry_id = $1 ORDER BY sort_order",
+        r#"
+        SELECT form_group.spelling_mode, form_group.phonetic_mode
+        FROM lexicon.v3_form_groups form_group
+        JOIN lexicon.entry_pos pos ON pos.id = form_group.entry_pos_id
+        WHERE form_group.entry_id = $1
+        ORDER BY pos.sort_order, form_group.ordinal
+        "#,
     )
     .bind(entry_id)
     .fetch_all(&pool)
@@ -1463,7 +1455,7 @@ async fn v3_pronoun_saves_a_fixed_non_base_form_and_round_trips_it(pool: PgPool)
             .await;
     assert_eq!(saved["word"]["forms"]["pos"][0]["pos"], "pronoun");
     assert_eq!(
-        saved["word"]["forms"]["pos"][0]["dialect_rules"],
+        saved["word"]["forms"]["pos"][0]["form_groups"][0]["dialect_rules"],
         json!({"spelling_mode": "distinguish", "phonetic_mode": "distinguish"})
     );
     assert_eq!(
@@ -1488,7 +1480,7 @@ async fn v3_pronoun_saves_a_fixed_non_base_form_and_round_trips_it(pool: PgPool)
     .unwrap();
     assert_eq!(stored_type, "comparative");
     let stored_rules: (String, String) = sqlx::query_as(
-        "SELECT spelling_mode, phonetic_mode FROM lexicon.entry_pos WHERE entry_id = $1 AND id = $2",
+        "SELECT DISTINCT spelling_mode, phonetic_mode FROM lexicon.v3_form_groups WHERE entry_id = $1 AND entry_pos_id = $2",
     )
     .bind(entry_id)
     .bind(Uuid::parse_str(saved["word"]["forms"]["pos"][0]["pos_id"].as_str().unwrap()).unwrap())
@@ -1519,8 +1511,8 @@ async fn v3_pronoun_saves_a_fixed_non_base_form_and_round_trips_it(pool: PgPool)
         "comparative"
     );
     assert_eq!(
-        reloaded["word"]["forms"]["pos"][0]["dialect_rules"],
-        saved["word"]["forms"]["pos"][0]["dialect_rules"]
+        reloaded["word"]["forms"]["pos"][0]["form_groups"],
+        saved["word"]["forms"]["pos"][0]["form_groups"]
     );
 }
 
@@ -1576,10 +1568,6 @@ async fn v3_meanings_draft_saves_before_forms_complete_but_complete_is_blocked(p
             "pos": [{
                 "pos_id": pos_id,
                 "pos": "noun",
-                "dialect_rules": {
-                    "spelling_mode": "unified",
-                    "phonetic_mode": "unified"
-                },
                 "forms": [],
                 "form_groups": []
             }]
@@ -2038,10 +2026,6 @@ async fn v3_complete_forms_require_pos_and_recompute_meanings_completion(pool: P
     expanded_forms["pos"].as_array_mut().unwrap().push(json!({
         "pos_id": adjective_pos_id,
         "pos": "adjective",
-        "dialect_rules": {
-            "spelling_mode": "unified",
-            "phonetic_mode": "unified"
-        },
         "forms": [{
             "id": adjective_form_id,
             "form_type": "base",
@@ -2064,6 +2048,8 @@ async fn v3_complete_forms_require_pos_and_recompute_meanings_completion(pool: P
         "form_groups": [{
             "id": Uuid::now_v7(),
             "is_regular": true,
+            "scope": "general",
+            "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
             "members": [{"id": Uuid::now_v7(), "form_id": adjective_form_id}]
         }]
     }));
@@ -2528,10 +2514,6 @@ async fn v3_form_storage_uses_the_authoritative_surface_normalization(pool: PgPo
             "pos": [{
                 "pos_id": pos_id,
                 "pos": "noun",
-                "dialect_rules": {
-                    "spelling_mode": "unified",
-                    "phonetic_mode": "unified"
-                },
                 "forms": [{
                     "id": form_id,
                     "form_type": "base",
@@ -2554,6 +2536,8 @@ async fn v3_form_storage_uses_the_authoritative_surface_normalization(pool: PgPo
                 "form_groups": [{
                     "id": group_id,
                     "is_regular": true,
+                    "scope": "general",
+                    "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
                     "members": [{"id": Uuid::now_v7(), "form_id": form_id}]
                 }]
             }]
@@ -3690,7 +3674,7 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
         2
     );
     assert_eq!(
-        saved["word"]["forms"]["pos"][0]["form_groups"][1]["members"][0]["form_id"],
+        saved["word"]["forms"]["pos"][0]["form_groups"][0]["members"][0]["form_id"],
         saved["word"]["forms"]["pos"][0]["forms"][0]["id"]
     );
     assert_eq!(
@@ -3779,7 +3763,7 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
     assert_eq!(
         list["words"][0]["dialects"],
         json!(["uk", "us"]),
-        "noun 词性 distinguish → 列表方言摘要为英美：{list}"
+        "变化组 distinguish → 列表方言摘要为英美：{list}"
     );
 
     let read_disabled_state = state
@@ -3811,7 +3795,7 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(counts, (2, 2, 3, 4, 4));
+    assert_eq!(counts, (1, 2, 2, 4, 4));
     let surface_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM lexicon.surface_sources WHERE entry_id = $1 AND content_schema_version = 3 AND is_deleted = FALSE",
     )
@@ -4768,7 +4752,8 @@ async fn v3_aggregate_node_limit_is_enforced_across_forms_and_meanings(pool: PgP
     let saved = create_v3_with_complete_forms(&state, &pool, &bearer).await;
     let entry_id = saved["word"]["id"].as_str().unwrap();
 
-    let groups = (0..1_984)
+    // 词形 fixture 占 14 个节点（词性 1、组 1、组员 2、词形 2、变体 4、发音 4），加 1986 个语义区间正好 2000。
+    let groups = (0..1_986)
         .map(|index| {
             json!({
                 "id": Uuid::now_v7(),
@@ -5035,10 +5020,6 @@ async fn v3_create_materializes_builtin_and_existing_pos_suggestions(pool: PgPoo
     first_forms["pos"].as_array_mut().unwrap().push(json!({
         "pos_id": pronoun_pos_id,
         "pos": "pronoun",
-        "dialect_rules": {
-            "spelling_mode": "unified",
-            "phonetic_mode": "unified"
-        },
         "forms": [{
             "id": pronoun_form_id,
             "form_type": "base",
@@ -5061,6 +5042,8 @@ async fn v3_create_materializes_builtin_and_existing_pos_suggestions(pool: PgPoo
         "form_groups": [{
             "id": pronoun_group_id,
             "is_regular": true,
+            "scope": "general",
+            "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
             "members": [{"id": Uuid::now_v7(), "form_id": pronoun_form_id}]
         }]
     }));
@@ -5817,7 +5800,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     assert_eq!(
         list["words"][0]["dialects"],
         json!(["uk", "us"]),
-        "短语行同样按词性 spelling_mode 聚合方言摘要：{list}"
+        "短语行同样按变化组 spelling_mode 聚合方言摘要：{list}"
     );
 }
 
@@ -6283,6 +6266,8 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
     forms["pos"][0]["form_groups"] = json!([{
         "id": Uuid::now_v7(),
         "is_regular": true,
+        "scope": "general",
+        "dialect_rules": {"spelling_mode": "distinguish", "phonetic_mode": "distinguish"},
         "members": [
             {"id": Uuid::now_v7(), "form_id": first_base_id},
             {"id": Uuid::now_v7(), "form_id": first_plural_id}
@@ -6290,6 +6275,8 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
     }, {
         "id": Uuid::now_v7(),
         "is_regular": false,
+        "scope": "general",
+        "dialect_rules": {"spelling_mode": "distinguish", "phonetic_mode": "distinguish"},
         "members": [
             {"id": Uuid::now_v7(), "form_id": second_base_id},
             {"id": Uuid::now_v7(), "form_id": second_plural_id}
@@ -7986,10 +7973,6 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
             "pos": [{
                 "pos_id": Uuid::now_v7(),
                 "pos": "noun",
-                "dialect_rules": {
-                    "spelling_mode": "unified",
-                    "phonetic_mode": "unified"
-                },
                 "forms": [{
                     "id": form_id,
                     "form_type": "base",
@@ -8012,6 +7995,8 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
                 "form_groups": [{
                     "id": group_id,
                     "is_regular": true,
+                    "scope": "general",
+                    "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
                     "members": [{"id": membership_id, "form_id": form_id}]
                 }]
             }]
@@ -8103,7 +8088,7 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
     assert_eq!(response["code"], "smart_lexicon_v3_storage_unavailable");
 
     let mut invalid_dialect_rules = valid_body.clone();
-    invalid_dialect_rules["content"]["pos"][0]["dialect_rules"] = json!({
+    invalid_dialect_rules["content"]["pos"][0]["form_groups"][0]["dialect_rules"] = json!({
         "spelling_mode": "distinguish",
         "phonetic_mode": "unified"
     });
@@ -8122,13 +8107,18 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
         .unwrap()
         .iter()
         .find(|issue| issue["code"] == "dialect_rules_invalid")
-        .expect("DU 组合应定位 POS dialect_rules");
+        .expect("DU 组合应定位到变化组的 dialect_rules");
     assert_eq!(issue["field"], "dialect_rules");
-    assert_eq!(issue["node_id"], issue["node_location"]["pos_id"]);
+    assert_eq!(issue["node_id"], group_id.to_string());
+    assert_eq!(
+        issue["node_location"]["form_group_id"],
+        group_id.to_string()
+    );
+    assert!(issue["node_location"]["pos_id"].is_string());
     assert!(issue["node_location"].get("form_id").is_none());
 
     let mut missing_dialect_rules = valid_body.clone();
-    missing_dialect_rules["content"]["pos"][0]
+    missing_dialect_rules["content"]["pos"][0]["form_groups"][0]
         .as_object_mut()
         .unwrap()
         .remove("dialect_rules");
@@ -8147,6 +8137,61 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
             issue["code"] == "dialect_rules_invalid" && issue["field"] == "dialect_rules"
         })
     }));
+
+    // 英美配置已下沉到组：词性上再带 dialect_rules 就是未知字段。
+    let mut pos_level_rules = valid_body.clone();
+    pos_level_rules["content"]["pos"][0]["dialect_rules"] =
+        json!({"spelling_mode": "unified", "phonetic_mode": "unified"});
+    let (status, _, response) = call_problem(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        pos_level_rules,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["code"], "invalid_request_body");
+
+    // 一形一组：第二个组再引用同一词形，422 定位到后出现的 membership。
+    let second_group_id = Uuid::now_v7();
+    let second_membership_id = Uuid::now_v7();
+    let mut shared_form = valid_body.clone();
+    shared_form["content"]["pos"][0]["form_groups"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": second_group_id,
+            "is_regular": false,
+            "scope": "general",
+            "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
+            "members": [{"id": second_membership_id, "form_id": form_id}]
+        }));
+    let (status, _, response) = call_problem(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        shared_form,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["code"], "validation_failed");
+    let issue = response["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "form_group_membership_invalid")
+        .expect("同一词形出现在两个组必须拒绝");
+    assert_eq!(issue["field"], "form_id");
+    assert_eq!(issue["node_id"], second_membership_id.to_string());
+    assert_eq!(
+        issue["node_location"]["form_group_id"],
+        second_group_id.to_string()
+    );
+    assert_eq!(issue["node_location"]["form_id"], form_id.to_string());
 
     let mixed_form_id = Uuid::now_v7();
     let mut mixed_regional_modes = valid_body.clone();
@@ -8190,6 +8235,8 @@ async fn v3_forms_http_contract_reports_deep_membership_location_before_storage_
         .push(json!({
             "id": Uuid::now_v7(),
             "is_regular": false,
+            "scope": "general",
+            "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
             "members": [{"id": Uuid::now_v7(), "form_id": mixed_form_id}]
         }));
     let (status, _, response) = call_problem(
@@ -9398,8 +9445,12 @@ async fn v3_create_rebinds_dictionary_base_forms_to_explicit_regional_headwords(
     assert_eq!(base["regional_variants"]["uk"]["spelling"], uk);
     assert_eq!(base["regional_variants"]["us"]["spelling"], us);
     assert_eq!(
-        created["word"]["forms"]["pos"][0]["dialect_rules"],
+        created["word"]["forms"]["pos"][0]["form_groups"][0]["dialect_rules"],
         json!({"spelling_mode": "distinguish", "phonetic_mode": "distinguish"})
+    );
+    assert_eq!(
+        created["word"]["forms"]["pos"][0]["form_groups"][0]["scope"],
+        "general"
     );
 }
 
@@ -12702,4 +12753,504 @@ async fn component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_
         "归档导致结果变化时旧游标不得静默漏项：{rejected}"
     );
     assert_eq!(rejected["field"], "cursor");
+}
+
+#[sqlx::test]
+async fn v3_dedicated_form_group_binds_senses_publishes_and_clears_through_impact(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let created = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let entry_id = created["word"]["id"].as_str().unwrap().to_owned();
+    let entry_uuid = Uuid::parse_str(&entry_id).unwrap();
+    let mut forms = created["word"]["forms"].clone();
+    let pos_id = forms["pos"][0]["pos_id"].clone();
+    let general_group_id = forms["pos"][0]["form_groups"][0]["id"].clone();
+    // fixture 只有一个通用组挂两个原形；把第一个原形挪进新建的第 2 组（一形一组）。
+    let dedicated_group_id = json!(Uuid::now_v7());
+    let mut moved_membership = forms["pos"][0]["form_groups"][0]["members"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        moved_membership["form_id"],
+        forms["pos"][0]["forms"][0]["id"]
+    );
+    // 组员节点绑定在父组上，换组必须换新 id（旧组员节点随之移除，影响预览要求确认）。
+    moved_membership["id"] = json!(Uuid::now_v7());
+    forms["pos"][0]["form_groups"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": dedicated_group_id,
+            "is_regular": false,
+            "scope": "general",
+            "dialect_rules": {"spelling_mode": "distinguish", "phonetic_mode": "distinguish"},
+            "members": [moved_membership]
+        }));
+
+    // job 案例：第 2 组独立改成「拼写不区分、音标区分」并标为专用，第 1 组保持英美都区分。
+    let uk_spelling = forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["spelling"].clone();
+    forms["pos"][0]["forms"][0]["regional_variants"]["us"]["spelling"] = uk_spelling;
+    forms["pos"][0]["form_groups"][1]["scope"] = json!("dedicated");
+    forms["pos"][0]["form_groups"][1]["dialect_rules"] =
+        json!({"spelling_mode": "unified", "phonetic_mode": "distinguish"});
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &entry_id,
+        created["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    let groups = &saved["word"]["forms"]["pos"][0]["form_groups"];
+    assert_eq!(groups[0]["scope"], "general");
+    assert_eq!(
+        groups[0]["dialect_rules"],
+        json!({"spelling_mode": "distinguish", "phonetic_mode": "distinguish"})
+    );
+    assert_eq!(groups[1]["scope"], "dedicated");
+    assert_eq!(
+        groups[1]["dialect_rules"],
+        json!({"spelling_mode": "unified", "phonetic_mode": "distinguish"})
+    );
+    let stored_groups: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT scope, spelling_mode, phonetic_mode FROM lexicon.v3_form_groups WHERE entry_id = $1 ORDER BY ordinal",
+    )
+    .bind(entry_uuid)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored_groups,
+        [
+            (
+                "general".to_owned(),
+                "distinguish".to_owned(),
+                "distinguish".to_owned()
+            ),
+            (
+                "dedicated".to_owned(),
+                "unified".to_owned(),
+                "distinguish".to_owned()
+            )
+        ]
+    );
+    let mut revision = saved["word"]["revision"].as_i64().unwrap();
+
+    let mut meanings = complete_v3_meanings_fixture(pos_id);
+    let mut special = meanings["pos"][0]["senses"][0].clone();
+    special["id"] = json!(Uuid::now_v7());
+    special["definitions"][0]["id"] = json!(Uuid::now_v7());
+    special["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    special["form_group_id"] = dedicated_group_id.clone();
+    let special_sense_id = special["id"].clone();
+    let special_sense_uuid = Uuid::parse_str(special_sense_id.as_str().unwrap()).unwrap();
+    meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(special);
+
+    // 结构性错误草稿也拦：只能绑本词性的专用组。
+    let mut bound_to_general = meanings.clone();
+    bound_to_general["pos"][0]["senses"][1]["form_group_id"] = general_group_id;
+    let (status, _, response) = call_problem(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        json!({
+            "schema_version": 3,
+            "base_revision": revision,
+            "intent": "save",
+            "content": bound_to_general
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    let issue = response["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "sense_form_group_invalid")
+        .expect("绑定通用组必须拒绝");
+    assert_eq!(issue["step"], "meanings");
+    assert_eq!(issue["field"], "form_group_id");
+    assert_eq!(issue["node_id"], special_sense_id);
+
+    // 专用组没有任何词义绑定：complete 报出来并定位到组卡片。
+    let mut unbound = meanings.clone();
+    unbound["pos"][0]["senses"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("form_group_id");
+    let (status, _, response) = call_problem(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        json!({
+            "schema_version": 3,
+            "base_revision": revision,
+            "intent": "complete",
+            "content": unbound
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    let issue = response["field_issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "dedicated_form_group_unused")
+        .expect("专用组无人绑定时 complete 必须拒绝");
+    assert_eq!(issue["step"], "forms");
+    assert_eq!(issue["field"], "scope");
+    assert_eq!(issue["node_id"], dedicated_group_id);
+    assert_eq!(issue["node_location"]["form_group_id"], dedicated_group_id);
+
+    let (status, meanings_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": revision,
+            "intent": "complete",
+            "content": meanings.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{meanings_saved}");
+    let senses = &meanings_saved["word"]["meanings"]["pos"][0]["senses"];
+    assert!(
+        senses[0].get("form_group_id").is_none(),
+        "未绑定的词义省略字段：{senses}"
+    );
+    assert_eq!(senses[1]["form_group_id"], dedicated_group_id);
+    let stored_binding: Option<Uuid> =
+        sqlx::query_scalar("SELECT form_group_id FROM lexicon.senses WHERE id = $1")
+            .bind(special_sense_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored_binding.map(|id| id.to_string()),
+        dedicated_group_id.as_str().map(str::to_owned)
+    );
+    revision = meanings_saved["word"]["revision"].as_i64().unwrap();
+
+    let (status, validation) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/validate"),
+        &bearer,
+        None,
+        Some(json!({"schema_version": 3, "base_revision": revision})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{validation}");
+    assert_eq!(validation["valid"], true, "{validation}");
+
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/publications"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version": 3, "base_revision": revision})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    revision = published["word"]["revision"].as_i64().unwrap();
+    let snapshot: Value = sqlx::query_scalar(
+        r#"
+        SELECT publication.snapshot
+        FROM lexicon.entries entry
+        JOIN lexicon.entry_publications publication
+          ON publication.id = entry.current_publication_id
+        WHERE entry.id = $1
+        "#,
+    )
+    .bind(entry_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot["forms"]["pos"][0]["form_groups"][1]["scope"],
+        "dedicated"
+    );
+    assert_eq!(
+        snapshot["forms"]["pos"][0]["form_groups"][1]["dialect_rules"],
+        json!({"spelling_mode": "unified", "phonetic_mode": "distinguish"})
+    );
+    assert_eq!(
+        snapshot["meanings"]["pos"][0]["senses"][1]["form_group_id"],
+        dedicated_group_id
+    );
+
+    let (status, list) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?page=1&page_size=20&q=harbour"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(
+        list["words"][0]["dialects"],
+        json!(["uk", "us"]),
+        "任一变化组区分拼写 → 英美：{list}"
+    );
+
+    // 专用组改回通用：影响预览报出被清绑定的词义，确认后词义回到通用。
+    let mut back_to_general = published["word"]["forms"].clone();
+    back_to_general["pos"][0]["form_groups"][1]["scope"] = json!("general");
+    let (impact, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &entry_id,
+        revision,
+        "complete",
+        back_to_general,
+    )
+    .await;
+    assert_eq!(impact["requires_confirmation"], true, "{impact}");
+    assert!(
+        impact["affected"].as_array().unwrap().iter().any(|item| {
+            item["node_id"] == special_sense_id
+                && item["node_type"] == "sense"
+                && item["reason"] == "form_group_binding_cleared"
+        }),
+        "{impact}"
+    );
+    assert!(
+        saved["word"]["meanings"]["pos"][0]["senses"][1]
+            .get("form_group_id")
+            .is_none()
+    );
+    let stored_binding: Option<Uuid> =
+        sqlx::query_scalar("SELECT form_group_id FROM lexicon.senses WHERE id = $1")
+            .bind(special_sense_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored_binding, None);
+    revision = saved["word"]["revision"].as_i64().unwrap();
+
+    // 重新标专用并绑定，再把这个组连同它的词形删掉：同样先预览、确认后清绑定，词义本身保留。
+    let mut dedicated_again = saved["word"]["forms"].clone();
+    dedicated_again["pos"][0]["form_groups"][1]["scope"] = json!("dedicated");
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &entry_id,
+        revision,
+        "complete",
+        dedicated_again,
+    )
+    .await;
+    revision = saved["word"]["revision"].as_i64().unwrap();
+    let (status, rebound) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": revision,
+            "intent": "complete",
+            "content": meanings
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rebound}");
+    revision = rebound["word"]["revision"].as_i64().unwrap();
+
+    let mut removed = rebound["word"]["forms"].clone();
+    removed["pos"][0]["form_groups"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    removed["pos"][0]["forms"].as_array_mut().unwrap().remove(0);
+    let (impact, saved) =
+        save_v3_forms_after_impact(&state, &bearer, &entry_id, revision, "complete", removed).await;
+    let affected = impact["affected"].as_array().unwrap();
+    assert!(
+        affected
+            .iter()
+            .any(|item| item["node_id"] == dedicated_group_id && item["node_type"] == "form_group"),
+        "{impact}"
+    );
+    assert!(
+        affected.iter().any(|item| {
+            item["node_id"] == special_sense_id && item["reason"] == "form_group_binding_cleared"
+        }),
+        "{impact}"
+    );
+    let senses = saved["word"]["meanings"]["pos"][0]["senses"]
+        .as_array()
+        .unwrap();
+    assert_eq!(senses.len(), 2, "删组只清绑定，不删词义");
+    assert!(senses[1].get("form_group_id").is_none());
+    let (group_count, binding): (i64, Option<Uuid>) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT count(*) FROM lexicon.v3_form_groups WHERE entry_id = $1),
+          (SELECT form_group_id FROM lexicon.senses WHERE id = $2)
+        "#,
+    )
+    .bind(entry_uuid)
+    .bind(special_sense_uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(group_count, 1);
+    assert_eq!(binding, None);
+}
+
+#[sqlx::test]
+async fn v3_form_group_changes_invalidate_meanings_completion(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let created = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let entry_id = created["word"]["id"].as_str().unwrap().to_owned();
+    let pos_id = created["word"]["forms"]["pos"][0]["pos_id"].clone();
+    let has_step = |word: &Value, step: &str| -> bool {
+        word["word"]["completed_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == step)
+    };
+
+    let meanings = complete_v3_meanings_fixture(pos_id);
+    let (status, completed) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": created["word"]["revision"],
+            "intent": "complete",
+            "content": meanings.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert!(has_step(&completed, "meanings"));
+
+    // 第 2 步新增一个专用组但还没有词义绑定它：词形保存照常成功，词义步不能再算完成。
+    let mut forms = completed["word"]["forms"].clone();
+    let mut dedicated_form = forms["pos"][0]["forms"][1].clone();
+    dedicated_form["id"] = json!(Uuid::now_v7());
+    for dialect in ["uk", "us"] {
+        dedicated_form["regional_variants"][dialect]["id"] = json!(Uuid::now_v7());
+        dedicated_form["regional_variants"][dialect]["pronunciations"][0]["id"] =
+            json!(Uuid::now_v7());
+    }
+    let dedicated_group_id = Uuid::now_v7();
+    forms["pos"][0]["form_groups"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": dedicated_group_id,
+            "is_regular": false,
+            "scope": "dedicated",
+            "dialect_rules": {"spelling_mode": "distinguish", "phonetic_mode": "distinguish"},
+            "members": [{"id": Uuid::now_v7(), "form_id": dedicated_form["id"]}]
+        }));
+    forms["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .push(dedicated_form);
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &entry_id,
+        completed["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    assert!(has_step(&saved, "forms"));
+    assert!(
+        !has_step(&saved, "meanings"),
+        "专用组无人绑定时词义步必须掉出完成：{}",
+        saved["word"]["completed_steps"]
+    );
+
+    // 第 3 步给一个新词义绑上专用组，重新完成。
+    let mut bound = meanings;
+    let mut special = bound["pos"][0]["senses"][0].clone();
+    special["id"] = json!(Uuid::now_v7());
+    special["definitions"][0]["id"] = json!(Uuid::now_v7());
+    special["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    special["form_group_id"] = json!(dedicated_group_id);
+    bound["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(special);
+    let (status, rebound) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": saved["word"]["revision"],
+            "intent": "complete",
+            "content": bound.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rebound}");
+    assert!(has_step(&rebound, "meanings"));
+
+    // 草稿保存把绑定清掉：保存本身不拦，但专用组又没人用了，词义步回到未完成。
+    let mut unbound = bound;
+    unbound["pos"][0]["senses"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("form_group_id");
+    let (status, drafted) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": rebound["word"]["revision"],
+            "intent": "save",
+            "content": unbound
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{drafted}");
+    assert!(
+        !has_step(&drafted, "meanings"),
+        "草稿清掉绑定后词义步必须掉出完成：{}",
+        drafted["word"]["completed_steps"]
+    );
 }

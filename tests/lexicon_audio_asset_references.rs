@@ -199,7 +199,6 @@ fn v3_forms(surface: &str, pos_id: Uuid) -> Value {
         "pos": [{
             "pos_id": pos_id,
             "pos": "noun",
-            "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
             "forms": [{
                 "id": form_id,
                 "form_type": "base",
@@ -222,6 +221,8 @@ fn v3_forms(surface: &str, pos_id: Uuid) -> Value {
             "form_groups": [{
                 "id": Uuid::now_v7(),
                 "is_regular": true,
+                "scope": "general",
+                "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
                 "members": [{"id": Uuid::now_v7(), "form_id": form_id}]
             }]
         }]
