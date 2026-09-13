@@ -10635,6 +10635,105 @@ async fn component_target_search_ranks_exact_before_prefix_before_contains_and_p
 }
 
 #[sqlx::test]
+async fn v3_phrase_detection_drops_dictionary_word_pos_and_creates(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_term(&pool, "make up", "phrase", "common_unmarked").await;
+    sqlx::query(
+        "UPDATE dictionary.terms SET pos = ARRAY['verb'] WHERE normalized_term = 'make up'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(
+            json!({"schema_version": 3, "language": "en", "kind": "phrase", "surface": "make up"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let (status, created) = call(
+        &state, Method::POST, &format!("{ROOT}/entries"), &bearer, Some(Uuid::now_v7()),
+        Some(json!({"schema_version": 3, "kind": "phrase", "detection_id": detection["detection_id"]})),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(detection["suggested_pos"], json!([]));
+    assert_eq!(detection["builtin_dictionary"]["suggested_pos"], json!([]));
+    assert_eq!(
+        detection["builtin_dictionary"]["suggested_forms"],
+        json!([])
+    );
+    assert_eq!(created["word"]["forms"]["pos"], json!([]));
+    seed_phrase_noun(&pool).await;
+    let (status, saved) = save_v3_forms_draft(
+        &state,
+        &bearer,
+        created["word"]["id"].as_str().unwrap(),
+        created["word"]["revision"].as_i64().unwrap(),
+        phrase_forms_fixture("make up"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["word"]["forms"]["pos"][0]["pos"], PHRASE_NOUN);
+    assert_eq!(
+        saved["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["spelling"],
+        "make up"
+    );
+    let (status, repeated) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(
+            json!({"schema_version": 3, "language": "en", "kind": "phrase", "surface": "make up"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(repeated["suggested_pos"], json!([PHRASE_NOUN]));
+}
+
+#[sqlx::test]
+async fn v3_phrase_detection_drops_existing_word_pos_but_keeps_matches(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    seed_dictionary_word(&pool, "over").await;
+    create_v3_skeleton(&state, &bearer, "word", "over").await;
+    // Remove dictionary evidence so this exercises only the existing-entry source.
+    sqlx::query("DELETE FROM dictionary.terms WHERE normalized_term = 'over'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"schema_version": 3, "language": "en", "kind": "phrase", "surface": "over"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    assert!(
+        !detection["matches"].as_array().unwrap().is_empty(),
+        "{detection}"
+    );
+    assert_eq!(detection["suggested_pos"], json!([]), "{detection}");
+}
+
+#[sqlx::test]
 async fn v3_detection_drops_suggested_pos_missing_from_catalog(pool: PgPool) {
     // 2026-09-06 起目录只种五个基础词性；内置词典映射出的介词等编码不在目录里时，
     // V3 检测必须像 V2 一样只建议目录现存的词性，否则前端会拿到无法保存的 pos。

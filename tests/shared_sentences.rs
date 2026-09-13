@@ -1473,3 +1473,227 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         "rejected reference must not create a partial sentence"
     );
 }
+
+#[sqlx::test]
+async fn pending_candidates_are_paginated_and_claim_preserves_sentence(pool: PgPool) {
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let flower = entry(&pool, actor, "flower").await;
+    let state = AppState::for_test(pool.clone());
+    let mut first = content(source);
+    first["sentence"]["en_text"]["common"]["value"]["text"] = json!("A wonderful flower flower.");
+    let mut repeated = first["annotations"][1].clone();
+    repeated["id"] = json!(Uuid::now_v7());
+    repeated["source_segments"] = json!([{"start":19,"end":25,"surface":"flower"}]);
+    first["annotations"].as_array_mut().unwrap().push(repeated);
+    let mut saved = Vec::new();
+    for body in [first, content(source)] {
+        let (status, item) = call(
+            &state,
+            actor,
+            Method::POST,
+            ROOT,
+            Some(
+                json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":body}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{item}");
+        saved.push(item);
+    }
+    for page in [1, 2] {
+        let (status, items) = call(
+            &state,
+            actor,
+            Method::GET,
+            &format!("{ROOT}?pending_entry_id={flower}&page_size=1&page={page}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{items}");
+        assert_eq!(
+            items["total"], 2,
+            "one sentence with repeated pending must count once"
+        );
+        assert_eq!(items["items"].as_array().unwrap().len(), 1);
+    }
+    let original = &saved[0];
+    let id = original["id"].as_str().unwrap();
+    let mut changed = original["content"].clone();
+    for annotation in changed["annotations"].as_array_mut().unwrap() {
+        if annotation["target"]["state"] == "pending" {
+            annotation["target"] = target_ref(flower);
+        }
+    }
+    let input = json!({"base_revision":1,"context_entry_id":flower,"context_sense_id":sense_id(flower),"content":changed});
+    let (status, claimed) = call(
+        &state,
+        actor,
+        Method::PUT,
+        &format!("{ROOT}/{id}"),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["id"], original["id"]);
+    assert_eq!(
+        claimed["content"]["sentence"],
+        original["content"]["sentence"]
+    );
+    assert_eq!(claimed["content"], changed);
+    let (_, candidates) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?pending_entry_id={flower}"),
+        None,
+    )
+    .await;
+    assert_eq!(candidates["total"], 1);
+    assert_eq!(candidates["items"][0]["id"], saved[1]["id"]);
+    let (_, linked) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?entry_id={flower}&sense_id={}", sense_id(flower)),
+        None,
+    )
+    .await;
+    assert_eq!(linked["total"], 1);
+    let (status, _) = call(
+        &state,
+        actor,
+        Method::PUT,
+        &format!("{ROOT}/{id}"),
+        Some(input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // Sorting uses updated_at rather than creation order.
+    sqlx::query("UPDATE lexicon.shared_sentences SET updated_at='2099-01-01' WHERE id=$1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, sorted) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?sort=updated_at_desc&page_size=1"),
+        None,
+    )
+    .await;
+    assert_eq!(sorted["items"][0]["id"], original["id"]);
+}
+
+#[sqlx::test]
+async fn sentence_status_filters_and_pending_scope_are_precise(pool: PgPool) {
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let flower = entry(&pool, actor, "flower").await;
+    let state = AppState::for_test(pool.clone());
+    let (_, original) = call(&state, actor, Method::POST, ROOT, Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content(source)}))).await;
+    let id = original["id"].as_str().unwrap();
+    for (status, total) in [("pending", 1), ("entry_only", 0), ("unlinked", 0)] {
+        let (_, items) = call(
+            &state,
+            actor,
+            Method::GET,
+            &format!("{ROOT}?association_status={status}"),
+            None,
+        )
+        .await;
+        assert_eq!(items["total"], total, "{status}: {items}");
+    }
+    // A skeleton without senses may discover candidates, but cannot claim a made-up sense.
+    sqlx::query("UPDATE lexicon.entry_editor_projection SET meanings=jsonb_set(meanings,'{pos,0,senses}','[]') WHERE entry_id=$1").bind(flower).execute(&pool).await.unwrap();
+    let (_, items) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?pending_entry_id={flower}"),
+        None,
+    )
+    .await;
+    assert_eq!(items["total"], 1);
+    let mut changed = original["content"].clone();
+    changed["annotations"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|a| a["target"]["state"] == "pending")
+        .unwrap()["target"] = target_ref(flower);
+    let (status, _) = call(
+        &state,
+        actor,
+        Method::PUT,
+        &format!("{ROOT}/{id}"),
+        Some(json!({"base_revision":1,"content":changed})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Current forms cannot resurrect the stale initial lemma after a rename.
+    sqlx::query("UPDATE lexicon.surface_sources SET surface='flowers',normalized_surface='flowers' WHERE entry_id=$1").bind(flower).execute(&pool).await.unwrap();
+    let (_, items) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?pending_entry_id={flower}"),
+        None,
+    )
+    .await;
+    assert_eq!(items["total"], 0);
+    sqlx::query("UPDATE lexicon.surface_sources SET surface='flower',normalized_surface='flower',dialect_scope='us' WHERE entry_id=$1").bind(flower).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE lexicon.shared_sentence_annotations SET source_dialect='uk' WHERE sentence_id=$1 AND pending_kind IS NOT NULL").bind(Uuid::parse_str(id).unwrap()).execute(&pool).await.unwrap();
+    let (_, items) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?pending_entry_id={flower}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        items["total"], 0,
+        "UK pending cannot match US-only spelling"
+    );
+    sqlx::query("UPDATE lexicon.shared_sentence_annotations SET source_dialect='common',pending_kind='phrase' WHERE sentence_id=$1 AND pending_kind IS NOT NULL").bind(Uuid::parse_str(id).unwrap()).execute(&pool).await.unwrap();
+    let (_, items) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?pending_entry_id={flower}"),
+        None,
+    )
+    .await;
+    assert_eq!(items["total"], 0, "word and phrase must not cross-match");
+    // Historical entry-only links have their own status, distinct from pending.
+    sqlx::query("UPDATE lexicon.shared_sentence_annotations SET target_sense_id=NULL,target_ref=NULL WHERE sentence_id=$1 AND target_entry_id IS NOT NULL").bind(Uuid::parse_str(id).unwrap()).execute(&pool).await.unwrap();
+    let (_, items) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?association_status=entry_only"),
+        None,
+    )
+    .await;
+    assert_eq!(items["total"], 1);
+    sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 AND target_entry_id IS NOT NULL").bind(Uuid::parse_str(id).unwrap()).execute(&pool).await.unwrap();
+    let (_, items) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}?association_status=unlinked"),
+        None,
+    )
+    .await;
+    assert_eq!(items["total"], 1, "pending-only sentence is unlinked");
+    for query in [
+        format!("entry_id={source}&pending_entry_id={flower}"),
+        "association_status=unknown".into(),
+        "sort=unknown".into(),
+    ] {
+        let (status, _) = call(&state, actor, Method::GET, &format!("{ROOT}?{query}"), None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}

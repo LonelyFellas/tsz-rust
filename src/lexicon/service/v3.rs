@@ -1041,7 +1041,7 @@ impl LexiconService {
         let (builtin_dictionary, suggested_pos) = if let Some(term) = term {
             // 内置词典的词性映射可能落在目录里已不存在的编码（如 2026-09-06 下线的介词等六个
             // 非基础种子），与 V2 路径一样只保留 catalog 现存的基本词性，避免建议出无法保存的 pos；
-            // 但保持词典给出的词性顺序（首项是词典主词性），不按目录排序重排。
+            // 同时过滤与词条类别不符的词性；保留合法词性的词典顺序，不猜测跨类别映射。
             let mapped_pos = map_dictionary_pos(&term.pos);
             let existing_codes = self
                 .repository
@@ -1049,6 +1049,7 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?
                 .into_iter()
+                .filter(|part| part.kind == v3_kind_string(input.kind))
                 .map(|part| part.code)
                 .collect::<std::collections::HashSet<_>>();
             let builtin_suggested_pos = mapped_pos
@@ -1203,8 +1204,18 @@ impl LexiconService {
                 &keys,
             )
             .await?;
+        // Surface warnings remain cross-kind, but only compatible catalog POS may seed a draft.
+        let compatible_pos = self
+            .repository
+            .catalog_parts(&existing_suggested_pos)
+            .await
+            .map_err(repository_error)?
+            .into_iter()
+            .filter(|part| part.kind == v3_kind_string(input.kind))
+            .map(|part| part.code)
+            .collect::<std::collections::HashSet<_>>();
         for pos in existing_suggested_pos {
-            if !detection.suggested_pos.contains(&pos) {
+            if compatible_pos.contains(&pos) && !detection.suggested_pos.contains(&pos) {
                 detection.suggested_pos.push(pos);
             }
         }
