@@ -1295,18 +1295,18 @@ async fn part_display_name_checks_reject_blank_untrimmed_and_overlong_values(poo
             "简洁显示必须 trim 后 1–16 字",
         );
     }
-    let invalid_full = ["", " noun", "noun ", &"f".repeat(65)];
+    let invalid_full = ["", " noun", "noun ", &"f".repeat(201)];
     for full_name_en in invalid_full {
         let result = insert_part_display(&pool, "合法简称", full_name_en).await;
         assert_db_error(
             result,
             CHECK_VIOLATION,
             Some("catalog_parts_of_speech_full_name_en_check"),
-            "英文全称必须 trim 后 1–64 字",
+            "英文全称必须 trim 后 1–200 字",
         );
     }
 
-    insert_part_display(&pool, &"简".repeat(16), &"f".repeat(64))
+    insert_part_display(&pool, &"简".repeat(16), &"f".repeat(200))
         .await
         .expect("边界长度的简洁显示 / 英文全称应被接受");
 }
@@ -1416,7 +1416,7 @@ async fn sub_part_display_checks_reject_blank_untrimmed_and_overlong_values(pool
         (
             "合法",
             "n.",
-            &"f".repeat(65),
+            &"f".repeat(201),
             "catalog_sub_parts_full_name_en_check",
         ),
     ] {
@@ -1434,10 +1434,47 @@ async fn sub_part_display_checks_reject_blank_untrimmed_and_overlong_values(pool
         noun,
         &"简".repeat(16),
         &"a".repeat(16),
-        &"f".repeat(64),
+        &"f".repeat(200),
     )
     .await
     .expect("边界长度的展示字段应被接受");
+}
+
+/// 词形变化的英文全称约束是建表时的列级 CHECK，名字由 PostgreSQL 生成；上限与另外两张表一致。
+#[sqlx::test]
+async fn form_type_full_name_en_check_rejects_blank_untrimmed_and_overlong_values(pool: PgPool) {
+    let noun = part_id(&pool, "noun").await;
+    let insert = |code: &'static str, full_name_en: String| {
+        sqlx::query(
+            r#"
+            INSERT INTO catalog.form_types (
+                id, part_of_speech_id, code, name_zh, name_en, short_name_zh, abbreviation, full_name_en
+            ) VALUES ($1, $2, $3, $3, $3, $3, $3, $4)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(noun)
+        .bind(code)
+        .bind(full_name_en)
+        .execute(&pool)
+    };
+
+    for (code, full_name_en) in [
+        ("blank_full", String::new()),
+        ("leading_full", " full".to_owned()),
+        ("trailing_full", "full ".to_owned()),
+        ("long_form_bad", "f".repeat(201)),
+    ] {
+        assert_db_error(
+            insert(code, full_name_en).await,
+            CHECK_VIOLATION,
+            Some("form_types_full_name_en_check"),
+            &format!("词形变化 {code} 的英文全称必须 trim 后 1–200 字"),
+        );
+    }
+    insert("long_form_ok", "f".repeat(200))
+        .await
+        .expect("词形变化英文全称 200 字的上边界应合法");
 }
 
 /// 词形归属的两个约束名是错误映射契约：服务层按名字把 23503 映射成 404、

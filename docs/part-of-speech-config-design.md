@@ -91,7 +91,7 @@ WHERE id = TRUE;
 - `code`：`^[a-z][a-z0-9_]{0,31}$`，数据库 CHECK 与 Rust 校验同时执行；
 - `name_zh`、`name_en`：服务端 trim 后长度 1–64；数据库 CHECK 同时保证已 trim 且长度合法；
 - `abbreviation`：服务端 trim 后长度 1–16；数据库 CHECK 同时保证已 trim 且长度合法；
-- `short_name_zh`：服务端 trim 后长度 1–16；`full_name_en`：trim 后 1–64；数据库 CHECK 同样保证；
+- `short_name_zh`：服务端 trim 后长度 1–16；`full_name_en`：trim 后 1–200（2026-09-13 起由 64 放宽，细分词性与词形变化同口径）；数据库 CHECK 同样保证；
 - `code` 全局唯一（跨 kind）；`phrase_` 前缀与短语 kind 双向绑定：短语词性必须带它、单词词性不许占用
   （CHECK `catalog_parts_of_speech_phrase_code_check`）；
 - 以下五个展示字段自 2026-09-12 起只在**同一 kind 内**唯一，短语侧可以再建一个「名词」

@@ -17,7 +17,7 @@ impl CatalogService {
             name_en: normalized_text(request.name_en, "name_en", 64)?,
             abbreviation: normalized_text(request.abbreviation, "abbreviation", 16)?,
             short_name_zh: normalized_text(request.short_name_zh, "short_name_zh", 16)?,
-            full_name_en: normalized_text(request.full_name_en, "full_name_en", 64)?,
+            full_name_en: normalized_text(request.full_name_en, "full_name_en", 200)?,
             sort_order: request.sort_order,
             actor_id,
         };
@@ -55,7 +55,7 @@ impl CatalogService {
             name_en: normalized_text(request.name_en, "name_en", 64)?,
             abbreviation: normalized_text(request.abbreviation, "abbreviation", 16)?,
             short_name_zh: normalized_text(request.short_name_zh, "short_name_zh", 16)?,
-            full_name_en: normalized_text(request.full_name_en, "full_name_en", 64)?,
+            full_name_en: normalized_text(request.full_name_en, "full_name_en", 200)?,
             sort_order: request.sort_order,
         };
         let mut tx = self
@@ -157,7 +157,7 @@ impl CatalogService {
             name_en: normalized_text(request.name_en, "name_en", 64)?,
             short_name_zh: normalized_text(request.short_name_zh, "short_name_zh", 16)?,
             abbreviation: normalized_text(request.abbreviation, "abbreviation", 16)?,
-            full_name_en: normalized_text(request.full_name_en, "full_name_en", 64)?,
+            full_name_en: normalized_text(request.full_name_en, "full_name_en", 200)?,
             sort_order: request.sort_order,
             actor_id,
         };
@@ -204,7 +204,7 @@ impl CatalogService {
             name_en: normalized_text(request.name_en, "name_en", 64)?,
             short_name_zh: normalized_text(request.short_name_zh, "short_name_zh", 16)?,
             abbreviation: normalized_text(request.abbreviation, "abbreviation", 16)?,
-            full_name_en: normalized_text(request.full_name_en, "full_name_en", 64)?,
+            full_name_en: normalized_text(request.full_name_en, "full_name_en", 200)?,
             sort_order: request.sort_order,
         };
         let mut tx = self

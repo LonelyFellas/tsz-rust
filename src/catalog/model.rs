@@ -58,8 +58,8 @@ pub struct CreatePartRequest {
     /// 简洁显示：业务页面用的短中文名，去空白后 1–16 字，全局唯一。
     #[schema(min_length = 1, max_length = 16)]
     pub short_name_zh: String,
-    /// 英文全称，去空白后 1–64 字，忽略大小写唯一。
-    #[schema(min_length = 1, max_length = 64)]
+    /// 英文全称，去空白后 1–200 字，忽略大小写唯一。
+    #[schema(min_length = 1, max_length = 200)]
     pub full_name_en: String,
     pub sort_order: i32,
 }
@@ -77,7 +77,7 @@ pub struct UpdatePartRequest {
     pub abbreviation: String,
     #[schema(min_length = 1, max_length = 16)]
     pub short_name_zh: String,
-    #[schema(min_length = 1, max_length = 64)]
+    #[schema(min_length = 1, max_length = 200)]
     pub full_name_en: String,
     pub sort_order: i32,
 }
@@ -97,8 +97,8 @@ pub struct CreateSubPartRequest {
     /// 英文缩写，去空白后 1–16 字；同一父级下允许重复。
     #[schema(min_length = 1, max_length = 16)]
     pub abbreviation: String,
-    /// 英文全称，去空白后 1–64 字；同一父级下忽略大小写唯一。
-    #[schema(min_length = 1, max_length = 64)]
+    /// 英文全称，去空白后 1–200 字；同一父级下忽略大小写唯一。
+    #[schema(min_length = 1, max_length = 200)]
     pub full_name_en: String,
     pub sort_order: i32,
 }
@@ -127,8 +127,8 @@ pub struct UpdateSubPartRequest {
     /// 英文缩写，去空白后 1–16 字；同一父级下允许重复。
     #[schema(min_length = 1, max_length = 16)]
     pub abbreviation: String,
-    /// 英文全称，去空白后 1–64 字；同一父级下忽略大小写唯一。
-    #[schema(min_length = 1, max_length = 64)]
+    /// 英文全称，去空白后 1–200 字；同一父级下忽略大小写唯一。
+    #[schema(min_length = 1, max_length = 200)]
     pub full_name_en: String,
     pub sort_order: i32,
 }

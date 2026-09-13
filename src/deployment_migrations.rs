@@ -111,7 +111,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20260913120000;
+    const CURRENT_RELEASE_VERSION: i64 = 20260913170000;
 
     #[sqlx::test]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {
@@ -386,6 +386,40 @@ mod tests {
         assert!(
             rendered.contains("duplicate name_en"),
             "回退失败原因应指名重复的正式英文：{rendered}"
+        );
+        let latest: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(latest, CURRENT_RELEASE_VERSION, "守卫失败时账本不应回退");
+    }
+
+    #[sqlx::test]
+    async fn deployment_undo_refuses_while_full_name_en_exceeds_64_characters(pool: PgPool) {
+        // 英文全称上限放宽到 200 后再回退会让超长存量撞 CHECK：要报出表名与 code，账本不动。
+        sqlx::query(
+            r#"
+            INSERT INTO catalog.parts_of_speech (
+                id, kind, code, name_zh, name_en, abbreviation,
+                short_name_zh, full_name_en, sort_order
+            ) VALUES ($1, 'word', 'long_full_name', '长全称', 'LONG FULL', 'lf.', '长全称', $2, 10)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind("f".repeat(65))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+            .await
+            .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("parts_of_speech:long_full_name"),
+            "回退失败原因应指名超长英文全称所在的表与 code：{rendered}"
         );
         let latest: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE",
