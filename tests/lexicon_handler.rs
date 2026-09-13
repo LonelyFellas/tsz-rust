@@ -10426,7 +10426,9 @@ async fn component_target_search_shares_the_discovery_capability_gate_with_resol
 }
 
 #[sqlx::test]
-async fn component_target_search_flags_truncated_when_the_scan_row_cap_is_hit(pool: PgPool) {
+async fn component_target_search_deduplicates_more_than_2000_surfaces_without_truncation(
+    pool: PgPool,
+) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -10439,8 +10441,7 @@ async fn component_target_search_flags_truncated_when_the_scan_row_cap_is_hit(po
         create_published_v3_phrase(&state, &pool, &bearer, "harbour club", json!([])).await;
     let entry_id = Uuid::parse_str(published["word"]["id"].as_str().unwrap()).unwrap();
 
-    // truncated 有两条独立成因，这里钉的是「一次取回的词面行触顶」那条：把同一条已发布词面
-    // 复制到 2000 行上限，候选去重后仍然只有几条，但结果必须标 truncated。
+    // 重复投影不能消耗可遍历窗口；超过旧2000行上限仍应返回完整去重候选。
     let cloned = sqlx::query(
         r#"
         INSERT INTO lexicon.surface_sources (
@@ -10482,14 +10483,11 @@ async fn component_target_search_flags_truncated_when_the_scan_row_cap_is_hit(po
     .await;
     assert_eq!(status, StatusCode::OK, "{capped}");
     assert_eq!(
-        capped["truncated"], true,
-        "取回行数触顶必须标 truncated：{capped}"
+        capped["truncated"], false,
+        "重复词面去重后完整返回，不得产生假截断：{capped}"
     );
     let matches = capped["matches"].as_array().unwrap();
-    assert!(
-        matches.len() < 200,
-        "触顶与「超出 page_size」是两条独立成因，去重后候选仍可能远少于一页：{capped}"
-    );
+    assert!(matches.len() < 200, "重复词面不得产生重复候选：{capped}");
     assert!(
         matches
             .iter()
@@ -12595,4 +12593,113 @@ fn phrase_meanings_fixture(pos_id: Value) -> Value {
         sense["sub_pos"] = json!("");
     }
     meanings
+}
+
+#[sqlx::test]
+async fn component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_late_entry(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let mut expected = HashSet::new();
+    let mut last_id = String::new();
+    // 251 足以穿过旧版 200 词条总量窗口，同时避免把正常 CI 时间消耗在重复建稿发布上。
+    // 开发阶段另以 1001 个真实发布词条 / 8008 候选完整跑过同一路径。
+    for index in 0..251_u32 {
+        let suffix = [index / 676, index / 26 % 26, index % 26]
+            .map(|n| char::from(b'a' + n as u8))
+            .iter()
+            .collect::<String>();
+        let (published, _) = create_published_v3_phrase(
+            &state,
+            &pool,
+            &bearer,
+            &format!("pagination harbour {suffix}"),
+            json!([]),
+        )
+        .await;
+        last_id = published["word"]["id"].as_str().unwrap().to_owned();
+        expected.insert(last_id.clone());
+    }
+    let mut cursor = None;
+    let mut visited = HashSet::new();
+    let mut candidate_keys = HashSet::new();
+    let mut total = None;
+    let mut last_next = None;
+    let started = std::time::Instant::now();
+    for _ in 0..200 {
+        let mut input = json!({"schema_version": 3, "q": "pagination harbour", "page_size": 50});
+        if let Some(value) = &cursor {
+            input["cursor"] = json!(value);
+        }
+        let (status, page) = search_component_targets(&state, &bearer, input).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let page_total = page["total"].as_u64().unwrap();
+        assert_eq!(*total.get_or_insert(page_total), page_total);
+        let matches = page["matches"].as_array().unwrap();
+        assert!(matches.len() <= 50);
+        for candidate in matches {
+            visited.insert(candidate["entry_id"].as_str().unwrap().to_owned());
+            let key = format!(
+                "{}:{}:{}:{}:{}",
+                candidate["entry_id"],
+                candidate["publication_id"],
+                candidate["pos_id"],
+                candidate["base_form_id"],
+                candidate["matched_variant_id"]
+            );
+            assert!(candidate_keys.insert(key), "跨页候选重复：{candidate}");
+        }
+        last_next = page["next_cursor"].as_str().map(str::to_owned);
+        assert_eq!(page["truncated"], json!(last_next.is_some()));
+        if last_next.is_none() {
+            break;
+        }
+        cursor = last_next.clone();
+    }
+    eprintln!(
+        "251-entry search traversal: {:?}, {} candidates",
+        started.elapsed(),
+        candidate_keys.len()
+    );
+    assert!(last_next.is_none(), "必须遍历到末页");
+    assert_eq!(visited, expected, "旧200词条窗口之外也必须可达");
+    assert_eq!(candidate_keys.len() as u64, total.unwrap());
+    let input =
+        json!({"schema_version":3,"q":"pagination harbour","page_size":1,"entry_id":last_id});
+    let (status, targeted) = search_component_targets(&state, &bearer, input.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{targeted}");
+    assert_eq!(targeted["matches"][0]["entry_id"], last_id);
+    let next = targeted["next_cursor"].as_str().expect("英美候选应能跨页");
+    let mut changed = input.clone();
+    changed["cursor"] = json!(next);
+    changed["entry_id"] = json!(Uuid::now_v7());
+    let (status, rejected) = search_component_targets(&state, &bearer, changed).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert_eq!(rejected["field"], "cursor");
+    for input in [
+        json!({"schema_version":3,"q":"not a matching surface","entry_id":last_id}),
+        json!({"schema_version":3,"q":"pagination harbour","entry_id":Uuid::now_v7()}),
+    ] {
+        let (status, empty) = search_component_targets(&state, &bearer, input).await;
+        assert_eq!(status, StatusCode::OK, "{empty}");
+        assert!(empty["matches"].as_array().unwrap().is_empty());
+    }
+    sqlx::query("UPDATE lexicon.entries SET archived_at = now() WHERE id = $1")
+        .bind(Uuid::parse_str(&last_id).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut archived = input;
+    archived["cursor"] = json!(next);
+    let (status, rejected) = search_component_targets(&state, &bearer, archived).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "归档导致结果变化时旧游标不得静默漏项：{rejected}"
+    );
+    assert_eq!(rejected["field"], "cursor");
 }

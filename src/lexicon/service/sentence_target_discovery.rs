@@ -1,6 +1,9 @@
 use super::*;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::lexicon::{
     dto::{
@@ -16,16 +19,35 @@ use crate::lexicon::{
     },
 };
 
-use super::sentence_association::PublishedAssociationTarget;
+use super::sentence_association::{PublishedAssociationCandidateKey, PublishedAssociationTarget};
 use super::v3::load_draft_component_targets;
 
 const MAX_DISCOVERY_TOKENS: usize = 100;
 const MAX_CONTIGUOUS_PHRASE_TOKENS: usize = 40;
 const DEFAULT_COMPONENT_TARGET_PAGE_SIZE: u32 = 50;
 const MAX_COMPONENT_TARGET_PAGE_SIZE: u32 = 200;
-/// 关键字检索一次最多取回的词面行数。ILIKE 的前置通配符走不了索引，这个上限只框住返回负载
-/// 与组装成本，不减少扫描；命中触顶时响应的 `truncated` 为 true。
-const MAX_COMPONENT_TARGET_SURFACE_ROWS: i64 = 2000;
+/// 每批快照的词条数；只限制峰值，不限制可遍历的结果集。
+const COMPONENT_TARGET_SNAPSHOT_BATCH_SIZE: usize = 200;
+
+#[derive(Debug, Clone)]
+struct ComponentTargetCandidateIndex {
+    key: PublishedAssociationCandidateKey,
+    match_rank: i32,
+    draft: bool,
+    headword: Arc<str>,
+}
+
+fn published_candidate_key(
+    candidate: &PublishedSentenceTargetCandidateV3,
+) -> PublishedAssociationCandidateKey {
+    PublishedAssociationCandidateKey {
+        entry_id: candidate.entry_id,
+        publication_id: candidate.publication_id,
+        pos_id: candidate.pos_id,
+        base_form_id: candidate.base_form_id,
+        matched_variant_id: candidate.matched_variant_id,
+    }
+}
 
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -219,8 +241,13 @@ impl LexiconService {
             keyword.to_owned()
         };
         let page_size = component_target_page_size(input.page_size)?;
-        let cursor_digest =
-            component_target_cursor_digest(keyword, input.kind, match_mode, input.include_drafts)?;
+        let cursor_digest = component_target_cursor_digest(
+            keyword,
+            input.kind,
+            match_mode,
+            input.include_drafts,
+            input.entry_id,
+        )?;
         // 关键字检索没有句子，也就没有 source dialect 可依；英美两个 scope 都查。
         let dialect_scopes = discovery_scopes(Dialect::Common);
         let mut transaction = self
@@ -236,26 +263,24 @@ impl LexiconService {
         let generation = LexiconRepository::sentence_discovery_generation(&mut transaction)
             .await
             .map_err(repository_error)?;
-        let offset =
-            component_target_cursor_offset(input.cursor.as_deref(), generation, &cursor_digest)?;
-        let published_surfaces = LexiconRepository::component_target_surfaces(
+        let published_entries = LexiconRepository::component_target_entry_matches(
             &mut transaction,
             &dialect_scopes,
             &lookup,
             input.kind,
-            MAX_COMPONENT_TARGET_SURFACE_ROWS,
+            input.entry_id,
             exact,
             false,
         )
         .await
         .map_err(repository_error)?;
-        let draft_surfaces = if input.include_drafts {
-            LexiconRepository::component_target_surfaces(
+        let draft_entries = if input.include_drafts {
+            LexiconRepository::component_target_entry_matches(
                 &mut transaction,
                 &dialect_scopes,
                 &lookup,
                 input.kind,
-                MAX_COMPONENT_TARGET_SURFACE_ROWS,
+                input.entry_id,
                 exact,
                 true,
             )
@@ -264,85 +289,211 @@ impl LexiconService {
         } else {
             Vec::new()
         };
-        let scan_capped = published_surfaces.len() as i64 >= MAX_COMPONENT_TARGET_SURFACE_ROWS
-            || draft_surfaces.len() as i64 >= MAX_COMPONENT_TARGET_SURFACE_ROWS;
-        // 快照是整份发布 JSONB（全部词形、词义、例句、关系）。词面行上限是 2000，直接照单
-        // 取快照就会为了回一页而拉回并解析上百份，绝大多数随后被截掉。一页最多
-        // MAX_COMPONENT_TARGET_PAGE_SIZE 条候选（去重键含 entry_id，200 个词条至少产出
-        // 200 条互不相同的候选），取回的词条数不必超过它。
-        // 去重按 surfaces 的首次出现顺序：SQL 已按「等于 → 前缀 → 其余，再按词面」排好，
-        // 首次出现顺序就是词条的最佳档位顺序；换成 UUID 序会让截断轴与展示无关。
-        // 已发布词面先于草稿词面进入窗口，与最终排序「同档位已发布优先」一致。
-        let mut seen = HashSet::new();
-        let mut published_entry_ids = published_surfaces
+        // 精确 total 需要遍历完整匹配集，但只积累轻量身份；forms / senses 等富 DTO
+        // 留到分页后、只为当前页物化。entry 查询已按词条去重，快照再分批读取。
+        let entry_ids = published_entries
             .iter()
-            .map(|surface| surface.entry_id)
-            .filter(|entry_id| seen.insert(*entry_id))
+            .chain(&draft_entries)
+            .map(|entry| entry.entry_id)
             .collect::<Vec<_>>();
-        let mut draft_entry_ids = draft_surfaces
+        let entry_rank = published_entries
             .iter()
-            .map(|surface| surface.entry_id)
-            .filter(|entry_id| seen.insert(*entry_id))
+            .chain(&draft_entries)
+            .map(|entry| (entry.entry_id, entry.match_rank))
+            .collect::<HashMap<_, _>>();
+        let published_entry_ids = published_entries
+            .iter()
+            .map(|entry| entry.entry_id)
+            .collect::<HashSet<_>>();
+        let draft_entry_ids = draft_entries
+            .iter()
+            .map(|entry| entry.entry_id)
+            .collect::<HashSet<_>>();
+        // 归档不会推进 discovery generation，但会移走候选；绑定可用词条集合避免 offset 跳漏。
+        let available_ids = entry_ids.iter().copied().collect::<BTreeSet<_>>();
+        let cursor_digest =
+            hex_digest(&sha256_json(&(cursor_digest, available_ids)).map_err(serialization_error)?);
+        let offset =
+            component_target_cursor_offset(input.cursor.as_deref(), generation, &cursor_digest)?;
+        let mut candidate_index =
+            HashMap::<PublishedAssociationCandidateKey, ComponentTargetCandidateIndex>::new();
+        for batch in entry_ids.chunks(COMPONENT_TARGET_SNAPSHOT_BATCH_SIZE) {
+            let published_ids = batch
+                .iter()
+                .copied()
+                .filter(|entry_id| published_entry_ids.contains(entry_id))
+                .collect::<Vec<_>>();
+            let draft_ids = batch
+                .iter()
+                .copied()
+                .filter(|entry_id| draft_entry_ids.contains(entry_id))
+                .collect::<Vec<_>>();
+            let published = LexiconRepository::component_target_surfaces(
+                &mut transaction,
+                &dialect_scopes,
+                &lookup,
+                input.kind,
+                &published_ids,
+                exact,
+                false,
+            )
+            .await
+            .map_err(repository_error)?;
+            let drafts = if input.include_drafts {
+                LexiconRepository::component_target_surfaces(
+                    &mut transaction,
+                    &dialect_scopes,
+                    &lookup,
+                    input.kind,
+                    &draft_ids,
+                    exact,
+                    true,
+                )
+                .await
+                .map_err(repository_error)?
+            } else {
+                Vec::new()
+            };
+            let mut targets =
+                LexiconRepository::current_publication_snapshots(&mut transaction, &published_ids)
+                    .await
+                    .map_err(repository_error)?
+                    .into_iter()
+                    .map(|record| {
+                        PublishedAssociationTarget::from_snapshot(record.snapshot, true)
+                            .map(|target| (record.entry_id, target))
+                    })
+                    .collect::<Result<HashMap<_, _>, _>>()?;
+            for target in load_draft_component_targets(&mut transaction, &draft_ids).await? {
+                targets.insert(
+                    target.id,
+                    PublishedAssociationTarget::from_component_target(target)?,
+                );
+            }
+            let headwords = targets
+                .iter()
+                .map(|(entry_id, target)| (*entry_id, Arc::<str>::from(target.headword())))
+                .collect::<HashMap<_, _>>();
+            for surface in published.iter().chain(&drafts) {
+                let Some(target) = targets.get(&surface.entry_id) else {
+                    continue;
+                };
+                let Some(headword) = headwords.get(&surface.entry_id) else {
+                    continue;
+                };
+                for key in target.sentence_discovery_candidate_keys(
+                    surface.publication_id,
+                    surface.pos_id,
+                    surface.matched_form_id,
+                    surface.matched_variant_id,
+                ) {
+                    candidate_index
+                        .entry(key)
+                        .or_insert_with(|| ComponentTargetCandidateIndex {
+                            key,
+                            match_rank: entry_rank.get(&key.entry_id).copied().unwrap_or(2),
+                            draft: key.publication_id.is_none(),
+                            headword: headword.clone(),
+                        });
+                }
+            }
+        }
+        let mut candidate_index = candidate_index.into_values().collect::<Vec<_>>();
+        candidate_index.sort_by(|left, right| {
+            left.match_rank
+                .cmp(&right.match_rank)
+                .then_with(|| left.draft.cmp(&right.draft))
+                .then_with(|| left.headword.cmp(&right.headword))
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        let total = candidate_index.len();
+        let has_more = offset.saturating_add(page_size) < total;
+        let page_keys = candidate_index
+            .iter()
+            .skip(offset)
+            .take(page_size)
+            .map(|candidate| candidate.key)
             .collect::<Vec<_>>();
-        let page_cap = MAX_COMPONENT_TARGET_PAGE_SIZE as usize;
-        let entries_capped = published_entry_ids.len() + draft_entry_ids.len() > page_cap;
-        published_entry_ids.truncate(page_cap);
-        draft_entry_ids.truncate(page_cap - published_entry_ids.len());
-        let mut targets = LexiconRepository::current_publication_snapshots(
+
+        // 当前页至多 200 条轻量身份；此处才加载对应快照并生成包含 forms / senses 的 DTO。
+        let page_entry_ids = page_keys
+            .iter()
+            .map(|key| key.entry_id)
+            .collect::<BTreeSet<_>>();
+        let page_published_ids = page_keys
+            .iter()
+            .filter(|key| key.publication_id.is_some())
+            .map(|key| key.entry_id)
+            .collect::<Vec<_>>();
+        let page_draft_ids = page_keys
+            .iter()
+            .filter(|key| key.publication_id.is_none())
+            .map(|key| key.entry_id)
+            .collect::<Vec<_>>();
+        let page_published = LexiconRepository::component_target_surfaces(
             &mut transaction,
-            &published_entry_ids,
+            &dialect_scopes,
+            &lookup,
+            input.kind,
+            &page_published_ids,
+            exact,
+            false,
         )
         .await
-        .map_err(repository_error)?
-        .into_iter()
-        .map(|record| {
-            PublishedAssociationTarget::from_snapshot(record.snapshot, true)
-                .map(|target| (record.entry_id, target))
-        })
-        .collect::<Result<HashMap<_, _>, _>>()?;
-        for target in load_draft_component_targets(&mut transaction, &draft_entry_ids).await? {
-            targets.insert(
+        .map_err(repository_error)?;
+        let page_drafts = if input.include_drafts {
+            LexiconRepository::component_target_surfaces(
+                &mut transaction,
+                &dialect_scopes,
+                &lookup,
+                input.kind,
+                &page_draft_ids,
+                exact,
+                true,
+            )
+            .await
+            .map_err(repository_error)?
+        } else {
+            Vec::new()
+        };
+        let mut page_targets =
+            LexiconRepository::current_publication_snapshots(&mut transaction, &page_published_ids)
+                .await
+                .map_err(repository_error)?
+                .into_iter()
+                .map(|record| {
+                    PublishedAssociationTarget::from_snapshot(record.snapshot, true)
+                        .map(|target| (record.entry_id, target))
+                })
+                .collect::<Result<HashMap<_, _>, _>>()?;
+        for target in load_draft_component_targets(&mut transaction, &page_draft_ids).await? {
+            page_targets.insert(
                 target.id,
                 PublishedAssociationTarget::from_component_target(target)?,
             );
         }
-        transaction.commit().await.map_err(database_error)?;
-
-        // 词条档位取它全部命中词面里最好的一档：give 既命中 give（等于）也命中 gives（前缀），算等于。
-        // exact 模式下命中词面都等于关键字，档位全为 0，顺序只剩已发布优先与 headword。
-        let lowered = lookup.to_lowercase();
-        let mut entry_rank = HashMap::<Uuid, u8>::new();
-        for surface in published_surfaces.iter().chain(&draft_surfaces) {
-            let rank = component_target_rank(&surface.normalized_surface, &lowered);
-            entry_rank
-                .entry(surface.entry_id)
-                .and_modify(|current| *current = (*current).min(rank))
-                .or_insert(rank);
-        }
-        // 没有句子区间就没有「命中了哪一段」，候选的 matches 留空而不是编一条证据。
-        let mut matches = published_candidates(&published_surfaces, &targets, None);
-        matches.extend(published_candidates(&draft_surfaces, &targets, None));
-        // 稳定排序：档位 → 已发布优先 → headword；同词条内保持分组键的确定顺序，前端按 entry_id 分组时相邻。
-        matches.sort_by(|left, right| {
-            let rank = |candidate: &PublishedSentenceTargetCandidateV3| {
-                entry_rank.get(&candidate.entry_id).copied().unwrap_or(2)
-            };
-            rank(left)
-                .cmp(&rank(right))
-                .then_with(|| {
-                    left.publication_id
-                        .is_none()
-                        .cmp(&right.publication_id.is_none())
-                })
-                .then_with(|| left.headword.cmp(&right.headword))
-        });
-        let total = matches.len();
-        let has_more = offset.saturating_add(page_size) < total;
-        let page = matches
+        let requested_keys = page_keys.iter().copied().collect::<HashSet<_>>();
+        let mut materialized = published_candidates(&page_published, &page_targets, None);
+        materialized.extend(published_candidates(&page_drafts, &page_targets, None));
+        let mut materialized = materialized
             .into_iter()
-            .skip(offset)
-            .take(page_size)
+            .filter_map(|candidate| {
+                let key = published_candidate_key(&candidate);
+                requested_keys.contains(&key).then_some((key, candidate))
+            })
+            .collect::<HashMap<_, _>>();
+        let page = page_keys
+            .iter()
+            .filter_map(|key| materialized.remove(key))
             .collect::<Vec<_>>();
+        if page.len() != page_keys.len()
+            || page
+                .iter()
+                .any(|candidate| !page_entry_ids.contains(&candidate.entry_id))
+        {
+            return Err(invariant_record());
+        }
+        transaction.commit().await.map_err(database_error)?;
         let next_cursor =
             has_more.then(|| format!("{generation}:{}:{cursor_digest}", offset + page_size));
 
@@ -350,13 +501,14 @@ impl LexiconService {
             schema_version: 3,
             matches: page,
             total: total as u64,
-            truncated: has_more || scan_capped || entries_capped,
+            truncated: has_more,
             next_cursor,
         })
     }
 }
 
 /// 与 `component_target_surfaces` 的 `ORDER BY CASE` 同一规则，两处必须同步改。
+#[cfg(test)]
 fn component_target_rank(normalized_surface: &str, lowered_keyword: &str) -> u8 {
     if normalized_surface == lowered_keyword {
         0
@@ -372,9 +524,11 @@ fn component_target_cursor_digest(
     kind: Option<EntryKind>,
     match_mode: ComponentTargetMatchV3,
     include_drafts: bool,
+    entry_id: Option<Uuid>,
 ) -> Result<String, LexiconServiceError> {
     Ok(hex_digest(
-        &sha256_json(&(q, kind, match_mode, include_drafts)).map_err(serialization_error)?,
+        &sha256_json(&(q, kind, match_mode, include_drafts, entry_id))
+            .map_err(serialization_error)?,
     ))
 }
 
@@ -392,7 +546,7 @@ fn component_target_cursor_offset(
     let cursor_digest = parts.next();
     match (cursor_generation, offset, cursor_digest) {
         (Some(cursor_generation), Some(offset), Some(cursor_digest))
-            if cursor_generation == generation && cursor_digest == digest && offset <= 100_000 =>
+            if cursor_generation == generation && cursor_digest == digest =>
         {
             Ok(offset)
         }
@@ -899,35 +1053,59 @@ mod tests {
 
     #[test]
     fn component_target_cursor_binds_generation_query_and_kind() {
-        let digest =
-            component_target_cursor_digest("give", None, ComponentTargetMatchV3::Contains, false)
-                .unwrap();
+        let digest = component_target_cursor_digest(
+            "give",
+            None,
+            ComponentTargetMatchV3::Contains,
+            false,
+            None,
+        )
+        .unwrap();
         assert_ne!(
             digest,
             component_target_cursor_digest(
                 "give",
                 Some(EntryKind::Phrase),
                 ComponentTargetMatchV3::Contains,
-                false
+                false,
+                None
             )
             .unwrap(),
             "kind 不同的搜索不能共用游标"
         );
         assert_ne!(
             digest,
-            component_target_cursor_digest("gave", None, ComponentTargetMatchV3::Contains, false)
-                .unwrap()
+            component_target_cursor_digest(
+                "gave",
+                None,
+                ComponentTargetMatchV3::Contains,
+                false,
+                None
+            )
+            .unwrap()
         );
         assert_ne!(
             digest,
-            component_target_cursor_digest("give", None, ComponentTargetMatchV3::Exact, false)
-                .unwrap(),
+            component_target_cursor_digest(
+                "give",
+                None,
+                ComponentTargetMatchV3::Exact,
+                false,
+                None
+            )
+            .unwrap(),
             "匹配方式不同的搜索不能共用游标"
         );
         assert_ne!(
             digest,
-            component_target_cursor_digest("give", None, ComponentTargetMatchV3::Contains, true)
-                .unwrap(),
+            component_target_cursor_digest(
+                "give",
+                None,
+                ComponentTargetMatchV3::Contains,
+                true,
+                None
+            )
+            .unwrap(),
             "是否含草稿不同的搜索不能共用游标"
         );
         assert_eq!(component_target_cursor_offset(None, 7, &digest).unwrap(), 0);
@@ -939,7 +1117,7 @@ mod tests {
         for (stale, generation) in [
             (cursor.clone(), 8),                     // 词库变了
             (format!("7:50:{}", "0".repeat(64)), 7), // 换了关键字/kind
-            (format!("7:100001:{digest}"), 7),       // offset 越界
+            (format!("7:-1:{digest}"), 7),           // offset 非法
             ("garbage".to_owned(), 7),
             (String::new(), 7),
         ] {
