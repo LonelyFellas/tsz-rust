@@ -12,8 +12,12 @@ use crate::{
     api::{ApiJson, ApiPath, ApiQuery},
     error::{AppError, ErrorCode},
     lexicon::{
-        dto::{SentenceSourceRangeV1, WordSentenceWritableV3},
-        normalization::normalize_headword,
+        dto::{
+            DraftMeaningsStepContentV3, SentenceSourceRangeV1, TextLinkV3, WordDefinitionV3,
+            WordSentenceWritableV3,
+        },
+        normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword},
+        sentence_target_discovery::tokenize,
     },
     state::AppState,
 };
@@ -23,12 +27,58 @@ use crate::{
 pub enum SentenceTarget {
     Linked {
         target_entry_id: Uuid,
+        target_pos_id: Uuid,
+        target_base_form_id: Uuid,
+        target_form_id: Uuid,
+        target_variant_id: Uuid,
+        target_sense_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        target_publication_id: Option<Uuid>,
     },
+    /// Historical entry-only association, readable for repair but not writable.
+    EntryOnly { target_entry_id: Uuid },
     Pending {
         kind: String,
         headword: String,
         gloss: Option<String>,
     },
+}
+
+impl SentenceTarget {
+    pub(crate) fn as_text_link(
+        &self,
+        id: Uuid,
+        source_segments: Vec<SentenceSourceRangeV1>,
+    ) -> Option<TextLinkV3> {
+        if let Self::Linked {
+            target_entry_id,
+            target_pos_id,
+            target_base_form_id,
+            target_form_id,
+            target_variant_id,
+            target_sense_id,
+            target_publication_id,
+        } = self
+        {
+            Some(TextLinkV3 {
+                id,
+                source_segments,
+                target_word_id: *target_entry_id,
+                target_pos_id: *target_pos_id,
+                target_base_form_id: *target_base_form_id,
+                target_form_id: *target_form_id,
+                target_variant_id: *target_variant_id,
+                target_sense_id: *target_sense_id,
+                target_publication_id: *target_publication_id,
+                via_phrase: None,
+                target_headword: None,
+                target_gloss: None,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -52,6 +102,7 @@ pub struct SharedSentenceContent {
 pub struct CreateSharedSentence {
     /// Stable client-generated UUID makes retries safe.
     pub source_entry_id: Uuid,
+    pub source_sense_id: Uuid,
     pub content: SharedSentenceContent,
 }
 
@@ -59,6 +110,12 @@ pub struct CreateSharedSentence {
 #[serde(deny_unknown_fields)]
 pub struct UpdateSharedSentence {
     pub base_revision: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub context_entry_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub context_sense_id: Option<Uuid>,
     pub content: SharedSentenceContent,
 }
 
@@ -70,11 +127,15 @@ pub struct SentenceRevision {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct CollectSharedSentence {
+pub struct UnlinkSentenceSense {
     pub base_revision: i64,
-    pub entry_id: Uuid,
-    /// Only pending annotations selected by the user are bound to entry_id.
-    pub annotation_ids: Vec<Uuid>,
+    pub sense_id: Uuid,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceSenseSummary {
+    pub id: Uuid,
+    pub gloss: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -83,7 +144,7 @@ pub struct SharedSentenceEntry {
     pub id: Uuid,
     pub headword: String,
     pub kind: String,
-    pub collected: bool,
+    pub senses: Vec<SentenceSenseSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -105,7 +166,7 @@ pub struct SentenceListQuery {
     pub created_from: Option<DateTime<Utc>>,
     pub created_to: Option<DateTime<Utc>>,
     pub entry_id: Option<Uuid>,
-    pub candidates: Option<bool>,
+    pub sense_id: Option<Uuid>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
 }
@@ -228,6 +289,7 @@ fn validate(content: &SharedSentenceContent) -> Result<(), AppError> {
             }
             previous_end = end;
         }
+        let literal = selected_literal(&text.iter().collect::<String>(), &a.source_segments)?;
         if let SentenceTarget::Pending {
             kind,
             headword,
@@ -235,7 +297,7 @@ fn validate(content: &SharedSentenceContent) -> Result<(), AppError> {
         } = &a.target
             && (!["word", "phrase"].contains(&kind.as_str())
                 || headword.chars().count() > 200
-                || normalize_headword(headword).is_err()
+                || normalize_headword(headword).map(|value| value.key).ok() != Some(literal)
                 || gloss.as_ref().is_some_and(|s| s.chars().count() > 2000))
         {
             return Err(invalid("待关联词条信息无效"));
@@ -272,16 +334,23 @@ async fn lock_targets(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     content: Option<&SharedSentenceContent>,
     source: Option<Uuid>,
+    sentence_id: Option<Uuid>,
 ) -> Result<(), AppError> {
     let mut ids: Vec<Uuid> = content
         .into_iter()
         .flat_map(|c| &c.annotations)
         .filter_map(|a| match a.target {
-            SentenceTarget::Linked { target_entry_id } => Some(target_entry_id),
+            SentenceTarget::Linked {
+                target_entry_id, ..
+            } => Some(target_entry_id),
             _ => None,
         })
         .chain(source)
         .collect();
+    let required = ids.clone();
+    if let Some(id) = sentence_id {
+        ids.extend(sqlx::query_scalar::<_,Uuid>("SELECT target_entry_id FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 AND target_entry_id IS NOT NULL").bind(id).fetch_all(&mut **tx).await.map_err(AppError::internal)?);
+    }
     ids.sort_unstable();
     ids.dedup();
     crate::lexicon::repository::LexiconRepository::lock_surface_contexts(tx, &ids)
@@ -303,7 +372,11 @@ async fn lock_targets(
     .fetch_all(&mut **tx)
     .await
     .map_err(AppError::internal)?;
-    if rows.len() != ids.len() || rows.iter().any(|(_, archived)| archived.is_some()) {
+    if required.iter().any(|id| {
+        !rows
+            .iter()
+            .any(|(row_id, archived)| row_id == id && archived.is_none())
+    }) {
         return Err(invalid("关联词条不存在或已归档"));
     }
     Ok(())
@@ -316,7 +389,10 @@ async fn annotations(
 ) -> Result<(), AppError> {
     for a in &content.annotations {
         let (target, kind, headword, normalized, gloss) = match &a.target {
-            SentenceTarget::Linked { target_entry_id } => {
+            SentenceTarget::Linked {
+                target_entry_id, ..
+            }
+            | SentenceTarget::EntryOnly { target_entry_id } => {
                 (Some(*target_entry_id), None, None, None, None)
             }
             SentenceTarget::Pending {
@@ -335,9 +411,11 @@ async fn annotations(
                 gloss.clone(),
             ),
         };
-        sqlx::query("INSERT INTO lexicon.shared_sentence_annotations(sentence_id,id,source_dialect,source_segments,target_entry_id,pending_kind,pending_headword,pending_normalized,pending_gloss) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+        sqlx::query("INSERT INTO lexicon.shared_sentence_annotations(sentence_id,id,source_dialect,source_segments,target_entry_id,pending_kind,pending_headword,pending_normalized,pending_gloss,target_sense_id,target_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
             .bind(id).bind(a.id).bind(&a.source_dialect).bind(serde_json::to_value(&a.source_segments).map_err(AppError::internal)?)
-            .bind(target).bind(kind).bind(headword).bind(normalized).bind(gloss).execute(&mut *conn).await.map_err(AppError::internal)?;
+            .bind(target).bind(kind).bind(headword).bind(normalized).bind(gloss)
+            .bind(a.target.as_text_link(a.id,vec![]).map(|l|l.target_sense_id))
+            .bind(if matches!(a.target,SentenceTarget::Linked{..}) {Some(serde_json::to_value(&a.target).map_err(AppError::internal)?)} else {None}).execute(&mut *conn).await.map_err(AppError::internal)?;
     }
     Ok(())
 }
@@ -358,16 +436,18 @@ async fn read_on(snapshot: &mut PgConnection, id: Uuid) -> Result<SharedSentence
     let annotations = ann
         .into_iter()
         .map(|a| {
-            let target = if let Some(target_entry_id) = a.get::<Option<Uuid>, _>("target_entry_id")
-            {
-                SentenceTarget::Linked { target_entry_id }
-            } else {
-                SentenceTarget::Pending {
-                    kind: a.get("pending_kind"),
-                    headword: a.get("pending_headword"),
-                    gloss: a.get("pending_gloss"),
-                }
-            };
+            let target =
+                if let Some(reference) = a.get::<Option<serde_json::Value>, _>("target_ref") {
+                    serde_json::from_value(reference).map_err(AppError::internal)?
+                } else if let Some(target_entry_id) = a.get::<Option<Uuid>, _>("target_entry_id") {
+                    SentenceTarget::EntryOnly { target_entry_id }
+                } else {
+                    SentenceTarget::Pending {
+                        kind: a.get("pending_kind"),
+                        headword: a.get("pending_headword"),
+                        gloss: a.get("pending_gloss"),
+                    }
+                };
             Ok(SharedSentenceAnnotation {
                 id: a.get("id"),
                 source_dialect: a.get("source_dialect"),
@@ -377,8 +457,44 @@ async fn read_on(snapshot: &mut PgConnection, id: Uuid) -> Result<SharedSentence
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
-    let entries = sqlx::query("SELECT e.id,e.kind,COALESCE((SELECT label FROM lexicon.entry_presentation_projection p WHERE p.entry_id=e.id),'') AS headword,EXISTS(SELECT 1 FROM lexicon.shared_sentence_collections c WHERE c.sentence_id=$1 AND c.entry_id=e.id) AS collected FROM lexicon.entries e WHERE e.id IN (SELECT target_entry_id FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 UNION SELECT entry_id FROM lexicon.shared_sentence_collections WHERE sentence_id=$1) ORDER BY headword,e.id")
-        .bind(id).fetch_all(&mut *snapshot).await.map_err(AppError::internal)?.into_iter().map(|r| SharedSentenceEntry {id:r.get("id"),headword:r.get("headword"),kind:r.get("kind"),collected:r.get("collected")}).collect();
+    let mut entries: Vec<SharedSentenceEntry> = sqlx::query("SELECT e.id,e.kind,COALESCE((SELECT label FROM lexicon.entry_presentation_projection p WHERE p.entry_id=e.id),'') AS headword FROM lexicon.entries e WHERE e.id IN (SELECT target_entry_id FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1) ORDER BY headword,e.id")
+        .bind(id).fetch_all(&mut *snapshot).await.map_err(AppError::internal)?.into_iter().map(|r| SharedSentenceEntry {id:r.get("id"),headword:r.get("headword"),kind:r.get("kind"),senses:vec![]}).collect();
+    let summaries=sqlx::query("SELECT DISTINCT a.target_entry_id,a.target_sense_id,COALESCE(pub.snapshot->'meanings',p.meanings) AS meanings FROM lexicon.shared_sentence_annotations a LEFT JOIN lexicon.entry_editor_projection p ON p.entry_id=a.target_entry_id LEFT JOIN lexicon.entry_publications pub ON pub.entry_id=a.target_entry_id AND pub.id=(a.target_ref->>'target_publication_id')::uuid WHERE a.sentence_id=$1 AND a.target_sense_id IS NOT NULL")
+        .bind(id).fetch_all(&mut *snapshot).await.map_err(AppError::internal)?;
+    for row in summaries {
+        let sense_id: Uuid = row.get("target_sense_id");
+        let meanings: Option<DraftMeaningsStepContentV3> = row
+            .get::<Option<serde_json::Value>, _>("meanings")
+            .and_then(|v| serde_json::from_value(v).ok());
+        let gloss = meanings
+            .as_ref()
+            .and_then(|m| {
+                m.pos
+                    .iter()
+                    .flat_map(|p| &p.senses)
+                    .find(|s| s.id == sense_id)
+            })
+            .and_then(|s| {
+                s.definitions.iter().find_map(|d| match d {
+                    WordDefinitionV3::ZhDefinition { content, .. }
+                    | WordDefinitionV3::ZhSentence { content, .. } => {
+                        Some(content.text().to_owned())
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|e| e.id == row.get::<Uuid, _>("target_entry_id"))
+            && !entry.senses.iter().any(|s| s.id == sense_id)
+        {
+            entry.senses.push(SentenceSenseSummary {
+                id: sense_id,
+                gloss,
+            });
+        }
+    }
     Ok(SharedSentence {
         id,
         revision: row.get("revision"),
@@ -417,10 +533,11 @@ pub async fn list(
     auth: AdminAuth,
     ApiQuery(q): ApiQuery<SentenceListQuery>,
 ) -> Result<Json<SharedSentenceList>, AppError> {
-    let admin = require_active_admin(&state, &auth).await?;
+    require_active_admin(&state, &auth).await?;
     let page = q.page.unwrap_or(1);
     let size = q.page_size.unwrap_or(10);
-    if !(1..=100000).contains(&page)
+    if (q.sense_id.is_some() && q.entry_id.is_none())
+        || !(1..=100000).contains(&page)
         || !(1..=50).contains(&size)
         || q.q.as_ref().is_some_and(|s| s.chars().count() > 200)
         || q.created_from.zip(q.created_to).is_some_and(|(a, b)| a > b)
@@ -431,34 +548,43 @@ pub async fn list(
             "分页或查询参数无效",
         ));
     }
-    if let Some(id) = q.entry_id.filter(|_| q.candidates.unwrap_or(false)) {
-        let mut conn = state.pool.acquire().await.map_err(AppError::internal)?;
-        writable_entry(&mut conn, id, &admin).await?;
-    }
-
     let mut snapshot = state.pool.begin().await.map_err(AppError::internal)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *snapshot)
         .await
         .map_err(AppError::internal)?;
-    let total: i64=sqlx::query_scalar(concat!("SELECT count(*) ", r#" FROM lexicon.shared_sentences s JOIN admins creator ON creator.id=s.created_by_admin_id
+    macro_rules! sentence_filter { () => { r#" FROM lexicon.shared_sentences s JOIN admins creator ON creator.id=s.created_by_admin_id
         WHERE s.deleted_at IS NULL
         AND ($1::text IS NULL OR s.id::text ILIKE '%'||$1||'%' OR s.content::text ILIKE '%'||$1||'%' OR creator.display_name ILIKE '%'||$1||'%')
         AND ($2::text IS NULL OR s.content->>'level'=$2)
         AND ($3::timestamptz IS NULL OR s.created_at >= $3) AND ($4::timestamptz IS NULL OR s.created_at <= $4)
-        AND ($5::uuid IS NULL OR (NOT $6 AND EXISTS(SELECT 1 FROM lexicon.shared_sentence_collections c WHERE c.sentence_id=s.id AND c.entry_id=$5))
-        OR ($6 AND NOT EXISTS(SELECT 1 FROM lexicon.shared_sentence_collections c WHERE c.sentence_id=s.id AND c.entry_id=$5)
-            AND EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND
-                (a.target_entry_id=$5 OR (a.target_entry_id IS NULL AND EXISTS(SELECT 1 FROM lexicon.entries e WHERE e.id=$5 AND e.kind=a.pending_kind AND (EXISTS(SELECT 1 FROM lexicon.surface_sources sf WHERE sf.entry_id=e.id AND NOT sf.is_deleted AND sf.normalized_surface=a.pending_normalized) OR EXISTS(SELECT 1 FROM lexicon.v3_entry_state st WHERE st.entry_id=e.id AND ('uk:'||a.pending_normalized=ANY(st.initial_headword_keys) OR 'us:'||a.pending_normalized=ANY(st.initial_headword_keys))))))))))"#)).bind(&q.q).bind(&q.level).bind(q.created_from).bind(q.created_to).bind(q.entry_id).bind(q.candidates.unwrap_or(false)).fetch_one(&mut *snapshot).await.map_err(AppError::internal)?;
-    let ids:Vec<Uuid>=sqlx::query_scalar(concat!("SELECT s.id ", r#" FROM lexicon.shared_sentences s JOIN admins creator ON creator.id=s.created_by_admin_id
-        WHERE s.deleted_at IS NULL
-        AND ($1::text IS NULL OR s.id::text ILIKE '%'||$1||'%' OR s.content::text ILIKE '%'||$1||'%' OR creator.display_name ILIKE '%'||$1||'%')
-        AND ($2::text IS NULL OR s.content->>'level'=$2)
-        AND ($3::timestamptz IS NULL OR s.created_at >= $3) AND ($4::timestamptz IS NULL OR s.created_at <= $4)
-        AND ($5::uuid IS NULL OR (NOT $6 AND EXISTS(SELECT 1 FROM lexicon.shared_sentence_collections c WHERE c.sentence_id=s.id AND c.entry_id=$5))
-        OR ($6 AND NOT EXISTS(SELECT 1 FROM lexicon.shared_sentence_collections c WHERE c.sentence_id=s.id AND c.entry_id=$5)
-            AND EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND
-                (a.target_entry_id=$5 OR (a.target_entry_id IS NULL AND EXISTS(SELECT 1 FROM lexicon.entries e WHERE e.id=$5 AND e.kind=a.pending_kind AND (EXISTS(SELECT 1 FROM lexicon.surface_sources sf WHERE sf.entry_id=e.id AND NOT sf.is_deleted AND sf.normalized_surface=a.pending_normalized) OR EXISTS(SELECT 1 FROM lexicon.v3_entry_state st WHERE st.entry_id=e.id AND ('uk:'||a.pending_normalized=ANY(st.initial_headword_keys) OR 'us:'||a.pending_normalized=ANY(st.initial_headword_keys))))))))))"#, " ORDER BY s.created_at DESC,s.id LIMIT $7 OFFSET $8")).bind(&q.q).bind(&q.level).bind(q.created_from).bind(q.created_to).bind(q.entry_id).bind(q.candidates.unwrap_or(false)).bind(size).bind((page-1)*size).fetch_all(&mut *snapshot).await.map_err(AppError::internal)?;
+        AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.target_entry_id=$5 AND a.target_sense_id IS NOT NULL AND ($6::uuid IS NULL OR a.target_sense_id=$6)))"# }; }
+    let total: i64 = sqlx::query_scalar(concat!("SELECT count(*) ", sentence_filter!()))
+        .bind(&q.q)
+        .bind(&q.level)
+        .bind(q.created_from)
+        .bind(q.created_to)
+        .bind(q.entry_id)
+        .bind(q.sense_id)
+        .fetch_one(&mut *snapshot)
+        .await
+        .map_err(AppError::internal)?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
+        "SELECT s.id ",
+        sentence_filter!(),
+        " ORDER BY s.created_at DESC,s.id LIMIT $7 OFFSET $8"
+    ))
+    .bind(&q.q)
+    .bind(&q.level)
+    .bind(q.created_from)
+    .bind(q.created_to)
+    .bind(q.entry_id)
+    .bind(q.sense_id)
+    .bind(size)
+    .bind((page - 1) * size)
+    .fetch_all(&mut *snapshot)
+    .await
+    .map_err(AppError::internal)?;
     let mut items = Vec::new();
     for id in ids {
         match read_on(&mut snapshot, id).await {
@@ -496,8 +622,21 @@ pub async fn create(
             .collect::<String>()
     };
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    lock_targets(&mut tx, Some(&input.content), Some(input.source_entry_id)).await?;
+    lock_targets(
+        &mut tx,
+        Some(&input.content),
+        Some(input.source_entry_id),
+        None,
+    )
+    .await?;
     writable_entry(&mut tx, input.source_entry_id, &admin).await?;
+    validate_targets(
+        &mut tx,
+        &input.content,
+        Some(input.source_entry_id),
+        Some(input.source_sense_id),
+    )
+    .await?;
     let inserted=sqlx::query("INSERT INTO lexicon.shared_sentences(id,content,create_digest,source_entry_id,created_by_admin_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING")
         .bind(id).bind(serde_json::to_value(&input.content.sentence).map_err(AppError::internal)?).bind(&payload).bind(input.source_entry_id).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?.rows_affected();
     if inserted == 0 {
@@ -519,14 +658,6 @@ pub async fn create(
         }
     } else {
         annotations(&mut tx, id, &input.content).await?;
-        sqlx::query(
-            "INSERT INTO lexicon.shared_sentence_collections(sentence_id,entry_id) VALUES($1,$2)",
-        )
-        .bind(id)
-        .bind(input.source_entry_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(AppError::internal)?;
     }
     tx.commit().await.map_err(AppError::internal)?;
     Ok(Json(read(&state.pool, id).await?))
@@ -539,13 +670,32 @@ pub async fn update(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<UpdateSharedSentence>,
 ) -> Result<Json<SharedSentence>, AppError> {
-    require_active_admin(&state, &auth).await?;
+    let admin = require_active_admin(&state, &auth).await?;
     validate(&input.content)?;
+    if input.context_entry_id.is_some() != input.context_sense_id.is_some() {
+        return Err(invalid("当前词条与词义必须同时提供"));
+    }
     if id != input.content.sentence.id {
         return Err(invalid("例句 ID 不可更改"));
     }
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    lock_targets(&mut tx, Some(&input.content), None).await?;
+    lock_targets(
+        &mut tx,
+        Some(&input.content),
+        input.context_entry_id,
+        Some(id),
+    )
+    .await?;
+    if let Some(context) = input.context_entry_id {
+        writable_entry(&mut tx, context, &admin).await?;
+    }
+    validate_targets(
+        &mut tx,
+        &input.content,
+        input.context_entry_id,
+        input.context_sense_id,
+    )
+    .await?;
     lock(&mut tx, id, input.base_revision).await?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
         .bind(id)
@@ -589,64 +739,215 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/collections",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),request_body=CollectSharedSentence,responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
-pub async fn collect(
-    State(state): State<AppState>,
-    auth: AdminAuth,
-    ApiPath(id): ApiPath<Uuid>,
-    ApiJson(input): ApiJson<CollectSharedSentence>,
-) -> Result<Json<SharedSentence>, AppError> {
-    let admin = require_active_admin(&state, &auth).await?;
-    if input.annotation_ids.len() > 100 {
-        return Err(invalid("标注过多"));
-    }
-    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    lock_targets(&mut tx, None, Some(input.entry_id)).await?;
-    writable_entry(&mut tx, input.entry_id, &admin).await?;
-    lock(&mut tx, id, input.base_revision).await?;
-    let mut eligible:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 AND target_entry_id=$2)").bind(id).bind(input.entry_id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
-    for annotation_id in &input.annotation_ids {
-        let changed=sqlx::query("UPDATE lexicon.shared_sentence_annotations a SET target_entry_id=$3,pending_kind=NULL,pending_headword=NULL,pending_normalized=NULL,pending_gloss=NULL WHERE sentence_id=$1 AND id=$2 AND target_entry_id IS NULL AND EXISTS(SELECT 1 FROM lexicon.entries e WHERE e.id=$3 AND e.kind=a.pending_kind AND (EXISTS(SELECT 1 FROM lexicon.surface_sources sf WHERE sf.entry_id=e.id AND NOT sf.is_deleted AND sf.normalized_surface=a.pending_normalized) OR EXISTS(SELECT 1 FROM lexicon.v3_entry_state st WHERE st.entry_id=e.id AND ('uk:'||a.pending_normalized=ANY(st.initial_headword_keys) OR 'us:'||a.pending_normalized=ANY(st.initial_headword_keys)))))")
-            .bind(id).bind(annotation_id).bind(input.entry_id).execute(&mut *tx).await.map_err(AppError::internal)?.rows_affected();
-        if changed != 1 {
-            return Err(AppError::conflict(
-                ErrorCode::PendingSentenceAssociationClaimed,
-                None,
-                "待关联标记已变化或与此词条不匹配",
-            ));
-        }
-        eligible = true;
-    }
-    if !eligible {
-        return Err(invalid("此例句未标注当前词条，请先确认关联"));
-    }
-    sqlx::query("INSERT INTO lexicon.shared_sentence_collections(sentence_id,entry_id) VALUES($1,$2) ON CONFLICT DO NOTHING").bind(id).bind(input.entry_id).execute(&mut *tx).await.map_err(AppError::internal)?;
-    bump(&mut tx, id).await?;
-    tx.commit().await.map_err(AppError::internal)?;
-    Ok(Json(read(&state.pool, id).await?))
-}
-
-#[utoipa::path(delete,path="/api/v1/admin/lexicon/sentences/{id}/collections/{entry_id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("entry_id"=Uuid,Path)),request_body=SentenceRevision,responses((status=204,description="删除或移除收录成功"),(status=400,description="输入无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本冲突"),(status=422,description="请求结构无效")))]
-pub async fn uncollect(
+#[utoipa::path(delete,path="/api/v1/admin/lexicon/sentences/{id}/associations/{entry_id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("entry_id"=Uuid,Path)),request_body=UnlinkSentenceSense,responses((status=204,description="解除当前词义全部关联"),(status=400,description="输入无效"),(status=401,description="未登录"),(status=403,description="无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本冲突"),(status=422,description="请求结构无效")))]
+pub async fn unlink(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath((id, entry_id)): ApiPath<(Uuid, Uuid)>,
-    ApiJson(input): ApiJson<SentenceRevision>,
+    ApiJson(input): ApiJson<UnlinkSentenceSense>,
 ) -> Result<StatusCode, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    lock_targets(&mut tx, None, Some(entry_id)).await?;
+    lock_targets(&mut tx, None, Some(entry_id), Some(id)).await?;
     writable_entry(&mut tx, entry_id, &admin).await?;
     lock(&mut tx, id, input.base_revision).await?;
-    sqlx::query(
-        "DELETE FROM lexicon.shared_sentence_collections WHERE sentence_id=$1 AND entry_id=$2",
-    )
-    .bind(id)
-    .bind(entry_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(AppError::internal)?;
+    sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 AND target_entry_id=$2 AND target_sense_id=$3")
+        .bind(id).bind(entry_id).bind(input.sense_id).execute(&mut *tx).await.map_err(AppError::internal)?;
     bump(&mut tx, id).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn selected_literal(text: &str, segments: &[SentenceSourceRangeV1]) -> Result<String, AppError> {
+    let tokens = tokenize(text);
+    let first = segments
+        .first()
+        .ok_or_else(|| invalid("请选择完整单词或短语"))?;
+    let last = segments.last().unwrap();
+    for segment in segments {
+        if !tokens.iter().any(|t| t.range.start == segment.start)
+            || !tokens.iter().any(|t| t.range.end == segment.end)
+        {
+            return Err(invalid("请选择完整单词，不能截取单词的一部分"));
+        }
+    }
+    if tokens
+        .iter()
+        .any(|t| t.range.start > first.start && t.range.start < last.end && t.hard_boundary_before)
+    {
+        return Err(invalid("关联短语不能跨越句子边界"));
+    }
+    normalize_headword(
+        &segments
+            .iter()
+            .map(|s| s.surface.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+    .map(|value| value.key)
+    .map_err(|_| invalid("所选文字不能构成单词或短语"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceTargetSurface {
+    pub surface: String,
+    pub dialect: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceEntryTarget {
+    pub id: Uuid,
+    pub headword: String,
+    pub kind: String,
+    pub surfaces: Vec<SentenceTargetSurface>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SentenceEntryTargets {
+    pub items: Vec<SentenceEntryTarget>,
+    pub total: i64,
+}
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct SentenceTargetQuery {
+    pub entry_id: Option<Uuid>,
+    pub context_entry_id: Option<Uuid>,
+    pub q: Option<String>,
+    pub kind: Option<String>,
+    pub dialect: Option<String>,
+    pub page: Option<i64>,
+}
+
+// Both candidate discovery and write validation use the same effective forms.
+// Initial keys only belong to an unfilled skeleton; they cannot revive a changed lemma.
+const TARGET_FORMS: &str = r#"
+WITH effective AS NOT MATERIALIZED (
+    SELECT e.id, e.kind, COALESCE(p.label, '') AS headword,
+           CASE WHEN e.id=$1 OR e.current_publication_id IS NULL THEN 'draft' ELSE 'current_publication' END AS scope,
+           e.current_publication_id
+    FROM lexicon.entries e
+    LEFT JOIN lexicon.entry_presentation_projection p ON p.entry_id=e.id
+    WHERE e.archived_at IS NULL AND e.language='en' AND e.kind IN ('word','phrase')
+      AND ($3::uuid IS NULL OR e.id=$3)
+      AND ($5::text IS NULL OR e.kind=$5)
+), forms AS (
+    SELECT e.id,e.kind,e.headword,s.surface,s.normalized_surface,s.dialect_scope AS dialect
+    FROM effective e JOIN lexicon.surface_sources s ON s.entry_id=e.id
+    WHERE NOT s.is_deleted AND s.language='en' AND s.normalization_version=$2
+      AND s.content_scope=e.scope
+      AND (e.scope='draft' OR s.publication_id=e.current_publication_id)
+      AND ($4::text IS NULL OR s.normalized_surface=$4)
+      AND ($6::text IS NULL OR $6='common' OR s.dialect_scope=$6)
+    UNION
+    SELECT e.id,e.kind,e.headword,substring(k FROM 4),substring(k FROM 4),left(k,2)
+    FROM effective e JOIN lexicon.v3_entry_state st ON st.entry_id=e.id
+    JOIN lexicon.entry_editor_projection p ON p.entry_id=e.id
+    CROSS JOIN LATERAL unnest(st.initial_headword_keys) k
+    WHERE e.scope='draft' AND COALESCE(jsonb_array_length(p.forms->'pos'),0)=0
+      AND NOT EXISTS(SELECT 1 FROM lexicon.surface_sources s WHERE s.entry_id=e.id AND NOT s.is_deleted AND s.content_scope='draft')
+      AND ($4::text IS NULL OR substring(k FROM 4)=$4)
+      AND ($6::text IS NULL OR $6='common' OR left(k,2)=$6)
+), matched AS (
+    SELECT DISTINCT id,kind,headword FROM forms
+), page AS (
+    SELECT * FROM matched ORDER BY headword,id LIMIT 50 OFFSET $7
+)
+SELECT (SELECT count(*) FROM matched)::bigint AS total,
+    COALESCE(jsonb_agg(jsonb_build_object('id',p.id,'kind',p.kind,'headword',p.headword,
+      'surfaces',(SELECT jsonb_agg(jsonb_build_object('surface',f.surface,'dialect',f.dialect) ORDER BY f.dialect,f.surface) FROM forms f WHERE f.id=p.id)) ORDER BY p.headword,p.id),'[]'::jsonb) AS items
+FROM page p
+"#;
+
+async fn target_forms(
+    conn: &mut PgConnection,
+    context: Option<Uuid>,
+    entry: Option<Uuid>,
+    query: Option<&SentenceTargetQuery>,
+) -> Result<SentenceEntryTargets, AppError> {
+    let normalized = query
+        .and_then(|q| q.q.as_ref())
+        .map(|s| normalize_headword(s).map(|v| v.key))
+        .transpose()
+        .map_err(|_| invalid("所选词面无效"))?;
+    let row = sqlx::query(TARGET_FORMS)
+        .bind(context)
+        .bind(HEADWORD_NORMALIZATION_VERSION)
+        .bind(entry)
+        .bind(normalized)
+        .bind(query.and_then(|q| q.kind.as_deref()))
+        .bind(query.and_then(|q| q.dialect.as_deref()))
+        .bind((query.and_then(|q| q.page).unwrap_or(1) - 1) * 50)
+        .fetch_one(conn)
+        .await
+        .map_err(AppError::internal)?;
+    Ok(SentenceEntryTargets {
+        total: row.get("total"),
+        items: serde_json::from_value(row.get("items")).map_err(AppError::internal)?,
+    })
+}
+
+async fn validate_targets(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    content: &SharedSentenceContent,
+    context: Option<Uuid>,
+    context_sense: Option<Uuid>,
+) -> Result<(), AppError> {
+    if context.is_some_and(|entry| !content.annotations.iter().any(|a| matches!(a.target,SentenceTarget::Linked{target_entry_id,target_sense_id,..} if target_entry_id==entry && Some(target_sense_id)==context_sense))) {
+        return Err(invalid("请先将句中的单词或短语关联到当前词义"));
+    }
+    for annotation in &content.annotations {
+        match &annotation.target {
+            SentenceTarget::EntryOnly { .. } => {
+                return Err(invalid("旧关联尚未选择具体词义，请补全或清除"));
+            }
+            SentenceTarget::Pending { .. } => {}
+            SentenceTarget::Linked { .. } => {
+                let link = annotation
+                    .target
+                    .as_text_link(annotation.id, annotation.source_segments.clone())
+                    .unwrap();
+                let valid = crate::lexicon::service::text_links::validate_shared_sentence_target(
+                    tx,
+                    &link,
+                    &annotation.source_dialect,
+                )
+                .await
+                .map_err(crate::lexicon::handler::map_error)?;
+                if !valid {
+                    return Err(invalid(
+                        "关联词义或词形已失效，请按词条、词形、词义重新选择",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/targets",tag="admin-lexicon",security(("bearer_auth"=[])),params(SentenceTargetQuery),responses((status=200,body=SentenceEntryTargets),(status=400,description="查询参数无效"),(status=401,description="未登录"),(status=403,description="无权编辑词条"),(status=404,description="词条不存在"),(status=409,description="词条已归档")))]
+pub async fn targets(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiQuery(q): ApiQuery<SentenceTargetQuery>,
+) -> Result<Json<SentenceEntryTargets>, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    let page = q.page.unwrap_or(1);
+    if !(1..=100000).contains(&page)
+        || (q.entry_id.is_none() && q.q.is_none())
+        || q.kind
+            .as_ref()
+            .is_some_and(|k| !["word", "phrase"].contains(&k.as_str()))
+        || q.dialect
+            .as_ref()
+            .is_some_and(|d| !["common", "uk", "us"].contains(&d.as_str()))
+    {
+        return Err(invalid("词条查询参数无效"));
+    }
+    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    if let Some(id) = q.context_entry_id {
+        writable_entry(&mut tx, id, &admin).await?;
+    }
+    Ok(Json(
+        target_forms(&mut tx, q.context_entry_id, q.entry_id, Some(&q)).await?,
+    ))
 }

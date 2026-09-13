@@ -205,6 +205,13 @@ impl LexiconService {
         );
         let pristine_meanings = word.meanings.clone();
         ensure_no_removed_inbound_senses(&mut tx, entry_id, &relational_meanings).await?;
+        super::text_links::ensure_shared_sentence_targets(
+            &mut tx,
+            entry_id,
+            &word.forms,
+            &word.meanings,
+        )
+        .await?;
 
         if let Some(publication) =
             v3_publication_by_revision_for_update(&mut tx, entry_id, word.revision).await?
@@ -500,6 +507,15 @@ impl LexiconService {
         }
         let publication_meanings = publication_meanings_for_reference_validation(&publication)?;
         ensure_no_removed_inbound_senses(&mut tx, entry_id, &publication_meanings).await?;
+        let shared_target: AdminWordV3 =
+            serde_json::from_value(publication.snapshot.clone()).map_err(serialization_error)?;
+        super::text_links::ensure_shared_sentence_targets(
+            &mut tx,
+            entry_id,
+            &shared_target.forms,
+            &shared_target.meanings,
+        )
+        .await?;
 
         replace_current_publication_surfaces_from_snapshot(&mut tx, &publication).await?;
         let next_lifecycle_revision = record.lifecycle_revision + 1;
