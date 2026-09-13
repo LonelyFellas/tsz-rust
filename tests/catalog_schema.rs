@@ -1710,8 +1710,8 @@ async fn parts_of_speech_kind_constraints(pool: PgPool) {
     let crossed = sqlx::query(
         r#"
         INSERT INTO lexicon.entry_pos (
-            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order, entry_kind
-        ) VALUES ($1, $2, $3, 'unified', 'unified', 0, 'word')
+            id, entry_id, part_of_speech_id, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 0, 'word')
         "#,
     )
     .bind(pos_node_id)
@@ -1736,8 +1736,8 @@ async fn parts_of_speech_kind_constraints(pool: PgPool) {
     sqlx::query(
         r#"
         INSERT INTO lexicon.entry_pos (
-            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order, entry_kind
-        ) VALUES ($1, $2, $3, 'unified', 'unified', 0, 'word')
+            id, entry_id, part_of_speech_id, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 0, 'word')
         "#,
     )
     .bind(pos_node_id)

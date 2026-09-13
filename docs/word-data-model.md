@@ -345,11 +345,12 @@ text_variant, relation
 - `id UUID PK`：node type = `pos`；
 - `entry_id UUID`；
 - `part_of_speech_id UUID FK -> catalog.parts_of_speech`；
-- `spelling_mode TEXT`：`unified` / `distinguish`；
-- `phonetic_mode TEXT`：`unified` / `distinguish`；
 - `sort_order INTEGER`。
 
 唯一约束：`(entry_id, part_of_speech_id)`。
+
+英美配置不挂在词性上，而是挂在变化组（§8.2）：同一词性下的各组各管各的（2026-09 TASK#45，
+见 `docs/features/form-group-dialect-scope/`）。
 
 不建议强制 `(entry_id, sort_order)` 唯一。拖拽排序时临时重复很常见，读取时以
 `sort_order, id` 稳定排序即可；若一定要唯一，必须使用可延迟唯一约束。
@@ -360,7 +361,13 @@ text_variant, relation
 - `entry_id UUID`；
 - `entry_pos_id UUID`；
 - `is_regular BOOLEAN`；
+- `scope TEXT`：`general`（通用，服务本词性下没有绑定专用组的词义）/ `dedicated`（专用，只服务绑定了它的词义）；
+- `spelling_mode TEXT`：`unified` / `distinguish`；
+- `phonetic_mode TEXT`：`unified` / `distinguish`；`spelling_mode = distinguish` 时必须为 `distinguish`；
 - `sort_order INTEGER`。
+
+组内词形按本组的 `spelling_mode` / `phonetic_mode` 校验形态，组与组互不影响。一个词形只属于一个组
+（V3 存储为 `v3_group_memberships` 上的 `UNIQUE (form_id)`），否则组级规则会出现「共用词形听谁的」。
 
 ### 8.3 `lexicon.form_slots`
 
@@ -429,6 +436,7 @@ text_variant, relation
 - `entry_pos_id UUID`；
 - `sub_part_of_speech_id UUID FK -> catalog.sub_parts_of_speech`；
 - `sense_group_id UUID NULL`；
+- `form_group_id UUID NULL`：绑定的专用变化组；为空表示使用本词性的通用组；
 - `level TEXT`：`A1`–`C2`；
 - `frequency NUMERIC(5,2) NULL`；
 - `depends_on_context BOOLEAN`；
@@ -437,7 +445,11 @@ text_variant, relation
 数据库必须使用复合外键保证：
 
 - sense 与 pos 属于同一 entry；
-- sense_group 与 sense 属于同一 entry。
+- sense_group 与 sense 属于同一 entry；
+- form_group 与 sense 属于同一 entry 的同一 POS：`(form_group_id, entry_pos_id, entry_id)` 复合外键。
+  该外键 `DEFERRABLE INITIALLY DEFERRED` 且不级联删除，因为词形保存会在同一事务里先写词义、
+  再整体删除并重插全部组；被删掉或改回通用的组由保存逻辑先清空词义上的绑定。
+  「只能绑专用组」由保存校验保证，数据库不重复约束。
 
 sub POS 确实属于 entry POS 引用的基本词性，首期由保存事务查询 catalog 并校验。细分词性不能
 移动父级，且 sense/sub POS 都有直接 FK，因此校验成功后所属关系不会自行漂移；配置删除竞态由

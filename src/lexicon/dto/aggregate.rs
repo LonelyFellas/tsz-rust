@@ -348,6 +348,9 @@ pub struct WordSenseV2 {
     pub level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sense_group_id: Option<Uuid>,
+    /// V3 词义绑定的专用变化组。V3 → V2 → V3 往返与关系投影都靠它带过去。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form_group_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency: Option<String>,
     pub depends_on_context: bool,

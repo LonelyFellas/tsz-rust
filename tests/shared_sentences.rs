@@ -43,7 +43,7 @@ fn target_ref(entry: Uuid) -> Value {
 async fn entry(pool: &PgPool, owner: Uuid, name: &str) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,revision,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word',1,'{}',$2,$2)").bind(id).bind(owner).execute(pool).await.unwrap();
-    let forms = json!({"pos":[{"pos_id":node_id(id,1),"pos":"verb","dialect_rules":{"spelling_mode":"unified","phonetic_mode":"unified"},"forms":[{"id":node_id(id,2),"form_type":"base","regional_variants":{"mode":"common","common":{"id":node_id(id,3),"dialect":"common","spelling":name,"origin":"manual","pronunciations":[]}}}],"form_groups":[{"id":node_id(id,5),"is_regular":true,"members":[{"id":node_id(id,9),"form_id":node_id(id,2)}]}]}]});
+    let forms = json!({"pos":[{"pos_id":node_id(id,1),"pos":"verb","forms":[{"id":node_id(id,2),"form_type":"base","regional_variants":{"mode":"common","common":{"id":node_id(id,3),"dialect":"common","spelling":name,"origin":"manual","pronunciations":[]}}}],"form_groups":[{"id":node_id(id,5),"is_regular":true,"scope":"general","dialect_rules":{"spelling_mode":"unified","phonetic_mode":"unified"},"members":[{"id":node_id(id,9),"form_id":node_id(id,2)}]}]}]});
     let meanings = json!({"sense_groups":[],"pos":[{"pos_id":node_id(id,1),"grammar_structures":[],"senses":[{"id":sense_id(id),"sub_pos":"","level":"A1","depends_on_context":false,"definitions":[],"sentences":[],"relations":[]}]}]});
     sqlx::query("INSERT INTO lexicon.entry_editor_projection(entry_id,forms,meanings,rebuilt_revision) VALUES($1,$2,$3,1)").bind(id).bind(forms).bind(meanings).execute(pool).await.unwrap();
     for (tag, kind) in [
@@ -679,7 +679,7 @@ async fn registered_form(pool: &PgPool, id: Uuid, surface: &str, kind: &str, dia
             .await
             .unwrap();
     forms["pos"][0]["forms"].as_array_mut().unwrap().push(json!({"id":node_id(id,6),"form_type":"past_tense","regional_variants":{"mode":"uk_us","uk":{"id":node_id(id,7),"dialect":"uk","spelling":surface,"origin":"manual","pronunciations":[]},"us":{"id":node_id(id,8),"dialect":"us","spelling":"unused","origin":"manual","pronunciations":[]}}}));
-    forms["pos"][0]["form_groups"] = json!([{"id":node_id(id,5),"is_regular":true,"members":[{"id":node_id(id,9),"form_id":node_id(id,2)},{"id":node_id(id,10),"form_id":node_id(id,6)}]}]);
+    forms["pos"][0]["form_groups"] = json!([{"id":node_id(id,5),"is_regular":true,"scope":"general","dialect_rules":{"spelling_mode":"unified","phonetic_mode":"unified"},"members":[{"id":node_id(id,9),"form_id":node_id(id,2)},{"id":node_id(id,10),"form_id":node_id(id,6)}]}]);
     sqlx::query("UPDATE lexicon.entry_editor_projection SET forms=$2 WHERE entry_id=$1")
         .bind(id)
         .bind(forms)

@@ -245,6 +245,7 @@ use utoipa::{
             crate::lexicon::dto::WordConcreteFormV3,
             crate::lexicon::dto::WordFormGroupMemberV3,
             crate::lexicon::dto::WordFormGroupV3,
+            crate::lexicon::dto::FormGroupScopeV3,
             crate::lexicon::dto::DialectModeV3,
             crate::lexicon::dto::DialectRulesV3,
             crate::lexicon::dto::WordPosFormsV3,
@@ -1711,13 +1712,32 @@ mod tests {
             serde_json::json!(["unified", "distinguish"])
         );
         assert_eq!(
-            schemas["WordPosFormsV3"]["properties"]["dialect_rules"]["$ref"],
+            schemas["WordFormGroupV3"]["properties"]["dialect_rules"]["$ref"],
             "#/components/schemas/DialectRulesV3"
         );
+        assert_eq!(
+            schemas["WordFormGroupV3"]["properties"]["scope"]["$ref"],
+            "#/components/schemas/FormGroupScopeV3"
+        );
+        assert_eq!(
+            schemas["FormGroupScopeV3"]["enum"],
+            serde_json::json!(["general", "dedicated"])
+        );
+        for field in ["dialect_rules", "scope"] {
+            assert!(
+                schemas["WordFormGroupV3"]["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|item| item == field)),
+                "WordFormGroupV3.{field} 必须必填"
+            );
+        }
         assert!(
-            schemas["WordPosFormsV3"]["required"]
-                .as_array()
-                .is_some_and(|required| required.iter().any(|field| field == "dialect_rules"))
+            schemas["WordPosFormsV3"]["properties"]["dialect_rules"].is_null(),
+            "英美配置已下沉到变化组，词性上不再有 dialect_rules"
+        );
+        assert!(
+            schemas["WordSenseV3"]["properties"]["form_group_id"].is_object()
+                && schemas["WordSenseWritableV3"]["properties"]["form_group_id"].is_object()
         );
         assert_eq!(
             schemas["PronunciationNormalizationVersionV3"]["enum"],

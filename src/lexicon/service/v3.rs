@@ -22,15 +22,15 @@ use crate::lexicon::dto::{
     DictionaryPronunciationEvidenceV3, DictionaryProvenanceV3, DictionaryProviderEvidenceV3,
     DraftFormsStepContentV3, DraftMeaningsStepContentV3, DraftNodeLocation,
     DraftValidationResponseV3, EnglishLanguageV3, EnglishTextV3, EntryPresentationV3,
-    FormsImpactItemV3, FormsImpactNodeTypeV3, FormsImpactResponseV3, PhraseComponentUsageV3,
-    PresenceAwareVec, PreviewFormsImpactInputV3, PronunciationNormalizationVersionV3,
-    PronunciationStyle, RetiredStableNodeV3, RichTextVariantV3, SaveFormsStepInputV3,
-    SaveMeaningsStepInputV3, SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin,
-    UkDialectV3, UsDialectV3, V3PublicationCapability, V3RetiredNodeRole, V3ValidationIssueCode,
-    ValidateAdminWordV3Input, WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3,
-    WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3, WordFormTypeV3, WordHeadwordsV2,
-    WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3, WordRegionalVariantsV3,
-    WordUkFormVariantV3, WordUsFormVariantV3,
+    FormGroupScopeV3, FormsImpactItemV3, FormsImpactNodeTypeV3, FormsImpactResponseV3,
+    PhraseComponentUsageV3, PresenceAwareVec, PreviewFormsImpactInputV3,
+    PronunciationNormalizationVersionV3, PronunciationStyle, RetiredStableNodeV3,
+    RichTextVariantV3, SaveFormsStepInputV3, SaveMeaningsStepInputV3, SuggestedConcreteFormV3,
+    SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3, UsDialectV3, V3PublicationCapability,
+    V3RetiredNodeRole, V3ValidationIssueCode, ValidateAdminWordV3Input, WordCommonFormVariantV3,
+    WordConcreteFormV3, WordDefinitionV3, WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3,
+    WordFormTypeV3, WordHeadwordsV2, WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3,
+    WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
 };
 use crate::lexicon::model::{ComponentTargetDraftRecord, NodeIdentityRecord, RegionEvidenceRecord};
 
@@ -282,11 +282,12 @@ fn materialize_v3_detection_forms(
             WordPosFormsV3 {
                 pos_id: Uuid::now_v7(),
                 pos: pos_code.clone(),
-                dialect_rules,
                 forms,
                 form_groups: vec![WordFormGroupV3 {
                     id: Uuid::now_v7(),
                     is_regular: true,
+                    scope: FormGroupScopeV3::General,
+                    dialect_rules,
                     members,
                 }],
             }
@@ -371,7 +372,9 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
         }
         match headwords {
             WordHeadwordsV2::Distinguish { .. } => {
-                pos.dialect_rules = DialectRulesV3::DISTINGUISH;
+                for group in &mut pos.form_groups {
+                    group.dialect_rules = DialectRulesV3::DISTINGUISH;
+                }
                 for form in &mut pos.forms {
                     if let WordRegionalVariantsV3::Common { common } = &form.regional_variants {
                         form.regional_variants = WordRegionalVariantsV3::UkUs {
@@ -399,15 +402,27 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                 }
             }
             WordHeadwordsV2::Unified { .. } => {
-                pos.dialect_rules = if pos.dialect_rules.phonetic_mode
-                    == crate::lexicon::dto::DialectModeV3::Distinguish
-                {
-                    DialectRulesV3::UNIFIED_DISTINGUISH
-                } else {
-                    DialectRulesV3::UNIFIED
-                };
+                // 各组按自己原有的音标模式收敛，组内词形按所属组的新规则转换。
+                let mut form_rules = HashMap::new();
+                for group in &mut pos.form_groups {
+                    group.dialect_rules = if group.dialect_rules.phonetic_mode
+                        == crate::lexicon::dto::DialectModeV3::Distinguish
+                    {
+                        DialectRulesV3::UNIFIED_DISTINGUISH
+                    } else {
+                        DialectRulesV3::UNIFIED
+                    };
+                    for membership in &group.members {
+                        form_rules
+                            .entry(membership.form_id)
+                            .or_insert(group.dialect_rules);
+                    }
+                }
                 for form in &mut pos.forms {
-                    match (&mut form.regional_variants, pos.dialect_rules) {
+                    let Some(rules) = form_rules.get(&form.id).copied() else {
+                        continue;
+                    };
+                    match (&mut form.regional_variants, rules) {
                         (
                             WordRegionalVariantsV3::UkUs { uk, us },
                             DialectRulesV3::UNIFIED_DISTINGUISH,
@@ -1865,7 +1880,14 @@ impl LexiconService {
             meanings_was_complete
                 && forms_complete
                 && pos_ownership_unchanged
-                && next_form_pos_ids == meaning_pos_ids,
+                && next_form_pos_ids == meaning_pos_ids
+                // 组改成专用、删掉唯一的通用组，都会让已完成的词义不再满足绑定规则。
+                && crate::lexicon::v3_contract::validate_sense_form_groups(
+                    &input.content,
+                    &meanings,
+                    StepSaveIntent::Complete,
+                )
+                .is_empty(),
         )
         .await?;
         sqlx::query(
@@ -2037,6 +2059,14 @@ impl LexiconService {
                 field: "pos_id",
                 message: "meanings must belong to a POS in the current V3 forms",
             });
+        }
+        let binding_issues = crate::lexicon::v3_contract::validate_sense_form_groups(
+            &forms,
+            &translation_content,
+            intent,
+        );
+        if !binding_issues.is_empty() {
+            return Err(v3_validation_failed(binding_issues));
         }
         let validation_forms = v3_meaning_validation_forms(&forms);
         let catalog = self
@@ -2290,7 +2320,14 @@ impl LexiconService {
             next_revision,
             &canonical_content,
             semantic_issues.is_empty()
-                && (intent == StepSaveIntent::Complete || meanings_was_complete),
+                && (intent == StepSaveIntent::Complete || meanings_was_complete)
+                // 草稿保存不拦完成规则，但清掉绑定后不能继续沿用旧的完成状态。
+                && crate::lexicon::v3_contract::validate_sense_form_groups(
+                    &forms,
+                    &canonical_content,
+                    StepSaveIntent::Complete,
+                )
+                .is_empty(),
         )
         .await?;
         sqlx::query(
@@ -2361,6 +2398,11 @@ impl LexiconService {
         issues.extend(crate::lexicon::v3_contract::validate_aggregate_node_limit(
             &word.forms,
             &word.meanings,
+        ));
+        issues.extend(crate::lexicon::v3_contract::validate_sense_form_groups(
+            &word.forms,
+            &word.meanings,
+            StepSaveIntent::Complete,
         ));
         let validation_forms = v3_meaning_validation_forms(&word.forms);
         let mut relational_meanings =
@@ -3839,6 +3881,28 @@ fn forms_impact_v3(
                 })
             }),
     );
+    // 组被删掉或改回通用时，reconcile 会把绑定它的词义改回通用。词义节点本身还在，
+    // 上面的节点差集看不出来，要单独报出来让管理员确认。
+    let proposed_bindings = proposed_meanings
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.senses)
+        .map(|sense| (sense.id, sense.form_group_id))
+        .collect::<HashMap<_, _>>();
+    affected.extend(
+        current_meanings
+            .pos
+            .iter()
+            .flat_map(|pos| &pos.senses)
+            .filter(|sense| {
+                sense.form_group_id.is_some() && proposed_bindings.get(&sense.id) == Some(&None)
+            })
+            .map(|sense| FormsImpactItemV3 {
+                node_id: sense.id,
+                node_type: FormsImpactNodeTypeV3::Sense,
+                reason: "form_group_binding_cleared".to_owned(),
+            }),
+    );
     affected.sort_by_key(|item| item.node_id);
     Ok(affected)
 }
@@ -3860,6 +3924,31 @@ fn reconcile_v3_meanings_after_forms(
             .position(|form_pos| form_pos.pos_id == meaning_pos.pos_id)
             .unwrap_or(usize::MAX)
     });
+    // 词义只能绑本词性的专用组：组被删掉或改回通用后绑定随之失效，词义回到通用。
+    let dedicated_groups = forms
+        .pos
+        .iter()
+        .map(|pos| {
+            let groups = pos
+                .form_groups
+                .iter()
+                .filter(|group| group.scope == FormGroupScopeV3::Dedicated)
+                .map(|group| group.id)
+                .collect::<HashSet<_>>();
+            (pos.pos_id, groups)
+        })
+        .collect::<HashMap<_, _>>();
+    for meaning_pos in &mut meanings.pos {
+        let dedicated = dedicated_groups.get(&meaning_pos.pos_id);
+        for sense in &mut meaning_pos.senses {
+            if sense
+                .form_group_id
+                .is_some_and(|id| !dedicated.is_some_and(|groups| groups.contains(&id)))
+            {
+                sense.form_group_id = None;
+            }
+        }
+    }
 }
 
 /// 英文富文本下挂的文本变体节点：unified 一个 common，distinguish 每个就位的方言一个。
@@ -4457,13 +4546,10 @@ async fn replace_v3_forms(
         let result = sqlx::query(
             r#"
             INSERT INTO lexicon.entry_pos (
-                id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode,
-                sort_order, content_schema_version, entry_kind
-            ) VALUES ($1, $2, $3, $4, $5, $6, 3, $7)
+                id, entry_id, part_of_speech_id, sort_order, content_schema_version, entry_kind
+            ) VALUES ($1, $2, $3, $4, 3, $5)
             ON CONFLICT (id) DO UPDATE
-            SET spelling_mode = EXCLUDED.spelling_mode,
-                phonetic_mode = EXCLUDED.phonetic_mode,
-                sort_order = EXCLUDED.sort_order
+            SET sort_order = EXCLUDED.sort_order
             WHERE lexicon.entry_pos.entry_id = EXCLUDED.entry_id
               AND lexicon.entry_pos.content_schema_version = 3
               AND lexicon.entry_pos.part_of_speech_id = EXCLUDED.part_of_speech_id
@@ -4472,8 +4558,6 @@ async fn replace_v3_forms(
         .bind(pos.pos_id)
         .bind(entry_id)
         .bind(part_id)
-        .bind(pos.dialect_rules.spelling_mode.as_str())
-        .bind(pos.dialect_rules.phonetic_mode.as_str())
         .bind(pos_ordinal as i32)
         .bind(entry_kind)
         .execute(&mut **tx)
@@ -4496,8 +4580,9 @@ async fn replace_v3_forms(
             sqlx::query(
                 r#"
                 INSERT INTO lexicon.v3_form_groups (
-                    id, entry_id, entry_pos_id, is_regular, ordinal
-                ) VALUES ($1, $2, $3, $4, $5)
+                    id, entry_id, entry_pos_id, is_regular, ordinal,
+                    scope, spelling_mode, phonetic_mode
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 "#,
             )
             .bind(group.id)
@@ -4505,6 +4590,9 @@ async fn replace_v3_forms(
             .bind(pos.pos_id)
             .bind(group.is_regular)
             .bind(group_ordinal as i32)
+            .bind(group.scope.as_str())
+            .bind(group.dialect_rules.spelling_mode.as_str())
+            .bind(group.dialect_rules.phonetic_mode.as_str())
             .execute(&mut **tx)
             .await
             .map_err(database_error)?;
@@ -5463,7 +5551,6 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: fixed_id(5),
                 pos: "phrase".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: vec![form],
                 form_groups: Vec::new(),
             }],
@@ -5603,6 +5690,8 @@ mod tests {
         let first_group = WordFormGroupV3 {
             id: fixed_id(200),
             is_regular: true,
+            scope: FormGroupScopeV3::General,
+            dialect_rules: DialectRulesV3::UNIFIED,
             members: vec![WordFormGroupMemberV3 {
                 id: fixed_id(201),
                 form_id: first_form.id,
@@ -5611,6 +5700,8 @@ mod tests {
         let second_group = WordFormGroupV3 {
             id: fixed_id(300),
             is_regular: false,
+            scope: FormGroupScopeV3::General,
+            dialect_rules: DialectRulesV3::UNIFIED,
             members: vec![WordFormGroupMemberV3 {
                 id: fixed_id(301),
                 form_id: second_form.id,
@@ -5631,11 +5722,75 @@ mod tests {
             pos: vec![WordPosFormsV3 {
                 pos_id: fixed_id(100),
                 pos: "noun".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms,
                 form_groups,
             }],
         }
+    }
+
+    fn forms_impact(
+        current: &DraftFormsStepContentV3,
+        proposed: &DraftFormsStepContentV3,
+        meanings: &DraftMeaningsStepContentV3,
+    ) -> Vec<FormsImpactItemV3> {
+        match forms_impact_v3(current, proposed, meanings) {
+            Ok(items) => items,
+            Err(_) => panic!("forms impact should be computable"),
+        }
+    }
+
+    fn meanings_bound_to(form_group_id: Option<Uuid>) -> DraftMeaningsStepContentV3 {
+        let mut meanings = sense_meanings(None);
+        meanings.pos[0].pos_id = fixed_id(100);
+        meanings.pos[0].senses[0].form_group_id = form_group_id;
+        meanings
+    }
+
+    #[test]
+    fn forms_impact_reports_senses_whose_dedicated_group_binding_is_cleared() {
+        let mut current = two_form_content(false);
+        current.pos[0].form_groups[1].scope = FormGroupScopeV3::Dedicated;
+        let dedicated_id = current.pos[0].form_groups[1].id;
+        let sense_id = fixed_id(700);
+        let meanings = meanings_bound_to(Some(dedicated_id));
+
+        // 组原样保留：绑定不受影响，不需要确认。
+        assert!(forms_impact(&current, &current, &meanings).is_empty());
+
+        // 专用组改回通用：词义节点还在，只是绑定被清掉，也必须报出来。
+        let mut back_to_general = current.clone();
+        back_to_general.pos[0].form_groups[1].scope = FormGroupScopeV3::General;
+        let affected = forms_impact(&current, &back_to_general, &meanings);
+        assert_eq!(affected.len(), 1);
+        assert_eq!(affected[0].node_id, sense_id);
+        assert_eq!(affected[0].node_type, FormsImpactNodeTypeV3::Sense);
+        assert_eq!(affected[0].reason, "form_group_binding_cleared");
+
+        // 删掉专用组（连同组员与词形）：组节点照常报，词义额外以 binding cleared 报出。
+        let mut removed = current.clone();
+        removed.pos[0].form_groups.remove(1);
+        removed.pos[0].forms.remove(1);
+        let affected = forms_impact(&current, &removed, &meanings);
+        assert!(affected.iter().any(|item| {
+            item.node_id == dedicated_id && item.node_type == FormsImpactNodeTypeV3::FormGroup
+        }));
+        assert!(affected.iter().any(|item| {
+            item.node_id == sense_id
+                && item.node_type == FormsImpactNodeTypeV3::Sense
+                && item.reason == "form_group_binding_cleared"
+        }));
+
+        // reconcile 真正把绑定改回通用，其余字段不动。
+        let mut reconciled = meanings.clone();
+        reconcile_v3_meanings_after_forms(&mut reconciled, &removed);
+        assert_eq!(reconciled.pos[0].senses[0].form_group_id, None);
+        assert_eq!(
+            reconciled.pos[0].senses[0].sense_group_id,
+            meanings.pos[0].senses[0].sense_group_id
+        );
+
+        // 本来就走通用组的词义不算受影响。
+        assert!(forms_impact(&current, &back_to_general, &meanings_bound_to(None)).is_empty());
     }
 
     async fn seed_admin(pool: &PgPool) -> Uuid {

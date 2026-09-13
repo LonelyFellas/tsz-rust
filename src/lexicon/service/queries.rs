@@ -589,7 +589,7 @@ impl LexiconService {
                             id: record.id,
                             kind: parse_v3_kind(&record.kind).ok_or_else(invariant_record)?,
                             presentation,
-                            dialects: v3_list_dialects(&record.pos_spelling_modes),
+                            dialects: v3_list_dialects(&record.form_group_spelling_modes),
                             revision: record.revision,
                             lifecycle_revision: record.lifecycle_revision,
                             annotation_visible: annotation_visible_ids.contains(&record.id),
@@ -660,14 +660,17 @@ fn publication_from_record(
     })
 }
 
-/// V3 列表行的方言摘要，按词性**当前**的拼写设置聚合：任一词性区分英美 → `[uk, us]`，
-/// 否则 `[common]`；还没有任何词性（`entry_pos` 为空）时给空数组，前端显示为未知。
-/// 建条 step 1 的英美选择只是 `v3_entry_state.initial_headwords` 里的快照，之后各词性
+/// V3 列表行的方言摘要，按变化组**当前**的拼写设置聚合：任一组区分英美 → `[uk, us]`，
+/// 否则 `[common]`；还没有任何变化组时给空数组，前端显示为未知。
+/// 建条 step 1 的英美选择只是 `v3_entry_state.initial_headwords` 里的快照，之后各组
 /// 在词形步各改各的，所以这里不看它。
-fn v3_list_dialects(pos_spelling_modes: &[String]) -> Vec<Dialect> {
-    if pos_spelling_modes.is_empty() {
+fn v3_list_dialects(form_group_spelling_modes: &[String]) -> Vec<Dialect> {
+    if form_group_spelling_modes.is_empty() {
         Vec::new()
-    } else if pos_spelling_modes.iter().any(|mode| mode == "distinguish") {
+    } else if form_group_spelling_modes
+        .iter()
+        .any(|mode| mode == "distinguish")
+    {
         vec![Dialect::Uk, Dialect::Us]
     } else {
         vec![Dialect::Common]
@@ -775,13 +778,13 @@ mod v3_list_dialects_tests {
     use super::*;
 
     #[test]
-    fn any_distinguish_pos_yields_uk_us() {
+    fn any_distinguish_group_yields_uk_us() {
         let modes = ["unified".to_owned(), "distinguish".to_owned()];
         assert_eq!(v3_list_dialects(&modes), vec![Dialect::Uk, Dialect::Us]);
     }
 
     #[test]
-    fn all_unified_pos_yields_common() {
+    fn all_unified_groups_yield_common() {
         assert_eq!(
             v3_list_dialects(&["unified".to_owned()]),
             vec![Dialect::Common]
@@ -789,7 +792,7 @@ mod v3_list_dialects_tests {
     }
 
     #[test]
-    fn no_pos_yields_empty() {
+    fn no_group_yields_empty() {
         assert!(v3_list_dialects(&[]).is_empty());
     }
 }

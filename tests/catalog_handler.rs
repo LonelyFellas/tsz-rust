@@ -133,8 +133,8 @@ async fn seed_lexicon_usage(
     sqlx::query(
         r#"
         INSERT INTO lexicon.entry_pos (
-            id, entry_id, part_of_speech_id, spelling_mode, phonetic_mode, sort_order, entry_kind
-        ) VALUES ($1, $2, $3, 'unified', 'unified', 0, (SELECT kind FROM lexicon.entries WHERE id = $2))
+            id, entry_id, part_of_speech_id, sort_order, entry_kind
+        ) VALUES ($1, $2, $3, 0, (SELECT kind FROM lexicon.entries WHERE id = $2))
         "#,
     )
     .bind(pos_node_id)

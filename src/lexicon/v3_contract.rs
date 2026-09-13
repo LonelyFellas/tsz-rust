@@ -10,10 +10,10 @@ use crate::{
     lexicon::dto::{
         Dialect, DialectModeV3, DialectRulesV3, DialectVariantRichTextSlotV3,
         DraftFormsStepContentV3, DraftMeaningsStepContentV3, DraftNodeLocation,
-        DraftValidationIssue, EnglishTextV3, PersistedWordStep, RichText, RichTextV3,
-        RichTextVariantV3, SentenceTranslationBandV3, StepSaveIntent, TranslationLanguageV3,
-        V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode, VoiceProfileV3,
-        WordConcreteFormV3, WordDefinitionV3, WordFormTypeV2, WordFormTypeV3,
+        DraftValidationIssue, EnglishTextV3, FormGroupScopeV3, PersistedWordStep, RichText,
+        RichTextV3, RichTextVariantV3, SentenceTranslationBandV3, StepSaveIntent,
+        TranslationLanguageV3, V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode,
+        VoiceProfileV3, WordConcreteFormV3, WordDefinitionV3, WordFormTypeV2, WordFormTypeV3,
         WordRegionalVariantsV3, WordSentenceTranslationV3,
     },
     lexicon::validation::MAX_ENTRY_NODES,
@@ -299,7 +299,18 @@ pub(crate) fn validate_forms(
                 }
                 match form_owners.get(&membership.form_id) {
                     Some(owner) if *owner == pos.pos_id => {
-                        *membership_counts.entry(membership.form_id).or_default() += 1;
+                        let count = membership_counts.entry(membership.form_id).or_default();
+                        *count += 1;
+                        // 英美配置挂在组上：一个词形只能听一个组的规则。
+                        if *count > 1 {
+                            issues.push(issue(
+                                V3ValidationIssueCode::FormGroupMembershipInvalid,
+                                "form_id",
+                                membership.id,
+                                "a concrete form can belong to only one form group",
+                                membership_location,
+                            ));
+                        }
                     }
                     Some(_) => issues.push(issue(
                         V3ValidationIssueCode::FormGroupMembershipInvalid,
@@ -350,23 +361,44 @@ pub(crate) fn validate_dialect_rules(
 ) -> Vec<DraftValidationIssue> {
     let mut issues = Vec::new();
     for pos in &content.pos {
-        if !pos.dialect_rules.is_valid() {
-            issues.push(issue(
-                V3ValidationIssueCode::DialectRulesInvalid,
-                "dialect_rules",
-                pos.pos_id,
-                "distinguish/unified is not a valid dialect rule combination",
-                location_for(pos.pos_id, Some(pos.pos_id), None, None, None, None, None),
-            ));
-            continue;
+        let mut form_rules = HashMap::<Uuid, DialectRulesV3>::new();
+        for group in &pos.form_groups {
+            if !group.dialect_rules.is_valid() {
+                issues.push(issue(
+                    V3ValidationIssueCode::DialectRulesInvalid,
+                    "dialect_rules",
+                    group.id,
+                    "distinguish/unified is not a valid dialect rule combination",
+                    location_for(
+                        group.id,
+                        Some(pos.pos_id),
+                        Some(group.id),
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                ));
+                continue;
+            }
+            // 一形多组由 membership 校验单独报错；这里只按第一个所属组查形态，免得重复报。
+            for membership in &group.members {
+                form_rules
+                    .entry(membership.form_id)
+                    .or_insert(group.dialect_rules);
+            }
         }
         for form in &pos.forms {
-            if !regional_variants_match_rules(&form.regional_variants, pos.dialect_rules) {
+            // 不属于任何（规则合法的）组的词形没有规则可查：孤儿由 orphan_form 报。
+            let Some(rules) = form_rules.get(&form.id).copied() else {
+                continue;
+            };
+            if !regional_variants_match_rules(&form.regional_variants, rules) {
                 issues.push(issue(
                     V3ValidationIssueCode::InvalidRegionalVariantShape,
                     "regional_variants",
                     form.id,
-                    "regional_variants do not match the part-of-speech dialect_rules",
+                    "regional_variants do not match the dialect_rules of the form's group",
                     location_for(
                         form.id,
                         Some(pos.pos_id),
@@ -400,6 +432,79 @@ fn regional_variants_match_rules(variants: &WordRegionalVariantsV3, rules: Diale
         ) => true,
         _ => false,
     }
+}
+
+/// 词义与变化组的绑定。结构性错误两个 intent 都拦；「专用组必须被绑定」与
+/// 「未绑定的词义所在词性要有通用组」只在 complete / 发布时拦，草稿允许先建组后绑定。
+pub(crate) fn validate_sense_form_groups(
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+    intent: StepSaveIntent,
+) -> Vec<DraftValidationIssue> {
+    let complete = intent == StepSaveIntent::Complete;
+    let mut issues = Vec::new();
+    let mut bound_groups = HashSet::new();
+    for meaning_pos in &meanings.pos {
+        let form_pos = forms
+            .pos
+            .iter()
+            .find(|pos| pos.pos_id == meaning_pos.pos_id);
+        let groups = form_pos.map_or(&[][..], |pos| pos.form_groups.as_slice());
+        let has_general_group = groups
+            .iter()
+            .any(|group| group.scope == FormGroupScopeV3::General);
+        for sense in &meaning_pos.senses {
+            match sense.form_group_id {
+                Some(group_id) => {
+                    if groups.iter().any(|group| {
+                        group.id == group_id && group.scope == FormGroupScopeV3::Dedicated
+                    }) {
+                        bound_groups.insert(group_id);
+                    } else {
+                        issues.push(meanings_issue(
+                            V3ValidationIssueCode::SenseFormGroupInvalid,
+                            "form_group_id",
+                            sense.id,
+                            "form_group_id must reference a dedicated form group of the same part of speech",
+                        ));
+                    }
+                }
+                None if complete && form_pos.is_some() && !has_general_group => {
+                    issues.push(meanings_issue(
+                        V3ValidationIssueCode::SenseFormGroupRequired,
+                        "form_group_id",
+                        sense.id,
+                        "a sense without a dedicated form group requires a general form group in its part of speech",
+                    ));
+                }
+                None => {}
+            }
+        }
+    }
+    if complete {
+        for pos in &forms.pos {
+            for group in &pos.form_groups {
+                if group.scope == FormGroupScopeV3::Dedicated && !bound_groups.contains(&group.id) {
+                    issues.push(issue(
+                        V3ValidationIssueCode::DedicatedFormGroupUnused,
+                        "scope",
+                        group.id,
+                        "a dedicated form group must be bound by at least one sense",
+                        location_for(
+                            group.id,
+                            Some(pos.pos_id),
+                            Some(group.id),
+                            None,
+                            None,
+                            None,
+                            None,
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    issues
 }
 
 pub(crate) fn validate_meanings(
@@ -1266,15 +1371,23 @@ fn raw_forms_issues(value: &Value) -> Vec<DraftValidationIssue> {
     };
     for pos in pos_items {
         let pos_id = uuid_field(pos, "pos_id");
-        let pos_node_id = pos_id.unwrap_or_else(Uuid::nil);
-        if !valid_raw_dialect_rules(pos.get("dialect_rules")) {
-            issues.push(issue(
-                V3ValidationIssueCode::DialectRulesInvalid,
-                "dialect_rules",
-                pos_node_id,
-                "dialect_rules must be one of unified/unified, unified/distinguish, or distinguish/distinguish",
-                location_for(pos_node_id, pos_id, None, None, None, None, None),
-            ));
+        for group in pos
+            .get("form_groups")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if !valid_raw_dialect_rules(group.get("dialect_rules")) {
+                let group_id = uuid_field(group, "id");
+                let group_node_id = group_id.unwrap_or_else(Uuid::nil);
+                issues.push(issue(
+                    V3ValidationIssueCode::DialectRulesInvalid,
+                    "dialect_rules",
+                    group_node_id,
+                    "dialect_rules must be one of unified/unified, unified/distinguish, or distinguish/distinguish",
+                    location_for(group_node_id, pos_id, group_id, None, None, None, None),
+                ));
+            }
         }
         let Some(forms) = pos.get("forms").and_then(Value::as_array) else {
             continue;
@@ -1425,10 +1538,6 @@ mod tests {
                 "pos": [{
                     "pos_id": "019d2a80-0000-7000-8000-000000000001",
                     "pos": "noun",
-                    "dialect_rules": {
-                        "spelling_mode": "unified",
-                        "phonetic_mode": "unified"
-                    },
                     "forms": [{
                         "id": "019d2a80-0000-7000-8000-000000000002",
                         "form_type": "base",
@@ -1451,15 +1560,13 @@ mod tests {
                     "form_groups": [{
                         "id": "019d2a80-0000-7000-8000-000000000005",
                         "is_regular": true,
+                        "scope": "general",
+                        "dialect_rules": {
+                            "spelling_mode": "unified",
+                            "phonetic_mode": "unified"
+                        },
                         "members": [{
                             "id": "019d2a80-0000-7000-8000-000000000006",
-                            "form_id": "019d2a80-0000-7000-8000-000000000002"
-                        }]
-                    }, {
-                        "id": "019d2a80-0000-7000-8000-000000000007",
-                        "is_regular": false,
-                        "members": [{
-                            "id": "019d2a80-0000-7000-8000-000000000008",
                             "form_id": "019d2a80-0000-7000-8000-000000000002"
                         }]
                     }]
@@ -1484,12 +1591,21 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(second_form);
-        request["content"]["pos"][0]["form_groups"][1]["members"]
+        request["content"]["pos"][0]["form_groups"]
             .as_array_mut()
             .unwrap()
             .push(json!({
-                "id": "019d2a80-0000-7000-8000-000000000014",
-                "form_id": "019d2a80-0000-7000-8000-000000000011"
+                "id": "019d2a80-0000-7000-8000-000000000007",
+                "is_regular": false,
+                "scope": "general",
+                "dialect_rules": {
+                    "spelling_mode": "unified",
+                    "phonetic_mode": "unified"
+                },
+                "members": [{
+                    "id": "019d2a80-0000-7000-8000-000000000014",
+                    "form_id": "019d2a80-0000-7000-8000-000000000011"
+                }]
             }));
         request
     }
@@ -1534,8 +1650,8 @@ mod tests {
     }
 
     #[test]
-    fn one_form_can_belong_to_multiple_groups_and_wire_order_is_preserved() {
-        let input = decode_valid(valid_request());
+    fn wire_order_is_preserved_and_one_form_cannot_join_two_groups() {
+        let input = decode_valid(two_common_forms_across_groups());
         assert!(validate_forms(&input.content, input.intent).is_empty());
 
         let encoded = serde_json::to_value(&input).expect("V3 request should serialize");
@@ -1553,6 +1669,38 @@ mod tests {
         ] {
             assert!(!encoded.to_string().contains(forbidden));
         }
+
+        // 英美配置挂在组上，一形只能一组：第二个组再引用同一词形，报在后出现的 membership 上。
+        let mut shared = two_common_forms_across_groups();
+        shared["content"]["pos"][0]["form_groups"][1]["members"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "019d2a80-0000-7000-8000-000000000008",
+                "form_id": "019d2a80-0000-7000-8000-000000000002"
+            }));
+        let shared = decode_valid(shared);
+        let issues = validate_forms(&shared.content, StepSaveIntent::Save);
+        let membership_issues = issues
+            .iter()
+            .filter(|issue| issue.code == "form_group_membership_invalid")
+            .collect::<Vec<_>>();
+        assert_eq!(membership_issues.len(), 1);
+        assert_eq!(membership_issues[0].field, "form_id");
+        assert_eq!(
+            membership_issues[0].node_id.to_string(),
+            "019d2a80-0000-7000-8000-000000000008"
+        );
+        let location = membership_issues[0].node_location.as_ref().unwrap();
+        assert_eq!(location.membership_id, Some(membership_issues[0].node_id));
+        assert_eq!(
+            location.form_group_id.map(|id| id.to_string()).as_deref(),
+            Some("019d2a80-0000-7000-8000-000000000007")
+        );
+        assert_eq!(
+            location.form_id.map(|id| id.to_string()).as_deref(),
+            Some("019d2a80-0000-7000-8000-000000000002")
+        );
 
         let mut repeated_type = valid_request();
         let mut second_form = repeated_type["content"]["pos"][0]["forms"][0].clone();
@@ -1620,13 +1768,11 @@ mod tests {
     }
 
     #[test]
-    fn dialect_rules_control_one_pos_across_groups_and_shared_forms() {
+    fn dialect_rules_apply_per_group() {
         let common = decode_valid(two_common_forms_across_groups());
         assert!(
-            validate_forms(&common.content, common.intent)
-                .iter()
-                .all(|issue| issue.code != "invalid_regional_variant_shape"),
-            "全部 common 且共享 form membership 应合法"
+            validate_forms(&common.content, common.intent).is_empty(),
+            "两组都是 common + unified/unified 应合法"
         );
 
         let mut uk_us = two_common_forms_across_groups();
@@ -1642,82 +1788,65 @@ mod tests {
             "019d2a80-0000-7000-8000-000000000027",
             "019d2a80-0000-7000-8000-000000000028",
         );
-        uk_us["content"]["pos"][0]["dialect_rules"] = json!({
-            "spelling_mode": "distinguish",
-            "phonetic_mode": "distinguish"
-        });
+        for group in uk_us["content"]["pos"][0]["form_groups"]
+            .as_array_mut()
+            .unwrap()
+        {
+            group["dialect_rules"] = json!({
+                "spelling_mode": "distinguish",
+                "phonetic_mode": "distinguish"
+            });
+        }
         let uk_us = decode_valid(uk_us);
         assert!(
-            validate_forms(&uk_us.content, uk_us.intent)
-                .iter()
-                .all(|issue| issue.code != "invalid_regional_variant_shape"),
-            "全部 uk_us 应合法"
+            validate_forms(&uk_us.content, uk_us.intent).is_empty(),
+            "两组都是 uk_us + distinguish/distinguish 应合法"
         );
 
-        let mut unified_spelling = two_common_forms_across_groups();
-        unified_spelling["content"]["pos"][0]["forms"][0]["regional_variants"] =
-            uk_us_regional_variants(
-                "019d2a80-0000-7000-8000-000000000041",
-                "019d2a80-0000-7000-8000-000000000042",
-                "019d2a80-0000-7000-8000-000000000043",
-                "019d2a80-0000-7000-8000-000000000044",
-            );
-        unified_spelling["content"]["pos"][0]["forms"][1]["regional_variants"] =
+        // job 案例：第 1 组英美音标不同（同拼写），第 2 组独立设为不区分，互不牵连。
+        let mut independent = two_common_forms_across_groups();
+        independent["content"]["pos"][0]["forms"][0]["regional_variants"] = uk_us_regional_variants(
+            "019d2a80-0000-7000-8000-000000000041",
+            "019d2a80-0000-7000-8000-000000000042",
+            "019d2a80-0000-7000-8000-000000000043",
+            "019d2a80-0000-7000-8000-000000000044",
+        );
+        independent["content"]["pos"][0]["forms"][0]["regional_variants"]["us"]["spelling"] =
+            json!("colour");
+        independent["content"]["pos"][0]["form_groups"][0]["dialect_rules"] = json!({
+            "spelling_mode": "unified",
+            "phonetic_mode": "distinguish"
+        });
+        let independent = decode_valid(independent);
+        assert!(
+            validate_forms(&independent.content, independent.intent).is_empty(),
+            "组级规则只管本组词形"
+        );
+
+        let mut mismatched_spelling = two_common_forms_across_groups();
+        mismatched_spelling["content"]["pos"][0]["forms"][1]["regional_variants"] =
             uk_us_regional_variants(
                 "019d2a80-0000-7000-8000-000000000045",
                 "019d2a80-0000-7000-8000-000000000046",
                 "019d2a80-0000-7000-8000-000000000047",
                 "019d2a80-0000-7000-8000-000000000048",
             );
-        for form in unified_spelling["content"]["pos"][0]["forms"]
-            .as_array_mut()
-            .unwrap()
-        {
-            form["regional_variants"]["us"]["spelling"] =
-                form["regional_variants"]["uk"]["spelling"].clone();
-        }
-        unified_spelling["content"]["pos"][0]["dialect_rules"] = json!({
+        mismatched_spelling["content"]["pos"][0]["form_groups"][1]["dialect_rules"] = json!({
             "spelling_mode": "unified",
             "phonetic_mode": "distinguish"
         });
-        let mut mismatched_spelling = unified_spelling.clone();
-        mismatched_spelling["content"]["pos"][0]["forms"][1]["regional_variants"]["us"]["spelling"] =
-            json!("different");
         let mismatched_spelling = decode_valid(mismatched_spelling);
         let issue = validate_forms(&mismatched_spelling.content, StepSaveIntent::Save)
             .into_iter()
             .find(|issue| issue.code == "invalid_regional_variant_shape")
-            .expect("unified/distinguish 必须拒绝 UK/US 异拼写");
+            .expect("unified/distinguish 组必须拒绝 UK/US 异拼写");
         assert_eq!(issue.field, "regional_variants");
         assert_eq!(
             issue.node_id,
             mismatched_spelling.content.pos[0].forms[1].id
         );
-        let unified_spelling = decode_valid(unified_spelling);
-        assert!(
-            validate_forms(&unified_spelling.content, unified_spelling.intent)
-                .iter()
-                .all(|issue| issue.code != "invalid_regional_variant_shape"),
-            "uk_us 同拼写应满足 unified/distinguish"
-        );
 
-        let mut illegal_rules = two_common_forms_across_groups();
-        illegal_rules["content"]["pos"][0]["dialect_rules"] = json!({
-            "spelling_mode": "distinguish",
-            "phonetic_mode": "unified"
-        });
-        let illegal_content: DraftFormsStepContentV3 =
-            serde_json::from_value(illegal_rules["content"].clone()).unwrap();
-        let issue = validate_forms(&illegal_content, StepSaveIntent::Save)
-            .into_iter()
-            .find(|issue| issue.code == "dialect_rules_invalid")
-            .expect("distinguish/unified 必须 fail closed");
-        assert_eq!(issue.field, "dialect_rules");
-        assert_eq!(issue.node_id, illegal_content.pos[0].pos_id);
-        let location = issue.node_location.unwrap();
-        assert_eq!(location.pos_id, Some(issue.node_id));
-        assert_eq!(location.form_id, None);
-
+        // 第 2 组仍是 unified/unified：组里的 uk_us 词形只报它自己，第 1 组不受牵连。
         let mut mixed = two_common_forms_across_groups();
         mixed["content"]["pos"][0]["forms"][1]["regional_variants"] = uk_us_regional_variants(
             "019d2a80-0000-7000-8000-000000000031",
@@ -1758,26 +1887,180 @@ mod tests {
                         && issue.node_id == mode_issues[0].node_id
                 })
         );
+
+        let mut illegal_rules = two_common_forms_across_groups();
+        illegal_rules["content"]["pos"][0]["form_groups"][1]["dialect_rules"] = json!({
+            "spelling_mode": "distinguish",
+            "phonetic_mode": "unified"
+        });
+        let illegal_content: DraftFormsStepContentV3 =
+            serde_json::from_value(illegal_rules["content"].clone()).unwrap();
+        let issues = validate_forms(&illegal_content, StepSaveIntent::Save);
+        let issue = issues
+            .iter()
+            .find(|issue| issue.code == "dialect_rules_invalid")
+            .expect("distinguish/unified 必须 fail closed");
+        assert_eq!(issue.field, "dialect_rules");
+        assert_eq!(issue.node_id, illegal_content.pos[0].form_groups[1].id);
+        let location = issue.node_location.as_ref().unwrap();
+        assert_eq!(location.pos_id, Some(illegal_content.pos[0].pos_id));
+        assert_eq!(location.form_group_id, Some(issue.node_id));
+        assert_eq!(location.form_id, None);
+        assert!(
+            issues
+                .iter()
+                .all(|issue| issue.code != "invalid_regional_variant_shape"),
+            "规则非法的组不再拿来查组内词形"
+        );
     }
 
     #[test]
-    fn missing_dialect_rules_are_rejected_for_requests_and_stored_data() {
-        let mut request = valid_request();
-        request["content"]["pos"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("dialect_rules");
+    fn group_rules_and_scope_are_required_and_pos_level_rules_are_rejected() {
+        for field in ["dialect_rules", "scope"] {
+            let mut request = valid_request();
+            request["content"]["pos"][0]["form_groups"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            let request_result: Result<SaveFormsStepInputV3, AppError> =
+                decode_v3_forms_request(request.clone());
+            assert!(request_result.is_err(), "新请求缺组级 {field} 必须失败");
+            let stored_result: Result<DraftFormsStepContentV3, _> =
+                serde_json::from_value(request["content"].clone());
+            assert!(
+                stored_result.is_err(),
+                "未上线词库已清空，stored V3 也必须带组级 {field}"
+            );
+        }
 
-        let request_result: Result<SaveFormsStepInputV3, AppError> =
-            decode_v3_forms_request(request.clone());
-        assert!(request_result.is_err(), "新请求缺 dialect_rules 必须失败");
-
-        let stored_result: Result<DraftFormsStepContentV3, _> =
-            serde_json::from_value(request["content"].clone());
+        let mut pos_level = valid_request();
+        pos_level["content"]["pos"][0]["dialect_rules"] = json!({
+            "spelling_mode": "unified",
+            "phonetic_mode": "unified"
+        });
+        let pos_level: Result<SaveFormsStepInputV3, AppError> = decode_v3_forms_request(pos_level);
         assert!(
-            stored_result.is_err(),
-            "未上线词库已清空，stored V3 也必须遵循 latest dialect_rules 合同"
+            pos_level.is_err(),
+            "词性上的 dialect_rules 已下沉到组，旧形状必须拒绝"
         );
+
+        let mut unknown_scope = valid_request();
+        unknown_scope["content"]["pos"][0]["form_groups"][0]["scope"] = json!("shared");
+        let unknown_scope: Result<SaveFormsStepInputV3, AppError> =
+            decode_v3_forms_request(unknown_scope);
+        assert!(unknown_scope.is_err());
+    }
+
+    fn meanings_with_bindings(
+        pos_id: Uuid,
+        bindings: &[Option<&str>],
+    ) -> DraftMeaningsStepContentV3 {
+        let senses = bindings
+            .iter()
+            .enumerate()
+            .map(|(index, binding)| {
+                let mut sense = json!({
+                    "id": format!("019d2a80-0000-7000-8000-0000000007{index:02x}"),
+                    "sub_pos": "",
+                    "level": "A1",
+                    "depends_on_context": false,
+                    "definitions": [],
+                    "sentences": [],
+                    "relations": []
+                });
+                if let Some(group_id) = binding {
+                    sense["form_group_id"] = json!(group_id);
+                }
+                sense
+            })
+            .collect::<Vec<_>>();
+        serde_json::from_value(json!({
+            "sense_groups": [],
+            "pos": [{"pos_id": pos_id, "grammar_structures": [], "senses": senses}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn sense_form_group_bindings_follow_scope_and_intent() {
+        const GENERAL: &str = "019d2a80-0000-7000-8000-000000000005";
+        const DEDICATED: &str = "019d2a80-0000-7000-8000-000000000007";
+        let mut request = two_common_forms_across_groups();
+        request["content"]["pos"][0]["form_groups"][1]["scope"] = json!("dedicated");
+        let forms = decode_valid(request).content;
+        let pos_id = forms.pos[0].pos_id;
+
+        // job 案例：Job 词义绑定专用组，其余词义走通用组。
+        let bound = meanings_with_bindings(pos_id, &[None, Some(DEDICATED)]);
+        assert!(validate_sense_form_groups(&forms, &bound, StepSaveIntent::Complete).is_empty());
+        assert_eq!(
+            serde_json::to_value(&bound).unwrap()["pos"][0]["senses"][1]["form_group_id"],
+            DEDICATED
+        );
+        assert!(
+            serde_json::to_value(&bound).unwrap()["pos"][0]["senses"][0]
+                .get("form_group_id")
+                .is_none(),
+            "未绑定时省略字段，不输出 null"
+        );
+
+        // 草稿允许专用组暂时没人绑定；complete 报出来并定位到组卡片。
+        let unbound = meanings_with_bindings(pos_id, &[None]);
+        assert!(validate_sense_form_groups(&forms, &unbound, StepSaveIntent::Save).is_empty());
+        let issues = validate_sense_form_groups(&forms, &unbound, StepSaveIntent::Complete);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "dedicated_form_group_unused");
+        assert_eq!(issues[0].field, "scope");
+        assert!(matches!(issues[0].step, PersistedWordStep::Forms));
+        assert_eq!(issues[0].node_id.to_string(), DEDICATED);
+        let location = issues[0].node_location.as_ref().unwrap();
+        assert_eq!(location.pos_id, Some(pos_id));
+        assert_eq!(location.form_group_id, Some(issues[0].node_id));
+        assert_eq!(location.node_role, "forms.form_group");
+
+        // 结构性错误两个 intent 都拦：绑到通用组、绑到不存在的组。
+        let missing = Uuid::now_v7().to_string();
+        for target in [GENERAL, missing.as_str()] {
+            let invalid = meanings_with_bindings(pos_id, &[Some(target), Some(DEDICATED)]);
+            for intent in [StepSaveIntent::Save, StepSaveIntent::Complete] {
+                let issues = validate_sense_form_groups(&forms, &invalid, intent);
+                assert_eq!(issues.len(), 1, "target={target}");
+                assert_eq!(issues[0].code, "sense_form_group_invalid");
+                assert_eq!(issues[0].field, "form_group_id");
+                assert!(matches!(issues[0].step, PersistedWordStep::Meanings));
+                assert_eq!(issues[0].node_id, invalid.pos[0].senses[0].id);
+            }
+        }
+
+        // 绑到别的词性的专用组同样非法。
+        let mut two_pos = forms.clone();
+        let mut second_pos = two_pos.pos[0].clone();
+        second_pos.pos_id = Uuid::now_v7();
+        for group in &mut second_pos.form_groups {
+            group.id = Uuid::now_v7();
+        }
+        two_pos.pos.push(second_pos);
+        let cross_pos = meanings_with_bindings(two_pos.pos[1].pos_id, &[Some(DEDICATED)]);
+        assert!(has_code(
+            &validate_sense_form_groups(&two_pos, &cross_pos, StepSaveIntent::Save),
+            V3ValidationIssueCode::SenseFormGroupInvalid
+        ));
+
+        // 词性没有通用组时，没绑定的词义无组可用：complete 定位到词义卡片。
+        let mut all_dedicated = forms.clone();
+        all_dedicated.pos[0].form_groups[0].scope = FormGroupScopeV3::Dedicated;
+        let partly_bound = meanings_with_bindings(pos_id, &[Some(GENERAL), Some(DEDICATED), None]);
+        assert!(
+            validate_sense_form_groups(&all_dedicated, &partly_bound, StepSaveIntent::Save)
+                .is_empty()
+        );
+        let issues =
+            validate_sense_form_groups(&all_dedicated, &partly_bound, StepSaveIntent::Complete);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "sense_form_group_required");
+        assert_eq!(issues[0].field, "form_group_id");
+        assert!(matches!(issues[0].step, PersistedWordStep::Meanings));
+        assert_eq!(issues[0].node_id, partly_bound.pos[0].senses[2].id);
     }
 
     #[test]
@@ -1852,10 +2135,6 @@ mod tests {
             .push(json!({
                 "pos_id": "019d2a80-0000-7000-8000-000000000010",
                 "pos": "verb",
-                "dialect_rules": {
-                    "spelling_mode": "unified",
-                    "phonetic_mode": "unified"
-                },
                 "forms": [form],
                 "form_groups": []
             }));
@@ -1881,7 +2160,6 @@ mod tests {
             pos: vec![crate::lexicon::dto::WordPosFormsV3 {
                 pos_id: Uuid::now_v7(),
                 pos: "noun".to_owned(),
-                dialect_rules: DialectRulesV3::UNIFIED,
                 forms: Vec::new(),
                 form_groups: Vec::new(),
             }],
@@ -1896,6 +2174,8 @@ mod tests {
         orphan["content"]["pos"][0]["form_groups"] = json!([{
             "id": "019d2a80-0000-7000-8000-000000000005",
             "is_regular": true,
+            "scope": "general",
+            "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
             "members": []
         }]);
         let orphan = decode_valid(orphan);
@@ -1907,8 +2187,13 @@ mod tests {
     #[test]
     fn complete_requires_every_form_group_to_keep_a_base_form() {
         // 一组词形变化描述同一个词的一套变化范式，缺了原形这组就没有落脚点。
-        let mut without_base = valid_request();
-        without_base["content"]["pos"][0]["forms"][0]["form_type"] = json!("plural");
+        let mut without_base = two_common_forms_across_groups();
+        for form in without_base["content"]["pos"][0]["forms"]
+            .as_array_mut()
+            .unwrap()
+        {
+            form["form_type"] = json!("plural");
+        }
 
         let mut draft = without_base.clone();
         draft["intent"] = json!("save");
@@ -1920,11 +2205,7 @@ mod tests {
 
         let complete = decode_valid(without_base);
         let issues = validate_forms(&complete.content, complete.intent);
-        assert!(has_code(
-            &issues,
-            V3ValidationIssueCode::BaseFormRequiredInGroup
-        ));
-        // 两个组共享同一个词形，两组都要各自报出来。
+        // 两个组各自缺原形，要各自报出来。
         assert_eq!(
             issues
                 .iter()
@@ -1936,14 +2217,14 @@ mod tests {
         );
 
         // 原封不动的请求里每组都挂着原形，不该被这条规则误伤。
-        let intact = decode_valid(valid_request());
+        let intact = decode_valid(two_common_forms_across_groups());
         assert!(!has_code(
             &validate_forms(&intact.content, intact.intent),
             V3ValidationIssueCode::BaseFormRequiredInGroup
         ));
 
         // 空组已经由 empty_form_group 说明白了，不再叠一条缺原形。
-        let mut empty_group = valid_request();
+        let mut empty_group = two_common_forms_across_groups();
         empty_group["content"]["pos"][0]["form_groups"][1]["members"] = json!([]);
         let empty_group = decode_valid(empty_group);
         let issues = validate_forms(&empty_group.content, empty_group.intent);

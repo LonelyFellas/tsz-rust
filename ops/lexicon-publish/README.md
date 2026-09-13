@@ -70,7 +70,8 @@ export TSZ_ADMIN_PASSWORD='your-password'
 写 `{"zh": "引申义", "en": "figurative"}` 可分开给；默认「核心义 / core」）。
 
 同一个词性里只要有一处区分英美，整个词性会升成 `uk_us` 形状，其余词形自动把 common 拼写复制到两侧——
-这是后端 `dialect_rules` 的硬约束（`distinguish` 拼写必须配 `distinguish` 音标）。
+脚本每个词性只建一个通用变化组，组内词形共用该组的 `dialect_rules`（后端硬约束：`distinguish` 拼写必须配
+`distinguish` 音标）。
 
 ## 会话缓存
 

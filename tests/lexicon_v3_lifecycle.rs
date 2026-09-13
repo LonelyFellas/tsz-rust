@@ -100,10 +100,6 @@ async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
         "pos": [{
             "pos_id": pos_id,
             "pos": "noun",
-            "dialect_rules": {
-                "spelling_mode": "unified",
-                "phonetic_mode": "unified"
-            },
             "forms": [{
                 "id": form_id,
                 "form_type": "base",
@@ -121,6 +117,8 @@ async fn seed_v3_entry(pool: &PgPool, admin_id: Uuid) -> Uuid {
             "form_groups": [{
                 "id": group_id,
                 "is_regular": true,
+                "scope": "general",
+                "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
                 "members": [{"id": membership_id, "form_id": form_id}]
             }]
         }]
