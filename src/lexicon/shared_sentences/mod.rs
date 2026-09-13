@@ -174,6 +174,7 @@ pub enum SentenceListSort {
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct SentenceListQuery {
     /// Filter before pagination. Pending and unlinked may overlap.
     #[param(inline)]

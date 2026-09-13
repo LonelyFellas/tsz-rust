@@ -1697,3 +1697,23 @@ async fn sentence_status_filters_and_pending_scope_are_precise(pool: PgPool) {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
+
+#[test]
+fn sentence_list_openapi_parameters_are_optional_queries() {
+    use utoipa::OpenApi;
+    let spec = serde_json::to_value(tsz_rust::openapi::ApiDoc::openapi()).unwrap();
+    let parameters = spec["paths"][ROOT]["get"]["parameters"].as_array().unwrap();
+    for name in [
+        "association_status",
+        "pending_entry_id",
+        "sort",
+        "entry_id",
+        "sense_id",
+        "page",
+        "page_size",
+    ] {
+        let parameter = parameters.iter().find(|p| p["name"] == name).unwrap();
+        assert_eq!(parameter["in"], "query", "{name}: {parameter}");
+        assert_eq!(parameter["required"], false, "{name}: {parameter}");
+    }
+}
