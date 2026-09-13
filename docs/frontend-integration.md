@@ -1926,18 +1926,22 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 `v3_entry_state.origin` 只剩 `native`。迁移开头会先数残留 V2 行，有就整条失败——库里还有 V2
 数据时这条迁移不该跑。
 
-## 独立多维例句（2026-09-12）
+## 独立多维例句：句内关联反查（2026-09-13，本地候选）
 
-共享例句独立于词条草稿及词条发布内容；当前例句通过收录关系读取，不嵌回 meanings。前端例句编辑器点“完成”立即保存并对后台可见，取消外层词条不会撤销。没有新增审核、独立发布按钮或题目生成。
+共享例句独立保存；句中的单词或短语关联的是已保存的具体词义。词义区块使用同一条 `shared_sentence_annotations` 上的 `target_entry_id + target_sense_id` 反查，不建立独立收录关系。同句多处指向同一词义时去重；词条汇总再按例句去重。完整产品规则见配套 tsz 工作树 `docs/features/shared-sentences/`。
 
-- `GET /api/v1/admin/lexicon/sentences`：关键词（ID/正文/创建人）、等级、创建时间与分页；`entry_id` 查询正式收录，`candidates=true` 查询可能收录的标注例句。
-- `POST /api/v1/admin/lexicon/sentences`：必须给出有权编辑的真实 `source_entry_id`；正文、句内标注与该词条收录在单事务完成。`content.sentence.id` 是客户端稳定 UUID，同 UUID 同创建内容重试返回已有例句，不创建副本；内容不同返回 409。
-- `GET/PUT/DELETE /api/v1/admin/lexicon/sentences/{id}`：详情、共享修改、整体删除。修改与删除带 `base_revision`；引用集合变化也推进 revision，过期确认返回 409。
-- `POST /api/v1/admin/lexicon/sentences/{id}/collections`：明确指定 `entry_id` 收录；`annotation_ids` 只包含用户勾选的 pending 标记，事务内验证候选、绑定具体词条并收录。已有 linked 目标用空数组，不重新定目标。
-- `DELETE /api/v1/admin/lexicon/sentences/{id}/collections/{entry_id}`：只解除该词条收录，保留例句和其他引用。
+- `GET /api/v1/admin/lexicon/sentences?entry_id=...&sense_id=...`：按同一条有效关联匹配词条与词义。`sense_id` 不能单独传；只传 `entry_id` 返回该词条全部词义的去重例句。Pending、EntryOnly、历史 source 和旧 collection 不构成词义成员关系。
+- `POST /api/v1/admin/lexicon/sentences`：必填 `source_entry_id + source_sense_id`。至少一条有效 Linked 同时指向当前词条和当前词义；只保存例句正文与标注，不代为保存词义。新词义先通过正常词义保存流程落库，才能创建例句。
+- `PUT /api/v1/admin/lexicon/sentences/{id}`：必填 `base_revision`，可选 `context_entry_id + context_sense_id` 必须成对出现。词义内编辑传完整上下文并校验当前关联；全局编辑不传，可以清除全部关联。保留的其他关联也须有效。
+- `DELETE /api/v1/admin/lexicon/sentences/{id}/associations/{entry_id}`：请求体为 `{base_revision, sense_id}`，只解除当前词义的全部标注，保留例句、其他词义和其他词条的关联。整体删除继续使用 `DELETE /sentences/{id}`。
+- Linked 包含 `target_entry_id / target_pos_id / target_base_form_id / target_form_id / target_variant_id / target_sense_id`，可选 `target_publication_id`。后端校验词性、同组原形与词形、方言变体及词义从属，并验证正文完整 token 与规范化拼写。短语直接关联自己的词义，允许非连续片段；共享例句独立于宿主词条，所以可以关联当前词条。
+- `SharedSentence.entries[].senses` 返回实际关联词义的 `{id, gloss}` 摘要。历史只有 entry 的标注返回 `state: "entry_only"`，全局可见，保存前必须补选词义或清除，不能猜测归入第一个词义。
+- 选择器复用 V3 成分目标查询的词条、词形、词义层级，使用精确词面匹配和草稿候选。旧 `GET /sentences/targets` 保留为词面元数据查询，不再作为完整身份或保存合法性的证明。
 
-句内片段采用 Unicode 码点偏移，支持非连续且不重叠的多段片段。`linked` 只接受具体词条 UUID（可为草稿）；`pending` 保留词条类型、待关联文字、释义/上下文和位置。规范化词面及已有词形只用于发现候选，不按拼写自动绑定或自动创建词条。同名词条通过其区分标签和不同 UUID 人工选择。
+当前草稿中已删除的词义或词形，不能靠旧发布快照恢复为新的有效关联。已有共享例句引用会阻止删除/修改相关词义或词形身份、发布或激活缺少目标的版本；返回 `409 reference_conflict`，需要先调整或解除例句关联。
 
-所有端点核实活跃管理员；创建和收录沿用未发布词条的创建人/超管写权限，共享例句作为已发布内容由活跃管理员维护。数据库结构迁移成对提供，已有共享数据时禁止直接回退删除结构。无旧数据回填或兼容窗口，新前后端须配套切换；本次不包含部署操作。
+旧 `/collections` 操作保持退出路由；不恢复 `sentence_collections`、`collected/sense_ids` 或词义保存队列。既有 collection 表和此前本地 sense migration 暂留，当前业务不读写它们。新迁移 `20260913120000_shared_sentence_targets` 在真实标注表添加 sense 外键、完整 target JSON 与索引。历史数据不自动分配词义，有新 sense target 时 down 拒绝有损回退。
 
-共享引用与词条归档：被活跃共享例句标注的具体词条须先解除对应标注，才能移入垃圾桶；单条和批量归档均返回 409 `reference_conflict` 并提示处理方法。批次包含例句来源词条也不豁免，因为共享例句独立发布。只移除收录不会删除句内标注。
+发布顺序：同批发布。新旧前后端的必填字段、枚举与严格 runtime validator 不兼容，不能滚动混用。维护窗口内暂停相关写入口，备份核对数据，切换配套后端和前端，验证创建、按词义反查、共享编辑与解除后恢复。本次仅本地验收，不执行发布。
+
+验收命令（使用隔离测试数据库及 Redis）：`SQLX_OFFLINE=true cargo test --locked --test shared_sentences`

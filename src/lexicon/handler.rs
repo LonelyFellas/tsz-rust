@@ -110,7 +110,7 @@ fn apply_capability_flags(capabilities: &mut AdminWordV3Capabilities, flags: Sma
     capabilities.sense_component_usages = Some(true);
 }
 
-fn map_error(error: LexiconServiceError) -> AppError {
+pub(crate) fn map_error(error: LexiconServiceError) -> AppError {
     match error {
         LexiconServiceError::AnnotationConflict(conflict) => AppError::conflict(
             ErrorCode::AnnotationConflict,
@@ -340,6 +340,11 @@ fn map_error(error: LexiconServiceError) -> AppError {
             ErrorCode::ReferenceConflict,
             None,
             "词条被共享例句标注，请先在多维例句库解除对应标注，再移入垃圾桶。",
+        ),
+        LexiconServiceError::SharedSentenceTargetInUse => AppError::conflict(
+            ErrorCode::ReferenceConflict,
+            None,
+            "该词义或词形仍被共享例句引用，请先解除或调整例句关联。",
         ),
         LexiconServiceError::ReferenceConflict => AppError::conflict(
             ErrorCode::ReferenceConflict,

@@ -38,8 +38,8 @@ use utoipa::{
         crate::lexicon::shared_sentences::create,
         crate::lexicon::shared_sentences::update,
         crate::lexicon::shared_sentences::delete,
-        crate::lexicon::shared_sentences::collect,
-        crate::lexicon::shared_sentences::uncollect,
+        crate::lexicon::shared_sentences::targets,
+        crate::lexicon::shared_sentences::unlink,
 
         // auth 域
         crate::auth::handler::login,

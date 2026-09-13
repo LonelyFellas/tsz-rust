@@ -1711,6 +1711,13 @@ impl LexiconService {
             None
         };
         reconcile_v3_meanings_after_forms(&mut meanings, &input.content);
+        super::text_links::ensure_shared_sentence_targets(
+            &mut transaction,
+            entry_id,
+            &input.content,
+            &meanings,
+        )
+        .await?;
         let aggregate_issues =
             crate::lexicon::v3_contract::validate_aggregate_node_limit(&input.content, &meanings);
         if !aggregate_issues.is_empty() {
@@ -2088,6 +2095,13 @@ impl LexiconService {
         if !aggregate_issues.is_empty() {
             return Err(v3_validation_failed(aggregate_issues));
         }
+        super::text_links::ensure_shared_sentence_targets(
+            &mut transaction,
+            entry_id,
+            &forms,
+            &canonical_content,
+        )
+        .await?;
         let mut proposed = proposed_nodes(&DraftFormsStepContent::default(), &relational_meanings);
         let translation_nodes = v3_translation_proposed_nodes(&canonical_content);
         let translation_ids = translation_nodes

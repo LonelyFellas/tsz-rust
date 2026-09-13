@@ -17,13 +17,10 @@ pub fn router() -> Router<AppState> {
                 .put(super::shared_sentences::update)
                 .delete(super::shared_sentences::delete),
         )
+        .route("/sentences/targets", get(super::shared_sentences::targets))
         .route(
-            "/sentences/{id}/collections",
-            axum::routing::post(super::shared_sentences::collect),
-        )
-        .route(
-            "/sentences/{id}/collections/{entry_id}",
-            axum::routing::delete(super::shared_sentences::uncollect),
+            "/sentences/{id}/associations/{entry_id}",
+            axum::routing::delete(super::shared_sentences::unlink),
         )
         .route("/detections", axum::routing::post(handler::detect))
         .route(

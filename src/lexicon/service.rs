@@ -138,6 +138,8 @@ pub enum LexiconServiceError {
     EntryHasUnavailablePublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
     #[error("a referenced publication is changing")]
     ReferenceConflict,
+    #[error("a shared sentence still references this sense or form")]
+    SharedSentenceTargetInUse,
     #[error("relation prebinding reconciliation fanout exceeds 500 eligible relations")]
     RelationPrebindingFanoutExceeded,
     #[error("a stable V3 node identity changed")]
