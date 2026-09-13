@@ -1945,3 +1945,15 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 发布顺序：同批发布。新旧前后端的必填字段、枚举与严格 runtime validator 不兼容，不能滚动混用。维护窗口内暂停相关写入口，备份核对数据，切换配套后端和前端，验证创建、按词义反查、共享编辑与解除后恢复。本次仅本地验收，不执行发布。
 
 验收命令（使用隔离测试数据库及 Redis）：`SQLX_OFFLINE=true cargo test --locked --test shared_sentences`
+
+### 例句管理筛选与反向候选（本地候选）
+
+`GET /api/v1/admin/lexicon/sentences` 增加可选参数：
+
+- `association_status=pending|entry_only|unlinked`：含待关联、含未选词义旧关联、无已绑定词条关联。pending 与 unlinked 可以重叠，过滤在分页前执行。
+- `pending_entry_id=<UUID>`：按当前词条的 draft 有效词形、类别、方言找 pending 例句；与 `entry_id/sense_id` 互斥。每句只计一次。空骨架可发现候选，保存完整词义后才能认领。
+- `sort=created_at_desc|updated_at_desc`：默认仍为创建时间倒序，支持按最近更新排序。
+
+响应仍为 `SharedSentenceList`。人工认领复用原 PUT，保留例句和 annotation ID，只替换明确选择的 target；带原 revision，当前词条上下文同时带 context entry/sense。多条旧 EntryOnly 必须一起补全，不能隐式删掉其他标注来保存。自动新建或发布词条不会猜选词义。
+
+新前端依赖这些参数实际生效，部署顺序为后端先、前端后；旧前端继续兼容新后端。没有新增表、迁移或写端点。配套需求与设计位于 tsz 的 `docs/features/sentence-management/`。

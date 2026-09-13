@@ -159,8 +159,30 @@ pub struct SharedSentence {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceAssociationStatus {
+    Pending,
+    EntryOnly,
+    Unlinked,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceListSort {
+    CreatedAtDesc,
+    UpdatedAtDesc,
+}
+
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct SentenceListQuery {
+    /// Filter before pagination. Pending and unlinked may overlap.
+    #[param(inline)]
+    pub association_status: Option<SentenceAssociationStatus>,
+    /// Pending annotations matching this entry's current draft forms.
+    pub pending_entry_id: Option<Uuid>,
+    #[param(inline)]
+    pub sort: Option<SentenceListSort>,
     pub q: Option<String>,
     pub level: Option<String>,
     pub created_from: Option<DateTime<Utc>>,
@@ -537,6 +559,7 @@ pub async fn list(
     let page = q.page.unwrap_or(1);
     let size = q.page_size.unwrap_or(10);
     if (q.sense_id.is_some() && q.entry_id.is_none())
+        || (q.pending_entry_id.is_some() && (q.entry_id.is_some() || q.sense_id.is_some()))
         || !(1..=100000).contains(&page)
         || !(1..=50).contains(&size)
         || q.q.as_ref().is_some_and(|s| s.chars().count() > 200)
@@ -553,12 +576,44 @@ pub async fn list(
         .execute(&mut *snapshot)
         .await
         .map_err(AppError::internal)?;
+    let association_status = q.association_status.map(|status| match status {
+        SentenceAssociationStatus::Pending => "pending",
+        SentenceAssociationStatus::EntryOnly => "entry_only",
+        SentenceAssociationStatus::Unlinked => "unlinked",
+    });
+    let pending_forms = if let Some(entry) = q.pending_entry_id {
+        let targets = target_forms(&mut snapshot, Some(entry), Some(entry), None).await?;
+        let target = targets
+            .items
+            .first()
+            .ok_or_else(|| invalid("目标词条不存在、已归档或没有可匹配词形"))?;
+        let forms = target.surfaces.iter().map(|surface| {
+            Ok(serde_json::json!({
+                "kind": target.kind,
+                "normalized": normalize_headword(&surface.surface).map_err(|_| invalid("目标词形无效"))?.key,
+                "dialect": surface.dialect,
+            }))
+        }).collect::<Result<Vec<_>, AppError>>()?;
+        Some(serde_json::Value::Array(forms))
+    } else {
+        None
+    };
     macro_rules! sentence_filter { () => { r#" FROM lexicon.shared_sentences s JOIN admins creator ON creator.id=s.created_by_admin_id
         WHERE s.deleted_at IS NULL
         AND ($1::text IS NULL OR s.id::text ILIKE '%'||$1||'%' OR s.content::text ILIKE '%'||$1||'%' OR creator.display_name ILIKE '%'||$1||'%')
         AND ($2::text IS NULL OR s.content->>'level'=$2)
         AND ($3::timestamptz IS NULL OR s.created_at >= $3) AND ($4::timestamptz IS NULL OR s.created_at <= $4)
-        AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.target_entry_id=$5 AND a.target_sense_id IS NOT NULL AND ($6::uuid IS NULL OR a.target_sense_id=$6)))"# }; }
+        AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.target_entry_id=$5 AND a.target_sense_id IS NOT NULL AND ($6::uuid IS NULL OR a.target_sense_id=$6)))
+        AND ($7::text IS NULL
+          OR ($7='pending' AND EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.pending_kind IS NOT NULL))
+          OR ($7='entry_only' AND EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.target_entry_id IS NOT NULL AND a.target_sense_id IS NULL))
+          OR ($7='unlinked' AND NOT EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.target_entry_id IS NOT NULL)))
+        AND ($8::jsonb IS NULL OR EXISTS(
+          SELECT 1 FROM lexicon.shared_sentence_annotations a
+          JOIN jsonb_to_recordset($8) AS f(kind text, normalized text, dialect text)
+            ON a.pending_kind=f.kind AND a.pending_normalized=f.normalized
+            AND (a.source_dialect='common' OR a.source_dialect=f.dialect)
+          WHERE a.sentence_id=s.id))"# }; }
     let total: i64 = sqlx::query_scalar(concat!("SELECT count(*) ", sentence_filter!()))
         .bind(&q.q)
         .bind(&q.level)
@@ -566,13 +621,15 @@ pub async fn list(
         .bind(q.created_to)
         .bind(q.entry_id)
         .bind(q.sense_id)
+        .bind(association_status)
+        .bind(&pending_forms)
         .fetch_one(&mut *snapshot)
         .await
         .map_err(AppError::internal)?;
     let ids: Vec<Uuid> = sqlx::query_scalar(concat!(
         "SELECT s.id ",
         sentence_filter!(),
-        " ORDER BY s.created_at DESC,s.id LIMIT $7 OFFSET $8"
+        " ORDER BY CASE WHEN $9 THEN s.updated_at ELSE s.created_at END DESC,s.id LIMIT $10 OFFSET $11"
     ))
     .bind(&q.q)
     .bind(&q.level)
@@ -580,6 +637,9 @@ pub async fn list(
     .bind(q.created_to)
     .bind(q.entry_id)
     .bind(q.sense_id)
+        .bind(association_status)
+        .bind(&pending_forms)
+    .bind(matches!(q.sort, Some(SentenceListSort::UpdatedAtDesc)))
     .bind(size)
     .bind((page - 1) * size)
     .fetch_all(&mut *snapshot)
