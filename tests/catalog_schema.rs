@@ -1442,7 +1442,7 @@ async fn sub_part_display_checks_reject_blank_untrimmed_and_overlong_values(pool
 
 /// 词形变化的英文全称约束是建表时的列级 CHECK，名字由 PostgreSQL 生成；上限与另外两张表一致。
 #[sqlx::test]
-async fn form_type_full_name_en_check_allows_up_to_200_characters(pool: PgPool) {
+async fn form_type_full_name_en_check_rejects_blank_untrimmed_and_overlong_values(pool: PgPool) {
     let noun = part_id(&pool, "noun").await;
     let insert = |code: &'static str, full_name_en: String| {
         sqlx::query(
@@ -1459,12 +1459,19 @@ async fn form_type_full_name_en_check_allows_up_to_200_characters(pool: PgPool) 
         .execute(&pool)
     };
 
-    assert_db_error(
-        insert("long_form_bad", "f".repeat(201)).await,
-        CHECK_VIOLATION,
-        Some("form_types_full_name_en_check"),
-        "词形变化英文全称超过 200 字应被 CHECK 拒绝",
-    );
+    for (code, full_name_en) in [
+        ("blank_full", String::new()),
+        ("leading_full", " full".to_owned()),
+        ("trailing_full", "full ".to_owned()),
+        ("long_form_bad", "f".repeat(201)),
+    ] {
+        assert_db_error(
+            insert(code, full_name_en).await,
+            CHECK_VIOLATION,
+            Some("form_types_full_name_en_check"),
+            &format!("词形变化 {code} 的英文全称必须 trim 后 1–200 字"),
+        );
+    }
     insert("long_form_ok", "f".repeat(200))
         .await
         .expect("词形变化英文全称 200 字的上边界应合法");

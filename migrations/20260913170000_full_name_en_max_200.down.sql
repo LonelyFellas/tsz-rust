@@ -1,10 +1,28 @@
+-- 回退：上限收回 64 会让超长的存量英文全称撞 CHECK，所以只要还有超过 64 字的就拒绝回退，
+-- 报出表名与 code 让运维先改短。
 DO $$
+DECLARE
+    long_names TEXT;
 BEGIN
-    IF EXISTS (SELECT 1 FROM catalog.parts_of_speech WHERE char_length(full_name_en) > 64)
-        OR EXISTS (SELECT 1 FROM catalog.sub_parts_of_speech WHERE char_length(full_name_en) > 64)
-        OR EXISTS (SELECT 1 FROM catalog.form_types WHERE char_length(full_name_en) > 64)
-    THEN
-        RAISE EXCEPTION '存在超过 64 字的英文全称，回退前请先把它们改短';
+    SELECT string_agg(item, ', ' ORDER BY item)
+    INTO long_names
+    FROM (
+        SELECT 'parts_of_speech:' || code AS item
+        FROM catalog.parts_of_speech
+        WHERE char_length(full_name_en) > 64
+        UNION ALL
+        SELECT 'sub_parts_of_speech:' || code
+        FROM catalog.sub_parts_of_speech
+        WHERE char_length(full_name_en) > 64
+        UNION ALL
+        SELECT 'form_types:' || code
+        FROM catalog.form_types
+        WHERE char_length(full_name_en) > 64
+    ) long_rows;
+    IF long_names IS NOT NULL THEN
+        RAISE EXCEPTION
+            'cannot restore full_name_en max length 64 while longer values exist: %',
+            long_names;
     END IF;
 END
 $$;
