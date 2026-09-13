@@ -4,11 +4,11 @@
 `tshb-test`（47.121.142.19，ssh 别名已配密钥）。服务器上
 `/opt/tsz-rust` 不是 git 仓库，唯一同步方式就是本流程。
 
-操作命令按仓库根目录执行；入口与授权要求见 [SKILL.md](../SKILL.md)。本文是实际部署时必须完整读取的操作手册。
+准备阶段从源仓库根目录执行，其后所有命令在本 session 的独立部署 checkout 执行；入口与授权要求见 [SKILL.md](../SKILL.md)。本文是实际部署时必须完整读取的操作手册。
 
 ## 红线
 
-- 只部署干净工作区中的本地 `main`，且 `HEAD` 必须等于 GitHub `origin/main`。
+- 只部署本 session 独立干净 checkout 中的 `main`，且 `HEAD` 必须等于 GitHub `origin/main`；不要求原开发工作区干净。
 - 只把 CI `conclusion == success` 视为通过；`skipped`、`neutral` 也不允许部署。
 - CI 为 `queued`、`in_progress`、`pending`、`requested` 或 `waiting` 时等待，不得提前部署。
 - CI 失败、取消、超时、无运行记录、GitHub API/认证异常或状态未知时，一律不部署。
@@ -22,19 +22,26 @@
 
 ## 1. 准备精确的 main 源码
 
-1. 运行 `git status --porcelain`。存在任何已跟踪或未跟踪改动就停止；不得部署未提交工作区。
-2. 安全切换并快进本地 `main`：
+1. 核对源仓库路径与 origin；保留原开发工作区的分支和全部改动。部署使用 CI 制品，不复制工作区文件。
+2. 创建本次独立部署 checkout，并从 GitHub 获取 main：
    ```bash
    set -euo pipefail
-   git switch main
-   git fetch origin main
-   git merge --ff-only origin/main
+   source_checkout=$(git rev-parse --show-toplevel)
+   source_origin=$(git remote get-url origin)
+   deploy_checkout=$(mktemp -d "${TMPDIR:-/tmp}/tsz-rust-deploy.XXXXXX")
+   git clone --shared --no-checkout "$source_checkout" "$deploy_checkout"
+   git -C "$deploy_checkout" remote set-url origin "$source_origin"
+   git -C "$deploy_checkout" fetch origin main
+   git -C "$deploy_checkout" switch -C main origin/main
+   printf '部署 checkout: %s\n' "$deploy_checkout"
    ```
-   切换或快进失败就停止；不得 reset、丢弃或覆盖本地改动。
+   保存返回的绝对路径；下一步在这个目录运行。它是本 session 的临时 clone，不切换或清理源仓库；部署期间保留源仓库对象。
+   恢复现有 session 时直接读取 state 中的 checkout，不重新创建。尚未写 state 就失败时保留临时目录供诊断。
 3. 原子取得本地部署锁，记录部署 SHA 和主题，并把 session/state 放在锁目录内：
 
    ```bash
    set -euo pipefail
+   deploy_checkout=$(git rev-parse --show-toplevel)
    deploy_sha=$(git rev-parse HEAD)
    deploy_tree=$(git rev-parse 'HEAD^{tree}')
    git show -s --format='%H %s' "$deploy_sha"
@@ -59,8 +66,8 @@
      > "$session_tools/require-green-main.sh"
    chmod 0755 "$session_tools/require-green-main.sh"
    printf '%s\n' "$deploy_session" > "$deploy_lock_dir/owner"
-   printf 'deploy_session=%q\ndeploy_sha=%q\ndeploy_tree=%q\nsession_tools=%q\n' \
-     "$deploy_session" "$deploy_sha" "$deploy_tree" "$session_tools" > "$state_file"
+   printf 'deploy_session=%q\ndeploy_sha=%q\ndeploy_tree=%q\nsession_tools=%q\ndeploy_checkout=%q\n' \
+     "$deploy_session" "$deploy_sha" "$deploy_tree" "$session_tools" "$deploy_checkout" > "$state_file"
    ```
 
    此后**每个** Bash 步骤都从锁目录的 state 读回状态，并用独立 owner 文件核对 session。
@@ -69,6 +76,8 @@
    ```bash
    set -euo pipefail
    set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+   test -n "${deploy_checkout:-}"
+   cd "$deploy_checkout"
    test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
    test -n "${deploy_session:-}" && test -n "${deploy_sha:-}"
    test "$deploy_sha" = "$(git rev-parse HEAD)"   # 残留或串号立即暴露
@@ -80,6 +89,8 @@
    ```bash
    set -euo pipefail
    set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+   test -n "${deploy_checkout:-}"
+   cd "$deploy_checkout"
    test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
    rm -f ~/.config/tsz-rust/deploy.lock/state.env ~/.config/tsz-rust/deploy.lock/owner
    rmdir ~/.config/tsz-rust/deploy.lock
@@ -92,6 +103,8 @@
 ```bash
 set -euo pipefail
 set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+test -n "${deploy_checkout:-}"
+cd "$deploy_checkout"
 test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
 test -x "$session_tools/require-green-main.sh"
 "$session_tools/require-green-main.sh" "$deploy_sha"
@@ -109,6 +122,8 @@ test -x "$session_tools/require-green-main.sh"
 ```bash
 set -euo pipefail
 set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+test -n "${deploy_checkout:-}"
+cd "$deploy_checkout"
 test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
 git fetch origin main
 test "$(git branch --show-current)" = main
@@ -124,6 +139,8 @@ test -z "$(git status --porcelain)"
 ```bash
 set -euo pipefail
 set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+test -n "${deploy_checkout:-}"
+cd "$deploy_checkout"
 test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
 ci_run=$(
   gh api "repos/LonelyFellas/tsz-rust/actions/runs?branch=main&head_sha=$deploy_sha&per_page=100" \
@@ -150,6 +167,8 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
    ```bash
    set -euo pipefail
    set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+   test -n "${deploy_checkout:-}"
+   cd "$deploy_checkout"
    test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
    artifact_name="tsz-rust-x86_64-linux-gnu-$deploy_sha-attempt-$ci_run_attempt"
    [[ "$artifact_name" =~ ^tsz-rust-x86_64-linux-gnu-[0-9a-f]{40}-attempt-[1-9][0-9]*$ ]]
@@ -213,6 +232,8 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
    ```bash
    set -euo pipefail
    set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+   test -n "${deploy_checkout:-}"
+   cd "$deploy_checkout"
    test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
    test -s "$tools/deployment_preflight.py"
    deployment_preflight=$(
@@ -249,7 +270,7 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
    rollback_expected_version=${rollback_expected_version:-$rollback_target_version}
    [[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
    test "$rollback_expected_version" -ge "$rollback_target_version"
-   printf 'rollback_target_version=%q\nrollback_expected_version=%q\n' \
+   printf 'rollback_schema_safe=false\nrollback_target_version=%q\nrollback_expected_version=%q\n' \
      "$rollback_target_version" "$rollback_expected_version" \
      >> ~/.config/tsz-rust/deploy.lock/state.env
    ```
@@ -257,11 +278,15 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
    自身 fail closed，不能为了让部署通过而在预检中写库或清数据。候选版本相对现网新增的
    每个 migration 都必须有 down migration；部署前数据库版本与候选最高版本写入本 session
    state，失败回退时只接受这个有界区间。
+   有新迁移时，在写服务器之前核实 down 区间的数据保护条件与隔离验证证据。仅证据证明整个区间可安全撤回时，向本 session state 追加 `rollback_schema_safe=true`，并在交付记录中注明证据；不得仅凭存在 down 文件设为 true。
+   否则保持 false，先明确并批准人工恢复方案；部署失败时停止服务、保留锁与现场并请求恢复决定。未确定任何恢复方案前不得进入服务器写入阶段。
 4. **现有部署来源核对（动服务器状态之前必做）**：读服务器上的正式 manifest，
    由脚本判定是否与本次目标相同——不要人眼比对两个 40 字符 SHA：
    ```bash
    set -euo pipefail
    set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+   test -n "${deploy_checkout:-}"
+   cd "$deploy_checkout"
    test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
    deployed_sha=$(ssh tshb-test 'cat /opt/tsz-deploy-manifests/api.json 2>/dev/null || echo "{}"' \
      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source",{}).get("git_sha",""))')
@@ -272,16 +297,15 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
    echo "服务器当前: ${deployed_sha:-<无 manifest>}"
    echo "本次目标:   $deploy_sha"
    if [ "$deployed_sha" = "$deploy_sha" ]; then
-     echo "!! 该提交已经部署过 —— 停下来向用户报告并确认是否仍要重跑"
+     echo "该提交已部署：先验证现有制品与健康状态，成功则无需重复发布"
    else
      echo "OK 与服务器当前来源不同，可继续"
    fi
    printf 'deployed_sha=%q\n' "$deployed_sha" >> ~/.config/tsz-rust/deploy.lock/state.env
    ```
-   打印 `!!` 那行就**停下来**向用户确认，不要默认继续。多个 session 并行时，你对生产
-   当前版本的记忆会过期——别用记忆代替这一步。空跑一轮的代价不只是白费时间：第 4 节
-   撤下旧 manifest 后，服务器会陷入「有二进制、无来源记录」的半状态，必须重启服务走完
-   全流程才能恢复（2026-08-20 实际发生过）。
+   同 SHA 时先验证现有 `api.json` 与实际二进制哈希、运行服务及第 5 节 health/ready/auth 冒烟（使用现有服务端口 8383，不停止服务或启动候选进程）。SHA 相同本身不代表成功。
+   若全部通过且用户未明确要求重部署，核对并释放本 session 本地锁，报告目标已满足，到此结束，不进入第 4 节。
+   若用户明确要求重部署，沿用已有授权继续；验证失败时报告具体差异并按现有授权处理，不能把失败报成已满足。
 
 ## 4. 部署步骤
 
@@ -291,6 +315,8 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
 ```bash
 set -euo pipefail
 set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+test -n "${deploy_checkout:-}"
+cd "$deploy_checkout"
 test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
 test -n "${deploy_sha:-}" && test -n "${deploy_tree:-}"
 test -n "${ci_run_id:-}" && test -n "${ci_run_attempt:-}"
@@ -482,6 +508,8 @@ manifest 中的原始 binary 字节数。两者分别是压缩上传包与二进
 ```bash
 set -euo pipefail
 set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+test -n "${deploy_checkout:-}"
+cd "$deploy_checkout"
 test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
 test "$deploy_sha" = "$(git rev-parse HEAD)"
 test -n "$ci_run_id" && test -n "$ci_run_attempt" && test -n "$deploy_tree"
@@ -525,7 +553,7 @@ ssh tshb-test "set -eu
   test \"\$(curl -fsS http://127.0.0.1:8383/healthz)\" = '{\"status\":\"ok\"}'
   test \"\$(curl -fsS http://127.0.0.1:8383/readyz)\" = '{\"status\":\"ready\"}'"
 
-# 新 manifest 验证完成后才释放服务器锁；再释放同 owner 的本地锁。unique staging 保留供审计。
+# 新 manifest 验证完成后才释放服务器锁；再释放同 owner 的本地锁。unique staging 与部署 checkout 保留供审计；不得清理原开发工作区。
 ssh tshb-test "set -eu; test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'; \
   rm -f /opt/tsz-rust/deploy.lock/owner /opt/tsz-rust/deploy.lock/git_sha; \
   rmdir /opt/tsz-rust/deploy.lock"
@@ -540,20 +568,24 @@ create 使用同目录临时文件 + 原子 rename；manifest 只包含 Git/CI/�
 ## 6. 回退
 
 从本 session 的锁内 state 读回第 4 节记录的精确 `deploy_backup_dir`、部署前 migration
-版本与候选最高版本，不得用通配符或人工猜测。先停止所有业务写入，用仍在正式路径上的
-候选二进制把数据库回到部署前版本；只有迁移账本验证通过后才恢复旧二进制与 manifest。
+版本与候选最高版本，不得用通配符或人工猜测。先停止所有业务写入。仅 `rollback_schema_safe=true` 时，允许候选二进制撤回已验证的迁移区间；否则保留停止状态与锁，按已批准的人工恢复方案请求必要决定。数据库已在部署前版本时可直接恢复二进制，无需 down。只有迁移账本验证通过后才恢复旧二进制与 manifest。
 候选二进制把整个 down 区间放在一个外层事务里，任一数据保护门拒绝时不会留下部分回退。
 本节可能在紧急情况下单独执行，因此代码块自带加载：
 
 ```bash
 set -euo pipefail
 set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+test -n "${deploy_checkout:-}"
+cd "$deploy_checkout"
 test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
 test -n "${deploy_backup_dir:-}"   # 为空说明 state 丢失，停下来人工确认备份目录，不要猜
 test -n "${rollback_target_version:-}" && test -n "${rollback_expected_version:-}"
 [[ "$rollback_target_version" =~ ^[1-9][0-9]*$ ]]
 [[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
 test "$rollback_expected_version" -ge "$rollback_target_version"
+
+rollback_schema_safe=${rollback_schema_safe:-false}
+case "$rollback_schema_safe" in true|false) ;; *) exit 1 ;; esac
 
 rollback_report=$(ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
@@ -585,6 +617,10 @@ rollback_report=$(ssh tshb-test "set -eu
       \"\$current_version\" '$rollback_target_version' \"\$current_version\"
   elif test \"\$current_version\" -gt '$rollback_target_version' \
     && test \"\$current_version\" -le '$rollback_expected_version'; then
+    if test '$rollback_schema_safe' != true; then
+      echo 'database rollback was not verified safe; preserving stopped service and locks' >&2
+      exit 1
+    fi
     /opt/tsz-rust/target/release/tsz-rust deploy-undo-migrations \
       '$rollback_target_version' \"\$current_version\"
   else
@@ -608,11 +644,11 @@ ssh tshb-test "set -eu
   systemctl restart tsz-rust"
 ```
 
-restore 会先验证备份组，再撤下正式 manifest，以同目录临时文件 + `os.replace` 原子换回二进制，最后才恢复旧 manifest；这避免覆盖运行中二进制的 `Text file busy` 和半恢复错配。第 4 节撤下旧 manifest 后，编译、重启、任一 smoke、create 或 verify 失败都必须执行本节，不得保留“新二进制 + 旧 manifest”。如果 down migration 因检测到新正文关联、重复译文或音频资产而拒绝，保留服务停止状态与两端锁，不能丢数据后强行恢复旧二进制。
+restore 会先验证备份组，再撤下正式 manifest，以同目录临时文件 + `os.replace` 原子换回二进制，最后才恢复旧 manifest；这避免覆盖运行中二进制的 `Text file busy` 和半恢复错配。第 4 节撤下旧 manifest 后，编译、重启、任一 smoke、create 或 verify 失败都必须进入本节按已验证的恢复边界处理，不得保留“新二进制 + 旧 manifest”。如果 down migration 因检测到新正文关联、重复译文或音频资产而拒绝，保留服务停止状态与两端锁，不能丢数据后强行恢复旧二进制。
 
 回退后重跑 health/ready/auth smoke；若恢复了 `api.json`，必须执行 `deployment_manifest.py verify`。若旧部署没有 manifest，回退后的来源状态明确为 UNKNOWN/BLOCKED，不能伪造一个 SHA。只有回退 smoke/manifest 全部通过后，才按第 5.1 节相同的 owner 校验顺序释放服务器锁和本地锁；失败时保留锁、state、staging 与 backup 供恢复，绝不自动抢锁。
 
-服务器上没有源码；含迁移的发布必须先由候选二进制撤回数据库，再换回旧二进制。只有数据库
+服务器上没有源码；含迁移的发布只有已验证安全时才由候选二进制撤回数据库；否则保持停止状态等待恢复决定，不换回不兼容的旧二进制。只有数据库
 已经处于部署前 migration 版本时，二进制恢复才构成完整回退。
 
 ## 7. 环境变量

@@ -1,6 +1,6 @@
 ---
 name: ship
-description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或更新面向 dev 的 PR。包含 Rust、SQLx、API/迁移验证和精确提交的独立 pre-push 审查；不用于仅实现或部署。
+description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或更新从 dev 面向 main 的 PR。包含 Rust、SQLx、API/迁移验证和精确提交的独立 pre-push 审查；不用于仅实现或部署。
 ---
 
 # 后端交付
@@ -37,27 +37,16 @@ API 响应新增字段也要核对实际消费者。V3 admin 等严格 runtime c
 
 ## 3. 统一安排质量门
 
-读取当前 CI、Cargo 配置和 hooks，复用同一代码/配置/环境状态下已有结果。
-迭代跑受影响的 `--lib`、`--test <target>` 或契约检查；完整代码变化交付前安排一次：
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
-```
-
-clippy 已包含编译检查，不为同一状态额外重复 `cargo check`。正常 hooks 仍必须执行。
-完整测试需要本地 Postgres/Redis；先检查仓库配置的测试依赖与隔离数据，不能拿快速单测冒充集成通过。
-API 修改按原生导出流程更新 OpenAPI；SQL/schema 修改使用 `cargo sqlx prepare -- --all-targets --all-features` 并审查 .sqlx 差异。
-代码/测试/配置变化后旧结果只适用于未受影响范围；测试恢复文件后须确保构建缓存没有沿用错误产物。
-
-耗时命令使用可继续读取的会话句柄，保存真实退出码。若与只读审查并行，固定相同输入，审查结果不能将仍运行的检查写成通过。
-不要在每个技能、提交或审查回合重复全量门；发现失败时先做定向复验。
+读取当前 CI、Cargo 配置与 hooks，复用同一输入下已通过的检查。原生 hooks 承接 clippy 与单元测试，不在自检阶段手工重复。
+代码变化补 fmt 及 hooks 未覆盖的必要定向检查；数据库集成测试按本次风险选择，跨模块风险或用户明确要求时再全量运行，不能将未运行的集成检查写成通过。
+API 修改按原生生成链更新 OpenAPI；SQL/schema 修改的 `.sqlx` 刷新由正常 pre-commit 承接，审查其生成差异。仅开发过程中确需缓存才能验证时提前生成，不重复手工刷新。
+纯规则文档提交由 hook 的保守白名单判定；配置、脚本、源码、生成输入等仍执行原生门禁。hooks 始终正常运行。
+耗时命令保留句柄与真实退出码；检查尚未结束时不报告通过。
 
 ## 4. 提交与一次独立审查
 
 1. 检查 `git diff --check` 和 staged diff，只提交本任务文件，使用 conventional commit；署名不写死历史模型。
-2. 正常 pre-commit 会刷新并暂存 .sqlx、运行 clippy。核对生成 diff 确属本任务；保留无关用户改动，需要时用隔离 checkout。
+2. pre-commit 对查询或构建输入变化刷新并暂存 .sqlx；非纯规则文档提交仍运行 clippy。核对生成 diff 确属本任务；保留无关用户改动，需要时用隔离 checkout。
 3. 提交后固定完整 `review_base_sha`（本次 origin/dev）与 `review_sha`（HEAD）。使用可用独立 review 工具；不可用时本技能要求一个新的只读 reviewer 子代理。
 4. 给 reviewer 原目标、精确 SHA、项目规则和实际测试结果。只读提交对象及直接受影响调用链，检查完整 `base_sha...review_sha`；不传自审结论，不重跑已提供的全量检查。脏工作区使用隔离 checkout。
 5. P0–P2 或其他实质正确性/安全问题阻断 push，误报用证据排除；P3 风格/清理不扇出额外 verifier。
@@ -72,5 +61,5 @@ API 修改按原生导出流程更新 OpenAPI；SQL/schema 修改使用 `cargo s
 失败读实际日志，区分 hooks、网络、认证；不要猜代理问题、擅自修改全局网络配置或引用不可访问的记忆。
 修复产生新 SHA 时补齐增量审查再推送。
 
-创建 `--base dev` 的 PR，已有同任务 PR 就更新；正文写清结果、契约/迁移、发布顺序、验证、审查与回退限制。多行正文用结构化参数或 `--body-file`。
+创建 `--base main --head dev` 的 PR，已有同任务 PR 就更新；正文写清结果、契约/迁移、发布顺序、验证、审查与回退限制。多行正文用结构化参数或 `--body-file`。
 报告 SHA、reviewer、检查状态、PR 链接和未验证事项。GitHub CI 全绿后才具备合并条件，合并与部署仍按各自授权执行。

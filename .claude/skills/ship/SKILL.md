@@ -1,6 +1,6 @@
 ---
 name: ship
-description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或更新面向 dev 的 PR。审查用分级 effort 的 /code-review 打在已提交 SHA 范围上，并行跑受影响测试，全量门交给原生 hooks；不用于仅实现或部署。
+description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或更新从 dev 面向 main 的 PR。审查用分级 effort 的 /code-review 打在已提交 SHA 范围上，并行跑受影响测试，全量门交给原生 hooks；不用于仅实现或部署。
 ---
 
 # 后端交付（Claude Code 版）
@@ -47,7 +47,7 @@ PR 以 **main** 为 base、从 dev 发起。合并 main 和部署使用各自授
 ## 3. 提交
 
 `git diff --check` 通过，只暂存本任务文件并检查 staged diff，使用 conventional commit。
-正常 pre-commit 会刷新并暂存 `.sqlx`、运行 clippy——**核对生成 diff 确属本任务**，
+pre-commit 对查询或构建输入变化刷新并暂存 `.sqlx`；非纯规则文档提交仍运行 clippy——**核对生成 diff 确属本任务**，
 hook 改写的文件必须纳入第 4 步审查范围。有混合 hunk 时精确暂存或用隔离 checkout。
 
 ## 4. 审查与测试——并行起跑，审查只一轮
@@ -74,17 +74,11 @@ hook 改写的文件必须纳入第 4 步审查范围。有混合 hunk 时精确
 
 ### 4b. 受影响测试
 
-跑受影响的 `--lib` / `--test <target>` / 契约检查。完整门在交付前跑一次：
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
-```
-
-clippy 已含编译检查，不重复 `cargo check`。完整测试需要本地 Postgres/Redis，
-先核实测试依赖与隔离数据，**不能拿快速单测冒充集成通过**。
-耗时命令用可继续读取的会话句柄，保存真实退出码。
+读取当前 CI、Cargo 配置与 hooks，复用同一输入下已通过的检查。原生 hooks 承接 clippy 与单元测试，不在自检阶段手工重复。
+代码变化补 fmt 及 hooks 未覆盖的必要定向检查；数据库集成测试按本次风险选择，跨模块风险或用户明确要求时再全量运行，不能将未运行的集成检查写成通过。
+API 修改按原生生成链更新 OpenAPI；SQL/schema 修改的 `.sqlx` 刷新由正常 pre-commit 承接，审查其生成差异。仅开发过程中确需缓存才能验证时提前生成，不重复手工刷新。
+纯规则文档提交由 hook 的保守白名单判定；配置、脚本、源码、生成输入等仍执行原生门禁。hooks 始终正常运行。
+耗时命令保留句柄与真实退出码；检查尚未结束时不报告通过。
 
 ## 5. 推送与 PR
 
@@ -93,9 +87,9 @@ clippy 已含编译检查，不重复 `cargo check`。完整测试需要本地 P
 失败读实际日志区分 hooks、网络、认证；不猜代理问题、不擅自改全局网络配置。
 修复产生新 SHA 时补齐增量审查再推送。
 
-创建 `--base dev` 的 PR，已有同任务 PR 就更新；正文写清结果、契约/迁移、发布顺序、
+创建 `--base main --head dev` 的 PR，已有同任务 PR 就更新；正文写清结果、契约/迁移、发布顺序、
 验证、审查与回退限制。多行正文用 `--body-file`。
 报告 SHA、审查结论、检查状态、PR 链接和未验证事项。
 GitHub CI 全绿后才具备合并条件，**合并与部署仍按各自授权执行**。
 
-ship 完成是阶段边界——交接信息落到 PR 正文后，建议开新会话继续下一件事。
+ship 后按用户指定终点交付；继续任务复用当前会话与 PR 中已有证据。
