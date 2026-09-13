@@ -1348,7 +1348,9 @@ async fn referenced_sense_cannot_be_removed_until_unlinked(pool: PgPool) {
 async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: PgPool) {
     let actor = admin(&pool).await;
     let source = entry(&pool, actor, "wonderful").await;
-    let redis_url = std::env::var("TEST_REDIS_URL").expect("isolated Redis URL");
+    let redis_url = std::env::var("TEST_REDIS_URL")
+        .or_else(|_| std::env::var("REDIS_URL"))
+        .expect("isolated Redis URL");
     let redis = deadpool_redis::Config::from_url(redis_url)
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .unwrap();
