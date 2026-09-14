@@ -56,7 +56,9 @@ job /dʒɒb/ 下有一个特例词义 Job /dʒəʊb/：大写、读音不同。�
 ## 约束
 
 - **无兼容承诺**：词性上的两列直接删、组上直接加非空列；`entry_editor_projection` JSON 与发布快照
-  不回填。测试服按既定口径清库（`TRUNCATE lexicon.*` + 两张词性表，`dictionary` / `metadata` 不动）。
+  不回填。测试服按既定口径清库（`TRUNCATE lexicon.*` + 两张词性表，`dictionary` / `metadata` 不动），
+  清完必须补回被连带清掉的 `lexicon.sentence_discovery_generation` 单例，否则例句发现与成分检索 500；
+  补行 SQL 见 `docs/frontend-integration.md`「发布顺序」第 3 步。
 - **前后端同批部署**：响应新增字段（组的 `scope` / `dialect_rules`、词义的 `form_group_id`）在前端
   strict runtime schema 下要求前端先；请求删除词性 `dialect_rules` 在后端 `deny_unknown_fields` 下
   要求后端先。两头都有，只能同批 + 清库。
