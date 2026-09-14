@@ -304,38 +304,39 @@ fn rejects_liaison_anchors_outside_the_span() {
 }
 
 #[test]
-fn merged_liaison_adopts_the_trailing_end_anchor() {
+fn liaisons_stay_apart_and_only_exact_duplicates_collapse() {
+    let liaison = |start, end, start_len, end_len| RichTextAnnotation::Liaison {
+        start,
+        end,
+        start_len,
+        end_len,
+    };
+    // [0,3) 与 [3,6) 首尾相接、与 [1,5) 交叠、同区间换了起点宽度，都是各自的弧；
+    // 只有四个字段全同的那条是重复。
     let mut value = RichText::V2(RichTextV2 {
         version: 2,
         text: "abcdef".to_owned(),
         annotations: vec![
-            RichTextAnnotation::Liaison {
-                start: 0,
-                end: 3,
-                start_len: 2,
-                end_len: 1,
-            },
-            RichTextAnnotation::Liaison {
-                start: 3,
-                end: 6,
-                start_len: 1,
-                end_len: 2,
-            },
+            liaison(3, 6, 1, 2),
+            liaison(0, 3, 2, 1),
+            liaison(1, 5, 1, 1),
+            liaison(0, 3, 1, 1),
+            liaison(0, 3, 2, 1),
         ],
     });
     canonicalize(&mut value).unwrap();
-    let RichText::V2(value) = value else {
-        panic!("expected V2")
-    };
-    assert!(matches!(
-        value.annotations[..],
-        [RichTextAnnotation::Liaison {
-            start: 0,
-            end: 6,
-            start_len: 2,
-            end_len: 2,
-        }]
-    ));
+    let once = serde_json::to_value(&value).unwrap();
+    assert_eq!(
+        once["annotations"],
+        serde_json::json!([
+            { "type": "liaison", "start": 0, "end": 3, "start_len": 2 },
+            { "type": "liaison", "start": 0, "end": 3 },
+            { "type": "liaison", "start": 1, "end": 5 },
+            { "type": "liaison", "start": 3, "end": 6, "end_len": 2 },
+        ])
+    );
+    canonicalize(&mut value).unwrap();
+    assert_eq!(serde_json::to_value(&value).unwrap(), once);
 }
 
 #[test]

@@ -155,6 +155,14 @@ fn canonicalize_v2(value: &mut RichTextV2) -> Result<(), Vec<RichTextIssue>> {
             merged.push(annotation);
             continue;
         }
+        // 连读是「两点之间的一条连线」，不是一段文字的属性：连读链首尾相接、交叠的两条
+        // 都是各自独立的弧，合并会让读回的弧线与编辑时画的对不上。只去掉四个字段全同的重复。
+        if matches!(annotation, RichTextAnnotation::Liaison { .. }) {
+            if !merged.contains(&annotation) {
+                merged.push(annotation);
+            }
+            continue;
+        }
         let (start, end) = range_bounds(&annotation).expect("range annotation");
         let previous = merged
             .iter_mut()
@@ -165,7 +173,6 @@ fn canonicalize_v2(value: &mut RichTextV2) -> Result<(), Vec<RichTextIssue>> {
             if start <= previous_end {
                 if end > previous_end {
                     set_range_end(previous, end);
-                    adopt_end_anchor(previous, &annotation);
                 }
                 continue;
             }
@@ -449,21 +456,6 @@ pub(super) fn set_range_end(annotation: &mut RichTextAnnotation, next_end: usize
     }
 }
 
-/// 两条连读合并后，弧线从前一条的起点锚点连到后一条的终点锚点，终点宽度要一起搬过来，
-/// 否则新的 `end` 会配上旧的 `end_len`，锚点落在错误的字母上。
-fn adopt_end_anchor(previous: &mut RichTextAnnotation, annotation: &RichTextAnnotation) {
-    if let (
-        RichTextAnnotation::Liaison {
-            end_len: previous_len,
-            ..
-        },
-        RichTextAnnotation::Liaison { end_len, .. },
-    ) = (previous, annotation)
-    {
-        *previous_len = *end_len;
-    }
-}
-
 pub(super) fn same_merge_attributes(left: &RichTextAnnotation, right: &RichTextAnnotation) -> bool {
     match (left, right) {
         (
@@ -474,7 +466,6 @@ pub(super) fn same_merge_attributes(left: &RichTextAnnotation, right: &RichTextA
             RichTextAnnotation::Highlight { color: left, .. },
             RichTextAnnotation::Highlight { color: right, .. },
         ) => left == right,
-        (RichTextAnnotation::Liaison { .. }, RichTextAnnotation::Liaison { .. }) => true,
         _ => false,
     }
 }

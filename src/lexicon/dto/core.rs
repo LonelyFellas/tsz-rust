@@ -125,7 +125,7 @@ pub(crate) fn is_liaison_anchor_len_default(value: &usize) -> bool {
     *value == liaison_anchor_len_default()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RichTextAnnotation {
     Emphasis {
