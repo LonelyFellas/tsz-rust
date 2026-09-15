@@ -58,7 +58,7 @@ impl LexiconService {
         .map_err(serialization_error)?;
         let mut word = self.get_v3(entry_id).await?;
         // 快照冻下来就改不了：字典音标里的历史连读要在这之前落掉。
-        super::v3::strip_forms_phonetic_liaisons(&mut word.forms);
+        super::v3::canonicalize_forms_pronunciation_extensions(&mut word.forms);
         let mut tx = self
             .repository
             .pool()
@@ -1136,14 +1136,17 @@ async fn update_v3_pronunciation_hashes(
     pronunciations: &[crate::lexicon::dto::WordPronunciationV3],
 ) -> Result<(), LexiconServiceError> {
     for pronunciation in pronunciations {
-        let hash = sha256_json(&serde_json::json!({
+        let mut content = serde_json::json!({
             "spelling": spelling,
             "dialect": dialect,
             "dict_phonetic": pronunciation.dict_phonetic,
             "actual_pron": pronunciation.actual_pron,
             "style": pronunciation.style,
-        }))
-        .map_err(serialization_error)?;
+        });
+        if let Some(synthesis) = &pronunciation.synthesis {
+            content["synthesis"] = serde_json::to_value(synthesis).map_err(serialization_error)?;
+        }
+        let hash = sha256_json(&content).map_err(serialization_error)?;
         let updated = sqlx::query(
             r#"
             UPDATE lexicon.entry_publication_nodes

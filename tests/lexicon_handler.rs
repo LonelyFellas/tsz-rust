@@ -14189,3 +14189,121 @@ async fn v3_form_group_changes_invalidate_meanings_completion(pool: PgPool) {
         drafted["word"]["completed_steps"]
     );
 }
+
+#[sqlx::test]
+async fn v3_synthesis_survives_forms_meanings_publication_and_history(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let draft = create_ready_v3_draft_with_sentences(
+        &state,
+        &pool,
+        &bearer,
+        &["A synthesis test sentence."],
+    )
+    .await;
+    let entry_id = draft["word"]["id"].as_str().unwrap().to_owned();
+    let entry_uuid: Uuid = entry_id.parse().unwrap();
+    let (status, mut word) = publish_ready_v3(&state, &bearer, &draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{word}");
+    let old_snapshot = current_publication_snapshot(&pool, entry_uuid).await;
+    let old_publication: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id=$1")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let path =
+        if word["word"]["forms"]["pos"][0]["forms"][0]["regional_variants"]["mode"] == "common" {
+            "/pos/0/forms/0/regional_variants/common/pronunciations/0"
+        } else {
+            "/pos/0/forms/0/regional_variants/uk/pronunciations/0"
+        };
+    assert!(
+        word["word"]["forms"]
+            .pointer(path)
+            .unwrap()
+            .get("synthesis")
+            .is_none()
+    );
+    let mut prior_hash: Option<Vec<u8>> = None;
+    for alphabet in ["ipa", "ups"] {
+        let synthesis = json!({"alphabet":alphabet,"ipa":"kæt","ups":"K AE T"});
+        let mut forms = word["word"]["forms"].clone();
+        forms.pointer_mut(path).unwrap()["synthesis"] = synthesis.clone();
+        let (_, saved) = save_v3_forms_after_impact(
+            &state,
+            &bearer,
+            &entry_id,
+            word["word"]["revision"].as_i64().unwrap(),
+            "complete",
+            forms,
+        )
+        .await;
+        let (status, reloaded) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/{entry_id}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reloaded}");
+        assert_eq!(
+            reloaded["word"]["forms"].pointer(path).unwrap()["synthesis"],
+            synthesis
+        );
+        let saved =
+            save_v3_meanings(&state, &bearer, &saved, saved["word"]["meanings"].clone()).await;
+        assert_eq!(
+            saved["word"]["forms"].pointer(path).unwrap()["synthesis"],
+            synthesis
+        );
+        let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+        assert_eq!(status, StatusCode::CREATED, "{published}");
+        let snapshot = current_publication_snapshot(&pool, entry_uuid).await;
+        assert_eq!(
+            snapshot["forms"].pointer(path).unwrap()["synthesis"],
+            synthesis
+        );
+        let pronunciation_id: Uuid = snapshot["forms"].pointer(path).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let hash: Vec<u8> = sqlx::query_scalar("SELECT content_hash FROM lexicon.entry_publication_nodes WHERE publication_id=(SELECT current_publication_id FROM lexicon.entries WHERE id=$1) AND node_id=$2")
+            .bind(entry_uuid).bind(pronunciation_id).fetch_one(&pool).await.unwrap();
+        if let Some(previous) = prior_hash {
+            assert_ne!(
+                previous, hash,
+                "changing only synthesis selection must change the pronunciation hash"
+            );
+        }
+        prior_hash = Some(hash);
+        word = published;
+    }
+    let preserved: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=$1")
+            .bind(old_publication)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        preserved, old_snapshot,
+        "historical snapshots must not be backfilled"
+    );
+    let (status, history) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}/publications/{old_publication}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    assert!(!history.to_string().contains("\"synthesis\""));
+}

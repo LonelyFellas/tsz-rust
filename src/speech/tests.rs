@@ -622,3 +622,44 @@ async fn azure_catalog_rejects_bad_responses_without_leaking_body() {
         server.abort();
     }
 }
+
+#[test]
+fn ups_preserves_spelling_and_has_independent_limits_and_cache_identity() {
+    let phonetic = |alphabet, phoneme: String| RichTextV2 {
+        version: 2,
+        text: "cat<&😀".into(),
+        annotations: vec![RichTextAnnotation::Phoneme {
+            start: 0,
+            end: 6,
+            alphabet,
+            phoneme,
+        }],
+    };
+    let ups = request(phonetic(RichTextPhonemeAlphabet::Ups, "K AE T &\"".into()));
+    assert!(
+        build_ssml(&ups).unwrap().contains(
+            "<phoneme alphabet=\"ups\" ph=\"K AE T &amp;&quot;\">cat&lt;&amp;😀</phoneme>"
+        )
+    );
+    let ipa = request(phonetic(RichTextPhonemeAlphabet::Ipa, "K AE T &\"".into()));
+    assert_ne!(ups.fingerprint(), ipa.fingerprint());
+    for (alphabet, limit) in [
+        (RichTextPhonemeAlphabet::Ipa, 200),
+        (RichTextPhonemeAlphabet::Ups, 1600),
+    ] {
+        let voice = voice();
+        let options = SpeechOptions::new(&voice, None, 0, 0).unwrap();
+        assert!(
+            SynthesisRequest::new(
+                voice.clone(),
+                options.clone(),
+                phonetic(alphabet, "A".repeat(limit))
+            )
+            .is_ok()
+        );
+        assert!(
+            SynthesisRequest::new(voice, options, phonetic(alphabet, "A".repeat(limit + 1)))
+                .is_err()
+        );
+    }
+}

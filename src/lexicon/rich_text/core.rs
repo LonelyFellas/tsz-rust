@@ -240,7 +240,7 @@ pub(super) fn validate_v2(value: &RichTextV2) -> Vec<RichTextIssue> {
                 start,
                 end,
                 phoneme,
-                ..
+                alphabet,
             } => {
                 validate_range(&mut issues, &value.text, *start, *end, &path);
                 let phoneme = phoneme.trim();
@@ -249,15 +249,15 @@ pub(super) fn validate_v2(value: &RichTextV2) -> Vec<RichTextIssue> {
                         &mut issues,
                         "nul_character_not_allowed",
                         format!("{path}.phoneme"),
-                        "IPA 不能包含 NUL 字符",
+                        "音素不能包含 NUL 字符",
                     );
                 }
-                if phoneme.is_empty() || phoneme.chars().count() > MAX_PHONEME_CODEPOINTS {
+                if phoneme.is_empty() || phoneme.chars().count() > phoneme_limit(*alphabet) {
                     push_issue(
                         &mut issues,
                         "invalid_phoneme",
                         path,
-                        "IPA 不能为空且不能超过 200 个码点",
+                        "音素不能为空；IPA 最多 200 个码点，UPS 最多 1600 个码点",
                     );
                 }
             }

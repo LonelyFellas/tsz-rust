@@ -103,6 +103,7 @@ pub enum RichTextEmphasisLevel {
 #[serde(rename_all = "snake_case")]
 pub enum RichTextPhonemeAlphabet {
     Ipa,
+    Ups,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
