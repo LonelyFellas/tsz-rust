@@ -338,6 +338,8 @@ function refreshOnce(): Promise<boolean> {
     过滤（原形始终返回）；新建必须指定归属，修改可以改挂，原形不接受该字段。
     `allowed_form_types` 随之按词性收窄，词条侧不做硬校验，存量词条不受影响。
     基本词性下仍挂有词形变化时不允许删除：DELETE 返回 409 `part_of_speech_has_form_types`。
+    词形变化的 `abbreviation` 不要求唯一（2026-09-15 起），同一基本词性下可以重复，`form_type_conflict`
+    不再带 `field=abbreviation`；中文名、简洁显示、英文名与英文全称仍在同一基本词性内唯一。
 
 基本词性 catalog item 与基本词性管理 item 均额外返回有序的
 `allowed_form_types` / `default_form_types`。两者当前相同，后者供新建表单初始化，前者是服务端
