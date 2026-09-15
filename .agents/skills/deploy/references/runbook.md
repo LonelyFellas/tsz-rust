@@ -650,12 +650,12 @@ restore 会先验证备份组，再撤下正式 manifest，以同目录临时文
 
 回退后重跑 health/ready/auth smoke；若恢复了 `api.json`，必须执行 `deployment_manifest.py verify`。若旧部署没有 manifest，回退后的来源状态明确为 UNKNOWN/BLOCKED，不能伪造一个 SHA。只有回退 smoke/manifest 全部通过后，才按第 5.1 节相同的 owner 校验顺序释放服务器锁和本地锁；失败时保留锁、state、staging 与 backup 供恢复，绝不自动抢锁。
 
-服务器上没有源码；含迁移的发布只有已验证安全时才由候选二进制撤回数据库；否则保持停止状态等待恢复决定，不换回不兼容的旧二进制。只有数据库
+服务器上不再用源码构建（`/opt/tsz-rust` 下旧版部署残留的源码树不参与运行或回退）；含迁移的发布只有已验证安全时才由候选二进制撤回数据库；否则保持停止状态等待恢复决定，不换回不兼容的旧二进制。只有数据库
 已经处于部署前 migration 版本时，二进制恢复才构成完整回退。
 
 ## 7. 环境变量
 
 `/opt/tsz-rust/.env`（部署只推送二进制与部署工具，从不触碰它；改它只能 ssh 手动）当前含：
 PORT / DATABASE_URL（外部 Aliyun RDS）/ JWT_SECRET / REDIS_URL / **COOKIE_SECURE=false**
-（域名备案中、无 TLS 的临时项；备案后上 Caddy TLS 时删除恢复默认 true）。
+（测试服 IP 入口 `http://47.121.142.19`、`:8081` 仍是纯 HTTP，Secure cookie 会被浏览器拒收；两个域名已由 nginx + certbot 提供 HTTPS，关闭 IP 入口后删除此项恢复默认 true；生产禁止 false）。
 新增配置项先核对 `.env.example`、`docs/deployment.md` 与目标环境；如果服务器缺少必需配置，在部署写入前准备具体方案并取得相应授权，不隐式修改服务器 .env。
