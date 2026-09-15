@@ -140,7 +140,6 @@ fn database_error(error: sqlx::Error) -> AppError {
                 "full_name_en",
                 "name_zh",
                 "name_en",
-                "abbreviation",
                 "code",
             ]
             .into_iter()

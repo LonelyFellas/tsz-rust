@@ -1222,6 +1222,46 @@ async fn form_type_catalog_crud_permissions_revision_and_base_protection(pool: P
     assert_eq!(status, StatusCode::CONFLICT, "{dup}");
     assert_eq!(dup["code"], "form_type_conflict");
 
+    // 英文缩写不参与唯一性：同一词性下「动名词形式」与另一条词形都可以缩写成 V-ing，大小写不同也照样放行。
+    let verb_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'verb'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for (code, name_zh, short_name_zh, name_en, abbreviation, full_name_en) in [
+        (
+            "gerund",
+            "动名词形式",
+            "动名词",
+            "GERUND",
+            "V-ing",
+            "gerund",
+        ),
+        (
+            "ing_form",
+            "ing 形式",
+            "ing形",
+            "Ing form",
+            "v-ing",
+            "ing form",
+        ),
+    ] {
+        let (status, _, created, _) = call(
+            &state,
+            Method::POST,
+            path,
+            Some(&bearer),
+            Some(json!({"part_of_speech_id":verb_id,"code":code,"name_zh":name_zh,"short_name_zh":short_name_zh,"name_en":name_en,"abbreviation":abbreviation,"full_name_en":full_name_en,"sort_order":200})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "同一词性下英文缩写允许重复：{created}"
+        );
+        assert_eq!(created["abbreviation"], abbreviation);
+    }
+
     // 列表按词性过滤：只返回该词性名下的，外加对所有词性通用的原形。
     let (status, _, scoped, _) = call(
         &state,
