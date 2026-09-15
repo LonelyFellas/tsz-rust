@@ -5,6 +5,32 @@ import tempfile
 import textwrap
 import unittest
 
+BASH_FENCE = re.compile(r"^[ \t]*```(?:bash|sh|shell)[ \t]*\n(.*?)^[ \t]*```", re.M | re.S)
+
+
+def remote_rsync_commands(markdown: str) -> list[str]:
+    """markdown 的 bash 代码块里推到 tshb-test 的 rsync 命令（`\\` 续行已拼成一条）。"""
+    commands = []
+    for block in BASH_FENCE.findall(markdown):
+        logical = ""
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not logical and (not stripped or stripped.startswith("#")):
+                continue
+            if stripped.endswith("\\"):
+                logical += stripped[:-1] + " "
+                continue
+            logical += stripped
+            if re.search(r"\brsync\b", logical) and "tshb-test:" in logical:
+                commands.append(logical)
+            logical = ""
+    return commands
+
+
+def lacks_owner_flags(command: str) -> bool:
+    tokens = set(command.split())
+    return not (tokens & {"--no-o", "--no-owner"} and tokens & {"--no-g", "--no-group"})
+
 
 class DeploySkillTests(unittest.TestCase):
     @classmethod
@@ -182,11 +208,40 @@ class DeploySkillTests(unittest.TestCase):
         self.assertIn(
             'rsync -az --no-o --no-g "$staging/tsz-rust"', self.runbook
         )
-        # 推到服务器的 rsync 不得保留本机属主（服务器上没有对应 uid，mv 后会留给 root 执行的文件）。
-        self.assertNotIn('rsync -az "', self.runbook)
         self.assertNotIn("< ops/deployment_preflight.py", self.runbook)
         self.assertNotIn("rsync -az ops/deployment_manifest.py", self.runbook)
         self.assertNotIn("python3 ops/ci_metrics.py", self.runbook)
+
+    def test_remote_rsync_commands_drop_local_owner(self) -> None:
+        # 推到服务器的 rsync 不得保留本机属主：服务器上没有对应 uid，mv 到位后会留给 root 执行的文件。
+        commands = remote_rsync_commands(self.runbook)
+        self.assertGreaterEqual(len(commands), 2)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertFalse(lacks_owner_flags(command))
+
+    def test_remote_rsync_scan_covers_new_forms(self) -> None:
+        sample = textwrap.dedent(
+            """
+            正文提到 rsync 到 tshb-test: 不算命令。
+
+            ```bash
+            # rsync -az "$a" "tshb-test:/comment"
+            rsync -avz "$a" "tshb-test:/plain"
+            rsync -a $a tshb-test:/unquoted
+            python3 "$tools/ci_metrics.py" run -- \\
+              rsync -az \\
+              "$a" "tshb-test:/continued"
+            rsync -az --no-o --no-g "$a" "tshb-test:/ok"
+            rsync -az "$a" "$staging/local-only"
+            ```
+            """
+        )
+        offending = [c for c in remote_rsync_commands(sample) if lacks_owner_flags(c)]
+        self.assertEqual(
+            [c.split()[-1] for c in offending],
+            ['"tshb-test:/plain"', "tshb-test:/unquoted", '"tshb-test:/continued"'],
+        )
 
 
 if __name__ == "__main__":
