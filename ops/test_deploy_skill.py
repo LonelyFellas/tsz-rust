@@ -1,5 +1,6 @@
 import pathlib
 import re
+import shlex
 import subprocess
 import tempfile
 import textwrap
@@ -11,6 +12,11 @@ BASH_FENCE = re.compile(r"^[ \t]*```(?:bash|sh|shell)[ \t]*\n(.*?)^[ \t]*```", r
 def remote_rsync_commands(markdown: str) -> list[str]:
     """markdown 的 bash 代码块里推到 tshb-test 的 rsync 命令（`\\` 续行已拼成一条）。"""
     commands = []
+
+    def collect(logical: str) -> None:
+        if re.search(r"\brsync\b", logical) and "tshb-test:" in logical:
+            commands.append(logical)
+
     for block in BASH_FENCE.findall(markdown):
         logical = ""
         for line in block.splitlines():
@@ -20,16 +26,49 @@ def remote_rsync_commands(markdown: str) -> list[str]:
             if stripped.endswith("\\"):
                 logical += stripped[:-1] + " "
                 continue
-            logical += stripped
-            if re.search(r"\brsync\b", logical) and "tshb-test:" in logical:
-                commands.append(logical)
+            collect(logical + stripped)
             logical = ""
+        if logical:
+            collect(logical)
     return commands
 
 
-def lacks_owner_flags(command: str) -> bool:
-    tokens = set(command.split())
-    return not (tokens & {"--no-o", "--no-owner"} and tokens & {"--no-g", "--no-group"})
+def rsync_keeps_local_owner(command: str) -> bool:
+    """按 rsync「后写覆盖先写」模拟属主/属组开关，任一推到 tshb-test 的 rsync 最终仍保留即为 True。"""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    segments, segment = [], []
+    for token in lexer:
+        if token in {"&&", "||", ";", "|", "&"}:
+            segments.append(segment)
+            segment = []
+        else:
+            segment.append(token)
+    segments.append(segment)
+    for segment in segments:
+        names = [token.rsplit("/", 1)[-1] for token in segment]
+        if "rsync" not in names or not any("tshb-test:" in token for token in segment):
+            continue
+        owner = group = False
+        for token in segment[names.index("rsync") + 1 :]:
+            if token == "--archive":
+                owner = group = True
+            elif token == "--owner":
+                owner = True
+            elif token == "--group":
+                group = True
+            elif token in {"--no-o", "--no-owner"}:
+                owner = False
+            elif token in {"--no-g", "--no-group"}:
+                group = False
+            elif re.fullmatch(r"-[A-Za-z]+", token):
+                if "a" in token or "o" in token:
+                    owner = True
+                if "a" in token or "g" in token:
+                    group = True
+        if owner or group:
+            return True
+    return False
 
 
 class DeploySkillTests(unittest.TestCase):
@@ -218,7 +257,7 @@ class DeploySkillTests(unittest.TestCase):
         self.assertGreaterEqual(len(commands), 2)
         for command in commands:
             with self.subTest(command=command):
-                self.assertFalse(lacks_owner_flags(command))
+                self.assertFalse(rsync_keeps_local_owner(command))
 
     def test_remote_rsync_scan_covers_new_forms(self) -> None:
         sample = textwrap.dedent(
@@ -232,17 +271,34 @@ class DeploySkillTests(unittest.TestCase):
             python3 "$tools/ci_metrics.py" run -- \\
               rsync -az \\
               "$a" "tshb-test:/continued"
+            rsync --no-o --no-g -az "$a" "tshb-test:/flags-first"
+            rsync -az "$a" "tshb-test:/comment-flags"  # --no-o --no-g
+            rsync -az --no-o --no-g "$a" "tshb-test:/ok" && rsync -az "$b" "tshb-test:/chained"
+            rsync -avz --no-owner --no-group -e "ssh -p 22" "$a" "tshb-test:/ok-long"
             rsync -az --no-o --no-g "$a" "tshb-test:/ok"
             rsync -az "$a" "$staging/local-only"
+            rsync -az "$a" \\
+              "tshb-test:/tail" \\
             ```
             """
         )
-        offending = [c for c in remote_rsync_commands(sample) if lacks_owner_flags(c)]
+        offending = [
+            re.findall(r"tshb-test:/[\w-]+", command)[-1]
+            for command in remote_rsync_commands(sample)
+            if rsync_keeps_local_owner(command)
+        ]
         self.assertEqual(
-            [c.split()[-1] for c in offending],
-            ['"tshb-test:/plain"', "tshb-test:/unquoted", '"tshb-test:/continued"'],
+            offending,
+            [
+                "tshb-test:/plain",
+                "tshb-test:/unquoted",
+                "tshb-test:/continued",
+                "tshb-test:/flags-first",
+                "tshb-test:/comment-flags",
+                "tshb-test:/chained",
+                "tshb-test:/tail",
+            ],
         )
-
 
 if __name__ == "__main__":
     unittest.main()
