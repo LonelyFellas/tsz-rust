@@ -1325,9 +1325,9 @@ sense 侧为空时回退到命中词形（与前端「sense 优先、缺失回�
 | `phrase_component_target_stale` | 成分 id | `target` | `meanings.phrase_component_usage` | `[pos_id, sense_id]` | 目标快照的词头/词义/词形八项任一对不上 |
 
 `node_location.pos_id` 一律是所属词性 id；`V3DraftNodeLocation` 没有扩字段，成分定位走
-`ancestor_node_ids`。注意 **V3 的 issue 形状不带 `reference_location`**（只有 V2 的
-`DraftValidationIssueV2` 有），所以 `sense_has_inbound_publication_refs` 在 V3 发布路径上不会
-告诉前端是哪条引用挡住的。
+`ancestor_node_ids`。V3 的 issue 形状不带 `reference_location`（只有 V2 的
+`DraftValidationIssueV2` 有）；发布被入站引用挡住时，改由 `409 inbound_reference_conflict` 的
+`meta.inbound_references` 点名是哪条引用（见「被引用节点保护」一节）。
 
 **能力开关已移除**：释义级成分用词默认开启，不再有 `SMART_LEXICON_V3_SENSE_COMPONENT_USAGES`，
 原先关闭时的写入闸（显式提交非空 `component_usages` 返回 `503`）随之取消。
@@ -1987,7 +1987,7 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 - 四类引用：`shared_sentence`（多维例句标注，含自指）、`publication_sense_ref`（其他词条**当前发布版本**里的词义引用，口径同 `current_inbound_sense_refs`）、`draft_relation`（其他词条草稿的近义 / 反义 / 派生）、`phrase_component`（短语草稿成分用词的 resolved 行，**只算 `target_publication_id` 为空的草稿目标**——钉住发布版本的成分引用的是不可变快照，不受草稿改动影响）。类型 2 / 3 / 4 排除已归档来源与自指。
 - `items[].target` 给出指向本词条的节点 id（`pos_id / base_form_id / form_id / variant_id / sense_id`，词义类引用在词义仍在时补 `pos_id`）；`stale` 表示目标在当前草稿已不成立，判定与保存用同一函数（例句：`shared_target_matches`；成分：`phrase_component_matches_target`；发布引用 / 关联：词义是否仍在）。
 - `items[].source` 按类型取用：例句给 `sentence_id / sentence_revision / sentence_text / source_dialect / segments`（码点下标）；其余给 `entry_id / entry_headword / entry_kind / entry_status / sense_id / sense_gloss / node_id / publication_id / relation_type / reference_kind`。
-- `nodes[]` 是每个被引用节点的完整计数（同一引用对 form 与 base_form 同一节点只计一次）；`items` 失效项优先，最多 500 条，超出置 `truncated`。前端禁用只看 `nodes`。
+- `nodes[]` 是每个被引用节点的完整计数（同一引用对 form 与 base_form 同一节点只计一次）；`items` 失效项优先，最多 500 条，超出置 `truncated`。前端操作锁只算未失效的引用（明细被截断时用 `nodes` 计数减去明细里的失效条数），徽标与列表显示全部。
 
 ### 写校验收敛
 
@@ -1995,6 +1995,7 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 
 - 违例一律 `409 inbound_reference_conflict`，`meta.inbound_references` 列出违例引用（同 `InboundReferenceV3`，最多 500 条）。取代了原来的 `reference_conflict`（例句引用）、`form_reference_conflict`（词形保存删词性撞发布引用）与发布 / 切换版本的 422 `sense_has_inbound_publication_refs`。`form_reference_conflict` 枚举值保留但不再发出；`reference_conflict` 仍用于目标行锁忙（重试）和移入垃圾桶被例句挡住。
 - 口径补齐：所有保存都查类型 4；词义保存查类型 2（原来发布时才拦）；词形保存删词性连带删词义时查类型 3（原来不拦）。
+- **草稿写入只拦本次改动破坏的引用**：词形保存、词义保存与 impact 以已保存内容为基线，只拦「基线里成立、提交后失效」的引用。基线里本来就失效的旧引用不挡草稿保存——关联词可以指向只在发布版里还有的词义，来源归档后再恢复也会造出失效引用，按现状拦会让目标词条永远保存不了。读接口照常标 `stale: true`；发布与切换版本不带基线，按现状拦。
 - `FormsImpactResponseV3` 新增可选 `blocked_references`：本次词形变更会破坏的引用，非空时随后的 PUT 必 409；无违例不带该键。
 - `POST /validate`、移入垃圾桶、删除词条本期不变。
 

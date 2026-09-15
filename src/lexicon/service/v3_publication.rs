@@ -215,6 +215,7 @@ impl LexiconService {
             &word.forms,
             &word.meanings,
             super::inbound_references::InboundReferenceCheck::PublicationContent,
+            None,
         )
         .await?;
 
@@ -518,6 +519,7 @@ impl LexiconService {
             &shared_target.forms,
             &shared_target.meanings,
             super::inbound_references::InboundReferenceCheck::PublicationContent,
+            None,
         )
         .await?;
 

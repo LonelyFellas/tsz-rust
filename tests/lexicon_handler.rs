@@ -7142,8 +7142,9 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
         vec![(component_id, "phrase_component".to_owned())]
     );
 
-    // 草稿再保存同样被拦：当前发布版本引用的词义不在提交内容里，revision 不动。
-    let (status, save_blocked) = save_v3_meanings_raw(
+    // 草稿再保存放行：那条词义在已保存内容里本来就没有了，不是这次改动破坏的。
+    // 已失效的旧引用只挡发布（上面已断言），不挡草稿保存，否则编辑者自己解不开。
+    let (status, word_resaved) = save_v3_meanings_raw(
         &state,
         &bearer,
         &word_entry_id,
@@ -7151,15 +7152,10 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
         writable_v3_meanings(&word_pruned),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{save_blocked}");
-    let references = inbound_reference_conflict_items(&save_blocked);
-    assert_eq!(references.len(), 1, "{save_blocked}");
-    assert_eq!(references[0]["kind"], "publication_sense_ref");
-    assert_eq!(references[0]["source"]["node_id"], json!(component_id));
-    assert_eq!(references[0]["target"]["sense_id"], referenced_sense_id);
+    assert_eq!(status, StatusCode::OK, "{word_resaved}");
     assert_eq!(
         entry_revision(&pool, word_entry_uuid).await,
-        word_pruned["word"]["revision"].as_i64().unwrap()
+        word_pruned["word"]["revision"].as_i64().unwrap() + 1
     );
 
     // 归档短语解除入站守卫，目标词才能把那条词义发布掉。
@@ -7176,7 +7172,7 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{phrase_archived}");
-    let (status, word_republished) = publish_ready_v3(&state, &bearer, &word_pruned).await;
+    let (status, word_republished) = publish_ready_v3(&state, &bearer, &word_resaved).await;
     assert_eq!(status, StatusCode::CREATED, "{word_republished}");
 
     // 恢复短语时它的当前发布仍指着一条已消失的词义——出站守卫必须认得成分引用。
@@ -11842,6 +11838,115 @@ async fn v3_relations_require_explicit_sense_binding_and_keep_same_name_text(poo
         reference["source"]["entry_headword"],
         source["word"]["presentation"]["label"]
     );
+}
+
+/// 草稿保存只拦本次改动破坏的引用。来源归档期间目标删掉被关联的词义、来源随后恢复，这条关联
+/// 在目标已保存内容里本来就失效了：读接口照常标出失效，但目标之后的草稿保存不能被它挡住，
+/// 否则编辑者自己解不开。
+#[sqlx::test]
+async fn v3_draft_saves_ignore_references_already_stale_in_saved_content(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let target = save_v3_meanings(
+        &state,
+        &bearer,
+        &target,
+        complete_v3_meanings_fixture(target["word"]["forms"]["pos"][0]["pos_id"].clone()),
+    )
+    .await;
+    let target_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let target_uuid = Uuid::parse_str(&target_id).unwrap();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let relation_id = Uuid::now_v7();
+    let source = create_v3_word_with_relation(
+        &state,
+        &bearer,
+        "wharf",
+        json!({
+            "id": relation_id, "relation": "synonym", "score": "80.00",
+            "target_word_id": target_id, "target_sense_id": target_sense_id
+        }),
+    )
+    .await;
+    let source_uuid = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+
+    // 来源归档期间，目标删掉被关联的词义不受这条关联约束（草稿保存，不走完整性校验）。
+    archive_v3_entry(&state, &bearer, &source).await;
+    let meanings_path = format!("{ROOT}/entries/{target_id}/steps/meanings");
+    let mut removed = writable_v3_meanings(&target);
+    removed["pos"][0]["senses"] = json!([]);
+    let (status, pruned) = call(
+        &state,
+        Method::PUT,
+        &meanings_path,
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target["word"]["revision"],
+            "intent": "save",
+            "content": removed.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pruned}");
+
+    // 恢复来源：关联重新算入站引用，但它指向的词义在目标已保存内容里早就没有了。
+    let (source_revision, source_lifecycle_revision): (i64, i64) =
+        sqlx::query_as("SELECT revision, lifecycle_revision FROM lexicon.entries WHERE id = $1")
+            .bind(source_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (status, restored) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_uuid}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": source_revision,
+            "base_lifecycle_revision": source_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    let references = inbound_references_of(&state, &bearer, &target_id).await;
+    let items = references["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{references}");
+    assert_eq!(
+        items[0]["id"],
+        json!(format!("draft_relation:{relation_id}"))
+    );
+    assert_eq!(items[0]["stale"], true, "{references}");
+
+    // 目标再保存（草稿）：这条失效引用不是本次改动破坏的，放行。
+    let base_revision = pruned["word"]["revision"].as_i64().unwrap();
+    let (status, resaved) = call(
+        &state,
+        Method::PUT,
+        &meanings_path,
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": base_revision,
+            "intent": "save",
+            "content": removed
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "已失效的旧引用不该挡草稿保存：{resaved}"
+    );
+    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision + 1);
 }
 
 /// Q5：别人草稿的关联词指向本词条词义时，删掉那个词性（词义随之消失）的词形保存被拦下；

@@ -1586,6 +1586,7 @@ impl LexiconService {
             &input.content,
             &reconciled_meanings,
             super::inbound_references::InboundReferenceCheck::DraftPreview,
+            Some((&current.forms, &current.meanings)),
         )
         .await?;
         reference_tx.commit().await.map_err(database_error)?;
@@ -1758,6 +1759,7 @@ impl LexiconService {
         } else {
             None
         };
+        let saved_meanings = meanings.clone();
         reconcile_v3_meanings_after_forms(&mut meanings, &input.content);
         super::inbound_references::ensure_inbound_references(
             &mut transaction,
@@ -1765,6 +1767,7 @@ impl LexiconService {
             &input.content,
             &meanings,
             super::inbound_references::InboundReferenceCheck::DraftSave,
+            Some((&current_forms, &saved_meanings)),
         )
         .await?;
         let aggregate_issues =
@@ -2149,6 +2152,7 @@ impl LexiconService {
             &forms,
             &canonical_content,
             super::inbound_references::InboundReferenceCheck::DraftSave,
+            Some((&forms, &current_v3_meanings)),
         )
         .await?;
         let mut proposed = proposed_nodes(&DraftFormsStepContent::default(), &relational_meanings);

@@ -42,6 +42,7 @@ impl InboundReferenceCheck {
 }
 
 /// 引用是否成立的判定依据；目标节点 ID 在 `InboundReferenceV3.target` 里。
+#[derive(Clone)]
 enum Rule {
     SharedSentence {
         link: Option<Box<TextLinkV3>>,
@@ -55,6 +56,7 @@ enum Rule {
     },
 }
 
+#[derive(Clone)]
 struct Candidate {
     reference: InboundReferenceV3,
     rule: Rule,
@@ -584,12 +586,18 @@ async fn describe_sources(
 }
 
 /// 给定内容下会被破坏（或已失效）的入站引用，带来源摘要，最多 500 条。
+///
+/// `baseline` 是已保存内容：草稿保存与词形影响预览只拦本次改动破坏的引用（基线里成立、提交后
+/// 失效）。基线里本来就失效的旧引用不挡草稿保存——关联词可以指向只在发布版里还有的词义，来源
+/// 词条归档期间目标删掉节点、之后来源恢复，都会造出目标编辑者自己解不开的失效引用。读接口照常
+/// 标出这些引用；发布与切换版本不传基线，按现状拦。
 pub(super) async fn inbound_reference_violations(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     forms: &DraftFormsStepContentV3,
     meanings: &DraftMeaningsStepContentV3,
     check: InboundReferenceCheck,
+    baseline: Option<(&DraftFormsStepContentV3, &DraftMeaningsStepContentV3)>,
 ) -> Result<Vec<InboundReferenceV3>, LexiconServiceError> {
     let retained_sense_ids = meanings
         .pos
@@ -597,11 +605,24 @@ pub(super) async fn inbound_reference_violations(
         .flat_map(|pos| pos.senses.iter().map(|sense| sense.id))
         .collect::<Vec<_>>();
     let mut candidates = collect_candidates(tx, entry_id, Some(&retained_sense_ids), check).await?;
+    // 判定会就地补全 target 并改写 stale，基线要在副本上判，不能和提交内容共用一份。
+    let already_stale = match baseline {
+        Some((baseline_forms, baseline_meanings)) => {
+            let mut before = candidates.clone();
+            evaluate(&mut before, entry_id, baseline_forms, baseline_meanings);
+            before
+                .into_iter()
+                .filter(|candidate| candidate.reference.stale)
+                .map(|candidate| candidate.reference.id)
+                .collect::<HashSet<_>>()
+        }
+        None => HashSet::new(),
+    };
     evaluate(&mut candidates, entry_id, forms, meanings);
     let mut violations = candidates
         .into_iter()
         .map(|candidate| candidate.reference)
-        .filter(|reference| reference.stale)
+        .filter(|reference| reference.stale && !already_stale.contains(&reference.id))
         .collect::<Vec<_>>();
     sort_references(&mut violations);
     violations.truncate(MAX_INBOUND_REFERENCE_ITEMS);
@@ -615,8 +636,10 @@ pub(super) async fn ensure_inbound_references(
     forms: &DraftFormsStepContentV3,
     meanings: &DraftMeaningsStepContentV3,
     check: InboundReferenceCheck,
+    baseline: Option<(&DraftFormsStepContentV3, &DraftMeaningsStepContentV3)>,
 ) -> Result<(), LexiconServiceError> {
-    let violations = inbound_reference_violations(tx, entry_id, forms, meanings, check).await?;
+    let violations =
+        inbound_reference_violations(tx, entry_id, forms, meanings, check, baseline).await?;
     if violations.is_empty() {
         Ok(())
     } else {
