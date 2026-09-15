@@ -34,40 +34,79 @@ def remote_rsync_commands(markdown: str) -> list[str]:
     return commands
 
 
+SHELL_PUNCTUATION = "();<>|&"
+# rsync 接受无歧义的长选项前缀（如 --arch、--no-own）：(完整名, 最短可认前缀长度, 影响的开关, 打开或关闭)。
+RSYNC_OWNER_LONG_OPTIONS = (
+    ("--archive", 4, ("owner", "group"), True),
+    ("--owner", 4, ("owner",), True),
+    ("--group", 4, ("group",), True),
+    ("--no-owner", 6, ("owner",), False),
+    ("--no-group", 6, ("group",), False),
+)
+
+
+def strip_shell_comment(command: str) -> str:
+    """按 bash 规则去注释：只有不在引号内、且位于词首的 # 才开始注释（`${x#y}`、`a#b` 不算）。"""
+    quote = None
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char == "#" and (index == 0 or command[index - 1].isspace()):
+            return command[:index]
+    return command
+
+
 def rsync_keeps_local_owner(command: str) -> bool:
-    """按 rsync「后写覆盖先写」模拟属主/属组开关，任一推到 tshb-test 的 rsync 最终仍保留即为 True。"""
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    """按 rsync「后写覆盖先写」模拟属主/属组开关，任一推到 tshb-test 的 rsync 最终仍保留即为 True。
+
+    推到 tshb-test 却认不出 rsync 词元的调用（如 `"$(command -v rsync)"`）一律按违规处理。
+    """
+    lexer = shlex.shlex(strip_shell_comment(command), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""
     segments, segment = [], []
     for token in lexer:
-        if token in {"&&", "||", ";", "|", "&"}:
+        is_operator = (
+            all(char in SHELL_PUNCTUATION for char in token)
+            and any(char in ";|&" for char in token)
+            and not any(char in "<>" for char in token)
+        )
+        if is_operator:
             segments.append(segment)
             segment = []
         else:
             segment.append(token)
     segments.append(segment)
     for segment in segments:
-        names = [token.rsplit("/", 1)[-1] for token in segment]
-        if "rsync" not in names or not any("tshb-test:" in token for token in segment):
+        if not any("tshb-test:" in token for token in segment):
             continue
-        owner = group = False
+        names = [token.rsplit("/", 1)[-1] for token in segment]
+        if "rsync" not in names:
+            if any(re.search(r"\brsync\b", token) for token in segment):
+                return True
+            continue
+        switches = {"owner": False, "group": False}
         for token in segment[names.index("rsync") + 1 :]:
-            if token == "--archive":
-                owner = group = True
-            elif token == "--owner":
-                owner = True
-            elif token == "--group":
-                group = True
-            elif token in {"--no-o", "--no-owner"}:
-                owner = False
-            elif token in {"--no-g", "--no-group"}:
-                group = False
+            option = token.split("=", 1)[0]
+            if option.startswith("--"):
+                for name, shortest, affected, enabled in RSYNC_OWNER_LONG_OPTIONS:
+                    if len(option) >= shortest and name.startswith(option):
+                        for switch in affected:
+                            switches[switch] = enabled
             elif re.fullmatch(r"-[A-Za-z]+", token):
                 if "a" in token or "o" in token:
-                    owner = True
+                    switches["owner"] = True
                 if "a" in token or "g" in token:
-                    group = True
-        if owner or group:
+                    switches["group"] = True
+        if switches["owner"] or switches["group"]:
             return True
     return False
 
@@ -273,16 +312,32 @@ class DeploySkillTests(unittest.TestCase):
             rsync --no-o --no-g -az "$a" "tshb-test:/flags-first"
             rsync -az "$a" "tshb-test:/comment-flags"  # --no-o --no-g
             rsync -az --no-o --no-g "$a" "tshb-test:/ok" && rsync -az "$b" "tshb-test:/chained"
+            rsync -az "$a" "tshb-test:/and-first" && rsync --no-o --no-g "$b" "tshb-test:/ok-and-second"
             rsync -avz --no-owner --no-group -e "ssh -p 22" "$a" "tshb-test:/ok-long"
             rsync -az --no-o --no-g "$a" "tshb-test:/ok"
             rsync -az "$a" "$staging/local-only"
+            rsync --no-o --no-g --arch "$a" "tshb-test:/abbrev-archive"
+            rsync -az --no-own --no-gro "$a" "tshb-test:/ok-abbrev"
+            "$(command -v rsync)" -az "$a" "tshb-test:/indirect"
+            rsync -az "$a" "tshb-test:/glued";(rsync --no-o --no-g "$b" "tshb-test:/ok-glued-second")
+            rsync -az "$a" "tshb-test:/pipe-amp"|&rsync --no-o --no-g "$b" "tshb-test:/ok-pipe-second"
+            rsync -az ${opts#-} "$a" "tshb-test:/midword-hash"
+            rsync -az --no-o --no-g "$a#b" "tshb-test:/ok-hash-in-quotes"
             rsync -az "$a" \\
               "tshb-test:/tail" \\
             ```
             """
         )
         offending = [
-            re.findall(r"tshb-test:/[\w-]+", command)[-1]
+            # 每条命令取第一个非 ok- 目标作标识：违规写法都不以 ok- 命名，合规写法都以 ok- 命名。
+            next(
+                (
+                    path
+                    for path in re.findall(r"tshb-test:/[\w-]+", command)
+                    if not path.startswith("tshb-test:/ok")
+                ),
+                command,
+            )
             for command in remote_rsync_commands(sample)
             if rsync_keeps_local_owner(command)
         ]
@@ -295,6 +350,12 @@ class DeploySkillTests(unittest.TestCase):
                 "tshb-test:/flags-first",
                 "tshb-test:/comment-flags",
                 "tshb-test:/chained",
+                "tshb-test:/and-first",
+                "tshb-test:/abbrev-archive",
+                "tshb-test:/indirect",
+                "tshb-test:/glued",
+                "tshb-test:/pipe-amp",
+                "tshb-test:/midword-hash",
                 "tshb-test:/tail",
             ],
         )
