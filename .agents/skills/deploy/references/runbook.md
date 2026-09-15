@@ -650,7 +650,7 @@ restore 会先验证备份组，再撤下正式 manifest，以同目录临时文
 
 回退后重跑 health/ready/auth smoke；若恢复了 `api.json`，必须执行 `deployment_manifest.py verify`。若旧部署没有 manifest，回退后的来源状态明确为 UNKNOWN/BLOCKED，不能伪造一个 SHA。只有回退 smoke/manifest 全部通过后，才按第 5.1 节相同的 owner 校验顺序释放服务器锁和本地锁；失败时保留锁、state、staging 与 backup 供恢复，绝不自动抢锁。
 
-服务器上不再用源码构建（`/opt/tsz-rust` 下旧版部署残留的源码树不参与运行或回退）；含迁移的发布只有已验证安全时才由候选二进制撤回数据库；否则保持停止状态等待恢复决定，不换回不兼容的旧二进制。只有数据库
+服务器上不再用源码构建，`/opt/tsz-rust` 下也不再保留源码树（旧版部署残留的源码、`target/` 下除 `release/tsz-rust` 外的构建产物与 import/seed 等旧工具二进制、根目录的手工二进制备份，已于 2026-09-15 清理），运行只需要二进制与 `.env`；含迁移的发布只有已验证安全时才由候选二进制撤回数据库；否则保持停止状态等待恢复决定，不换回不兼容的旧二进制。只有数据库
 已经处于部署前 migration 版本时，二进制恢复才构成完整回退。
 
 ## 7. 环境变量
@@ -661,6 +661,6 @@ restore 会先验证备份组，再撤下正式 manifest，以同目录临时文
 - **COOKIE_SECURE=false**（测试服的 IP 直连入口仍是纯 HTTP，Secure cookie 会被浏览器拒收；两个域名已由 nginx + certbot 提供 HTTPS，关闭 IP 直连入口后删除此项恢复默认 true；生产禁止 false）
 - Azure TTS：AZURE_SPEECH_ENABLED / AZURE_SPEECH_REGION / AZURE_SPEECH_KEY / AZURE_SPEECH_CONNECT_TIMEOUT_MS / AZURE_SPEECH_REQUEST_TIMEOUT_MS / AZURE_SPEECH_MAX_RESPONSE_BYTES
 - 对象存储：OBJECT_STORAGE_SPACES，以及 speech 空间的 OBJECT_STORAGE_SPEECH_BACKEND / OBJECT_STORAGE_SPEECH_OSS_ENDPOINT / OBJECT_STORAGE_SPEECH_OSS_REGION / OBJECT_STORAGE_SPEECH_OSS_BUCKET / OBJECT_STORAGE_SPEECH_OSS_ROOT / OBJECT_STORAGE_SPEECH_OSS_ACCESS_KEY_ID / OBJECT_STORAGE_SPEECH_OSS_ACCESS_KEY_SECRET / OBJECT_STORAGE_SPEECH_PRIVACY / OBJECT_STORAGE_SPEECH_MAX_OBJECT_SIZE_BYTES / OBJECT_STORAGE_SPEECH_PRESIGN_TTL_SECONDS / OBJECT_STORAGE_SPEECH_CACHE_CONTROL
-- 已不再读取的残留：LEXICON_GENERATOR_PROVIDER / QWEN_LEXICON_API_KEY / QWEN_LEXICON_MODEL（词条内容生成 2026-09-11 随 V2 内容格式下线，见 `.env.example`）
+- 智能词库 V3 开关（默认 false，取值只接受小写 true/false）：SMART_LEXICON_V3_READ / SMART_LEXICON_V3_CREATE / SMART_LEXICON_V3_EDIT / SMART_LEXICON_V3_PUBLISH / SMART_LEXICON_V3_PROJECTION / SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS / SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY；另有 SMART_LEXICON_V3_LEGACY_BRIDGE_READ / SMART_LEXICON_V3_SENSE_COMPONENT_USAGES，配置结构里已无对应字段，不被读取
 
 新增配置项先核对 `.env.example`、`docs/deployment.md` 与目标环境；如果服务器缺少必需配置，在部署写入前准备具体方案并取得相应授权，不隐式修改服务器 .env。
