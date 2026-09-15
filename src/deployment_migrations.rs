@@ -401,6 +401,70 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn deployment_undo_reports_duplicate_form_type_abbreviation(pool: PgPool) {
+        // 放开词形缩写唯一后同一词性下可以有 V-ing / v-ing；回退要指名重复的词形而不是裸 23505。
+        let verb: Uuid =
+            sqlx::query_scalar("SELECT id FROM catalog.parts_of_speech WHERE code = 'verb'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        for (code, name_zh, short_name_zh, name_en, abbreviation, full_name_en) in [
+            (
+                "gerund",
+                "动名词形式",
+                "动名词",
+                "GERUND",
+                "V-ing",
+                "gerund",
+            ),
+            (
+                "ing_form",
+                "ing 形式",
+                "ing形",
+                "Ing form",
+                "v-ing",
+                "ing form",
+            ),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO catalog.form_types (
+                    id, part_of_speech_id, code, name_zh, name_en,
+                    short_name_zh, abbreviation, full_name_en, sort_order
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 200)
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(verb)
+            .bind(code)
+            .bind(name_zh)
+            .bind(name_en)
+            .bind(short_name_zh)
+            .bind(abbreviation)
+            .bind(full_name_en)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+            .await
+            .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("verb 下的 gerund/ing_form"),
+            "回退失败原因应指名缩写重复的词形：{rendered}"
+        );
+        let latest: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(latest, CURRENT_RELEASE_VERSION, "守卫失败时账本不应回退");
+    }
+
+    #[sqlx::test]
     async fn deployment_undo_refuses_while_full_name_en_exceeds_64_characters(pool: PgPool) {
         // 英文全称上限放宽到 200 后再回退会让超长存量撞 CHECK：要报出表名与 code，账本不动。
         sqlx::query(
