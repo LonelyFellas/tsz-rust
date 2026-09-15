@@ -39,7 +39,7 @@ SHELL_PUNCTUATION = "();<>|&"
 RSYNC_OWNER_LONG_OPTIONS = (
     ("--archive", 4, ("owner", "group"), True),
     ("--owner", 4, ("owner",), True),
-    ("--group", 4, ("group",), True),
+    ("--group", 3, ("group",), True),
     ("--no-owner", 6, ("owner",), False),
     ("--no-group", 6, ("group",), False),
 )
@@ -59,9 +59,24 @@ def strip_shell_comment(command: str) -> str:
                 quote = None
         elif char in "'\"":
             quote = char
-        elif char == "#" and (index == 0 or command[index - 1].isspace()):
+        elif char == "#" and (index == 0 or command[index - 1].isspace() or command[index - 1] in ";&|()<>"):
             return command[:index]
     return command
+
+
+def is_shell_operator(token: str) -> bool:
+    """只由 shell 符号组成、且含命令分隔（; && || 或不挨着 < > 的 | &）的词元；`>&`、`&>`、`>|` 是重定向。"""
+    if not token or any(char not in SHELL_PUNCTUATION for char in token):
+        return False
+    if ";" in token or "&&" in token or "||" in token:
+        return True
+    for index, char in enumerate(token):
+        if char in "|&":
+            before = token[index - 1] if index else ""
+            after = token[index + 1] if index + 1 < len(token) else ""
+            if before not in ("<", ">") and after not in ("<", ">"):
+                return True
+    return False
 
 
 def rsync_keeps_local_owner(command: str) -> bool:
@@ -74,12 +89,7 @@ def rsync_keeps_local_owner(command: str) -> bool:
     lexer.commenters = ""
     segments, segment = [], []
     for token in lexer:
-        is_operator = (
-            all(char in SHELL_PUNCTUATION for char in token)
-            and any(char in ";|&" for char in token)
-            and not any(char in "<>" for char in token)
-        )
-        if is_operator:
+        if is_shell_operator(token):
             segments.append(segment)
             segment = []
         else:
@@ -323,6 +333,10 @@ class DeploySkillTests(unittest.TestCase):
             rsync -az "$a" "tshb-test:/pipe-amp"|&rsync --no-o --no-g "$b" "tshb-test:/ok-pipe-second"
             rsync -az ${opts#-} "$a" "tshb-test:/midword-hash"
             rsync -az --no-o --no-g "$a#b" "tshb-test:/ok-hash-in-quotes"
+            rsync -rlpt --g "$a" "tshb-test:/group-abbrev"
+            (rsync -az "$a" "tshb-test:/paren-comment")# --no-o --no-g
+            rsync -az "$a" "tshb-test:/semi-redirect";>log rsync --no-o --no-g "$b" "tshb-test:/ok-semi-second"
+            rsync -az --no-o --no-g "$a" "tshb-test:/ok-redirect" 2>&1 >|log
             rsync -az "$a" \\
               "tshb-test:/tail" \\
             ```
@@ -356,6 +370,9 @@ class DeploySkillTests(unittest.TestCase):
                 "tshb-test:/glued",
                 "tshb-test:/pipe-amp",
                 "tshb-test:/midword-hash",
+                "tshb-test:/group-abbrev",
+                "tshb-test:/paren-comment",
+                "tshb-test:/semi-redirect",
                 "tshb-test:/tail",
             ],
         )
