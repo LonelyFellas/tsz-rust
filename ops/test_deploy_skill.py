@@ -11,11 +11,14 @@ BASH_FENCE = re.compile(r"^[ \t]*```(?:bash|sh|shell)[ \t]*\n(.*?)^[ \t]*```[ \t
 
 
 def remote_rsync_commands(markdown: str) -> list[str]:
-    """markdown 的 bash 代码块里推到 tshb-test 的 rsync 命令（`\\` 续行已拼成一条）。"""
+    """markdown 的 bash 代码块里推到 tshb-test 的命令（`\\` 续行已拼成一条）。
+
+    不要求写出 rsync：`"$RSYNC" …` 这类变量调用也要交给 rsync_keeps_local_owner 判定。
+    """
     commands = []
 
     def collect(logical: str) -> None:
-        if re.search(r"\brsync\b", logical) and "tshb-test:" in logical:
+        if "tshb-test:" in logical:
             commands.append(logical)
 
     for block in BASH_FENCE.findall(markdown):
@@ -46,26 +49,51 @@ RSYNC_OWNER_LONG_OPTIONS = (
 
 
 def strip_shell_comment(command: str) -> str:
-    """按 bash 规则去注释：只有不在引号内、且位于词首的 # 才开始注释（`${x#y}`、`a#b` 不算）。"""
-    quote = None
+    """按 bash 规则去注释：只有不在引号内、且位于词首的 # 才开始注释（`${x#y}`、`a#b`、`$(…)#` 不算）。
+
+    `$(…)`、`$((…))`、`<(…)`、`>(…)` 的 `)` 仍在词内，只有子 shell `(…)` 的 `)` 之后才算词首，
+    所以要跟踪括号嵌套；替换里的引号另起一层（`"$(printf "%s #" x)"` 里的 # 仍在引号内）。
+    """
+    nesting = []  # 未闭合的 ' " 与括号：替换记为 $(，子 shell 记为 (
     escaped = False
+    word_start = True
+    previous = ""  # 上一个未被转义的字符
     for index, char in enumerate(command):
+        top = nesting[-1] if nesting else None
+        boundary = False
         if escaped:
             escaped = False
-        elif char == "\\" and quote != "'":
+            char = ""
+        elif top == "'":
+            if char == "'":
+                nesting.pop()
+        elif char == "\\":
             escaped = True
-        elif quote:
-            if char == quote:
-                quote = None
+        elif char == "(" and (top != '"' or previous == "$"):
+            nesting.append("$(" if previous in ("$", "<", ">") else "(")
+            boundary = True
+        elif top == '"':
+            if char == '"':
+                nesting.pop()
         elif char in "'\"":
-            quote = char
-        elif char == "#" and (index == 0 or command[index - 1].isspace() or command[index - 1] in ";&|()<>"):
+            nesting.append(char)
+        elif char == ")" and top in ("$(", "("):
+            boundary = nesting.pop() == "("
+        elif char == "#" and word_start:
             return command[:index]
+        else:
+            boundary = char.isspace() or char in ";&|()<>"
+        word_start = boundary
+        previous = char
     return command
 
 
 def is_shell_operator(token: str) -> bool:
-    """只由 shell 符号组成、且含命令分隔（; && || 或不挨着 < > 的 | &）的词元；`>&`、`&>`、`>|` 是重定向。"""
+    """只由 shell 符号组成、且含命令分隔（; && || 或不属于重定向的 | &）的词元。
+
+    重定向只有左边挨着 < > 的 | &（`>|`、`>&`、`<&`）和右边挨着 > 的 &（`&>`、`&>>`）；
+    `|>`、`|<`、`&<` 是管道或后台之后紧跟重定向，照样分段。
+    """
     if not token or any(char not in SHELL_PUNCTUATION for char in token):
         return False
     if ";" in token or "&&" in token or "||" in token:
@@ -74,15 +102,29 @@ def is_shell_operator(token: str) -> bool:
         if char in "|&":
             before = token[index - 1] if index else ""
             after = token[index + 1] if index + 1 < len(token) else ""
-            if before not in ("<", ">") and after not in ("<", ">"):
+            if before not in ("<", ">") and not (char == "&" and after == ">"):
                 return True
     return False
+
+
+# 命令词前面可以出现的词元：子 shell / 分组、保留字、`NAME=值` 赋值。
+COMMAND_PREFIX = re.compile(r"(?:\(+|\{|!|if|then|elif|else|while|until|do|time)$|[A-Za-z_]\w*=")
+
+
+def command_word_indexes(segment: list[str]) -> list[int]:
+    """段里命令词的位置：跳过 COMMAND_PREFIX 后的第一个词，以及独立 `--` 之后被包装执行的词（如 `ci_metrics.py run --`）。"""
+    indexes = [index + 1 for index, token in enumerate(segment[:-1]) if token == "--"]
+    first = next((index for index, token in enumerate(segment) if not COMMAND_PREFIX.match(token)), None)
+    if first is not None:
+        indexes.append(first)
+    return indexes
 
 
 def rsync_keeps_local_owner(command: str) -> bool:
     """按 rsync「后写覆盖先写」模拟属主/属组开关，任一推到 tshb-test 的 rsync 最终仍保留即为 True。
 
-    推到 tshb-test 却认不出 rsync 词元的调用（如 `"$(command -v rsync)"`）一律按违规处理。
+    推到 tshb-test 却认不出 rsync 词元时，出现独立的 rsync 字样（如 `"$(command -v rsync)"`），或命令词含 rsync、
+    是变量或命令替换（如 `rsync-3.2.7`、`"$RSYNC"`，看不出是不是 rsync），一律按违规处理。
     """
     lexer = shlex.shlex(strip_shell_comment(command), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -100,7 +142,9 @@ def rsync_keeps_local_owner(command: str) -> bool:
             continue
         names = [token.rsplit("/", 1)[-1] for token in segment]
         if "rsync" not in names:
-            if any(re.search(r"\brsync\b", token) for token in segment):
+            if any(re.search(r"(?<![\w-])rsync(?![\w-])", token) for token in segment) or any(
+                re.search(r"[$`]|rsync", names[index]) for index in command_word_indexes(segment)
+            ):
                 return True
             continue
         switches = {"owner": False, "group": False}
@@ -337,6 +381,24 @@ class DeploySkillTests(unittest.TestCase):
             (rsync -az "$a" "tshb-test:/paren-comment")# --no-o --no-g
             rsync -az "$a" "tshb-test:/semi-redirect";>log rsync --no-o --no-g "$b" "tshb-test:/ok-semi-second"
             rsync -az --no-o --no-g "$a" "tshb-test:/ok-redirect" 2>&1 >|log
+            rsync -az "$a" "tshb-test:/pipe-redirect" |>log rsync --no-o --no-g "$b" "tshb-test:/ok-pipe-redirect-second"
+            rsync -az "$a" "tshb-test:/pipe-input" |<in rsync --no-o --no-g "$b" "tshb-test:/ok-pipe-input-second"
+            rsync -az "$a" "tshb-test:/background-input" &<in rsync --no-o --no-g "$b" "tshb-test:/ok-background-input-second"
+            rsync --no-o --no-g "$a" "tshb-test:/redirect-archive" 2>&1 >|log &>log <&0 -a
+            rsync --no-o --no-g "$a" tshb-test:/subst-hash-$(date +%s)#tag -a
+            rsync --no-o --no-g "$a" tshb-test:/arith-hash-$((1+1))#tag -a
+            rsync --no-o --no-g "$a" "tshb-test:/quoted-subst-$(printf "%s #" x)" -a
+            rsync --no-o --no-g --files-from <(printf x)#tag -a "$a" "tshb-test:/process-subst-hash"
+            rsync -az "$a" "tshb-test:/quoted-escaped-paren-\\$(" # --no-o --no-g
+            python3 "$tools/ci_metrics.py" run --name deploy-binary-rsync -- scp "$staging/rsync-cache" "tshb-test:/ok-scp-named-rsync"
+            "$RSYNC" -az "$a" "tshb-test:/var-command"
+            # 命令词是变量时看不出是不是 rsync，带了 --no-o --no-g 也判违规
+            RSYNC_RSH=ssh ${RSYNC} --no-o --no-g "$a" "tshb-test:/var-command-assign"
+            ("$RSYNC" -az "$a" "tshb-test:/var-command-subshell")
+            python3 "$tools/ci_metrics.py" run --name deploy-binary-push -- "$RSYNC" -az "$a" "tshb-test:/var-command-wrapped"
+            "$tools/ci_metrics.py" run --name deploy-binary-push -- scp "$a" "tshb-test:/ok-var-dir-command"
+            if ! "$RSYNC" -az "$a" "tshb-test:/var-command-if"; then :; fi
+            /usr/local/bin/rsync-3.2.7 -az "$a" "tshb-test:/versioned-command"
             rsync -az "$a" \\
               "tshb-test:/tail" \\
             ```
@@ -373,6 +435,21 @@ class DeploySkillTests(unittest.TestCase):
                 "tshb-test:/group-abbrev",
                 "tshb-test:/paren-comment",
                 "tshb-test:/semi-redirect",
+                "tshb-test:/pipe-redirect",
+                "tshb-test:/pipe-input",
+                "tshb-test:/background-input",
+                "tshb-test:/redirect-archive",
+                "tshb-test:/subst-hash-",
+                "tshb-test:/arith-hash-",
+                "tshb-test:/quoted-subst-",
+                "tshb-test:/process-subst-hash",
+                "tshb-test:/quoted-escaped-paren-",
+                "tshb-test:/var-command",
+                "tshb-test:/var-command-assign",
+                "tshb-test:/var-command-subshell",
+                "tshb-test:/var-command-wrapped",
+                "tshb-test:/var-command-if",
+                "tshb-test:/versioned-command",
                 "tshb-test:/tail",
             ],
         )
