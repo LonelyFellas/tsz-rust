@@ -28,7 +28,8 @@ SSML、provider voice id、fingerprint、object key、音频、URL 或输出格�
 voice 目录由数据库维护，migration 仅建立 schema/table，不硬编码生产 voice seed。本 PR 最初以
 `ops/speech-voice-catalog/seed.sql` 为目录真相源；后续 azure-voice-catalog 改为编译进二进制的预置目录，
 应用启动时在迁移之后按 Azure voice ID 补缺、不改已有记录，seed.sql 只保留旧版初始化数据，新库不要再执行
-（见 `docs/deployment.md` 与 `ops/speech-voice-catalog/README.md`）。空目录是合法状态；
+（见 `docs/deployment.md` 与 `ops/speech-voice-catalog/README.md`）。启动补缺后目录正常不为空；运维停用全部
+英美 Azure 音色时 voice 查询返回空列表，仍是合法状态；
 未配置 Azure 或 `speech` storage 不影响进程启动与 voice 查询，试听在运行时返回稳定 503。
 
 ## 3. 数据模型与回退

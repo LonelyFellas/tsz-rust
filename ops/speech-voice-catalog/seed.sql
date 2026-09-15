@@ -1,7 +1,7 @@
 -- speech.voices 发音人目录种子。幂等，可重复执行。
 --
 -- 放在 ops/ 而不在 migrations/：voice 目录是运营数据而非 schema，
--- migration 只建表（docs/tts-preview-api-design.md §2：「空目录是合法状态」）。
+-- migration 只建表（docs/tts-preview-api-design.md §2：「migration 仅建立 schema/table，不硬编码生产 voice seed」）。
 -- 应用启动会自动跑 migration，不应该顺手改写运营维护的目录。
 --
 -- styles 逐个发音人取自 Azure voices list 的 StyleList，**各不相同，不能互相照抄**：
