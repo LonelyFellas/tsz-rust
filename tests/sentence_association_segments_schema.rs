@@ -331,3 +331,72 @@ async fn exact_publication_identity_rejects_sense_and_form_from_another_publicat
         "lexicon_sentence_associations_target_publication_variant_fkey",
     );
 }
+
+#[sqlx::test]
+async fn discovery_generation_trigger_recreates_missing_singleton_once_per_transaction(
+    pool: PgPool,
+) {
+    let generation_query = "SELECT generation, last_txid FROM lexicon.sentence_discovery_generation WHERE singleton = TRUE";
+    let touch = "UPDATE lexicon.surface_sources SET event_offset = event_offset WHERE FALSE";
+    sqlx::query("DELETE FROM lexicon.sentence_discovery_generation")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(touch).execute(&mut *tx).await.unwrap();
+    let first: Option<(i64, Option<i64>)> = sqlx::query_as(generation_query)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(touch).execute(&mut *tx).await.unwrap();
+    let second: Option<(i64, Option<i64>)> = sqlx::query_as(generation_query)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let (recreated, txid) = first.expect("任何词面写入语句都应补回单例");
+    assert!(recreated > 1, "补回的水位不能从 1 重来：{recreated}");
+    assert!(txid.is_some());
+    assert_eq!(second, first, "同一事务只推进一次");
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(touch).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let (bumped, _): (i64, Option<i64>) = sqlx::query_as(generation_query)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bumped, recreated + 1);
+}
+
+#[sqlx::test]
+async fn self_heal_generation_migration_restores_missing_singleton_idempotently(pool: PgPool) {
+    const UP: &str =
+        include_str!("../migrations/20260914120000_self_heal_sentence_discovery_generation.up.sql");
+    const DOWN: &str = include_str!(
+        "../migrations/20260914120000_self_heal_sentence_discovery_generation.down.sql"
+    );
+    let generation_query = "SELECT generation, last_txid FROM lexicon.sentence_discovery_generation WHERE singleton = TRUE";
+    sqlx::query("DELETE FROM lexicon.sentence_discovery_generation")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 按清库口径清过、已经缺行的环境，部署这版迁移即恢复。
+    sqlx::raw_sql(UP).execute(&pool).await.unwrap();
+    let restored: (i64, Option<i64>) = sqlx::query_as(generation_query)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(restored.0 > 1, "补回的水位不能从 1 重来：{}", restored.0);
+    assert_eq!(restored.1, None);
+
+    sqlx::raw_sql(UP).execute(&pool).await.unwrap();
+    sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    let retained: (i64, Option<i64>) = sqlx::query_as(generation_query)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(retained, restored, "重放与回退都不能动健康的单例");
+}

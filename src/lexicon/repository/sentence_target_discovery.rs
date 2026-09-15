@@ -25,12 +25,17 @@ impl LexiconRepository {
     pub(crate) async fn sentence_discovery_generation(
         tx: &mut Transaction<'_, Postgres>,
     ) -> Result<i64, LexiconRepositoryError> {
+        // 清库会连带清掉单例；只读事务里补不了，由下一次词面写入的触发器补回。
+        // 缺行时要在日志里点名单例，而不是笼统的 database operation failed。
         sqlx::query_scalar(
             "SELECT generation FROM lexicon.sentence_discovery_generation WHERE singleton = TRUE",
         )
-        .fetch_one(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
-        .map_err(LexiconRepositoryError::Database)
+        .map_err(LexiconRepositoryError::Database)?
+        .ok_or(LexiconRepositoryError::Invariant(
+            "lexicon.sentence_discovery_generation singleton row is missing",
+        ))
     }
 
     pub(crate) async fn published_sentence_discovery_surfaces(
@@ -333,5 +338,30 @@ impl LexiconRepository {
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[sqlx::test]
+    async fn missing_discovery_generation_names_the_singleton(pool: PgPool) {
+        sqlx::query("DELETE FROM lexicon.sentence_discovery_generation")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let error = LexiconRepository::sentence_discovery_generation(&mut tx)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, LexiconRepositoryError::Invariant(_)),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("sentence_discovery_generation"),
+            "日志要能指明单例缺失：{error}"
+        );
     }
 }

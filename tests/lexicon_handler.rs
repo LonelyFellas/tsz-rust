@@ -10181,6 +10181,130 @@ async fn component_target_search_recovers_after_missing_generation_is_repaired(p
     );
 }
 
+/// 清库口径 `TRUNCATE lexicon.*` 会连带清掉发现代数单例，迁移不重跑；
+/// 之后第一次保存或发布写词面时必须补回，发现接口随之恢复。
+#[sqlx::test]
+async fn surface_writes_rebuild_missing_discovery_generation(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let (published, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "time being", json!([])).await;
+    let published_id = published["word"]["id"].as_str().unwrap().to_owned();
+    let (draft_id, forms) = create_v3_phrase_draft(&state, &bearer, "time out").await;
+    let generation_query = "SELECT generation, last_txid FROM lexicon.sentence_discovery_generation WHERE singleton = TRUE";
+    let (before, _): (i64, Option<i64>) = sqlx::query_as(generation_query)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let search_body = json!({"schema_version": 3, "q": "time", "page_size": 50});
+    let resolve_body = json!({
+        "schema_version": 3,
+        "sentence_text": "For the time being we time out.",
+        "source_dialect": "common",
+        "mode": "all_published_targets",
+        "page_size_per_range": 20
+    });
+    let resolve_path = format!("{ROOT}/entries/sentence-targets/resolve");
+
+    sqlx::query("DELETE FROM lexicon.sentence_discovery_generation")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, failed) = search_component_targets(&state, &bearer, search_body.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "还没有写入时读侧拿不到代数：{failed}"
+    );
+
+    // 保存草稿写 draft 词面即补回；水位取新时间戳，不回到 1 复用旧游标版本。
+    let (_, forms_saved) =
+        save_v3_forms_after_impact(&state, &bearer, &draft_id, 1, "complete", forms).await;
+    let saved: Option<(i64, Option<i64>)> = sqlx::query_as(generation_query)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+    let (saved_generation, saved_txid) = saved.expect("保存草稿应补回发现代数单例");
+    assert!(saved_generation > before, "{saved_generation} <= {before}");
+    assert!(saved_txid.is_some());
+
+    let (status, found) = search_component_targets(&state, &bearer, search_body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert!(
+        component_match_entry_ids(&found).contains(&published_id),
+        "{found}"
+    );
+    let (status, resolved) = call(
+        &state,
+        Method::POST,
+        &resolve_path,
+        &bearer,
+        None,
+        Some(resolve_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    assert_eq!(resolved["discovery_generation"], saved_generation);
+    assert!(resolved.to_string().contains(&published_id), "{resolved}");
+
+    let (status, meanings_saved) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{draft_id}/steps/meanings"),
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": forms_saved["word"]["revision"],
+            "intent": "complete",
+            "content":
+                phrase_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone())
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{meanings_saved}");
+
+    // 发布写 current_publication 词面，同样能补回。
+    sqlx::query("DELETE FROM lexicon.sentence_discovery_generation")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, republished) = publish_ready_v3(&state, &bearer, &meanings_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{republished}");
+    let published_generation: Option<(i64, Option<i64>)> = sqlx::query_as(generation_query)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+    let (published_generation, _) = published_generation.expect("发布应补回发现代数单例");
+    assert!(
+        published_generation > saved_generation,
+        "{published_generation} <= {saved_generation}"
+    );
+
+    let (status, found) = search_component_targets(&state, &bearer, search_body).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let found_ids = component_match_entry_ids(&found);
+    assert!(
+        found_ids.contains(&published_id) && found_ids.contains(&draft_id),
+        "{found}"
+    );
+    let (status, resolved) = call(
+        &state,
+        Method::POST,
+        &resolve_path,
+        &bearer,
+        None,
+        Some(resolve_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    assert_eq!(resolved["discovery_generation"], published_generation);
+    assert!(resolved.to_string().contains(&draft_id), "{resolved}");
+}
+
 #[sqlx::test]
 async fn component_target_search_matches_published_surfaces_and_hides_drafts_and_archived(
     pool: PgPool,

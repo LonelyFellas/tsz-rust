@@ -2023,6 +2023,16 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 2. 前端 `sync:openapi`，按 design §6 改完后合 main。
 3. 测试服先清库（`TRUNCATE lexicon.*` 加两张词性表，`dictionary` 与 `metadata` 不动）。
    库里还有 V3 词条时，迁移 `20260913200000_form_group_dialect_scope` 会直接报错。
+   `TRUNCATE lexicon.*` 会连带清掉运行时单例 `lexicon.sentence_discovery_generation`，迁移不会重跑补回，清完立即执行：
+
+   ```sql
+   INSERT INTO lexicon.sentence_discovery_generation (singleton, generation)
+   VALUES (TRUE, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::BIGINT)
+   ON CONFLICT (singleton) DO NOTHING;
+   ```
+
+   缺这一行时 `sentence-targets/resolve` 与 `component-targets/search` 返回 500。迁移
+   `20260914120000_self_heal_sentence_discovery_generation` 起，下一次保存或发布词条会自动补回，但在那之前仍是 500。
 4. 先部署后端，再部署前端。
 
 部署回退时，守卫把「词性上缺 `dialect_rules`」和词义上的 `form_group_id` 视为回退版本读不了的形状。
