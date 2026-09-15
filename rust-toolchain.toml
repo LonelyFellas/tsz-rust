@@ -8,7 +8,7 @@
 # 请周期性主动上抬（升完在本地跑一遍 clippy -D warnings 再提），别让仓库卡在旧编译器上。
 #
 # 刻意不写 components：rustfmt / clippy 只有 CI 需要，由 ci.yml 的 action 输入单独指定。
-# 写在这里会让每个供给该工具链的地方都多拉两个组件——生产服务器只跑 cargo build，
-# 而它到 static.rust-lang.org 实测只有约 29 KB/s，多下的每一 MB 都是部署时长。
+# 写在这里会让每个供给该工具链的地方都多拉两个组件——CI 里只编译、跑测试的 job
+# （unit-doc / integration / release-artifact）都用不上。服务器只装 CI 产物二进制，不装工具链。
 [toolchain]
 channel = "1.98.0"

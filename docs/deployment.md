@@ -131,14 +131,10 @@ curl localhost:8383/healthz        # {"status":"ok"}    存活（不碰库）
 curl localhost:8383/readyz         # {"status":"ready"} 就绪（探 DB+Redis）
 ```
 
-**发音人目录**：`speech.voices` 是运营数据，不随 migration 建立。新建库或从备份恢复后要重跑一次种子，
-否则试听目录为空，前端「获取语音」按钮会全部禁用：
-
-```bash
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /opt/tsz-rust/ops/speech-voice-catalog/seed.sql
-```
-
-幂等，可反复执行（一致时不写库，也不会启用运维停用过的发音人）；语义与改目录的注意事项见
+**发音人目录**：`speech.voices` 是运营数据，migration 只建表。应用启动时在迁移之后自动把编译进二进制的
+预置目录按 Azure voice ID 补缺，已有记录（含启停与限幅）一概不改，所以新建库或从备份恢复后无需手动跑种子。
+`ops/speech-voice-catalog/seed.sql` 只保留旧版初始化数据，新部署不要再执行：它按旧 alias 合并，
+会给启动时已补入的同一 Azure 发音人再插一条重复记录。从 Azure 刷新目录能力见
 `ops/speech-voice-catalog/README.md`。
 
 **升级流程**：`systemctl stop` → 覆盖二进制 → `systemctl start`。新迁移会在启动时自动应用（多实例同时启动有 advisory lock 兜底，只一个真正执行）。
