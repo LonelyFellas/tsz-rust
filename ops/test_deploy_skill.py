@@ -6,7 +6,8 @@ import tempfile
 import textwrap
 import unittest
 
-BASH_FENCE = re.compile(r"^[ \t]*```(?:bash|sh|shell)[ \t]*\n(.*?)^[ \t]*```", re.M | re.S)
+# runbook 里 bash 代码块的唯一解析口径：fail-fast 检查与推送 rsync 检查共用。
+BASH_FENCE = re.compile(r"^[ \t]*```(?:bash|sh|shell)[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.M | re.S)
 
 
 def remote_rsync_commands(markdown: str) -> list[str]:
@@ -152,9 +153,7 @@ class DeploySkillTests(unittest.TestCase):
         self.assertNotIn('rm -rf "$staging"', self.runbook)
 
     def test_every_bash_block_is_fail_fast_and_pipe_safe(self) -> None:
-        bash_blocks = re.findall(
-            r"(?ms)^\s*```bash\n(.*?)^\s*```$", self.runbook
-        )
+        bash_blocks = BASH_FENCE.findall(self.runbook)
         self.assertGreater(len(bash_blocks), 0)
         for block in bash_blocks:
             with self.subTest(block=block.splitlines()[1:3]):
