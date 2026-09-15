@@ -107,10 +107,14 @@ def is_shell_operator(token: str) -> bool:
     return False
 
 
+# 命令词前面可以出现的词元：子 shell / 分组、保留字、`NAME=值` 赋值。
+COMMAND_PREFIX = re.compile(r"(?:\(+|\{|!|if|then|elif|else|while|until|do|time)$|[A-Za-z_]\w*=")
+
+
 def command_word_indexes(segment: list[str]) -> list[int]:
-    """段里命令词的位置：跳过 `(` 与 `NAME=值` 赋值后的第一个词，以及独立 `--` 之后被包装执行的词（如 `ci_metrics.py run --`）。"""
+    """段里命令词的位置：跳过 COMMAND_PREFIX 后的第一个词，以及独立 `--` 之后被包装执行的词（如 `ci_metrics.py run --`）。"""
     indexes = [index + 1 for index, token in enumerate(segment[:-1]) if token == "--"]
-    first = next((index for index, token in enumerate(segment) if not re.match(r"\(|[A-Za-z_]\w*=", token)), None)
+    first = next((index for index, token in enumerate(segment) if not COMMAND_PREFIX.match(token)), None)
     if first is not None:
         indexes.append(first)
     return indexes
@@ -119,8 +123,8 @@ def command_word_indexes(segment: list[str]) -> list[int]:
 def rsync_keeps_local_owner(command: str) -> bool:
     """按 rsync「后写覆盖先写」模拟属主/属组开关，任一推到 tshb-test 的 rsync 最终仍保留即为 True。
 
-    推到 tshb-test 却认不出 rsync 词元时，出现 rsync 字样（如 `"$(command -v rsync)"`），或命令词是变量、
-    命令替换（如 `"$RSYNC"`，看不出是不是 rsync），一律按违规处理。
+    推到 tshb-test 却认不出 rsync 词元时，出现独立的 rsync 字样（如 `"$(command -v rsync)"`），或命令词含 rsync、
+    是变量或命令替换（如 `rsync-3.2.7`、`"$RSYNC"`，看不出是不是 rsync），一律按违规处理。
     """
     lexer = shlex.shlex(strip_shell_comment(command), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -139,7 +143,7 @@ def rsync_keeps_local_owner(command: str) -> bool:
         names = [token.rsplit("/", 1)[-1] for token in segment]
         if "rsync" not in names:
             if any(re.search(r"(?<![\w-])rsync(?![\w-])", token) for token in segment) or any(
-                re.search(r"[$`]", names[index]) for index in command_word_indexes(segment)
+                re.search(r"[$`]|rsync", names[index]) for index in command_word_indexes(segment)
             ):
                 return True
             continue
@@ -393,6 +397,8 @@ class DeploySkillTests(unittest.TestCase):
             ("$RSYNC" -az "$a" "tshb-test:/var-command-subshell")
             python3 "$tools/ci_metrics.py" run --name deploy-binary-push -- "$RSYNC" -az "$a" "tshb-test:/var-command-wrapped"
             "$tools/ci_metrics.py" run --name deploy-binary-push -- scp "$a" "tshb-test:/ok-var-dir-command"
+            if ! "$RSYNC" -az "$a" "tshb-test:/var-command-if"; then :; fi
+            /usr/local/bin/rsync-3.2.7 -az "$a" "tshb-test:/versioned-command"
             rsync -az "$a" \\
               "tshb-test:/tail" \\
             ```
@@ -442,6 +448,8 @@ class DeploySkillTests(unittest.TestCase):
                 "tshb-test:/var-command-assign",
                 "tshb-test:/var-command-subshell",
                 "tshb-test:/var-command-wrapped",
+                "tshb-test:/var-command-if",
+                "tshb-test:/versioned-command",
                 "tshb-test:/tail",
             ],
         )
