@@ -492,7 +492,7 @@ pub(super) fn apply_manual(meanings: &mut DraftMeaningsStepContentV3) {
     }
 }
 
-fn shared_target_matches(
+pub(super) fn shared_target_matches(
     forms: &DraftFormsStepContentV3,
     meanings: &DraftMeaningsStepContentV3,
     link: &TextLinkV3,
@@ -562,35 +562,6 @@ pub(crate) async fn validate_shared_sentence_target(
     Ok(target.is_some_and(|target| {
         shared_target_matches(&target.forms, &target.meanings, link, dialect)
     }))
-}
-
-pub(crate) async fn ensure_shared_sentence_targets(
-    tx: &mut Transaction<'_, Postgres>,
-    entry_id: Uuid,
-    forms: &DraftFormsStepContentV3,
-    meanings: &DraftMeaningsStepContentV3,
-) -> Result<(), LexiconServiceError> {
-    use sqlx::Row;
-    let refs=sqlx::query("SELECT a.id,a.target_ref,a.source_segments,a.source_dialect FROM lexicon.shared_sentence_annotations a JOIN lexicon.shared_sentences s ON s.id=a.sentence_id WHERE s.deleted_at IS NULL AND a.target_entry_id=$1 AND a.target_ref IS NOT NULL")
-        .bind(entry_id).fetch_all(&mut **tx).await.map_err(database_error)?;
-    for row in refs {
-        let target: crate::lexicon::shared_sentences::SentenceTarget =
-            serde_json::from_value(row.get("target_ref")).map_err(serialization_error)?;
-        let segments =
-            serde_json::from_value(row.get("source_segments")).map_err(serialization_error)?;
-        let Some(link) = target.as_text_link(row.get("id"), segments) else {
-            return Err(LexiconServiceError::SharedSentenceTargetInUse);
-        };
-        if !shared_target_matches(
-            forms,
-            meanings,
-            &link,
-            &row.get::<String, _>("source_dialect"),
-        ) {
-            return Err(LexiconServiceError::SharedSentenceTargetInUse);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

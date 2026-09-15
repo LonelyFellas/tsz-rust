@@ -6785,6 +6785,14 @@ fn sense_component_issue<'a>(body: &'a Value, code: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("缺少 {code}：{body}"))
 }
 
+/// 409 `inbound_reference_conflict` 的 Problem Details 里被点名的入站引用清单。
+fn inbound_reference_conflict_items(problem: &Value) -> &[Value] {
+    assert_eq!(problem["code"], "inbound_reference_conflict", "{problem}");
+    problem["meta"]["inbound_references"]
+        .as_array()
+        .unwrap_or_else(|| panic!("meta.inbound_references 应为数组：{problem}"))
+}
+
 #[sqlx::test]
 async fn v3_sense_phrase_component_issues_cover_the_closed_code_catalog(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
@@ -7063,6 +7071,14 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
     let referenced_sense_id =
         word_published["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
 
+    // 先在目标词草稿里删掉将被引用的那条词义：此刻还没有任何入站引用，草稿放行。
+    let mut without_referenced_sense = writable_v3_meanings(&word_published);
+    let spare = without_referenced_sense["pos"][0]["senses"][1].clone();
+    without_referenced_sense["pos"][0]["senses"] = json!([spare]);
+    let word_pruned =
+        save_v3_meanings(&state, &bearer, &word_published, without_referenced_sense).await;
+
+    // 短语把成分钉在目标词的当前发布版本上（快照里那条词义还在），创建并发布。
     let component = resolved_component_json(&word_published, word_publication_id, "uk", "guarded");
     let component_id = Uuid::parse_str(component["id"].as_str().unwrap()).unwrap();
     let phrase_draft = create_v3_phrase_with_sense_components(
@@ -7075,22 +7091,40 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
     let (status, phrase_published) = publish_ready_v3(&state, &bearer, &phrase_draft).await;
     assert_eq!(status, StatusCode::CREATED, "{phrase_published}");
     let phrase_entry_id = phrase_published["word"]["id"].as_str().unwrap().to_owned();
+    let phrase_publication_id =
+        current_publication_id(&pool, Uuid::parse_str(&phrase_entry_id).unwrap()).await;
 
-    // 目标词草稿里删掉被引用的词义：草稿放行，发布时 fail closed。
-    let mut without_referenced_sense = writable_v3_meanings(&word_published);
-    let spare = without_referenced_sense["pos"][0]["senses"][1].clone();
-    without_referenced_sense["pos"][0]["senses"] = json!([spare]);
-    let word_pruned =
-        save_v3_meanings(&state, &bearer, &word_published, without_referenced_sense).await;
+    // 发布已删掉该词义的草稿：短语当前发布版本仍引用它，fail closed 且点名来源。
     let (status, blocked) = publish_ready_v3(&state, &bearer, &word_pruned).await;
     assert_eq!(
         status,
-        StatusCode::UNPROCESSABLE_ENTITY,
+        StatusCode::CONFLICT,
         "释义级成分引用的词义不得被删掉后发布：{blocked}"
     );
-    let issue = sense_component_issue(&blocked, "sense_has_inbound_publication_refs");
-    assert_eq!(issue["node_id"], referenced_sense_id);
-    // V3 的 issue 形状不带 reference_location，来源只能从发布引用表核对。
+    let references = inbound_reference_conflict_items(&blocked);
+    assert_eq!(references.len(), 1, "{blocked}");
+    let reference = &references[0];
+    assert_eq!(reference["kind"], "publication_sense_ref");
+    assert_eq!(reference["stale"], true);
+    assert_eq!(reference["target"]["sense_id"], referenced_sense_id);
+    assert!(
+        reference["target"].get("pos_id").is_none(),
+        "词义已不在提交内容里，找不到所属词性：{reference}"
+    );
+    assert_eq!(reference["source"]["entry_id"], json!(phrase_entry_id));
+    assert_eq!(
+        reference["source"]["publication_id"],
+        json!(phrase_publication_id)
+    );
+    assert_eq!(reference["source"]["node_id"], json!(component_id));
+    assert_eq!(reference["source"]["reference_kind"], "phrase_component");
+    assert_eq!(reference["source"]["entry_kind"], "phrase");
+    assert_eq!(reference["source"]["entry_status"], "published");
+    assert_eq!(
+        reference["source"]["entry_headword"],
+        phrase_published["word"]["presentation"]["label"]
+    );
+    // 来源与发布引用表一致。
     let blocking_refs: Vec<(Uuid, String)> = sqlx::query_as(
         r#"
         SELECT source_node_id, reference_kind
@@ -7108,6 +7142,22 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
         vec![(component_id, "phrase_component".to_owned())]
     );
 
+    // 草稿再保存放行：那条词义在已保存内容里本来就没有了，不是这次改动破坏的。
+    // 已失效的旧引用只挡发布（上面已断言），不挡草稿保存，否则编辑者自己解不开。
+    let (status, word_resaved) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        &word_entry_id,
+        word_pruned["word"]["revision"].as_i64().unwrap(),
+        writable_v3_meanings(&word_pruned),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{word_resaved}");
+    assert_eq!(
+        entry_revision(&pool, word_entry_uuid).await,
+        word_pruned["word"]["revision"].as_i64().unwrap() + 1
+    );
+
     // 归档短语解除入站守卫，目标词才能把那条词义发布掉。
     let (status, phrase_archived) = call(
         &state,
@@ -7122,7 +7172,7 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{phrase_archived}");
-    let (status, word_republished) = publish_ready_v3(&state, &bearer, &word_pruned).await;
+    let (status, word_republished) = publish_ready_v3(&state, &bearer, &word_resaved).await;
     assert_eq!(status, StatusCode::CREATED, "{word_republished}");
 
     // 恢复短语时它的当前发布仍指着一条已消失的词义——出站守卫必须认得成分引用。
@@ -10112,6 +10162,557 @@ async fn phrase_components_may_target_never_published_drafts_and_upgrade_after_t
     );
 }
 
+// ---- 入站引用守卫（被引用节点保护）----
+
+/// 按影响预览的结果拼词形保存请求：有确认 token 就带上（与 save_v3_forms_after_impact 同一套）。
+fn forms_input_after_impact(
+    impact: &Value,
+    base_revision: i64,
+    intent: &str,
+    content: Value,
+) -> Value {
+    let mut input = json!({
+        "schema_version": 3,
+        "base_revision": base_revision,
+        "intent": intent,
+        "content": content
+    });
+    if let Some(token) = impact["confirmation_token"].as_str() {
+        input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["impact_confirmation_token"].as_str() {
+        input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+        input["confirmed_surface_match_token"] = json!(token);
+    }
+    input
+}
+
+async fn preview_v3_forms_impact(
+    state: &AppState,
+    bearer: &str,
+    entry_id: &str,
+    base_revision: i64,
+    content: &Value,
+) -> Value {
+    let (status, impact) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms/impact"),
+        bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": base_revision,
+            "content": content
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    impact
+}
+
+async fn save_v3_forms_raw(
+    state: &AppState,
+    bearer: &str,
+    entry_id: &str,
+    input: Value,
+) -> (StatusCode, Value) {
+    call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        bearer,
+        None,
+        Some(input),
+    )
+    .await
+}
+
+async fn inbound_references_of(state: &AppState, bearer: &str, entry_id: &str) -> Value {
+    let (status, body) = call(
+        state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}/inbound-references"),
+        bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+/// `nodes` 里某个节点的 (node_type, total)。
+fn node_total<'a>(body: &'a Value, node_id: &Value) -> Option<(&'a str, u64)> {
+    body["nodes"]
+        .as_array()?
+        .iter()
+        .find(|node| node["node_id"] == *node_id)
+        .map(|node| {
+            (
+                node["node_type"].as_str().unwrap(),
+                node["total"].as_u64().unwrap(),
+            )
+        })
+}
+
+/// 另起词面的单词草稿（避开同形词标注门）：词形完整，首条词义带一条关联。
+async fn create_v3_word_with_relation(
+    state: &AppState,
+    bearer: &str,
+    surface: &str,
+    relation: Value,
+) -> Value {
+    let entry_id = create_legacy_v3_empty_skeleton(state, bearer, surface).await;
+    let (_, forms_saved) = save_v3_forms_after_impact(
+        state,
+        bearer,
+        &entry_id.to_string(),
+        1,
+        "complete",
+        v3_forms_fixture_for(surface),
+    )
+    .await;
+    let mut content =
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+    content["pos"][0]["senses"][0]["relations"] = json!([relation]);
+    save_v3_meanings(state, bearer, &forms_saved, content).await
+}
+
+async fn archive_v3_entry(state: &AppState, bearer: &str, word: &Value) {
+    let (status, archived) = call(
+        state,
+        Method::POST,
+        &format!(
+            "{ROOT}/entries/{}/archive",
+            word["word"]["id"].as_str().unwrap()
+        ),
+        bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": word["word"]["revision"],
+            "base_lifecycle_revision": word["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+}
+
+/// 读接口：别人草稿的关联词与短语草稿的成分用词都指向本词条草稿节点；
+/// 已归档来源不算；`nodes` 是按节点的完整计数。
+#[sqlx::test]
+async fn inbound_references_list_draft_relations_and_draft_components_with_node_counts(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let target_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let target_uuid = Uuid::parse_str(&target_id).unwrap();
+    let target_pos_id = target["word"]["forms"]["pos"][0]["pos_id"].clone();
+    let target_form = &target["word"]["forms"]["pos"][0]["forms"][0];
+    let target_form_id = target_form["id"].clone();
+    let target_variant_id = target_form["regional_variants"]["uk"]["id"].clone();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+
+    let relation_id = Uuid::now_v7();
+    let relation_source = create_v3_word_with_relation(
+        &state,
+        &bearer,
+        "wharf",
+        json!({
+            "id": relation_id, "relation": "synonym", "score": "80.00",
+            "target_word_id": target_id, "target_sense_id": target_sense_id
+        }),
+    )
+    .await;
+    let archived_source = create_v3_word_with_relation(
+        &state,
+        &bearer,
+        "haven",
+        json!({
+            "id": Uuid::now_v7(), "relation": "antonym", "score": "60.00",
+            "target_word_id": target_id, "target_sense_id": target_sense_id
+        }),
+    )
+    .await;
+    archive_v3_entry(&state, &bearer, &archived_source).await;
+    let component = resolved_draft_component_json(&target, "uk", "harbour");
+    let component_id = Uuid::parse_str(component["id"].as_str().unwrap()).unwrap();
+    let phrase =
+        create_v3_phrase_with_sense_components(&state, &bearer, "harbour side", json!([component]))
+            .await;
+
+    let body = inbound_references_of(&state, &bearer, &target_id).await;
+    assert_eq!(body["entry_id"], json!(target_id));
+    assert_eq!(
+        body["revision"],
+        json!(entry_revision(&pool, target_uuid).await)
+    );
+    assert_eq!(body["truncated"], false);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "已归档来源的关联不该出现：{body}");
+    assert!(
+        items
+            .iter()
+            .all(|item| item["source"]["entry_id"] != archived_source["word"]["id"]),
+        "{body}"
+    );
+
+    // 都成立时按类型排：草稿关联在成分用词之前。
+    let relation = &items[0];
+    assert_eq!(
+        relation["id"],
+        json!(format!("draft_relation:{relation_id}"))
+    );
+    assert_eq!(relation["kind"], "draft_relation");
+    assert_eq!(relation["stale"], false);
+    assert_eq!(
+        relation["target"],
+        json!({"pos_id": target_pos_id, "sense_id": target_sense_id})
+    );
+    assert_eq!(
+        relation["source"]["entry_id"],
+        relation_source["word"]["id"]
+    );
+    assert_eq!(relation["source"]["node_id"], json!(relation_id));
+    assert_eq!(relation["source"]["relation_type"], "synonym");
+    assert_eq!(
+        relation["source"]["sense_id"],
+        relation_source["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+    );
+    assert_eq!(relation["source"]["sense_gloss"], "港口");
+    assert_eq!(
+        relation["source"]["entry_headword"],
+        relation_source["word"]["presentation"]["label"]
+    );
+    assert_eq!(relation["source"]["entry_kind"], "word");
+    assert_eq!(relation["source"]["entry_status"], "draft");
+
+    let component_item = &items[1];
+    assert_eq!(
+        component_item["id"],
+        json!(format!("phrase_component:{component_id}"))
+    );
+    assert_eq!(component_item["kind"], "phrase_component");
+    assert_eq!(component_item["stale"], false);
+    assert_eq!(
+        component_item["target"],
+        json!({
+            "pos_id": target_pos_id,
+            "base_form_id": target_form_id,
+            "form_id": target_form_id,
+            "variant_id": target_variant_id,
+            "sense_id": target_sense_id
+        })
+    );
+    assert_eq!(component_item["source"]["entry_id"], phrase["word"]["id"]);
+    assert_eq!(component_item["source"]["node_id"], json!(component_id));
+    assert_eq!(
+        component_item["source"]["sense_id"],
+        phrase["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+    );
+    assert_eq!(component_item["source"]["sense_gloss"], "港口");
+    assert_eq!(
+        component_item["source"]["entry_headword"],
+        phrase["word"]["presentation"]["label"]
+    );
+    assert_eq!(component_item["source"]["entry_kind"], "phrase");
+    assert_eq!(component_item["source"]["entry_status"], "draft");
+
+    // 关联只保护词义（及其所属词性）；成分保护 pos / 原形 / 变体 / 词义，原形与词形同节点只计一次。
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 4, "{body}");
+    assert_eq!(node_total(&body, &target_pos_id), Some(("pos", 2)));
+    assert_eq!(node_total(&body, &target_form_id), Some(("form", 1)));
+    assert_eq!(node_total(&body, &target_variant_id), Some(("variant", 1)));
+    assert_eq!(node_total(&body, &target_sense_id), Some(("sense", 2)));
+}
+
+/// 读接口：短语当前发布版本里的成分引用以发布引用出现；钉住发布版本的成分本身
+/// 引用的是不可变快照，不算入站引用。
+#[sqlx::test]
+async fn inbound_references_list_publication_sense_refs_but_not_pinned_components(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, target_published) = publish_ready_v3(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_id = target_published["word"]["id"].as_str().unwrap().to_owned();
+    let target_publication_id =
+        current_publication_id(&pool, Uuid::parse_str(&target_id).unwrap()).await;
+    let target_pos_id = target_published["word"]["forms"]["pos"][0]["pos_id"].clone();
+    let target_sense_id = target_published["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+
+    let component =
+        resolved_component_json(&target_published, target_publication_id, "uk", "harbour");
+    let component_id = Uuid::parse_str(component["id"].as_str().unwrap()).unwrap();
+    let phrase =
+        create_v3_phrase_with_sense_components(&state, &bearer, "harbour side", json!([component]))
+            .await;
+    let (status, phrase_published) = publish_ready_v3(&state, &bearer, &phrase).await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase_published}");
+    let phrase_publication_id = current_publication_id(
+        &pool,
+        Uuid::parse_str(phrase_published["word"]["id"].as_str().unwrap()).unwrap(),
+    )
+    .await;
+
+    let body = inbound_references_of(&state, &bearer, &target_id).await;
+    assert_eq!(body["revision"], target_published["word"]["revision"]);
+    assert_eq!(body["truncated"], false);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "钉住发布版本的成分不算入站引用：{body}");
+    let reference = &items[0];
+    assert_eq!(
+        reference["id"],
+        json!(format!(
+            "publication_sense_ref:{phrase_publication_id}:{component_id}:{}",
+            target_sense_id.as_str().unwrap()
+        ))
+    );
+    assert_eq!(reference["kind"], "publication_sense_ref");
+    assert_eq!(reference["stale"], false);
+    assert_eq!(
+        reference["target"],
+        json!({"pos_id": target_pos_id, "sense_id": target_sense_id})
+    );
+    assert_eq!(
+        reference["source"]["entry_id"],
+        phrase_published["word"]["id"]
+    );
+    assert_eq!(
+        reference["source"]["publication_id"],
+        json!(phrase_publication_id)
+    );
+    assert_eq!(reference["source"]["node_id"], json!(component_id));
+    assert_eq!(reference["source"]["reference_kind"], "phrase_component");
+    assert!(
+        reference["source"].get("sense_id").is_none(),
+        "发布引用不记来源词义：{reference}"
+    );
+    assert_eq!(
+        reference["source"]["entry_headword"],
+        phrase_published["word"]["presentation"]["label"]
+    );
+    assert_eq!(reference["source"]["entry_kind"], "phrase");
+    assert_eq!(reference["source"]["entry_status"], "published");
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 2, "{body}");
+    assert_eq!(node_total(&body, &target_pos_id), Some(("pos", 1)));
+    assert_eq!(node_total(&body, &target_sense_id), Some(("sense", 1)));
+}
+
+/// Q1：短语成分指向从未发布的草稿节点时，目标词的破坏性改动被拦下，短语归档后解除。
+#[sqlx::test]
+async fn v3_draft_target_phrase_components_block_breaking_edits_until_the_phrase_is_archived(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let target_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let target_uuid = Uuid::parse_str(&target_id).unwrap();
+    let base_revision = target["word"]["revision"].as_i64().unwrap();
+    let target_pos_id = target["word"]["forms"]["pos"][0]["pos_id"].clone();
+    let target_form = &target["word"]["forms"]["pos"][0]["forms"][0];
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let component = resolved_draft_component_json(&target, "uk", "harbour");
+    let component_id = Uuid::parse_str(component["id"].as_str().unwrap()).unwrap();
+    let phrase =
+        create_v3_phrase_with_sense_components(&state, &bearer, "harbour side", json!([component]))
+            .await;
+
+    // 1. 影响预览：成分指向的原形改成复数形，form_type 对不上，预览先列出被破坏的引用。
+    let mut retyped = target["word"]["forms"].clone();
+    retyped["pos"][0]["forms"][0]["form_type"] = json!("plural");
+    let impact =
+        preview_v3_forms_impact(&state, &bearer, &target_id, base_revision, &retyped).await;
+    let blocked = impact["blocked_references"]
+        .as_array()
+        .unwrap_or_else(|| panic!("预览应列出被破坏的成分引用：{impact}"));
+    assert_eq!(blocked.len(), 1, "{impact}");
+    assert_eq!(
+        blocked[0]["id"],
+        json!(format!("phrase_component:{component_id}"))
+    );
+    assert_eq!(blocked[0]["kind"], "phrase_component");
+    assert_eq!(blocked[0]["stale"], true);
+    assert_eq!(
+        blocked[0]["target"],
+        json!({
+            "pos_id": target_pos_id,
+            "base_form_id": target_form["id"],
+            "form_id": target_form["id"],
+            "variant_id": target_form["regional_variants"]["uk"]["id"],
+            "sense_id": target_sense_id
+        })
+    );
+    assert_eq!(blocked[0]["source"]["entry_id"], phrase["word"]["id"]);
+    assert_eq!(blocked[0]["source"]["node_id"], json!(component_id));
+    assert_eq!(blocked[0]["source"]["entry_kind"], "phrase");
+    assert_eq!(blocked[0]["source"]["entry_status"], "draft");
+
+    // 2. 照样提交：409，清单与预览一致，revision 不动。
+    let (status, problem) = save_v3_forms_raw(
+        &state,
+        &bearer,
+        &target_id,
+        forms_input_after_impact(&impact, base_revision, "save", retyped.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
+    assert_eq!(
+        inbound_reference_conflict_items(&problem),
+        blocked.as_slice()
+    );
+    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision);
+
+    // 3. 换掉整套词义（被指向的词义消失）：同样 409。
+    let replacement = complete_v3_meanings_fixture(target_pos_id.clone());
+    let (status, problem) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        &target_id,
+        base_revision,
+        replacement.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
+    let references = inbound_reference_conflict_items(&problem);
+    assert_eq!(references.len(), 1, "{problem}");
+    assert_eq!(references[0]["kind"], "phrase_component");
+    assert_eq!(references[0]["stale"], true);
+    assert_eq!(references[0]["target"]["sense_id"], target_sense_id);
+    assert_eq!(references[0]["source"]["node_id"], json!(component_id));
+    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision);
+
+    // 4. 归档短语解除守卫：两种改动都放行。
+    archive_v3_entry(&state, &bearer, &phrase).await;
+    let (status, replaced) =
+        save_v3_meanings_raw(&state, &bearer, &target_id, base_revision, replacement).await;
+    assert_eq!(status, StatusCode::OK, "{replaced}");
+    let base_revision = replaced["word"]["revision"].as_i64().unwrap();
+    let impact =
+        preview_v3_forms_impact(&state, &bearer, &target_id, base_revision, &retyped).await;
+    assert!(
+        impact.get("blocked_references").is_none(),
+        "来源归档后不再有入站引用：{impact}"
+    );
+    let (status, retyped_saved) = save_v3_forms_raw(
+        &state,
+        &bearer,
+        &target_id,
+        forms_input_after_impact(&impact, base_revision, "save", retyped),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{retyped_saved}");
+    assert_eq!(
+        retyped_saved["word"]["forms"]["pos"][0]["forms"][0]["form_type"],
+        "plural"
+    );
+}
+
+/// 来源词条正被别的事务改动时，入站引用检查不等锁：仍是可重试的 409 `reference_conflict`，
+/// 而不是 `inbound_reference_conflict`。
+#[sqlx::test]
+async fn v3_meanings_save_reports_a_busy_reference_source_as_reference_conflict(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let word_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let mut two_senses = writable_v3_meanings(&word_draft);
+    let mut spare = two_senses["pos"][0]["senses"][0].clone();
+    spare["id"] = json!(Uuid::now_v7());
+    spare["definitions"][0]["id"] = json!(Uuid::now_v7());
+    spare["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    spare["definitions"][0]["content"] = rich_text("备用词义");
+    spare["sentences"] = json!([]);
+    two_senses["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(spare);
+    let word_saved = save_v3_meanings(&state, &bearer, &word_draft, two_senses).await;
+    let (status, word_published) = publish_ready_v3(&state, &bearer, &word_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{word_published}");
+    let word_id = word_published["word"]["id"].as_str().unwrap().to_owned();
+    let word_uuid = Uuid::parse_str(&word_id).unwrap();
+    let word_publication_id = current_publication_id(&pool, word_uuid).await;
+    let component = resolved_component_json(&word_published, word_publication_id, "uk", "busy");
+    let component_id = Uuid::parse_str(component["id"].as_str().unwrap()).unwrap();
+    let phrase =
+        create_v3_phrase_with_sense_components(&state, &bearer, "busy phrase", json!([component]))
+            .await;
+    let (status, phrase_published) = publish_ready_v3(&state, &bearer, &phrase).await;
+    assert_eq!(status, StatusCode::CREATED, "{phrase_published}");
+    let phrase_uuid = Uuid::parse_str(phrase_published["word"]["id"].as_str().unwrap()).unwrap();
+
+    let base_revision = word_published["word"]["revision"].as_i64().unwrap();
+    let mut without_referenced_sense = writable_v3_meanings(&word_published);
+    let spare = without_referenced_sense["pos"][0]["senses"][1].clone();
+    without_referenced_sense["pos"][0]["senses"] = json!([spare]);
+
+    let mut held = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM lexicon.entries WHERE id = $1 FOR UPDATE")
+        .bind(phrase_uuid)
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let (status, busy) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        &word_id,
+        base_revision,
+        without_referenced_sense.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{busy}");
+    assert_eq!(busy["code"], "reference_conflict", "{busy}");
+    assert!(
+        busy["meta"]["inbound_references"].is_null(),
+        "锁忙不该冒充引用清单：{busy}"
+    );
+    held.rollback().await.unwrap();
+
+    let (status, blocked) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        &word_id,
+        base_revision,
+        without_referenced_sense,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    let references = inbound_reference_conflict_items(&blocked);
+    assert_eq!(references.len(), 1, "{blocked}");
+    assert_eq!(references[0]["kind"], "publication_sense_ref");
+    assert_eq!(references[0]["source"]["node_id"], json!(component_id));
+    assert_eq!(entry_revision(&pool, word_uuid).await, base_revision);
+}
+
 #[sqlx::test]
 async fn component_target_search_recovers_after_missing_generation_is_repaired(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
@@ -11207,19 +11808,229 @@ async fn v3_relations_require_explicit_sense_binding_and_keep_same_name_text(poo
         source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"],
         target_id
     );
+    // 删掉被别人草稿关联的词义：入站引用守卫点名那条关联，未被引用的词义不在清单里。
     let mut removed = writable_v3_meanings(&target);
     removed["pos"][0]["senses"] = json!([]);
     let (status, rejected) = call(&state, Method::PUT, &format!("{ROOT}/entries/{target_id}/steps/meanings"),
         &bearer, None, Some(json!({"schema_version": 3, "base_revision": target["word"]["revision"], "intent": "save", "content": removed}))).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
-    assert!(
-        rejected["field_issues"]
-            .as_array()
-            .unwrap_or_else(|| panic!("unexpected error: {rejected}"))
-            .iter()
-            .any(|issue| issue["code"] == "relation_target_unavailable"
-                && issue["node_id"] == target_sense_id)
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    let references = inbound_reference_conflict_items(&rejected);
+    assert_eq!(references.len(), 1, "{rejected}");
+    let reference = &references[0];
+    assert_eq!(reference["kind"], "draft_relation");
+    assert_eq!(reference["stale"], true);
+    assert_eq!(
+        reference["id"],
+        json!(format!("draft_relation:{relation_id}"))
     );
+    assert_eq!(reference["target"]["sense_id"], target_sense_id);
+    assert_eq!(reference["source"]["entry_id"], json!(source_id));
+    assert_eq!(reference["source"]["relation_type"], "synonym");
+    assert_eq!(reference["source"]["node_id"], json!(relation_id));
+    assert_eq!(
+        reference["source"]["sense_id"],
+        source["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+    );
+    assert_eq!(reference["source"]["sense_gloss"], "港口");
+    assert_eq!(reference["source"]["entry_kind"], "word");
+    assert_eq!(reference["source"]["entry_status"], "draft");
+    assert_eq!(
+        reference["source"]["entry_headword"],
+        source["word"]["presentation"]["label"]
+    );
+}
+
+/// 草稿保存只拦本次改动破坏的引用。来源归档期间目标删掉被关联的词义、来源随后恢复，这条关联
+/// 在目标已保存内容里本来就失效了：读接口照常标出失效，但目标之后的草稿保存不能被它挡住，
+/// 否则编辑者自己解不开。
+#[sqlx::test]
+async fn v3_draft_saves_ignore_references_already_stale_in_saved_content(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let target = save_v3_meanings(
+        &state,
+        &bearer,
+        &target,
+        complete_v3_meanings_fixture(target["word"]["forms"]["pos"][0]["pos_id"].clone()),
+    )
+    .await;
+    let target_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let target_uuid = Uuid::parse_str(&target_id).unwrap();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let relation_id = Uuid::now_v7();
+    let source = create_v3_word_with_relation(
+        &state,
+        &bearer,
+        "wharf",
+        json!({
+            "id": relation_id, "relation": "synonym", "score": "80.00",
+            "target_word_id": target_id, "target_sense_id": target_sense_id
+        }),
+    )
+    .await;
+    let source_uuid = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+
+    // 来源归档期间，目标删掉被关联的词义不受这条关联约束（草稿保存，不走完整性校验）。
+    archive_v3_entry(&state, &bearer, &source).await;
+    let meanings_path = format!("{ROOT}/entries/{target_id}/steps/meanings");
+    let mut removed = writable_v3_meanings(&target);
+    removed["pos"][0]["senses"] = json!([]);
+    let (status, pruned) = call(
+        &state,
+        Method::PUT,
+        &meanings_path,
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": target["word"]["revision"],
+            "intent": "save",
+            "content": removed.clone()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pruned}");
+
+    // 恢复来源：关联重新算入站引用，但它指向的词义在目标已保存内容里早就没有了。
+    let (source_revision, source_lifecycle_revision): (i64, i64) =
+        sqlx::query_as("SELECT revision, lifecycle_revision FROM lexicon.entries WHERE id = $1")
+            .bind(source_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (status, restored) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_uuid}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": source_revision,
+            "base_lifecycle_revision": source_lifecycle_revision
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    let references = inbound_references_of(&state, &bearer, &target_id).await;
+    let items = references["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{references}");
+    assert_eq!(
+        items[0]["id"],
+        json!(format!("draft_relation:{relation_id}"))
+    );
+    assert_eq!(items[0]["stale"], true, "{references}");
+
+    // 目标再保存（草稿）：这条失效引用不是本次改动破坏的，放行。
+    let base_revision = pruned["word"]["revision"].as_i64().unwrap();
+    let (status, resaved) = call(
+        &state,
+        Method::PUT,
+        &meanings_path,
+        &bearer,
+        None,
+        Some(json!({
+            "schema_version": 3,
+            "base_revision": base_revision,
+            "intent": "save",
+            "content": removed
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "已失效的旧引用不该挡草稿保存：{resaved}"
+    );
+    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision + 1);
+}
+
+/// Q5：别人草稿的关联词指向本词条词义时，删掉那个词性（词义随之消失）的词形保存被拦下；
+/// 来源撤掉关联后同一份词形放行。
+#[sqlx::test]
+async fn v3_forms_save_cannot_drop_a_pos_whose_sense_another_draft_relation_targets(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let target = save_v3_meanings(
+        &state,
+        &bearer,
+        &target,
+        complete_v3_meanings_fixture(target["word"]["forms"]["pos"][0]["pos_id"].clone()),
+    )
+    .await;
+    let target_id = target["word"]["id"].as_str().unwrap().to_owned();
+    let target_uuid = Uuid::parse_str(&target_id).unwrap();
+    let target_sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let base_revision = target["word"]["revision"].as_i64().unwrap();
+    let relation_id = Uuid::now_v7();
+    let source = create_v3_word_with_relation(
+        &state,
+        &bearer,
+        "wharf",
+        json!({
+            "id": relation_id, "relation": "synonym", "score": "80.00",
+            "target_word_id": target_id, "target_sense_id": target_sense_id
+        }),
+    )
+    .await;
+
+    // 删掉唯一的词性：词义随之消失，关联词失去目标。
+    let cleared = json!({"pos": []});
+    let impact =
+        preview_v3_forms_impact(&state, &bearer, &target_id, base_revision, &cleared).await;
+    let blocked = impact["blocked_references"]
+        .as_array()
+        .unwrap_or_else(|| panic!("预览应列出被破坏的关联：{impact}"));
+    assert_eq!(blocked.len(), 1, "{impact}");
+    assert_eq!(blocked[0]["kind"], "draft_relation");
+    assert_eq!(blocked[0]["stale"], true);
+    assert_eq!(blocked[0]["target"]["sense_id"], target_sense_id);
+    assert_eq!(blocked[0]["source"]["entry_id"], source["word"]["id"]);
+    assert_eq!(blocked[0]["source"]["node_id"], json!(relation_id));
+    assert_eq!(blocked[0]["source"]["relation_type"], "synonym");
+    let (status, problem) = save_v3_forms_raw(
+        &state,
+        &bearer,
+        &target_id,
+        forms_input_after_impact(&impact, base_revision, "save", cleared.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
+    assert_eq!(
+        inbound_reference_conflict_items(&problem),
+        blocked.as_slice()
+    );
+    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision);
+
+    // 来源草稿撤掉关联后，同一份词形保存放行。
+    let mut unlinked = writable_v3_meanings(&source);
+    unlinked["pos"][0]["senses"][0]["relations"] = json!([]);
+    save_v3_meanings(&state, &bearer, &source, unlinked).await;
+    let impact =
+        preview_v3_forms_impact(&state, &bearer, &target_id, base_revision, &cleared).await;
+    assert!(
+        impact.get("blocked_references").is_none(),
+        "关联撤掉后不再有入站引用：{impact}"
+    );
+    let (status, cleared_saved) = save_v3_forms_raw(
+        &state,
+        &bearer,
+        &target_id,
+        forms_input_after_impact(&impact, base_revision, "save", cleared),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared_saved}");
+    assert_eq!(cleared_saved["word"]["forms"]["pos"], json!([]));
+    assert_eq!(cleared_saved["word"]["meanings"]["pos"], json!([]));
 }
 
 // Annotation tests use unique SQLx test names so they cannot reuse another task's databases.

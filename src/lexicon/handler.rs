@@ -20,7 +20,7 @@ use crate::{
             DeleteDraftInput, DetectLexiconSurfaceResponseV3, DetectLexiconSurfaceV3Input,
             DraftValidationResponseV3, EntryDeleteBatchInput, EntryDeleteBatchResponse,
             EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput, EntryPath,
-            FormsImpactResponseV3, PreviewFormsImpactInputV3, PublicationPath,
+            FormsImpactResponseV3, InboundReferencesV3, PreviewFormsImpactInputV3, PublicationPath,
             PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
             ResolveSentenceTargetsV3Input, ResolveSentenceTargetsV3Response, SaveFormsStepInputV3,
             SaveMeaningsStepInputV3, SearchComponentTargetsV3Input,
@@ -48,8 +48,8 @@ pub use commands::{
 };
 pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
 pub use query::{
-    get, get_publication, list, list_publications, related_search, resolve_sentence_targets,
-    search_component_targets, stats, surface_match_snapshot_page,
+    get, get_publication, inbound_references, list, list_publications, related_search,
+    resolve_sentence_targets, search_component_targets, stats, surface_match_snapshot_page,
 };
 
 fn service(state: &AppState) -> LexiconService {
@@ -341,11 +341,15 @@ pub(crate) fn map_error(error: LexiconServiceError) -> AppError {
             None,
             "词条被共享例句标注，请先在多维例句库解除对应标注，再移入垃圾桶。",
         ),
-        LexiconServiceError::SharedSentenceTargetInUse => AppError::conflict(
-            ErrorCode::ReferenceConflict,
+        LexiconServiceError::InboundReferenceConflict(references) => AppError::conflict(
+            ErrorCode::InboundReferenceConflict,
             None,
-            "该词义或词形仍被共享例句引用，请先解除或调整例句关联。",
-        ),
+            "本次修改会破坏其他内容对本词条的引用，请先解除或调整这些引用。",
+        )
+        .with_meta(ProblemMeta {
+            inbound_references: Some(references),
+            ..ProblemMeta::default()
+        }),
         LexiconServiceError::ReferenceConflict => AppError::conflict(
             ErrorCode::ReferenceConflict,
             None,
@@ -360,11 +364,6 @@ pub(crate) fn map_error(error: LexiconServiceError) -> AppError {
             ErrorCode::StableNodeIdChanged,
             None,
             "a stable V3 node identity changed",
-        ),
-        LexiconServiceError::FormReferenceConflict => AppError::conflict(
-            ErrorCode::FormReferenceConflict,
-            None,
-            "the form operation would break an existing reference",
         ),
         LexiconServiceError::StepNotReachable => AppError::conflict(
             ErrorCode::StepNotReachable,

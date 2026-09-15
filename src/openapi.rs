@@ -95,6 +95,7 @@ use utoipa::{
         crate::lexicon::handler::lifecycle::archive_batch,
         crate::lexicon::handler::lifecycle::restore_batch,
         crate::lexicon::handler::query::get,
+        crate::lexicon::handler::query::inbound_references,
         crate::lexicon::handler::query::list_publications,
         crate::lexicon::handler::query::get_publication,
         crate::lexicon::handler::lifecycle::archive,
@@ -309,6 +310,13 @@ use utoipa::{
             crate::lexicon::dto::FormsImpactResponseV3,
             crate::lexicon::dto::FormsImpactNodeTypeV3,
             crate::lexicon::dto::FormsImpactItemV3,
+            crate::lexicon::dto::InboundReferencesV3,
+            crate::lexicon::dto::InboundReferenceV3,
+            crate::lexicon::dto::InboundReferenceKindV3,
+            crate::lexicon::dto::InboundReferenceNodeTypeV3,
+            crate::lexicon::dto::InboundReferenceNodeV3,
+            crate::lexicon::dto::InboundReferenceTargetV3,
+            crate::lexicon::dto::InboundReferenceSourceV3,
             crate::lexicon::dto::V3ValidationIssueCode,
             crate::lexicon::dto::V3DraftNodeLocation,
             crate::lexicon::dto::DraftValidationResponseV3,
@@ -1804,6 +1812,11 @@ mod tests {
             "AdminWordPublicationV3",
             "AdminWordPublicationEnvelope",
             "AdminWordPublicationListResponse",
+            "InboundReferencesV3",
+            "InboundReferenceV3",
+            "InboundReferenceNodeV3",
+            "InboundReferenceTargetV3",
+            "InboundReferenceSourceV3",
         ] {
             assert_eq!(
                 schemas[schema]["additionalProperties"], false,
@@ -2326,6 +2339,12 @@ mod tests {
                 "200",
                 "SurfaceMatchPageV3",
             ),
+            (
+                "get",
+                "/api/v1/admin/lexicon/entries/{id}/inbound-references",
+                "200",
+                "InboundReferencesV3",
+            ),
         ] {
             assert_eq!(
                 paths[path][method]["responses"][status]["content"]["application/json"]["schema"]["$ref"],
@@ -2401,6 +2420,7 @@ mod tests {
             "unsupported_schema_version",
             "stable_node_id_changed",
             "form_reference_conflict",
+            "inbound_reference_conflict",
             "smart_lexicon_v3_storage_unavailable",
             "smart_lexicon_v3_detection_unavailable",
         ] {
@@ -2439,7 +2459,7 @@ mod tests {
             );
             let description = conflict["description"].as_str().unwrap();
             assert!(description.contains("stable_node_id_changed"));
-            assert!(description.contains("form_reference_conflict"));
+            assert!(description.contains("inbound_reference_conflict"));
         }
 
         for root in [

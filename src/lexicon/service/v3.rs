@@ -1571,6 +1571,26 @@ impl LexiconService {
             return Err(v3_validation_failed(issues));
         }
         let affected = forms_impact_v3(&current.forms, &input.content, &current.meanings)?;
+        // 与保存同一判定：提前告诉客户端哪些入站引用会被这次词形变更破坏，确认条据此禁用确认。
+        let mut reconciled_meanings = current.meanings.clone();
+        reconcile_v3_meanings_after_forms(&mut reconciled_meanings, &input.content);
+        let mut reference_tx = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        let blocked = super::inbound_references::inbound_reference_violations(
+            &mut reference_tx,
+            entry_id,
+            &input.content,
+            &reconciled_meanings,
+            super::inbound_references::InboundReferenceCheck::DraftPreview,
+            Some((&current.forms, &current.meanings)),
+        )
+        .await?;
+        reference_tx.commit().await.map_err(database_error)?;
+        let blocked_references = (!blocked.is_empty()).then_some(blocked);
         if read_projection
             && let Some(surface_match_page) = self
                 .preview_v3_forms_surface_warning(
@@ -1589,6 +1609,7 @@ impl LexiconService {
                 affected,
                 confirmation_token: None,
                 surface_match_page: Some(surface_match_page),
+                blocked_references,
             });
         }
         if affected.is_empty() {
@@ -1599,6 +1620,7 @@ impl LexiconService {
                 affected,
                 confirmation_token: None,
                 surface_match_page: None,
+                blocked_references,
             });
         }
         let token = Uuid::now_v7();
@@ -1622,6 +1644,7 @@ impl LexiconService {
             affected,
             confirmation_token: Some(token),
             surface_match_page: None,
+            blocked_references,
         })
     }
 
@@ -1736,12 +1759,15 @@ impl LexiconService {
         } else {
             None
         };
+        let saved_meanings = meanings.clone();
         reconcile_v3_meanings_after_forms(&mut meanings, &input.content);
-        super::text_links::ensure_shared_sentence_targets(
+        super::inbound_references::ensure_inbound_references(
             &mut transaction,
             entry_id,
             &input.content,
             &meanings,
+            super::inbound_references::InboundReferenceCheck::DraftSave,
+            Some((&current_forms, &saved_meanings)),
         )
         .await?;
         let aggregate_issues =
@@ -1752,22 +1778,6 @@ impl LexiconService {
         let relational_meanings: DraftMeaningsStepContent =
             serde_json::from_value(serde_json::to_value(&meanings).map_err(serialization_error)?)
                 .map_err(serialization_error)?;
-        let retained_sense_ids = relational_meanings
-            .pos
-            .iter()
-            .flat_map(|pos| pos.senses.iter().map(|sense| sense.id))
-            .collect::<Vec<_>>();
-        if !LexiconRepository::current_inbound_sense_refs(
-            &mut transaction,
-            entry_id,
-            &retained_sense_ids,
-        )
-        .await
-        .map_err(repository_error)?
-        .is_empty()
-        {
-            return Err(LexiconServiceError::FormReferenceConflict);
-        }
         let audit_node_delta = preflight_v3_form_node_identities(
             &mut transaction,
             entry_id,
@@ -2136,11 +2146,13 @@ impl LexiconService {
         if !aggregate_issues.is_empty() {
             return Err(v3_validation_failed(aggregate_issues));
         }
-        super::text_links::ensure_shared_sentence_targets(
+        super::inbound_references::ensure_inbound_references(
             &mut transaction,
             entry_id,
             &forms,
             &canonical_content,
+            super::inbound_references::InboundReferenceCheck::DraftSave,
+            Some((&forms, &current_v3_meanings)),
         )
         .await?;
         let mut proposed = proposed_nodes(&DraftFormsStepContent::default(), &relational_meanings);
@@ -2181,39 +2193,6 @@ impl LexiconService {
             &proposed_ids,
             &existing,
         );
-        let current_sense_ids = current_relational_meanings
-            .pos
-            .iter()
-            .flat_map(|pos| &pos.senses)
-            .map(|sense| sense.id)
-            .collect::<HashSet<_>>();
-        let next_sense_ids = relational_meanings
-            .pos
-            .iter()
-            .flat_map(|pos| &pos.senses)
-            .map(|sense| sense.id)
-            .collect::<HashSet<_>>();
-        let removed_sense_ids = current_sense_ids
-            .difference(&next_sense_ids)
-            .copied()
-            .collect::<Vec<_>>();
-        // An explicit relation must be removed or changed before its target sense is deleted.
-        let inbound = sqlx::query_scalar::<_, Uuid>(
-            "SELECT DISTINCT target_sense_id FROM lexicon.relations WHERE target_entry_id = $1 AND target_sense_id = ANY($2) AND entry_id <> $1 ORDER BY target_sense_id LIMIT 1",
-        )
-        .bind(entry_id)
-        .bind(&removed_sense_ids)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(database_error)?;
-        if let Some(referenced_sense_id) = inbound {
-            return Err(v3_validation_failed(vec![reference_issue(
-                referenced_sense_id,
-                "senses",
-                "relation_target_unavailable",
-                "该词义仍被其他词条关联，请先删除或修改关联再删除词义",
-            )]));
-        }
         LexiconRepository::prepare_v3_sentence_translation_aliases(
             &mut transaction,
             entry_id,
@@ -2810,7 +2789,7 @@ fn component_target_gloss(
 
 /// `expected_text` = Some((词面, 释义)) 时还要求文案等值（钉住发布版本的成分）；None 只查结构。
 #[allow(clippy::too_many_arguments)]
-fn phrase_component_matches_target(
+pub(super) fn phrase_component_matches_target(
     target: &ComponentTargetWord,
     target_pos_id: Uuid,
     target_base_form_id: Uuid,

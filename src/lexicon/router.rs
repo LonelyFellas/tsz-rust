@@ -51,6 +51,10 @@ pub fn router() -> Router<AppState> {
             get(handler::get).delete(handler::delete_draft),
         )
         .route(
+            "/entries/{id}/inbound-references",
+            get(handler::inbound_references),
+        )
+        .route(
             "/entries/{id}/archive",
             axum::routing::post(handler::archive),
         )

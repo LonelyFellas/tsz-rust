@@ -109,6 +109,30 @@ fn content(target: Uuid) -> Value {
     let translation = Uuid::now_v7();
     json!({"sentence":{"id":Uuid::now_v7(),"level":"B1","en_text":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":{"version":2,"text":"A wonderful flower.","annotations":[]}}},"zh_text_id":translation,"zh_text":{"version":2,"text":"一朵美丽的花。","annotations":[]},"zh_translations":[{"id":translation,"band":"balanced_fluency","language":"zh","content":{"version":2,"text":"一朵美丽的花。","annotations":[]}}],"links":[]},"annotations":[{"id":Uuid::now_v7(),"source_dialect":"common","source_segments":[{"start":2,"end":11,"surface":"wonderful"}],"target":target_ref(target)},{"id":Uuid::now_v7(),"source_dialect":"common","source_segments":[{"start":12,"end":18,"surface":"flower"}],"target":{"state":"pending","kind":"word","headword":"flower","gloss":"花"}}]})
 }
+/// `content(source)` 那条例句对 `source` 的标注在 `problem` / 影响预览里的样子：
+/// 只此一条、已失效，目标节点与例句摘要都点得出来。
+fn assert_single_stale_sentence_reference(references: &Value, source: Uuid, sentence_id: &str) {
+    let references = references
+        .as_array()
+        .unwrap_or_else(|| panic!("引用清单应为数组：{references}"));
+    assert_eq!(references.len(), 1, "{references:?}");
+    let reference = &references[0];
+    assert_eq!(reference["kind"], "shared_sentence", "{reference}");
+    assert_eq!(reference["stale"], true, "{reference}");
+    assert_eq!(reference["target"]["variant_id"], json!(node_id(source, 3)));
+    assert_eq!(reference["target"]["sense_id"], json!(sense_id(source)));
+    assert_eq!(reference["source"]["sentence_id"], sentence_id);
+    assert_eq!(reference["source"]["sentence_text"], "A wonderful flower.");
+    assert_eq!(reference["source"]["segments"][0]["surface"], "wonderful");
+}
+fn assert_inbound_reference_conflict(problem: &Value, source: Uuid, sentence_id: &str) {
+    assert_eq!(problem["code"], "inbound_reference_conflict", "{problem}");
+    assert_single_stale_sentence_reference(
+        &problem["meta"]["inbound_references"],
+        source,
+        sentence_id,
+    );
+}
 
 #[sqlx::test]
 async fn annotations_define_membership_and_unlink_preserves_shared_content(pool: PgPool) {
@@ -1318,7 +1342,7 @@ async fn referenced_sense_cannot_be_removed_until_unlinked(pool: PgPool) {
     let input = json!({"schema_version":3,"base_revision":1,"intent":"save","content":{"sense_groups":[],"pos":[{"pos_id":node_id(source,1),"grammar_structures":[],"senses":[]}]}});
     let (status, problem) = call(&state, actor, Method::PUT, &path, Some(input.clone())).await;
     assert_eq!(status, StatusCode::CONFLICT, "{problem}");
-    assert_eq!(problem["code"], "reference_conflict");
+    assert_inbound_reference_conflict(&problem, source, id);
     let revision: i64 = sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id=$1")
         .bind(source)
         .fetch_one(&pool)
@@ -1402,6 +1426,8 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{impact}");
+        // 影响预览与保存同一判定：预览先把会被破坏的标注列出来。
+        assert_single_stale_sentence_reference(&impact["blocked_references"], source, id);
         let (status, problem) = call(
             &state,
             actor,
@@ -1411,7 +1437,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{mutate}: {problem}");
-        assert_eq!(problem["code"], "reference_conflict");
+        assert_inbound_reference_conflict(&problem, source, id);
     }
     // A historical version without the referenced sense cannot become current.
     snapshot["meanings"]["pos"][0]["senses"] = json!([]);
@@ -1428,7 +1454,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{problem}");
-    assert_eq!(problem["code"], "reference_conflict");
+    assert_inbound_reference_conflict(&problem, source, id);
     let (_, current) = call(
         &state,
         actor,
@@ -1716,4 +1742,238 @@ fn sentence_list_openapi_parameters_are_optional_queries() {
         assert_eq!(parameter["in"], "query", "{name}: {parameter}");
         assert_eq!(parameter["required"], false, "{name}: {parameter}");
     }
+}
+
+/// `nodes` 里某个节点的 (node_type, total)。
+fn node_total(body: &Value, node_id: Uuid) -> Option<(&str, u64)> {
+    body["nodes"]
+        .as_array()?
+        .iter()
+        .find(|node| node["node_id"] == json!(node_id))
+        .map(|node| {
+            (
+                node["node_type"].as_str().unwrap(),
+                node["total"].as_u64().unwrap(),
+            )
+        })
+}
+
+/// 例句里指向 `target` 的那条已关联标注的 id（另一条是待关联的 flower）。
+fn linked_annotation_id(sentence: &Value, target: Uuid) -> Uuid {
+    sentence["content"]["annotations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|annotation| annotation["target"]["target_entry_id"] == json!(target))
+        .and_then(|annotation| annotation["id"].as_str())
+        .map(|id| Uuid::parse_str(id).unwrap())
+        .unwrap_or_else(|| panic!("{sentence}"))
+}
+
+#[sqlx::test]
+async fn inbound_references_list_sentence_targets_with_stale_first(pool: PgPool) {
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let state = AppState::for_test(pool.clone())
+        .with_smart_lexicon_v3_flags_for_test(tsz_rust::config::SmartLexiconV3Flags::all_enabled());
+    let path = format!("/api/v1/admin/lexicon/entries/{source}/inbound-references");
+    let (status, missing) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!(
+            "/api/v1/admin/lexicon/entries/{}/inbound-references",
+            Uuid::now_v7()
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    let (status, empty) = call(&state, actor, Method::GET, &path, None).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(
+        empty,
+        json!({"entry_id": source, "revision": 1, "nodes": [], "items": [], "truncated": false})
+    );
+
+    // 两条例句都标注了本词条；第二条随后被改成对不上的词面（模拟正文被改过）。
+    let (status, first) = call(
+        &state,
+        actor,
+        Method::POST,
+        ROOT,
+        Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content(source)})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, second) = call(
+        &state,
+        actor,
+        Method::POST,
+        ROOT,
+        Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content(source)})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let fresh_annotation = linked_annotation_id(&first, source);
+    let stale_annotation = linked_annotation_id(&second, source);
+    assert!(
+        fresh_annotation < stale_annotation,
+        "后建的标注 id 更大，失效项排在前面才说明不是按 id 排的"
+    );
+    sqlx::query("UPDATE lexicon.shared_sentence_annotations SET source_segments=$2 WHERE id=$1")
+        .bind(stale_annotation)
+        .bind(json!([{"start":2,"end":8,"surface":"wonder"}]))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, body) = call(&state, actor, Method::GET, &path, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["entry_id"], json!(source));
+    assert_eq!(body["revision"], 1);
+    assert_eq!(body["truncated"], false);
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{body}");
+    let stale = &items[0];
+    assert_eq!(
+        stale["id"],
+        json!(format!("shared_sentence:{stale_annotation}"))
+    );
+    assert_eq!(stale["kind"], "shared_sentence");
+    assert_eq!(stale["stale"], true, "{stale}");
+    assert_eq!(stale["source"]["sentence_id"], second["id"]);
+    assert_eq!(stale["source"]["segments"][0]["surface"], "wonder");
+    let fresh = &items[1];
+    assert_eq!(
+        fresh["id"],
+        json!(format!("shared_sentence:{fresh_annotation}"))
+    );
+    assert_eq!(fresh["stale"], false, "{fresh}");
+    assert_eq!(
+        fresh["target"],
+        json!({
+            "pos_id": node_id(source, 1),
+            "base_form_id": node_id(source, 2),
+            "form_id": node_id(source, 2),
+            "variant_id": node_id(source, 3),
+            "sense_id": sense_id(source)
+        })
+    );
+    assert_eq!(
+        fresh["source"],
+        json!({
+            "sentence_id": first["id"],
+            "sentence_revision": 1,
+            "sentence_text": "A wonderful flower.",
+            "source_dialect": "common",
+            "segments": [{"start": 2, "end": 11, "surface": "wonderful"}]
+        })
+    );
+    // 每条标注各计一次 pos / 原形 / 变体 / 词义；form_id 与 base_form_id 同一节点只计一次。
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 4, "{body}");
+    assert_eq!(node_total(&body, node_id(source, 1)), Some(("pos", 2)));
+    assert_eq!(node_total(&body, node_id(source, 2)), Some(("form", 2)));
+    assert_eq!(node_total(&body, node_id(source, 3)), Some(("variant", 2)));
+    assert_eq!(node_total(&body, sense_id(source)), Some(("sense", 2)));
+}
+
+#[sqlx::test]
+async fn forms_impact_flags_only_changes_that_break_sentence_targets(pool: PgPool) {
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let redis_url = std::env::var("TEST_REDIS_URL")
+        .or_else(|_| std::env::var("REDIS_URL"))
+        .expect("isolated Redis URL");
+    let redis = deadpool_redis::Config::from_url(redis_url)
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(tsz_rust::config::SmartLexiconV3Flags::all_enabled());
+    let (status, saved) = call(
+        &state,
+        actor,
+        Method::POST,
+        ROOT,
+        Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content(source)})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let id = saved["id"].as_str().unwrap();
+    let (_, envelope) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("/api/v1/admin/lexicon/entries/{source}"),
+        None,
+    )
+    .await;
+    let forms = envelope["word"]["forms"].clone();
+    let impact_path = format!("/api/v1/admin/lexicon/entries/{source}/steps/forms/impact");
+    let save_path = format!("/api/v1/admin/lexicon/entries/{source}/steps/forms");
+
+    // 英美通用改成分列（变化组规则跟着改成两侧发音）：标注钉着的 common 变体 id 消失，
+    // 预览与保存都点名它。
+    let mut split = forms.clone();
+    split["pos"][0]["form_groups"][0]["dialect_rules"] =
+        json!({"spelling_mode": "unified", "phonetic_mode": "distinguish"});
+    split["pos"][0]["forms"][0]["regional_variants"] = json!({
+        "mode": "uk_us",
+        "uk": {"id": Uuid::now_v7(), "dialect": "uk", "spelling": "wonderful", "origin": "manual", "pronunciations": []},
+        "us": {"id": Uuid::now_v7(), "dialect": "us", "spelling": "wonderful", "origin": "manual", "pronunciations": []}
+    });
+    let (status, impact) = call(
+        &state,
+        actor,
+        Method::POST,
+        &impact_path,
+        Some(json!({"schema_version":3,"base_revision":1,"content":split})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert_single_stale_sentence_reference(&impact["blocked_references"], source, id);
+    let (status, problem) = call(
+        &state,
+        actor,
+        Method::PUT,
+        &save_path,
+        Some(json!({"schema_version":3,"base_revision":1,"intent":"save","content":split,"confirmed_impact_token":impact["confirmation_token"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
+    assert_inbound_reference_conflict(&problem, source, id);
+    assert_eq!(
+        problem["meta"]["inbound_references"],
+        impact["blocked_references"]
+    );
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id=$1")
+        .bind(source)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(revision, 1);
+
+    // 只补一条发音：引用照旧成立，预览不带 blocked_references。
+    // （这份手工夹具的节点没有父子绑定，走不完整条保存链路；无关改动能保存成功
+    // 由 lexicon_handler 里的真实词条用例覆盖。）
+    let mut harmless = forms.clone();
+    harmless["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"] = json!([{
+        "id": Uuid::now_v7(),
+        "dict_phonetic": "/ˈwʌndəfʊl/",
+        "actual_pron": "wʌndəfʊl",
+        "style": "normal"
+    }]);
+    let (status, impact) = call(
+        &state,
+        actor,
+        Method::POST,
+        &impact_path,
+        Some(json!({"schema_version":3,"base_revision":1,"content":harmless})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert!(
+        impact.get("blocked_references").is_none(),
+        "无关改动不该列出被破坏的引用：{impact}"
+    );
 }

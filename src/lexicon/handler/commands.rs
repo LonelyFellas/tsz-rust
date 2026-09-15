@@ -95,7 +95,7 @@ pub async fn create(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
         (status = 404, description = "词条不存在"),
-        (status = 409, description = "revision、stable_node_id_changed、form_reference_conflict、surface warning 或策略冲突"),
+        (status = 409, description = "revision、stable_node_id_changed、inbound_reference_conflict、surface warning 或策略冲突"),
         (status = 413, description = "请求体超过 8,192,000 字节"),
         (status = 422, description = "词形结构非法或 schema_version 不是 3"),
         (status = 503, description = "确认 token 或 V3 存储能力不可用")
@@ -142,7 +142,7 @@ pub async fn preview_forms_impact(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "词条不存在"),
-        (status = 409, description = "revision、stable_node_id_changed、form_reference_conflict、surface warning、策略或下游确认冲突"),
+        (status = 409, description = "revision、stable_node_id_changed、inbound_reference_conflict（meta.inbound_references 列出被破坏的引用）、surface warning、策略或下游确认冲突"),
         (status = 410, description = "surface 确认 snapshot 已过期"),
         (status = 413, description = "请求体超过 8,192,000 字节"),
         (status = 422, description = "词形校验失败或 schema_version 不是 3"),
@@ -197,7 +197,7 @@ pub async fn save_forms(
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
         (status = 404, description = "词条不存在"),
-        (status = 409, description = "revision 或步骤可达性冲突"),
+        (status = 409, description = "revision、inbound_reference_conflict 或步骤可达性冲突"),
         (status = 413, description = "请求体超过 8,192,000 字节"),
         (status = 422, description = "词义校验失败或 schema_version 不是 3"),
         (status = 503, description = "V3 存储能力不可用")
