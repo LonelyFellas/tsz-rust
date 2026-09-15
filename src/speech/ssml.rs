@@ -155,11 +155,12 @@ fn open_range(
         // 三分类落地之前的 `strong`，等产品定了各类该怎么读再分开映射。
         RichTextAnnotation::Emphasis { .. } => output.push_str(r#"<emphasis level="strong">"#),
         RichTextAnnotation::Phoneme {
-            alphabet: RichTextPhonemeAlphabet::Ipa,
-            phoneme,
-            ..
+            alphabet, phoneme, ..
         } => {
-            output.push_str(r#"<phoneme alphabet="ipa" ph=""#);
+            output.push_str(match alphabet {
+                RichTextPhonemeAlphabet::Ipa => r#"<phoneme alphabet="ipa" ph=""#,
+                RichTextPhonemeAlphabet::Ups => r#"<phoneme alphabet="ups" ph=""#,
+            });
             push_attr(output, phoneme.trim());
             output.push_str(r#"">"#);
         }

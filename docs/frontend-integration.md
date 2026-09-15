@@ -2068,3 +2068,16 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 
 部署回退时，守卫把「词性上缺 `dialect_rules`」和词义上的 `form_group_id` 视为回退版本读不了的形状。
 库里已有新形状数据就拒绝回退，需要先清库。
+
+### 任务 54：独立 Azure IPA / UPS 输入（工作区实现，待配套发布）
+
+V3 发音新增可选 `synthesis: { alphabet: "ipa" | "ups", ipa: string, ups: string }`。
+沿用 forms JSON 与不可变发布快照，无迁移；缺省不输出，双空候选保存时归一为缺省。
+草稿允许未填完；完成/发布要求已配置时选中侧非空，UPS 为 ASCII。
+候选禁止控制字符，IPA 最多 200 码点、UPS 最多 1600；未选中候选可保留草稿。
+已有 RichText phoneme alphabet 同步支持 ups，仍由服务端生成 SSML；缓存自动包含 alphabet/phoneme。
+`audio_assets` 继续是上传录音引用，切换源不能删除；发音节点 hash 仅在 synthesis 存在时扩展输入。
+
+严格旧 reader/writer 不兼容新字段。前端先以 `VITE_AZURE_PRONUNCIATION_INPUTS=false` 发布兼容读取与字段保留，
+再配套后端，处理旧编辑会话后开启写入口；出现新数据后不得回退至不认识字段的旧版本。
+完整设计、业界依据及实际验证集中在前端 `docs/features/azure-pronunciation-inputs/`。

@@ -232,10 +232,24 @@ pub enum PhraseComponentUsageV3 {
     },
 }
 
+/// Independent Azure synthesis candidates; dictionary notation remains display-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PronunciationSynthesisV3 {
+    pub alphabet: RichTextPhonemeAlphabet,
+    #[schema(max_length = 200)]
+    pub ipa: String,
+    #[schema(max_length = 1600)]
+    pub ups: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordPronunciationV3 {
     pub id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub synthesis: Option<PronunciationSynthesisV3>,
     #[schema(max_length = 200)]
     pub dict_phonetic: String,
     /// 编辑器正文与 dict_phonetic 保持一致；旧记录不输出扩展字段。
@@ -250,8 +264,7 @@ pub struct WordPronunciationV3 {
     pub audio_assets: Vec<AudioAsset>,
     #[schema(max_length = 200)]
     pub actual_pron: String,
-    /// 编辑器正文与 actual_pron 保持一致。连读只标在这里：字典音标那一侧负责
-    /// 喂语音合成，连读是纯展示的标注，两边分工不混。旧记录不输出扩展字段。
+    /// 编辑器正文与 actual_pron 保持一致；连读仅用于展示。旧记录不输出扩展字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub actual_pron_rich: Option<RichTextV3>,
@@ -504,7 +517,7 @@ pub enum RichTextAnnotationV3 {
         start: usize,
         end: usize,
         alphabet: RichTextPhonemeAlphabet,
-        #[schema(max_length = 200)]
+        #[schema(max_length = 1600)]
         phoneme: String,
     },
     Liaison {

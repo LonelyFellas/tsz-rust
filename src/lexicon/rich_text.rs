@@ -9,6 +9,15 @@ pub const MAX_RICH_TEXT_CODEPOINTS: usize = 5_000;
 pub const MAX_RICH_TEXT_ANNOTATIONS: usize = 500;
 pub const MAX_PAUSE_MS: u32 = 5_000;
 pub const MAX_PHONEME_CODEPOINTS: usize = 200;
+/// UPS ASCII tokens and separators expand the equivalent IPA representation.
+pub const MAX_UPS_CODEPOINTS: usize = 1600;
+
+pub fn phoneme_limit(alphabet: crate::lexicon::dto::RichTextPhonemeAlphabet) -> usize {
+    match alphabet {
+        crate::lexicon::dto::RichTextPhonemeAlphabet::Ipa => MAX_PHONEME_CODEPOINTS,
+        crate::lexicon::dto::RichTextPhonemeAlphabet::Ups => MAX_UPS_CODEPOINTS,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RichTextIssue {

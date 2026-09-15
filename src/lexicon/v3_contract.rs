@@ -1,3 +1,4 @@
+use crate::lexicon::dto::RichTextPhonemeAlphabet;
 use std::collections::{HashMap, HashSet};
 
 use serde::de::DeserializeOwned;
@@ -1167,6 +1168,47 @@ fn validate_variant(
                 ));
             }
         }
+        if let Some(synthesis) = &pronunciation.synthesis {
+            for (field, value, limit) in [
+                (
+                    "synthesis.ipa",
+                    &synthesis.ipa,
+                    crate::lexicon::rich_text::MAX_PHONEME_CODEPOINTS,
+                ),
+                (
+                    "synthesis.ups",
+                    &synthesis.ups,
+                    crate::lexicon::rich_text::MAX_UPS_CODEPOINTS,
+                ),
+            ] {
+                if value.chars().count() > limit || value.chars().any(char::is_control) {
+                    issues.push(issue(
+                        V3ValidationIssueCode::ContentLimitExceeded,
+                        field,
+                        pronunciation.id,
+                        "synthesis input exceeds its length limit or contains control characters",
+                        pronunciation_location.clone(),
+                    ));
+                }
+            }
+            let (field, selected) = match synthesis.alphabet {
+                RichTextPhonemeAlphabet::Ipa => ("synthesis.ipa", &synthesis.ipa),
+                RichTextPhonemeAlphabet::Ups => ("synthesis.ups", &synthesis.ups),
+            };
+            if complete
+                && (!synthesis.ipa.trim().is_empty() || !synthesis.ups.trim().is_empty())
+                && (selected.trim().is_empty()
+                    || (synthesis.alphabet == RichTextPhonemeAlphabet::Ups && !selected.is_ascii()))
+            {
+                issues.push(issue(
+                    V3ValidationIssueCode::PronunciationRequired,
+                    field,
+                    pronunciation.id,
+                    "configured synthesis requires the selected phoneme input",
+                    pronunciation_location.clone(),
+                ));
+            }
+        }
         let mut profile_issues = Vec::new();
         validate_voice_profile(
             pronunciation.voice_profile.as_ref(),
@@ -2308,6 +2350,40 @@ mod tests {
             &validate_forms(&incomplete.content, incomplete.intent),
             V3ValidationIssueCode::DuplicatePronunciation
         ));
+    }
+
+    #[test]
+    fn synthesis_draft_complete_and_strict_wire_contract() {
+        let mut raw = valid_request();
+        raw["intent"] = json!("save");
+        let path = "/content/pos/0/forms/0/regional_variants/common/pronunciations/0";
+        raw.pointer_mut(path).unwrap()["synthesis"] =
+            json!({"alphabet":"ups","ipa":"kæt","ups":""});
+        let draft = decode_valid(raw.clone());
+        assert!(validate_forms(&draft.content, StepSaveIntent::Save).is_empty());
+        assert!(
+            validate_forms(&draft.content, StepSaveIntent::Complete)
+                .iter()
+                .any(|issue| issue.field == "synthesis.ups")
+        );
+        raw.pointer_mut(path).unwrap()["synthesis"]["ups"] = json!("K AE T");
+        let complete = decode_valid(raw.clone());
+        assert!(validate_forms(&complete.content, StepSaveIntent::Complete).is_empty());
+        raw.pointer_mut(path).unwrap()["synthesis"]["ups"] = json!("A".repeat(1601));
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Save)
+                .iter()
+                .any(|issue| issue.field == "synthesis.ups")
+        );
+        raw.pointer_mut(path).unwrap()["synthesis"]["unexpected"] = json!(true);
+        assert!(decode_v3_forms_request::<SaveFormsStepInputV3>(raw).is_err());
+        let legacy = decode_valid(valid_request());
+        assert!(
+            !serde_json::to_value(legacy.content)
+                .unwrap()
+                .to_string()
+                .contains("synthesis")
+        );
     }
 
     #[test]
