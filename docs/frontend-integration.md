@@ -1956,7 +1956,7 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 - `SharedSentence.entries[].senses` 返回实际关联词义的 `{id, gloss}` 摘要。历史只有 entry 的标注返回 `state: "entry_only"`，全局可见，保存前必须补选词义或清除，不能猜测归入第一个词义。
 - 选择器复用 V3 成分目标查询的词条、词形、词义层级，使用精确词面匹配和草稿候选。旧 `GET /sentences/targets` 保留为词面元数据查询，不再作为完整身份或保存合法性的证明。
 
-当前草稿中已删除的词义或词形，不能靠旧发布快照恢复为新的有效关联。已有共享例句引用会阻止删除/修改相关词义或词形身份、发布或激活缺少目标的版本；返回 `409 reference_conflict`，需要先调整或解除例句关联。
+当前草稿中已删除的词义或词形，不能靠旧发布快照恢复为新的有效关联。已有共享例句引用会阻止删除/修改相关词义或词形身份、发布或激活缺少目标的版本；自「被引用节点保护」起返回 `409 inbound_reference_conflict`（见下节），需要先调整或解除例句关联。
 
 旧 `/collections` 操作保持退出路由；不恢复 `sentence_collections`、`collected/sense_ids` 或词义保存队列。既有 collection 表和此前本地 sense migration 暂留，当前业务不读写它们。新迁移 `20260913120000_shared_sentence_targets` 在真实标注表添加 sense 外键、完整 target JSON 与索引。历史数据不自动分配词义，有新 sense target 时 down 拒绝有损回退。
 
@@ -1975,6 +1975,34 @@ V3 多维释义英文正文及例句 en_text 的 RichTextVariantV3 新增可选 
 响应仍为 `SharedSentenceList`。人工认领复用原 PUT，保留例句和 annotation ID，只替换明确选择的 target；带原 revision，当前词条上下文同时带 context entry/sense。多条旧 EntryOnly 必须一起补全，不能隐式删掉其他标注来保存。自动新建或发布词条不会猜选词义。
 
 新前端依赖这些参数实际生效，部署顺序为后端先、前端后；旧前端继续兼容新后端。没有新增表、迁移或写端点。配套需求与设计位于 tsz 的 `docs/features/sentence-management/`。
+
+## 被引用节点保护：入站引用读取与写校验收敛（2026-09-15，本地候选）
+
+配套需求与设计在 tsz 的 `docs/features/referenced-node-guard/`。目标：管理员在向导里提交前就知道哪些词性 / 词形 / 英美变体 / 词义被别处引用，界面直接禁用会破坏引用的操作；保存仍被拦下时错误里带引用明细与位置。
+
+### 新接口 `GET /api/v1/admin/lexicon/entries/{id}/inbound-references`
+
+权限同 `GET /entries/{id}`。返回 `InboundReferencesV3 { entry_id, revision, nodes[], items[], truncated }`：
+
+- 四类引用：`shared_sentence`（多维例句标注，含自指）、`publication_sense_ref`（其他词条**当前发布版本**里的词义引用，口径同 `current_inbound_sense_refs`）、`draft_relation`（其他词条草稿的近义 / 反义 / 派生）、`phrase_component`（短语草稿成分用词的 resolved 行，**只算 `target_publication_id` 为空的草稿目标**——钉住发布版本的成分引用的是不可变快照，不受草稿改动影响）。类型 2 / 3 / 4 排除已归档来源与自指。
+- `items[].target` 给出指向本词条的节点 id（`pos_id / base_form_id / form_id / variant_id / sense_id`，词义类引用在词义仍在时补 `pos_id`）；`stale` 表示目标在当前草稿已不成立，判定与保存用同一函数（例句：`shared_target_matches`；成分：`phrase_component_matches_target`；发布引用 / 关联：词义是否仍在）。
+- `items[].source` 按类型取用：例句给 `sentence_id / sentence_revision / sentence_text / source_dialect / segments`（码点下标）；其余给 `entry_id / entry_headword / entry_kind / entry_status / sense_id / sense_gloss / node_id / publication_id / relation_type / reference_kind`。
+- `nodes[]` 是每个被引用节点的完整计数（同一引用对 form 与 base_form 同一节点只计一次）；`items` 失效项优先，最多 500 条，超出置 `truncated`。前端禁用只看 `nodes`。
+
+### 写校验收敛
+
+词形保存、词义保存、`POST /steps/forms/impact`、发布、切换版本统一走 `inbound_references::ensure_inbound_references`：
+
+- 违例一律 `409 inbound_reference_conflict`，`meta.inbound_references` 列出违例引用（同 `InboundReferenceV3`，最多 500 条）。取代了原来的 `reference_conflict`（例句引用）、`form_reference_conflict`（词形保存删词性撞发布引用）与发布 / 切换版本的 422 `sense_has_inbound_publication_refs`。`form_reference_conflict` 枚举值保留但不再发出；`reference_conflict` 仍用于目标行锁忙（重试）和移入垃圾桶被例句挡住。
+- 口径补齐：所有保存都查类型 4；词义保存查类型 2（原来发布时才拦）；词形保存删词性连带删词义时查类型 3（原来不拦）。
+- `FormsImpactResponseV3` 新增可选 `blocked_references`：本次词形变更会破坏的引用，非空时随后的 PUT 必 409；无违例不带该键。
+- `POST /validate`、移入垃圾桶、删除词条本期不变。
+
+### 发布顺序
+
+新接口是新路径，后端可先上。`blocked_references` 与 `meta.inbound_references` 是既有响应形状变化，前端 V3 runtime validator 拒收未声明字段：**前端先 `sync:openapi` 并部署，后端再上**，或两端同批。旧前端遇新后端：`meta` 被 validator 丢弃后退化为「操作未完成」，impact 只在确有违例时因新字段解析失败——都是本来就会 409 的场景，不会误伤。
+
+验收命令（隔离测试库 + Redis）：`SQLX_OFFLINE=true cargo test --locked --test shared_sentences` 与 `--test lexicon_handler`（含 `inbound_references_*`、`*_inbound_reference_*` 用例）。
 
 ## 变化组独立英美配置与专用组（TASK#45，2026-09-13，后端已实现）
 

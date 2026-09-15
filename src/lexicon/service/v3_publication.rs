@@ -209,12 +209,12 @@ impl LexiconService {
             super::text_links::validate_targets(&mut tx, entry_id, &mut word.meanings).await?,
         );
         let pristine_meanings = word.meanings.clone();
-        ensure_no_removed_inbound_senses(&mut tx, entry_id, &relational_meanings).await?;
-        super::text_links::ensure_shared_sentence_targets(
+        super::inbound_references::ensure_inbound_references(
             &mut tx,
             entry_id,
             &word.forms,
             &word.meanings,
+            super::inbound_references::InboundReferenceCheck::PublicationContent,
         )
         .await?;
 
@@ -510,15 +510,14 @@ impl LexiconService {
                 unavailable,
             ));
         }
-        let publication_meanings = publication_meanings_for_reference_validation(&publication)?;
-        ensure_no_removed_inbound_senses(&mut tx, entry_id, &publication_meanings).await?;
         let shared_target: AdminWordV3 =
             serde_json::from_value(publication.snapshot.clone()).map_err(serialization_error)?;
-        super::text_links::ensure_shared_sentence_targets(
+        super::inbound_references::ensure_inbound_references(
             &mut tx,
             entry_id,
             &shared_target.forms,
             &shared_target.meanings,
+            super::inbound_references::InboundReferenceCheck::PublicationContent,
         )
         .await?;
 
@@ -779,17 +778,6 @@ fn v2_meanings_to_v3(
     Ok(meanings)
 }
 
-fn publication_meanings_for_reference_validation(
-    publication: &VersionedPublication,
-) -> Result<DraftMeaningsStepContent, LexiconServiceError> {
-    match publication.content_schema_version {
-        3 => serde_json::from_value::<AdminWordV3>(publication.snapshot.clone())
-            .map_err(serialization_error)
-            .and_then(|word| v3_meanings_to_v2(&word.meanings)),
-        version => Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
-    }
-}
-
 fn publication_forms_for_activation(
     publication: &VersionedPublication,
 ) -> Result<Option<DraftFormsStepContentV3>, LexiconServiceError> {
@@ -962,43 +950,6 @@ async fn phrase_component_publication_references(
         });
     }
     Ok(references)
-}
-
-async fn ensure_no_removed_inbound_senses(
-    tx: &mut Transaction<'_, Postgres>,
-    entry_id: Uuid,
-    meanings: &DraftMeaningsStepContent,
-) -> Result<(), LexiconServiceError> {
-    let retained_sense_ids = meanings
-        .pos
-        .iter()
-        .flat_map(|pos| pos.senses.iter().map(|sense| sense.id))
-        .collect::<Vec<_>>();
-    let inbound = LexiconRepository::current_inbound_sense_refs(tx, entry_id, &retained_sense_ids)
-        .await
-        .map_err(repository_error)?;
-    if inbound.is_empty() {
-        return Ok(());
-    }
-    Err(v3_validation_failed(
-        inbound
-            .into_iter()
-            .map(|reference| DraftValidationIssue {
-                step: PersistedWordStep::Meanings,
-                node_id: reference.target_sense_id,
-                field: "senses".to_owned(),
-                code: "sense_has_inbound_publication_refs".to_owned(),
-                message: "该词义仍被其他词条的当前发布版本引用".to_owned(),
-                reference_location: Some(DraftReferenceLocation {
-                    source_entry_id: reference.source_entry_id,
-                    source_publication_id: reference.source_publication_id,
-                    source_node_id: reference.source_node_id,
-                    reference_kind: reference.reference_kind,
-                }),
-                node_location: None,
-            })
-            .collect(),
-    ))
 }
 
 async fn insert_v3_publication(

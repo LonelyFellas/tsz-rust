@@ -14,8 +14,8 @@ use crate::lexicon::{
         AdminWordStats, AdminWordStatus, AdminWordV3, AdminWordV3Envelope, DeleteDraftInput,
         Dialect, DialectRulesV2, DialectVariantSlotV2, DictionaryCoverageStateV2,
         DraftFormsStepContent, DraftFormsStepContentV3, DraftMeaningsStepContent,
-        DraftReferenceLocation, DraftValidationIssue, EnglishTextV2, EntryDeleteBatchResponse,
-        EntryKind, EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput,
+        DraftValidationIssue, EnglishTextV2, EntryDeleteBatchResponse, EntryKind,
+        EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput,
         EntryLifecycleTarget, EntryPresentationV3, EntryReferenceKind, EntryReferencePreview,
         EntryReferenceSummary, LexiconSurfaceMatchV2, MatchedEntryContextV2, PersistedWordStep,
         RelatedSearchLegacyResponse, RelatedSearchMatchMode, RelatedSearchQuery,
@@ -57,6 +57,7 @@ mod dictionary_suggestions;
 mod editing;
 mod entry;
 mod helpers;
+mod inbound_references;
 mod lifecycle;
 mod publishing;
 mod queries;
@@ -138,14 +139,12 @@ pub enum LexiconServiceError {
     EntryHasUnavailablePublicationRefs(Vec<crate::lexicon::model::InboundSenseReferenceRecord>),
     #[error("a referenced publication is changing")]
     ReferenceConflict,
-    #[error("a shared sentence still references this sense or form")]
-    SharedSentenceTargetInUse,
+    #[error("the write would break inbound references to this entry")]
+    InboundReferenceConflict(Vec<crate::lexicon::dto::InboundReferenceV3>),
     #[error("relation prebinding reconciliation fanout exceeds 500 eligible relations")]
     RelationPrebindingFanoutExceeded,
     #[error("a stable V3 node identity changed")]
     StableNodeIdChanged,
-    #[error("a V3 form operation would break an existing reference")]
-    FormReferenceConflict,
     #[error("step is not reachable")]
     StepNotReachable,
     #[error("V3 draft validation failed")]

@@ -103,6 +103,39 @@ pub async fn get(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/admin/lexicon/entries/{id}/inbound-references",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(EntryPath),
+    responses(
+        (status = 200, description = "指向本词条当前草稿节点的入站引用（多维例句标注、已发布内容词义引用、草稿关联词、短语成分用词），并标出已失效的；nodes 为完整计数，items 最多 500 条", body = InboundReferencesV3),
+        (status = 400, description = "词条 ID 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 404, description = "词条不存在"),
+        (status = 422, description = "词条 schema_version 不受当前 reader 支持"),
+        (status = 500, description = "数据库查询失败"),
+        (status = 503, description = "V3 读取能力未开启")
+    )
+)]
+pub async fn inbound_references(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(path): ApiPath<EntryPath>,
+) -> Result<(StatusCode, Json<InboundReferencesV3>), AppError> {
+    require_active_admin(&state, &auth).await?;
+    if !state.smart_lexicon_v3_flags.read {
+        return Err(v3_storage_unavailable());
+    }
+    let response = service(&state)
+        .inbound_references_v3(path.id)
+        .await
+        .map_err(map_error)?;
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/admin/lexicon/entries/{id}/publications",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),

@@ -62,6 +62,7 @@ pub enum ErrorCode {
     RelationPrebindingFanoutExceeded,
     StableNodeIdChanged,
     FormReferenceConflict,
+    InboundReferenceConflict,
     DetectionMismatch,
     DetectionExpired,
     DuplicateWord,
@@ -121,7 +122,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 98] = [
+    pub const ALL: [Self; 99] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -173,6 +174,7 @@ impl ErrorCode {
         Self::RelationPrebindingFanoutExceeded,
         Self::StableNodeIdChanged,
         Self::FormReferenceConflict,
+        Self::InboundReferenceConflict,
         Self::DetectionMismatch,
         Self::DetectionExpired,
         Self::DuplicateWord,
@@ -437,6 +439,11 @@ impl ErrorCode {
             Self::FormReferenceConflict => (
                 "form_reference_conflict",
                 "Form reference conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::InboundReferenceConflict => (
+                "inbound_reference_conflict",
+                "Inbound reference conflict",
                 StatusCode::CONFLICT,
             ),
             Self::DetectionMismatch => (
@@ -747,6 +754,10 @@ pub struct ProblemMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub reference_locations: Option<Vec<ProblemReferenceLocation>>,
+    /// `inbound_reference_conflict`：本次写入会破坏或已失效的入站引用，最多 500 条。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_items = 500)]
+    pub inbound_references: Option<Vec<crate::lexicon::dto::InboundReferenceV3>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub surface_match_page: Option<crate::lexicon::dto::SurfaceMatchPageV3>,
@@ -986,6 +997,10 @@ mod tests {
         for (code, slug) in [
             (ErrorCode::StableNodeIdChanged, "stable_node_id_changed"),
             (ErrorCode::FormReferenceConflict, "form_reference_conflict"),
+            (
+                ErrorCode::InboundReferenceConflict,
+                "inbound_reference_conflict",
+            ),
         ] {
             let (status, body) =
                 response_json(AppError::conflict(code, None, "V3 contract conflict")).await;
