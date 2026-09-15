@@ -655,7 +655,7 @@ restore 会先验证备份组，再撤下正式 manifest，以同目录临时文
 
 ## 7. 环境变量
 
-`/opt/tsz-rust/.env`（rsync 永远排除，改它只能 ssh 手动）当前含：
+`/opt/tsz-rust/.env`（部署只推送二进制与部署工具，从不触碰它；改它只能 ssh 手动）当前含：
 PORT / DATABASE_URL（外部 Aliyun RDS）/ JWT_SECRET / REDIS_URL / **COOKIE_SECURE=false**
 （域名备案中、无 TLS 的临时项；备案后上 Caddy TLS 时删除恢复默认 true）。
 新增配置项先核对 `.env.example`、`docs/deployment.md` 与目标环境；如果服务器缺少必需配置，在部署写入前准备具体方案并取得相应授权，不隐式修改服务器 .env。
