@@ -1,9 +1,75 @@
 import pathlib
 import re
+import shlex
 import subprocess
 import tempfile
 import textwrap
 import unittest
+
+# runbook 里 bash 代码块的唯一解析口径：fail-fast 检查与推送 rsync 检查共用。
+BASH_FENCE = re.compile(r"^[ \t]*```(?:bash|sh|shell)[ \t]*\n(.*?)^[ \t]*```[ \t]*$", re.M | re.S)
+
+
+def remote_rsync_commands(markdown: str) -> list[str]:
+    """markdown 的 bash 代码块里推到 tshb-test 的 rsync 命令（`\\` 续行已拼成一条）。"""
+    commands = []
+
+    def collect(logical: str) -> None:
+        if re.search(r"\brsync\b", logical) and "tshb-test:" in logical:
+            commands.append(logical)
+
+    for block in BASH_FENCE.findall(markdown):
+        logical = ""
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not logical and (not stripped or stripped.startswith("#")):
+                continue
+            if stripped.endswith("\\"):
+                logical += stripped[:-1] + " "
+                continue
+            collect(logical + stripped)
+            logical = ""
+        if logical:
+            collect(logical)
+    return commands
+
+
+def rsync_keeps_local_owner(command: str) -> bool:
+    """按 rsync「后写覆盖先写」模拟属主/属组开关，任一推到 tshb-test 的 rsync 最终仍保留即为 True。"""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    segments, segment = [], []
+    for token in lexer:
+        if token in {"&&", "||", ";", "|", "&"}:
+            segments.append(segment)
+            segment = []
+        else:
+            segment.append(token)
+    segments.append(segment)
+    for segment in segments:
+        names = [token.rsplit("/", 1)[-1] for token in segment]
+        if "rsync" not in names or not any("tshb-test:" in token for token in segment):
+            continue
+        owner = group = False
+        for token in segment[names.index("rsync") + 1 :]:
+            if token == "--archive":
+                owner = group = True
+            elif token == "--owner":
+                owner = True
+            elif token == "--group":
+                group = True
+            elif token in {"--no-o", "--no-owner"}:
+                owner = False
+            elif token in {"--no-g", "--no-group"}:
+                group = False
+            elif re.fullmatch(r"-[A-Za-z]+", token):
+                if "a" in token or "o" in token:
+                    owner = True
+                if "a" in token or "g" in token:
+                    group = True
+        if owner or group:
+            return True
+    return False
 
 
 class DeploySkillTests(unittest.TestCase):
@@ -87,9 +153,7 @@ class DeploySkillTests(unittest.TestCase):
         self.assertNotIn('rm -rf "$staging"', self.runbook)
 
     def test_every_bash_block_is_fail_fast_and_pipe_safe(self) -> None:
-        bash_blocks = re.findall(
-            r"(?ms)^\s*```bash\n(.*?)^\s*```$", self.runbook
-        )
+        bash_blocks = BASH_FENCE.findall(self.runbook)
         self.assertGreater(len(bash_blocks), 0)
         for block in bash_blocks:
             with self.subTest(block=block.splitlines()[1:3]):
@@ -177,11 +241,63 @@ class DeploySkillTests(unittest.TestCase):
                 self.assertIn(repository_path, self.runbook)
         self.assertIn('< "$tools/deployment_preflight.py"', self.runbook)
         self.assertIn(
-            'rsync -az "$tools/deployment_manifest.py"', self.runbook
+            'rsync -az --no-o --no-g "$tools/deployment_manifest.py"', self.runbook
+        )
+        self.assertIn(
+            'rsync -az --no-o --no-g "$staging/tsz-rust"', self.runbook
         )
         self.assertNotIn("< ops/deployment_preflight.py", self.runbook)
         self.assertNotIn("rsync -az ops/deployment_manifest.py", self.runbook)
         self.assertNotIn("python3 ops/ci_metrics.py", self.runbook)
+
+    def test_remote_rsync_commands_drop_local_owner(self) -> None:
+        # 推到服务器的 rsync 不得保留本机属主：服务器上没有对应 uid，mv 到位后会留给 root 执行的文件。
+        commands = remote_rsync_commands(self.runbook)
+        self.assertGreaterEqual(len(commands), 2)
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertFalse(rsync_keeps_local_owner(command))
+
+    def test_remote_rsync_scan_covers_new_forms(self) -> None:
+        sample = textwrap.dedent(
+            """
+            正文提到 rsync 到 tshb-test: 不算命令。
+
+            ```bash
+            # rsync -az "$a" "tshb-test:/comment"
+            rsync -avz "$a" "tshb-test:/plain"
+            rsync -a $a tshb-test:/unquoted
+            python3 "$tools/ci_metrics.py" run -- \\
+              rsync -az \\
+              "$a" "tshb-test:/continued"
+            rsync --no-o --no-g -az "$a" "tshb-test:/flags-first"
+            rsync -az "$a" "tshb-test:/comment-flags"  # --no-o --no-g
+            rsync -az --no-o --no-g "$a" "tshb-test:/ok" && rsync -az "$b" "tshb-test:/chained"
+            rsync -avz --no-owner --no-group -e "ssh -p 22" "$a" "tshb-test:/ok-long"
+            rsync -az --no-o --no-g "$a" "tshb-test:/ok"
+            rsync -az "$a" "$staging/local-only"
+            rsync -az "$a" \\
+              "tshb-test:/tail" \\
+            ```
+            """
+        )
+        offending = [
+            re.findall(r"tshb-test:/[\w-]+", command)[-1]
+            for command in remote_rsync_commands(sample)
+            if rsync_keeps_local_owner(command)
+        ]
+        self.assertEqual(
+            offending,
+            [
+                "tshb-test:/plain",
+                "tshb-test:/unquoted",
+                "tshb-test:/continued",
+                "tshb-test:/flags-first",
+                "tshb-test:/comment-flags",
+                "tshb-test:/chained",
+                "tshb-test:/tail",
+            ],
+        )
 
 
 if __name__ == "__main__":

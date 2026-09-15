@@ -398,7 +398,9 @@ deploy_tool_incoming="/opt/tsz-deploy-tools/backend-deployment-manifest.incoming
 ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
   install -d -m 0755 /opt/tsz-deploy-tools /opt/tsz-deploy-manifests"
-rsync -az "$tools/deployment_manifest.py" "tshb-test:$deploy_tool_incoming"
+# rsync 一律带 --no-o --no-g：不把本机 uid/gid（如 501）带到服务器——那边没有对应用户，
+# 而 mv 会保留属主；工具与二进制由 root 执行，必须保持 root 属主。
+rsync -az --no-o --no-g "$tools/deployment_manifest.py" "tshb-test:$deploy_tool_incoming"
 ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
   python3 '$deploy_tool_incoming' --help >/dev/null
@@ -413,7 +415,7 @@ ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
   install -d -m 0755 /opt/tsz-rust/target/release"
 python3 "$tools/ci_metrics.py" run --name deploy-binary-rsync -- \
-  rsync -az "$staging/tsz-rust" "tshb-test:$binary_incoming"
+  rsync -az --no-o --no-g "$staging/tsz-rust" "tshb-test:$binary_incoming"
 ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
   chmod 0755 '$binary_incoming'
@@ -648,12 +650,17 @@ restore 会先验证备份组，再撤下正式 manifest，以同目录临时文
 
 回退后重跑 health/ready/auth smoke；若恢复了 `api.json`，必须执行 `deployment_manifest.py verify`。若旧部署没有 manifest，回退后的来源状态明确为 UNKNOWN/BLOCKED，不能伪造一个 SHA。只有回退 smoke/manifest 全部通过后，才按第 5.1 节相同的 owner 校验顺序释放服务器锁和本地锁；失败时保留锁、state、staging 与 backup 供恢复，绝不自动抢锁。
 
-服务器上没有源码；含迁移的发布只有已验证安全时才由候选二进制撤回数据库；否则保持停止状态等待恢复决定，不换回不兼容的旧二进制。只有数据库
+服务器上不再用源码构建（`/opt/tsz-rust` 下旧版部署残留的源码树不参与运行或回退）；含迁移的发布只有已验证安全时才由候选二进制撤回数据库；否则保持停止状态等待恢复决定，不换回不兼容的旧二进制。只有数据库
 已经处于部署前 migration 版本时，二进制恢复才构成完整回退。
 
 ## 7. 环境变量
 
-`/opt/tsz-rust/.env`（rsync 永远排除，改它只能 ssh 手动）当前含：
-PORT / DATABASE_URL（外部 Aliyun RDS）/ JWT_SECRET / REDIS_URL / **COOKIE_SECURE=false**
-（域名备案中、无 TLS 的临时项；备案后上 Caddy TLS 时删除恢复默认 true）。
+`/opt/tsz-rust/.env`（部署只推送二进制与部署工具，从不触碰它；改它只能 ssh 手动）当前含以下键（2026-09-15 只读核对键名，不含取值）：
+
+- 基础与鉴权：PORT / DATABASE_URL（外部 Aliyun RDS）/ REDIS_URL / JWT_SECRET / ADMIN_JWT_SECRET（必须不同于 JWT_SECRET）
+- **COOKIE_SECURE=false**（测试服的 IP 直连入口仍是纯 HTTP，Secure cookie 会被浏览器拒收；两个域名已由 nginx + certbot 提供 HTTPS，关闭 IP 直连入口后删除此项恢复默认 true；生产禁止 false）
+- Azure TTS：AZURE_SPEECH_ENABLED / AZURE_SPEECH_REGION / AZURE_SPEECH_KEY / AZURE_SPEECH_CONNECT_TIMEOUT_MS / AZURE_SPEECH_REQUEST_TIMEOUT_MS / AZURE_SPEECH_MAX_RESPONSE_BYTES
+- 对象存储：OBJECT_STORAGE_SPACES，以及 speech 空间的 OBJECT_STORAGE_SPEECH_BACKEND / OBJECT_STORAGE_SPEECH_OSS_ENDPOINT / OBJECT_STORAGE_SPEECH_OSS_REGION / OBJECT_STORAGE_SPEECH_OSS_BUCKET / OBJECT_STORAGE_SPEECH_OSS_ROOT / OBJECT_STORAGE_SPEECH_OSS_ACCESS_KEY_ID / OBJECT_STORAGE_SPEECH_OSS_ACCESS_KEY_SECRET / OBJECT_STORAGE_SPEECH_PRIVACY / OBJECT_STORAGE_SPEECH_MAX_OBJECT_SIZE_BYTES / OBJECT_STORAGE_SPEECH_PRESIGN_TTL_SECONDS / OBJECT_STORAGE_SPEECH_CACHE_CONTROL
+- 已不再读取的残留：LEXICON_GENERATOR_PROVIDER / QWEN_LEXICON_API_KEY / QWEN_LEXICON_MODEL（词条内容生成 2026-09-11 随 V2 内容格式下线，见 `.env.example`）
+
 新增配置项先核对 `.env.example`、`docs/deployment.md` 与目标环境；如果服务器缺少必需配置，在部署写入前准备具体方案并取得相应授权，不隐式修改服务器 .env。
