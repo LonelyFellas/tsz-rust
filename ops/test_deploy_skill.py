@@ -177,8 +177,13 @@ class DeploySkillTests(unittest.TestCase):
                 self.assertIn(repository_path, self.runbook)
         self.assertIn('< "$tools/deployment_preflight.py"', self.runbook)
         self.assertIn(
-            'rsync -az "$tools/deployment_manifest.py"', self.runbook
+            'rsync -az --no-o --no-g "$tools/deployment_manifest.py"', self.runbook
         )
+        self.assertIn(
+            'rsync -az --no-o --no-g "$staging/tsz-rust"', self.runbook
+        )
+        # 推到服务器的 rsync 不得保留本机属主（服务器上没有对应 uid，mv 后会留给 root 执行的文件）。
+        self.assertNotIn('rsync -az "', self.runbook)
         self.assertNotIn("< ops/deployment_preflight.py", self.runbook)
         self.assertNotIn("rsync -az ops/deployment_manifest.py", self.runbook)
         self.assertNotIn("python3 ops/ci_metrics.py", self.runbook)

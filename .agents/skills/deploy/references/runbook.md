@@ -398,7 +398,9 @@ deploy_tool_incoming="/opt/tsz-deploy-tools/backend-deployment-manifest.incoming
 ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
   install -d -m 0755 /opt/tsz-deploy-tools /opt/tsz-deploy-manifests"
-rsync -az "$tools/deployment_manifest.py" "tshb-test:$deploy_tool_incoming"
+# rsync 一律带 --no-o --no-g：不把本机 uid/gid（如 501）带到服务器——那边没有对应用户，
+# 而 mv 会保留属主；工具与二进制由 root 执行，必须保持 root 属主。
+rsync -az --no-o --no-g "$tools/deployment_manifest.py" "tshb-test:$deploy_tool_incoming"
 ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
   python3 '$deploy_tool_incoming' --help >/dev/null
@@ -413,7 +415,7 @@ ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
   install -d -m 0755 /opt/tsz-rust/target/release"
 python3 "$tools/ci_metrics.py" run --name deploy-binary-rsync -- \
-  rsync -az "$staging/tsz-rust" "tshb-test:$binary_incoming"
+  rsync -az --no-o --no-g "$staging/tsz-rust" "tshb-test:$binary_incoming"
 ssh tshb-test "set -eu
   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
   chmod 0755 '$binary_incoming'
