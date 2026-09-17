@@ -69,7 +69,11 @@ fn v3_fixture(form_count: usize) -> V3Fixture {
                 "pos_id": pos_id,
                 "pos": "noun",
                 "forms": forms,
-                "form_groups": []
+                "form_groups": form_ids.iter().map(|id| json!({
+                    "id": Uuid::now_v7(), "is_regular": true, "scope": "general",
+                    "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
+                    "members": [{"id": Uuid::now_v7(), "form_id": id}]
+                })).collect::<Vec<_>>()
             }]
         },
         "meanings": {
@@ -196,6 +200,7 @@ fn v3_discovery_candidates_repeat_the_same_form_inventory_for_every_base_form() 
             id,
             form_type: form_type.to_owned(),
             base_form_ids: bases,
+            allowed_sense_ids: Vec::new(),
             variants: vec![PublishedAssociationVariant {
                 id: variant_id,
                 dialect: Dialect::Common,
@@ -410,5 +415,129 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
         candidates
             .iter()
             .all(|candidate| inventory[&past_id].contains(&candidate.base_form_id))
+    );
+}
+
+#[test]
+fn dedicated_forms_limit_candidates_and_saved_targets_to_bound_senses_in_the_same_pos() {
+    use crate::lexicon::dto::TextLinkV3;
+    use crate::lexicon::service::{
+        text_links,
+        v3::{ComponentTargetScope, ComponentTargetWord, phrase_component_matches_target},
+    };
+
+    let mut fixture = v3_fixture(3);
+    let group_id = fixture.snapshot["forms"]["pos"][0]["form_groups"][1]["id"].clone();
+    fixture.snapshot["forms"]["pos"][0]["form_groups"][1]["scope"] = json!("dedicated");
+    // 第三组没有绑定词义（允许编辑中的草稿），不能回退全量。
+    fixture.snapshot["forms"]["pos"][0]["form_groups"][2]["scope"] = json!("dedicated");
+    let first_sense = fixture.snapshot["meanings"]["pos"][0]["senses"][0].clone();
+    let mut sense_ids = vec![fixture.sense_id];
+    for _ in 0..2 {
+        let mut sense = first_sense.clone();
+        let id = Uuid::now_v7();
+        sense_ids.push(id);
+        sense["id"] = json!(id);
+        sense["form_group_id"] = group_id.clone();
+        fixture.snapshot["meanings"]["pos"][0]["senses"]
+            .as_array_mut()
+            .unwrap()
+            .push(sense);
+    }
+    let other_sense_id = Uuid::now_v7();
+    let mut other_sense = first_sense;
+    other_sense["id"] = json!(other_sense_id);
+    fixture.snapshot["meanings"]["pos"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "pos_id": Uuid::now_v7(), "grammar_structures": [], "senses": [other_sense]
+        }));
+    let word: AdminWordV3 = serde_json::from_value(fixture.snapshot.clone()).unwrap();
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true).unwrap();
+    let candidates = target.sentence_discovery_candidates(
+        None,
+        fixture.pos_id,
+        fixture.form_ids[1],
+        fixture.variant_ids[1],
+        None,
+    );
+    assert_eq!(candidates.len(), 1);
+    let candidate = &candidates[0];
+    assert_eq!(
+        candidate.senses.len(),
+        3,
+        "保留跨组切换所需词义，但不包含其他词性"
+    );
+    assert_eq!(
+        candidate.forms[0].allowed_sense_ids.as_ref().unwrap(),
+        &sense_ids
+    );
+    assert_eq!(
+        candidate.forms[1].allowed_sense_ids.as_ref().unwrap(),
+        &sense_ids[1..]
+    );
+    assert_eq!(candidate.forms[2].allowed_sense_ids, Some(vec![]));
+    let wire = serde_json::to_value(&candidate.forms[2]).unwrap();
+    assert_eq!(wire["allowed_sense_ids"], json!([]));
+
+    let component_target = ComponentTargetWord {
+        id: word.id,
+        kind: word.kind,
+        label: word.presentation.label.clone(),
+        forms: word.forms.clone(),
+        meanings: word.meanings.clone(),
+        scope: ComponentTargetScope::Draft { revision: 7 },
+    };
+    // 正文/共享例句、成分保存与候选必须使用相同规则。
+    for (index, form_id) in fixture.form_ids.iter().enumerate() {
+        for sense_id in sense_ids.iter().chain(std::iter::once(&other_sense_id)) {
+            let expected = *sense_id != other_sense_id
+                && (index == 0 || (index == 1 && *sense_id != fixture.sense_id));
+            assert_eq!(
+                phrase_component_matches_target(
+                    &component_target,
+                    fixture.pos_id,
+                    *form_id,
+                    *sense_id,
+                    *form_id,
+                    fixture.variant_ids[index],
+                    Dialect::Common,
+                    "base".into(),
+                    None,
+                ),
+                expected
+            );
+            let link: TextLinkV3 = serde_json::from_value(json!({
+                "id": Uuid::now_v7(), "source_segments": [{"start":0,"end":7,"surface":"harbour"}],
+                "target_word_id": word.id, "target_pos_id": fixture.pos_id,
+                "target_base_form_id": form_id, "target_form_id": form_id,
+                "target_variant_id": fixture.variant_ids[index], "target_sense_id": sense_id
+            }))
+            .unwrap();
+            assert_eq!(
+                text_links::shared_target_matches(&word.forms, &word.meanings, &link, "common"),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn automatic_association_does_not_pick_an_unbound_dedicated_form() {
+    let mut fixture = v3_fixture(2);
+    fixture.snapshot["forms"]["pos"][0]["form_groups"][1]["scope"] = json!("dedicated");
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true).unwrap();
+    assert!(
+        target
+            .automatic_target(fixture.pos_id, &[fixture.variant_ids[1]])
+            .is_none()
+    );
+    assert_eq!(
+        target
+            .automatic_target(fixture.pos_id, &fixture.variant_ids)
+            .unwrap()
+            .target_form_slot_id,
+        Some(fixture.form_ids[0])
     );
 }

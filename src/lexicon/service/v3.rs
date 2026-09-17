@@ -851,6 +851,7 @@ impl LexiconService {
                 .is_some_and(|revision| revision != record.revision),
             presentation,
             capabilities: AdminWordV3Capabilities {
+                atomic_form_sense_bindings: Some(true),
                 text_links: Some(true),
                 publication: match state.origin.as_str() {
                     "native" => V3PublicationCapability::Native,
@@ -1485,6 +1486,7 @@ impl LexiconService {
             has_unpublished_changes: false,
             presentation,
             capabilities: AdminWordV3Capabilities {
+                atomic_form_sense_bindings: Some(true),
                 text_links: Some(true),
                 publication: V3PublicationCapability::Native,
                 pronunciation_normalization_version:
@@ -1548,6 +1550,7 @@ impl LexiconService {
         mut input: PreviewFormsImpactInputV3,
         read_projection: bool,
     ) -> Result<FormsImpactResponseV3, LexiconServiceError> {
+        input.sense_bindings.sort_by_key(|binding| binding.sense_id);
         canonicalize_v3_forms(&mut input.content)?;
         let current = self.get_v3(entry_id).await?;
         ensure_v3_active(&current)?;
@@ -1573,10 +1576,20 @@ impl LexiconService {
         if !issues.is_empty() {
             return Err(v3_validation_failed(issues));
         }
-        let affected = forms_impact_v3(&current.forms, &input.content, &current.meanings)?;
+        let affected = forms_impact_v3(
+            &current.forms,
+            &input.content,
+            &current.meanings,
+            &input.sense_bindings,
+        )?;
         // 与保存同一判定：提前告诉客户端哪些入站引用会被这次词形变更破坏，确认条据此禁用确认。
         let mut reconciled_meanings = current.meanings.clone();
         reconcile_v3_meanings_after_forms(&mut reconciled_meanings, &input.content);
+        super::form_senses::apply_sense_bindings(
+            &input.content,
+            &mut reconciled_meanings,
+            &input.sense_bindings,
+        )?;
         let mut reference_tx = self
             .repository
             .pool()
@@ -1601,6 +1614,7 @@ impl LexiconService {
                     entry_id,
                     current.revision,
                     &input.content,
+                    &input.sense_bindings,
                     &affected,
                 )
                 .await?
@@ -1634,7 +1648,10 @@ impl LexiconService {
                 &ImpactConfirmation {
                     entry_id,
                     base_revision: current.revision,
-                    content_hash: sha256_json(&input.content).map_err(serialization_error)?,
+                    content_hash: super::form_senses::forms_command_hash(
+                        &input.content,
+                        &input.sense_bindings,
+                    )?,
                 },
                 IMPACT_TTL,
             )
@@ -1660,6 +1677,7 @@ impl LexiconService {
         write_projection: bool,
         is_super_admin: bool,
     ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
+        input.sense_bindings.sort_by_key(|binding| binding.sense_id);
         canonicalize_v3_forms(&mut input.content)?;
         let compatibility_source = self.get_v3(entry_id).await?;
         ensure_v3_active(&compatibility_source)?;
@@ -1716,7 +1734,12 @@ impl LexiconService {
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
         let forms_was_complete = record.completed_steps.iter().any(|step| step == "forms");
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
-        let affected = forms_impact_v3(&current_forms, &input.content, &meanings)?;
+        let affected = forms_impact_v3(
+            &current_forms,
+            &input.content,
+            &meanings,
+            &input.sense_bindings,
+        )?;
         if !write_projection && !affected.is_empty() {
             let Some(token) = input.confirmed_impact_token else {
                 return Err(LexiconServiceError::DownstreamConfirmationRequired(
@@ -1728,7 +1751,8 @@ impl LexiconService {
                 .load(actor_id, token)
                 .await
                 .map_err(LexiconServiceError::ImpactStore)?;
-            let expected_hash = sha256_json(&input.content).map_err(serialization_error)?;
+            let expected_hash =
+                super::form_senses::forms_command_hash(&input.content, &input.sense_bindings)?;
             if confirmation.as_ref().is_none_or(|confirmation| {
                 confirmation.entry_id != entry_id
                     || confirmation.base_revision != record.revision
@@ -1753,6 +1777,7 @@ impl LexiconService {
                     next_revision,
                     &current_forms,
                     &input.content,
+                    &input.sense_bindings,
                     &affected,
                     input.confirmed_surface_match_token.as_deref(),
                     input.confirmed_impact_token,
@@ -1764,6 +1789,11 @@ impl LexiconService {
         };
         let saved_meanings = meanings.clone();
         reconcile_v3_meanings_after_forms(&mut meanings, &input.content);
+        super::form_senses::apply_sense_bindings(
+            &input.content,
+            &mut meanings,
+            &input.sense_bindings,
+        )?;
         super::inbound_references::ensure_inbound_references(
             &mut transaction,
             entry_id,
@@ -2847,6 +2877,11 @@ pub(super) fn phrase_component_matches_target(
     if !base_is_valid {
         return false;
     }
+    if !super::form_senses::allowed_form_senses(pos, &target.meanings, target_form_id)
+        .any(|sense| sense.id == target_sense_id)
+    {
+        return false;
+    }
     let Some(gloss) = component_target_gloss(target, target_pos_id, target_sense_id) else {
         return false;
     };
@@ -3837,6 +3872,7 @@ fn forms_impact_v3(
     current: &DraftFormsStepContentV3,
     proposed: &DraftFormsStepContentV3,
     current_meanings: &DraftMeaningsStepContentV3,
+    sense_bindings: &[crate::lexicon::dto::SenseFormGroupBindingV3],
 ) -> Result<Vec<FormsImpactItemV3>, LexiconServiceError> {
     let proposed_ids = v3_form_node_types(proposed);
     let mut affected = v3_form_node_types(current)
@@ -3851,6 +3887,7 @@ fn forms_impact_v3(
         .collect::<Vec<_>>();
     let mut proposed_meanings = current_meanings.clone();
     reconcile_v3_meanings_after_forms(&mut proposed_meanings, proposed);
+    super::form_senses::apply_sense_bindings(proposed, &mut proposed_meanings, sense_bindings)?;
     let proposed_meaning_ids = v3_meaning_node_types(&proposed_meanings);
     affected.extend(
         v3_meaning_node_types(current_meanings)
@@ -5723,7 +5760,7 @@ mod tests {
         proposed: &DraftFormsStepContentV3,
         meanings: &DraftMeaningsStepContentV3,
     ) -> Vec<FormsImpactItemV3> {
-        match forms_impact_v3(current, proposed, meanings) {
+        match forms_impact_v3(current, proposed, meanings, &[]) {
             Ok(items) => items,
             Err(_) => panic!("forms impact should be computable"),
         }

@@ -56,6 +56,7 @@ mod annotations;
 mod dictionary_suggestions;
 mod editing;
 mod entry;
+mod form_senses;
 mod helpers;
 mod inbound_references;
 mod lifecycle;

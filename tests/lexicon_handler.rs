@@ -13949,6 +13949,137 @@ async fn v3_dedicated_form_group_binds_senses_publishes_and_clears_through_impac
         "任一变化组区分拼写 → 英美：{list}"
     );
 
+    // 检索保留全词性词义供切换，但每个词形明确给出允许范围。
+    let (status, candidates) = search_component_targets(
+        &state,
+        &bearer,
+        json!({
+            "schema_version": 3, "q": "harbour", "match": "exact", "include_drafts": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{candidates}");
+    for candidate in candidates["matches"].as_array().unwrap() {
+        if candidate["entry_id"] != json!(entry_id) {
+            continue;
+        }
+        assert_eq!(candidate["senses"].as_array().unwrap().len(), 2);
+        for form in candidate["forms"].as_array().unwrap() {
+            if form["form_id"] == published["word"]["forms"]["pos"][0]["forms"][0]["id"] {
+                assert_eq!(form["allowed_sense_ids"], json!([special_sense_id]));
+            } else {
+                assert_eq!(form["allowed_sense_ids"].as_array().unwrap().len(), 2);
+            }
+        }
+    }
+    assert!(
+        candidates["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["entry_id"] == json!(entry_id)),
+        "target must be present: {candidates}"
+    );
+
+    let host =
+        create_v3_phrase_with_sense_components(&state, &bearer, "harbour boundary", json!([]))
+            .await;
+    let host_id = host["word"]["id"].as_str().unwrap();
+    let host_revision = host["word"]["revision"].as_i64().unwrap();
+    let target_publication = current_publication_id(&pool, entry_uuid).await;
+    // 第一原形属于专用组，默认取到的第一个通用词义不适用。
+    let mut component = resolved_component_json(&published, target_publication, "uk", "harbour");
+    let mut host_meanings = writable_v3_meanings(&host);
+    host_meanings["pos"][0]["senses"][0]["component_usages"] = json!([component]);
+    let (status, response) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        host_id,
+        host_revision,
+        host_meanings.clone(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "wrong dedicated component must fail: {response}"
+    );
+
+    host_meanings["pos"][0]["senses"][0]["component_usages"] = json!([]);
+    let invalid_link = text_link_json(&component, json!([{"start":2,"end":9,"surface":"harbour"}]));
+    host_meanings["pos"][0]["senses"][0]["sentences"] = json!([sentence_with_text_links_json(
+        &host,
+        "A harbour sentence.",
+        json!([invalid_link])
+    )]);
+    let (status, response) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        host_id,
+        host_revision,
+        host_meanings.clone(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "wrong dedicated text link must fail: {response}"
+    );
+
+    component["target_sense_id"] = special_sense_id.clone();
+    let valid_link = text_link_json(&component, json!([{"start":2,"end":9,"surface":"harbour"}]));
+    host_meanings["pos"][0]["senses"][0]["component_usages"] = json!([component]);
+    host_meanings["pos"][0]["senses"][0]["sentences"] = json!([sentence_with_text_links_json(
+        &host,
+        "A harbour sentence.",
+        json!([valid_link])
+    )]);
+    let host_saved = save_v3_meanings(&state, &bearer, &host, host_meanings).await;
+    // 模拟旧版本保存过的错误配对：发布也必须重新检查，不能只拦本次保存。
+    let host_uuid = Uuid::parse_str(host_id).unwrap();
+    let wrong_sense = published["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    for path in [
+        vec![
+            "pos",
+            "0",
+            "senses",
+            "0",
+            "component_usages",
+            "0",
+            "target_sense_id",
+        ],
+        vec![
+            "pos",
+            "0",
+            "senses",
+            "0",
+            "sentences",
+            "0",
+            "en_text",
+            "common",
+            "text_links",
+            "0",
+            "target_sense_id",
+        ],
+    ] {
+        sqlx::query("UPDATE lexicon.entry_editor_projection SET meanings = jsonb_set(meanings, $2::text[], $3::jsonb) WHERE entry_id = $1")
+            .bind(host_uuid).bind(&path).bind(&wrong_sense).execute(&pool).await.unwrap();
+        let (status, response) = publish_ready_v3(&state, &bearer, &host_saved).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "legacy mismatch must not publish: {response}"
+        );
+        sqlx::query("UPDATE lexicon.entry_editor_projection SET meanings = jsonb_set(meanings, $2::text[], $3::jsonb) WHERE entry_id = $1")
+            .bind(host_uuid).bind(&path).bind(&special_sense_id).execute(&pool).await.unwrap();
+    }
+    let (status, host_published) = publish_ready_v3(&state, &bearer, &host_saved).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "correct dedicated targets must publish: {host_published}"
+    );
+
     // 专用组改回通用：影响预览报出被清绑定的词义，确认后词义回到通用。
     let mut back_to_general = published["word"]["forms"].clone();
     back_to_general["pos"][0]["form_groups"][1]["scope"] = json!("general");
@@ -14306,4 +14437,76 @@ async fn v3_synthesis_survives_forms_meanings_publication_and_history(pool: PgPo
     .await;
     assert_eq!(status, StatusCode::OK, "{history}");
     assert!(!history.to_string().contains("\"synthesis\""));
+}
+
+#[sqlx::test]
+async fn v3_forms_atomically_bind_senses_without_breaking_existing_component_references(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let id = target["word"]["id"].as_str().unwrap();
+    let revision = target["word"]["revision"].as_i64().unwrap();
+    let mut forms = target["word"]["forms"].clone();
+    let group_id = forms["pos"][0]["form_groups"][0]["id"].clone();
+    let sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let component = resolved_draft_component_json(&target, "uk", "harbour");
+    create_v3_phrase_with_sense_components(&state, &bearer, "harbour binding", json!([component]))
+        .await;
+    forms["pos"][0]["form_groups"][0]["scope"] = json!("dedicated");
+    let before = preview_v3_forms_impact(&state, &bearer, id, revision, &forms).await;
+    assert!(!before["blocked_references"].as_array().unwrap().is_empty());
+    let bindings = json!([{"sense_id": sense_id, "form_group_id": group_id}]);
+    let (status, impact) = call(&state, Method::POST, &format!("{ROOT}/entries/{id}/steps/forms/impact"), &bearer, None, Some(json!({"schema_version":3,"base_revision":revision,"content":forms,"sense_bindings":bindings}))).await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert!(
+        impact["blocked_references"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "{impact}"
+    );
+    let mut input = forms_input_after_impact(&impact, revision, "save", forms.clone());
+    input["sense_bindings"] = bindings;
+    let (status, saved) = save_v3_forms_raw(&state, &bearer, id, input).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["word"]["forms"]["pos"][0]["form_groups"][0]["scope"],
+        "dedicated"
+    );
+    assert_eq!(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["form_group_id"],
+        group_id
+    );
+    let revision = saved["word"]["revision"].as_i64().unwrap();
+    let (status, invalid) = save_v3_forms_raw(&state, &bearer, id, json!({"schema_version":3,"base_revision":revision,"intent":"save","content":forms,"sense_bindings":[{"sense_id":sense_id}]})).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "last binding must remain: {invalid}"
+    );
+    assert_eq!(
+        entry_revision(&pool, Uuid::parse_str(id).unwrap()).await,
+        revision
+    );
+
+    forms["pos"][0]["form_groups"][0]["scope"] = json!("general");
+    let (status, impact) = call(&state, Method::POST, &format!("{ROOT}/entries/{id}/steps/forms/impact"), &bearer, None, Some(json!({"schema_version":3,"base_revision":revision,"content":forms,"sense_bindings":[{"sense_id":sense_id}]}))).await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    let mut input = forms_input_after_impact(&impact, revision, "save", forms);
+    // 即使 reconcile 会得到相同解绑结果，也不能复用另一份命令的确认 token。
+    let (status, rejected) = save_v3_forms_raw(&state, &bearer, id, input.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    input["sense_bindings"] = json!([{"sense_id":sense_id}]);
+    let (status, reset) = save_v3_forms_raw(&state, &bearer, id, input).await;
+    assert_eq!(status, StatusCode::OK, "{reset}");
+    assert!(
+        reset["word"]["meanings"]["pos"][0]["senses"][0]
+            .get("form_group_id")
+            .is_none()
+    );
 }

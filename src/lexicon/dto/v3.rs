@@ -367,7 +367,7 @@ pub struct WordFormGroupV3 {
     pub id: Uuid,
     /// 仅保留 V2 迁移元数据，不表达 base/derived 父子关系。
     pub is_regular: bool,
-    /// 通用组服务本词性下没有绑定专用组的词义；专用组只服务绑定了它的词义。
+    /// 通用组服务本词性下全部词义；专用组只服务同词性下绑定了它的词义。
     pub scope: FormGroupScopeV3,
     /// 组内词形按本组规则校验，组与组互不影响。
     pub dialect_rules: DialectRulesV3,
@@ -1140,6 +1140,10 @@ pub enum V3PublicationCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordV3Capabilities {
+    /// 支持在词形影响预览及保存中原子更新既有词义绑定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub atomic_form_sense_bindings: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub text_links: Option<bool>,
@@ -1283,6 +1287,16 @@ pub struct CreateAdminWordV3Input {
     pub confirmed_surface_match_token: Option<String>,
 }
 
+/// 随词形变更原子保存的既有词义绑定；缺省 form_group_id 表示解除绑定。
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SenseFormGroupBindingV3 {
+    pub sense_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub form_group_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewFormsImpactInputV3 {
@@ -1291,6 +1305,9 @@ pub struct PreviewFormsImpactInputV3 {
     pub schema_version: u8,
     #[schema(minimum = 1)]
     pub base_revision: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 2000)]
+    pub sense_bindings: Vec<SenseFormGroupBindingV3>,
     pub content: DraftFormsStepContentV3,
 }
 
@@ -1309,6 +1326,9 @@ pub struct SaveFormsStepInputV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub confirmed_surface_match_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 2000)]
+    pub sense_bindings: Vec<SenseFormGroupBindingV3>,
     pub content: DraftFormsStepContentV3,
 }
 

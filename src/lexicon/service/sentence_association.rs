@@ -260,6 +260,7 @@ struct PublishedAssociationForm {
     id: Uuid,
     form_type: String,
     base_form_ids: Vec<Uuid>,
+    allowed_sense_ids: Vec<Uuid>,
     variants: Vec<PublishedAssociationVariant>,
 }
 
@@ -410,6 +411,13 @@ impl PublishedAssociationTarget {
                             id: form.id,
                             form_type: v3_form_type_name(&form.form_type).to_owned(),
                             base_form_ids,
+                            allowed_sense_ids: super::form_senses::allowed_form_senses(
+                                forms,
+                                meanings_content,
+                                form.id,
+                            )
+                            .map(|sense| sense.id)
+                            .collect(),
                             variants: variants
                                 .iter()
                                 .map(|(id, dialect, spelling, component_usages)| {
@@ -502,6 +510,7 @@ impl PublishedAssociationTarget {
                             form_type: form_type.clone(),
                             spelling: variant.spelling.clone(),
                             dialect: variant.dialect,
+                            allowed_sense_ids: Some(candidate_form.allowed_sense_ids.clone()),
                             base_form_ids: if true {
                                 candidate_form.base_form_ids.clone()
                             } else {
@@ -562,12 +571,17 @@ impl PublishedAssociationTarget {
             .forms
             .iter()
             .filter(|form| {
-                form.variants
-                    .iter()
-                    .any(|variant| variant_ids.contains(&variant.id))
+                form.allowed_sense_ids.contains(&sense.id)
+                    && form
+                        .variants
+                        .iter()
+                        .any(|variant| variant_ids.contains(&variant.id))
             })
             .map(|form| (form.id, form.form_type.clone()))
             .collect::<BTreeMap<_, _>>();
+        if slots.is_empty() {
+            return None;
+        }
         let slot = (slots.len() == 1)
             .then(|| slots.into_iter().next())
             .flatten();

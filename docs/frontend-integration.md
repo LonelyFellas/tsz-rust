@@ -2081,3 +2081,27 @@ V3 发音新增可选 `synthesis: { alphabet: "ipa" | "ups", ipa: string, ups: s
 严格旧 reader/writer 不兼容新字段。前端先以 `VITE_AZURE_PRONUNCIATION_INPUTS=false` 发布兼容读取与字段保留，
 再配套后端，处理旧编辑会话后开启写入口；出现新数据后不得回退至不认识字段的旧版本。
 完整设计、业界依据及实际验证集中在前端 `docs/features/azure-pronunciation-inputs/`。
+
+
+## 2026-09-17：关联候选按专用词形组限制词义
+
+`POST /api/v1/admin/lexicon/entries/component-targets/search` 与
+`POST /api/v1/admin/lexicon/entries/sentence-targets/resolve` 的 `forms[]` 新增可选
+`allowed_sense_ids: UUID[]`。新后端始终返回：空数组表示该词形不可关联任何词义；
+旧后端缺省时，新前端兼容旧行为，不能把显式空数组当成缺省。
+
+通用组允许同基本词性的全部词义；专用组仅允许同基本词性下绑定该组的词义。
+候选顶层 `senses` 仍保留全词性词义供切换词形，消费者必须按具体词形的允许列表过滤。
+正文关联、成分保存和发布复用相同校验；固定发布版本按其快照判断，不读最新草稿。
+
+无数据库迁移。旧前端 runtime schema 拒绝新增字段，先发布接受可选字段的新前端，
+再发布后端；旧标签页需刷新。历史错误配对不会自动删除或改义，再保存/发布时提示重新选择。
+
+
+### 词形组绑定弹窗的原子保存
+
+`PreviewFormsImpactInputV3` / `SaveFormsStepInputV3` 增加可选 `sense_bindings`，
+每项 `{sense_id, form_group_id?}` 只更新当前词条既有词义；缺省组表示解除绑定。
+拟议组与词义必须同基本词性，组状态和绑定在同一事务保存；普通影响及词面确认摘要均包含补丁。
+`capabilities.atomic_form_sense_bindings` 为 true 才开启前端绑定弹窗及发送补丁。
+新前端兼容旧后端缺省能力字段，需先部署兼容前端、再部署后端，无数据库迁移。
