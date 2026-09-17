@@ -945,6 +945,7 @@ impl LexiconService {
         entry_id: Uuid,
         base_revision: i64,
         content: &DraftFormsStepContentV3,
+        sense_bindings: &[crate::lexicon::dto::SenseFormGroupBindingV3],
         affected: &[FormsImpactItemV3],
     ) -> Result<Option<SurfaceMatchPageV3>, LexiconServiceError> {
         let keys = forms_surface_keys(entry_id, content)?;
@@ -967,6 +968,11 @@ impl LexiconService {
             .await
             .map_err(LexiconServiceError::SurfacePolicy)?;
         let content_digest = canonical_v3_forms_digest(content)?;
+        let command_digest = if sense_bindings.is_empty() {
+            content_digest.clone()
+        } else {
+            hash_serializable(&(content, sense_bindings))?
+        };
         let evidence = self
             .repository
             .forms_surface_acknowledgement_by_entry(entry_id)
@@ -985,7 +991,7 @@ impl LexiconService {
             actor_id,
             entry_id,
             base_revision,
-            &content_digest,
+            &command_digest,
             affected,
             &material,
             policy,
@@ -1012,6 +1018,7 @@ impl LexiconService {
         next_revision: i64,
         previous: &DraftFormsStepContentV3,
         content: &DraftFormsStepContentV3,
+        sense_bindings: &[crate::lexicon::dto::SenseFormGroupBindingV3],
         affected: &[FormsImpactItemV3],
         surface_token: Option<&str>,
         impact_token: Option<Uuid>,
@@ -1055,6 +1062,11 @@ impl LexiconService {
             .v3_surface_material_in(tx, &keys, Some(entry_id), true)
             .await?;
         let content_digest = canonical_v3_forms_digest(content)?;
+        let command_digest = if sense_bindings.is_empty() {
+            content_digest.clone()
+        } else {
+            hash_serializable(&(content, sense_bindings))?
+        };
         let previous_evidence = LexiconRepository::forms_surface_acknowledgement(tx, entry_id)
             .await
             .map_err(repository_error)?;
@@ -1085,7 +1097,7 @@ impl LexiconService {
                 actor_id,
                 entry_id,
                 base_revision,
-                &content_digest,
+                &command_digest,
                 affected,
                 &material,
                 policy,
@@ -1143,7 +1155,8 @@ impl LexiconService {
         }
         if !affected.is_empty() && verified_impact.is_none() {
             let token = impact_token.ok_or_else(|| downstream_required_v3(affected))?;
-            let expected_content_hash = sha256_json(content).map_err(serialization_error)?;
+            let expected_content_hash =
+                super::form_senses::forms_command_hash(content, sense_bindings)?;
             let confirmation = self
                 .impacts
                 .load(actor_id, token)

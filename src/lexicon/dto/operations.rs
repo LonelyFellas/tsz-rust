@@ -469,6 +469,10 @@ pub struct SentenceTargetSenseV3 {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SentenceTargetCandidateFormV3 {
+    /// 此词形允许关联的同词性词义。新服务始终返回（空数组表示不可选）；缺省兼容旧服务。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_items = 2000)]
+    pub allowed_sense_ids: Option<Vec<Uuid>>,
     pub form_id: Uuid,
     pub variant_id: Uuid,
     #[schema(value_type = String, min_length = 1, max_length = 32, pattern = "^[a-z][a-z0-9_]{0,31}$")]

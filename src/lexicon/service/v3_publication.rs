@@ -151,9 +151,29 @@ impl LexiconService {
         if !issues.is_empty() {
             return Err(v3_validation_failed(issues));
         }
-        // 成分用词可能指向草稿目标：目标事后可能已发布（这里升级并回填发布版本）、加了短语成分
-        // （套娃）或删了词义。只有存在草稿目标时才重跑：发布快照目标不可变，保存时的结论到发布仍成立。
-        if component_usages_have_draft_targets(&word.forms, &word.meanings) {
+        // 固定发布目标先沿用引用锁与归档检查，保留 reference_conflict 的既有语义。
+        // 草稿目标会在校验时升级发布版本，其引用锚点必须在升级之后计算。
+        let pinned_component_references = if all_component_usages(&word.forms, &word.meanings)
+            .iter()
+            .any(|component| {
+                matches!(
+                    component,
+                    PhraseComponentUsageV3::Resolved {
+                        target_publication_id: None,
+                        ..
+                    }
+                )
+            }) {
+            None
+        } else {
+            Some(
+                phrase_component_publication_references(&mut tx, &word.forms, &word.meanings)
+                    .await?,
+            )
+        };
+        // 发布时按当前规则复核所有成分。固定快照虽然不可变，但旧版本保存时
+        // 尚未校验专用组的词义范围，不能沿用当时的放行结论。
+        if !all_component_usages(&word.forms, &word.meanings).is_empty() {
             // 词形步的成分校验对保存路径报 400 InvalidField；发布路径的失败是「目标草稿事后变了」，
             // 与释义级一样落成 422 issue，前端才能按发布问题处理。
             match super::v3::validate_phrase_components(
@@ -202,9 +222,13 @@ impl LexiconService {
             return Err(v3_validation_failed(reference_resolution.issues));
         }
         let mut publication_references = reference_resolution.publication_references;
-        publication_references.extend(
-            phrase_component_publication_references(&mut tx, &word.forms, &word.meanings).await?,
-        );
+        publication_references.extend(match pinned_component_references {
+            Some(references) => references,
+            None => {
+                phrase_component_publication_references(&mut tx, &word.forms, &word.meanings)
+                    .await?
+            }
+        });
         publication_references.extend(
             super::text_links::validate_targets(&mut tx, entry_id, &mut word.meanings).await?,
         );
@@ -817,23 +841,6 @@ fn all_component_usages(
                 .flat_map(|sense| sense.component_usages.iter().cloned()),
         )
         .collect()
-}
-
-fn component_usages_have_draft_targets(
-    forms: &DraftFormsStepContentV3,
-    meanings: &DraftMeaningsStepContentV3,
-) -> bool {
-    all_component_usages(forms, meanings)
-        .iter()
-        .any(|component| {
-            matches!(
-                component,
-                PhraseComponentUsageV3::Resolved {
-                    target_publication_id: None,
-                    ..
-                }
-            )
-        })
 }
 
 /// 成分用词的发布引用：目标已发布的记 `publication` 范围（锁住那一版发布），仍是草稿的记

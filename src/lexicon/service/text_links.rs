@@ -159,13 +159,8 @@ fn target_content_gloss(
     {
         return None;
     }
-    let sense = meanings
-        .pos
-        .iter()
-        .find(|p| p.pos_id == link.target_pos_id)?
-        .senses
-        .iter()
-        .find(|s| s.id == link.target_sense_id)?;
+    let sense = super::form_senses::allowed_form_senses(pos, meanings, link.target_form_id)
+        .find(|sense| sense.id == link.target_sense_id)?;
     Some(
         sense
             .definitions

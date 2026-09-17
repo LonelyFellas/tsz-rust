@@ -361,7 +361,7 @@ text_variant, relation
 - `entry_id UUID`；
 - `entry_pos_id UUID`；
 - `is_regular BOOLEAN`；
-- `scope TEXT`：`general`（通用，服务本词性下没有绑定专用组的词义）/ `dedicated`（专用，只服务绑定了它的词义）；
+- `scope TEXT`：`general`（通用，服务本词性下全部词义）/ `dedicated`（专用，只服务绑定了它的词义）；
 - `spelling_mode TEXT`：`unified` / `distinguish`；
 - `phonetic_mode TEXT`：`unified` / `distinguish`；`spelling_mode = distinguish` 时必须为 `distinguish`；
 - `sort_order INTEGER`。
