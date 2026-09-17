@@ -258,6 +258,44 @@ async fn collect_candidates(
         return Ok(candidates);
     }
 
+    // Saved bindings protect sense deletion even when the request omits the sense and its bindings.
+    let bindings = sqlx::query_as::<_, (Uuid, Uuid, Uuid, i32)>(
+        r#"
+        WITH bindings AS (
+            SELECT sense_id, form_group_id, entry_pos_id FROM lexicon.sense_form_group_bindings WHERE entry_id = $1
+            UNION
+            SELECT id, form_group_id, entry_pos_id FROM lexicon.senses WHERE entry_id = $1 AND form_group_id IS NOT NULL
+        )
+        SELECT binding.sense_id, binding.form_group_id, binding.entry_pos_id, form_group.ordinal
+        FROM bindings binding JOIN lexicon.v3_form_groups form_group ON form_group.id = binding.form_group_id
+        ORDER BY binding.sense_id, binding.form_group_id
+        "#,
+    )
+    .bind(entry_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    for (sense_id, group_id, pos_id, ordinal) in bindings {
+        candidates.push(Candidate {
+            reference: reference(
+                format!("form_group_sense_binding:{group_id}:{sense_id}"),
+                InboundReferenceKindV3::FormGroupSenseBinding,
+                InboundReferenceTargetV3 {
+                    pos_id: Some(pos_id),
+                    sense_id: Some(sense_id),
+                    ..InboundReferenceTargetV3::default()
+                },
+                InboundReferenceSourceV3 {
+                    entry_id: Some(entry_id),
+                    node_id: Some(group_id),
+                    form_group_label: Some(format!("第 {} 组词形变化", ordinal + 1)),
+                    ..InboundReferenceSourceV3::default()
+                },
+            ),
+            rule: Rule::Sense,
+        });
+    }
+
     // 3. 其他词条草稿里的关联词（排除自指与已归档来源）。
     let relations = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Uuid)>(
         r#"
@@ -453,6 +491,7 @@ const fn kind_rank(kind: InboundReferenceKindV3) -> u8 {
         InboundReferenceKindV3::PublicationSenseRef => 1,
         InboundReferenceKindV3::DraftRelation => 2,
         InboundReferenceKindV3::PhraseComponent => 3,
+        InboundReferenceKindV3::FormGroupSenseBinding => 4,
     }
 }
 

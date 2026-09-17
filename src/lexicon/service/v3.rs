@@ -852,6 +852,7 @@ impl LexiconService {
             presentation,
             capabilities: AdminWordV3Capabilities {
                 atomic_form_sense_bindings: Some(true),
+                multi_group_sense_bindings: Some(true),
                 text_links: Some(true),
                 publication: match state.origin.as_str() {
                     "native" => V3PublicationCapability::Native,
@@ -1487,6 +1488,7 @@ impl LexiconService {
             presentation,
             capabilities: AdminWordV3Capabilities {
                 atomic_form_sense_bindings: Some(true),
+                multi_group_sense_bindings: Some(true),
                 text_links: Some(true),
                 publication: V3PublicationCapability::Native,
                 pronunciation_normalization_version:
@@ -2084,6 +2086,22 @@ impl LexiconService {
         let mut current_v3_meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut current_v3_meanings);
+        for saved in current_v3_meanings.pos.iter().flat_map(|pos| &pos.senses) {
+            if saved.form_group_ids.is_some()
+                && let Some(next) = translation_content
+                    .pos
+                    .iter()
+                    .flat_map(|pos| &pos.senses)
+                    .find(|sense| sense.id == saved.id)
+                && next.form_group_ids.is_none()
+            {
+                return Err(LexiconServiceError::InvalidField {
+                    field: "form_group_ids",
+                    message: "refresh the editor before saving multi-group sense bindings",
+                });
+            }
+        }
+
         let current_relational_meanings: DraftMeaningsStepContent = serde_json::from_value(
             serde_json::to_value(&current_v3_meanings).map_err(serialization_error)?,
         )
@@ -2102,6 +2120,28 @@ impl LexiconService {
                 field: "pos_id",
                 message: "meanings must belong to a POS in the current V3 forms",
             });
+        }
+        let retained_senses = translation_content
+            .pos
+            .iter()
+            .flat_map(|pos| &pos.senses)
+            .map(|sense| sense.id)
+            .collect::<HashSet<_>>();
+        if current_v3_meanings
+            .pos
+            .iter()
+            .flat_map(|pos| &pos.senses)
+            .any(|sense| !retained_senses.contains(&sense.id))
+        {
+            super::inbound_references::ensure_inbound_references(
+                &mut transaction,
+                entry_id,
+                &forms,
+                &translation_content,
+                super::inbound_references::InboundReferenceCheck::DraftSave,
+                Some((&forms, &current_v3_meanings)),
+            )
+            .await?;
         }
         let binding_issues = crate::lexicon::v3_contract::validate_sense_form_groups(
             &forms,
@@ -3906,7 +3946,7 @@ fn forms_impact_v3(
         .pos
         .iter()
         .flat_map(|pos| &pos.senses)
-        .map(|sense| (sense.id, sense.form_group_id))
+        .map(|sense| (sense.id, sense.bound_form_group_ids()))
         .collect::<HashMap<_, _>>();
     affected.extend(
         current_meanings
@@ -3914,7 +3954,12 @@ fn forms_impact_v3(
             .iter()
             .flat_map(|pos| &pos.senses)
             .filter(|sense| {
-                sense.form_group_id.is_some() && proposed_bindings.get(&sense.id) == Some(&None)
+                proposed_bindings.get(&sense.id).is_some_and(|next| {
+                    sense
+                        .bound_form_group_ids()
+                        .iter()
+                        .any(|id| !next.contains(id))
+                })
             })
             .map(|sense| FormsImpactItemV3 {
                 node_id: sense.id,
@@ -3960,6 +4005,9 @@ fn reconcile_v3_meanings_after_forms(
     for meaning_pos in &mut meanings.pos {
         let dedicated = dedicated_groups.get(&meaning_pos.pos_id);
         for sense in &mut meaning_pos.senses {
+            if let Some(ids) = &mut sense.form_group_ids {
+                ids.retain(|id| dedicated.is_some_and(|groups| groups.contains(id)));
+            }
             if sense
                 .form_group_id
                 .is_some_and(|id| !dedicated.is_some_and(|groups| groups.contains(&id)))
