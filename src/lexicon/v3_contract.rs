@@ -425,7 +425,7 @@ fn regional_variants_match_rules(variants: &WordRegionalVariantsV3, rules: Diale
             DialectModeV3::Unified,
             DialectModeV3::Distinguish,
             WordRegionalVariantsV3::UkUs { uk, us },
-        ) => uk.spelling == us.spelling,
+        ) => uk.spelling == us.spelling && uk.is_regular == us.is_regular,
         (
             DialectModeV3::Distinguish,
             DialectModeV3::Distinguish,
@@ -1689,6 +1689,49 @@ mod tests {
 
     fn has_code(issues: &[DraftValidationIssue], code: V3ValidationIssueCode) -> bool {
         issues.iter().any(|issue| issue.code == code.as_str())
+    }
+
+    #[test]
+    fn spelling_regularity_is_optional_strict_and_shared_only_for_unified_spelling() {
+        let mut request = valid_request();
+        let common = &mut request["content"]["pos"][0]["forms"][0]["regional_variants"]["common"];
+        common["is_regular"] = json!(false);
+        let decoded = decode_valid(request.clone());
+        assert!(validate_forms(&decoded.content, StepSaveIntent::Save).is_empty());
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap()["content"]["pos"][0]["forms"][0]["regional_variants"]
+                ["common"]["is_regular"],
+            false
+        );
+        request["content"]["pos"][0]["forms"][0]["regional_variants"]["common"]["is_regular"] =
+            Value::Null;
+        assert!(decode_v3_forms_request::<SaveFormsStepInputV3>(request).is_err());
+        let mut request = valid_request();
+        let pos = &mut request["content"]["pos"][0];
+        pos["forms"][0]["regional_variants"] = uk_us_regional_variants(
+            "019d2a80-0000-7000-8000-000000000021",
+            "019d2a80-0000-7000-8000-000000000022",
+            "019d2a80-0000-7000-8000-000000000023",
+            "019d2a80-0000-7000-8000-000000000024",
+        );
+        pos["forms"][0]["regional_variants"]["uk"]["is_regular"] = json!(false);
+        pos["forms"][0]["regional_variants"]["us"]["is_regular"] = json!(true);
+        pos["form_groups"][0]["dialect_rules"] =
+            json!({"spelling_mode":"distinguish", "phonetic_mode":"distinguish"});
+        assert!(
+            validate_forms(&decode_valid(request.clone()).content, StepSaveIntent::Save).is_empty()
+        );
+        request["content"]["pos"][0]["forms"][0]["regional_variants"]["us"]["spelling"] =
+            json!("colour");
+        request["content"]["pos"][0]["form_groups"][0]["dialect_rules"]["spelling_mode"] =
+            json!("unified");
+        assert!(has_code(
+            &validate_forms(&decode_valid(request.clone()).content, StepSaveIntent::Save),
+            V3ValidationIssueCode::InvalidRegionalVariantShape
+        ));
+        request["content"]["pos"][0]["forms"][0]["regional_variants"]["us"]["is_regular"] =
+            json!(false);
+        assert!(validate_forms(&decode_valid(request).content, StepSaveIntent::Save).is_empty());
     }
 
     #[test]

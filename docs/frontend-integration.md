@@ -2105,3 +2105,20 @@ V3 发音新增可选 `synthesis: { alphabet: "ipa" | "ups", ipa: string, ups: s
 拟议组与词义必须同基本词性，组状态和绑定在同一事务保存；普通影响及词面确认摘要均包含补丁。
 `capabilities.atomic_form_sense_bindings` 为 true 才开启前端绑定弹窗及发送补丁。
 新前端兼容旧后端缺省能力字段，需先部署兼容前端、再部署后端，无数据库迁移。
+
+## 2026-09-17：TASK 53 规则变化标记按词形拼写保存
+
+V3 的 common、uk、us 拼写变体新增可选且非 null 的 `is_regular: boolean`。
+原变化组字段保留为历史兼容元数据，新录入和后续业务读取应使用变体字段。
+英美拼写区分时两侧独立；`spelling_mode=unified` 时即使发音区分，uk/us 的标记也必须一致。
+新建默认 true；旧数据缺字段时沿用所属组值，旧请求缺字段时先保留同 ID 变体已存值。
+forms impact/save 使用相同规范化，GET 与发布快照保留新字段。
+
+迁移 `20260917100000_add_form_variant_regularity` 新增关系表 nullable boolean 列，并回填旧组值。
+草稿或发布快照已经写入新字段时，down migration 明确拒绝回退，避免旧严格 DTO 读不了新数据。
+历史不可变发布快照不做批量重写。
+
+旧前端严格 runtime schema 会拒绝新响应，旧后端严格 DTO 会拒绝新请求，因此两端完整功能版本
+不能任意单独上线。上线前需先发布只接受/保留新字段但不启用写入口的兼容前端，再发布后端，
+最后发布启用本次编辑功能的前端，并处理旧编辑会话。本次 PR 不包含该兼容过渡版本或部署授权；
+不能用两边快速连发替代兼容验证。设计和验证记录位于前端 `docs/features/form-spelling-regularity/`。

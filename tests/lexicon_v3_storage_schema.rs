@@ -1289,3 +1289,48 @@ async fn v3_sibling_ordinals_are_unique(pool: PgPool) {
         "lexicon_v3_pronunciations_ordinal_key",
     );
 }
+
+#[sqlx::test]
+async fn spelling_regularity_migration_backfills_legacy_groups_and_reverts_before_new_writes(
+    pool: PgPool,
+) {
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260917100000_add_form_variant_regularity.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let admin_id = insert_admin(&pool).await;
+    let entry_id = insert_v3_entry(&pool, admin_id).await;
+    let noun_id = catalog_pos_id(&pool, "noun").await;
+    let mut tx = pool.begin().await.unwrap();
+    let pos_id = insert_v3_pos(&mut tx, entry_id, noun_id, 0).await;
+    let group_id = insert_v3_group(&mut tx, entry_id, pos_id, 0).await;
+    let (_, _, variant_id) =
+        insert_valid_common_form(&mut tx, entry_id, pos_id, group_id, "base", 0, 0).await;
+    sqlx::query("UPDATE lexicon.v3_form_groups SET is_regular=false WHERE id=$1")
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260917100000_add_form_variant_regularity.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let value: Option<bool> =
+        sqlx::query_scalar("SELECT is_regular FROM lexicon.v3_form_variants WHERE id=$1")
+            .bind(variant_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(value, Some(false));
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260917100000_add_form_variant_regularity.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+}

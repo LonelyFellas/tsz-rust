@@ -177,6 +177,7 @@ fn materialize_suggested_v3_form(
         (SuggestedRegionalVariantsV3::Common { common }, DialectRulesV3::UNIFIED) => {
             WordRegionalVariantsV3::Common {
                 common: WordCommonFormVariantV3 {
+                    is_regular: None,
                     id: Uuid::now_v7(),
                     dialect: CommonDialectV3::Common,
                     spelling: common.spelling.clone(),
@@ -188,6 +189,7 @@ fn materialize_suggested_v3_form(
         }
         (SuggestedRegionalVariantsV3::Common { common }, _) => WordRegionalVariantsV3::UkUs {
             uk: WordUkFormVariantV3 {
+                is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: UkDialectV3::Uk,
                 spelling: common.spelling.clone(),
@@ -196,6 +198,7 @@ fn materialize_suggested_v3_form(
                 component_usages: Vec::new().into(),
             },
             us: WordUsFormVariantV3 {
+                is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: UsDialectV3::Us,
                 spelling: common.spelling.clone(),
@@ -206,6 +209,7 @@ fn materialize_suggested_v3_form(
         },
         (SuggestedRegionalVariantsV3::UkUs { uk, us }, _) => WordRegionalVariantsV3::UkUs {
             uk: WordUkFormVariantV3 {
+                is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: UkDialectV3::Uk,
                 spelling: uk.spelling.clone(),
@@ -214,6 +218,7 @@ fn materialize_suggested_v3_form(
                 component_usages: Vec::new().into(),
             },
             us: WordUsFormVariantV3 {
+                is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: UsDialectV3::Us,
                 spelling: us.spelling.clone(),
@@ -236,6 +241,7 @@ fn blank_v3_base_form() -> WordConcreteFormV3 {
         form_type: "base".to_owned(),
         regional_variants: WordRegionalVariantsV3::Common {
             common: WordCommonFormVariantV3 {
+                is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: CommonDialectV3::Common,
                 spelling: String::new(),
@@ -382,6 +388,7 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                     if let WordRegionalVariantsV3::Common { common } = &form.regional_variants {
                         form.regional_variants = WordRegionalVariantsV3::UkUs {
                             uk: WordUkFormVariantV3 {
+                                is_regular: None,
                                 id: common.id,
                                 dialect: UkDialectV3::Uk,
                                 spelling: common.spelling.clone(),
@@ -390,6 +397,7 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                                 component_usages: common.component_usages.clone(),
                             },
                             us: WordUsFormVariantV3 {
+                                is_regular: None,
                                 id: Uuid::now_v7(),
                                 dialect: UsDialectV3::Us,
                                 spelling: common.spelling.clone(),
@@ -433,6 +441,7 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                         (WordRegionalVariantsV3::UkUs { uk, .. }, DialectRulesV3::UNIFIED) => {
                             form.regional_variants = WordRegionalVariantsV3::Common {
                                 common: WordCommonFormVariantV3 {
+                                    is_regular: None,
                                     id: uk.id,
                                     dialect: CommonDialectV3::Common,
                                     spelling: uk.spelling.clone(),
@@ -624,6 +633,52 @@ fn initial_v3_headword_keys(
     }
 }
 
+/// 新字段优先；旧请求按稳定变体 ID 保留已存值，然后兼容旧组级数据。
+fn normalize_form_regularity(
+    content: &mut DraftFormsStepContentV3,
+    current: Option<&DraftFormsStepContentV3>,
+) {
+    let mut stored = HashMap::new();
+    if let Some(current) = current {
+        for pos in &current.pos {
+            for form in &pos.forms {
+                match &form.regional_variants {
+                    WordRegionalVariantsV3::Common { common } => {
+                        stored.insert(common.id, common.is_regular);
+                    }
+                    WordRegionalVariantsV3::UkUs { uk, us } => {
+                        stored.insert(uk.id, uk.is_regular);
+                        stored.insert(us.id, us.is_regular);
+                    }
+                }
+            }
+        }
+    }
+    for pos in &mut content.pos {
+        for form in &mut pos.forms {
+            let legacy = pos
+                .form_groups
+                .iter()
+                .filter(|group| group.members.iter().any(|member| member.form_id == form.id))
+                .all(|group| group.is_regular);
+            let resolve = |id, value: &mut Option<bool>| {
+                if value.is_none() {
+                    *value = Some(stored.get(&id).copied().flatten().unwrap_or(legacy));
+                }
+            };
+            match &mut form.regional_variants {
+                WordRegionalVariantsV3::Common { common } => {
+                    resolve(common.id, &mut common.is_regular)
+                }
+                WordRegionalVariantsV3::UkUs { uk, us } => {
+                    resolve(uk.id, &mut uk.is_regular);
+                    resolve(us.id, &mut us.is_regular);
+                }
+            }
+        }
+    }
+}
+
 fn preserve_missing_component_usages(
     proposed: &mut DraftFormsStepContentV3,
     current: &DraftFormsStepContentV3,
@@ -791,8 +846,9 @@ impl LexiconService {
             return Err(invariant_record());
         }
         let kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
-        let forms: DraftFormsStepContentV3 =
+        let mut forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
+        normalize_form_regularity(&mut forms, None);
         let mut meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
@@ -1337,6 +1393,7 @@ impl LexiconService {
             );
             compatibility_v3_headwords(&detection, &forms)?
         };
+        normalize_form_regularity(&mut forms, None);
         let detection_basis_dialect = detection_basis_dialect_for_headwords(
             &detection.normalized_surface,
             &confirmed_headwords,
@@ -1556,6 +1613,7 @@ impl LexiconService {
         ensure_v3_active(&current)?;
         ensure_v3_revision(&current, input.base_revision)?;
         preserve_missing_component_usages(&mut input.content, &current.forms)?;
+        normalize_form_regularity(&mut input.content, Some(&current.forms));
         ensure_phrase_component_ownership(current.kind, &input.content)?;
         let mut validation_tx = self
             .repository
@@ -1683,6 +1741,7 @@ impl LexiconService {
         ensure_v3_active(&compatibility_source)?;
         ensure_v3_revision(&compatibility_source, input.base_revision)?;
         preserve_missing_component_usages(&mut input.content, &compatibility_source.forms)?;
+        normalize_form_regularity(&mut input.content, Some(&compatibility_source.forms));
         let issues = crate::lexicon::v3_contract::validate_forms(&input.content, input.intent);
         if !issues.is_empty() {
             return Err(v3_validation_failed(issues));
@@ -4650,6 +4709,7 @@ async fn replace_v3_forms(
                         "common",
                         common.id,
                         &common.spelling,
+                        common.is_regular,
                         common.origin,
                         &common.pronunciations,
                         &common.component_usages,
@@ -4664,6 +4724,7 @@ async fn replace_v3_forms(
                         "uk",
                         uk.id,
                         &uk.spelling,
+                        uk.is_regular,
                         uk.origin,
                         &uk.pronunciations,
                         &uk.component_usages,
@@ -4676,6 +4737,7 @@ async fn replace_v3_forms(
                         "us",
                         us.id,
                         &us.spelling,
+                        us.is_regular,
                         us.origin,
                         &us.pronunciations,
                         &us.component_usages,
@@ -4725,6 +4787,7 @@ async fn insert_v3_variant(
     dialect: &str,
     variant_id: Uuid,
     spelling: &str,
+    is_regular: Option<bool>,
     origin: TextOrigin,
     pronunciations: &[crate::lexicon::dto::WordPronunciationV3],
     component_usages: &[PhraseComponentUsageV3],
@@ -4752,8 +4815,8 @@ async fn insert_v3_variant(
         r#"
         INSERT INTO lexicon.v3_form_variants (
             id, entry_id, form_id, dialect, spelling, normalized_spelling,
-            normalization_version, origin
-        ) VALUES ($1, $2, $3, $4, $5, $6, 1, $7)
+            normalization_version, origin, is_regular
+        ) VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $8)
         "#,
     )
     .bind(variant_id)
@@ -4763,6 +4826,7 @@ async fn insert_v3_variant(
     .bind(spelling)
     .bind(normalized_spelling)
     .bind(text_origin_name(origin))
+    .bind(is_regular)
     .execute(&mut **tx)
     .await
     .map_err(database_error)?;
@@ -5541,6 +5605,7 @@ mod tests {
             form_type: "base".to_owned(),
             regional_variants: WordRegionalVariantsV3::Common {
                 common: WordCommonFormVariantV3 {
+                    is_regular: None,
                     id: variant_id,
                     dialect: CommonDialectV3::Common,
                     spelling: format!("form-{form_id}"),
@@ -5753,6 +5818,48 @@ mod tests {
                 form_groups,
             }],
         }
+    }
+
+    #[test]
+    fn spelling_regularity_preserves_saved_values_before_legacy_group_fallback() {
+        let mut current = two_form_content(false);
+        normalize_form_regularity(&mut current, None);
+        let WordRegionalVariantsV3::Common { common } = &current.pos[0].forms[1].regional_variants
+        else {
+            panic!("common fixture")
+        };
+        assert_eq!(common.is_regular, Some(false));
+        let WordRegionalVariantsV3::Common { common } =
+            &mut current.pos[0].forms[0].regional_variants
+        else {
+            panic!("common fixture")
+        };
+        common.is_regular = Some(false);
+        let mut legacy_request = two_form_content(false);
+        normalize_form_regularity(&mut legacy_request, Some(&current));
+        let WordRegionalVariantsV3::Common { common } =
+            &legacy_request.pos[0].forms[0].regional_variants
+        else {
+            panic!("common fixture")
+        };
+        assert_eq!(
+            common.is_regular,
+            Some(false),
+            "missing field must not reset stored false to group true"
+        );
+        let WordRegionalVariantsV3::Common { common } =
+            &mut legacy_request.pos[0].forms[0].regional_variants
+        else {
+            panic!("common fixture")
+        };
+        common.is_regular = Some(true);
+        normalize_form_regularity(&mut legacy_request, Some(&current));
+        let WordRegionalVariantsV3::Common { common } =
+            &legacy_request.pos[0].forms[0].regional_variants
+        else {
+            panic!("common fixture")
+        };
+        assert_eq!(common.is_regular, Some(true));
     }
 
     fn forms_impact(
