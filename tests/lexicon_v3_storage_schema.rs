@@ -1295,7 +1295,7 @@ async fn spelling_regularity_migration_backfills_legacy_groups_and_reverts_befor
     pool: PgPool,
 ) {
     sqlx::raw_sql(include_str!(
-        "../migrations/20260917100000_add_form_variant_regularity.down.sql"
+        "../migrations/20260917180000_add_form_variant_regularity.down.sql"
     ))
     .execute(&pool)
     .await
@@ -1315,7 +1315,7 @@ async fn spelling_regularity_migration_backfills_legacy_groups_and_reverts_befor
         .unwrap();
     tx.commit().await.unwrap();
     sqlx::raw_sql(include_str!(
-        "../migrations/20260917100000_add_form_variant_regularity.up.sql"
+        "../migrations/20260917180000_add_form_variant_regularity.up.sql"
     ))
     .execute(&pool)
     .await
@@ -1328,7 +1328,7 @@ async fn spelling_regularity_migration_backfills_legacy_groups_and_reverts_befor
             .unwrap();
     assert_eq!(value, Some(false));
     sqlx::raw_sql(include_str!(
-        "../migrations/20260917100000_add_form_variant_regularity.down.sql"
+        "../migrations/20260917180000_add_form_variant_regularity.down.sql"
     ))
     .execute(&pool)
     .await

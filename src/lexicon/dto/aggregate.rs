@@ -351,12 +351,24 @@ pub struct WordSenseV2 {
     /// V3 词义绑定的专用变化组。V3 → V2 → V3 往返与关系投影都靠它带过去。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub form_group_id: Option<Uuid>,
+    /// 同词性的专用组集合；显式空集合解除全部绑定，缺省兼容历史单组字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_items = 2000)]
+    pub form_group_ids: Option<Vec<Uuid>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency: Option<String>,
     pub depends_on_context: bool,
     pub definitions: Vec<WordDefinitionV2>,
     pub sentences: Vec<WordSentenceV2>,
     pub relations: Vec<WordRelationV2>,
+}
+
+impl WordSenseV2 {
+    pub fn bound_form_group_ids(&self) -> &[Uuid] {
+        self.form_group_ids
+            .as_deref()
+            .unwrap_or(self.form_group_id.as_slice())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

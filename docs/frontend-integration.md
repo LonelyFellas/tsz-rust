@@ -2106,6 +2106,23 @@ V3 发音新增可选 `synthesis: { alphabet: "ipa" | "ups", ipa: string, ups: s
 `capabilities.atomic_form_sense_bindings` 为 true 才开启前端绑定弹窗及发送补丁。
 新前端兼容旧后端缺省能力字段，需先部署兼容前端、再部署后端，无数据库迁移。
 
+### 2026-09-17：词义多组绑定与词形组入站引用
+
+词义读写和 `sense_bindings[]` 增加可选 `form_group_ids: UUID[]`。显式数组（包括空数组）
+优先于历史 `form_group_id`；省略数组仍读取历史单值。新前端仅在
+`capabilities.multi_group_sense_bindings=true` 时开放多组编辑，新写使用完整数组。
+已有数组的词义拒绝不带数组的旧页面覆盖写入，避免多组绑定被静默截断。
+
+`GET /api/v1/admin/lexicon/entries/{id}/inbound-references` 新增
+`form_group_sense_binding`，每个组—词义关系计一条；source.node_id 指向组，
+source.form_group_label 提供组名。仍存在绑定时，删除词义返回入站引用冲突。
+解除某组绑定只移除该组的边；短语与多维例句等已有保护保留。
+
+新增迁移 `20260917120000_multi_group_sense_bindings`，从旧单列回填关系表。
+引用读取合并旧单列并去重，兼容迁移后旧写端未补关系表的情况。
+先更新兼容前端，再迁移并更新后端，旧浏览器刷新；旧前端不能接受新枚举/字段。
+存在新数组 JSON 时 down 明确拒绝，不能回退时丢弃其他组绑定或改写历史发布快照。
+
 ## 2026-09-17：TASK 53 规则变化标记按词形拼写保存
 
 V3 的 common、uk、us 拼写变体新增可选且非 null 的 `is_regular: boolean`。
@@ -2114,7 +2131,7 @@ V3 的 common、uk、us 拼写变体新增可选且非 null 的 `is_regular: boo
 新建默认 true；旧数据缺字段时沿用所属组值，旧请求缺字段时先保留同 ID 变体已存值。
 forms impact/save 使用相同规范化，GET 与发布快照保留新字段。
 
-迁移 `20260917100000_add_form_variant_regularity` 新增关系表 nullable boolean 列，并回填旧组值。
+迁移 `20260917180000_add_form_variant_regularity` 新增关系表 nullable boolean 列，并回填旧组值。
 草稿或发布快照已经写入新字段时，down migration 明确拒绝回退，避免旧严格 DTO 读不了新数据。
 历史不可变发布快照不做批量重写。
 

@@ -1007,6 +1007,10 @@ pub struct WordSenseV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub form_group_id: Option<Uuid>,
+    /// 同词性的专用组集合；显式空集合解除全部绑定，缺省兼容历史单组字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_items = 2000)]
+    pub form_group_ids: Option<Vec<Uuid>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub frequency: Option<String>,
@@ -1022,6 +1026,14 @@ pub struct WordSenseV3 {
     #[serde(default, skip_serializing_if = "PresenceAwareVec::is_empty")]
     #[schema(value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
     pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
+}
+
+impl WordSenseV3 {
+    pub fn bound_form_group_ids(&self) -> &[Uuid] {
+        self.form_group_ids
+            .as_deref()
+            .unwrap_or(self.form_group_id.as_slice())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1112,6 +1124,10 @@ pub struct WordSenseWritableV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub form_group_id: Option<Uuid>,
+    /// 同词性的专用组集合；显式空集合解除全部绑定，缺省兼容历史单组字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_items = 2000)]
+    pub form_group_ids: Option<Vec<Uuid>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub frequency: Option<String>,
@@ -1127,6 +1143,14 @@ pub struct WordSenseWritableV3 {
     #[serde(default, skip_serializing_if = "PresenceAwareVec::is_empty")]
     #[schema(value_type = Vec<PhraseComponentUsageV3>, max_items = 100)]
     pub component_usages: PresenceAwareVec<PhraseComponentUsageV3>,
+}
+
+impl WordSenseWritableV3 {
+    pub fn bound_form_group_ids(&self) -> &[Uuid] {
+        self.form_group_ids
+            .as_deref()
+            .unwrap_or(self.form_group_id.as_slice())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1175,6 +1199,9 @@ pub struct AdminWordV3Capabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub atomic_form_sense_bindings: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub multi_group_sense_bindings: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub text_links: Option<bool>,
@@ -1326,6 +1353,18 @@ pub struct SenseFormGroupBindingV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub form_group_id: Option<Uuid>,
+    /// 同词性的专用组集合；显式空集合解除全部绑定，缺省兼容历史单组字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_items = 2000)]
+    pub form_group_ids: Option<Vec<Uuid>>,
+}
+
+impl SenseFormGroupBindingV3 {
+    pub fn bound_form_group_ids(&self) -> &[Uuid] {
+        self.form_group_ids
+            .as_deref()
+            .unwrap_or(self.form_group_id.as_slice())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1474,6 +1513,8 @@ pub enum InboundReferenceKindV3 {
     DraftRelation,
     /// 短语草稿的成分用词。
     PhraseComponent,
+    /// 本词条专用词形组对词义的绑定。
+    FormGroupSenseBinding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
@@ -1511,6 +1552,9 @@ pub struct InboundReferenceTargetV3 {
 #[derive(Debug, Clone, Default, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InboundReferenceSourceV3 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub form_group_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub entry_id: Option<Uuid>,
