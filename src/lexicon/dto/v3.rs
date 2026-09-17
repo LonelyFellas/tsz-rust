@@ -287,6 +287,13 @@ where
     PronunciationStyle::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_optional_regularity<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    bool::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordCommonFormVariantV3 {
@@ -294,6 +301,14 @@ pub struct WordCommonFormVariantV3 {
     pub dialect: CommonDialectV3,
     #[schema(max_length = 200)]
     pub spelling: String,
+    /// 该拼写是否规则变化；缺省兼容历史组级值。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_regularity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub is_regular: Option<bool>,
     pub origin: TextOrigin,
     #[schema(max_items = 2000)]
     pub pronunciations: Vec<WordPronunciationV3>,
@@ -309,6 +324,14 @@ pub struct WordUkFormVariantV3 {
     pub dialect: UkDialectV3,
     #[schema(max_length = 200)]
     pub spelling: String,
+    /// 该拼写是否规则变化；缺省兼容历史组级值。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_regularity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub is_regular: Option<bool>,
     pub origin: TextOrigin,
     #[schema(max_items = 2000)]
     pub pronunciations: Vec<WordPronunciationV3>,
@@ -324,6 +347,14 @@ pub struct WordUsFormVariantV3 {
     pub dialect: UsDialectV3,
     #[schema(max_length = 200)]
     pub spelling: String,
+    /// 该拼写是否规则变化；缺省兼容历史组级值。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_regularity",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub is_regular: Option<bool>,
     pub origin: TextOrigin,
     #[schema(max_items = 2000)]
     pub pronunciations: Vec<WordPronunciationV3>,

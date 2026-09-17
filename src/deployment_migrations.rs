@@ -117,7 +117,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20260917120000;
+    const CURRENT_RELEASE_VERSION: i64 = 20260917180000;
 
     #[sqlx::test]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {

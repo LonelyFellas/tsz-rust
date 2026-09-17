@@ -14549,6 +14549,104 @@ async fn v3_forms_atomically_bind_senses_without_breaking_existing_component_ref
 }
 
 #[sqlx::test]
+async fn v3_spelling_regularity_round_trips_without_group_or_dialect_leakage(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let ready =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is quiet."])
+            .await;
+    let id = ready["word"]["id"].as_str().unwrap();
+    let mut content = ready["word"]["forms"].clone();
+    content["pos"][0]["forms"][0]["regional_variants"]["uk"]["is_regular"] = json!(false);
+    content["pos"][0]["forms"][0]["regional_variants"]["us"]["is_regular"] = json!(true);
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        ready["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        content,
+    )
+    .await;
+    let expected = saved["word"]["forms"].clone();
+    assert_eq!(
+        expected["pos"][0]["forms"][0]["regional_variants"]["uk"]["is_regular"],
+        false
+    );
+    assert_eq!(
+        expected["pos"][0]["forms"][0]["regional_variants"]["us"]["is_regular"],
+        true
+    );
+    assert_eq!(
+        expected["pos"][0]["forms"][1]["regional_variants"]["uk"]["is_regular"],
+        true
+    );
+    let (status, loaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{loaded}");
+    assert_eq!(loaded["word"]["forms"], expected);
+    let uk_id = Uuid::parse_str(
+        expected["pos"][0]["forms"][0]["regional_variants"]["uk"]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let stored: Option<bool> =
+        sqlx::query_scalar("SELECT is_regular FROM lexicon.v3_form_variants WHERE id=$1")
+            .bind(uk_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(false));
+    // 缺字段的历史客户端重新保存，不得用旧组 true 覆盖独立的 false。
+    let mut legacy = expected.clone();
+    for form in legacy["pos"][0]["forms"].as_array_mut().unwrap() {
+        for dialect in ["uk", "us"] {
+            form["regional_variants"][dialect]
+                .as_object_mut()
+                .unwrap()
+                .remove("is_regular");
+        }
+    }
+    let (_, resaved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        saved["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        legacy,
+    )
+    .await;
+    assert_eq!(resaved["word"]["forms"], expected);
+    let (status, published) = publish_ready_v3(&state, &bearer, &resaved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let snapshot = current_publication_snapshot(&pool, Uuid::parse_str(id).unwrap()).await;
+    assert_eq!(snapshot["forms"], expected);
+    // 已写入新格式数据时拒绝回退，避免旧 DTO 无法读取以及独立标记丢失。
+    let error = sqlx::raw_sql(include_str!(
+        "../migrations/20260917180000_add_form_variant_regularity.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cannot rollback spelling regularity")
+    );
+}
+
+#[sqlx::test]
 async fn v3_multi_group_bindings_count_each_source_and_protect_sense_deletion(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
