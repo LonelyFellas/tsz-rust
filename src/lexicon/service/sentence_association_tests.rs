@@ -541,3 +541,30 @@ fn automatic_association_does_not_pick_an_unbound_dedicated_form() {
         Some(fixture.form_ids[0])
     );
 }
+
+#[test]
+fn two_dedicated_groups_can_offer_the_same_sense() {
+    let mut fixture = v3_fixture(2);
+    let ids = fixture.snapshot["forms"]["pos"][0]["form_groups"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .map(|group| {
+            group["scope"] = json!("dedicated");
+            group["id"].clone()
+        })
+        .collect::<Vec<_>>();
+    fixture.snapshot["meanings"]["pos"][0]["senses"][0]["form_group_ids"] = json!(ids);
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true).unwrap();
+    let candidates = target.sentence_discovery_candidates(
+        None,
+        fixture.pos_id,
+        fixture.form_ids[0],
+        fixture.variant_ids[0],
+        None,
+    );
+    assert_eq!(candidates.len(), 1);
+    for form in &candidates[0].forms {
+        assert_eq!(form.allowed_sense_ids, Some(vec![fixture.sense_id]));
+    }
+}

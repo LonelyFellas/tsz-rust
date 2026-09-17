@@ -59,6 +59,7 @@ pub async fn undo(
                 OR jsonb_path_exists(forms, '$.**.actual_pron_rich'::jsonpath)
                 OR jsonb_path_exists(forms, '$.pos[*] ? (!(exists (@.dialect_rules)))'::jsonpath)
                 OR jsonb_path_exists(meanings, '$.**.senses[*].form_group_id'::jsonpath)
+                OR jsonb_path_exists(meanings, '$.**.senses[*].form_group_ids'::jsonpath)
                 OR jsonb_path_exists(
                      meanings,
                      '$.**.band ? (@ == "word_for_word" || @ == "balanced_fluency"
@@ -71,6 +72,7 @@ pub async fn undo(
                  OR jsonb_path_exists(snapshot, '$.**.actual_pron_rich'::jsonpath)
                  OR jsonb_path_exists(snapshot, '$.forms.pos[*] ? (!(exists (@.dialect_rules)))'::jsonpath)
                  OR jsonb_path_exists(snapshot, '$.**.senses[*].form_group_id'::jsonpath)
+                 OR jsonb_path_exists(snapshot, '$.**.senses[*].form_group_ids'::jsonpath)
                  OR jsonb_path_exists(
                       snapshot,
                       '$.**.band ? (@ == "word_for_word" || @ == "balanced_fluency"
@@ -115,7 +117,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20260915141955;
+    const CURRENT_RELEASE_VERSION: i64 = 20260917120000;
 
     #[sqlx::test]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {
@@ -621,6 +623,7 @@ mod tests {
         // 守卫拦的是「回退后的旧二进制读不了的键」。逐个投影形态各验一遍：
         // 写错 jsonpath 时守卫会静默返回 0 并放行，没有别的地方会报警。
         let payloads = [
+            (r#"{}"#, r#"{"pos":[{"senses":[{"form_group_ids":[]}]}]}"#),
             (r#"{}"#, r#"{"pos":[{"text_links":[]}]}"#),
             (
                 r#"{"pos":[{"forms":[{"regional_variants":{"common":{"pronunciations":[{"actual_pron_rich":{"version":2,"text":"a","annotations":[]}}]}}}]}]}"#,

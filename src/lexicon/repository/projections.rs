@@ -110,7 +110,11 @@ pub(super) async fn insert_meanings(
             .bind(pos_meanings.pos_id)
             .bind(sub_part_id)
             .bind(sense.sense_group_id)
-            .bind(sense.form_group_id)
+            .bind(if sense.form_group_ids.is_some() {
+                None
+            } else {
+                sense.form_group_id
+            })
             .bind(&sense.level)
             .bind(sense.frequency.as_deref())
             .bind(sense.depends_on_context)
@@ -118,6 +122,19 @@ pub(super) async fn insert_meanings(
             .execute(&mut **tx)
             .await
             .map_err(map_entry_write_error)?;
+
+            for group_id in sense.bound_form_group_ids() {
+                sqlx::query(
+                    "INSERT INTO lexicon.sense_form_group_bindings (sense_id, form_group_id, entry_pos_id, entry_id) VALUES ($1, $2, $3, $4)",
+                )
+                .bind(sense.id)
+                .bind(group_id)
+                .bind(pos_meanings.pos_id)
+                .bind(entry_id)
+                .execute(&mut **tx)
+                .await
+                .map_err(map_entry_write_error)?;
+            }
 
             for (definition_index, definition) in sense.definitions.iter().enumerate() {
                 insert_definition(tx, entry_id, sense.id, definition, definition_index as i32)

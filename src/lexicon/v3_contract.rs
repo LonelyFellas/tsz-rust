@@ -455,30 +455,39 @@ pub(crate) fn validate_sense_form_groups(
             .iter()
             .any(|group| group.scope == FormGroupScopeV3::General);
         for sense in &meaning_pos.senses {
-            match sense.form_group_id {
-                Some(group_id) => {
-                    if groups.iter().any(|group| {
+            let bindings = sense.bound_form_group_ids();
+            if bindings.len() > 2000 {
+                issues.push(meanings_issue(
+                    V3ValidationIssueCode::SenseFormGroupInvalid,
+                    "form_group_id",
+                    sense.id,
+                    "too many form group bindings",
+                ));
+            }
+            let mut seen = HashSet::new();
+            for &group_id in bindings {
+                if seen.insert(group_id)
+                    && groups.iter().any(|group| {
                         group.id == group_id && group.scope == FormGroupScopeV3::Dedicated
-                    }) {
-                        bound_groups.insert(group_id);
-                    } else {
-                        issues.push(meanings_issue(
-                            V3ValidationIssueCode::SenseFormGroupInvalid,
-                            "form_group_id",
-                            sense.id,
-                            "form_group_id must reference a dedicated form group of the same part of speech",
-                        ));
-                    }
-                }
-                None if complete && form_pos.is_some() && !has_general_group => {
+                    })
+                {
+                    bound_groups.insert(group_id);
+                } else {
                     issues.push(meanings_issue(
-                        V3ValidationIssueCode::SenseFormGroupRequired,
+                        V3ValidationIssueCode::SenseFormGroupInvalid,
                         "form_group_id",
                         sense.id,
-                        "a sense without a dedicated form group requires a general form group in its part of speech",
+                        "form groups must be distinct dedicated groups of the same part of speech",
                     ));
                 }
-                None => {}
+            }
+            if bindings.is_empty() && complete && form_pos.is_some() && !has_general_group {
+                issues.push(meanings_issue(
+                    V3ValidationIssueCode::SenseFormGroupRequired,
+                    "form_group_id",
+                    sense.id,
+                    "a sense without a dedicated form group requires a general form group in its part of speech",
+                ));
             }
         }
     }
@@ -2103,6 +2112,35 @@ mod tests {
         assert_eq!(issues[0].field, "form_group_id");
         assert!(matches!(issues[0].step, PersistedWordStep::Meanings));
         assert_eq!(issues[0].node_id, partly_bound.pos[0].senses[2].id);
+    }
+
+    #[test]
+    fn multi_group_bindings_validate_each_edge_and_empty_array_overrides_legacy() {
+        let mut forms = decode_valid(two_common_forms_across_groups()).content;
+        for group in &mut forms.pos[0].form_groups {
+            group.scope = FormGroupScopeV3::Dedicated;
+        }
+        let ids = forms.pos[0]
+            .form_groups
+            .iter()
+            .map(|group| group.id)
+            .collect::<Vec<_>>();
+        let mut meanings = meanings_with_bindings(forms.pos[0].pos_id, &[None]);
+        meanings.pos[0].senses[0].form_group_ids = Some(ids.clone());
+        assert!(validate_sense_form_groups(&forms, &meanings, StepSaveIntent::Complete).is_empty());
+        meanings.pos[0].senses[0].form_group_ids = Some(vec![ids[0], ids[0]]);
+        assert!(has_code(
+            &validate_sense_form_groups(&forms, &meanings, StepSaveIntent::Save),
+            V3ValidationIssueCode::SenseFormGroupInvalid
+        ));
+        meanings.pos[0].senses[0].form_group_ids = Some(vec![ids[0], Uuid::now_v7()]);
+        assert!(has_code(
+            &validate_sense_form_groups(&forms, &meanings, StepSaveIntent::Save),
+            V3ValidationIssueCode::SenseFormGroupInvalid
+        ));
+        meanings.pos[0].senses[0].form_group_id = Some(ids[0]);
+        meanings.pos[0].senses[0].form_group_ids = Some(vec![]);
+        assert!(meanings.pos[0].senses[0].bound_form_group_ids().is_empty());
     }
 
     #[test]

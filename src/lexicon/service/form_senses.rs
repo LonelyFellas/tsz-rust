@@ -23,7 +23,7 @@ pub(super) fn allowed_form_senses<'a>(
         .flat_map(|meanings| &meanings.senses)
         .filter(move |sense| {
             group.is_some_and(|(id, scope)| {
-                scope == FormGroupScopeV3::General || sense.form_group_id == Some(id)
+                scope == FormGroupScopeV3::General || sense.bound_form_group_ids().contains(&id)
             })
         })
 }
@@ -46,7 +46,7 @@ pub(super) fn apply_sense_bindings(
         return Err(invalid());
     }
     let mut seen = HashSet::new();
-    let mut touched = HashSet::new();
+    let mut touched: HashSet<Uuid> = HashSet::new();
     for binding in bindings {
         if !seen.insert(binding.sense_id) {
             return Err(invalid());
@@ -57,9 +57,16 @@ pub(super) fn apply_sense_bindings(
             .flat_map(|pos| &mut pos.senses)
             .find(|sense| sense.id == binding.sense_id)
             .ok_or_else(invalid)?;
-        touched.extend(sense.form_group_id);
-        touched.extend(binding.form_group_id);
+        if sense.form_group_ids.is_some() && binding.form_group_ids.is_none() {
+            return Err(super::LexiconServiceError::InvalidField {
+                field: "form_group_ids",
+                message: "refresh the editor before saving multi-group sense bindings",
+            });
+        }
+        touched.extend(sense.bound_form_group_ids());
+        touched.extend(binding.bound_form_group_ids());
         sense.form_group_id = binding.form_group_id;
+        sense.form_group_ids = binding.form_group_ids.clone();
     }
     if bindings.is_empty() {
         return Ok(());

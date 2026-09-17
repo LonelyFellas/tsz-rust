@@ -14482,6 +14482,43 @@ async fn v3_forms_atomically_bind_senses_without_breaking_existing_component_ref
         saved["word"]["meanings"]["pos"][0]["senses"][0]["form_group_id"],
         group_id
     );
+    // Legacy single bindings survive a reversible migration and remain protected if an old writer
+    // has not populated the new relation table yet.
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260917120000_multi_group_sense_bindings.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260917120000_multi_group_sense_bindings.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let edge_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.sense_form_group_bindings WHERE entry_id=$1",
+    )
+    .bind(Uuid::parse_str(id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(edge_count, 1);
+    sqlx::query("DELETE FROM lexicon.sense_form_group_bindings WHERE entry_id=$1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let references = inbound_references_of(&state, &bearer, id).await;
+    assert_eq!(
+        references["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"] == "form_group_sense_binding")
+            .count(),
+        1
+    );
     let revision = saved["word"]["revision"].as_i64().unwrap();
     let (status, invalid) = save_v3_forms_raw(&state, &bearer, id, json!({"schema_version":3,"base_revision":revision,"intent":"save","content":forms,"sense_bindings":[{"sense_id":sense_id}]})).await;
     assert_eq!(
@@ -14509,4 +14546,108 @@ async fn v3_forms_atomically_bind_senses_without_breaking_existing_component_ref
             .get("form_group_id")
             .is_none()
     );
+}
+
+#[sqlx::test]
+async fn v3_multi_group_bindings_count_each_source_and_protect_sense_deletion(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let id = target["word"]["id"].as_str().unwrap();
+    let mut forms = target["word"]["forms"].clone();
+    let extra = v3_forms_fixture_for("harbour");
+    let extra_group = extra["pos"][0]["form_groups"][0].clone();
+    let first = forms["pos"][0]["form_groups"][0]["id"].clone();
+    let second = extra_group["id"].clone();
+    forms["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .extend(extra["pos"][0]["forms"].as_array().unwrap().clone());
+    forms["pos"][0]["form_groups"]
+        .as_array_mut()
+        .unwrap()
+        .push(extra_group);
+    forms["pos"][0]["form_groups"][0]["scope"] = json!("dedicated");
+    let last = forms["pos"][0]["form_groups"].as_array().unwrap().len() - 1;
+    forms["pos"][0]["form_groups"][last]["scope"] = json!("dedicated");
+    let sense_id = target["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let mut word = target.clone();
+    for ids in [json!([first, second]), json!([second]), json!([])] {
+        if ids.as_array().unwrap().len() < 2 {
+            forms["pos"][0]["form_groups"][0]["scope"] = json!("general");
+        }
+        if ids.as_array().unwrap().is_empty() {
+            forms["pos"][0]["form_groups"][last]["scope"] = json!("general");
+        }
+        let revision = word["word"]["revision"].as_i64().unwrap();
+        let bindings = json!([{"sense_id":sense_id,"form_group_ids":ids}]);
+        let (status, impact) = call(&state, Method::POST, &format!("{ROOT}/entries/{id}/steps/forms/impact"), &bearer, None,
+            Some(json!({"schema_version":3,"base_revision":revision,"content":forms,"sense_bindings":bindings}))).await;
+        assert_eq!(status, StatusCode::OK, "{impact}");
+        let mut input = forms_input_after_impact(&impact, revision, "save", forms.clone());
+        input["sense_bindings"] = bindings;
+        let (status, saved) = save_v3_forms_raw(&state, &bearer, id, input).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(
+            saved["word"]["meanings"]["pos"][0]["senses"][0]["form_group_ids"],
+            ids
+        );
+        if ids.as_array().unwrap().len() == 2 {
+            let mut transaction = pool.begin().await.unwrap();
+            let error = sqlx::raw_sql(include_str!(
+                "../migrations/20260917120000_multi_group_sense_bindings.down.sql"
+            ))
+            .execute(&mut *transaction)
+            .await
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("new binding JSON must be explicitly downgraded")
+            );
+            transaction.rollback().await.unwrap();
+        }
+        let references = inbound_references_of(&state, &bearer, id).await;
+        let group_refs = references["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"] == "form_group_sense_binding")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            group_refs.len(),
+            ids.as_array().unwrap().len(),
+            "{references}"
+        );
+        if !group_refs.is_empty() {
+            assert_eq!(
+                node_total(&references, &sense_id),
+                Some(("sense", group_refs.len() as u64))
+            );
+            assert!(
+                group_refs
+                    .iter()
+                    .all(|item| item["source"]["form_group_label"].is_string())
+            );
+        }
+        let mut meanings = strip_response_only_sentence_fields(saved["word"]["meanings"].clone());
+        meanings["pos"][0]["senses"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        let (status, deleted) = call(&state, Method::PUT, &format!("{ROOT}/entries/{id}/steps/meanings"), &bearer, None,
+            Some(json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"save","content":meanings}))).await;
+        if group_refs.is_empty() {
+            assert_eq!(status, StatusCode::OK, "{deleted}");
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{deleted}");
+            assert_eq!(
+                inbound_reference_conflict_items(&deleted).len(),
+                group_refs.len()
+            );
+        }
+        word = saved;
+    }
 }
