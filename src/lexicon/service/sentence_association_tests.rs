@@ -381,6 +381,19 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
         }),
     );
 
+    // 配置顺序来自组和组内成员，不是 forms 的创建顺序；共享词形只出现一次。
+    // 未入组的历史原形仍保留在末尾，不能因展示排序改变候选集合。
+    for candidate in &candidates {
+        assert_eq!(
+            candidate
+                .forms
+                .iter()
+                .map(|form| form.form_id)
+                .collect::<Vec<_>>(),
+            vec![hi, past_id, lo, base_c],
+            "candidate inventory must follow configured group/member order"
+        );
+    }
     let expected_past_bases = vec![lo, hi];
     let mut candidate_bases = candidates
         .iter()
@@ -415,6 +428,75 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
         candidates
             .iter()
             .all(|candidate| inventory[&past_id].contains(&candidate.base_form_id))
+    );
+}
+
+#[test]
+fn draft_and_published_candidates_follow_member_reordering_without_changing_identity() {
+    use super::v3::{ComponentTargetScope, ComponentTargetWord};
+
+    let mut fixture = v3_fixture(3);
+    let ids = fixture.form_ids.clone();
+    // 同组配置与创建顺序相反；随后再调序，候选身份和词义范围必须保持不变。
+    fixture.snapshot["forms"]["pos"][0]["form_groups"] = json!([{
+        "id": Uuid::now_v7(), "is_regular": true, "scope": "general",
+        "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
+        "members": ([ids[2], ids[0], ids[1]].map(|id| json!({"id": Uuid::now_v7(), "form_id": id})))
+    }]);
+    let mut word: AdminWordV3 = serde_json::from_value(fixture.snapshot).unwrap();
+    let inventory = |word: &AdminWordV3, published: bool| {
+        let target = if published {
+            PublishedAssociationTarget::from_v3(word.clone()).unwrap()
+        } else {
+            PublishedAssociationTarget::from_component_target(ComponentTargetWord {
+                id: word.id,
+                kind: word.kind,
+                label: word.presentation.label.clone(),
+                forms: word.forms.clone(),
+                meanings: word.meanings.clone(),
+                scope: ComponentTargetScope::Draft { revision: 1 },
+            })
+            .unwrap()
+        };
+        target.sentence_discovery_candidates(
+            None,
+            fixture.pos_id,
+            ids[0],
+            fixture.variant_ids[0],
+            None,
+        )[0]
+        .forms
+        .iter()
+        .map(|form| {
+            (
+                form.form_id,
+                form.variant_id,
+                form.base_form_ids.clone(),
+                form.allowed_sense_ids.clone(),
+            )
+        })
+        .collect::<Vec<_>>()
+    };
+    let before = inventory(&word, false);
+    assert_eq!(
+        before.iter().map(|form| form.0).collect::<Vec<_>>(),
+        vec![ids[2], ids[0], ids[1]]
+    );
+    assert_eq!(inventory(&word, true), before);
+    word.forms.pos[0].form_groups[0].members.swap(0, 2);
+    let after = inventory(&word, false);
+    assert_eq!(
+        after,
+        vec![before[2].clone(), before[1].clone(), before[0].clone()]
+    );
+    assert_eq!(inventory(&word, true), after);
+    assert_eq!(
+        word.forms.pos[0]
+            .forms
+            .iter()
+            .map(|form| form.id)
+            .collect::<Vec<_>>(),
+        ids
     );
 }
 

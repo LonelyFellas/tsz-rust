@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 use super::v3::ComponentTargetWord;
 use crate::lexicon::{
@@ -383,55 +384,70 @@ impl PublishedAssociationTarget {
             .map(|forms| PublishedAssociationPos {
                 id: forms.pos_id,
                 pos: forms.pos.clone(),
-                forms: forms
-                    .forms
-                    .iter()
-                    .map(|form| {
-                        let variants = v3_form_variants(&form.regional_variants);
-                        let mut base_form_ids = forms
-                            .form_groups
-                            .iter()
-                            .filter(|group| {
-                                group.members.iter().any(|member| member.form_id == form.id)
-                            })
-                            .flat_map(|group| &group.members)
-                            .filter_map(|member| {
-                                forms.forms.iter().find(|candidate| {
-                                    candidate.id == member.form_id && candidate.form_type == "base"
-                                })
-                            })
-                            .map(|base| base.id)
-                            .collect::<Vec<_>>();
-                        if base_form_ids.is_empty() && form.form_type == "base" {
-                            base_form_ids.push(form.id);
-                        }
-                        base_form_ids.sort_unstable();
-                        base_form_ids.dedup();
-                        PublishedAssociationForm {
-                            id: form.id,
-                            form_type: v3_form_type_name(&form.form_type).to_owned(),
-                            base_form_ids,
-                            allowed_sense_ids: super::form_senses::allowed_form_senses(
-                                forms,
-                                meanings_content,
-                                form.id,
-                            )
-                            .map(|sense| sense.id)
-                            .collect(),
-                            variants: variants
+                forms: {
+                    // 编辑页重排的是组内 membership，不能按词形的创建顺序展示候选。
+                    // 共享词形以首次出现为准；未入组的历史词形追加在末尾，保留候选集合。
+                    let by_id = forms
+                        .forms
+                        .iter()
+                        .map(|form| (form.id, form))
+                        .collect::<HashMap<_, _>>();
+                    let mut seen = HashSet::new();
+                    forms
+                        .form_groups
+                        .iter()
+                        .flat_map(|group| &group.members)
+                        .filter_map(|member| by_id.get(&member.form_id).copied())
+                        .chain(forms.forms.iter())
+                        .filter(|form| seen.insert(form.id))
+                        .map(|form| {
+                            let variants = v3_form_variants(&form.regional_variants);
+                            let mut base_form_ids = forms
+                                .form_groups
                                 .iter()
-                                .map(|(id, dialect, spelling, component_usages)| {
-                                    PublishedAssociationVariant {
-                                        id: *id,
-                                        dialect: *dialect,
-                                        spelling: (*spelling).to_owned(),
-                                        component_usages: component_usages.to_vec(),
-                                    }
+                                .filter(|group| {
+                                    group.members.iter().any(|member| member.form_id == form.id)
                                 })
+                                .flat_map(|group| &group.members)
+                                .filter_map(|member| {
+                                    forms.forms.iter().find(|candidate| {
+                                        candidate.id == member.form_id
+                                            && candidate.form_type == "base"
+                                    })
+                                })
+                                .map(|base| base.id)
+                                .collect::<Vec<_>>();
+                            if base_form_ids.is_empty() && form.form_type == "base" {
+                                base_form_ids.push(form.id);
+                            }
+                            base_form_ids.sort_unstable();
+                            base_form_ids.dedup();
+                            PublishedAssociationForm {
+                                id: form.id,
+                                form_type: v3_form_type_name(&form.form_type).to_owned(),
+                                base_form_ids,
+                                allowed_sense_ids: super::form_senses::allowed_form_senses(
+                                    forms,
+                                    meanings_content,
+                                    form.id,
+                                )
+                                .map(|sense| sense.id)
                                 .collect(),
-                        }
-                    })
-                    .collect(),
+                                variants: variants
+                                    .iter()
+                                    .map(|(id, dialect, spelling, component_usages)| {
+                                        PublishedAssociationVariant {
+                                            id: *id,
+                                            dialect: *dialect,
+                                            spelling: (*spelling).to_owned(),
+                                            component_usages: component_usages.to_vec(),
+                                        }
+                                    })
+                                    .collect(),
+                            }
+                        })
+                        .collect()
+                },
                 senses: association_senses_v3(meanings_content, &meanings, forms.pos_id),
             })
             .collect();
