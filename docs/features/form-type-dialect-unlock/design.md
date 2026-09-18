@@ -14,7 +14,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 后端 `cargo test --lib` | 276 passed / 14 failed（均为缺 `DATABASE_URL` 的集成测试，改动前后一致，零回归）；新增 6 个漂移测试全绿 |
+| 后端 `cargo test --lib` | **293 passed / 0 failed**；新增 9 个结构漂移 / 方言坐标用例全绿 |
 | 后端 `cargo clippy --all-targets` | 零警告 |
 | 前端 `pnpm --filter @tsz/admin test -- --run` | 1609 passed / 2 skipped / 0 failed |
 | 前端 `pnpm --filter @tsz/admin typecheck` | 通过 |
@@ -27,6 +27,34 @@
    前端本地就能做（它已有完整引用索引），不需要后端确认 token。后端只负责「类型漂移后引用仍成立」，
    前端负责提示。代价：直连 API 可绕过提示，但引用不会损坏，无数据完整性风险。见 §4。
 2. **§3.4 的 `TextLinkV3.target_dialect` 已加**（例句引用需要），成分引用的 `target_dialect` 原本就有。
+
+预推送独立审查后的三处订正（评审发现，已改）：
+
+1. **发布顺序由「前端先」改为「后端先」**。`target_dialect` 是无条件写入字段，旧后端
+   `deny_unknown_fields` 会拒——前端先发会打断例句标注/关联的保存。详见 §5。
+2. **`dialect_side_available` 恒真已写明**。`Dialect` 只有 common/uk/us 三值，该 match 已穷尽
+   剩余取值，所以成分引用的有效性实际由 form / base / sense 存在性判，`target_variant_id` 只作记录。
+   已把这条写进函数与调用处注释，并补 `phrase_component_reference_survives_variant_id_change`、
+   `shared_sentence_reference_honors_explicit_target_dialect`、`phrase_component_reference_still_fails_when_sense_is_gone`
+   等正反向用例。match 保留作方言集合扩张时的编译期兜底。
+3. **前端拼写冲突关联口径扩大**。`spellingConflictReferences` 原来只按变体实例 id 关联，结构漂移换 id
+   后会漏报即时冲突；现改为「实例 id 或引用解析出的方言侧」，保守口径（两侧都定位不到时不报，
+   交由后端 409 兜底），不在同一词形另一侧误报。
+4. **例句侧消费者按「词形 + 方言侧」认领引用**。`sameSentenceTarget` 原来只比 `target_variant_id`，
+   结构漂移后 `SentenceEditor.currentLinked` 为 false → `canSave` 为 false（这批例句改不动）。现改为
+   实例 id 快速路径 + 方言侧重解析（`target_dialect` 优先，缺字段用 `source_dialect` 兜底，口径同
+   `shared_target_matches`），并补单测。
+
+评审确认的残留（P3，已达成的共识是有意不修）：
+
+- `V3TargetCascader` 的选中态仍按变体实例 id 键控（`formKeyOf` 含 `variant_id`）：结构漂移后级联叶子
+  不高亮、管理员非偏好侧可能不渲染该行。它是 `readOnly` 展示路径（`SharedSentenceAssociationPicker`
+  的清除入口在外置按钮），不丢数据、不阻断保存。
+- `sameSentenceTarget` 仍比 `target_base_form_id`，而 `savedSenseTargets` 只把**当前仍是 base 类型**
+  的词形当候选原形；某组有 ≥2 个 base 时把存量引用的 base A 改成派生类型，前端会认不出（后端只判
+  base 存在 + 同组）。需先造出多 base 才可达。
+- `requirements.md §5` 列的 8 条 `tests/lexicon_handler.rs` 集成验收仍未自动化，当前由 lib 用例 +
+  端到端手工验证覆盖。
 
 ## 1. 现状与依赖
 
@@ -170,8 +198,20 @@ pub target_dialect: Option<Dialect>,
 - **零迁移优先**：判定双读（id 快速路径 + 语义坐标）兼容全部存量引用；
 - 仅当双读无法覆盖某历史形态时，再补一次性 SQL 修 `target_variant_id` → 语义坐标；
 - 已发布快照冻结，判定不得回写历史快照；
-- 前端先部署（若新增错误码，顺序同 `draft-visibility-write-guard` §4：后端生成 openapi →
-  前端 sync → 前端先部署 → 后端部署）。
+- **后端先部署，前端后部署**。本任务给例句引用新增了 `target_dialect`，写入与读取两侧都动，
+  顺序不是可选项：
+  - **写入**：新前端保存例句标注 / 关联时会带 `target_dialect`，而旧后端 `SentenceTarget` /
+    `UpdateSharedSentence` 是 `deny_unknown_fields` 且没有该字段——**前端先发会把这条写
+    路径直接打断**（400/422）。
+  - **读取**：新后端用 `skip_serializing_if` 只在字段存在时返回；先部署后端时库里还没有该
+    字段，旧前端读到的响应与原来一致，不会撞上 runtime contract 的 `additionalProperties: false`。
+
+  正确顺序：后端（含 `docs/openapi.json` 导出）→ 前端 `sync:openapi` → 部署后端 → 部署前端。
+  前端上线后**旧标签页必须刷新**：未刷新的旧前端一旦加载含 `target_dialect` 的草稿，会被 runtime
+  validator 拒收（同 `.agents/skills/deploy/SKILL.md` 的通用要求）。
+
+> 与已上线的 `form-spelling-regularity` 不同：那次前端新增的写字段由开关（`VITE_FORM_SPELLING_REGULARITY`）
+> 兜住，所以能前端先发兼容版；本次 `target_dialect` 是无条件写入，没有开关，只能后端先。
 
 ## 6. 验收命令
 
@@ -208,7 +248,7 @@ pnpm typecheck && pnpm lint
 2. ✅ 后端：契约补字段（§3.4）；§3.5 降级为前端提示（见 §0 订正 1）；
 3. ✅ 后端：`docs/openapi.json` 重新生成；
 4. ✅ 前端：sync + 解锁 UI + 漂移提示 + 测试更新；
-5. ⏳ 两仓全绿后按 §5 顺序部署（**待用户授权**）。
+5. ⏳ 两仓全绿后按 §5 顺序部署（**后端先 → 前端后**；前端上线后要求刷新旧标签页）（**待用户授权**）。
 
 ## 8. 仍待人工验收
 
