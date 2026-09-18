@@ -35,6 +35,26 @@ pub enum Dialect {
     Us,
 }
 
+impl Dialect {
+    /// 解析方言字面量；与序列化取值（`common` / `uk` / `us`）同口径。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "common" => Some(Self::Common),
+            "uk" => Some(Self::Uk),
+            "us" => Some(Self::Us),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Common => "common",
+            Self::Uk => "uk",
+            Self::Us => "us",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 /// `distinguish` 词条由管理员选择的主词侧；用于主词展示顺序及后续方言内容初始化，

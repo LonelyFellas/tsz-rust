@@ -13,8 +13,8 @@ use crate::{
     error::{AppError, ErrorCode},
     lexicon::{
         dto::{
-            DraftMeaningsStepContentV3, SentenceSourceRangeV1, TextLinkV3, WordDefinitionV3,
-            WordSentenceWritableV3,
+            Dialect, DraftMeaningsStepContentV3, SentenceSourceRangeV1, TextLinkV3,
+            WordDefinitionV3, WordSentenceWritableV3,
         },
         normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword},
         sentence_target_discovery::tokenize,
@@ -32,6 +32,11 @@ pub enum SentenceTarget {
         target_form_id: Uuid,
         target_variant_id: Uuid,
         target_sense_id: Uuid,
+        /// 目标变体的方言侧。变体实例 id 随英美结构切换而变，引用按「词形 + 方言侧」重解析
+        /// 时需要它；缺省兼容存量条目（退化为宽容匹配）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schema(nullable = false)]
+        target_dialect: Option<Dialect>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[schema(nullable = false)]
         target_publication_id: Option<Uuid>,
@@ -58,6 +63,7 @@ impl SentenceTarget {
             target_form_id,
             target_variant_id,
             target_sense_id,
+            target_dialect,
             target_publication_id,
         } = self
         {
@@ -70,6 +76,7 @@ impl SentenceTarget {
                 target_form_id: *target_form_id,
                 target_variant_id: *target_variant_id,
                 target_sense_id: *target_sense_id,
+                target_dialect: *target_dialect,
                 target_publication_id: *target_publication_id,
                 via_phrase: None,
                 target_headword: None,
