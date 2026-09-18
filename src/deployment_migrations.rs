@@ -47,7 +47,11 @@ pub async fn undo(
         "database migration version does not match the failed deployment"
     );
 
-    let incompatible_payloads: i64 = sqlx::query_scalar(
+    // 该目标起已支持下面全部历史字段；较新的 down 由各自迁移的数据守卫保护。
+    let incompatible_payloads: i64 = if target_version >= 20260917120000 {
+        0
+    } else {
+        sqlx::query_scalar(
         r#"
         SELECT
             (SELECT count(*)
@@ -81,7 +85,8 @@ pub async fn undo(
     )
     .fetch_one(&mut *transaction)
     .await
-    .context("failed to inspect persisted V3 payload compatibility")?;
+    .context("failed to inspect persisted V3 payload compatibility")?
+    };
     ensure!(
         incompatible_payloads == 0,
         "persisted V3 payloads are not readable by the rollback release"
@@ -118,6 +123,67 @@ mod tests {
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
     const CURRENT_RELEASE_VERSION: i64 = 20260917180000;
+
+    #[sqlx::test]
+    async fn deployment_undo_preserves_payloads_supported_by_target_and_guards_new_regularity(
+        pool: PgPool,
+    ) {
+        let admin_id = Uuid::now_v7();
+        let entry_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO admins (id, phone, password_hash, display_name) VALUES ($1, $2, 'hash', 'regularity rollback')")
+            .bind(admin_id).bind(format!("regularity-rollback-{}", admin_id.simple())).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO lexicon.entries (id, content_schema_version, language, kind, revision, detection_snapshot, created_by_admin_id, updated_by_admin_id) VALUES ($1, 3, 'en', 'word', 1, '{}', $2, $2)")
+            .bind(entry_id).bind(admin_id).execute(&pool).await.unwrap();
+        let forms = serde_json::json!({"pos":[{"forms":[{"regional_variants":{"common":{"is_regular":false,"pronunciations":[{"audio_assets":[]}]}}}],"form_groups":[]}]});
+        let meanings =
+            serde_json::json!({"pos":[{"senses":[{"form_group_ids":[],"text_links":[]}]}]});
+        sqlx::query("INSERT INTO lexicon.entry_editor_projection (entry_id, forms, meanings, rebuilt_revision) VALUES ($1, $2, $3, 1)")
+            .bind(entry_id).bind(&forms).bind(&meanings).execute(&pool).await.unwrap();
+        let target = 20260917120000;
+        let error = undo(&pool, target, CURRENT_RELEASE_VERSION)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cannot rollback spelling regularity"),
+            "new fields must reach the migration-specific guard: {error:#}"
+        );
+        let current: i64 =
+            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success IS TRUE")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(current, CURRENT_RELEASE_VERSION);
+        let mut legacy_forms = forms.clone();
+        legacy_forms["pos"][0]["forms"][0]["regional_variants"]["common"]
+            .as_object_mut()
+            .unwrap()
+            .remove("is_regular");
+        sqlx::query("UPDATE lexicon.entry_editor_projection SET forms=$2 WHERE entry_id=$1")
+            .bind(entry_id)
+            .bind(&legacy_forms)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let report = undo(&pool, target, CURRENT_RELEASE_VERSION).await.unwrap();
+        assert_eq!(report.current_version, target);
+        let stored: (serde_json::Value, serde_json::Value) = sqlx::query_as(
+            "SELECT forms, meanings FROM lexicon.entry_editor_projection WHERE entry_id=$1",
+        )
+        .bind(entry_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, (legacy_forms, meanings));
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, target)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("persisted V3 payloads are not readable"),
+            "older schema still needs the legacy guard: {error:#}"
+        );
+    }
 
     #[sqlx::test]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {
