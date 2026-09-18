@@ -10515,7 +10515,8 @@ async fn inbound_references_list_publication_sense_refs_but_not_pinned_component
     assert_eq!(node_total(&body, &target_sense_id), Some(("sense", 1)));
 }
 
-/// Q1：短语成分指向从未发布的草稿节点时，目标词的破坏性改动被拦下，短语归档后解除。
+/// Q1：短语成分指向从未发布的草稿节点时，目标词的破坏性改动（删掉被指向的词义）被拦下，
+/// 短语归档后解除；改词形类型属保护式放开，不再拦截（TASK#58）。
 #[sqlx::test]
 async fn v3_draft_target_phrase_components_block_breaking_edits_until_the_phrase_is_archived(
     pool: PgPool,
@@ -10541,52 +10542,32 @@ async fn v3_draft_target_phrase_components_block_breaking_edits_until_the_phrase
         create_v3_phrase_with_sense_components(&state, &bearer, "harbour side", json!([component]))
             .await;
 
-    // 1. 影响预览：成分指向的原形改成复数形，form_type 对不上，预览先列出被破坏的引用。
+    // 1. TASK#58：改词形类型不再让成分引用失效（保护式放开）——影响预览不再列出被破坏的引用。
     let mut retyped = target["word"]["forms"].clone();
     retyped["pos"][0]["forms"][0]["form_type"] = json!("plural");
     let impact =
         preview_v3_forms_impact(&state, &bearer, &target_id, base_revision, &retyped).await;
-    let blocked = impact["blocked_references"]
-        .as_array()
-        .unwrap_or_else(|| panic!("预览应列出被破坏的成分引用：{impact}"));
-    assert_eq!(blocked.len(), 1, "{impact}");
-    assert_eq!(
-        blocked[0]["id"],
-        json!(format!("phrase_component:{component_id}"))
+    assert!(
+        impact.get("blocked_references").is_none(),
+        "改词形类型不再破坏成分引用：{impact}"
     );
-    assert_eq!(blocked[0]["kind"], "phrase_component");
-    assert_eq!(blocked[0]["stale"], true);
-    assert_eq!(
-        blocked[0]["target"],
-        json!({
-            "pos_id": target_pos_id,
-            "base_form_id": target_form["id"],
-            "form_id": target_form["id"],
-            "variant_id": target_form["regional_variants"]["uk"]["id"],
-            "sense_id": target_sense_id
-        })
-    );
-    assert_eq!(blocked[0]["source"]["entry_id"], phrase["word"]["id"]);
-    assert_eq!(blocked[0]["source"]["node_id"], json!(component_id));
-    assert_eq!(blocked[0]["source"]["entry_kind"], "phrase");
-    assert_eq!(blocked[0]["source"]["entry_status"], "draft");
 
-    // 2. 照样提交：409，清单与预览一致，revision 不动。
-    let (status, problem) = save_v3_forms_raw(
+    // 2. 照样提交：放行，revision 前进。
+    let (status, retyped_saved) = save_v3_forms_raw(
         &state,
         &bearer,
         &target_id,
-        forms_input_after_impact(&impact, base_revision, "save", retyped.clone()),
+        forms_input_after_impact(&impact, base_revision, "save", retyped),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
+    assert_eq!(status, StatusCode::OK, "{retyped_saved}");
     assert_eq!(
-        inbound_reference_conflict_items(&problem),
-        blocked.as_slice()
+        retyped_saved["word"]["forms"]["pos"][0]["forms"][0]["form_type"],
+        "plural"
     );
-    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision);
+    let base_revision = retyped_saved["word"]["revision"].as_i64().unwrap();
 
-    // 3. 换掉整套词义（被指向的词义消失）：同样 409。
+    // 3. 换掉整套词义（被指向的词义消失）：仍 409——引用失去锚点。
     let replacement = complete_v3_meanings_fixture(target_pos_id.clone());
     let (status, problem) = save_v3_meanings_raw(
         &state,
@@ -10602,33 +10583,18 @@ async fn v3_draft_target_phrase_components_block_breaking_edits_until_the_phrase
     assert_eq!(references[0]["kind"], "phrase_component");
     assert_eq!(references[0]["stale"], true);
     assert_eq!(references[0]["target"]["sense_id"], target_sense_id);
+    assert_eq!(
+        references[0]["target"]["form_id"],
+        json!(target_form["id"])
+    );
     assert_eq!(references[0]["source"]["node_id"], json!(component_id));
     assert_eq!(entry_revision(&pool, target_uuid).await, base_revision);
 
-    // 4. 归档短语解除守卫：两种改动都放行。
+    // 4. 归档短语解除守卫：删词义放行。
     archive_v3_entry(&state, &bearer, &phrase).await;
     let (status, replaced) =
         save_v3_meanings_raw(&state, &bearer, &target_id, base_revision, replacement).await;
     assert_eq!(status, StatusCode::OK, "{replaced}");
-    let base_revision = replaced["word"]["revision"].as_i64().unwrap();
-    let impact =
-        preview_v3_forms_impact(&state, &bearer, &target_id, base_revision, &retyped).await;
-    assert!(
-        impact.get("blocked_references").is_none(),
-        "来源归档后不再有入站引用：{impact}"
-    );
-    let (status, retyped_saved) = save_v3_forms_raw(
-        &state,
-        &bearer,
-        &target_id,
-        forms_input_after_impact(&impact, base_revision, "save", retyped),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{retyped_saved}");
-    assert_eq!(
-        retyped_saved["word"]["forms"]["pos"][0]["forms"][0]["form_type"],
-        "plural"
-    );
 }
 
 /// 来源词条正被别的事务改动时，入站引用检查不等锁：仍是可重试的 409 `reference_conflict`，
