@@ -2921,6 +2921,30 @@ fn component_target_gloss(
 
 /// `expected_text` = Some((词面, 释义)) 时还要求文案等值（钉住发布版本的成分）；None 只查结构。
 #[allow(clippy::too_many_arguments)]
+/// 变体实例 id 快速路径：同结构保存、存量引用按旧口径命中，行为不变。
+fn variant_id_matches(form: &WordConcreteFormV3, target_variant_id: Uuid) -> bool {
+    match &form.regional_variants {
+        WordRegionalVariantsV3::Common { common } => common.id == target_variant_id,
+        WordRegionalVariantsV3::UkUs { uk, us } => {
+            uk.id == target_variant_id || us.id == target_variant_id
+        }
+    }
+}
+
+/// 目标方言侧在当前结构下是否可定位。变体实例 id 会随「英美通用 ↔ 英/美」结构切换而换，
+/// 但方言与结构的映射是双向的：common 结构任一引用方言都能落到它；uk/us 结构能接 common 引用
+/// 与自己的方言。两者均无法定位时才视为失效。
+fn dialect_side_available(form: &WordConcreteFormV3, target_dialect: Dialect) -> bool {
+    match (&form.regional_variants, target_dialect) {
+        // 通用结构：单一拼写，任何目标方言都落它。
+        (WordRegionalVariantsV3::Common { .. }, _) => true,
+        // 分离结构：uk/us 侧都在；common 引用落到偏好侧（由拼写一致性兜底）。
+        (WordRegionalVariantsV3::UkUs { .. }, Dialect::Common | Dialect::Uk | Dialect::Us) => true,
+    }
+}
+
+/// `expected_text` = Some((词面, 释义)) 时还要求文案等值（钉住发布版本的成分）；None 只查结构。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn phrase_component_matches_target(
     target: &ComponentTargetWord,
     target_pos_id: Uuid,
@@ -2946,24 +2970,23 @@ pub(super) fn phrase_component_matches_target(
     let Some(form) = pos.forms.iter().find(|form| form.id == target_form_id) else {
         return false;
     };
-    if form.form_type != target_form_type {
+    // 词形类型不再做硬拒绝：改类型不换 `form.id`，引用在业务上绑的是「这个词形 + 方言侧」。
+    // 类型漂移（引用时记的 `target_form_type` 与当前 form 类型不一致）不再让引用失效，
+    // 而是由保存侧的确认流提示「会让 N 处引用失效」（见 inbound_references）。
+    let _target_form_type = target_form_type;
+    // 变体定位：先走 id 快速路径（同结构、存量引用完全不变）；未命中时按方言侧重解析。
+    // 结构漂移（common ↔ uk_us）会换掉变体实例 id，此时按方言映射判定：common 引用落到
+    // uk/us 任一侧、uk/us 引用落到 common 都已存在。只有当目标方言侧在两种结构下都无法
+    // 定位（即 target_dialect 与当前结构不兼容）时才失效——目前 common/uk/us 之间可双向
+    // 映射，因此漂移不构成失效，真正的失效由 form / base / sense 的存在性判。
+    if !variant_id_matches(form, target_variant_id) && !dialect_side_available(form, target_dialect)
+    {
         return false;
     }
-    let variant_matches = match (&form.regional_variants, target_dialect) {
-        (WordRegionalVariantsV3::Common { common }, Dialect::Common) => {
-            common.id == target_variant_id
-        }
-        (WordRegionalVariantsV3::UkUs { uk, .. }, Dialect::Uk) => uk.id == target_variant_id,
-        (WordRegionalVariantsV3::UkUs { us, .. }, Dialect::Us) => us.id == target_variant_id,
-        _ => false,
-    };
-    if !variant_matches {
-        return false;
-    }
-    let base_is_valid = pos
-        .forms
-        .iter()
-        .any(|candidate| candidate.id == target_base_form_id && candidate.form_type == "base")
+    // base 校验只保留分组关系：`target_base_form_id` 指向的词形必须与引用目标同组。
+    // 不再要求它当前仍是 `base` 类型——词形类型漂移不换 `form.id`，引用仍成立（保护式放开，
+    // 由保存侧提示），与 `form_type` 不再硬拒绝一致。
+    let base_is_valid = pos.forms.iter().any(|c| c.id == target_base_form_id)
         && (target_form_id == target_base_form_id
             || pos.form_groups.iter().any(|group| {
                 let ids = group

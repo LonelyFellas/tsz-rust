@@ -134,19 +134,13 @@ fn target_content_gloss(
     link: &TextLinkV3,
 ) -> Option<String> {
     let pos = forms.pos.iter().find(|p| p.pos_id == link.target_pos_id)?;
-    let form = pos.forms.iter().find(|f| f.id == link.target_form_id)?;
-    let valid_variant = match &form.regional_variants {
-        WordRegionalVariantsV3::Common { common } => common.id == link.target_variant_id,
-        WordRegionalVariantsV3::UkUs { uk, us } => {
-            uk.id == link.target_variant_id || us.id == link.target_variant_id
-        }
-    };
-    if !valid_variant
-        || !pos
-            .forms
-            .iter()
-            .any(|f| f.id == link.target_base_form_id && f.form_type == "base")
-    {
+    // form 必须存在；变体定位不在这里判：变体实例 id 会随「英美通用 ↔ 英/美」结构切换而换，
+    // 它由 `shared_target_matches` 按「词形 + 方言侧」重解析。这里只负责「form / base / sense
+    // 是否还在」与取释义，避免结构漂移把合法引用误判为失效。
+    let _form = pos.forms.iter().find(|f| f.id == link.target_form_id)?;
+    // base 校验只保留「该词形还在」与分组关系；词形类型漂移不换 `form.id`，
+    // 引用仍成立（保护式放开），不再因 `form_type` 不是 `base` 而失效。
+    if !pos.forms.iter().any(|f| f.id == link.target_base_form_id) {
         return None;
     }
     if link.target_form_id != link.target_base_form_id
@@ -513,15 +507,42 @@ pub(super) fn shared_target_matches(
     let Ok(normalized) = normalize_headword(&literal) else {
         return false;
     };
-    let matches = |id, spelling: &str, side: &str| {
+    let spelling_matches =
+        |spelling: &str| normalize_headword(spelling).is_ok_and(|v| v.key == normalized.key);
+    // 快速路径：变体实例 id 相等且（来源方言允许该侧 / 该侧拼写匹配）。旧引用与同结构保存
+    // 完全按原语义命中，行为不变。
+    let id_matches = |id: Uuid, spelling: &str, side: &str| {
         id == link.target_variant_id
             && (dialect == "common" || side == "common" || side == dialect)
-            && normalize_headword(spelling).is_ok_and(|v| v.key == normalized.key)
+            && spelling_matches(spelling)
     };
-    match &form.regional_variants {
-        WordRegionalVariantsV3::Common { common } => matches(common.id, &common.spelling, "common"),
+    let hit = match &form.regional_variants {
+        WordRegionalVariantsV3::Common { common } => {
+            id_matches(common.id, &common.spelling, "common")
+        }
         WordRegionalVariantsV3::UkUs { uk, us } => {
-            matches(uk.id, &uk.spelling, "uk") || matches(us.id, &us.spelling, "us")
+            id_matches(uk.id, &uk.spelling, "uk") || id_matches(us.id, &us.spelling, "us")
+        }
+    };
+    if hit {
+        return true;
+    }
+    // 语义坐标兜底：结构漂移（common ↔ uk_us）后变体实例 id 会换掉，旧 id 找不到。引用在
+    // 业务上绑定的是「该词形 + 方言侧」，因此按方言定位重解析：只要目标方言侧存在、拼写归一
+    // 后与标注片段一致即成立。任一侧可匹配时放宽，避免因偏好不同误判失效。
+    let target_dialect = link.target_dialect.or_else(|| Dialect::parse(dialect));
+    match (&form.regional_variants, target_dialect) {
+        // 英美通用词形：单一拼写，任何目标方言都落它。
+        (WordRegionalVariantsV3::Common { common }, _) => spelling_matches(&common.spelling),
+        // 英美分离词形：目标指明侧则只认该侧，否则任一侧匹配即可（漂移放宽）。
+        (WordRegionalVariantsV3::UkUs { uk, .. }, Some(Dialect::Uk)) => {
+            spelling_matches(&uk.spelling)
+        }
+        (WordRegionalVariantsV3::UkUs { us, .. }, Some(Dialect::Us)) => {
+            spelling_matches(&us.spelling)
+        }
+        (WordRegionalVariantsV3::UkUs { uk, us }, _) => {
+            spelling_matches(&uk.spelling) || spelling_matches(&us.spelling)
         }
     }
 }

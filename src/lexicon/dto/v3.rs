@@ -703,6 +703,11 @@ pub struct TextLinkV3 {
     pub target_form_id: Uuid,
     pub target_variant_id: Uuid,
     pub target_sense_id: Uuid,
+    /// 目标变体的方言侧。变体实例 id 会随「英美通用 ↔ 英/美」结构切换而改变，引用在业务上
+    /// 绑的是「词形 + 方言侧」；缺省时判定退化为按来源方言与任一侧拼写宽容匹配（兼容存量）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_dialect: Option<Dialect>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub via_phrase: Option<TextLinkViaPhraseV3>,

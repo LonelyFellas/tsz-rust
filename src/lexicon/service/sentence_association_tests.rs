@@ -568,3 +568,211 @@ fn two_dedicated_groups_can_offer_the_same_sense() {
         assert_eq!(form.allowed_sense_ids, Some(vec![fixture.sense_id]));
     }
 }
+
+/// TASK#58：英美结构切换（common ↔ uk_us）后，变体实例 id 会换掉，但引用在业务上绑的是
+/// 「词形 + 方言侧」，应仍成立。这里覆盖共享例句标注引用与短语成分类引用的判定。
+mod dialect_structure_drift {
+    use super::*;
+    use crate::lexicon::dto::TextLinkV3;
+    use crate::lexicon::service::text_links;
+    use crate::lexicon::service::v3::{
+        ComponentTargetScope, ComponentTargetWord, phrase_component_matches_target,
+    };
+
+    /// 把 fixture 第 0 个词形从 common 结构改写成 uk_us：uk 复用原 common 的 id（同侧），
+    /// us 另给新 id；拼写沿用原 common 值，模拟「拆成英美、拼写暂时共用」。
+    fn to_uk_us(snapshot: &mut Value, form_index: usize, common_id: Uuid) -> (Uuid, Uuid) {
+        let uk_id = common_id;
+        let us_id = Uuid::now_v7();
+        snapshot["forms"]["pos"][0]["forms"][form_index]["regional_variants"] = json!({
+            "mode": "uk_us",
+            "uk": {
+                "id": uk_id, "dialect": "uk", "spelling": "harbour",
+                "origin": "manual", "pronunciations": []
+            },
+            "us": {
+                "id": us_id, "dialect": "us", "spelling": "harbor",
+                "origin": "manual", "pronunciations": []
+            }
+        });
+        (uk_id, us_id)
+    }
+
+    fn component_target(snapshot: &Value) -> (AdminWordV3, ComponentTargetWord) {
+        let word: AdminWordV3 = serde_json::from_value(snapshot.clone()).unwrap();
+        let target = ComponentTargetWord {
+            id: word.id,
+            kind: word.kind,
+            label: word.presentation.label.clone(),
+            forms: word.forms.clone(),
+            meanings: word.meanings.clone(),
+            scope: ComponentTargetScope::Draft { revision: 0 },
+        };
+        (word, target)
+    }
+
+    #[test]
+    fn shared_sentence_reference_survives_common_to_uk_us() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let common_id = fixture.variant_ids[0];
+        // 引用原 common 变体；标注片段与 common 拼写一致。
+        let link: TextLinkV3 = serde_json::from_value(json!({
+            "id": Uuid::now_v7(),
+            "source_segments": [{"start":0,"end":7,"surface":"harbour"}],
+            "target_word_id": fixture.entry_id, "target_pos_id": fixture.pos_id,
+            "target_base_form_id": form_id, "target_form_id": form_id,
+            "target_variant_id": common_id, "target_sense_id": fixture.sense_id
+        }))
+        .unwrap();
+        let word: AdminWordV3 = serde_json::from_value(fixture.snapshot.clone()).unwrap();
+        assert!(text_links::shared_target_matches(
+            &word.forms,
+            &word.meanings,
+            &link,
+            "common"
+        ));
+
+        // 切成 uk_us：uk 侧复用原 common id，引用应仍成立（id 快速路径命中）。
+        let mut drifted = fixture.snapshot.clone();
+        to_uk_us(&mut drifted, 0, common_id);
+        let word: AdminWordV3 = serde_json::from_value(drifted).unwrap();
+        assert!(
+            text_links::shared_target_matches(&word.forms, &word.meanings, &link, "common"),
+            "结构换成 uk_us 后，指向原 common 变体的引用应仍成立"
+        );
+    }
+
+    #[test]
+    fn shared_sentence_reference_survives_id_change_common_to_uk_us() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let common_id = fixture.variant_ids[0];
+        let link: TextLinkV3 = serde_json::from_value(json!({
+            "id": Uuid::now_v7(),
+            "source_segments": [{"start":0,"end":7,"surface":"harbour"}],
+            "target_word_id": fixture.entry_id, "target_pos_id": fixture.pos_id,
+            "target_base_form_id": form_id, "target_form_id": form_id,
+            "target_variant_id": common_id, "target_sense_id": fixture.sense_id
+        }))
+        .unwrap();
+        // 结构换成 uk_us 且两侧都是全新 id：id 快速路径必然落空，靠方言侧重解析成立。
+        let mut drifted = fixture.snapshot.clone();
+        drifted["forms"]["pos"][0]["forms"][0]["regional_variants"] = json!({
+            "mode": "uk_us",
+            "uk": {"id": Uuid::now_v7(), "dialect": "uk", "spelling": "harbour",
+                   "origin": "manual", "pronunciations": []},
+            "us": {"id": Uuid::now_v7(), "dialect": "us", "spelling": "harbor",
+                   "origin": "manual", "pronunciations": []}
+        });
+        let word: AdminWordV3 = serde_json::from_value(drifted).unwrap();
+        assert!(
+            text_links::shared_target_matches(&word.forms, &word.meanings, &link, "common"),
+            "变体 id 全换后，按方言侧拼写重解析应仍成立"
+        );
+    }
+
+    #[test]
+    fn shared_sentence_reference_survives_uk_us_to_common() {
+        let mut snapshot = v3_fixture(1).snapshot.clone();
+        let form_id: Uuid =
+            serde_json::from_value(snapshot["forms"]["pos"][0]["forms"][0]["id"].clone()).unwrap();
+        let sense_id: Uuid =
+            serde_json::from_value(snapshot["meanings"]["pos"][0]["senses"][0]["id"].clone())
+                .unwrap();
+        let entry_id: Uuid = serde_json::from_value(snapshot["id"].clone()).unwrap();
+        let pos_id: Uuid =
+            serde_json::from_value(snapshot["forms"]["pos"][0]["pos_id"].clone()).unwrap();
+        // 先造成 uk_us 结构，引用 uk 侧。
+        let (uk_id, _us_id) = to_uk_us(&mut snapshot, 0, Uuid::now_v7());
+        let link: TextLinkV3 = serde_json::from_value(json!({
+            "id": Uuid::now_v7(),
+            "source_segments": [{"start":0,"end":7,"surface":"harbour"}],
+            "target_word_id": entry_id, "target_pos_id": pos_id,
+            "target_base_form_id": form_id, "target_form_id": form_id,
+            "target_variant_id": uk_id, "target_sense_id": sense_id
+        }))
+        .unwrap();
+        // 再合回 common，且 common 换新 id：引用落到 common 侧，仍成立。
+        snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"] = json!({
+            "mode": "common",
+            "common": {"id": Uuid::now_v7(), "dialect": "common", "spelling": "harbour",
+                       "origin": "manual", "pronunciations": []}
+        });
+        let word: AdminWordV3 = serde_json::from_value(snapshot).unwrap();
+        assert!(
+            text_links::shared_target_matches(&word.forms, &word.meanings, &link, "uk"),
+            "合回 common 后，指向 uk 变体的引用应仍成立"
+        );
+    }
+
+    #[test]
+    fn phrase_component_reference_survives_common_to_uk_us() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let common_id = fixture.variant_ids[0];
+        // uk_us 结构 + 指向 uk 侧（复用 common id）。
+        let mut drifted = fixture.snapshot.clone();
+        let (uk_id, _us_id) = to_uk_us(&mut drifted, 0, common_id);
+        let (_word, target) = component_target(&drifted);
+        assert!(phrase_component_matches_target(
+            &target,
+            fixture.pos_id,
+            form_id,
+            fixture.sense_id,
+            form_id,
+            uk_id,
+            Dialect::Uk,
+            "base".into(),
+            None,
+        ));
+    }
+
+    #[test]
+    fn phrase_component_reference_survives_form_type_change() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let variant_id = fixture.variant_ids[0];
+        // 引用时记的是 base 类型；把当前 form 类型改成过去式应仍成立（保护式放开）。
+        let mut changed = fixture.snapshot.clone();
+        changed["forms"]["pos"][0]["forms"][0]["form_type"] = json!("past_tense");
+        let (_word, target) = component_target(&changed);
+        assert!(
+            phrase_component_matches_target(
+                &target,
+                fixture.pos_id,
+                form_id,
+                fixture.sense_id,
+                form_id,
+                variant_id,
+                Dialect::Common,
+                "base".into(),
+                None,
+            ),
+            "词形类型漂移不应让成分引用失效"
+        );
+    }
+
+    #[test]
+    fn phrase_component_reference_still_fails_when_form_is_gone() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let variant_id = fixture.variant_ids[0];
+        let (_word, target) = component_target(&fixture.snapshot);
+        // 引用指向一个不存在的 form：应失效（防放宽过头）。
+        assert!(
+            !phrase_component_matches_target(
+                &target,
+                fixture.pos_id,
+                form_id,
+                fixture.sense_id,
+                Uuid::now_v7(),
+                variant_id,
+                Dialect::Common,
+                "base".into(),
+                None,
+            ),
+            "目标词形不存在时引用必须失效"
+        );
+    }
+}
