@@ -1231,11 +1231,14 @@ async fn sense_identity_cannot_be_forged_and_legacy_links_require_repair(pool: P
     let source = entry(&pool, actor, "wonderful").await;
     let other = entry(&pool, actor, "wonderful").await;
     let state = AppState::for_test(pool.clone());
+    // TASK#58：变体实例 id 不再是引用的有效性判据——绑定坐标是「词形 + 方言侧」，id 只作快速
+    // 路径，所以它不在下面这份「身份」清单里（容忍范例见
+    // form_changes_and_old_publications_cannot_strand_sentence_targets 里的 id 漂移用例）。
+    // 其余四个目标节点仍是身份，冒用一律 400。
     for field in [
         "target_pos_id",
         "target_base_form_id",
         "target_form_id",
-        "target_variant_id",
         "target_sense_id",
     ] {
         let mut body = content(source);
@@ -1404,41 +1407,49 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     let id = saved["id"].as_str().unwrap();
-    for mutate in ["spelling", "variant"] {
-        let mut forms = snapshot["forms"].clone();
-        let field = if mutate == "spelling" {
-            "spelling"
-        } else {
-            "id"
-        };
-        forms["pos"][0]["forms"][0]["regional_variants"]["common"][field] = if mutate == "spelling"
-        {
-            json!("wonderfully")
-        } else {
-            json!(Uuid::now_v7())
-        };
-        let (status, impact) = call(
-            &state,
-            actor,
-            Method::POST,
-            &format!("/api/v1/admin/lexicon/entries/{source}/steps/forms/impact"),
-            Some(json!({"schema_version":3,"base_revision":1,"content":forms})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{impact}");
-        // 影响预览与保存同一判定：预览先把会被破坏的标注列出来。
-        assert_single_stale_sentence_reference(&impact["blocked_references"], source, id);
-        let (status, problem) = call(
-            &state,
-            actor,
-            Method::PUT,
-            &format!("/api/v1/admin/lexicon/entries/{source}/steps/forms"),
-            Some(json!({"schema_version":3,"base_revision":1,"intent":"save","content":forms,"confirmed_impact_token":impact["confirmation_token"]})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{mutate}: {problem}");
-        assert_inbound_reference_conflict(&problem, source, id);
-    }
+    // 拼写改成与标注片段对不上：仍会失效（数据自洽底线不放宽）。
+    let mut respelled = snapshot["forms"].clone();
+    respelled["pos"][0]["forms"][0]["regional_variants"]["common"]["spelling"] =
+        json!("wonderfully");
+    let (status, impact) = call(
+        &state,
+        actor,
+        Method::POST,
+        &format!("/api/v1/admin/lexicon/entries/{source}/steps/forms/impact"),
+        Some(json!({"schema_version":3,"base_revision":1,"content":respelled})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    // 影响预览与保存同一判定：预览先把会被破坏的标注列出来。
+    assert_single_stale_sentence_reference(&impact["blocked_references"], source, id);
+    let (status, problem) = call(
+        &state,
+        actor,
+        Method::PUT,
+        &format!("/api/v1/admin/lexicon/entries/{source}/steps/forms"),
+        Some(json!({"schema_version":3,"base_revision":1,"intent":"save","content":respelled,"confirmed_impact_token":impact["confirmation_token"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
+    assert_inbound_reference_conflict(&problem, source, id);
+
+    // TASK#58：单独换掉变体实例 id（common ↔ uk_us 结构漂移的常态）不再让标注失效——
+    // 绑定坐标是「词形 + 方言侧」。
+    let mut drifted = snapshot["forms"].clone();
+    drifted["pos"][0]["forms"][0]["regional_variants"]["common"]["id"] = json!(Uuid::now_v7());
+    let (status, impact) = call(
+        &state,
+        actor,
+        Method::POST,
+        &format!("/api/v1/admin/lexicon/entries/{source}/steps/forms/impact"),
+        Some(json!({"schema_version":3,"base_revision":1,"content":drifted})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert!(
+        impact.get("blocked_references").is_none(),
+        "变体实例 id 漂移不该列出被破坏的引用：{impact}"
+    );
     // A historical version without the referenced sense cannot become current.
     snapshot["meanings"]["pos"][0]["senses"] = json!([]);
     let empty_publication = Uuid::now_v7();
@@ -1910,10 +1921,9 @@ async fn forms_impact_flags_only_changes_that_break_sentence_targets(pool: PgPoo
     .await;
     let forms = envelope["word"]["forms"].clone();
     let impact_path = format!("/api/v1/admin/lexicon/entries/{source}/steps/forms/impact");
-    let save_path = format!("/api/v1/admin/lexicon/entries/{source}/steps/forms");
 
-    // 英美通用改成分列（变化组规则跟着改成两侧发音）：标注钉着的 common 变体 id 消失，
-    // 预览与保存都点名它。
+    // TASK#58：英美通用改成分列（变化组规则跟着改成两侧发音）：标注钉着的 common 变体 id
+    // 消失，但绑定坐标是「词形 + 方言侧」，common ↔ uk_us 切换后引用自动跟随——不再算破坏。
     let mut split = forms.clone();
     split["pos"][0]["form_groups"][0]["dialect_rules"] =
         json!({"spelling_mode": "unified", "phonetic_mode": "distinguish"});
@@ -1931,21 +1941,25 @@ async fn forms_impact_flags_only_changes_that_break_sentence_targets(pool: PgPoo
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{impact}");
-    assert_single_stale_sentence_reference(&impact["blocked_references"], source, id);
-    let (status, problem) = call(
+    assert!(
+        impact.get("blocked_references").is_none(),
+        "结构漂移不该列出被破坏的引用：{impact}"
+    );
+
+    // 拼写改成与标注片段对不上：仍算破坏，预览点名它（预览只标真正破的改动）。
+    let mut respelled = forms.clone();
+    respelled["pos"][0]["forms"][0]["regional_variants"]["common"]["spelling"] =
+        json!("wonderfully");
+    let (status, impact) = call(
         &state,
         actor,
-        Method::PUT,
-        &save_path,
-        Some(json!({"schema_version":3,"base_revision":1,"intent":"save","content":split,"confirmed_impact_token":impact["confirmation_token"]})),
+        Method::POST,
+        &impact_path,
+        Some(json!({"schema_version":3,"base_revision":1,"content":respelled})),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
-    assert_inbound_reference_conflict(&problem, source, id);
-    assert_eq!(
-        problem["meta"]["inbound_references"],
-        impact["blocked_references"]
-    );
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert_single_stale_sentence_reference(&impact["blocked_references"], source, id);
     let revision: i64 = sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id=$1")
         .bind(source)
         .fetch_one(&pool)
