@@ -10583,10 +10583,7 @@ async fn v3_draft_target_phrase_components_block_breaking_edits_until_the_phrase
     assert_eq!(references[0]["kind"], "phrase_component");
     assert_eq!(references[0]["stale"], true);
     assert_eq!(references[0]["target"]["sense_id"], target_sense_id);
-    assert_eq!(
-        references[0]["target"]["form_id"],
-        json!(target_form["id"])
-    );
+    assert_eq!(references[0]["target"]["form_id"], json!(target_form["id"]));
     assert_eq!(references[0]["source"]["node_id"], json!(component_id));
     assert_eq!(entry_revision(&pool, target_uuid).await, base_revision);
 
