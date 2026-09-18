@@ -775,4 +775,112 @@ mod dialect_structure_drift {
             "目标词形不存在时引用必须失效"
         );
     }
+
+    /// 显式 `target_dialect` 必须被尊重：标了 uk 侧就不认美式拼写（覆盖 `Some(Uk)`），
+    /// 标了 us 侧就认美式拼写（覆盖 `Some(Us)`）；缺字段的存量引用仍按容忍口径。
+    #[test]
+    fn shared_sentence_reference_honors_explicit_target_dialect() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let mut drifted = fixture.snapshot.clone();
+        // uk 侧拼 "harbour"（复用原 common id）、us 侧拼 "harbor"。
+        let (_uk_id, _us_id) = to_uk_us(&mut drifted, 0, fixture.variant_ids[0]);
+        let word: AdminWordV3 = serde_json::from_value(drifted).unwrap();
+        let link = |surface: &str, target_dialect: Option<&str>, variant_id: Uuid| -> TextLinkV3 {
+            let mut value = json!({
+                "id": Uuid::now_v7(),
+                "source_segments": [{"start":0,"end":surface.len(),"surface":surface}],
+                "target_word_id": fixture.entry_id, "target_pos_id": fixture.pos_id,
+                "target_base_form_id": form_id, "target_form_id": form_id,
+                "target_variant_id": variant_id, "target_sense_id": fixture.sense_id
+            });
+            if let Some(dialect) = target_dialect {
+                value["target_dialect"] = json!(dialect);
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        assert!(
+            !text_links::shared_target_matches(
+                &word.forms,
+                &word.meanings,
+                &link("harbor", Some("uk"), Uuid::now_v7()),
+                "common"
+            ),
+            "target_dialect=uk 时，只有美式拼写的引用应判失效"
+        );
+        // 用新 id 保证不进 id 快速路径，真正走到 `Some(Us)` 兜底分支。
+        assert!(
+            text_links::shared_target_matches(
+                &word.forms,
+                &word.meanings,
+                &link("harbor", Some("us"), Uuid::now_v7()),
+                "common"
+            ),
+            "target_dialect=us 时，美式拼写应命中"
+        );
+        assert!(
+            text_links::shared_target_matches(
+                &word.forms,
+                &word.meanings,
+                &link("harbor", None, Uuid::now_v7()),
+                "common"
+            ),
+            "缺 target_dialect 的存量引用按任一侧拼写容忍匹配"
+        );
+        assert!(
+            !text_links::shared_target_matches(
+                &word.forms,
+                &word.meanings,
+                &link("harbourx", None, Uuid::now_v7()),
+                "common"
+            ),
+            "拼写与任何一侧都对不上时必须失效（防放宽过头）"
+        );
+    }
+
+    /// 变体实例 id 漂移后，只要 form / base / sense 还在，成分引用仍成立：
+    /// 绑定坐标是「词形 + 方言侧」，实例 id 只作记录（见 `dialect_side_available` 说明）。
+    #[test]
+    fn phrase_component_reference_survives_variant_id_change() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let mut drifted = fixture.snapshot.clone();
+        let (_uk_id, _us_id) = to_uk_us(&mut drifted, 0, fixture.variant_ids[0]);
+        let (_word, target) = component_target(&drifted);
+        assert!(
+            phrase_component_matches_target(
+                &target,
+                fixture.pos_id,
+                form_id,
+                fixture.sense_id,
+                form_id,
+                Uuid::now_v7(),
+                Dialect::Uk,
+                "base".into(),
+                None,
+            ),
+            "变体实例 id 漂移不应让成分引用失效"
+        );
+    }
+
+    #[test]
+    fn phrase_component_reference_still_fails_when_sense_is_gone() {
+        let fixture = v3_fixture(1);
+        let form_id = fixture.form_ids[0];
+        let (_word, target) = component_target(&fixture.snapshot);
+        assert!(
+            !phrase_component_matches_target(
+                &target,
+                fixture.pos_id,
+                form_id,
+                Uuid::now_v7(),
+                form_id,
+                fixture.variant_ids[0],
+                Dialect::Common,
+                "base".into(),
+                None,
+            ),
+            "目标词义不存在时引用必须失效"
+        );
+    }
 }

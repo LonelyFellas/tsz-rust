@@ -2919,8 +2919,6 @@ fn component_target_gloss(
     )
 }
 
-/// `expected_text` = Some((词面, 释义)) 时还要求文案等值（钉住发布版本的成分）；None 只查结构。
-#[allow(clippy::too_many_arguments)]
 /// 变体实例 id 快速路径：同结构保存、存量引用按旧口径命中，行为不变。
 fn variant_id_matches(form: &WordConcreteFormV3, target_variant_id: Uuid) -> bool {
     match &form.regional_variants {
@@ -2934,11 +2932,17 @@ fn variant_id_matches(form: &WordConcreteFormV3, target_variant_id: Uuid) -> boo
 /// 目标方言侧在当前结构下是否可定位。变体实例 id 会随「英美通用 ↔ 英/美」结构切换而换，
 /// 但方言与结构的映射是双向的：common 结构任一引用方言都能落到它；uk/us 结构能接 common 引用
 /// 与自己的方言。两者均无法定位时才视为失效。
+///
+/// 注意 `Dialect` 当前只有 common/uk/us 三值，第二个分支已列全剩余取值，本函数**恒为 true**；
+/// 也就是说成分引用的有效性实际由 form / base / sense 的存在性决定，`target_variant_id` 仅作
+/// 记录、不再参与判定（绑定坐标是「form + 方言侧」，见 design.md §2.2）。保留这个 match 是给
+/// 方言集合扩张留的编译期兜底：新增 `Dialect` 变体会让它不再穷尽，必须显式补齐映射。
 fn dialect_side_available(form: &WordConcreteFormV3, target_dialect: Dialect) -> bool {
     match (&form.regional_variants, target_dialect) {
         // 通用结构：单一拼写，任何目标方言都落它。
         (WordRegionalVariantsV3::Common { .. }, _) => true,
-        // 分离结构：uk/us 侧都在；common 引用落到偏好侧（由拼写一致性兜底）。
+        // 分离结构：uk/us 侧都在。这里只判「该侧存在」；具体落到哪一侧属于业务口径——
+        // 例句路径另有拼写校验，成分路径没有，只认 form / base / sense 存在性。
         (WordRegionalVariantsV3::UkUs { .. }, Dialect::Common | Dialect::Uk | Dialect::Us) => true,
     }
 }
@@ -2975,10 +2979,9 @@ pub(super) fn phrase_component_matches_target(
     // 而是由保存侧的确认流提示「会让 N 处引用失效」（见 inbound_references）。
     let _target_form_type = target_form_type;
     // 变体定位：先走 id 快速路径（同结构、存量引用完全不变）；未命中时按方言侧重解析。
-    // 结构漂移（common ↔ uk_us）会换掉变体实例 id，此时按方言映射判定：common 引用落到
-    // uk/us 任一侧、uk/us 引用落到 common 都已存在。只有当目标方言侧在两种结构下都无法
-    // 定位（即 target_dialect 与当前结构不兼容）时才失效——目前 common/uk/us 之间可双向
-    // 映射，因此漂移不构成失效，真正的失效由 form / base / sense 的存在性判。
+    // 结构漂移（common ↔ uk_us）会换掉变体实例 id，而 common/uk/us 之间双向可映射
+    // （见 dialect_side_available：该判定当前恒为 true），因此漂移不构成失效；真正的失效由
+    // form / base / sense 的存在性判（见下方 base 校验与 target_content_gloss）。
     if !variant_id_matches(form, target_variant_id) && !dialect_side_available(form, target_dialect)
     {
         return false;
