@@ -230,7 +230,7 @@ pub(crate) fn validate_forms(
     }
 
     for pos in &content.pos {
-        for group in &pos.form_groups {
+        for (group_index, group) in pos.form_groups.iter().enumerate() {
             let group_location = location_for(
                 group.id,
                 Some(pos.pos_id),
@@ -247,7 +247,7 @@ pub(crate) fn validate_forms(
                 &mut issues,
                 group_location.clone(),
             );
-            // 一组词形变化描述的是同一个词的一套变化范式，没有原形就无从谈起。
+            // 只有第 1 组必须有原形：它是这个词的落脚点；第 2 组起可只有屈折形。
             // 与空组同样只在 complete 时拦：草稿允许边录边补，发布前必须补齐。
             let group_has_base = group
                 .members
@@ -261,12 +261,12 @@ pub(crate) fn validate_forms(
                     "a complete entry cannot retain an empty form group",
                     group_location,
                 ));
-            } else if complete && !group_has_base {
+            } else if complete && group_index == 0 && !group_has_base {
                 issues.push(issue(
                     V3ValidationIssueCode::BaseFormRequiredInGroup,
                     "members",
                     group.id,
-                    "a complete form group requires at least one base form",
+                    "the first form group requires at least one base form",
                     group_location,
                 ));
             }
@@ -2308,8 +2308,8 @@ mod tests {
     }
 
     #[test]
-    fn complete_requires_every_form_group_to_keep_a_base_form() {
-        // 一组词形变化描述同一个词的一套变化范式，缺了原形这组就没有落脚点。
+    fn complete_requires_the_first_form_group_to_keep_a_base_form() {
+        // 只有第 1 组必须有原形：缺了原形这个词就没有落脚点；第 2 组起可只有屈折形。
         let mut without_base = two_common_forms_across_groups();
         for form in without_base["content"]["pos"][0]["forms"]
             .as_array_mut()
@@ -2328,7 +2328,7 @@ mod tests {
 
         let complete = decode_valid(without_base);
         let issues = validate_forms(&complete.content, complete.intent);
-        // 两个组各自缺原形，要各自报出来。
+        // 两个组都缺原形，只有第 1 组要报出来。
         assert_eq!(
             issues
                 .iter()
@@ -2336,8 +2336,24 @@ mod tests {
                     item.code == V3ValidationIssueCode::BaseFormRequiredInGroup.as_str()
                 })
                 .count(),
-            2
+            1
         );
+
+        // 第 1 组保留原形、第 2 组没有原形：这条规则应放行。
+        let mut second_without_base = two_common_forms_across_groups();
+        for form in second_without_base["content"]["pos"][0]["forms"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .skip(1)
+        {
+            form["form_type"] = json!("plural");
+        }
+        let second_without_base = decode_valid(second_without_base);
+        assert!(!has_code(
+            &validate_forms(&second_without_base.content, second_without_base.intent),
+            V3ValidationIssueCode::BaseFormRequiredInGroup
+        ));
 
         // 原封不动的请求里每组都挂着原形，不该被这条规则误伤。
         let intact = decode_valid(two_common_forms_across_groups());
@@ -2351,6 +2367,17 @@ mod tests {
         empty_group["content"]["pos"][0]["form_groups"][1]["members"] = json!([]);
         let empty_group = decode_valid(empty_group);
         let issues = validate_forms(&empty_group.content, empty_group.intent);
+        assert!(has_code(&issues, V3ValidationIssueCode::EmptyFormGroup));
+        assert!(!has_code(
+            &issues,
+            V3ValidationIssueCode::BaseFormRequiredInGroup
+        ));
+
+        // 第 1 组（组 0）空时，empty_form_group 命中后 else if 短路，不叠报缺原形。
+        let mut empty_first_group = two_common_forms_across_groups();
+        empty_first_group["content"]["pos"][0]["form_groups"][0]["members"] = json!([]);
+        let empty_first_group = decode_valid(empty_first_group);
+        let issues = validate_forms(&empty_first_group.content, empty_first_group.intent);
         assert!(has_code(&issues, V3ValidationIssueCode::EmptyFormGroup));
         assert!(!has_code(
             &issues,
