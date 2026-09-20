@@ -42,45 +42,27 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
             .any(|(start, end)| *start <= position && position < *end)
     };
 
+    // Core / Function / 历史 Strong 只控制教学样式，不是韵律指令。
+    // 按颜色输出 emphasis 会把 jobs 切成 job + s；只有显式音标需要包裹正文。
     let ranges = request
         .content()
         .annotations
         .iter()
         .filter(|annotation| {
-            matches!(
-                annotation,
-                RichTextAnnotation::Emphasis { .. } | RichTextAnnotation::Phoneme { .. }
-            )
-        })
-        .filter(|annotation| match annotation {
-            RichTextAnnotation::Emphasis {
-                level: RichTextEmphasisLevel::Grammar,
-                ..
-            } => false,
-            _ => range(annotation)
-                .is_none_or(|(start, end)| (start..end).any(|position| !is_silent(position))),
+            range(annotation)
+                .is_some_and(|(start, end)| (start..end).any(|position| !is_silent(position)))
         })
         .collect::<Vec<_>>();
     let codepoints = request.content().text.chars().collect::<Vec<_>>();
     let mut spoken = false;
 
     for position in 0..=codepoints.len() {
-        let mut ending = ranges
+        // SynthesisRequest 已校验音标互不重叠，无需按教学标注的嵌套顺序排序。
+        for annotation in ranges
             .iter()
             .copied()
             .filter(|annotation| range(annotation).is_some_and(|(_, end)| end == position))
-            .collect::<Vec<_>>();
-        ending.sort_by_key(|annotation| {
-            (
-                std::cmp::Reverse(range(annotation).unwrap().0),
-                match annotation {
-                    RichTextAnnotation::Phoneme { .. } => 0,
-                    RichTextAnnotation::Emphasis { .. } => 1,
-                    _ => unreachable!(),
-                },
-            )
-        });
-        for annotation in ending {
+        {
             close_range(&mut output, annotation);
         }
 
@@ -96,22 +78,11 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
             }
         }
 
-        let mut starting = ranges
+        for annotation in ranges
             .iter()
             .copied()
             .filter(|annotation| range(annotation).is_some_and(|(start, _)| start == position))
-            .collect::<Vec<_>>();
-        starting.sort_by_key(|annotation| {
-            (
-                std::cmp::Reverse(range(annotation).unwrap().1),
-                match annotation {
-                    RichTextAnnotation::Emphasis { .. } => 0,
-                    RichTextAnnotation::Phoneme { .. } => 1,
-                    _ => unreachable!(),
-                },
-            )
-        });
-        for annotation in starting {
+        {
             open_range(&mut output, annotation)?;
         }
 
@@ -140,8 +111,7 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
 
 fn range(annotation: &RichTextAnnotation) -> Option<(usize, usize)> {
     match annotation {
-        RichTextAnnotation::Emphasis { start, end, .. }
-        | RichTextAnnotation::Phoneme { start, end, .. } => Some((*start, *end)),
+        RichTextAnnotation::Phoneme { start, end, .. } => Some((*start, *end)),
         _ => None,
     }
 }
@@ -151,9 +121,6 @@ fn open_range(
     annotation: &RichTextAnnotation,
 ) -> Result<(), SpeechModelError> {
     match annotation {
-        // 三分类（功能词 / 核心词 / 语法词）是教学标注，不是韵律指令；试听一律沿用
-        // 三分类落地之前的 `strong`，等产品定了各类该怎么读再分开映射。
-        RichTextAnnotation::Emphasis { .. } => output.push_str(r#"<emphasis level="strong">"#),
         RichTextAnnotation::Phoneme {
             alphabet, phoneme, ..
         } => {
@@ -171,7 +138,6 @@ fn open_range(
 
 fn close_range(output: &mut String, annotation: &RichTextAnnotation) {
     match annotation {
-        RichTextAnnotation::Emphasis { .. } => output.push_str("</emphasis>"),
         RichTextAnnotation::Phoneme { .. } => output.push_str("</phoneme>"),
         _ => unreachable!("only speech range annotations are collected"),
     }
