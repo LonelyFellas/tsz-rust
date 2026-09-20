@@ -1250,13 +1250,14 @@ fn validate_variant(
                     ));
                 }
             }
-            // Legacy candidates without use_spelling retain their existing whole-phrase behavior.
+            // Only legacy candidates without word metadata retain whole-phrase behavior.
             if complete
-                && synthesis.use_spelling == Some(false)
+                && synthesis.use_spelling != Some(true)
                 && synthesis.alphabet == RichTextPhonemeAlphabet::Ups
             {
                 let text_words: Vec<_> = spelling.split_whitespace().collect();
-                if text_words.len() > 1
+                if (synthesis.ups_words.is_some()
+                    || (synthesis.use_spelling == Some(false) && text_words.len() > 1))
                     && !synthesis.ups_words.as_ref().is_some_and(|words| {
                         words.len() == text_words.len()
                             && words
@@ -2553,6 +2554,12 @@ mod tests {
         assert!(validate_forms(&request.content, StepSaveIntent::Complete).is_empty());
         let serialized = serde_json::to_value(request.content).unwrap();
         assert_eq!(serialized.pointer("/pos/0/forms/0/regional_variants/common/pronunciations/0/synthesis/ups_words/1/text").unwrap(), "cat");
+        raw.pointer_mut(variant).unwrap()["spelling"] = json!("hello");
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete)
+                .iter()
+                .any(|problem| problem.field == "synthesis.ups")
+        );
         raw.pointer_mut(variant).unwrap()["spelling"] = json!("hello dog");
         assert!(
             validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete)
