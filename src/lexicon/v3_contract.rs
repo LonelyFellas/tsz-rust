@@ -1200,12 +1200,90 @@ fn validate_variant(
                     ));
                 }
             }
+            if let Some(words) = &synthesis.ups_words
+                && (words.is_empty()
+                    || words.len() > 30
+                    || words.iter().any(|word| {
+                        word.text.trim().is_empty()
+                            || word.text.chars().count() > 200
+                            || word.text.chars().any(char::is_control)
+                            || word.phoneme.trim().is_empty()
+                            || word.phoneme.len() > 1600
+                            || !word.phoneme.is_ascii()
+                            || word.phoneme.chars().any(char::is_control)
+                    }))
+            {
+                issues.push(issue(
+                    V3ValidationIssueCode::ContentLimitExceeded,
+                    "synthesis.ups",
+                    pronunciation.id,
+                    "UPS word metadata must contain 1-30 bounded, nonempty text/phoneme pairs",
+                    pronunciation_location.clone(),
+                ));
+            }
+            if complete && synthesis.use_spelling != Some(true) {
+                use crate::lexicon::dto::PhonemeLocaleV3;
+                let candidate_locale = match synthesis.alphabet {
+                    RichTextPhonemeAlphabet::Ipa => synthesis.ipa_locale,
+                    RichTextPhonemeAlphabet::Ups => synthesis.ups_locale,
+                };
+                let mismatch = matches!(
+                    (dialect, candidate_locale),
+                    (Dialect::Uk, Some(PhonemeLocaleV3::EnUs))
+                        | (Dialect::Us, Some(PhonemeLocaleV3::EnGb))
+                );
+                let unconfirmed_common = dialect == Dialect::Common
+                    && synthesis.use_spelling == Some(false)
+                    && candidate_locale.is_none();
+                if mismatch || unconfirmed_common {
+                    let field = if synthesis.alphabet == RichTextPhonemeAlphabet::Ipa {
+                        "synthesis.ipa"
+                    } else {
+                        "synthesis.ups"
+                    };
+                    issues.push(issue(
+                        V3ValidationIssueCode::PronunciationRequired,
+                        field,
+                        pronunciation.id,
+                        "selected phoneme accent must be confirmed and match the regional variant",
+                        pronunciation_location.clone(),
+                    ));
+                }
+            }
+            // Legacy candidates without use_spelling retain their existing whole-phrase behavior.
+            if complete
+                && synthesis.use_spelling == Some(false)
+                && synthesis.alphabet == RichTextPhonemeAlphabet::Ups
+            {
+                let text_words: Vec<_> = spelling.split_whitespace().collect();
+                if text_words.len() > 1
+                    && !synthesis.ups_words.as_ref().is_some_and(|words| {
+                        words.len() == text_words.len()
+                            && words
+                                .iter()
+                                .zip(&text_words)
+                                .all(|(word, text)| word.text == *text)
+                            && words
+                                .iter()
+                                .map(|word| word.phoneme.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                == synthesis.ups.trim()
+                    })
+                {
+                    issues.push(issue(V3ValidationIssueCode::PronunciationRequired, "synthesis.ups", pronunciation.id,
+                        "UPS phrase word boundaries are missing or stale; convert again from actual pronunciation", pronunciation_location.clone()));
+                }
+            }
             let (field, selected) = match synthesis.alphabet {
                 RichTextPhonemeAlphabet::Ipa => ("synthesis.ipa", &synthesis.ipa),
                 RichTextPhonemeAlphabet::Ups => ("synthesis.ups", &synthesis.ups),
             };
             if complete
-                && (!synthesis.ipa.trim().is_empty() || !synthesis.ups.trim().is_empty())
+                && synthesis.use_spelling != Some(true)
+                && (synthesis.use_spelling == Some(false)
+                    || !synthesis.ipa.trim().is_empty()
+                    || !synthesis.ups.trim().is_empty())
                 && (selected.trim().is_empty()
                     || (synthesis.alphabet == RichTextPhonemeAlphabet::Ups && !selected.is_ascii()))
             {
@@ -2458,6 +2536,98 @@ mod tests {
             &validate_forms(&incomplete.content, incomplete.intent),
             V3ValidationIssueCode::DuplicatePronunciation
         ));
+    }
+
+    #[test]
+    fn ups_source_and_phrase_metadata_round_trip_without_changing_legacy_wire() {
+        use crate::lexicon::dto::PronunciationSynthesisV3;
+        let legacy = json!({"alphabet":"ups","ipa":"kæt","ups":"K AE T"});
+        let decoded: PronunciationSynthesisV3 = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+        let mut raw = valid_request();
+        let variant = "/content/pos/0/forms/0/regional_variants/common";
+        raw.pointer_mut(variant).unwrap()["spelling"] = json!("hello cat");
+        let path = format!("{variant}/pronunciations/0");
+        raw.pointer_mut(&path).unwrap()["synthesis"] = json!({"alphabet":"ups","ipa":"","ups":"H AX . S1 L O K AE T","use_spelling":false,"ups_locale":"en-US","ups_words":[{"text":"hello","phoneme":"H AX . S1 L O"},{"text":"cat","phoneme":"K AE T"}]});
+        let request = decode_valid(raw.clone());
+        assert!(validate_forms(&request.content, StepSaveIntent::Complete).is_empty());
+        let serialized = serde_json::to_value(request.content).unwrap();
+        assert_eq!(serialized.pointer("/pos/0/forms/0/regional_variants/common/pronunciations/0/synthesis/ups_words/1/text").unwrap(), "cat");
+        raw.pointer_mut(variant).unwrap()["spelling"] = json!("hello dog");
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete)
+                .iter()
+                .any(|problem| problem.field == "synthesis.ups")
+        );
+        raw.pointer_mut(&path).unwrap()["synthesis"]["use_spelling"] = json!(true);
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete).is_empty()
+        );
+        raw.pointer_mut(&path).unwrap()["synthesis"]["ups_words"] =
+            json!([{"text":"hello","phoneme":"K\nT"}]);
+        assert!(
+            validate_forms(&decode_valid(raw).content, StepSaveIntent::Save)
+                .iter()
+                .any(|problem| problem.field == "synthesis.ups")
+        );
+    }
+
+    #[test]
+    fn new_common_candidates_require_accent_confirmation_without_rewriting_legacy() {
+        let mut raw = valid_request();
+        let path = "/content/pos/0/forms/0/regional_variants/common/pronunciations/0";
+        raw.pointer_mut(path).unwrap()["synthesis"] =
+            json!({"alphabet":"ipa","ipa":"kæt","ups":"","use_spelling":false});
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Save).is_empty()
+        );
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete)
+                .iter()
+                .any(|problem| problem.field == "synthesis.ipa")
+        );
+        raw.pointer_mut(path).unwrap()["synthesis"]["ipa_locale"] = json!("en-US");
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete).is_empty()
+        );
+        raw.pointer_mut(path).unwrap()["synthesis"]["ipa_locale"] = json!("en-AU");
+        assert!(decode_v3_forms_request::<SaveFormsStepInputV3>(raw).is_err());
+    }
+
+    #[test]
+    fn explicit_dialect_rejects_other_accent_but_spelling_source_is_independent() {
+        use crate::lexicon::dto::WordPronunciationV3;
+        let raw = valid_request();
+        let mut pronunciation: WordPronunciationV3 = serde_json::from_value(
+            raw.pointer("/content/pos/0/forms/0/regional_variants/common/pronunciations/0")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        pronunciation.synthesis = Some(serde_json::from_value(json!({"alphabet":"ipa","ipa":"kæt","ups":"","ipa_locale":"en-US","use_spelling":false})).unwrap());
+        for (dialect, spelling_source, rejected) in [
+            (Dialect::Uk, false, true),
+            (Dialect::Us, false, false),
+            (Dialect::Uk, true, false),
+        ] {
+            pronunciation.synthesis.as_mut().unwrap().use_spelling = Some(spelling_source);
+            let mut issues = Vec::new();
+            validate_variant(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                dialect,
+                "cat",
+                std::slice::from_ref(&pronunciation),
+                true,
+                &mut HashMap::new(),
+                &mut issues,
+            );
+            assert_eq!(
+                issues.iter().any(|issue| issue.field == "synthesis.ipa"),
+                rejected
+            );
+        }
     }
 
     #[test]
