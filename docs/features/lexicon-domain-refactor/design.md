@@ -61,6 +61,18 @@
 
 分页子项不改 method/path、DTO 或 schema，无 migration。旧前端已消费 next_cursor，响应 wire 不变；搜索弱一致不替代保存/发布严格校验。后续契约破坏性变更按已确认的停流配套发布，不增加兼容层。本任务不执行任何发布操作。
 
+## 第二批续作：成分与句中候选分页
+
+续作基线：后端 `c33b8b2fd32be7fcba711a1de6138929fd848879`（PR #182，关联搜索分页已合入并由用户确认部署），前端 `3a1bd05`。不重复修改 `related_search`。
+
+- `service/sentence_target_discovery.rs`：成分搜索按 `(match_rank, draft, headword, entry_id, pos_id, base_form_id, matched_variant_id)` 做 keyset；句中已发布候选按末尾四个稳定节点 ID 做 keyset。发布版本 ID 不进入排序键，重新发布不移动同一节点。
+- 成分游标保留 q/kind/match/include_drafts/entry_id 的查询绑定；不再绑定 generation 或可用词条集合。句中游标保留方言与完整句子/片段指纹绑定，自动发现返回的游标可以交给 selected_segments 继续翻页。
+- 当前请求内仍用一致读及当前发布快照组装候选。跨请求为弱一致，排序键之前新插入的结果需刷新查看；total 是本次计数，不决定是否继续。排序键之后新增的结果可继续遍历，删除前页结果不跳过后页。
+- 新游标只接受稳定键格式，不兼容旧 offset 游标；旧页面需刷新搜索。不改 method/path 或 JSON 字段形状，无迁移及 SQLx 查询变动；OpenAPI 仅更新说明。
+- 新增/调整验证：成分 HTTP 跨页插入和归档、generation 改变、查询不匹配、超过 200 词条遍历；句中 HTTP 自动转手动翻页、前页归档、方言/文本/无效游标拒绝；单元验证发布 ID 不影响节点分页身份。
+
+引用及候选剩余调查：`v3.rs::resolve_component_target` 已支持当前发布快照 probe 不满足时回落当前草稿，不应重写成另一个解析器。搜索入口仍过滤从未发布词条；放开过滤前必须拆开同一 entry 的发布/草稿目标映射，当前按 entry_id 单键的 map 会使两种内容互相覆盖。`inbound_references.rs` 的发布检查仍仅收共享例句与发布词义引用，草稿保存守卫不能孤立移除。这些不是本分页改动已完成的能力。
+
 ## 数据与契约
 
 - 第一批不改 API 结构或数据库 schema。OpenAPI 重导只有三个共享类型的描述更新，去掉 `description` 后与基线完全一致；无需前端同步运行时类型。SQLx 在任务隔离库刷新，缓存无差异。

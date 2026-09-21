@@ -402,7 +402,7 @@ pub enum ResolveSentenceTargetsV3Input {
         page_size_per_range: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[schema(nullable = false)]
-        /// 由同一位置上一页返回；绑定 discovery generation、source dialect 与片段指纹。
+        /// 由同一位置上一页返回；绑定 source dialect、片段指纹与稳定节点排序键，不绑定词库代数。
         cursor: Option<String>,
     },
 }
@@ -598,9 +598,9 @@ pub struct SearchComponentTargetsV3Input {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub entry_id: Option<Uuid>,
-    /// 上一页返回的 `next_cursor`。绑定 discovery generation 与本次 `q` / `kind`：凡是写
-    /// `surface_sources` 的变动（发布、词形步保存等）或换了关键字/kind 后即失效（400
-    /// `invalid_query`，`field = "cursor"`）。游标同时绑定可用词条集合，归档导致结果集变化时也失效。
+    /// 上一页返回的 `next_cursor`。绑定 `q` / `kind` / `match` / `include_drafts` / `entry_id`
+    /// 及最后返回的稳定节点排序键；查询条件改变或游标无效返回 400 `invalid_query`。
+    /// 无关保存、发布及归档不会使游标失效；并发修改下搜索弱一致，保存/发布仍严格验证。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub cursor: Option<String>,
@@ -635,7 +635,7 @@ pub struct SearchComponentTargetsV3Response {
     /// `matches` 恒为空数组——没有「命中了句子里的哪一段」可言，后端不构造假证据。
     /// 顺序：词面等于 `q` 的词条最前，以 `q` 开头的其次，其余按 headword；同一词条的候选相邻。
     pub matches: Vec<PublishedSentenceTargetCandidateV3>,
-    /// 完整匹配集的候选总数（跨所有页，同一词条可能有多条词形候选）。
+    /// 本次请求可见的完整匹配集候选总数（弱一致；同一词条可能有多条词形候选），不控制分页结束。
     pub total: u64,
     /// 还有未返回的候选；为 true 时同时给出 `next_cursor`。
     pub truncated: bool,
