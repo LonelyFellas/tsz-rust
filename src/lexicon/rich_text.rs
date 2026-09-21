@@ -1,8 +1,8 @@
 use std::{cmp::Ordering, collections::BTreeMap};
 
 use crate::lexicon::dto::{
-    DialectVariantSlotV2, DraftMeaningsStepContent, EnglishTextV2, RichText, RichTextAnnotation,
-    RichTextV1, RichTextV2, WordDefinitionV2,
+    DialectVariantRichTextSlotV3, DraftMeaningsStepContentV3, EnglishTextV3, RichText,
+    RichTextAnnotation, RichTextV1, RichTextV2, RichTextV3, WordDefinitionV3,
 };
 
 pub const MAX_RICH_TEXT_CODEPOINTS: usize = 5_000;
@@ -28,7 +28,9 @@ pub struct RichTextIssue {
 
 mod core;
 
-pub use core::{canonicalize, canonicalize_meanings, is_valid};
+pub use core::{canonicalize, canonicalize_meanings, is_valid, is_valid_native};
 
+#[cfg(test)]
+mod meanings_tests;
 #[cfg(test)]
 mod tests;

@@ -13,7 +13,6 @@ use super::dictionary_suggestions::{
 };
 use super::*;
 use crate::lexicon::audio_assets::dto::{AudioAsset, AudioAssetGender, AudioAssetLocale};
-use crate::lexicon::dto::DraftMeaningsStepContent;
 use crate::lexicon::dto::{
     AdminWordDraftV3Envelope, AdminWordV3, AdminWordV3Capabilities, AdminWordV3Envelope,
     BuiltinDictionaryEvidenceV3, CommonDialectV3, CreateAdminWordV3Input,
@@ -1869,9 +1868,6 @@ impl LexiconService {
         if !aggregate_issues.is_empty() {
             return Err(v3_validation_failed(aggregate_issues));
         }
-        let relational_meanings: DraftMeaningsStepContent =
-            serde_json::from_value(serde_json::to_value(&meanings).map_err(serialization_error)?)
-                .map_err(serialization_error)?;
         let audit_node_delta = preflight_v3_form_node_identities(
             &mut transaction,
             entry_id,
@@ -1895,7 +1891,7 @@ impl LexiconService {
         LexiconRepository::replace_meanings_content(
             &mut transaction,
             entry_id,
-            &relational_meanings,
+            &meanings,
             &sub_parts,
         )
         .await
@@ -2088,14 +2084,10 @@ impl LexiconService {
             return Err(v3_validation_failed(issues));
         }
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut content);
-        if !crate::lexicon::v3_contract::canonicalize_sentence_translations(&mut content) {
-            return Err(v3_validation_failed(
-                crate::lexicon::v3_contract::validate_meanings(&content, intent),
-            ));
-        }
-        let mut translation_content = content.clone();
-        let mut relational_meanings =
-            crate::lexicon::service::v3_publication::v3_meanings_to_v2(&content)?;
+        let rich_text_is_safe = canonicalize_meanings(&mut content);
+        // 规范化译文后刷新展示别名，但不从关系投影重建完整内容。
+        crate::lexicon::v3_contract::normalize_sentence_translations(&mut content);
+        super::v3_publication::clear_v3_sentence_associations(&mut content);
         let mut transaction = self
             .repository
             .pool()
@@ -2127,27 +2119,25 @@ impl LexiconService {
             &mut transaction,
             entry_id,
             compatibility_source.kind,
-            &mut translation_content,
+            &mut content,
         )
         .await?;
         if !component_issues.is_empty() {
             return Err(v3_validation_failed(component_issues));
         }
 
-        let audio_issues =
-            validate_audio_assets(&mut transaction, entry_id, &translation_content).await?;
+        let audio_issues = validate_audio_assets(&mut transaction, entry_id, &content).await?;
         if !audio_issues.is_empty() {
             return Err(v3_validation_failed(audio_issues));
         }
-        super::text_links::validate_targets(&mut transaction, entry_id, &mut translation_content)
-            .await?;
+        super::text_links::validate_targets(&mut transaction, entry_id, &mut content).await?;
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
         let mut current_v3_meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut current_v3_meanings);
         for saved in current_v3_meanings.pos.iter().flat_map(|pos| &pos.senses) {
             if saved.form_group_ids.is_some()
-                && let Some(next) = translation_content
+                && let Some(next) = content
                     .pos
                     .iter()
                     .flat_map(|pos| &pos.senses)
@@ -2161,16 +2151,12 @@ impl LexiconService {
             }
         }
 
-        let current_relational_meanings: DraftMeaningsStepContent = serde_json::from_value(
-            serde_json::to_value(&current_v3_meanings).map_err(serialization_error)?,
-        )
-        .map_err(serialization_error)?;
         let form_pos = forms
             .pos
             .iter()
             .map(|pos| pos.pos_id)
             .collect::<HashSet<_>>();
-        if relational_meanings
+        if content
             .pos
             .iter()
             .any(|pos| !form_pos.contains(&pos.pos_id))
@@ -2180,7 +2166,7 @@ impl LexiconService {
                 message: "meanings must belong to a POS in the current V3 forms",
             });
         }
-        let retained_senses = translation_content
+        let retained_senses = content
             .pos
             .iter()
             .flat_map(|pos| &pos.senses)
@@ -2196,27 +2182,22 @@ impl LexiconService {
                 &mut transaction,
                 entry_id,
                 &forms,
-                &translation_content,
+                &content,
                 super::inbound_references::InboundReferenceCheck::DraftSave,
                 Some((&forms, &current_v3_meanings)),
             )
             .await?;
         }
-        let binding_issues = crate::lexicon::v3_contract::validate_sense_form_groups(
-            &forms,
-            &translation_content,
-            intent,
-        );
+        let binding_issues =
+            crate::lexicon::v3_contract::validate_sense_form_groups(&forms, &content, intent);
         if !binding_issues.is_empty() {
             return Err(v3_validation_failed(binding_issues));
         }
-        let validation_forms = v3_meaning_validation_forms(&forms);
         let catalog = self
-            .catalog_context_for_reference(&mut transaction, &validation_forms, &record.kind)
+            .catalog_context_for_reference(&mut transaction, &forms, &record.kind)
             .await?;
-        let rich_text_is_safe = canonicalize_meanings(&mut relational_meanings);
-        let mut affected_contexts = relation_target_entry_ids(&current_relational_meanings);
-        affected_contexts.extend(relation_target_entry_ids(&relational_meanings));
+        let mut affected_contexts = relation_target_entry_ids(&current_v3_meanings);
+        affected_contexts.extend(relation_target_entry_ids(&content));
         affected_contexts.sort_unstable();
         affected_contexts.dedup();
         LexiconRepository::lock_surface_contexts(&mut transaction, &affected_contexts)
@@ -2225,7 +2206,7 @@ impl LexiconService {
         let reference_resolution = resolve_meaning_references(
             &mut transaction,
             entry_id,
-            &mut relational_meanings,
+            &mut content,
             ReferenceResolutionMode::Canonicalize,
             false,
         )
@@ -2233,20 +2214,10 @@ impl LexiconService {
         if !reference_resolution.issues.is_empty() {
             return Err(v3_validation_failed(reference_resolution.issues));
         }
-        let semantic_issues = validate_meanings(
-            entry_id,
-            &validation_forms,
-            &relational_meanings,
-            &v3_meaning_validation_headwords(),
-            &catalog.sub_part_parents,
-        );
+        let semantic_issues =
+            validate_meanings(entry_id, &forms, &content, &catalog.sub_part_parents);
         if !rich_text_is_safe
-            || !meaning_storage_is_safe(
-                entry_id,
-                &validation_forms,
-                &relational_meanings,
-                &catalog.sub_part_parents,
-            )
+            || !meaning_storage_is_safe(entry_id, &forms, &content, &catalog.sub_part_parents)
         {
             return Err(v3_validation_failed(meanings_storage_issues(
                 entry_id,
@@ -2256,22 +2227,8 @@ impl LexiconService {
         if intent == StepSaveIntent::Complete && !semantic_issues.is_empty() {
             return Err(v3_validation_failed(semantic_issues));
         }
-        let mut canonical_content: DraftMeaningsStepContentV3 = serde_json::from_value(
-            serde_json::to_value(&relational_meanings).map_err(serialization_error)?,
-        )
-        .map_err(serialization_error)?;
-        copy_sentence_translations(&translation_content, &mut canonical_content)?;
-        restore_sense_component_usages(&translation_content, &mut canonical_content);
-        restore_voice_profiles(&translation_content, &mut canonical_content);
-        restore_sense_group_voice(&translation_content, &mut canonical_content);
-
-        restore_audio_assets(
-            &mut transaction,
-            &translation_content,
-            &mut canonical_content,
-        )
-        .await?;
-        super::text_links::restore(&translation_content, &mut canonical_content);
+        let mut canonical_content = content;
+        hydrate_audio_asset_metadata(&mut transaction, &mut canonical_content).await?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut canonical_content);
         let aggregate_issues =
             crate::lexicon::v3_contract::validate_aggregate_node_limit(&forms, &canonical_content);
@@ -2287,16 +2244,7 @@ impl LexiconService {
             Some((&forms, &current_v3_meanings)),
         )
         .await?;
-        let mut proposed = proposed_nodes(&DraftFormsStepContent::default(), &relational_meanings);
-        let translation_nodes = v3_translation_proposed_nodes(&canonical_content);
-        let translation_ids = translation_nodes
-            .iter()
-            .map(|node| node.id)
-            .collect::<HashSet<_>>();
-        proposed.retain(|node| !translation_ids.contains(&node.id));
-        proposed.extend(translation_nodes);
-        // 成分节点不做 retain：V2 形状根本不产它们，撞 id 就该走 node_id_reused 报出来。
-        proposed.extend(v3_component_proposed_nodes(&canonical_content));
+        let proposed = proposed_meaning_nodes(&canonical_content);
         let proposed_ids = sorted_unique_node_ids(proposed.iter().map(|node| node.id));
         LexiconRepository::lock_node_ids(&mut transaction, &proposed_ids)
             .await
@@ -2305,8 +2253,7 @@ impl LexiconService {
             LexiconRepository::node_identities(&mut transaction, entry_id, &proposed_ids)
                 .await
                 .map_err(repository_error)?;
-        let node_issues =
-            validate_node_identities(entry_id, &validation_forms, &proposed, &existing);
+        let node_issues = validate_node_identities(entry_id, &forms, &proposed, &existing);
         if node_issues
             .iter()
             .any(|issue| issue.code == "stable_node_id_changed")
@@ -2318,10 +2265,7 @@ impl LexiconService {
         }
         let audit_node_delta = v3_audit_node_delta(
             entry_id,
-            &v3_meaning_node_ids_with_v3_only_nodes(
-                &current_relational_meanings,
-                &current_v3_meanings,
-            ),
+            &v3_meaning_node_ids(&current_v3_meanings),
             &proposed_ids,
             &existing,
         );
@@ -2335,7 +2279,7 @@ impl LexiconService {
         LexiconRepository::replace_meanings_content(
             &mut transaction,
             entry_id,
-            &relational_meanings,
+            &canonical_content,
             &catalog.sub_part_ids,
         )
         .await
@@ -2494,7 +2438,7 @@ impl LexiconService {
         entry_id: Uuid,
         input: ValidateAdminWordV3Input,
     ) -> Result<DraftValidationResponseV3, LexiconServiceError> {
-        let word = self.get_v3(entry_id).await?;
+        let mut word = self.get_v3(entry_id).await?;
         ensure_v3_active(&word)?;
         ensure_v3_revision(&word, input.base_revision)?;
         let mut issues =
@@ -2515,9 +2459,6 @@ impl LexiconService {
             &word.meanings,
             StepSaveIntent::Complete,
         ));
-        let validation_forms = v3_meaning_validation_forms(&word.forms);
-        let mut relational_meanings =
-            crate::lexicon::service::v3_publication::v3_meanings_to_v2(&word.meanings)?;
         let mut transaction = self
             .repository
             .pool()
@@ -2525,23 +2466,18 @@ impl LexiconService {
             .await
             .map_err(database_error)?;
         let catalog = self
-            .catalog_context_for_reference(
-                &mut transaction,
-                &validation_forms,
-                v3_kind_string(word.kind),
-            )
+            .catalog_context_for_reference(&mut transaction, &word.forms, v3_kind_string(word.kind))
             .await?;
         issues.extend(validate_meanings(
             entry_id,
-            &validation_forms,
-            &relational_meanings,
-            &v3_meaning_validation_headwords(),
+            &word.forms,
+            &word.meanings,
             &catalog.sub_part_parents,
         ));
         let reference_resolution = resolve_meaning_references(
             &mut transaction,
             entry_id,
-            &mut relational_meanings,
+            &mut word.meanings,
             ReferenceResolutionMode::Verify,
             false,
         )
@@ -3385,63 +3321,6 @@ fn preserve_missing_sense_component_usages(
     }
 }
 
-/// V3 → V2 → V3 往返会静默吞掉 `component_usages`（`WordSenseV2` 没这个字段且不 deny），
-/// 每个落库点都要从往返前的 V3 内容回填。
-pub(super) fn restore_sense_component_usages(
-    source: &DraftMeaningsStepContentV3,
-    target: &mut DraftMeaningsStepContentV3,
-) {
-    let by_sense = source
-        .pos
-        .iter()
-        .flat_map(|pos| &pos.senses)
-        .map(|sense| (sense.id, sense.component_usages.to_vec()))
-        .collect::<HashMap<_, _>>();
-    for sense in target.pos.iter_mut().flat_map(|pos| &mut pos.senses) {
-        sense.component_usages = by_sense.get(&sense.id).cloned().unwrap_or_default().into();
-    }
-}
-
-/// V3 → V2 → V3 往返会静默吞掉 `voice_profile`（`GrammarVariantV2` / `TextVariantV2` 没这个
-/// 字段且不 deny），和 `component_usages` 一样，每个落库点都要从往返前的 V3 内容按节点 id 回填。
-///
-/// 语法结构变体与英文文本变体共用一张 id → profile 表：两者的 id 都是 `text_variants.id`，
-/// 全库唯一，不会互相串。
-pub(super) fn restore_voice_profiles(
-    source: &DraftMeaningsStepContentV3,
-    target: &mut DraftMeaningsStepContentV3,
-) {
-    let mut by_node = HashMap::new();
-    for pos in &source.pos {
-        for variant in pos
-            .grammar_structures
-            .iter()
-            .flat_map(|grammar| &grammar.variants)
-        {
-            by_node.insert(variant.id, variant.voice_profile.clone());
-        }
-        for text in source_english_texts(pos) {
-            for variant in crate::lexicon::v3_contract::english_text_variants(text) {
-                by_node.insert(variant.id, variant.voice_profile.clone());
-            }
-        }
-    }
-    for pos in &mut target.pos {
-        for variant in pos
-            .grammar_structures
-            .iter_mut()
-            .flat_map(|grammar| &mut grammar.variants)
-        {
-            variant.voice_profile = by_node.get(&variant.id).cloned().flatten();
-        }
-        for text in target_english_texts(pos) {
-            for variant in english_text_variants_mut(text) {
-                variant.voice_profile = by_node.get(&variant.id).cloned().flatten();
-            }
-        }
-    }
-}
-
 /// 单个语法结构变体最多挂几条录音。与 `GrammarVariantV3.audio_assets` 的 `max_items` 同一个数。
 const MAX_VARIANT_AUDIO_ASSETS: usize = 8;
 
@@ -3696,22 +3575,19 @@ fn audio_asset_issue(variant_id: Uuid, message: &str) -> DraftValidationIssue {
     )
 }
 
-/// `audio_assets` 和 `voice_profile` 一样活不过 V2 往返，必须按节点 id 回填。
-/// 但这里不是「把请求里的值搬回来」——除 id 外的字段一律以数据库为准重新灌入，
-/// 客户端回传的展示元数据不作数，省掉一整套「改了就 422」的比对。
-pub(super) async fn restore_audio_assets(
+/// 音频 ID 来自内容，展示元数据以数据库为准；直接更新完整模型，不重建内容。
+pub(super) async fn hydrate_audio_asset_metadata(
     tx: &mut Transaction<'_, Postgres>,
-    source: &DraftMeaningsStepContentV3,
-    target: &mut DraftMeaningsStepContentV3,
+    content: &mut DraftMeaningsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
-    let requested = requested_audio_assets(source);
+    let requested = requested_audio_assets(content);
     if requested.is_empty() {
         return Ok(());
     }
     let canonical = load_audio_asset_metadata(tx, &requested).await?;
 
     let by_variant = requested.into_iter().collect::<HashMap<_, _>>();
-    for variant in target
+    for variant in content
         .pos
         .iter_mut()
         .flat_map(|pos| &mut pos.grammar_structures)
@@ -3826,33 +3702,6 @@ pub(super) fn english_text_variants_mut(
                 DialectVariantRichTextSlotV3::Missing => None,
             })
             .collect(),
-    }
-}
-
-/// V3 → V2 → V3 往返会把每句的多档 `zh_translations` 塌成 1 档（`WordSentenceV2` 只有单条
-/// `zh_text`，回程 `normalize_sentence_translations` 只按别名补 1 档），发布路径的每个往返点都要
-/// 从往返前的 V3 内容按 sentence id 回填。源里没有的句子（正常不会发生）保留 normalize 的结果，
-/// 不塞空档——空 `zh_translations` 是非法态。
-pub(super) fn restore_sentence_zh_translations(
-    source: &DraftMeaningsStepContentV3,
-    target: &mut DraftMeaningsStepContentV3,
-) {
-    let by_sentence = source
-        .pos
-        .iter()
-        .flat_map(|pos| &pos.senses)
-        .flat_map(|sense| &sense.sentences)
-        .map(|sentence| (sentence.id, sentence.zh_translations.to_vec()))
-        .collect::<HashMap<_, _>>();
-    for sentence in target
-        .pos
-        .iter_mut()
-        .flat_map(|pos| &mut pos.senses)
-        .flat_map(|sense| &mut sense.sentences)
-    {
-        if let Some(translations) = by_sentence.get(&sentence.id) {
-            sentence.zh_translations = translations.clone().into();
-        }
     }
 }
 
@@ -4183,81 +4032,12 @@ fn v3_form_node_ids(content: &DraftFormsStepContentV3) -> Vec<Uuid> {
     ids
 }
 
-fn v3_meaning_node_ids(content: &DraftMeaningsStepContent) -> Vec<Uuid> {
+fn v3_meaning_node_ids(content: &DraftMeaningsStepContentV3) -> Vec<Uuid> {
     sorted_unique_node_ids(
-        proposed_nodes(&DraftFormsStepContent::default(), content)
+        proposed_meaning_nodes(content)
             .into_iter()
             .map(|node| node.id),
     )
-}
-
-fn v3_translation_proposed_nodes(content: &DraftMeaningsStepContentV3) -> Vec<ProposedNode> {
-    content
-        .pos
-        .iter()
-        .flat_map(|pos| &pos.senses)
-        .flat_map(|sense| &sense.sentences)
-        .flat_map(|sentence| {
-            sentence
-                .zh_translations
-                .iter()
-                .map(|translation| ProposedNode {
-                    id: translation.id,
-                    node_type: "text_variant",
-                    step: PersistedWordStep::Meanings,
-                    parent_node_id: Some(sentence.id),
-                    node_role: crate::lexicon::node_identity::SENTENCE_TRANSLATION_ROLE.to_owned(),
-                    stable_slot: false,
-                })
-        })
-        .collect()
-}
-
-/// V2 形状看不见的 V3-only 节点（多档翻译、释义级成分）要一并算进节点增量，
-/// 否则审计会把它们当成凭空出现。
-fn v3_meaning_node_ids_with_v3_only_nodes(
-    relational: &DraftMeaningsStepContent,
-    v3: &DraftMeaningsStepContentV3,
-) -> Vec<Uuid> {
-    sorted_unique_node_ids(
-        v3_meaning_node_ids(relational)
-            .into_iter()
-            .chain(
-                v3_translation_proposed_nodes(v3)
-                    .into_iter()
-                    .map(|node| node.id),
-            )
-            .chain(
-                v3_component_proposed_nodes(v3)
-                    .into_iter()
-                    .map(|node| node.id),
-            ),
-    )
-}
-
-fn copy_sentence_translations(
-    source: &DraftMeaningsStepContentV3,
-    target: &mut DraftMeaningsStepContentV3,
-) -> Result<(), LexiconServiceError> {
-    let translations = source
-        .pos
-        .iter()
-        .flat_map(|pos| &pos.senses)
-        .flat_map(|sense| &sense.sentences)
-        .map(|sentence| (sentence.id, sentence.zh_translations.clone()))
-        .collect::<HashMap<_, _>>();
-    for sentence in target
-        .pos
-        .iter_mut()
-        .flat_map(|pos| &mut pos.senses)
-        .flat_map(|sense| &mut sense.sentences)
-    {
-        sentence.zh_translations = translations
-            .get(&sentence.id)
-            .cloned()
-            .ok_or_else(invariant_record)?;
-    }
-    Ok(())
 }
 
 fn preserve_missing_sentence_translations(
@@ -4422,19 +4202,7 @@ async fn preflight_v3_form_node_identities(
     let existing = LexiconRepository::node_identities(tx, entry_id, &proposed_ids)
         .await
         .map_err(repository_error)?;
-    let mut locator_forms = v3_meaning_validation_forms(proposed_content);
-    for (locator_pos, proposed_pos) in locator_forms.pos.iter_mut().zip(&proposed_content.pos) {
-        locator_pos.form_groups = proposed_pos
-            .form_groups
-            .iter()
-            .map(|group| WordFormGroupV2 {
-                id: group.id,
-                is_regular: group.is_regular,
-                slots: Vec::new(),
-            })
-            .collect();
-    }
-    let node_issues = validate_node_identities(entry_id, &locator_forms, &proposed, &existing);
+    let node_issues = validate_node_identities(entry_id, proposed_content, &proposed, &existing);
     if node_issues
         .iter()
         .any(|issue| issue.code == "stable_node_id_changed")
@@ -5556,9 +5324,12 @@ mod tests {
         // 语义区间由词形保存保留，同样不进。
         assert_eq!(types.len(), 4, "{types:?}");
 
-        // 同一份内容转 V2 内部模型也不能再失败（validate / 发布走这条）。
-        crate::lexicon::service::v3_publication::v3_meanings_to_v2(&content)
-            .expect("剥掉关联后应能转成 V2 内部模型");
+        // 服务端只读关联不产生可写稳定节点。
+        assert!(
+            !proposed_meaning_nodes(&content)
+                .iter()
+                .any(|node| node.id == association_id)
+        );
     }
 
     #[test]
@@ -5779,10 +5550,13 @@ mod tests {
             "显式空数组必须清空"
         );
 
-        // V2 往返把字段整个吞掉，落库前只能靠往返前的内容回填。
-        let mut round_tripped = sense_meanings(None);
-        restore_sense_component_usages(&current, &mut round_tripped);
-        assert_eq!(round_tripped.pos[0].senses[0].component_usages.len(), 1);
+        let mut normalized = current.clone();
+        assert!(canonicalize_meanings(&mut normalized));
+        assert_eq!(
+            serde_json::to_value(&normalized).unwrap(),
+            serde_json::to_value(&current).unwrap(),
+            "规范化完整模型不能丢失成分用词"
+        );
     }
 
     #[test]
@@ -6280,47 +6054,18 @@ mod tests {
     }
 }
 
-/// V2 中间结构不含语义区间语音字段，按稳定 id 恢复 V3 扩展。
-pub(super) fn restore_sense_group_voice(
-    source: &DraftMeaningsStepContentV3,
-    target: &mut DraftMeaningsStepContentV3,
-) {
-    let by_id: HashMap<_, _> = source
-        .sense_groups
-        .iter()
-        .map(|group| (group.id, group))
-        .collect();
-    for group in &mut target.sense_groups {
-        if let Some(original) = by_id.get(&group.id) {
-            group.name_en_rich = original.name_en_rich.clone();
-            group.voice_profile = original.voice_profile.clone();
-        }
-    }
-}
-
 #[cfg(test)]
 mod sense_group_voice_tests {
     use super::*;
     #[test]
-    fn sense_group_voice_survives_v2_bridge_and_legacy_omission() {
-        let legacy = serde_json::json!({"sense_groups":[{"id":Uuid::new_v4(),"name_zh":"工作","name_en":"work"}],"pos":[]});
-        let old: DraftMeaningsStepContentV3 = serde_json::from_value(legacy.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&old).unwrap(), legacy);
-        let mut raw = legacy;
+    fn sense_group_voice_survives_native_canonicalization() {
+        let mut raw = serde_json::json!({"sense_groups":[{"id":Uuid::new_v4(),"name_zh":"工作","name_en":"work"}],"pos":[]});
         raw["sense_groups"][0]["name_en_rich"] =
             serde_json::json!({"version":2,"text":"work","annotations":[]});
         raw["sense_groups"][0]["voice_profile"] =
             serde_json::json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]});
-        let source: DraftMeaningsStepContentV3 = serde_json::from_value(raw.clone()).unwrap();
-        let bridge: DraftMeaningsStepContent = serde_json::from_value(raw.clone()).unwrap();
-        let mut target: DraftMeaningsStepContentV3 =
-            serde_json::from_value(serde_json::to_value(bridge).unwrap()).unwrap();
-        restore_sense_group_voice(&source, &mut target);
-        assert_eq!(serde_json::to_value(&target).unwrap(), raw);
-        restore_sense_group_voice(&old, &mut target);
-        assert_eq!(
-            serde_json::to_value(&target).unwrap(),
-            serde_json::to_value(old).unwrap()
-        );
+        let mut content: DraftMeaningsStepContentV3 = serde_json::from_value(raw.clone()).unwrap();
+        assert!(canonicalize_meanings(&mut content));
+        assert_eq!(serde_json::to_value(&content).unwrap(), raw);
     }
 }

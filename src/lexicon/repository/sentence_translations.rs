@@ -98,8 +98,6 @@ impl LexiconRepository {
                         if translation.id == primary.id {
                             continue;
                         }
-                        let content: RichText =
-                            serde_json::from_value(serde_json::to_value(&translation.content)?)?;
                         insert_text_variant(
                             tx,
                             translation.id,
@@ -108,7 +106,7 @@ impl LexiconRepository {
                             translation.band.field_role(),
                             translation_language(translation),
                             Dialect::Common,
-                            &content,
+                            &translation.content,
                             TextOrigin::Manual,
                             index as i32,
                         )

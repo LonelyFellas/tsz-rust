@@ -149,6 +149,79 @@ fn v3_target_resolves_automatic_associations() {
 }
 
 #[test]
+fn native_target_readers_preserve_sense_components_with_resolved_sentence_projections() {
+    let mut fixture = v3_fixture(1);
+    fixture.snapshot["kind"] = json!("phrase");
+    let component_id = Uuid::now_v7();
+    let sense = &mut fixture.snapshot["meanings"]["pos"][0]["senses"][0];
+    sense["component_usages"] = json!([{
+        "state": "unresolved", "id": component_id, "literal": "harbour"
+    }]);
+    sense["sentences"][0]["associations_state"] = json!("resolved");
+    sense["sentences"][0]["associations"] = json!([{
+        "state": "pending",
+        "id": Uuid::now_v7(),
+        "association_schema_version": 3,
+        "source_dialect": "common",
+        "source_segments": [{"start": 4, "end": 11, "surface": "harbour"}],
+        "origin": "auto",
+        "pending_target_kind": "word",
+        "pending_target_headword": "harbour"
+    }]);
+    let publication_id = Uuid::now_v7();
+    let reference = ResolvedSenseTargetRecord {
+        target_entry_id: fixture.entry_id,
+        target_sense_id: fixture.sense_id,
+        target_publication_id: publication_id,
+        target_revision: 7,
+        snapshot: fixture.snapshot.clone(),
+    };
+    assert_eq!(
+        published_sense_snapshot(&reference).unwrap(),
+        ("harbour".to_owned(), "港口".to_owned())
+    );
+    let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true).unwrap();
+    let candidates = target.sentence_discovery_candidates(
+        Some(publication_id),
+        fixture.pos_id,
+        fixture.form_ids[0],
+        fixture.variant_ids[0],
+        None,
+    );
+    assert_eq!(candidates.len(), 1);
+    let sense = &candidates[0].senses[0];
+    assert_eq!(sense.sense_id, fixture.sense_id);
+    assert_eq!(sense.gloss, "港口");
+    assert_eq!(
+        sense.component_usages,
+        vec![PhraseComponentUsageV3::Unresolved {
+            id: component_id,
+            literal: "harbour".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn native_gloss_uses_first_chinese_definition_and_never_falls_back_to_english() {
+    let fixture = v3_fixture(1);
+    let mut word: AdminWordV3 = serde_json::from_value(fixture.snapshot).unwrap();
+    let sense = &mut word.meanings.pos[0].senses[0];
+    let english = serde_json::from_value(json!({
+        "definition_mode": "en_definition", "id": Uuid::now_v7(), "level": "A1",
+        "content": {"mode": "unified", "common": {
+            "id": Uuid::now_v7(), "origin": "manual", "value": rich_text("a port")
+        }}
+    }))
+    .unwrap();
+    sense.definitions.insert(0, english);
+    assert_eq!(published_sense_gloss(sense), "港口");
+    sense.definitions.truncate(1);
+    assert_eq!(published_sense_gloss(sense), "");
+    sense.definitions.clear();
+    assert_eq!(published_sense_gloss(sense), "");
+}
+
+#[test]
 fn v3_same_surface_across_forms_keeps_association_without_guessing_form() {
     let fixture = v3_fixture(2);
     let target = PublishedAssociationTarget::from_snapshot(fixture.snapshot, true)

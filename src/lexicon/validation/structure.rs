@@ -1,10 +1,12 @@
 use super::*;
 use crate::lexicon::node_identity::{
-    BASE_FORM_ROLE, FORM_GROUP_ROLE, FORM_SLOT_ROLE_PREFIX, GRAMMAR_STRUCTURE_ROLE,
-    LEGACY_NODE_ROLE, POS_ROLE, PRONUNCIATION_ROLE, RELATION_ROLE, SENSE_GROUP_ROLE, SENSE_ROLE,
-    SENTENCE_ROLE, definition_role, dialect_from_name, form_slot_role, form_variant_role,
-    text_variant_role,
+    BASE_FORM_ROLE, FORM_SLOT_ROLE_PREFIX, GRAMMAR_STRUCTURE_ROLE, LEGACY_NODE_ROLE,
+    PHRASE_COMPONENT_USAGE_ROLE, RELATION_ROLE, SENSE_GROUP_ROLE, SENSE_ROLE, SENTENCE_ROLE,
+    SENTENCE_TRANSLATION_ROLE, definition_role, dialect_from_name, text_variant_role,
 };
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) const MAX_ENTRY_NODES: usize = 2_000;
 
@@ -30,55 +32,8 @@ pub(crate) struct ProposedNode {
     pub stable_slot: bool,
 }
 
-pub(crate) fn proposed_nodes(
-    forms: &DraftFormsStepContent,
-    meanings: &DraftMeaningsStepContent,
-) -> Vec<ProposedNode> {
+pub(crate) fn proposed_meaning_nodes(meanings: &DraftMeaningsStepContentV3) -> Vec<ProposedNode> {
     let mut nodes = Vec::new();
-    for pos in &forms.pos {
-        push_node(
-            &mut nodes,
-            pos.pos_id,
-            "pos",
-            PersistedWordStep::Forms,
-            None,
-            POS_ROLE,
-            false,
-        );
-        push_node(
-            &mut nodes,
-            pos.base_form.id,
-            "form_slot",
-            PersistedWordStep::Forms,
-            Some(pos.pos_id),
-            BASE_FORM_ROLE,
-            true,
-        );
-        push_form_variant_nodes(&mut nodes, pos.base_form.id, &pos.base_form.variants);
-        for group in &pos.form_groups {
-            push_node(
-                &mut nodes,
-                group.id,
-                "form_group",
-                PersistedWordStep::Forms,
-                Some(pos.pos_id),
-                FORM_GROUP_ROLE,
-                false,
-            );
-            for slot in &group.slots {
-                push_node(
-                    &mut nodes,
-                    slot.id,
-                    "form_slot",
-                    PersistedWordStep::Forms,
-                    Some(group.id),
-                    form_slot_role(&slot.form_type),
-                    true,
-                );
-                push_form_variant_nodes(&mut nodes, slot.id, &slot.variants);
-            }
-        }
-    }
     for group in &meanings.sense_groups {
         push_node(
             &mut nodes,
@@ -125,8 +80,8 @@ pub(crate) fn proposed_nodes(
             );
             for definition in &sense.definitions {
                 match definition {
-                    WordDefinitionV2::ZhDefinition { id, content_id, .. }
-                    | WordDefinitionV2::ZhSentence { id, content_id, .. } => {
+                    WordDefinitionV3::ZhDefinition { id, content_id, .. }
+                    | WordDefinitionV3::ZhSentence { id, content_id, .. } => {
                         push_node(
                             &mut nodes,
                             *id,
@@ -146,8 +101,8 @@ pub(crate) fn proposed_nodes(
                             true,
                         );
                     }
-                    WordDefinitionV2::EnDefinition { id, content, .. }
-                    | WordDefinitionV2::EnSentence { id, content, .. } => {
+                    WordDefinitionV3::EnDefinition { id, content, .. }
+                    | WordDefinitionV3::EnSentence { id, content, .. } => {
                         push_node(
                             &mut nodes,
                             *id,
@@ -172,14 +127,32 @@ pub(crate) fn proposed_nodes(
                     false,
                 );
                 push_english_text_nodes(&mut nodes, sentence.id, "en_text", &sentence.en_text);
+                // zh_text 只是主译文别名，不再产生第二个稳定节点。
+                for translation in &sentence.zh_translations {
+                    push_node(
+                        &mut nodes,
+                        translation.id,
+                        "text_variant",
+                        PersistedWordStep::Meanings,
+                        Some(sentence.id),
+                        SENTENCE_TRANSLATION_ROLE,
+                        false,
+                    );
+                }
+            }
+            for component in &sense.component_usages {
+                let id = match component {
+                    crate::lexicon::dto::PhraseComponentUsageV3::Unresolved { id, .. }
+                    | crate::lexicon::dto::PhraseComponentUsageV3::Resolved { id, .. } => *id,
+                };
                 push_node(
                     &mut nodes,
-                    sentence.zh_text_id,
-                    "text_variant",
+                    id,
+                    "phrase_component_usage",
                     PersistedWordStep::Meanings,
-                    Some(sentence.id),
-                    text_variant_role("zh_text", "zh", Dialect::Common),
-                    true,
+                    Some(sense.id),
+                    PHRASE_COMPONENT_USAGE_ROLE,
+                    false,
                 );
             }
             for relation in &sense.relations {
@@ -200,7 +173,7 @@ pub(crate) fn proposed_nodes(
 
 pub(crate) fn validate_node_identities(
     entry_id: Uuid,
-    forms: &DraftFormsStepContent,
+    forms: &DraftFormsStepContentV3,
     proposed: &[ProposedNode],
     existing: &[NodeIdentityRecord],
 ) -> Vec<DraftValidationIssue> {
@@ -319,7 +292,7 @@ struct NodeLocator<'a> {
 }
 
 impl<'a> NodeLocator<'a> {
-    fn new(forms: &'a DraftFormsStepContent, proposed: &'a [ProposedNode]) -> Self {
+    fn new(forms: &'a DraftFormsStepContentV3, proposed: &'a [ProposedNode]) -> Self {
         Self {
             proposed_by_id: proposed.iter().map(|node| (node.id, node)).collect(),
             pos_codes: forms
@@ -430,43 +403,14 @@ fn push_node(
     });
 }
 
-fn push_form_variant_nodes(
-    nodes: &mut Vec<ProposedNode>,
-    slot_id: Uuid,
-    variants: &[crate::lexicon::dto::WordFormVariantV2],
-) {
-    for variant in variants {
-        push_node(
-            nodes,
-            variant.id,
-            "form_variant",
-            PersistedWordStep::Forms,
-            Some(slot_id),
-            form_variant_role(variant.dialect),
-            true,
-        );
-        for pronunciation in &variant.pronunciations {
-            push_node(
-                nodes,
-                pronunciation.id,
-                "pronunciation",
-                PersistedWordStep::Forms,
-                Some(variant.id),
-                PRONUNCIATION_ROLE,
-                false,
-            );
-        }
-    }
-}
-
 fn push_english_text_nodes(
     nodes: &mut Vec<ProposedNode>,
     owner_id: Uuid,
     field_role: &str,
-    value: &EnglishTextV2,
+    value: &EnglishTextV3,
 ) {
     match value {
-        EnglishTextV2::Unified { common } => push_node(
+        EnglishTextV3::Unified { common } => push_node(
             nodes,
             common.id,
             "text_variant",
@@ -475,9 +419,9 @@ fn push_english_text_nodes(
             text_variant_role(field_role, "en", Dialect::Common),
             true,
         ),
-        EnglishTextV2::Distinguish { uk, us, .. } => {
+        EnglishTextV3::Distinguish { uk, us, .. } => {
             for (dialect, slot) in [(Dialect::Uk, uk), (Dialect::Us, us)] {
-                if let DialectVariantSlotV2::Ready { variant } = slot {
+                if let DialectVariantRichTextSlotV3::Ready { variant } = slot {
                     push_node(
                         nodes,
                         variant.id,

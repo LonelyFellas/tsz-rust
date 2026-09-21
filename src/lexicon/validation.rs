@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::lexicon::dto::{
-    Dialect, DialectVariantSlotV2, DraftFormsStepContent, DraftMeaningsStepContent,
-    DraftNodeLocation, DraftValidationIssue, EnglishTextV2, PersistedWordStep, RichText,
-    WordDefinitionV2, WordFormTypeV2, WordHeadwordsV2,
+    Dialect, DialectVariantRichTextSlotV3, DraftFormsStepContentV3, DraftMeaningsStepContentV3,
+    DraftNodeLocation, DraftValidationIssue, EnglishTextV3, PersistedWordStep, RichTextV3,
+    WordDefinitionV3, WordFormTypeV2,
 };
 use crate::lexicon::model::NodeIdentityRecord;
 
@@ -18,7 +18,7 @@ use helpers::*;
 pub use meanings::validate_meanings;
 pub use structure::MAX_STEP_CONTENT_BODY_BYTES;
 pub(crate) use structure::{
-    MAX_ENTRY_NODES, ProposedNode, proposed_nodes, validate_node_identities,
+    MAX_ENTRY_NODES, ProposedNode, proposed_meaning_nodes, validate_node_identities,
 };
 
 #[cfg(test)]

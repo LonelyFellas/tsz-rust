@@ -578,7 +578,7 @@ impl LexiconRepository {
     pub(crate) async fn replace_meanings_content(
         tx: &mut Transaction<'_, Postgres>,
         entry_id: Uuid,
-        meanings: &DraftMeaningsStepContent,
+        meanings: &DraftMeaningsStepContentV3,
         sub_parts: &HashMap<String, Uuid>,
     ) -> Result<(), LexiconRepositoryError> {
         // 成分节点只能按 node_role 退役：`phrase_component_usage` 这个 node_type 在 B1

@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::{
     lexicon::{
         dto::{
-            Dialect, DialectVariantSlotV2, DraftMeaningsStepContent, EnglishTextV2, EntryKind,
-            RichText, TextOrigin, WordDefinitionV2,
+            Dialect, DialectVariantRichTextSlotV3, DraftMeaningsStepContentV3, EnglishTextV3,
+            EntryKind, RichTextV3, TextOrigin, WordDefinitionV3,
         },
         model::{
             CatalogPartRecord, CatalogSubPartRecord, ComponentTargetDraftRecord,

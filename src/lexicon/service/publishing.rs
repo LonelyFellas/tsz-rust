@@ -1,8 +1,8 @@
 use super::*;
+use crate::lexicon::dto::{DraftMeaningsStepContentV3, WordDefinitionV3, WordRelationV3};
 
-// --- publication ---
-
-impl LexiconService {}
+#[cfg(test)]
+mod tests;
 
 // --- references ---
 
@@ -45,7 +45,7 @@ pub(super) struct MeaningReferenceResolution {
 pub(super) async fn resolve_meaning_references(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: Uuid,
-    meanings: &mut DraftMeaningsStepContent,
+    meanings: &mut DraftMeaningsStepContentV3,
     mode: ReferenceResolutionMode,
     lock_for_publish: bool,
 ) -> Result<MeaningReferenceResolution, LexiconServiceError> {
@@ -87,7 +87,9 @@ pub(super) async fn resolve_meaning_references(
                 }
             }
             for relation in &sense.relations {
-                let Some((target_entry_id, target_sense_id)) = relation.bound_target() else {
+                let Some((target_entry_id, target_sense_id)) =
+                    relation.target_word_id.zip(relation.target_sense_id)
+                else {
                     // Unlinked display text is valid in drafts and publications.
                     if let Some(issue) = pending_relation_issue(relation) {
                         issues.push(issue);
@@ -197,7 +199,9 @@ pub(super) async fn resolve_meaning_references(
     for pos in &mut meanings.pos {
         for sense in &mut pos.senses {
             for relation in &mut sense.relations {
-                let Some((target_entry_id, target_sense_id)) = relation.bound_target() else {
+                let Some((target_entry_id, target_sense_id)) =
+                    relation.target_word_id.zip(relation.target_sense_id)
+                else {
                     continue;
                 };
                 let key = SenseTargetKey {
@@ -300,7 +304,7 @@ fn relation_target_snapshot(
     }
 
     let headword = draft_target_headword(record)?;
-    let meanings: DraftMeaningsStepContent =
+    let meanings: DraftMeaningsStepContentV3 =
         serde_json::from_value(record.draft_meanings.clone()).map_err(serialization_error)?;
     let sense = meanings
         .pos
@@ -344,9 +348,7 @@ pub(super) fn published_sense_snapshot(
         3 => {
             let word: AdminWordV3 =
                 serde_json::from_value(record.snapshot.clone()).map_err(serialization_error)?;
-            let meanings =
-                crate::lexicon::service::v3_publication::v3_meanings_to_v2(&word.meanings)?;
-            (word.presentation.label, meanings)
+            (word.presentation.label, word.meanings)
         }
         version => return Err(LexiconServiceError::UnsupportedSchemaVersion(version)),
     };
@@ -364,11 +366,8 @@ pub(super) fn published_sense_snapshot(
 }
 
 /// 校验未绑定关联词的文本存储限制；保存和发布使用相同规则。
-pub(super) fn pending_relation_issue(relation: &WordRelationV2) -> Option<DraftValidationIssue> {
-    if relation.pending_target_headword.is_none()
-        && relation.prebound_target_word_id.is_none()
-        && relation.pending_target_gloss.is_some()
-    {
+pub(super) fn pending_relation_issue(relation: &WordRelationV3) -> Option<DraftValidationIssue> {
+    if relation.pending_target_headword.is_none() && relation.pending_target_gloss.is_some() {
         return Some(reference_issue(
             relation.id,
             "pending_target_gloss",
@@ -391,14 +390,6 @@ pub(super) fn pending_relation_issue(relation: &WordRelationV2) -> Option<DraftV
             "预定义词义不能超过 5000 个字符",
         ));
     }
-    if relation.prebound_target_word_id.is_some() {
-        return Some(reference_issue(
-            relation.id,
-            "prebound_target_word_id",
-            "relation_target_shape_invalid",
-            "预绑定已停用，请选择具体词义或使用纯文本",
-        ));
-    }
     // 手输关联词是独立展示文本，保存和发布均保留，不创建或自动绑定词条。
     // 两个阶段只校验存储限制，不要求它是合法英文词条名。
     if relation
@@ -419,14 +410,15 @@ pub(super) fn pending_relation_issue(relation: &WordRelationV2) -> Option<DraftV
     None
 }
 
-pub(super) fn published_sense_gloss(sense: &WordSenseV2) -> String {
+/// 中文词义摘要。草稿、发布引用和搜索候选共用完整内容模型，不做旧模型转换。
+pub(super) fn published_sense_gloss(sense: &WordSenseV3) -> String {
     sense
         .definitions
         .iter()
         .find_map(|definition| match definition {
-            WordDefinitionV2::ZhDefinition { content, .. }
-            | WordDefinitionV2::ZhSentence { content, .. } => Some(content.text().to_owned()),
-            WordDefinitionV2::EnDefinition { .. } | WordDefinitionV2::EnSentence { .. } => None,
+            WordDefinitionV3::ZhDefinition { content, .. }
+            | WordDefinitionV3::ZhSentence { content, .. } => Some(content.text().to_owned()),
+            WordDefinitionV3::EnDefinition { .. } | WordDefinitionV3::EnSentence { .. } => None,
         })
         .unwrap_or_default()
 }

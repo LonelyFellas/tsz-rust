@@ -696,33 +696,6 @@ pub(crate) fn normalize_sentence_translations(content: &mut DraftMeaningsStepCon
     }
 }
 
-pub(crate) fn canonicalize_sentence_translations(content: &mut DraftMeaningsStepContentV3) -> bool {
-    let mut valid = true;
-    for translation in content
-        .pos
-        .iter_mut()
-        .flat_map(|pos| &mut pos.senses)
-        .flat_map(|sense| &mut sense.sentences)
-        .flat_map(|sentence| &mut sentence.zh_translations)
-    {
-        let Ok(mut rich_text) = serde_json::from_value::<RichText>(
-            serde_json::to_value(&translation.content).unwrap_or(Value::Null),
-        ) else {
-            valid = false;
-            continue;
-        };
-        if crate::lexicon::rich_text::canonicalize(&mut rich_text).is_err() {
-            valid = false;
-            continue;
-        }
-        match serde_json::from_value(serde_json::to_value(rich_text).unwrap_or(Value::Null)) {
-            Ok(canonical) => translation.content = canonical,
-            Err(_) => valid = false,
-        }
-    }
-    valid
-}
-
 pub(crate) fn validate_complete_definition_grammar(
     content: &DraftMeaningsStepContentV3,
 ) -> Vec<DraftValidationIssue> {
@@ -2774,7 +2747,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_meanings_reject_extra_keys_without_tightening_the_v2_dto() {
+    fn meanings_reject_extra_keys_and_enforce_node_limits() {
         let value = json!({
             "schema_version": 3,
             "base_revision": 1,
@@ -2790,13 +2763,13 @@ mod tests {
                 .is_err()
         );
         assert!(
-            serde_json::from_value::<crate::lexicon::dto::DraftMeaningsStepContent>(json!({
+            serde_json::from_value::<DraftMeaningsStepContentV3>(json!({
                 "sense_groups": [],
                 "pos": [],
                 "unexpected": true
             }))
-            .is_ok(),
-            "legacy V2 decoder must remain backward-compatible"
+            .is_err(),
+            "完整内容模型不接受旧聚合的宽松反序列化"
         );
 
         let mut oversized: crate::lexicon::dto::SaveMeaningsStepInputV3 =

@@ -4708,6 +4708,36 @@ async fn v3_meanings_reject_read_only_and_invalid_complete_without_writing(pool:
     assert_eq!(status, StatusCode::OK, "{current}");
     assert_eq!(current["word"]["revision"], 2);
 
+    // 非主译文也进入同一份稳定节点清单，不能覆盖/吞掉同 ID 的词义节点。
+    let mut colliding = complete_v3_meanings_fixture(pos_id.clone());
+    let colliding_sense_id = colliding["pos"][0]["senses"][0]["id"].clone();
+    let mut colliding_sentence = sentence.clone();
+    colliding_sentence["links"][0]["sense_id"] = colliding_sense_id.clone();
+    colliding_sentence["zh_translations"] = json!([
+        {"id": colliding_sentence["zh_text_id"], "band": "balanced_fluency", "language": "zh", "content": rich_text("这是一个港口。")},
+        {"id": colliding_sense_id, "band": "adapted_creation", "language": "zh", "content": rich_text("港口在这里。")}
+    ]);
+    colliding["pos"][0]["senses"][0]["sentences"] = json!([colliding_sentence]);
+    let (status, _, problem) = call_problem(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+        &bearer,
+        None,
+        json!({
+            "schema_version": 3, "base_revision": 2, "intent": "complete", "content": colliding
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert!(has_issue(&problem, "node_id_reused"), "{problem}");
+    let senses: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.senses WHERE entry_id = $1")
+        .bind(entry_uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(senses, 0, "节点冲突不能留下部分词义写入");
+
     let mut legal_content = complete_v3_meanings_fixture(pos_id);
     let mut legal_sentence = sentence;
     legal_sentence["links"][0]["sense_id"] = legal_content["pos"][0]["senses"][0]["id"].clone();

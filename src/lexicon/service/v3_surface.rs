@@ -14,7 +14,7 @@ use crate::lexicon::{
         RelationReferenceSummaryV3, SurfaceAttentionLevelV2, SurfaceCanContinueTrue,
         SurfaceConfirmationReasonV2, SurfaceContentScopeV2, SurfaceMatchCandidateV2,
         SurfaceMatchCategoryV2, SurfaceMatchItemV3, SurfaceMatchPageV3, SurfaceMatchSeverityV2,
-        WordDefinitionV3, WordFormTypeV2, WordFormTypeV3, WordSenseV3,
+        WordFormTypeV2, WordFormTypeV3,
     },
     repository::SurfaceLockKey,
     surface_snapshot::{
@@ -284,18 +284,6 @@ impl V3RelationSummaryBuilder {
 
 fn empty_v3_relation_summary() -> RelationReferenceSummaryV3 {
     V3RelationSummaryBuilder::default().finish()
-}
-
-fn v3_sense_gloss(sense: &WordSenseV3) -> String {
-    sense
-        .definitions
-        .iter()
-        .find_map(|definition| match definition {
-            WordDefinitionV3::ZhDefinition { content, .. }
-            | WordDefinitionV3::ZhSentence { content, .. } => Some(content.text().to_owned()),
-            WordDefinitionV3::EnDefinition { .. } | WordDefinitionV3::EnSentence { .. } => None,
-        })
-        .unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -674,11 +662,6 @@ impl LexiconService {
         let mut suggested_pos = BTreeSet::new();
         for record in records {
             match record.content_schema_version {
-                2 => {
-                    let forms: DraftFormsStepContent =
-                        serde_json::from_value(record.forms).map_err(serialization_error)?;
-                    suggested_pos.extend(forms.pos.into_iter().map(|pos| pos.pos));
-                }
                 3 => {
                     let forms: DraftFormsStepContentV3 =
                         serde_json::from_value(record.forms).map_err(serialization_error)?;
@@ -1790,23 +1773,6 @@ impl LexiconService {
             .into_iter()
             .map(|record| {
                 let (mut pos_labels, mut gloss_previews) = match record.content_schema_version {
-                    2 => {
-                        let forms: DraftFormsStepContent =
-                            serde_json::from_value(record.forms).map_err(serialization_error)?;
-                        let meanings: DraftMeaningsStepContent =
-                            serde_json::from_value(record.meanings).map_err(serialization_error)?;
-                        (
-                            forms.pos.into_iter().map(|pos| pos.pos).collect::<Vec<_>>(),
-                            meanings
-                                .pos
-                                .iter()
-                                .flat_map(|pos| &pos.senses)
-                                .map(published_sense_gloss)
-                                .filter(|gloss| !gloss.is_empty())
-                                .take(5)
-                                .collect::<Vec<_>>(),
-                        )
-                    }
                     3 => {
                         let forms: DraftFormsStepContentV3 =
                             serde_json::from_value(record.forms).map_err(serialization_error)?;
@@ -1818,7 +1784,7 @@ impl LexiconService {
                                 .pos
                                 .iter()
                                 .flat_map(|pos| &pos.senses)
-                                .map(v3_sense_gloss)
+                                .map(published_sense_gloss)
                                 .filter(|gloss| !gloss.is_empty())
                                 .take(5)
                                 .collect::<Vec<_>>(),

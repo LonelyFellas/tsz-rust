@@ -157,21 +157,6 @@ fn related_v3_matches(
     Ok(matches)
 }
 
-fn related_v3_sense_gloss(sense: &WordSenseV3) -> String {
-    sense
-        .definitions
-        .iter()
-        .find_map(|definition| match definition {
-            crate::lexicon::dto::WordDefinitionV3::ZhDefinition { content, .. }
-            | crate::lexicon::dto::WordDefinitionV3::ZhSentence { content, .. } => {
-                Some(content.text().to_owned())
-            }
-            crate::lexicon::dto::WordDefinitionV3::EnDefinition { .. }
-            | crate::lexicon::dto::WordDefinitionV3::EnSentence { .. } => None,
-        })
-        .unwrap_or_default()
-}
-
 // --- query ---
 
 impl LexiconService {
@@ -418,7 +403,7 @@ impl LexiconService {
                         .flat_map(|pos| &pos.senses)
                         .map(|sense| RelatedWordSenseV3 {
                             sense_id: sense.id,
-                            gloss: related_v3_sense_gloss(sense),
+                            gloss: published_sense_gloss(sense),
                         })
                         .collect();
                     Ok(RelatedWordResultV3 {

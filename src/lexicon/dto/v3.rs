@@ -643,6 +643,13 @@ pub enum RichTextV3 {
 }
 
 impl RichTextV3 {
+    pub(crate) fn version(&self) -> u8 {
+        match self {
+            Self::V1(value) => value.version,
+            Self::V2(value) => value.version,
+        }
+    }
+
     pub(crate) fn text(&self) -> &str {
         match self {
             Self::V1(value) => &value.text,
@@ -1026,6 +1033,12 @@ pub struct WordRelationV3 {
     #[schema(nullable = false, read_only)]
     pub target_status: Option<AdminWordStatus>,
     pub score: String,
+}
+
+impl WordRelationV3 {
+    pub fn bound_target(&self) -> Option<(Uuid, Uuid)> {
+        self.target_word_id.zip(self.target_sense_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

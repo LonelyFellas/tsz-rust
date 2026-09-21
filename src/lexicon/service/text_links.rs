@@ -63,23 +63,6 @@ pub(super) fn preserve_missing(
     Ok(())
 }
 
-pub(super) fn restore(
-    source: &DraftMeaningsStepContentV3,
-    target: &mut DraftMeaningsStepContentV3,
-) {
-    let links: HashMap<_, _> = variants(source)
-        .map(|v| (v.id, v.text_links.clone()))
-        .collect();
-    for variant in target
-        .pos
-        .iter_mut()
-        .flat_map(target_english_texts)
-        .flat_map(english_text_variants_mut)
-    {
-        variant.text_links = links.get(&variant.id).cloned().unwrap_or_default();
-    }
-}
-
 pub(crate) fn valid_ranges(variant: &RichTextVariantV3) -> bool {
     if variant.text_links.len() > 100 {
         return false;

@@ -1181,12 +1181,22 @@ V2 聚合、V2 写读路径或 `AdminWordV2` 的地方，都只作历史记录�
   `v3_entry_state` 的 `origin` 只剩 `native`，`migration_batch_id` / `source_publication_id` /
   `source_revision` / `publication_canary_enabled` 四列一并删除。
 
-### 20.3 刻意保留
+### 20.3 保留边界与后续收敛
 
-- `DraftMeaningsStepContent` 及其 `WordSenseV2` / `WordDefinitionV2` / `WordRelationV2` 等一族
-  **不是 V2 wire 类型**，而是词义校验与存储安全网的内部规范模型：V3 保存与发布都把
-  `DraftMeaningsStepContentV3` 适配成这套结构再喂给 `validate_meanings`。它们已从 OpenAPI 注销，
-  只在进程内存活。改名或改造成 V3 原生类型是独立的重构，不在本次范围。
+- 下线 V2 wire 时曾保留 `DraftMeaningsStepContent`、`DraftFormsStepContent` 及其旧聚合类型供内部校验使用。
+  这些类型及适配器已在第一批领域重构中删除：校验、稳定节点生成、关系表写入和例句扫描均直接
+  消费完整 `DraftMeaningsStepContentV3` / `DraftFormsStepContentV3`，不再有 JSON 聚合往返或裁剪投影。
 - `RichTextV1` / `RichTextV2` 是富文本文档的版本轴，与词条内容格式无关，照常保留。
 - `RelatedSearchResponse::{Legacy,V2}` 是关联词搜索的分页形状版本，与内容格式无关。
 - `SurfaceMatchPageV2` 及其一族仍是 surface snapshot 的内部规范形状，wire 上只出 V3 投影。
+
+## 21. 第一批领域模型收敛
+
+- 保存、发布、引用解析与仓储写入共用完整原生内容；不通过恢复函数补回翻译、成分、语音或链接。
+- `proposed_meaning_nodes` 是词义稳定节点生成入口，直接包含所有译文和释义级成分；主译文别名不重复建节点，只读关联不算可写节点。
+- 身份校验直接读取原生词形定位词性和组，不再构造空 base form 或虚假词头。
+- 语义校验允许 common 语法变体或完整 uk/us 对；目录引用检查使用实际词形代码。
+- 音频元数据仍由数据库校准，属于服务端事实，不是格式转换补偿。
+- 富文本文档的 V1/V2 标注算法继续复用，不等于恢复旧词条内容格式。
+- 本批不改变共享例句发布机制、批次发布、权限或回退规则；后续批次见
+  `docs/features/lexicon-domain-refactor/requirements.md` 与 `design.md`。

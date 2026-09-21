@@ -28,20 +28,20 @@ pub(super) struct SentenceVariant<'a> {
 }
 
 /// 把词义内容里所有例句的所有正文侧摊平。
-pub(super) fn sentence_variants(meanings: &DraftMeaningsStepContent) -> Vec<SentenceVariant<'_>> {
+pub(super) fn sentence_variants(meanings: &DraftMeaningsStepContentV3) -> Vec<SentenceVariant<'_>> {
     let mut variants = Vec::new();
     for pos in &meanings.pos {
         for sense in &pos.senses {
             for sentence in &sense.sentences {
                 match &sentence.en_text {
-                    EnglishTextV2::Unified { common } => variants.push(SentenceVariant {
+                    EnglishTextV3::Unified { common } => variants.push(SentenceVariant {
                         sentence_id: sentence.id,
                         dialect: Dialect::Common,
                         text: common.value.text(),
                     }),
-                    EnglishTextV2::Distinguish { uk, us, .. } => {
+                    EnglishTextV3::Distinguish { uk, us, .. } => {
                         for (dialect, slot) in [(Dialect::Uk, uk), (Dialect::Us, us)] {
-                            if let DialectVariantSlotV2::Ready { variant } = slot {
+                            if let DialectVariantRichTextSlotV3::Ready { variant } = slot {
                                 variants.push(SentenceVariant {
                                     sentence_id: sentence.id,
                                     dialect,
@@ -376,8 +376,6 @@ impl PublishedAssociationTarget {
         forms_content: &crate::lexicon::dto::DraftFormsStepContentV3,
         meanings_content: &DraftMeaningsStepContentV3,
     ) -> Result<Self, LexiconServiceError> {
-        let meanings =
-            crate::lexicon::service::v3_publication::v3_meanings_to_v2(meanings_content)?;
         let pos = forms_content
             .pos
             .iter()
@@ -448,7 +446,7 @@ impl PublishedAssociationTarget {
                         })
                         .collect()
                 },
-                senses: association_senses_v3(meanings_content, &meanings, forms.pos_id),
+                senses: association_senses(meanings_content, forms.pos_id),
             })
             .collect();
         Ok(Self {
@@ -614,7 +612,7 @@ impl PublishedAssociationTarget {
 }
 
 fn association_senses(
-    meanings: &DraftMeaningsStepContent,
+    meanings: &DraftMeaningsStepContentV3,
     pos_id: Uuid,
 ) -> Vec<PublishedAssociationSense> {
     meanings
@@ -628,36 +626,11 @@ fn association_senses(
                     id: sense.id,
                     level: sense.level.clone(),
                     gloss: published_sense_gloss(sense),
-                    component_usages: Vec::new(),
+                    component_usages: sense.component_usages.to_vec(),
                 })
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// V3 目标的词义视图。gloss 沿用 V2 形状（`published_sense_gloss` 只认 V2 定义），
-/// 成分用词只有 V3 结构里才有，所以两份 meanings 都要。
-fn association_senses_v3(
-    meanings: &crate::lexicon::dto::DraftMeaningsStepContentV3,
-    relational: &DraftMeaningsStepContent,
-    pos_id: Uuid,
-) -> Vec<PublishedAssociationSense> {
-    let component_usages_by_sense = meanings
-        .pos
-        .iter()
-        .flat_map(|pos| &pos.senses)
-        .map(|sense| (sense.id, sense.component_usages.to_vec()))
-        .collect::<HashMap<_, _>>();
-    association_senses(relational, pos_id)
-        .into_iter()
-        .map(|sense| PublishedAssociationSense {
-            component_usages: component_usages_by_sense
-                .get(&sense.id)
-                .cloned()
-                .unwrap_or_default(),
-            ..sense
-        })
-        .collect()
 }
 
 fn v3_form_variants(
@@ -739,7 +712,7 @@ impl LexiconService {
     pub(super) async fn refresh_sentence_associations(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         entry_id: Uuid,
-        meanings: &DraftMeaningsStepContent,
+        meanings: &DraftMeaningsStepContentV3,
         allow_v3_targets: bool,
         allow_automatic_associations: bool,
         only_sentence_id: Option<Uuid>,

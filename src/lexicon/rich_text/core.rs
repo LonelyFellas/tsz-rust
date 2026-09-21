@@ -14,49 +14,84 @@ pub fn is_valid(value: &RichText) -> bool {
     canonicalize(&mut value).is_ok()
 }
 
+pub fn is_valid_native(value: &RichTextV3) -> bool {
+    canonicalize_native(&mut value.clone())
+}
+
 /// Validates and canonicalizes every rich-text value in the meanings payload.
 ///
 /// Invalid values are left untouched so the regular draft validator can attach
 /// the error to the owning domain node. Valid V2 values are normalized before
 /// they are hashed or persisted.
-pub fn canonicalize_meanings(content: &mut DraftMeaningsStepContent) -> bool {
+pub fn canonicalize_meanings(content: &mut DraftMeaningsStepContentV3) -> bool {
     let mut valid = true;
+    for group in &mut content.sense_groups {
+        if let Some(content) = &mut group.name_en_rich {
+            valid &= canonicalize_native(content);
+        }
+    }
     for pos in &mut content.pos {
         for grammar in &mut pos.grammar_structures {
             for variant in &mut grammar.variants {
-                valid &= canonicalize(&mut variant.content).is_ok();
+                valid &= canonicalize_native(&mut variant.content);
             }
         }
         for sense in &mut pos.senses {
             for definition in &mut sense.definitions {
                 match definition {
-                    WordDefinitionV2::ZhDefinition { content, .. }
-                    | WordDefinitionV2::ZhSentence { content, .. } => {
-                        valid &= canonicalize(content).is_ok();
+                    WordDefinitionV3::ZhDefinition { content, .. }
+                    | WordDefinitionV3::ZhSentence { content, .. } => {
+                        valid &= canonicalize_native(content);
                     }
-                    WordDefinitionV2::EnDefinition { content, .. }
-                    | WordDefinitionV2::EnSentence { content, .. } => {
+                    WordDefinitionV3::EnDefinition { content, .. }
+                    | WordDefinitionV3::EnSentence { content, .. } => {
                         valid &= canonicalize_english_text(content);
                     }
                 }
             }
             for sentence in &mut sense.sentences {
                 valid &= canonicalize_english_text(&mut sentence.en_text);
-                valid &= canonicalize(&mut sentence.zh_text).is_ok();
+                valid &= canonicalize_native(&mut sentence.zh_text);
+                for translation in &mut sentence.zh_translations {
+                    valid &= canonicalize_native(&mut translation.content);
+                }
             }
         }
     }
     valid
 }
 
-fn canonicalize_english_text(value: &mut EnglishTextV2) -> bool {
+/// Only the rich-text leaf enters the shared annotation algorithm. The complete
+/// meanings aggregate stays intact; voice settings, links and assets never pass
+/// through a reduced intermediate model.
+fn canonicalize_native(value: &mut RichTextV3) -> bool {
+    let Ok(json) = serde_json::to_value(&*value) else {
+        return false;
+    };
+    let Ok(mut rich) = serde_json::from_value::<RichText>(json) else {
+        return false;
+    };
+    if canonicalize(&mut rich).is_err() {
+        return false;
+    }
+    let Ok(json) = serde_json::to_value(rich) else {
+        return false;
+    };
+    let Ok(canonical) = serde_json::from_value(json) else {
+        return false;
+    };
+    *value = canonical;
+    true
+}
+
+fn canonicalize_english_text(value: &mut EnglishTextV3) -> bool {
     match value {
-        EnglishTextV2::Unified { common } => canonicalize(&mut common.value).is_ok(),
-        EnglishTextV2::Distinguish { uk, us, .. } => {
+        EnglishTextV3::Unified { common } => canonicalize_native(&mut common.value),
+        EnglishTextV3::Distinguish { uk, us, .. } => {
             let mut valid = true;
             for slot in [uk, us] {
-                if let DialectVariantSlotV2::Ready { variant } = slot {
-                    valid &= canonicalize(&mut variant.value).is_ok();
+                if let DialectVariantRichTextSlotV3::Ready { variant } = slot {
+                    valid &= canonicalize_native(&mut variant.value);
                 }
             }
             valid
