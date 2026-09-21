@@ -2,9 +2,8 @@ use super::*;
 
 pub fn validate_meanings(
     entry_id: Uuid,
-    forms: &DraftFormsStepContent,
-    content: &DraftMeaningsStepContent,
-    headwords: &WordHeadwordsV2,
+    forms: &DraftFormsStepContentV3,
+    content: &DraftMeaningsStepContentV3,
     sub_part_parents: &HashMap<String, String>,
 ) -> Vec<DraftValidationIssue> {
     let mut issues = Vec::new();
@@ -68,13 +67,8 @@ pub fn validate_meanings(
     }
 
     let mut seen_pos = HashSet::new();
-    // 语法结构的方言形状：unified 词条只接受单条 common；distinguish 词条既接受历史的
-    // uk + us 双条，也接受收敛后的单条 common（英美方言偏好化 A1 · 后端提案 P1）。
-    let allowed_dialects: &[&[Dialect]] = if matches!(headwords, WordHeadwordsV2::Unified { .. }) {
-        &[&[Dialect::Common]]
-    } else {
-        &[&[Dialect::Common], &[Dialect::Uk, Dialect::Us]]
-    };
+    // 原生内容允许通用语法变体或完整英美对，不依赖伪造的词头模式。
+    let allowed_dialects: &[&[Dialect]] = &[&[Dialect::Common], &[Dialect::Uk, Dialect::Us]];
     for pos in &content.pos {
         let Some(pos_code) = form_pos.get(&pos.pos_id).copied() else {
             issue(
@@ -248,27 +242,27 @@ pub fn validate_meanings(
             let mut has_chinese = false;
             for definition in &sense.definitions {
                 match definition {
-                    WordDefinitionV2::ZhDefinition { content_id, .. }
-                    | WordDefinitionV2::ZhSentence { content_id, .. } => unique_node(
+                    WordDefinitionV3::ZhDefinition { content_id, .. }
+                    | WordDefinitionV3::ZhSentence { content_id, .. } => unique_node(
                         &mut issues,
                         &mut node_types,
                         PersistedWordStep::Meanings,
                         *content_id,
                         "text_variant",
                     ),
-                    WordDefinitionV2::EnDefinition { content, .. }
-                    | WordDefinitionV2::EnSentence { content, .. } => {
+                    WordDefinitionV3::EnDefinition { content, .. }
+                    | WordDefinitionV3::EnSentence { content, .. } => {
                         register_english_text_nodes(&mut issues, &mut node_types, content);
                     }
                 }
                 let (id, grammar_id, valid_content, chinese) = match definition {
-                    WordDefinitionV2::ZhDefinition {
+                    WordDefinitionV3::ZhDefinition {
                         id,
                         grammar_structure_id,
                         content,
                         ..
                     }
-                    | WordDefinitionV2::ZhSentence {
+                    | WordDefinitionV3::ZhSentence {
                         id,
                         grammar_structure_id,
                         content,
@@ -279,13 +273,13 @@ pub fn validate_meanings(
                         valid_rich_text(content) && !content.text().trim().is_empty(),
                         true,
                     ),
-                    WordDefinitionV2::EnDefinition {
+                    WordDefinitionV3::EnDefinition {
                         id,
                         grammar_structure_id,
                         content,
                         ..
                     }
-                    | WordDefinitionV2::EnSentence {
+                    | WordDefinitionV3::EnSentence {
                         id,
                         grammar_structure_id,
                         content,
@@ -461,9 +455,7 @@ pub fn validate_meanings(
                     );
                 }
                 if relation.bound_target().is_some()
-                    && (relation.prebound_target_word_id.is_some()
-                        || relation.prebinding_state.is_some()
-                        || relation.pending_target_headword.is_some()
+                    && (relation.pending_target_headword.is_some()
                         || relation.pending_target_gloss.is_some())
                 {
                     issue(
@@ -477,35 +469,6 @@ pub fn validate_meanings(
                         },
                         "relation_target_shape_invalid",
                         "已绑定关联词不能再携带待建词面或预定义词义",
-                    );
-                }
-                if relation.prebound_target_word_id.is_some()
-                    && (relation.target_word_id.is_some()
-                        || relation.target_sense_id.is_some()
-                        || relation.pending_target_headword.is_some()
-                        || !matches!(
-                            relation.prebinding_state.as_deref(),
-                            Some("waiting_first_sense" | "target_sense_deleted")
-                        ))
-                {
-                    issue(
-                        &mut issues,
-                        PersistedWordStep::Meanings,
-                        relation.id,
-                        "prebound_target_word_id",
-                        "relation_target_shape_invalid",
-                        "预绑定关联词不携带待建词面，且必须保留稳定目标与服务端状态",
-                    );
-                }
-                if relation.prebound_target_word_id.is_none() && relation.prebinding_state.is_some()
-                {
-                    issue(
-                        &mut issues,
-                        PersistedWordStep::Meanings,
-                        relation.id,
-                        "prebound_target_word_id",
-                        "relation_target_shape_invalid",
-                        "预绑定状态缺少稳定目标词条",
                     );
                 }
             }
@@ -529,25 +492,15 @@ pub fn validate_meanings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexicon::dto::SourceDialect;
     use serde_json::json;
 
-    fn forms(pos: &str, pos_id: Uuid) -> DraftFormsStepContent {
-        DraftFormsStepContent {
+    fn forms(pos: &str, pos_id: Uuid) -> DraftFormsStepContentV3 {
+        DraftFormsStepContentV3 {
             pos: vec![
                 serde_json::from_value(json!({
                     "pos_id": pos_id,
                     "pos": pos,
-                    "dialect_rules": {"spelling_mode": "unified", "phonetic_mode": "unified"},
-                    "base_form": {
-                        "id": Uuid::now_v7(), "form_type": "base",
-                        "variants": [{
-                            "id": Uuid::now_v7(), "dialect": "common", "spelling": "high",
-                            "origin": "dictionary", "pronunciations": [{
-                                "id": Uuid::now_v7(), "dict_phonetic": "", "actual_pron": "", "style": "normal"
-                            }]
-                        }]
-                    },
+                    "forms": [],
                     "form_groups": []
                 }))
                 .unwrap(),
@@ -555,7 +508,7 @@ mod tests {
         }
     }
 
-    fn meanings_without_sub_pos(pos_id: Uuid) -> DraftMeaningsStepContent {
+    fn meanings_without_sub_pos(pos_id: Uuid) -> DraftMeaningsStepContentV3 {
         serde_json::from_value(json!({
             "sense_groups": [],
             "pos": [{
@@ -578,11 +531,6 @@ mod tests {
     /// `sub_parts` 是「细分词性编码 -> 所属基本词性编码」，与目录下发的形状一致。
     fn sub_pos_required_issues(pos: &str, sub_parts: &[(&str, &str)]) -> usize {
         let pos_id = Uuid::now_v7();
-        let headwords = WordHeadwordsV2::Distinguish {
-            uk: "high".to_owned(),
-            us: "high".to_owned(),
-            source_dialect: SourceDialect::Uk,
-        };
         let parents = sub_parts
             .iter()
             .map(|(sub, parent)| ((*sub).to_owned(), (*parent).to_owned()))
@@ -591,7 +539,6 @@ mod tests {
             Uuid::now_v7(),
             &forms(pos, pos_id),
             &meanings_without_sub_pos(pos_id),
-            &headwords,
             &parents,
         )
         .into_iter()

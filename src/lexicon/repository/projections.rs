@@ -7,7 +7,7 @@ use super::*;
 pub(super) async fn insert_meanings(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
-    meanings: &DraftMeaningsStepContent,
+    meanings: &DraftMeaningsStepContentV3,
     sub_parts: &HashMap<String, Uuid>,
 ) -> Result<(), LexiconRepositoryError> {
     for (index, group) in meanings.sense_groups.iter().enumerate() {
@@ -213,11 +213,10 @@ pub(super) async fn insert_meanings(
                         id, entry_id, source_sense_id, relation_type,
                         target_entry_id, target_sense_id, score,
                         target_headword_snapshot, target_gloss_snapshot,
-                        prebound_target_entry_id, prebinding_reason,
                         pending_target_headword, pending_target_gloss, sort_order
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7::numeric, $8, $9,
-                        $10, $11, $12, $13, $14
+                        $10, $11, $12
                     )
                     "#,
                 )
@@ -246,8 +245,6 @@ pub(super) async fn insert_meanings(
                             .or_else(|| Some(String::new())),
                     ),
                 )
-                .bind(relation.prebound_target_word_id)
-                .bind(relation.prebinding_state.as_deref())
                 .bind(relation.pending_target_headword.as_deref())
                 .bind(relation.pending_target_gloss.as_deref())
                 .bind(relation_index as i32)
@@ -264,29 +261,29 @@ pub(super) async fn insert_definition(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     sense_id: Uuid,
-    definition: &WordDefinitionV2,
+    definition: &WordDefinitionV3,
     sort_order: i32,
 ) -> Result<(), LexiconRepositoryError> {
     let (id, level, grammar_id, kind, language) = match definition {
-        WordDefinitionV2::ZhDefinition {
+        WordDefinitionV3::ZhDefinition {
             id,
             level,
             grammar_structure_id,
             ..
         } => (*id, level, *grammar_structure_id, "definition", "zh"),
-        WordDefinitionV2::ZhSentence {
+        WordDefinitionV3::ZhSentence {
             id,
             level,
             grammar_structure_id,
             ..
         } => (*id, level, *grammar_structure_id, "sentence", "zh"),
-        WordDefinitionV2::EnDefinition {
+        WordDefinitionV3::EnDefinition {
             id,
             level,
             grammar_structure_id,
             ..
         } => (*id, level, *grammar_structure_id, "definition", "en"),
-        WordDefinitionV2::EnSentence {
+        WordDefinitionV3::EnSentence {
             id,
             level,
             grammar_structure_id,
@@ -324,12 +321,12 @@ pub(super) async fn insert_definition(
     .map_err(map_entry_write_error)?;
 
     match definition {
-        WordDefinitionV2::ZhDefinition {
+        WordDefinitionV3::ZhDefinition {
             content_id,
             content,
             ..
         }
-        | WordDefinitionV2::ZhSentence {
+        | WordDefinitionV3::ZhSentence {
             content_id,
             content,
             ..
@@ -348,8 +345,8 @@ pub(super) async fn insert_definition(
             )
             .await?;
         }
-        WordDefinitionV2::EnDefinition { content, .. }
-        | WordDefinitionV2::EnSentence { content, .. } => {
+        WordDefinitionV3::EnDefinition { content, .. }
+        | WordDefinitionV3::EnSentence { content, .. } => {
             insert_english_text(tx, entry_id, id, "content", content).await?;
         }
     }
@@ -361,10 +358,10 @@ pub(super) async fn insert_english_text(
     entry_id: Uuid,
     owner_id: Uuid,
     field_role: &str,
-    content: &EnglishTextV2,
+    content: &EnglishTextV3,
 ) -> Result<(), LexiconRepositoryError> {
     match content {
-        EnglishTextV2::Unified { common } => {
+        EnglishTextV3::Unified { common } => {
             insert_text_variant(
                 tx,
                 common.id,
@@ -379,12 +376,12 @@ pub(super) async fn insert_english_text(
             )
             .await?;
         }
-        EnglishTextV2::Distinguish { uk, us, .. } => {
+        EnglishTextV3::Distinguish { uk, us, .. } => {
             for (index, (dialect, slot)) in [(Dialect::Uk, uk), (Dialect::Us, us)]
                 .into_iter()
                 .enumerate()
             {
-                if let DialectVariantSlotV2::Ready { variant } = slot {
+                if let DialectVariantRichTextSlotV3::Ready { variant } = slot {
                     insert_text_variant(
                         tx,
                         variant.id,
@@ -414,7 +411,7 @@ pub(super) async fn insert_text_variant(
     field_role: &str,
     language: &str,
     dialect: Dialect,
-    content: &RichText,
+    content: &RichTextV3,
     origin: TextOrigin,
     sort_order: i32,
 ) -> Result<(), LexiconRepositoryError> {

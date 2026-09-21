@@ -42,8 +42,8 @@ pub(super) fn meanings_storage_issues(
 
 pub(super) fn meaning_storage_is_safe(
     entry_id: Uuid,
-    forms: &DraftFormsStepContent,
-    meanings: &DraftMeaningsStepContent,
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
     sub_part_parents: &HashMap<String, String>,
 ) -> bool {
     let pos_codes = forms
@@ -153,42 +153,42 @@ pub(super) fn meaning_storage_is_safe(
     true
 }
 
-pub(super) fn definition_id(definition: &WordDefinitionV2) -> Uuid {
+pub(super) fn definition_id(definition: &WordDefinitionV3) -> Uuid {
     match definition {
-        WordDefinitionV2::ZhDefinition { id, .. }
-        | WordDefinitionV2::ZhSentence { id, .. }
-        | WordDefinitionV2::EnDefinition { id, .. }
-        | WordDefinitionV2::EnSentence { id, .. } => *id,
+        WordDefinitionV3::ZhDefinition { id, .. }
+        | WordDefinitionV3::ZhSentence { id, .. }
+        | WordDefinitionV3::EnDefinition { id, .. }
+        | WordDefinitionV3::EnSentence { id, .. } => *id,
     }
 }
 
-pub(super) fn definition_grammar_id(definition: &WordDefinitionV2) -> Option<Uuid> {
+pub(super) fn definition_grammar_id(definition: &WordDefinitionV3) -> Option<Uuid> {
     match definition {
-        WordDefinitionV2::ZhDefinition {
+        WordDefinitionV3::ZhDefinition {
             grammar_structure_id,
             ..
         }
-        | WordDefinitionV2::ZhSentence {
+        | WordDefinitionV3::ZhSentence {
             grammar_structure_id,
             ..
         }
-        | WordDefinitionV2::EnDefinition {
+        | WordDefinitionV3::EnDefinition {
             grammar_structure_id,
             ..
         }
-        | WordDefinitionV2::EnSentence {
+        | WordDefinitionV3::EnSentence {
             grammar_structure_id,
             ..
         } => *grammar_structure_id,
     }
 }
 
-pub(super) fn definition_level(definition: &WordDefinitionV2) -> &str {
+pub(super) fn definition_level(definition: &WordDefinitionV3) -> &str {
     match definition {
-        WordDefinitionV2::ZhDefinition { level, .. }
-        | WordDefinitionV2::ZhSentence { level, .. }
-        | WordDefinitionV2::EnDefinition { level, .. }
-        | WordDefinitionV2::EnSentence { level, .. } => level,
+        WordDefinitionV3::ZhDefinition { level, .. }
+        | WordDefinitionV3::ZhSentence { level, .. }
+        | WordDefinitionV3::EnDefinition { level, .. }
+        | WordDefinitionV3::EnSentence { level, .. } => level,
     }
 }
 

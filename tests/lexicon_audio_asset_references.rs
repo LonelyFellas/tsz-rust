@@ -383,7 +383,7 @@ fn issue_codes(body: &Value) -> Vec<String> {
 }
 
 #[sqlx::test]
-async fn audio_assets_survive_the_v2_round_trip_and_carry_server_metadata(pool: PgPool) {
+async fn native_meanings_preserve_audio_assets_and_use_server_metadata(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let mut state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -410,7 +410,7 @@ async fn audio_assets_survive_the_v2_round_trip_and_carry_server_metadata(pool: 
 
     let stored = &saved["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["audio_assets"]
         [0];
-    assert_eq!(stored["id"], asset["id"], "字段必须活过 V2 往返");
+    assert_eq!(stored["id"], asset["id"], "原生内容必须保留音频引用");
     assert_eq!(stored["original_name"], "slow.mp3", "展示名以库为准");
     assert_eq!(stored["locale"], "en-GB", "归属以库为准");
     assert_eq!(stored["size_bytes"], asset["size_bytes"]);

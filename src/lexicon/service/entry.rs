@@ -212,19 +212,13 @@ impl LexiconService {
     pub(super) async fn catalog_context_for_reference(
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        forms: &DraftFormsStepContent,
+        forms: &DraftFormsStepContentV3,
         entry_kind: &str,
     ) -> Result<CatalogContext, LexiconServiceError> {
         let form_codes = forms
             .pos
             .iter()
-            .flat_map(|p| {
-                std::iter::once(p.base_form.form_type.clone()).chain(
-                    p.form_groups
-                        .iter()
-                        .flat_map(|g| g.slots.iter().map(|s| s.form_type.clone())),
-                )
-            })
+            .flat_map(|pos| pos.forms.iter().map(|form| form.form_type.clone()))
             .collect::<Vec<_>>();
         let configured_form_codes =
             LexiconRepository::form_types_for_reference(transaction, &form_codes)

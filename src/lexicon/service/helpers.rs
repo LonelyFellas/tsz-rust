@@ -37,14 +37,16 @@ pub(super) fn normalize_submitted_headwords(
     Ok(())
 }
 
-pub(super) fn relation_target_entry_ids(meanings: &DraftMeaningsStepContent) -> Vec<Uuid> {
+pub(super) fn relation_target_entry_ids(
+    meanings: &crate::lexicon::dto::DraftMeaningsStepContentV3,
+) -> Vec<Uuid> {
     let mut entry_ids = meanings
         .pos
         .iter()
         .flat_map(|pos| pos.senses.iter())
         .flat_map(|sense| sense.relations.iter())
-        // 待物化的关联词还没有目标词条，自然也没有需要一起锁的上下文。
-        .filter_map(|relation| relation.target_word_id.or(relation.prebound_target_word_id))
+        // 纯文本关联没有目标词条，不参与引用上下文锁。
+        .filter_map(|relation| relation.target_word_id)
         .collect::<Vec<_>>();
     entry_ids.sort_unstable();
     entry_ids.dedup();

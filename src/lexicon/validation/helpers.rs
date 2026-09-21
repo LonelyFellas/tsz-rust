@@ -1,42 +1,42 @@
 use super::*;
 
-pub(super) fn valid_english_text(value: &EnglishTextV2) -> bool {
+pub(super) fn valid_english_text(value: &EnglishTextV3) -> bool {
     match value {
-        EnglishTextV2::Unified { common } => {
+        EnglishTextV3::Unified { common } => {
             valid_rich_text(&common.value) && !common.value.text().trim().is_empty()
         }
-        EnglishTextV2::Distinguish { uk, us, .. } => [uk, us].iter().all(|slot| {
-            matches!(slot, DialectVariantSlotV2::Ready { variant }
+        EnglishTextV3::Distinguish { uk, us, .. } => [uk, us].iter().all(|slot| {
+            matches!(slot, DialectVariantRichTextSlotV3::Ready { variant }
                 if valid_rich_text(&variant.value) && !variant.value.text().trim().is_empty())
         }),
     }
 }
 
-pub(super) fn definition_level(definition: &WordDefinitionV2) -> &str {
+pub(super) fn definition_level(definition: &WordDefinitionV3) -> &str {
     match definition {
-        WordDefinitionV2::ZhDefinition { level, .. }
-        | WordDefinitionV2::ZhSentence { level, .. }
-        | WordDefinitionV2::EnDefinition { level, .. }
-        | WordDefinitionV2::EnSentence { level, .. } => level,
+        WordDefinitionV3::ZhDefinition { level, .. }
+        | WordDefinitionV3::ZhSentence { level, .. }
+        | WordDefinitionV3::EnDefinition { level, .. }
+        | WordDefinitionV3::EnSentence { level, .. } => level,
     }
 }
 
 pub(super) fn register_english_text_nodes(
     issues: &mut Vec<DraftValidationIssue>,
     node_types: &mut HashMap<Uuid, &'static str>,
-    value: &EnglishTextV2,
+    value: &EnglishTextV3,
 ) {
     match value {
-        EnglishTextV2::Unified { common } => unique_node(
+        EnglishTextV3::Unified { common } => unique_node(
             issues,
             node_types,
             PersistedWordStep::Meanings,
             common.id,
             "text_variant",
         ),
-        EnglishTextV2::Distinguish { uk, us, .. } => {
+        EnglishTextV3::Distinguish { uk, us, .. } => {
             for slot in [uk, us] {
-                if let DialectVariantSlotV2::Ready { variant } = slot {
+                if let DialectVariantRichTextSlotV3::Ready { variant } = slot {
                     unique_node(
                         issues,
                         node_types,
@@ -50,8 +50,8 @@ pub(super) fn register_english_text_nodes(
     }
 }
 
-pub(super) fn valid_rich_text(value: &RichText) -> bool {
-    crate::lexicon::rich_text::is_valid(value)
+pub(super) fn valid_rich_text(value: &RichTextV3) -> bool {
+    crate::lexicon::rich_text::is_valid_native(value)
 }
 
 pub(super) fn valid_percent(value: &str) -> bool {

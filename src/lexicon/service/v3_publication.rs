@@ -5,16 +5,12 @@ use std::collections::HashSet;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use super::v3::{
-    restore_audio_assets, restore_sense_component_usages, restore_sense_group_voice,
-    restore_sentence_zh_translations, restore_voice_profiles,
-};
+use super::v3::hydrate_audio_asset_metadata;
 use super::*;
 use crate::lexicon::dto::{
     ActivatePublicationV3Input, AdminWordStatus, AdminWordV3, AdminWordV3Envelope,
-    DraftFormsStepContentV3, DraftMeaningsStepContent, DraftMeaningsStepContentV3,
-    PersistedWordStep, PhraseComponentUsageV3, PublishAdminWordV3Input,
-    SentenceAssociationsStateV2, StepSaveIntent, WordRegionalVariantsV3,
+    DraftFormsStepContentV3, DraftMeaningsStepContentV3, PersistedWordStep, PhraseComponentUsageV3,
+    PublishAdminWordV3Input, SentenceAssociationsStateV2, StepSaveIntent, WordRegionalVariantsV3,
 };
 use crate::lexicon::model::{
     NewPublicationSenseReference, PublicationSenseReferenceKind, PublicationTargetContentScope,
@@ -123,24 +119,22 @@ impl LexiconService {
             &word.meanings,
             StepSaveIntent::Complete,
         ));
-        let validation_forms = v3_meaning_validation_forms(&word.forms);
         let catalog = self
-            .catalog_context_for_reference(&mut tx, &validation_forms, &record.kind)
+            .catalog_context_for_reference(&mut tx, &word.forms, &record.kind)
             .await?;
-        let mut relational_meanings = v3_meanings_to_v2(&word.meanings)?;
-        let rich_text_is_safe = canonicalize_meanings(&mut relational_meanings);
+        let rich_text_is_safe = canonicalize_meanings(&mut word.meanings);
+        crate::lexicon::v3_contract::normalize_sentence_translations(&mut word.meanings);
         let semantic_issues = validate_meanings(
             entry_id,
-            &validation_forms,
-            &relational_meanings,
-            &v3_meaning_validation_headwords(),
+            &word.forms,
+            &word.meanings,
             &catalog.sub_part_parents,
         );
         if !rich_text_is_safe
             || !meaning_storage_is_safe(
                 entry_id,
-                &validation_forms,
-                &relational_meanings,
+                &word.forms,
+                &word.meanings,
                 &catalog.sub_part_parents,
             )
         {
@@ -213,7 +207,7 @@ impl LexiconService {
         let reference_resolution = resolve_meaning_references(
             &mut tx,
             entry_id,
-            &mut relational_meanings,
+            &mut word.meanings,
             ReferenceResolutionMode::Verify,
             true,
         )
@@ -232,7 +226,6 @@ impl LexiconService {
         publication_references.extend(
             super::text_links::validate_targets(&mut tx, entry_id, &mut word.meanings).await?,
         );
-        let pristine_meanings = word.meanings.clone();
         super::inbound_references::ensure_inbound_references(
             &mut tx,
             entry_id,
@@ -322,21 +315,13 @@ impl LexiconService {
         Self::refresh_sentence_associations(
             &mut tx,
             entry_id,
-            &relational_meanings,
+            &word.meanings,
             true,
             allow_automatic_associations,
             None,
         )
         .await?;
-        let mut canonical_v3_meanings = v2_meanings_to_v3(relational_meanings)?;
-        restore_sense_component_usages(&pristine_meanings, &mut canonical_v3_meanings);
-        restore_sentence_zh_translations(&pristine_meanings, &mut canonical_v3_meanings);
-        restore_voice_profiles(&pristine_meanings, &mut canonical_v3_meanings);
-        restore_sense_group_voice(&pristine_meanings, &mut canonical_v3_meanings);
-
-        restore_audio_assets(&mut tx, &pristine_meanings, &mut canonical_v3_meanings).await?;
-        super::text_links::restore(&pristine_meanings, &mut canonical_v3_meanings);
-        word.meanings = canonical_v3_meanings;
+        hydrate_audio_asset_metadata(&mut tx, &mut word.meanings).await?;
         Self::hydrate_v3_sentence_associations_in(&mut tx, entry_id, &mut word.meanings).await?;
         word.status = AdminWordStatus::Published;
         word.published_revision = Some(word.revision);
@@ -775,33 +760,6 @@ async fn versioned_publication(
     .fetch_optional(&mut **tx)
     .await
     .map_err(database_error)
-}
-
-/// 把 V3 词义转成 V2 内部模型。
-///
-/// 例句关联必须在转换**之前**剥掉：`WordSentenceAssociationV3` 比 V2 侧多出
-/// `association_schema_version`、`source_segments` 等字段，而 `WordSentenceAssociationV2` 带
-/// `deny_unknown_fields`——词义里只要有一条已解析的关联，往返就会失败成 500（禅道 BUG #6）。
-/// 关联是读取时按例句 text_link 推导出来的投影，这些消费方都不需要它，所以一律从这里走，
-/// 不要在转换之后再补 `clear_sentence_associations`。
-pub(super) fn v3_meanings_to_v2(
-    meanings: &DraftMeaningsStepContentV3,
-) -> Result<DraftMeaningsStepContent, LexiconServiceError> {
-    let mut meanings = meanings.clone();
-    crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
-    clear_v3_sentence_associations(&mut meanings);
-    serde_json::from_value(serde_json::to_value(meanings).map_err(serialization_error)?)
-        .map_err(serialization_error)
-}
-
-fn v2_meanings_to_v3(
-    meanings: DraftMeaningsStepContent,
-) -> Result<DraftMeaningsStepContentV3, LexiconServiceError> {
-    let mut meanings =
-        serde_json::from_value(serde_json::to_value(meanings).map_err(serialization_error)?)
-            .map_err(serialization_error)?;
-    crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
-    Ok(meanings)
 }
 
 fn publication_forms_for_activation(
@@ -1251,7 +1209,7 @@ async fn insert_publication_sense_refs(
     Ok(())
 }
 
-fn clear_v3_sentence_associations(meanings: &mut DraftMeaningsStepContentV3) {
+pub(super) fn clear_v3_sentence_associations(meanings: &mut DraftMeaningsStepContentV3) {
     for pos in &mut meanings.pos {
         for sense in &mut pos.senses {
             for sentence in &mut sense.sentences {

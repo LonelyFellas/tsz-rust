@@ -221,9 +221,9 @@ impl LexiconService {
             ));
         }
         ensure_lifecycle_schema_capability(record.content_schema_version, allow_v3)?;
-        let relational_meanings: DraftMeaningsStepContent =
+        let meanings: crate::lexicon::dto::DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
-        let relation_targets = relation_target_entry_ids(&relational_meanings);
+        let relation_targets = relation_target_entry_ids(&meanings);
         LexiconRepository::lock_surface_contexts(transaction, &relation_targets)
             .await
             .map_err(repository_error)?;

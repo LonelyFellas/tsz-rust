@@ -12,21 +12,19 @@ use crate::lexicon::{
         AdminWordListItemV3, AdminWordListPage, AdminWordListQuery, AdminWordListResponse,
         AdminWordPublicationEnvelope, AdminWordPublicationListResponse, AdminWordPublicationV3,
         AdminWordStats, AdminWordStatus, AdminWordV3, AdminWordV3Envelope, DeleteDraftInput,
-        Dialect, DialectRulesV2, DialectVariantSlotV2, DictionaryCoverageStateV2,
-        DraftFormsStepContent, DraftFormsStepContentV3, DraftMeaningsStepContent,
-        DraftValidationIssue, EnglishTextV2, EntryDeleteBatchResponse, EntryKind,
-        EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput,
-        EntryLifecycleTarget, EntryPresentationV3, EntryReferenceKind, EntryReferencePreview,
-        EntryReferenceSummary, LexiconSurfaceMatchV2, MatchedEntryContextV2, PersistedWordStep,
+        Dialect, DictionaryCoverageStateV2, DraftFormsStepContentV3, DraftMeaningsStepContentV3,
+        DraftValidationIssue, EntryDeleteBatchResponse, EntryKind, EntryLifecycleBatchInput,
+        EntryLifecycleBatchResponse, EntryLifecycleInput, EntryLifecycleTarget,
+        EntryPresentationV3, EntryReferenceKind, EntryReferencePreview, EntryReferenceSummary,
+        LexiconSurfaceMatchV2, MatchedEntryContextV2, PersistedWordStep,
         RelatedSearchLegacyResponse, RelatedSearchMatchMode, RelatedSearchQuery,
         RelatedSearchResponse, RelatedSearchV2Response, RelatedWordMatchV3, RelatedWordResultV3,
         RelatedWordSenseV3, RelationReferencePreviewV2, RelationTypeV2,
         ResolveSentenceTargetsV3Input, ResolveSentenceTargetsV3Response,
         SentenceAssociationOriginV2, SentenceAssociationStateV1, SentenceAssociationsStateV2,
         SentenceSourceRangeV1, SourceDialect, StepSaveIntent, SurfaceConfirmationReasonV2,
-        SurfaceMatchPageV3, SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, WordBaseFormSlotV2,
-        WordCreationStep, WordDefinitionV2, WordEntryKindV3, WordFormGroupV2, WordHeadwordsV2,
-        WordPosFormsV2, WordRegionalVariantsV3, WordRelationV2, WordSenseV2, WordSenseV3,
+        SurfaceMatchPageV3, SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, WordCreationStep,
+        WordDefinitionV3, WordEntryKindV3, WordHeadwordsV2, WordRegionalVariantsV3, WordSenseV3,
     },
     impact_store::{ImpactConfirmation, ImpactStore, ImpactStoreError},
     model::{
@@ -49,7 +47,9 @@ use crate::lexicon::{
         SurfaceSnapshotError, SurfaceSnapshotStore, VerifiedSurfaceConfirmation,
         surface_context_digest, surface_owner_bundle_digest,
     },
-    validation::{ProposedNode, proposed_nodes, validate_meanings, validate_node_identities},
+    validation::{
+        ProposedNode, proposed_meaning_nodes, validate_meanings, validate_node_identities,
+    },
 };
 
 mod annotations;
@@ -180,42 +180,6 @@ fn v3_validation_failed(
     issues: Vec<crate::lexicon::dto::DraftValidationIssue>,
 ) -> LexiconServiceError {
     LexiconServiceError::ValidationFailedV3(crate::lexicon::v3_contract::v3_issues(&issues))
-}
-
-fn v3_meaning_validation_forms(forms: &DraftFormsStepContentV3) -> DraftFormsStepContent {
-    DraftFormsStepContent {
-        pos: forms
-            .pos
-            .iter()
-            .map(|pos| WordPosFormsV2 {
-                pos_id: pos.pos_id,
-                pos: pos.pos.clone(),
-                dialect_rules: DialectRulesV2 {
-                    spelling_mode: "distinguish".to_owned(),
-                    phonetic_mode: "distinguish".to_owned(),
-                },
-                // V3 meanings are POS-owned. This adapter exists only to reuse the
-                // established meanings validator and is never persisted or exposed.
-                base_form: WordBaseFormSlotV2 {
-                    id: Uuid::nil(),
-                    form_type: "base".to_owned(),
-                    variants: Vec::new(),
-                },
-                form_groups: Vec::new(),
-            })
-            .collect(),
-    }
-}
-
-fn v3_meaning_validation_headwords() -> WordHeadwordsV2 {
-    // Distinguish mode accepts either a common grammar variant or a complete
-    // UK/US pair. The placeholder is validation-only and never becomes a V3
-    // identity, presentation label, surface, or stored compatibility value.
-    WordHeadwordsV2::Distinguish {
-        uk: "v3".to_owned(),
-        us: "v3".to_owned(),
-        source_dialect: SourceDialect::Uk,
-    }
 }
 
 pub struct LexiconService {
