@@ -1,27 +1,6 @@
 use super::*;
 
 impl LexiconRepository {
-    pub(crate) async fn related_search_dataset_version(
-        &self,
-    ) -> Result<i64, LexiconRepositoryError> {
-        // 草稿候选进入数据集后，forms surface projection 与 meanings 保存事件都必须
-        // 使已签名游标失效；发布/归档/恢复继续由 entry/lifecycle 事件覆盖。
-        sqlx::query_scalar(
-            r#"
-            SELECT count(*)
-            FROM platform.outbox_events
-            WHERE aggregate_type IN (
-                'lexicon.entry',
-                'lexicon.entry.lifecycle',
-                'lexicon.surface_projection'
-            )
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(LexiconRepositoryError::Database)
-    }
-
     pub(crate) async fn related_search(
         &self,
         filter: &RelatedSearchFilter<'_>,

@@ -2756,6 +2756,126 @@ async fn v3_freetext_relation_saves_and_publishes(pool: PgPool) {
     );
 }
 
+/// 搜索游标只绑定查询与稳定排序键，不绑定全库写入事件或首页 total。
+#[sqlx::test]
+async fn related_search_cursor_survives_writes_and_uses_current_remaining_count(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let first = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let second = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
+    let path = format!(
+        "{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=1&include_drafts=true"
+    );
+    let (status, page1) = call(&state, Method::GET, &path, &bearer, None, None).await;
+    assert_eq!(status, StatusCode::OK, "{page1}");
+    assert_eq!(page1["total"], 2);
+    assert_eq!(page1["results"][0]["entry_id"], first["word"]["id"]);
+    let cursor = page1["next_cursor"].as_str().unwrap();
+
+    // 新建同排序词面的后续目标，同时产生 lexicon.entry/surface_projection outbox 事件。
+    let third = create_v3_with_annotated_complete_forms(&state, &pool, &bearer).await;
+    let (status, page2) = call(
+        &state,
+        Method::GET,
+        &format!("{path}&cursor={cursor}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "跨页写入不能使搜索游标失效：{page2}"
+    );
+    assert_eq!(page2["results"][0]["entry_id"], second["word"]["id"]);
+    assert_eq!(page2["total"], 3);
+    let next = page2["next_cursor"]
+        .as_str()
+        .expect("不能用首页 total=2 提前截断第三项");
+    let (status, page3) = call(
+        &state,
+        Method::GET,
+        &format!("{path}&cursor={next}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page3}");
+    assert_eq!(page3["results"][0]["entry_id"], third["word"]["id"]);
+    assert!(page3["next_cursor"].is_null(), "{page3}");
+
+    // 已返回项的正常草稿写入也不影响重放同一个分页请求。
+    let content = complete_v3_meanings_fixture(first["word"]["forms"]["pos"][0]["pos_id"].clone());
+    save_v3_meanings(&state, &bearer, &first, content).await;
+    let (status, replay) = call(
+        &state,
+        Method::GET,
+        &format!("{path}&cursor={cursor}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"], page2["results"]);
+
+    // 弱一致并不放开查询参数、管理员身份或签名约束。
+    let outsider_id = seed_admin(&pool).await;
+    let outsider = token(&state, outsider_id);
+    for (search, actor) in [
+        (
+            format!("{}&cursor={cursor}", path.replace("q=harbour", "q=other")),
+            &bearer,
+        ),
+        (
+            format!(
+                "{}&cursor={cursor}",
+                path.replace("page_size=1", "page_size=2")
+            ),
+            &bearer,
+        ),
+        (format!("{path}&cursor={cursor}"), &outsider),
+        (format!("{path}&cursor=garbage"), &bearer),
+    ] {
+        let (status, rejected) = call(&state, Method::GET, &search, actor, None, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["field"], "cursor", "{rejected}");
+    }
+
+    // 后续目标归档后继续原游标：正常结束而非要求重开搜索。
+    let third_id = third["word"]["id"].as_str().unwrap();
+    let (status, archived) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{third_id}/archive"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "base_revision": third["word"]["revision"],
+            "base_lifecycle_revision": third["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    let (status, end) = call(
+        &state,
+        Method::GET,
+        &format!("{path}&cursor={next}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{end}");
+    assert_eq!(end["results"], json!([]));
+    assert!(end["next_cursor"].is_null(), "{end}");
+}
+
 /// 关联词候选对**所有**管理员亮出草稿（2026-09-11 口径）：草稿能被别人引用。
 ///
 /// 此前这里断言的是相反的事：外人搜别人的草稿只得到空结果。放开后关联词搜索与撞名

@@ -37,6 +37,30 @@
 7. 不顺便改变发布依赖的产品判定；新规则在第二、三批切换。缺字段保留等既有客户端协议尚未在本批修改，不能与旧聚合转换混为一谈。
 8. 保真测试覆盖翻译、成分、语音、音频、文本链接、词义组和只读关联；增加非主译文与词义 ID 冲突的 HTTP 回归，验证拒绝且无部分写入。
 
+## 第二批差距与实施路径
+
+基线：后端 `cbf2c2632da65962fe96d3284fece2bec08dfa99`（PR #181），前端 `3a1bd05`；分别从 fetch 后的 origin/main 创建 `feat/lexicon-domain-batch-2` worktree。
+
+实际已有能力与差距：
+
+- `inbound_references.rs` 已统一五类入站引用采集、节点计数、来源摘要和失效判定，前端 `V3ReferenceList/referenceGuard` 已能打开来源词条并通过 `focus_node` 定位，例句可跳例句库。复用这些实现，不另建引用表或平行检查器。
+- 当前草稿保存与前端节点控件仍按入站引用阻断删除；目标规则要求可编辑草稿、在发布边界处理破坏性影响。调整前须核对节点墓碑、关系表约束、共享例句即时生效路径，不能仅移除守卫。
+- 关联搜索默认只返回发布快照，显式 include_drafts 只补“从未发布”的词条，漏掉已发布词条中的新增词义。成分目标加载也优先整条发布快照；候选与保存必须按具体节点一致解析，不能仅把搜索 SQL 放开。
+- `publishing.rs` 允许关联词发布时指向草稿；例句 context 则要求发布目标。单独发布具体节点有效性的规则须与第三批批次发布边界协调，不能把当前不同规则标为已统一。
+- `queries.rs/repository/query.rs` 的关联搜索已有签名游标、查询/管理员绑定、确定性复合键排序，但以 outbox count 使任何相关事件导致游标失效，且以首页冻结 total 判断是否还有下一页，会在并发插入后过早结束。
+- `sentence_target_discovery.rs::search_component_targets_v3` 另有 generation + 可用词条集合摘要 + offset 分页；它并不是关联搜索的同一个游标，后续要独立改为稳定键，不能只删 generation 校验继续使用 offset。句中候选分页也需分开验证。
+- 前端关联词 `V3MeaningsAndExamplesStep` 和成分级联器 `V3TargetCascader` 当前主动发送 include_drafts=true，尚不符合“默认发布、主动展开草稿”。`referenceGuard` 的已有修复链接不能证明用户已能保存删除草稿后再修复；`WordWizardV3` 仍按 blocked_references 阻断保存。
+- 已核对的学习端路径：`apps/web/src/features/practice/components/PracticeBoard.tsx` 是占位 UI，`features/wordlist/hooks/useWordLists.ts` 直接返回/修改 MOCK_WORDLISTS，真实 API 调用仍为 TODO。当前 Rust `src` 无 learning/wordlist 服务模块。不能把这些页面的 mock 运行当作词库发布消费或历史回放的联调证据；本批不扩大为新建学习系统。
+
+实施顺序及可观察条件：
+
+1. 先完成独立的关联搜索弱一致分页：删除 outbox 版本读取与重试，保留签名及查询参数校验；按当前页剩余结果数量决定 next_cursor，total 仅作为弱一致估计，不驱动结束条件。测试跨页无关更新、插入/归档、查询及签名不匹配；不提供旧游标兼容分支。
+2. 引用规则及影响分析：沿用原采集和判定，核对草稿/发布目标及各来源生命周期，再切换保存与发布边界；修复入口复用 focus_node 并补缺失定位反馈。具体契约改动随调查补齐，未实现前不声明完成。
+3. 草稿候选：覆盖已发布词条的新增具体节点，并同步关联词、成分和例句候选/保存解析；默认不展开，展开后标出具体未发布依赖。不能仅靠词条级 status 判定。
+4. 同步确有变化的 OpenAPI、前端类型与 runtime schema；执行受影响回归和两仓质量门。
+
+分页子项不改 method/path、DTO 或 schema，无 migration。旧前端已消费 next_cursor，响应 wire 不变；搜索弱一致不替代保存/发布严格校验。后续契约破坏性变更按已确认的停流配套发布，不增加兼容层。本任务不执行任何发布操作。
+
 ## 数据与契约
 
 - 第一批不改 API 结构或数据库 schema。OpenAPI 重导只有三个共享类型的描述更新，去掉 `description` 后与基线完全一致；无需前端同步运行时类型。SQLx 在任务隔离库刷新，缓存无差异。

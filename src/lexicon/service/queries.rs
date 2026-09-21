@@ -19,13 +19,11 @@ struct RelatedSearchCursor {
     include_v3: bool,
     include_drafts: bool,
     page_size: u32,
-    total: u64,
     consumed: u64,
     last_kind: Option<EntryKind>,
     last_headword: Option<String>,
     last_status_rank: Option<i16>,
     last_word_id: Option<Uuid>,
-    dataset_version: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -245,8 +243,7 @@ impl LexiconService {
             .key;
         let match_mode = query.match_mode.unwrap_or(RelatedSearchMatchMode::Contains);
         let exclude_exact = query.exclude_exact.unwrap_or(false);
-        let requested_cursor = query.cursor.is_some();
-        let mut cursor = if let Some(encoded) = query.cursor.as_deref() {
+        let cursor = if let Some(encoded) = query.cursor.as_deref() {
             let cursor = decode_related_search_cursor(encoded, &self.related_search_cursor_key)
                 .map_err(|_| LexiconServiceError::InvalidField {
                     field: "cursor",
@@ -279,77 +276,39 @@ impl LexiconService {
                 include_v3,
                 include_drafts,
                 page_size,
-                total: 0,
                 consumed: 0,
                 last_kind: None,
                 last_headword: None,
                 last_status_rank: None,
                 last_word_id: None,
-                dataset_version: 0,
             }
         };
-        let mut attempts = 0;
-        let records = loop {
-            let dataset_version = self
-                .repository
-                .related_search_dataset_version()
-                .await
-                .map_err(repository_error)?;
-            if requested_cursor && cursor.dataset_version != dataset_version {
-                return Err(LexiconServiceError::InvalidField {
-                    field: "cursor",
-                    message: "related search targets changed; restart the search",
-                });
-            }
-            if !requested_cursor {
-                cursor.dataset_version = dataset_version;
-            }
-            let records = self
-                .repository
-                .related_search(&RelatedSearchFilter {
-                    q: &normalized_q,
-                    kind: query.kind,
-                    include_v3,
-                    include_drafts,
-                    exact: match_mode == RelatedSearchMatchMode::Exact,
-                    exclude_exact,
-                    limit: i64::from(page_size),
-                    last_kind: cursor.last_kind,
-                    last_headword: cursor.last_headword.as_deref(),
-                    last_status_rank: cursor.last_status_rank,
-                    last_word_id: cursor.last_word_id,
-                })
-                .await
-                .map_err(repository_error)?;
-            let current_version = self
-                .repository
-                .related_search_dataset_version()
-                .await
-                .map_err(repository_error)?;
-            if current_version == dataset_version {
-                break records;
-            }
-            if requested_cursor {
-                return Err(LexiconServiceError::InvalidField {
-                    field: "cursor",
-                    message: "related search targets changed; restart the search",
-                });
-            }
-            attempts += 1;
-            if attempts == 3 {
-                return Err(repository_error(LexiconRepositoryError::Invariant(
-                    "related search targets kept changing while opening a cursor",
-                )));
-            }
-        };
+        // 搜索是弱一致的 keyset 分页；无关写入不使游标失效。
+        // 目标有效性由保存/发布重新验证，不用全局 outbox 行数代替业务校验。
+        let records = self
+            .repository
+            .related_search(&RelatedSearchFilter {
+                q: &normalized_q,
+                kind: query.kind,
+                include_v3,
+                include_drafts,
+                exact: match_mode == RelatedSearchMatchMode::Exact,
+                exclude_exact,
+                limit: i64::from(page_size),
+                last_kind: cursor.last_kind,
+                last_headword: cursor.last_headword.as_deref(),
+                last_status_rank: cursor.last_status_rank,
+                last_word_id: cursor.last_word_id,
+            })
+            .await
+            .map_err(repository_error)?;
         let page_total = records
             .first()
             .map_or(0, |record| record.total.max(0) as u64);
-        let total = if cursor.consumed == 0 {
-            page_total
-        } else {
-            cursor.total
-        };
+        // count(*) OVER() 在游标条件之后计算，是本次查询的剩余数量。
+        // total 只是已返回数 + 当前剩余数的估计，不能用首页 total 截断后续新增结果。
+        let total = cursor.consumed + page_total;
+        let has_more = page_total > records.len() as u64;
         let last_page_key = records.last().map(|record| record.sort_headword.clone());
         let last_status_rank = records.last().map(|record| record.status_rank);
         let results = records
@@ -419,11 +378,10 @@ impl LexiconService {
             })
             .collect::<Result<Vec<_>, LexiconServiceError>>()?;
         let consumed = cursor.consumed + results.len() as u64;
-        let next_cursor = (v2 && !results.is_empty() && consumed < total).then(|| {
+        let next_cursor = (v2 && !results.is_empty() && has_more).then(|| {
             let last = results.last().expect("non-empty page has a last result");
             let (last_kind, last_word_id) = (entry_kind_from_v3(last.kind), last.entry_id);
             let next = RelatedSearchCursor {
-                total,
                 consumed,
                 last_kind: Some(last_kind),
                 last_headword: last_page_key,
@@ -731,13 +689,11 @@ mod related_search_cursor_tests {
             include_v3: true,
             include_drafts: true,
             page_size: 20,
-            total: 40,
             consumed: 20,
             last_kind: Some(EntryKind::Word),
             last_headword: Some("workspace".to_owned()),
             last_status_rank: Some(1),
             last_word_id: Some(Uuid::nil()),
-            dataset_version: 7,
         }
     }
 
@@ -748,7 +704,8 @@ mod related_search_cursor_tests {
         assert_eq!(decoded.actor_id, Uuid::nil());
         assert_eq!(decoded.consumed, 20);
         assert!(decoded.include_v3);
-        assert_eq!(decoded.dataset_version, 7);
+        assert_eq!(decoded.last_headword.as_deref(), Some("workspace"));
+        assert_eq!(decoded.last_status_rank, Some(1));
         assert!(decode_related_search_cursor(&encoded, b"wrong-key").is_err());
 
         let mut bytes = URL_SAFE_NO_PAD.decode(&encoded).unwrap();
