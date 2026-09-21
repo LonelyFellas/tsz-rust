@@ -2,6 +2,8 @@
 
 ## 工作流
 
+- 前后端统一使用任务分支 → main：新任务先 `git fetch origin`，从最新 `origin/main` 创建独立任务分支和 worktree；已有本任务 worktree 则复用。不在 main 或 dev 直接开发、提交、推送。旧 Skill 中与此冲突的分支约定不再适用。
+
 技能链路 `assess → build → ship`，Bug 走 `bugfix → ship`；部署见下节。
 默认在当前会话连续推进已授权阶段，复用现有证据；用户要求或实际上下文限制出现时再交接。
 

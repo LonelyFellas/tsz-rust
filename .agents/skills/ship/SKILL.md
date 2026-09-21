@@ -1,18 +1,18 @@
 ---
 name: ship
-description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或更新从 dev 面向 main 的 PR。包含 Rust、SQLx、API/迁移验证和精确提交的独立 pre-push 审查；不用于仅实现或部署。
+description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或更新从任务分支面向 main 的 PR。包含 Rust、SQLx、API/迁移验证和精确提交的独立 pre-push 审查；不用于仅实现或部署。
 ---
 
 # 后端交付
 
-分支模型：dev → main。功能开发直接在 dev 上提交（用户不用 worktree，也不建 feature 分支）；
-PR 以 main 为 base、从 dev 发起。合并 main 和部署使用各自授权及流程。
+分支模型：任务分支 → main。新任务先 `git fetch origin`，从最新 `origin/main` 创建独立任务分支和 worktree；
+已有本任务 worktree/PR 则复用，不混入其他任务。PR 以 main 为 base。合并 main 和部署使用各自授权及流程。
 
 ## 1. 基线与授权
 
-- 检查完整 diff、分支、remotes、已有 PR 和用户改动。fetch 后固定本次 origin/dev 基线，保留任务已有分支。
-- 在 dev 上直接提交与推送；绝不向 main 直接提交或推送。开 PR 前核对 dev 相对 main 的全部落差：
-  直接在 dev 上做意味着 PR 会夹带之前未合的提交，在 PR 正文里说明，或与用户确认是否一并合入。
+- 检查完整 diff、分支、remotes、已有 PR 和用户改动。fetch 后固定本次 origin/main 基线，保留本任务已有分支与 worktree。
+- 仅在本任务分支提交与推送；绝不向 main 直接提交或推送。开 PR 前核对相对 main 的完整差异，不能夹带未授权任务。
+- detached HEAD 或处于其他任务 checkout 时，保留其改动，在从最新 origin/main 创建的独立 worktree 中只迁移本次授权范围，不清空或重置用户工作区。
 - 「提交并推送」「开 PR」「ship」已经授权相应交付步骤；沿用本会话授权，不逐步重复确认。「仅提交」不含 push，「仅审查」不含 commit，实施批准不自动包含交付。
 - 仅审查时交付发现与验证局限，不自动改文件、刷新 .sqlx 或进入提交阶段；修复与写入需要原请求包含相应范围。
 - 缺少授权时，先完成可审查的结果、验证与提交说明，再一次性请求缺少的决定。需要停下时链接本文件并引用触发规则。
@@ -47,7 +47,7 @@ API 修改按原生生成链更新 OpenAPI；SQL/schema 修改的 `.sqlx` 刷新
 
 1. 检查 `git diff --check` 和 staged diff，只提交本任务文件，使用 conventional commit；署名不写死历史模型。
 2. pre-commit 对查询或构建输入变化刷新并暂存 .sqlx；非纯规则文档提交仍运行 clippy。核对生成 diff 确属本任务；保留无关用户改动，需要时用隔离 checkout。
-3. 提交后固定完整 `review_base_sha`（本次 origin/dev）与 `review_sha`（HEAD）。使用可用独立 review 工具；不可用时本技能要求一个新的只读 reviewer 子代理。
+3. 提交后固定完整 `review_base_sha`（本次 origin/main）与 `review_sha`（HEAD）。使用可用独立 review 工具；不可用时本技能要求一个新的只读 reviewer 子代理。
 4. 给 reviewer 原目标、精确 SHA、项目规则和实际测试结果。只读提交对象及直接受影响调用链，检查完整 `base_sha...review_sha`；不传自审结论，不重跑已提供的全量检查。脏工作区使用隔离 checkout。
 5. P0–P2 或其他实质正确性/安全问题阻断 push，误报用证据排除；P3 风格/清理不扇出额外 verifier。
 6. 修复后记录旧/新 SHA，重跑受影响检查，请同一 reviewer 检查 `old_sha..new_sha`、原问题与相关调用链。不变部分沿用初审证据，最终结论覆盖当前 SHA。范围扩大或原审查假设失效才全量重审。
@@ -61,5 +61,6 @@ API 修改按原生生成链更新 OpenAPI；SQL/schema 修改的 `.sqlx` 刷新
 失败读实际日志，区分 hooks、网络、认证；不要猜代理问题、擅自修改全局网络配置或引用不可访问的记忆。
 修复产生新 SHA 时补齐增量审查再推送。
 
-创建 `--base main --head dev` 的 PR，已有同任务 PR 就更新；正文写清结果、契约/迁移、发布顺序、验证、审查与回退限制。多行正文用结构化参数或 `--body-file`。
+开 PR 前再次 `git fetch origin` 并检查与 origin/main 的合并冲突；发现冲突先处理、验证并补齐增量审查。
+创建 `--base main --head <本任务分支>` 的 PR，已有同任务 open PR 就更新；正文写清结果、契约/迁移、发布顺序、验证、审查与回退限制。多行正文用结构化参数或 `--body-file`。
 报告 SHA、reviewer、检查状态、PR 链接和未验证事项。GitHub CI 全绿后才具备合并条件，合并与部署仍按各自授权执行。
