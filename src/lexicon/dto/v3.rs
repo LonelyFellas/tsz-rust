@@ -232,11 +232,40 @@ pub enum PhraseComponentUsageV3 {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpsWordV3 {
+    #[schema(min_length = 1, max_length = 200)]
+    pub text: String,
+    #[schema(min_length = 1, max_length = 1600)]
+    pub phoneme: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub enum PhonemeLocaleV3 {
+    #[serde(rename = "en-GB")]
+    EnGb,
+    #[serde(rename = "en-US")]
+    EnUs,
+}
+
 /// Independent Azure synthesis candidates; dictionary notation remains display-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PronunciationSynthesisV3 {
     pub alphabet: RichTextPhonemeAlphabet,
+    /// Missing in legacy drafts means use the selected phoneme alphabet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_spelling: Option<bool>,
+    /// Each candidate retains its own accent; changing preferences cannot relabel old phonemes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipa_locale: Option<PhonemeLocaleV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ups_locale: Option<PhonemeLocaleV3>,
+    /// Word boundaries for the single-line UPS candidate, never inferred from phone spaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(max_items = 30)]
+    pub ups_words: Option<Vec<UpsWordV3>>,
     #[schema(max_length = 200)]
     pub ipa: String,
     #[schema(max_length = 1600)]
