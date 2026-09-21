@@ -2,12 +2,13 @@
 
 ## 状态
 
-**第一批内部模型重构已完成并通过验收。第二至第五批未开始。**
+**第一批已通过 PR #181 合入并部署（用户确认），合并提交 `cbf2c2632da65962fe96d3284fece2bec08dfa99`。第二批已开始，当前只完成关联搜索分页子项；整批未完成。第三至第五批未开始。**
 
 - Worktree：`/Users/darwish/Dev/tsz-core/tsz-rust-lexicon-domain-refactor`
 - 分支：`feat/lexicon-domain-refactor`
 - 基线：`72747b6186562ecf87ac2984a2d1824f6c50fc9e`
-- 用户授权五批实施，不写旧格式兼容；未提交、推送、部署或清理远端数据。
+- 上述 worktree/分支/基线为第一批实施记录。第一批后续合入部署状态见本节顶部。
+- 第二批继续沿用已确认决策，不写旧格式/旧数据兼容；本轮不提交、推送或部署，不清理远端数据。
 
 ## 第一批完成清单
 
@@ -62,6 +63,55 @@
 
 没有把仅含注释、运行 0 项的 `lexicon_v3_relation_consumers` 当作验证证据。
 
-## 下一批
+## 第二批进行中
 
-第二批：沿用现有入站引用实现，统一引用规则与影响分析，补齐实际前端/学习端消费者调查，落实草稿候选与搜索分页调整。第一批没有这方面的功能完成声明，也没有前端 UI 验收声明。
+### 隔离基线
+
+- 后端：`/Users/darwish/Dev/tsz-core/tsz-rust-lexicon-domain-batch-2`，`feat/lexicon-domain-batch-2`，fetch 后最新 `origin/main` = `cbf2c2632da65962fe96d3284fece2bec08dfa99`。
+- 前端：`/Users/darwish/Dev/tsz-core/tsz-lexicon-domain-batch-2`，`feat/lexicon-domain-batch-2`，fetch 后最新 `origin/main` = `3a1bd05`。当前仅调查、尚无前端代码改动。
+- 原第一批 worktree 及其他任务工作区未修改。
+
+### 实际差距
+
+详情见 `design.md` 第二批章节。可复用入站引用采集/判定、来源链接和 focus_node 导航；缺口是草稿与发布校验边界、具体节点发布状态、默认关闭草稿候选，以及独立成分/句中搜索分页。学习端现有练习占位与词表 mock 不能提供真实消费验证证据。
+
+### 已完成子项：关联搜索弱一致分页
+
+- 删除 `related_search_dataset_version` 和 outbox 行数/重试耦合，游标只携带查询身份及复合排序键/已返回数量。
+- 保留签名校验、管理员绑定、查询参数绑定和确定性 keyset 排序。
+- 以本页查询剩余数量判断 next_cursor；total 为已返回数量加当前剩余数量的弱一致估计，不再以首页冻结总数提前结束。
+- HTTP 回归覆盖：跨页新增目标、已返回目标保存草稿、正常继续/结束、后续目标归档、不同查询/分页大小/管理员及无效游标拒绝。
+- 不改 DTO、method/path、OpenAPI、数据库 schema 或 SQLx 宏查询，无新增迁移/缓存生成物。未加旧游标或数据兼容分支。
+
+### 本轮验证
+
+任务专属容器（标签 `task=lexicon-domain-batch-2`），不访问其他任务实例或远端数据库：
+
+- `tsz-lexicon-b2-pg`：Postgres 16，`127.0.0.1:63526`，维护库 `lexicon_b2`；SQLx 测试自动创建独立测试库。
+- `tsz-lexicon-b2-redis`：Redis 7，`127.0.0.1:63745/0`；同时显式设置 TEST_REDIS_URL / REDIS_URL，不走默认 fallback。
+- 编译缓存使用 `/Users/darwish/.cargo-target`，启动时无其他 cargo 构建进程。
+- 本轮收尾已停止两个任务容器，未删除数据卷。恢复时可 `docker start tsz-lexicon-b2-pg tsz-lexicon-b2-redis`，再核对端口，不沿用历史端口假设。
+
+首次新增 HTTP 测试在查询约束断言失败：测试预期 422，既有 GET 契约实际 400；修正测试断言，未改变既有错误响应。
+
+最终命令退出码 0（`SQLX_OFFLINE=true`，数据库命令使用上述隔离连接）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --locked --test lexicon_handler related_search_cursor_survives -- --nocapture` | 1 passed |
+| `cargo test --locked --lib lexicon:: -- --test-threads=4` | 192 passed |
+| `cargo test --locked --test lexicon_handler -- --test-threads=4` | 98 passed（包含新增场景） |
+| `cargo clippy --locked --all-targets --all-features -- -D warnings` | 通过 |
+| `cargo fmt --all --check`、`git diff --check` | 通过 |
+
+不重复计数，合计 **290 项**。日志：`/tmp/lexicon-b2-pagination-final.log`，退出码：`/tmp/lexicon-b2-pagination-final.exit`。旧发布草稿目标等回归通过只保护尚未修改的路径，不代表目标引用规则已实现。
+
+### 未完成（阻断第二批验收）
+
+1. 统一草稿/发布引用规则及影响分析，允许草稿编辑后在发布前处理破坏性引用；补齐各种引用业务结构及节点定位验证。
+2. 引用修复入口的实际闭环与缺失来源节点反馈；现有跳转可复用，但未做本轮 UI 验收。
+3. 关联词/成分/例句候选默认发布、主动展开草稿，已发布词条新增词义的具体依赖标识，以及与保存/发布目标解析一致性。
+4. 成分和句中候选分页的弱一致稳定键改造，不能将本轮关联搜索修改泛化为全部搜索完成。
+5. 上述变更需要的契约同步、前端测试和真实联调。
+
+本轮代码保留为未提交改动；没有提交、推送、PR、部署或真实业务数据修改。
