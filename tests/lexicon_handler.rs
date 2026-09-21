@@ -10827,7 +10827,9 @@ async fn v3_meanings_save_reports_a_busy_reference_source_as_reference_conflict(
 }
 
 #[sqlx::test]
-async fn component_target_search_recovers_after_missing_generation_is_repaired(pool: PgPool) {
+async fn component_target_search_is_independent_of_generation_and_repair_preserves_state(
+    pool: PgPool,
+) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -10842,9 +10844,9 @@ async fn component_target_search_recovers_after_missing_generation_is_repaired(p
         .await
         .unwrap();
     let body = json!({"schema_version": 3, "q": "time", "page_size": 50});
-    let (status, failed) = search_component_targets(&state, &bearer, body.clone()).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
-    assert_eq!(failed["code"], "internal_error");
+    let (status, found) = search_component_targets(&state, &bearer, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    assert!(component_match_entry_ids(&found).contains(&entry_id));
 
     const REPAIR: &str = include_str!(
         "../migrations/20260906170000_repair_missing_sentence_discovery_generation.up.sql"
@@ -10927,11 +10929,19 @@ async fn surface_writes_rebuild_missing_discovery_generation(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let (status, failed) = search_component_targets(&state, &bearer, search_body.clone()).await;
+    let (status, failed) = call(
+        &state,
+        Method::POST,
+        &resolve_path,
+        &bearer,
+        None,
+        Some(resolve_body.clone()),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::INTERNAL_SERVER_ERROR,
-        "还没有写入时读侧拿不到代数：{failed}"
+        "句中发现响应仍需代数元数据，缺失时不能伪造：{failed}"
     );
 
     // 保存草稿写 draft 词面即补回；水位取新时间戳，不回到 1 复用旧游标版本。
@@ -11386,6 +11396,93 @@ async fn component_target_search_deduplicates_more_than_2000_surfaces_without_tr
 }
 
 #[sqlx::test]
+async fn sentence_target_cursor_survives_generation_changes_and_earlier_entry_removal(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    for _ in 0..2 {
+        let draft = create_ready_v3_annotated_draft_with_sentences(
+            &state,
+            &pool,
+            &bearer,
+            &["The harbour is calm."],
+        )
+        .await;
+        let (status, published) = publish_ready_v3(&state, &bearer, &draft).await;
+        assert_eq!(status, StatusCode::CREATED, "{published}");
+    }
+    let path = format!("{ROOT}/entries/sentence-targets/resolve");
+    let automatic = json!({"schema_version":3, "sentence_text":"harbour", "source_dialect":"common",
+        "mode":"all_published_targets", "page_size_per_range":1});
+    let (status, first) = call(&state, Method::POST, &path, &bearer, None, Some(automatic)).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let range = &first["range_results"][0];
+    let cursor = range["next_cursor"]
+        .as_str()
+        .expect("multiple candidates need pagination");
+    let first_entry = range["published_matches"][0]["entry_id"].as_str().unwrap();
+    let selected = json!({"schema_version":3, "sentence_text":"harbour", "source_dialect":"common",
+        "mode":"selected_segments", "selected_segments":[{"start":0,"end":7,"surface":"harbour"}],
+        "include_drafts":false, "page_size_per_range":100, "cursor":cursor});
+    let (status, before) = call(
+        &state,
+        Method::POST,
+        &path,
+        &bearer,
+        None,
+        Some(selected.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let expected = before["range_results"][0]["published_matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|candidate| candidate["entry_id"].as_str() != Some(first_entry))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(!expected.is_empty());
+    sqlx::query("UPDATE lexicon.entries SET archived_at = now() WHERE id = $1")
+        .bind(Uuid::parse_str(first_entry).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lexicon.sentence_discovery_generation SET generation = generation + 1 WHERE singleton = TRUE")
+        .execute(&pool).await.unwrap();
+    let (status, continued) = call(
+        &state,
+        Method::POST,
+        &path,
+        &bearer,
+        None,
+        Some(selected.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{continued}");
+    assert_eq!(
+        continued["range_results"][0]["published_matches"],
+        json!(expected)
+    );
+    assert!(continued["range_results"][0].get("next_cursor").is_none());
+    for (field, value) in [
+        ("source_dialect", json!("uk")),
+        ("cursor", json!("invalid")),
+        ("sentence_text", json!("harbour elsewhere")),
+    ] {
+        let mut changed = selected.clone();
+        changed[field] = value;
+        let (status, rejected) =
+            call(&state, Method::POST, &path, &bearer, None, Some(changed)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        assert_eq!(rejected["field"], "cursor");
+    }
+}
+
+#[sqlx::test]
 async fn component_target_search_ranks_exact_before_prefix_before_contains_and_pages_with_a_cursor(
     pool: PgPool,
 ) {
@@ -11482,7 +11579,7 @@ async fn component_target_search_ranks_exact_before_prefix_before_contains_and_p
     }
     assert_eq!(walked, whole_sequence, "翻页拼接必须与整页逐条一致");
 
-    // 游标绑定 q 与 kind；词库一变（generation 前进）旧游标即失效。
+    // 游标绑定 q 与 kind，但无关词库更新不使稳定节点游标失效。
     let (status, first) = search_component_targets(
         &state,
         &bearer,
@@ -11507,18 +11604,40 @@ async fn component_target_search_ranks_exact_before_prefix_before_contains_and_p
     .execute(&pool)
     .await
     .unwrap();
-    let (status, stale) = search_component_targets(
+    let (status, continued) = search_component_targets(
         &state,
         &bearer,
         json!({"schema_version": 3, "q": "harbour", "page_size": 1, "cursor": cursor}),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "{continued}");
+    assert_eq!(continued["matches"][0], whole["matches"][1]);
+
+    // 已返回词条归档不能导致 offset 跳过后续候选，新插入的排序靠后词条仍可见。
+    sqlx::query("UPDATE lexicon.entries SET archived_at = now() WHERE id = $1")
+        .bind(Uuid::parse_str(&exact_id).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (inserted, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "harbour port", json!([])).await;
+    let (status, remaining) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "page_size": 200, "cursor": cursor}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{remaining}");
     assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "词库变动后旧游标必须失效：{stale}"
+        distinct_in_order(&entry_sequence(&remaining)),
+        vec![
+            prefix_id,
+            inserted["word"]["id"].as_str().unwrap().to_owned(),
+            contains_id
+        ]
     );
-    assert_eq!(stale["field"], "cursor", "{stale}");
+    assert_eq!(remaining["truncated"], false);
+    assert!(remaining.get("next_cursor").is_none());
 }
 
 #[sqlx::test]
@@ -13794,13 +13913,11 @@ async fn component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_
         .unwrap();
     let mut archived = input;
     archived["cursor"] = json!(next);
-    let (status, rejected) = search_component_targets(&state, &bearer, archived).await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "归档导致结果变化时旧游标不得静默漏项：{rejected}"
-    );
-    assert_eq!(rejected["field"], "cursor");
+    let (status, empty) = search_component_targets(&state, &bearer, archived).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert!(empty["matches"].as_array().unwrap().is_empty());
+    assert_eq!(empty["truncated"], false);
+    assert!(empty.get("next_cursor").is_none());
 }
 
 #[sqlx::test]

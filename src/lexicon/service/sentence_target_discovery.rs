@@ -1,4 +1,6 @@
 use super::*;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -35,6 +37,65 @@ struct ComponentTargetCandidateIndex {
     match_rank: i32,
     draft: bool,
     headword: Arc<str>,
+}
+
+// Revisions and publication IDs are not stable pagination identities.
+type TargetNodeKey = (Uuid, Uuid, Uuid, Uuid);
+type ComponentPageKey = (i32, bool, String, TargetNodeKey);
+
+fn target_node_key(key: PublishedAssociationCandidateKey) -> TargetNodeKey {
+    (
+        key.entry_id,
+        key.pos_id,
+        key.base_form_id,
+        key.matched_variant_id,
+    )
+}
+
+fn component_page_key(candidate: &ComponentTargetCandidateIndex) -> ComponentPageKey {
+    (
+        candidate.match_rank,
+        candidate.draft,
+        candidate.headword.to_string(),
+        target_node_key(candidate.key),
+    )
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveryCursor<K> {
+    context: String,
+    after: K,
+}
+
+fn encode_discovery_cursor<K: Serialize>(context: &str, after: K) -> String {
+    URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&DiscoveryCursor {
+            context: context.to_owned(),
+            after,
+        })
+        .expect("discovery cursor serialization cannot fail"),
+    )
+}
+
+fn decode_discovery_cursor<K: serde::de::DeserializeOwned>(
+    cursor: Option<&str>,
+    context: &str,
+) -> Result<Option<K>, LexiconServiceError> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    let decoded = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<DiscoveryCursor<K>>(&bytes).ok())
+        .filter(|cursor| cursor.context == context);
+    decoded
+        .map(|cursor| Some(cursor.after))
+        .ok_or(LexiconServiceError::InvalidField {
+            field: "cursor",
+            message: "cursor is invalid for this search",
+        })
 }
 
 fn published_candidate_key(
@@ -162,7 +223,7 @@ impl LexiconService {
         let mut range_results = if let Some((segments, normalized)) = selected {
             let fingerprint =
                 source_fingerprint(sentence_text, &segments).map_err(|_| invariant_record())?;
-            let offset = selected_cursor_offset(&input, generation, &fingerprint)?;
+            let after = selected_cursor_key(&input, &fingerprint)?;
             let kind = if segments.len() == 1 && tokenize(&normalized).len() == 1 {
                 SentenceTargetMatchKindV3::Word
             } else if segments.len() == 1 {
@@ -179,8 +240,8 @@ impl LexiconService {
                 draft_matches,
                 RangeResultPagination {
                     page_size,
-                    offset,
-                    cursor_context: Some((generation, input.source_dialect(), fingerprint)),
+                    after,
+                    cursor_context: selected_cursor_context(input.source_dialect(), &fingerprint),
                 },
             )?]
         } else {
@@ -189,7 +250,6 @@ impl LexiconService {
                 surfaces,
                 &targets,
                 page_size,
-                generation,
                 input.source_dialect(),
             )?
         };
@@ -216,8 +276,8 @@ impl LexiconService {
     /// 已发布词条只按其当前发布版本出现一次。
     ///
     /// 顺序：词面等于 q 的词条最前、以 q 开头的其次、其余按 headword；同档位已发布优先于草稿
-    /// （SQL 与 Rust 两侧同一规则）。分页照 resolve 的游标：绑定 discovery generation 与
-    /// q/kind/match/include_drafts 摘要，词库变动或换任一条件即失效。
+    /// （SQL 与 Rust 两侧同一规则）。游标绑定查询摘要及稳定节点排序键，不绑定词库版本；
+    /// total 是当前请求可见的弱一致计数，不控制分页结束。
     pub async fn search_component_targets_v3(
         &self,
         input: SearchComponentTargetsV3Input,
@@ -260,9 +320,6 @@ impl LexiconService {
             .execute(&mut *transaction)
             .await
             .map_err(database_error)?;
-        let generation = LexiconRepository::sentence_discovery_generation(&mut transaction)
-            .await
-            .map_err(repository_error)?;
         let published_entries = LexiconRepository::component_target_entry_matches(
             &mut transaction,
             &dialect_scopes,
@@ -309,12 +366,8 @@ impl LexiconService {
             .iter()
             .map(|entry| entry.entry_id)
             .collect::<HashSet<_>>();
-        // 归档不会推进 discovery generation，但会移走候选；绑定可用词条集合避免 offset 跳漏。
-        let available_ids = entry_ids.iter().copied().collect::<BTreeSet<_>>();
-        let cursor_digest =
-            hex_digest(&sha256_json(&(cursor_digest, available_ids)).map_err(serialization_error)?);
-        let offset =
-            component_target_cursor_offset(input.cursor.as_deref(), generation, &cursor_digest)?;
+        let after: Option<ComponentPageKey> =
+            decode_discovery_cursor(input.cursor.as_deref(), &cursor_digest)?;
         let mut candidate_index =
             HashMap::<PublishedAssociationCandidateKey, ComponentTargetCandidateIndex>::new();
         for batch in entry_ids.chunks(COMPONENT_TARGET_SNAPSHOT_BATCH_SIZE) {
@@ -399,19 +452,23 @@ impl LexiconService {
             }
         }
         let mut candidate_index = candidate_index.into_values().collect::<Vec<_>>();
-        candidate_index.sort_by(|left, right| {
-            left.match_rank
-                .cmp(&right.match_rank)
-                .then_with(|| left.draft.cmp(&right.draft))
-                .then_with(|| left.headword.cmp(&right.headword))
-                .then_with(|| left.key.cmp(&right.key))
-        });
+        candidate_index.sort_by_cached_key(component_page_key);
         let total = candidate_index.len();
-        let has_more = offset.saturating_add(page_size) < total;
+        candidate_index.retain(|candidate| {
+            after
+                .as_ref()
+                .is_none_or(|after| component_page_key(candidate) > *after)
+        });
+        let has_more = candidate_index.len() > page_size;
+        candidate_index.truncate(page_size);
+        let next_cursor = has_more.then(|| {
+            encode_discovery_cursor(
+                &cursor_digest,
+                component_page_key(candidate_index.last().expect("nonempty page")),
+            )
+        });
         let page_keys = candidate_index
             .iter()
-            .skip(offset)
-            .take(page_size)
             .map(|candidate| candidate.key)
             .collect::<Vec<_>>();
 
@@ -494,9 +551,6 @@ impl LexiconService {
             return Err(invariant_record());
         }
         transaction.commit().await.map_err(database_error)?;
-        let next_cursor =
-            has_more.then(|| format!("{generation}:{}:{cursor_digest}", offset + page_size));
-
         Ok(SearchComponentTargetsV3Response {
             schema_version: 3,
             matches: page,
@@ -530,31 +584,6 @@ fn component_target_cursor_digest(
         &sha256_json(&(q, kind, match_mode, include_drafts, entry_id))
             .map_err(serialization_error)?,
     ))
-}
-
-fn component_target_cursor_offset(
-    cursor: Option<&str>,
-    generation: i64,
-    digest: &str,
-) -> Result<usize, LexiconServiceError> {
-    let Some(cursor) = cursor else {
-        return Ok(0);
-    };
-    let mut parts = cursor.splitn(3, ':');
-    let cursor_generation = parts.next().and_then(|value| value.parse::<i64>().ok());
-    let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
-    let cursor_digest = parts.next();
-    match (cursor_generation, offset, cursor_digest) {
-        (Some(cursor_generation), Some(offset), Some(cursor_digest))
-            if cursor_generation == generation && cursor_digest == digest =>
-        {
-            Ok(offset)
-        }
-        _ => Err(LexiconServiceError::InvalidField {
-            field: "cursor",
-            message: "cursor is invalid or stale for this search",
-        }),
-    }
 }
 
 fn component_target_keyword(q: &str) -> Result<&str, LexiconServiceError> {
@@ -606,42 +635,24 @@ fn page_size(input: &ResolveSentenceTargetsV3Input) -> Result<usize, LexiconServ
     Ok(value as usize)
 }
 
-fn selected_cursor_offset(
+fn selected_cursor_context(dialect: Dialect, fingerprint: &str) -> String {
+    format!(
+        "sentence:{}:{fingerprint}",
+        crate::lexicon::node_identity::dialect_name(dialect)
+    )
+}
+
+fn selected_cursor_key(
     input: &ResolveSentenceTargetsV3Input,
-    generation: i64,
     fingerprint: &str,
-) -> Result<usize, LexiconServiceError> {
+) -> Result<Option<TargetNodeKey>, LexiconServiceError> {
     let ResolveSentenceTargetsV3Input::SelectedSegments { cursor, .. } = input else {
-        return Ok(0);
+        return Ok(None);
     };
-    let Some(cursor) = cursor else {
-        return Ok(0);
-    };
-    let mut parts = cursor.splitn(4, ':');
-    let cursor_generation = parts.next().and_then(|value| value.parse::<i64>().ok());
-    let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
-    let cursor_dialect = parts.next();
-    let cursor_fingerprint = parts.next();
-    match (
-        cursor_generation,
-        offset,
-        cursor_dialect,
-        cursor_fingerprint,
-    ) {
-        (Some(cursor_generation), Some(offset), Some(cursor_dialect), Some(cursor_fingerprint))
-            if cursor_generation == generation
-                && cursor_dialect
-                    == crate::lexicon::node_identity::dialect_name(input.source_dialect())
-                && cursor_fingerprint == fingerprint
-                && offset <= 100_000 =>
-        {
-            Ok(offset)
-        }
-        _ => Err(LexiconServiceError::InvalidField {
-            field: "cursor",
-            message: "cursor is invalid or stale for the selected sentence range",
-        }),
-    }
+    decode_discovery_cursor(
+        cursor.as_deref(),
+        &selected_cursor_context(input.source_dialect(), fingerprint),
+    )
 }
 
 fn discovery_scopes(dialect: Dialect) -> Vec<String> {
@@ -723,7 +734,6 @@ fn automatic_range_results(
     surfaces: Vec<SentenceDiscoverySurfaceRecord>,
     targets: &HashMap<Uuid, PublishedAssociationTarget>,
     page_size: usize,
-    generation: i64,
     source_dialect: Dialect,
 ) -> Result<Vec<SentenceTargetRangeResultV3>, LexiconServiceError> {
     let aliases = surfaces
@@ -764,14 +774,7 @@ fn automatic_range_results(
         .matches
         .into_iter()
         .map(|matched| {
-            automatic_range_result(
-                sentence_text,
-                matched,
-                targets,
-                page_size,
-                generation,
-                source_dialect,
-            )
+            automatic_range_result(sentence_text, matched, targets, page_size, source_dialect)
         })
         .collect()
 }
@@ -781,7 +784,6 @@ fn automatic_range_result(
     matched: DiscoveryMatch<SentenceDiscoverySurfaceRecord>,
     targets: &HashMap<Uuid, PublishedAssociationTarget>,
     page_size: usize,
-    generation: i64,
     source_dialect: Dialect,
 ) -> Result<SentenceTargetRangeResultV3, LexiconServiceError> {
     let kind = match matched.kind {
@@ -805,8 +807,8 @@ fn automatic_range_result(
         Vec::new(),
         RangeResultPagination {
             page_size,
-            offset: 0,
-            cursor_context: Some((generation, source_dialect, fingerprint)),
+            after: None,
+            cursor_context: selected_cursor_context(source_dialect, &fingerprint),
         },
     )
 }
@@ -863,8 +865,8 @@ fn published_candidates(
 
 struct RangeResultPagination {
     page_size: usize,
-    offset: usize,
-    cursor_context: Option<(i64, Dialect, String)>,
+    after: Option<TargetNodeKey>,
+    cursor_context: String,
 }
 
 fn range_result(
@@ -886,26 +888,22 @@ fn range_result(
         })
         .collect::<Vec<_>>();
     let published_total = published_matches.len() as u64;
-    published_matches = published_matches
-        .into_iter()
-        .skip(pagination.offset)
-        .collect();
+    published_matches.sort_by_key(|candidate| target_node_key(published_candidate_key(candidate)));
+    published_matches.retain(|candidate| {
+        pagination
+            .after
+            .is_none_or(|after| target_node_key(published_candidate_key(candidate)) > after)
+    });
     let has_more = published_matches.len() > pagination.page_size;
     published_matches.truncate(pagination.page_size);
-    let next_cursor = has_more
-        .then(|| {
-            pagination
-                .cursor_context
-                .as_ref()
-                .map(|(generation, source_dialect, fingerprint)| {
-                    format!(
-                        "{generation}:{}:{}:{fingerprint}",
-                        pagination.offset + pagination.page_size,
-                        crate::lexicon::node_identity::dialect_name(*source_dialect)
-                    )
-                })
-        })
-        .flatten();
+    let next_cursor = has_more.then(|| {
+        encode_discovery_cursor(
+            &pagination.cursor_context,
+            target_node_key(published_candidate_key(
+                published_matches.last().expect("nonempty page"),
+            )),
+        )
+    });
     Ok(SentenceTargetRangeResultV3 {
         source_segments,
         segments_fingerprint: source_fingerprint(sentence_text, &segments)
@@ -972,52 +970,75 @@ mod tests {
     }
 
     #[test]
-    fn automatic_cursor_drives_selected_second_page_and_binds_generation_and_dialect() {
+    fn automatic_cursor_drives_selected_page_after_removal_and_republication() {
         let segments = vec![SourceSegment {
             range: CodepointRange { start: 0, end: 4 },
         }];
         let fingerprint = source_fingerprint("word", &segments).unwrap();
+        let mut first = candidate();
+        let mut second = candidate();
+        let mut third = candidate();
+        first.entry_id = Uuid::from_u128(1);
+        second.entry_id = Uuid::from_u128(2);
+        third.entry_id = Uuid::from_u128(3);
         let page = range_result(
             "word",
-            segments,
+            segments.clone(),
             "word".to_owned(),
-            vec![candidate(), candidate()],
+            vec![first.clone(), second.clone(), third.clone()],
             Vec::new(),
             RangeResultPagination {
                 page_size: 1,
-                offset: 0,
-                cursor_context: Some((7, Dialect::Uk, fingerprint.clone())),
+                after: None,
+                cursor_context: selected_cursor_context(Dialect::Uk, &fingerprint),
             },
         )
         .unwrap();
-        assert_eq!(page.published_total, 2);
+        assert_eq!(page.published_total, 3);
         assert_eq!(page.published_matches.len(), 1);
         let cursor = page
             .next_cursor
             .expect("truncated automatic range needs a cursor");
+        let after = selected_cursor_key(
+            &selected_input(Dialect::Uk, Some(cursor.clone())),
+            &fingerprint,
+        )
+        .unwrap();
         assert_eq!(
-            selected_cursor_offset(
-                &selected_input(Dialect::Uk, Some(cursor.clone())),
-                7,
-                &fingerprint
-            )
-            .unwrap(),
-            1
+            after,
+            Some(target_node_key(published_candidate_key(&first)))
         );
         assert!(
-            selected_cursor_offset(
+            selected_cursor_key(
                 &selected_input(Dialect::Us, Some(cursor.clone())),
-                7,
                 &fingerprint
             )
-            .is_err(),
-            "UK cursor must not be reusable for US text"
+            .is_err()
         );
         assert!(
-            selected_cursor_offset(&selected_input(Dialect::Uk, Some(cursor)), 8, &fingerprint)
-                .is_err(),
-            "cursor from an older discovery generation must be stale"
+            selected_cursor_key(
+                &selected_input(Dialect::Uk, Some(cursor)),
+                "different range"
+            )
+            .is_err()
         );
+        // Removing an earlier row cannot skip the next node; changing its publication cannot move it.
+        second.publication_id = Some(Uuid::now_v7());
+        let page = range_result(
+            "word",
+            segments,
+            "word".to_owned(),
+            vec![second.clone(), third],
+            Vec::new(),
+            RangeResultPagination {
+                page_size: 1,
+                after,
+                cursor_context: selected_cursor_context(Dialect::Uk, &fingerprint),
+            },
+        )
+        .unwrap();
+        assert_eq!(page.published_matches[0].entry_id, second.entry_id);
+        assert!(page.next_cursor.is_some());
     }
 
     #[test]
@@ -1052,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn component_target_cursor_binds_generation_query_and_kind() {
+    fn component_target_cursor_binds_query_and_kind_not_dataset_generation() {
         let digest = component_target_cursor_digest(
             "give",
             None,
@@ -1108,23 +1129,31 @@ mod tests {
             .unwrap(),
             "是否含草稿不同的搜索不能共用游标"
         );
-        assert_eq!(component_target_cursor_offset(None, 7, &digest).unwrap(), 0);
-        let cursor = format!("7:50:{digest}");
-        assert_eq!(
-            component_target_cursor_offset(Some(&cursor), 7, &digest).unwrap(),
-            50
+        let key: ComponentPageKey = (
+            0,
+            false,
+            "give".to_owned(),
+            (
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+            ),
         );
-        for (stale, generation) in [
-            (cursor.clone(), 8),                     // 词库变了
-            (format!("7:50:{}", "0".repeat(64)), 7), // 换了关键字/kind
-            (format!("7:-1:{digest}"), 7),           // offset 非法
-            ("garbage".to_owned(), 7),
-            (String::new(), 7),
-        ] {
-            assert!(
-                component_target_cursor_offset(Some(&stale), generation, &digest).is_err(),
-                "{stale:?} @ generation {generation} 应被拒"
-            );
+        assert_eq!(
+            decode_discovery_cursor::<ComponentPageKey>(None, &digest).unwrap(),
+            None
+        );
+        let cursor = encode_discovery_cursor(&digest, &key);
+        assert_eq!(
+            decode_discovery_cursor::<ComponentPageKey>(Some(&cursor), &digest).unwrap(),
+            Some(key)
+        );
+        assert!(
+            decode_discovery_cursor::<ComponentPageKey>(Some(&cursor), "different query").is_err()
+        );
+        for invalid in ["7:50:old-offset-cursor", "garbage", ""] {
+            assert!(decode_discovery_cursor::<ComponentPageKey>(Some(invalid), &digest).is_err());
         }
     }
 
