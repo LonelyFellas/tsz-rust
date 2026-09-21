@@ -1,6 +1,6 @@
 ---
 name: ship
-description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或更新从 dev 面向 main 的 PR。审查用分级 effort 的 /code-review 打在已提交 SHA 范围上，并行跑受影响测试，全量门交给原生 hooks；不用于仅实现或部署。
+description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或更新从任务分支面向 main 的 PR。审查用分级 effort 的 /code-review 打在已提交 SHA 范围上，并行跑受影响测试，全量门交给原生 hooks；不用于仅实现或部署。
 ---
 
 # 后端交付（Claude Code 版）
@@ -8,15 +8,15 @@ description: 审查并按授权提交、推送 tsz-rust 后端改动，创建或
 本文件是 Claude Code 下后端 ship 的**唯一**流程来源，自带完整规则，不读 `.agents/skills/ship/`
 （那份是给 Codex 的宿主中立版，两边独立维护）。项目约定读 `AGENTS.md`。
 
-分支模型：dev → main。功能开发**直接在 dev 上提交**（用户不用 worktree，也不建 feature 分支）；
-PR 以 **main** 为 base、从 dev 发起。合并 main 和部署使用各自授权及流程。
+分支模型：任务分支 → main。新任务先 `git fetch origin`，从最新 `origin/main` 创建独立任务分支和 worktree；
+已有本任务 worktree/PR 则复用，不混入其他任务。PR 以 **main** 为 base。合并 main 和部署使用各自授权及流程。
 
 ## 1. 基线与授权
 
-- 检查完整 diff、分支、remotes、已有 PR 和用户改动。fetch 后固定本次 `origin/dev` 基线。
-- 在 dev 上直接提交与推送；**绝不向 main 直接提交或推送**。
-- 开 PR 前核对 dev 相对 main 的全部落差：直接在 dev 上做意味着 PR 会**夹带之前未合的提交**，
-  在 PR 正文里说明，或与用户确认是否一并合入。
+- 检查完整 diff、分支、remotes、已有 PR 和用户改动。fetch 后固定本次 `origin/main` 基线，保留本任务已有分支与 worktree。
+- 仅在本任务分支提交与推送；**绝不向 main 直接提交或推送**。
+- 开 PR 前核对任务分支相对 main 的全部落差，不能夹带未授权任务。
+- detached HEAD 或处于其他任务 checkout 时，保留其改动，在从最新 origin/main 创建的独立 worktree 中只迁移本次授权范围，不清空或重置用户工作区。
 - 「提交并推送」「开 PR」「ship」已授权相应交付步骤，**不逐步重复确认**；
   「仅提交」不含 push，「仅审查」不含 commit，实施批准不自动包含交付。
 - 仅审查时交付发现与验证局限，不自动改文件、不刷新 `.sqlx`、不进入提交阶段。
@@ -52,7 +52,7 @@ hook 改写的文件必须纳入第 4 步审查范围。有混合 hunk 时精确
 
 ## 4. 审查与测试——并行起跑，审查只一轮
 
-提交后固定 `review_base_sha`（本次 `origin/dev`）与 `review_sha`（HEAD）。
+提交后固定 `review_base_sha`（本次 `origin/main`）与 `review_sha`（HEAD）。
 **先发起 `/code-review`（后台跑），随即用 Bash 跑受影响测试**，两边结果回来再一起汇总。
 
 ### 4a. `/code-review`：档位按 diff 右尺寸，每次显式带 effort
@@ -87,7 +87,8 @@ API 修改按原生生成链更新 OpenAPI；SQL/schema 修改的 `.sqlx` 刷新
 失败读实际日志区分 hooks、网络、认证；不猜代理问题、不擅自改全局网络配置。
 修复产生新 SHA 时补齐增量审查再推送。
 
-创建 `--base main --head dev` 的 PR，已有同任务 PR 就更新；正文写清结果、契约/迁移、发布顺序、
+开 PR 前再次 `git fetch origin` 并检查与 origin/main 的合并冲突；发现冲突先处理、验证并补齐增量审查。
+创建 `--base main --head <本任务分支>` 的 PR，已有同任务 open PR 就更新；正文写清结果、契约/迁移、发布顺序、
 验证、审查与回退限制。多行正文用 `--body-file`。
 报告 SHA、审查结论、检查状态、PR 链接和未验证事项。
 GitHub CI 全绿后才具备合并条件，**合并与部署仍按各自授权执行**。
