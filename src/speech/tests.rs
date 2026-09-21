@@ -76,29 +76,102 @@ fn ssml_is_escaped_nested_and_deterministic() {
         once.contains("A&lt;&amp;<phoneme alphabet=\"ipa\" ph=\"a&amp;b\">😀</phoneme>B"),
         "{once}"
     );
-    assert!(once.contains("<emphasis level=\"strong\">"));
-    assert!(once.contains("</emphasis><break time=\"250ms\"/>"));
+    assert!(!once.contains("emphasis"));
+    assert!(once.contains("B<break time=\"250ms\"/></prosody>"));
     assert!(!once.contains("highlight"));
     assert!(once.contains("rate=\"+10%\" pitch=\"-2st\""));
 }
 
 #[test]
-fn spoken_grammar_levels_still_synthesize_as_strong_emphasis() {
-    for level in [RichTextEmphasisLevel::Function, RichTextEmphasisLevel::Core] {
-        let content = RichTextV2 {
+fn teaching_marks_do_not_split_words_or_change_spoken_text() {
+    for text in ["jobs", "job something; someone jobs", "😀 jobs<&"] {
+        let end = text.chars().count();
+        let plain_ssml = build_ssml(&request(plain(text))).unwrap();
+        for level in [
+            RichTextEmphasisLevel::Function,
+            RichTextEmphasisLevel::Core,
+            RichTextEmphasisLevel::Strong,
+        ] {
+            for annotations in [
+                vec![RichTextAnnotation::Emphasis {
+                    start: 0,
+                    end,
+                    level,
+                }],
+                // 部分标注与普通正文的交界也不能切断单词。
+                vec![RichTextAnnotation::Emphasis {
+                    start: 0,
+                    end: 3,
+                    level,
+                }],
+                vec![
+                    RichTextAnnotation::Emphasis {
+                        start: 0,
+                        end: 3,
+                        level,
+                    },
+                    RichTextAnnotation::Emphasis {
+                        start: 3,
+                        end,
+                        level: RichTextEmphasisLevel::Function,
+                    },
+                ],
+            ] {
+                let content = RichTextV2 {
+                    version: 2,
+                    text: text.to_owned(),
+                    annotations,
+                };
+                assert_eq!(
+                    build_ssml(&request(content)).unwrap(),
+                    plain_ssml,
+                    "{text}: {level:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn teaching_marks_preserve_explicit_phonemes_and_pauses() {
+    for (alphabet, phoneme, tag) in [
+        (RichTextPhonemeAlphabet::Ipa, "dʒɒbz", "ipa"),
+        (RichTextPhonemeAlphabet::Ups, "JH AA B Z", "ups"),
+    ] {
+        let mut content = RichTextV2 {
             version: 2,
-            text: "ab".to_owned(),
-            annotations: vec![RichTextAnnotation::Emphasis {
-                start: 0,
-                end: 2,
-                level,
-            }],
+            text: "jobs work".to_owned(),
+            annotations: vec![
+                RichTextAnnotation::Phoneme {
+                    start: 0,
+                    end: 4,
+                    alphabet,
+                    phoneme: phoneme.to_owned(),
+                },
+                RichTextAnnotation::Pause {
+                    at: 4,
+                    duration_ms: 250,
+                },
+            ],
         };
-        let ssml = build_ssml(&request(content)).unwrap();
-        assert!(
-            ssml.contains("<emphasis level=\"strong\">ab</emphasis>"),
-            "{level:?}: {ssml}"
-        );
+        let expected = build_ssml(&request(content.clone())).unwrap();
+        content.annotations.extend([
+            RichTextAnnotation::Emphasis {
+                start: 0,
+                end: 4,
+                level: RichTextEmphasisLevel::Core,
+            },
+            RichTextAnnotation::Emphasis {
+                start: 4,
+                end: 9,
+                level: RichTextEmphasisLevel::Function,
+            },
+        ]);
+        let actual = build_ssml(&request(content)).unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual.contains(&format!(
+            "<phoneme alphabet=\"{tag}\" ph=\"{phoneme}\">jobs</phoneme><break time=\"250ms\"/> work"
+        )), "{actual}");
     }
 }
 
@@ -293,7 +366,43 @@ fn fingerprint_is_stable_for_equivalent_canonical_content_and_versions_options()
     .unwrap();
     assert_ne!(first.fingerprint(), other_locale.fingerprint());
     assert_eq!(CACHE_SCHEMA_VERSION, "speech-cache-v1");
-    assert_eq!(SSML_BUILDER_VERSION, "rich-text-v2-ssml-v2");
+    assert_eq!(SSML_BUILDER_VERSION, "rich-text-v2-ssml-v3");
+}
+
+#[test]
+fn continuous_speech_uses_a_new_cache_fingerprint() {
+    use sha2::{Digest, Sha256};
+
+    let request = request(plain("jobs"));
+    // 重建旧版与新版的公开指纹协议，确认版本确实进入哈希，而非只改常量。
+    for (version, matches_current) in [
+        (b"rich-text-v2-ssml-v2".as_slice(), false),
+        (b"rich-text-v2-ssml-v3".as_slice(), true),
+    ] {
+        let mut hash = Sha256::new();
+        let fields: &[&[u8]] = &[
+            b"speech-cache-v1",
+            version,
+            b"azure",
+            b"en-US-JennyNeural",
+            b"en-US",
+            b"some",
+            b"cheerful",
+            b"10",
+            b"-2",
+            b"audio-24khz-96kbitrate-mono-mp3",
+            request.normalized_content(),
+        ];
+        for field in fields {
+            hash.update((field.len() as u64).to_be_bytes());
+            hash.update(field);
+        }
+        let expected: [u8; 32] = hash.finalize().into();
+        assert_eq!(
+            *request.fingerprint().as_bytes() == expected,
+            matches_current
+        );
+    }
 }
 
 #[derive(Clone)]

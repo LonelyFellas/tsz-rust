@@ -9,7 +9,7 @@ use crate::lexicon::{
 };
 
 pub const CACHE_SCHEMA_VERSION: &str = "speech-cache-v1";
-pub const SSML_BUILDER_VERSION: &str = "rich-text-v2-ssml-v2";
+pub const SSML_BUILDER_VERSION: &str = "rich-text-v2-ssml-v3";
 pub const PROVIDER_NAME: &str = "azure";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
