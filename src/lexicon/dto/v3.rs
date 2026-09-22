@@ -1029,6 +1029,7 @@ pub struct WordRelationV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, read_only)]
     pub target_gloss: Option<String>,
+    /// 具体目标词义的状态；词条已有发布版本不代表新增草稿词义已发布。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, read_only)]
     pub target_status: Option<AdminWordStatus>,
@@ -1542,7 +1543,7 @@ pub struct FormsImpactResponseV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub surface_match_page: Option<SurfaceMatchPageV3>,
-    /// 本次词形变更会破坏的入站引用；非空时保存必 409 `inbound_reference_conflict`。无违例时省略。
+    /// 本次词形变更会影响的入站引用。允许保存草稿；破坏性影响必须在发布前修复，发布冲突返回 `inbound_reference_conflict`。无违例时省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, max_items = 500)]
     pub blocked_references: Option<Vec<InboundReferenceV3>>,
@@ -1562,6 +1563,8 @@ pub enum InboundReferenceKindV3 {
     PhraseComponent,
     /// 本词条专用词形组对词义的绑定。
     FormGroupSenseBinding,
+    /// 其他词条草稿正文中的直接或经短语成分关联。
+    DraftTextLink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
@@ -1632,7 +1635,7 @@ pub struct InboundReferenceSourceV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub relation_type: Option<String>,
-    /// 发布引用的 `reference_kind`：relation / sentence_context / phrase_component / text_link。
+    /// 内容引用种类：relation / sentence_context / phrase_component / text_link；草稿正文也使用 text_link。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub reference_kind: Option<String>,

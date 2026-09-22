@@ -2876,13 +2876,247 @@ async fn related_search_cursor_survives_writes_and_uses_current_remaining_count(
     assert!(end["next_cursor"].is_null(), "{end}");
 }
 
-/// 关联词候选对**所有**管理员亮出草稿（2026-09-11 口径）：草稿能被别人引用。
-///
-/// 此前这里断言的是相反的事：外人搜别人的草稿只得到空结果。放开后关联词搜索与撞名
-/// 机器一致，看得见也绑得上；写权限不受影响，仍由 ensure_draft_writable 守着。
-/// 例句发现（sentence-targets/resolve）不在本次放开范围，草稿候选仍只对创建者可见。
+/// 词条曾发布不代表新增词义已发布；搜索、保存回显与单独发布按具体节点判断。
 #[sqlx::test]
-async fn relation_draft_candidates_open_up_while_discovery_stays_creator_only(pool: PgPool) {
+async fn related_search_exposes_only_new_draft_senses_of_published_entries(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let draft = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let path =
+        format!("{ROOT}/entries/related-search?q=harbour&kind=word&match_mode=exact&page_size=20");
+    let (_, unchanged) = call(
+        &state,
+        Method::GET,
+        &format!("{path}&include_drafts=true"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        unchanged["results"].as_array().unwrap().len(),
+        1,
+        "{unchanged}"
+    );
+
+    let mut meanings = published["word"]["meanings"].clone();
+    let old_sense_id = meanings["pos"][0]["senses"][0]["id"].clone();
+    let mut new_sense = meanings["pos"][0]["senses"][0].clone();
+    let new_sense_id = json!(Uuid::now_v7());
+    new_sense["id"] = new_sense_id.clone();
+    for definition in new_sense["definitions"].as_array_mut().unwrap() {
+        definition["id"] = json!(Uuid::now_v7());
+        definition["content_id"] = json!(Uuid::now_v7());
+        definition["content"] = rich_text("新增未发布词义");
+    }
+    meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(new_sense);
+    save_v3_meanings(&state, &bearer, &published, meanings).await;
+
+    let (status, default) = call(&state, Method::GET, &path, &bearer, None, None).await;
+    assert_eq!(status, StatusCode::OK, "{default}");
+    assert_eq!(default["results"].as_array().unwrap().len(), 1);
+    assert!(
+        default["results"][0].get("status").is_none(),
+        "published is the implicit default: {default}"
+    );
+    assert_eq!(default["results"][0]["senses"][0]["sense_id"], old_sense_id);
+    assert_eq!(default["results"][0]["senses"].as_array().unwrap().len(), 1);
+
+    let (status, expanded) = call(
+        &state,
+        Method::GET,
+        &format!("{path}&include_drafts=true"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{expanded}");
+    let results = expanded["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "{expanded}");
+    let draft_result = results
+        .iter()
+        .find(|item| item["status"] == "draft")
+        .unwrap();
+    assert_eq!(draft_result["entry_id"], published["word"]["id"]);
+    assert_eq!(
+        draft_result["senses"].as_array().unwrap().len(),
+        1,
+        "{expanded}"
+    );
+    assert_eq!(draft_result["senses"][0]["sense_id"], new_sense_id);
+    assert_eq!(draft_result["senses"][0]["gloss"], "新增未发布词义");
+
+    // 句中发现也按具体节点区分发布/草稿，两个范围共享页容量而不是无界补充草稿。
+    for include_drafts in [false, true] {
+        let mut input = json!({"schema_version":3,"sentence_text":"The harbour is calm.","source_dialect":"common",
+            "mode":"selected_segments","selected_segments":[{"start":4,"end":11,"surface":"harbour"}],
+            "include_drafts":include_drafts,"page_size_per_range":1});
+        let mut seen = HashSet::new();
+        let mut saw_draft = false;
+        let mut finished = false;
+        for page in 0..20 {
+            let (status, response) = call(
+                &state,
+                Method::POST,
+                &format!("{ROOT}/entries/sentence-targets/resolve"),
+                &bearer,
+                None,
+                Some(input.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            let range = &response["range_results"][0];
+            let pubs = range["published_matches"].as_array().unwrap();
+            let drafts = range["draft_matches"].as_array().unwrap();
+            assert!(pubs.len() + drafts.len() <= 1, "{range}");
+            assert_eq!(range["draft_total"].as_u64().unwrap() > 0, include_drafts);
+            for (is_draft, items) in [(false, pubs), (true, drafts)] {
+                for candidate in items {
+                    saw_draft |= is_draft;
+                    assert_eq!(candidate.get("publication_id").is_none(), is_draft);
+                    assert!(candidate["senses"].as_array().unwrap().iter().any(
+                        |sense| &sense["sense_id"]
+                            == if is_draft {
+                                &new_sense_id
+                            } else {
+                                &old_sense_id
+                            }
+                    ));
+                    if is_draft {
+                        assert!(
+                            candidate["senses"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .all(|sense| sense["sense_id"] != old_sense_id)
+                        );
+                    }
+                    assert!(
+                        seen.insert(format!(
+                            "{}:{}:{}:{}:{is_draft}",
+                            candidate["entry_id"],
+                            candidate["pos_id"],
+                            candidate["base_form_id"],
+                            candidate["matched_variant_id"]
+                        )),
+                        "重复节点：{range}"
+                    );
+                }
+            }
+            let Some(cursor) = range["next_cursor"].as_str() else {
+                finished = true;
+                break;
+            };
+            input["cursor"] = json!(cursor);
+            if include_drafts && page == 0 {
+                let mut changed_scope = input.clone();
+                changed_scope["include_drafts"] = json!(false);
+                let (status, rejected) = call(
+                    &state,
+                    Method::POST,
+                    &format!("{ROOT}/entries/sentence-targets/resolve"),
+                    &bearer,
+                    None,
+                    Some(changed_scope),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+                assert_eq!(rejected["field"], "cursor");
+            }
+        }
+        assert!(finished);
+        assert_eq!(saw_draft, include_drafts);
+    }
+
+    for include_drafts in [false, true] {
+        let (status, candidates) = search_component_targets(
+            &state,
+            &bearer,
+            json!({
+                "schema_version": 3, "q": "harbour", "kind": "word", "match": "exact",
+                "page_size": 200, "include_drafts": include_drafts
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{candidates}");
+        let matches = candidates["matches"].as_array().unwrap();
+        assert!(
+            matches
+                .iter()
+                .any(|item| item.get("publication_id").is_some())
+        );
+        for candidate in matches
+            .iter()
+            .filter(|item| item.get("publication_id").is_some())
+        {
+            assert!(
+                candidate["senses"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|sense| sense["sense_id"] == old_sense_id),
+                "published snapshot was replaced by draft: {candidate}"
+            );
+        }
+        assert_eq!(
+            matches
+                .iter()
+                .any(|candidate| candidate.get("publication_id").is_none()
+                    && candidate["senses"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|sense| sense["sense_id"] == new_sense_id)),
+            include_drafts,
+            "{candidates}"
+        );
+    }
+
+    let source = create_v3_word_with_relation(
+        &state,
+        &bearer,
+        "wharf",
+        json!({
+            "id": Uuid::now_v7(), "relation": "synonym", "score": "80.00",
+            "target_word_id": published["word"]["id"], "target_sense_id": new_sense_id
+        }),
+    )
+    .await;
+    assert_eq!(
+        source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_status"],
+        "draft"
+    );
+    let (status, rejected) = publish_ready_v3(&state, &bearer, &source).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        rejected.to_string().contains("relation_target_unavailable"),
+        "{rejected}"
+    );
+
+    let mut source_meanings = source["word"]["meanings"].clone();
+    source_meanings["pos"][0]["senses"][0]["relations"][0]["target_sense_id"] = old_sense_id;
+    let relation = source_meanings["pos"][0]["senses"][0]["relations"][0]
+        .as_object_mut()
+        .unwrap();
+    for field in ["target_headword", "target_gloss", "target_status"] {
+        relation.remove(field);
+    }
+    let repaired = save_v3_meanings(&state, &bearer, &source, source_meanings).await;
+    let (status, repaired_publication) = publish_ready_v3(&state, &bearer, &repaired).await;
+    assert_eq!(status, StatusCode::CREATED, "{repaired_publication}");
+}
+
+/// 展开草稿时关联和句中发现均可见具体节点，不扩大编辑权限。
+#[sqlx::test]
+async fn relation_and_discovery_drafts_are_visible_without_granting_edit_rights(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -2894,6 +3128,13 @@ async fn relation_draft_candidates_open_up_while_discovery_stays_creator_only(po
     let outsider = token(&state, outsider_id);
 
     let owner_forms = create_v3_with_complete_forms(&state, &pool, &owner).await;
+    let owner_forms = save_v3_meanings(
+        &state,
+        &owner,
+        &owner_forms,
+        complete_v3_meanings_fixture(owner_forms["word"]["forms"]["pos"][0]["pos_id"].clone()),
+    )
+    .await;
     let owner_entry_id = owner_forms["word"]["id"].as_str().unwrap();
 
     let search_path = format!(
@@ -2924,7 +3165,7 @@ async fn relation_draft_candidates_open_up_while_discovery_stays_creator_only(po
     );
     assert_eq!(owner_results[0]["entry_id"], owner_entry_id);
 
-    // 例句发现的草稿候选不跟着放开：别人的未发布草稿仍不可见。
+    // 句中候选也覆盖其他管理员草稿，但返回可验证的具体词形/词义身份。
     let discovery_body = json!({
         "schema_version": 3,
         "sentence_text": "The harbour is calm.",
@@ -2944,11 +3185,38 @@ async fn relation_draft_candidates_open_up_while_discovery_stays_creator_only(po
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{outsider_discovery}");
+    let draft_matches = outsider_discovery["range_results"][0]["draft_matches"]
+        .as_array()
+        .unwrap();
+    assert!(!draft_matches.is_empty(), "{outsider_discovery}");
     assert!(
-        outsider_discovery["range_results"][0]["draft_matches"]
-            .as_array()
-            .is_some_and(Vec::is_empty),
-        "别人的未发布草稿不得进入发现候选：{outsider_discovery}"
+        draft_matches
+            .iter()
+            .all(|candidate| candidate["entry_id"] == owner_entry_id
+                && candidate.get("publication_id").is_none()
+                && candidate["pos_id"].is_string()
+                && candidate["base_form_id"].is_string()
+                && candidate["matched_variant_id"].is_string()
+                && candidate["senses"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|sense| sense["sense_id"]
+                        == owner_forms["word"]["meanings"]["pos"][0]["senses"][0]["id"])),
+        "{outsider_discovery}"
+    );
+    let (status, denied) = save_v3_meanings_raw(
+        &state,
+        &outsider,
+        owner_entry_id,
+        owner_forms["word"]["revision"].as_i64().unwrap(),
+        writable_v3_meanings(&owner_forms),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "候选可见不代表有编辑权：{denied}"
     );
 
     let (status, owner_discovery) = call(
@@ -2972,13 +3240,15 @@ async fn relation_draft_candidates_open_up_while_discovery_stays_creator_only(po
     );
 }
 
-/// 别人的草稿不只是能被搜到，还要真能绑成关联词并跟着发布。
+/// 别人的草稿可被引用并保存，但单独发布必须等待具体目标词义发布。
 ///
 /// 搜索侧由 `relation_draft_candidates_open_up_while_discovery_stays_creator_only` 守着；
 /// 这条守写入与发布侧：写入面没有 creator 谓词是「可引用」成立的前提，一旦有人给
 /// `resolve_relation_targets` 加上过滤，功能会静默失效而搜索那条测试照常绿。
 #[sqlx::test]
-async fn an_outsider_binds_and_publishes_a_relation_to_another_admins_draft_sense(pool: PgPool) {
+async fn an_outsider_saves_draft_relation_but_publishes_only_after_target_publication(
+    pool: PgPool,
+) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -2987,7 +3257,7 @@ async fn an_outsider_binds_and_publishes_a_relation_to_another_admins_draft_sens
     let owner = token(&state, seed_admin(&pool).await);
     let outsider = token(&state, seed_admin(&pool).await);
 
-    // owner 的草稿：存了词义，但始终不发布。
+    // owner 先只保存词义；引用方必须等待该词义发布。
     let target = create_v3_with_complete_forms(&state, &pool, &owner).await;
     let target_id = target["word"]["id"].as_str().unwrap().to_owned();
     let mut target_content =
@@ -2997,7 +3267,7 @@ async fn an_outsider_binds_and_publishes_a_relation_to_another_admins_draft_sens
     target_content["pos"][0]["senses"][0]["definitions"][0]["content"] =
         rich_text("别人草稿的港口");
     let target_sense_id = target_content["pos"][0]["senses"][0]["id"].clone();
-    save_v3_meanings(&state, &owner, &target, target_content).await;
+    let target = save_v3_meanings(&state, &owner, &target, target_content).await;
 
     // outsider 另起一个词面建词条：同形词要走标注确认，而标注只有创建者能改，
     // 会把这条用例卡在与本次改动无关的那道门上。
@@ -3036,7 +3306,46 @@ async fn an_outsider_binds_and_publishes_a_relation_to_another_admins_draft_sens
         "服务端应回填目标草稿的词义快照：{saved}"
     );
 
-    // 发布引用方：引用落在草稿作用域，且不带发布号。
+    // 保存不阻断草稿依赖，发布与发布前校验必须拒绝，且失败不创建任何发布记录。
+    let (status, validation) = call(
+        &state,
+        Method::POST,
+        &format!(
+            "{ROOT}/entries/{}/validate",
+            saved["word"]["id"].as_str().unwrap()
+        ),
+        &outsider,
+        None,
+        Some(json!({"schema_version": 3, "base_revision": saved["word"]["revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{validation}");
+    assert_eq!(validation["valid"], false, "{validation}");
+    assert!(
+        validation["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["code"] == "relation_target_unavailable"
+                && issue["node_id"] == json!(relation_id)),
+        "{validation}"
+    );
+    let (status, rejected) = publish_ready_v3(&state, &outsider, &saved).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        rejected.to_string().contains("relation_target_unavailable"),
+        "{rejected}"
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications WHERE entry_id = $1")
+            .bind(Uuid::parse_str(saved["word"]["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    let (status, target_published) = publish_ready_v3(&state, &owner, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    // 沿用原 revision 发布成功，也证明失败未偷偷修改引用方草稿。
     let (status, published) = publish_ready_v3(&state, &outsider, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let (scope, publication_id) = sqlx::query_as::<_, (String, Option<Uuid>)>(
@@ -3050,9 +3359,9 @@ async fn an_outsider_binds_and_publishes_a_relation_to_another_admins_draft_sens
     .bind(Uuid::parse_str(saved["word"]["id"].as_str().unwrap()).unwrap())
     .fetch_one(&pool)
     .await
-    .expect("发布后应留下一条指向草稿词义的引用行");
-    assert_eq!(scope, "draft");
-    assert_eq!(publication_id, None);
+    .expect("发布后应留下一条指向已发布词义的引用行");
+    assert_eq!(scope, "publication");
+    assert!(publication_id.is_some());
 }
 
 /// 撞名机器对**所有**管理员亮出草稿命中（2026-09-08 口径）。
@@ -7252,14 +7561,17 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
         "释义级成分引用的词义不得被删掉后发布：{blocked}"
     );
     let references = inbound_reference_conflict_items(&blocked);
-    assert_eq!(references.len(), 1, "{blocked}");
-    let reference = &references[0];
+    assert_eq!(references.len(), 2, "{blocked}");
+    let reference = references
+        .iter()
+        .find(|item| item["kind"] == "publication_sense_ref")
+        .unwrap();
     assert_eq!(reference["kind"], "publication_sense_ref");
     assert_eq!(reference["stale"], true);
     assert_eq!(reference["target"]["sense_id"], referenced_sense_id);
-    assert!(
-        reference["target"].get("pos_id").is_none(),
-        "词义已不在提交内容里，找不到所属词性：{reference}"
+    assert_eq!(
+        reference["target"]["pos_id"], word_published["word"]["forms"]["pos"][0]["pos_id"],
+        "即使草稿节点已删除，来源快照仍应保留完整目标身份：{reference}"
     );
     assert_eq!(reference["source"]["entry_id"], json!(phrase_entry_id));
     assert_eq!(
@@ -9857,6 +10169,174 @@ async fn create_unpublished_harbour_draft_with_plural(
     (saved, plural_id)
 }
 
+#[sqlx::test]
+async fn referenced_form_deletion_saves_draft_but_requires_published_source_repair(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let (target, plural_id) =
+        create_unpublished_harbour_draft_with_plural(&state, &pool, &bearer).await;
+    let (status, target) = publish_ready_v3(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "{target}");
+    let target_id = target["word"]["id"].as_str().unwrap();
+    let target_uuid = Uuid::parse_str(target_id).unwrap();
+    let old_publication = current_publication_id(&pool, target_uuid).await;
+    let plural = target["word"]["forms"]["pos"][0]["forms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|form| form["id"] == json!(plural_id))
+        .unwrap();
+    let mut component = resolved_component_json(&target, old_publication, "uk", "harbours");
+    component["target_form_id"] = json!(plural_id);
+    component["target_variant_id"] = plural["regional_variants"]["uk"]["id"].clone();
+    component["target_form_type"] = json!("plural");
+    let link = text_link_json(
+        &component,
+        json!([{"start":0,"end":8,"surface":"harbours"}]),
+    );
+    let source = create_v3_phrase_with_sense_components(
+        &state,
+        &bearer,
+        "harbours club",
+        json!([component]),
+    )
+    .await;
+    let mut meanings = writable_v3_meanings_with_links(&source);
+    meanings["pos"][0]["senses"][0]["sentences"] = json!([sentence_with_text_links_json(
+        &source,
+        "harbours",
+        json!([link])
+    )]);
+    let source = save_v3_meanings(&state, &bearer, &source, meanings).await;
+    let (status, source) = publish_ready_v3(&state, &bearer, &source).await;
+    assert_eq!(status, StatusCode::CREATED, "{source}");
+    let source_id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let old_source_publication = current_publication_id(&pool, source_id).await;
+
+    let mut forms = target["word"]["forms"].clone();
+    forms["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|form| form["id"] != json!(plural_id));
+    forms["pos"][0]["form_groups"][0]["members"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|member| member["form_id"] != json!(plural_id));
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        target_id,
+        target["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    let saved = save_v3_meanings(&state, &bearer, &saved, writable_v3_meanings(&saved)).await;
+    assert_eq!(
+        saved["word"]["meanings"]["pos"][0]["senses"][0]["id"],
+        target["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+    );
+    let (status, live_candidates) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version":3,"q":"harbours","match":"exact","include_drafts":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{live_candidates}");
+    assert!(
+        live_candidates["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["entry_id"] == json!(target_uuid)),
+        "草稿删除不能改变当前发布候选：{live_candidates}"
+    );
+    let impact = inbound_references_of(&state, &bearer, target_id).await;
+    let refs = impact["items"].as_array().unwrap();
+    assert_eq!(refs.len(), 4, "{impact}");
+    assert!(
+        refs.iter()
+            .all(|item| item["stale"] == true && item["target"]["form_id"] == json!(plural_id)),
+        "{impact}"
+    );
+    assert!(refs.iter().any(|item| item["kind"] == "draft_text_link"));
+    let (status, rejected) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(inbound_reference_conflict_items(&rejected).len(), 4);
+    assert_eq!(
+        current_publication_id(&pool, target_uuid).await,
+        old_publication
+    );
+
+    let mut repaired = writable_v3_meanings_with_links(&source);
+    repaired["pos"][0]["senses"][0]["component_usages"] = json!([]);
+    repaired["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["text_links"] = json!([]);
+    let repaired = save_v3_meanings(&state, &bearer, &source, repaired).await;
+    let (status, still_blocked) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{still_blocked}");
+    assert_eq!(inbound_reference_conflict_items(&still_blocked).len(), 2);
+    let (status, repaired) = publish_ready_v3(&state, &bearer, &repaired).await;
+    assert_eq!(status, StatusCode::CREATED, "{repaired}");
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let (_, live_candidates) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version":3,"q":"harbours","match":"exact","include_drafts":false}),
+    )
+    .await;
+    assert!(
+        live_candidates["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["entry_id"] != json!(target_uuid))
+    );
+    let retired: bool = sqlx::query_scalar(
+        "SELECT removed_from_draft_at IS NOT NULL FROM lexicon.nodes WHERE entry_id=$1 AND id=$2",
+    )
+    .bind(target_uuid)
+    .bind(plural_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(retired);
+    let snapshot: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=$1")
+            .bind(old_publication)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        snapshot["forms"]["pos"][0]["forms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|form| form["id"] == json!(plural_id))
+    );
+    // 历史快照可以回放，但不能被重新激活来绕过当前目标完整身份校验。
+    let current_source_publication = current_publication_id(&pool, source_id).await;
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{source_id}/publications/{old_source_publication}/activate"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({
+            "schema_version":3,"base_revision":repaired["word"]["revision"],
+            "base_lifecycle_revision":repaired["word"]["lifecycle_revision"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert_eq!(
+        current_publication_id(&pool, source_id).await,
+        current_source_publication
+    );
+}
+
 /// 把响应里的词义搬成可写形状，并去掉正文关联上服务端回填的只读字段（写请求禁止带）。
 fn writable_v3_meanings_with_links(word: &Value) -> Value {
     let mut meanings = writable_v3_meanings(word);
@@ -10132,22 +10612,15 @@ async fn text_links_may_target_never_published_drafts_and_upgrade_after_the_targ
         "{association}"
     );
 
-    // 宿主照常发布：引用记 draft 范围、锚在目标当时的 entry revision，快照里的关联没有发布版本。
-    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
-    assert_eq!(status, StatusCode::CREATED, "{published}");
-    let target_revision = entry_revision(&pool, target_entry_id).await;
-    assert_eq!(
-        current_sense_ref_anchors(&pool, host_entry_id, "text_link").await,
-        vec![(None, "draft".to_owned(), target_revision)]
-    );
-    let snapshot = current_publication_snapshot(&pool, host_entry_id).await;
-    let snapshot_link = &snapshot["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]
-        ["text_links"][0];
-    assert_eq!(snapshot_link["target_word_id"], target["word"]["id"]);
+    // 保存允许草稿依赖，单独发布拒绝未发布的具体文本目标，且不产生发布引用。
+    let (status, rejected) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
     assert!(
-        snapshot_link.get("target_publication_id").is_none(),
-        "{snapshot_link}"
+        current_sense_ref_anchors(&pool, host_entry_id, "text_link")
+            .await
+            .is_empty()
     );
+    let published = saved;
 
     // 目标发布后，宿主下一次保存由服务端补上目标当前发布版本，再发布即为 publication 范围。
     let (status, target_published) = publish_ready_v3(&state, &author_bearer, &target).await;
@@ -10277,13 +10750,20 @@ async fn phrase_components_may_target_never_published_drafts_and_upgrade_after_t
         "{refreshed_usage}"
     );
 
-    let (status, published) = publish_ready_v3(&state, &bearer, &refreshed).await;
-    assert_eq!(status, StatusCode::CREATED, "{published}");
-    let target_revision = entry_revision(&pool, target_entry_id).await;
-    assert_eq!(
-        current_sense_ref_anchors(&pool, host_entry_id, "phrase_component").await,
-        vec![(None, "draft".to_owned(), target_revision)]
+    let (status, rejected) = publish_ready_v3(&state, &bearer, &refreshed).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert!(
+        rejected
+            .to_string()
+            .contains("phrase_component_target_unavailable"),
+        "{rejected}"
     );
+    assert!(
+        current_sense_ref_anchors(&pool, host_entry_id, "phrase_component")
+            .await
+            .is_empty()
+    );
+    let published = refreshed;
 
     let (status, target_published) = publish_ready_v3(&state, &author_bearer, &target).await;
     assert_eq!(status, StatusCode::CREATED, "{target_published}");
@@ -10586,10 +11066,9 @@ async fn inbound_references_list_draft_relations_and_draft_components_with_node_
     assert_eq!(node_total(&body, &target_sense_id), Some(("sense", 2)));
 }
 
-/// 读接口：短语当前发布版本里的成分引用以发布引用出现；钉住发布版本的成分本身
-/// 引用的是不可变快照，不算入站引用。
+/// 发布与草稿是不同生命周期的活跃来源；固定历史快照不能隐藏当前草稿的引用影响。
 #[sqlx::test]
-async fn inbound_references_list_publication_sense_refs_but_not_pinned_components(pool: PgPool) {
+async fn inbound_references_include_complete_published_and_draft_component_targets(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -10625,8 +11104,11 @@ async fn inbound_references_list_publication_sense_refs_but_not_pinned_component
     assert_eq!(body["revision"], target_published["word"]["revision"]);
     assert_eq!(body["truncated"], false);
     let items = body["items"].as_array().unwrap();
-    assert_eq!(items.len(), 1, "钉住发布版本的成分不算入站引用：{body}");
-    let reference = &items[0];
+    assert_eq!(items.len(), 2, "发布和草稿成分均应显示完整影响：{body}");
+    let reference = items
+        .iter()
+        .find(|item| item["kind"] == "publication_sense_ref")
+        .unwrap();
     assert_eq!(
         reference["id"],
         json!(format!(
@@ -10636,9 +11118,14 @@ async fn inbound_references_list_publication_sense_refs_but_not_pinned_component
     );
     assert_eq!(reference["kind"], "publication_sense_ref");
     assert_eq!(reference["stale"], false);
+    assert_eq!(reference["target"]["pos_id"], target_pos_id);
+    assert_eq!(reference["target"]["sense_id"], target_sense_id);
+    let form = &target_published["word"]["forms"]["pos"][0]["forms"][0];
+    assert_eq!(reference["target"]["base_form_id"], form["id"]);
+    assert_eq!(reference["target"]["form_id"], form["id"]);
     assert_eq!(
-        reference["target"],
-        json!({"pos_id": target_pos_id, "sense_id": target_sense_id})
+        reference["target"]["variant_id"],
+        form["regional_variants"]["uk"]["id"]
     );
     assert_eq!(
         reference["source"]["entry_id"],
@@ -10660,17 +11147,14 @@ async fn inbound_references_list_publication_sense_refs_but_not_pinned_component
     );
     assert_eq!(reference["source"]["entry_kind"], "phrase");
     assert_eq!(reference["source"]["entry_status"], "published");
-    assert_eq!(body["nodes"].as_array().unwrap().len(), 2, "{body}");
-    assert_eq!(node_total(&body, &target_pos_id), Some(("pos", 1)));
-    assert_eq!(node_total(&body, &target_sense_id), Some(("sense", 1)));
+    assert_eq!(body["nodes"].as_array().unwrap().len(), 4, "{body}");
+    assert_eq!(node_total(&body, &target_pos_id), Some(("pos", 2)));
+    assert_eq!(node_total(&body, &target_sense_id), Some(("sense", 2)));
 }
 
-/// Q1：短语成分指向从未发布的草稿节点时，目标词的破坏性改动（删掉被指向的词义）被拦下，
-/// 短语归档后解除；改词形类型属保护式放开，不再拦截（TASK#58）。
+/// 草稿允许删除目标词义；影响列表保留失效来源，来源归档后依赖消失。
 #[sqlx::test]
-async fn v3_draft_target_phrase_components_block_breaking_edits_until_the_phrase_is_archived(
-    pool: PgPool,
-) {
+async fn v3_draft_target_edits_retain_stale_components_until_source_repair(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -10717,7 +11201,7 @@ async fn v3_draft_target_phrase_components_block_breaking_edits_until_the_phrase
     );
     let base_revision = retyped_saved["word"]["revision"].as_i64().unwrap();
 
-    // 3. 换掉整套词义（被指向的词义消失）：仍 409——引用失去锚点。
+    // 3. 草稿允许替换词义，来源引用保留并被标识为失效。
     let replacement = complete_v3_meanings_fixture(target_pos_id.clone());
     let (status, problem) = save_v3_meanings_raw(
         &state,
@@ -10727,27 +11211,24 @@ async fn v3_draft_target_phrase_components_block_breaking_edits_until_the_phrase
         replacement.clone(),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
-    let references = inbound_reference_conflict_items(&problem);
-    assert_eq!(references.len(), 1, "{problem}");
+    assert_eq!(status, StatusCode::OK, "{problem}");
+    let impact = inbound_references_of(&state, &bearer, &target_id).await;
+    let references = impact["items"].as_array().unwrap();
+    assert_eq!(references.len(), 1, "{impact}");
     assert_eq!(references[0]["kind"], "phrase_component");
     assert_eq!(references[0]["stale"], true);
     assert_eq!(references[0]["target"]["sense_id"], target_sense_id);
     assert_eq!(references[0]["target"]["form_id"], json!(target_form["id"]));
     assert_eq!(references[0]["source"]["node_id"], json!(component_id));
-    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision);
-
-    // 4. 归档短语解除守卫：删词义放行。
+    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision + 1);
     archive_v3_entry(&state, &bearer, &phrase).await;
-    let (status, replaced) =
-        save_v3_meanings_raw(&state, &bearer, &target_id, base_revision, replacement).await;
-    assert_eq!(status, StatusCode::OK, "{replaced}");
+    let cleared = inbound_references_of(&state, &bearer, &target_id).await;
+    assert!(cleared["items"].as_array().unwrap().is_empty(), "{cleared}");
 }
 
-/// 来源词条正被别的事务改动时，入站引用检查不等锁：仍是可重试的 409 `reference_conflict`，
-/// 而不是 `inbound_reference_conflict`。
+/// 草稿保存不锁入站来源；发布遇到来源锁忙返回可重试冲突，引用修复须先发布来源。
 #[sqlx::test]
-async fn v3_meanings_save_reports_a_busy_reference_source_as_reference_conflict(pool: PgPool) {
+async fn v3_draft_deletion_defers_busy_source_and_reference_checks_until_publish(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -10794,14 +11275,20 @@ async fn v3_meanings_save_reports_a_busy_reference_source_as_reference_conflict(
         .execute(&mut *held)
         .await
         .unwrap();
-    let (status, busy) = save_v3_meanings_raw(
+    let (status, saved) = save_v3_meanings_raw(
         &state,
         &bearer,
         &word_id,
         base_revision,
-        without_referenced_sense.clone(),
+        without_referenced_sense,
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "草稿不应锁引用来源：{saved}");
+    assert_eq!(
+        current_publication_id(&pool, word_uuid).await,
+        word_publication_id
+    );
+    let (status, busy) = publish_ready_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CONFLICT, "{busy}");
     assert_eq!(busy["code"], "reference_conflict", "{busy}");
     assert!(
@@ -10810,20 +11297,35 @@ async fn v3_meanings_save_reports_a_busy_reference_source_as_reference_conflict(
     );
     held.rollback().await.unwrap();
 
-    let (status, blocked) = save_v3_meanings_raw(
-        &state,
-        &bearer,
-        &word_id,
-        base_revision,
-        without_referenced_sense,
-    )
-    .await;
+    let (status, blocked) = publish_ready_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
     let references = inbound_reference_conflict_items(&blocked);
-    assert_eq!(references.len(), 1, "{blocked}");
-    assert_eq!(references[0]["kind"], "publication_sense_ref");
-    assert_eq!(references[0]["source"]["node_id"], json!(component_id));
-    assert_eq!(entry_revision(&pool, word_uuid).await, base_revision);
+    assert_eq!(references.len(), 2, "{blocked}");
+    assert!(
+        references
+            .iter()
+            .all(|item| item["source"]["node_id"] == json!(component_id))
+    );
+    assert_eq!(entry_revision(&pool, word_uuid).await, base_revision + 1);
+    assert_eq!(
+        current_publication_id(&pool, word_uuid).await,
+        word_publication_id
+    );
+    let mut repaired_meanings = writable_v3_meanings(&phrase_published);
+    repaired_meanings["pos"][0]["senses"][0]["component_usages"] = json!([]);
+    let repaired_source =
+        save_v3_meanings(&state, &bearer, &phrase_published, repaired_meanings).await;
+    let (status, still_blocked) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{still_blocked}");
+    assert_eq!(inbound_reference_conflict_items(&still_blocked).len(), 1);
+    let (status, repaired_publication) = publish_ready_v3(&state, &bearer, &repaired_source).await;
+    assert_eq!(status, StatusCode::CREATED, "{repaired_publication}");
+    let (status, target_publication) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_publication}");
+    assert_ne!(
+        current_publication_id(&pool, word_uuid).await,
+        word_publication_id
+    );
 }
 
 #[sqlx::test]
@@ -12040,14 +12542,15 @@ async fn v3_relations_require_explicit_sense_binding_and_keep_same_name_text(poo
         source["word"]["meanings"]["pos"][0]["senses"][0]["relations"][0]["target_word_id"],
         target_id
     );
-    // 删掉被别人草稿关联的词义：入站引用守卫点名那条关联，未被引用的词义不在清单里。
+    // 删除草稿词义后仍保留引用，影响读取精确定位来源，不能偷偷删除来源关系。
     let mut removed = writable_v3_meanings(&target);
     removed["pos"][0]["senses"] = json!([]);
     let (status, rejected) = call(&state, Method::PUT, &format!("{ROOT}/entries/{target_id}/steps/meanings"),
         &bearer, None, Some(json!({"schema_version": 3, "base_revision": target["word"]["revision"], "intent": "save", "content": removed}))).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
-    let references = inbound_reference_conflict_items(&rejected);
-    assert_eq!(references.len(), 1, "{rejected}");
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    let impact = inbound_references_of(&state, &bearer, target_id).await;
+    let references = impact["items"].as_array().unwrap();
+    assert_eq!(references.len(), 1, "{impact}");
     let reference = &references[0];
     assert_eq!(reference["kind"], "draft_relation");
     assert_eq!(reference["stale"], true);
@@ -12184,7 +12687,7 @@ async fn v3_draft_saves_ignore_references_already_stale_in_saved_content(pool: P
 /// Q5：别人草稿的关联词指向本词条词义时，删掉那个词性（词义随之消失）的词形保存被拦下；
 /// 来源撤掉关联后同一份词形放行。
 #[sqlx::test]
-async fn v3_forms_save_cannot_drop_a_pos_whose_sense_another_draft_relation_targets(pool: PgPool) {
+async fn v3_forms_save_retires_referenced_pos_and_preserves_source_for_repair(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -12236,14 +12739,22 @@ async fn v3_forms_save_cannot_drop_a_pos_whose_sense_another_draft_relation_targ
         forms_input_after_impact(&impact, base_revision, "save", cleared.clone()),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
-    assert_eq!(
-        inbound_reference_conflict_items(&problem),
-        blocked.as_slice()
-    );
-    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision);
+    assert_eq!(status, StatusCode::OK, "{problem}");
+    let after = inbound_references_of(&state, &bearer, &target_id).await;
+    assert_eq!(after["items"], json!(blocked));
+    assert_eq!(entry_revision(&pool, target_uuid).await, base_revision + 1);
+    let retired: bool = sqlx::query_scalar(
+        "SELECT removed_from_draft_at IS NOT NULL FROM lexicon.nodes WHERE entry_id = $1 AND id = $2",
+    )
+    .bind(target_uuid)
+    .bind(Uuid::parse_str(target_sense_id.as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(retired, "草稿节点应保留墓碑，不物理删除");
+    let base_revision = base_revision + 1;
 
-    // 来源草稿撤掉关联后，同一份词形保存放行。
+    // 来源草稿撤掉关联后，影响列表随之清空。
     let mut unlinked = writable_v3_meanings(&source);
     unlinked["pos"][0]["senses"][0]["relations"] = json!([]);
     save_v3_meanings(&state, &bearer, &source, unlinked).await;
@@ -14877,7 +15388,157 @@ async fn v3_spelling_regularity_round_trips_without_group_or_dialect_leakage(poo
 }
 
 #[sqlx::test]
-async fn v3_multi_group_bindings_count_each_source_and_protect_sense_deletion(pool: PgPool) {
+async fn history_activation_preserves_unpublished_internal_sense_bindings(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let initial = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let (status, first) = publish_ready_v3(&state, &bearer, &initial).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    let id = first["word"]["id"].as_str().unwrap();
+    let entry_id = Uuid::parse_str(id).unwrap();
+    let first_publication = current_publication_id(&pool, entry_id).await;
+    let mut meanings = writable_v3_meanings(&first);
+    meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("第二次发布文案");
+    let second = save_v3_meanings(&state, &bearer, &first, meanings).await;
+    let (status, second) = publish_ready_v3(&state, &bearer, &second).await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    assert_ne!(
+        current_publication_id(&pool, entry_id).await,
+        first_publication
+    );
+    let mut meanings = writable_v3_meanings(&second);
+    let mut new_sense = meanings["pos"][0]["senses"][0].clone();
+    let sense_id = Uuid::now_v7();
+    new_sense["id"] = json!(sense_id);
+    new_sense["definitions"][0]["id"] = json!(Uuid::now_v7());
+    new_sense["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    new_sense["definitions"][0]["content"] = rich_text("仅草稿新增的词义");
+    meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(new_sense);
+    let draft = save_v3_meanings(&state, &bearer, &second, meanings).await;
+    let mut forms = draft["word"]["forms"].clone();
+    forms["pos"][0]["form_groups"][0]["scope"] = json!("dedicated");
+    let bindings =
+        json!([{"sense_id":sense_id,"form_group_ids":[forms["pos"][0]["form_groups"][0]["id"]]}]);
+    let revision = draft["word"]["revision"].as_i64().unwrap();
+    let (status, impact) = call(&state, Method::POST, &format!("{ROOT}/entries/{id}/steps/forms/impact"), &bearer, None,
+        Some(json!({"schema_version":3,"base_revision":revision,"content":forms,"sense_bindings":bindings}))).await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    let mut input = forms_input_after_impact(&impact, revision, "save", forms);
+    input["sense_bindings"] = bindings;
+    let (status, bound) = save_v3_forms_raw(&state, &bearer, id, input).await;
+    assert_eq!(status, StatusCode::OK, "{bound}");
+    let refs = inbound_references_of(&state, &bearer, id).await;
+    assert!(
+        refs["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == "form_group_sense_binding"
+                && item["target"]["sense_id"] == json!(sense_id))
+    );
+    let (status, activated) = activate_v3_history(
+        &state,
+        &bearer,
+        entry_id,
+        first_publication,
+        bound["word"]["revision"].as_i64().unwrap(),
+        bound["word"]["lifecycle_revision"].as_i64().unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "草稿内部绑定不依赖当前发布快照：{activated}"
+    );
+    assert_eq!(
+        current_publication_id(&pool, entry_id).await,
+        first_publication
+    );
+    let (status, current) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{current}");
+    assert_eq!(current["word"]["revision"], bound["word"]["revision"]);
+    assert_eq!(current["word"]["forms"], bound["word"]["forms"]);
+    assert_eq!(current["word"]["meanings"], bound["word"]["meanings"]);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.sense_form_group_bindings WHERE entry_id=$1 AND sense_id=$2",
+    )
+    .bind(entry_id)
+    .bind(sense_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn draft_sense_deletion_clears_its_own_group_bindings_and_retains_tombstone(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let word = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let id = word["word"]["id"].as_str().unwrap();
+    let revision = word["word"]["revision"].as_i64().unwrap();
+    let sense_id = word["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let mut forms = word["word"]["forms"].clone();
+    forms["pos"][0]["form_groups"][0]["scope"] = json!("dedicated");
+    let bindings =
+        json!([{"sense_id":sense_id,"form_group_ids":[forms["pos"][0]["form_groups"][0]["id"]]}]);
+    let (status, impact) = call(&state, Method::POST, &format!("{ROOT}/entries/{id}/steps/forms/impact"), &bearer, None,
+        Some(json!({"schema_version":3,"base_revision":revision,"content":forms,"sense_bindings":bindings}))).await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    let mut input = forms_input_after_impact(&impact, revision, "save", forms);
+    input["sense_bindings"] = bindings;
+    let (status, bound) = save_v3_forms_raw(&state, &bearer, id, input).await;
+    assert_eq!(status, StatusCode::OK, "{bound}");
+    let mut meanings = writable_v3_meanings(&bound);
+    meanings["pos"][0]["senses"] = json!([]);
+    let (status, deleted) = call(&state, Method::PUT, &format!("{ROOT}/entries/{id}/steps/meanings"), &bearer, None,
+        Some(json!({"schema_version":3,"base_revision":bound["word"]["revision"],"intent":"save","content":meanings}))).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert!(
+        !deleted["word"]["completed_steps"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("meanings"))
+    );
+    let entry_id = Uuid::parse_str(id).unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.sense_form_group_bindings WHERE entry_id=$1",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+    let retired: bool = sqlx::query_scalar(
+        "SELECT removed_from_draft_at IS NOT NULL FROM lexicon.nodes WHERE entry_id=$1 AND id=$2",
+    )
+    .bind(entry_id)
+    .bind(Uuid::parse_str(sense_id.as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(retired);
+    let (status, rejected) = publish_ready_v3(&state, &bearer, &deleted).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+}
+
+#[sqlx::test]
+async fn v3_multi_group_bindings_count_each_source_across_binding_changes(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -14960,6 +15621,11 @@ async fn v3_multi_group_bindings_count_each_source_and_protect_sense_deletion(po
                     .all(|item| item["source"]["form_group_label"].is_string())
             );
         }
+        // 前两轮继续验证多组绑定调整；最后一轮再删除词义，避免复用已经退休的节点 ID。
+        if !group_refs.is_empty() {
+            word = saved;
+            continue;
+        }
         let mut meanings = strip_response_only_sentence_fields(saved["word"]["meanings"].clone());
         meanings["pos"][0]["senses"]
             .as_array_mut()
@@ -14967,15 +15633,7 @@ async fn v3_multi_group_bindings_count_each_source_and_protect_sense_deletion(po
             .remove(0);
         let (status, deleted) = call(&state, Method::PUT, &format!("{ROOT}/entries/{id}/steps/meanings"), &bearer, None,
             Some(json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"save","content":meanings}))).await;
-        if group_refs.is_empty() {
-            assert_eq!(status, StatusCode::OK, "{deleted}");
-        } else {
-            assert_eq!(status, StatusCode::CONFLICT, "{deleted}");
-            assert_eq!(
-                inbound_reference_conflict_items(&deleted).len(),
-                group_refs.len()
-            );
-        }
-        word = saved;
+        assert_eq!(status, StatusCode::OK, "{deleted}");
+        word = deleted;
     }
 }

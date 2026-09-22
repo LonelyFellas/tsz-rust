@@ -9,11 +9,9 @@ use std::{
 
 use crate::lexicon::{
     dto::{
-        ComponentTargetMatchV3, DraftSentenceTargetCandidateV3, PublishedSentenceTargetCandidateV3,
-        SearchComponentTargetsV3Input, SearchComponentTargetsV3Response,
-        SentenceTargetDiscoveryCompletenessV3, SentenceTargetDraftLinkabilityV3,
-        SentenceTargetDraftStateV3, SentenceTargetMatchEvidenceV3, SentenceTargetMatchKindV3,
-        SentenceTargetRangeResultV3,
+        ComponentTargetMatchV3, PublishedSentenceTargetCandidateV3, SearchComponentTargetsV3Input,
+        SearchComponentTargetsV3Response, SentenceTargetDiscoveryCompletenessV3,
+        SentenceTargetMatchEvidenceV3, SentenceTargetMatchKindV3, SentenceTargetRangeResultV3,
     },
     sentence_target_discovery::{
         AliasPosting, CodepointRange, ContiguousPattern, DiscoveryCatalog, DiscoveryEngine,
@@ -41,6 +39,14 @@ struct ComponentTargetCandidateIndex {
 
 // Revisions and publication IDs are not stable pagination identities.
 type TargetNodeKey = (Uuid, Uuid, Uuid, Uuid);
+type DiscoveryPageKey = (bool, TargetNodeKey);
+
+fn discovery_page_key(candidate: &PublishedSentenceTargetCandidateV3) -> DiscoveryPageKey {
+    (
+        candidate.publication_id.is_none(),
+        target_node_key(published_candidate_key(candidate)),
+    )
+}
 type ComponentPageKey = (i32, bool, String, TargetNodeKey);
 
 fn target_node_key(key: PublishedAssociationCandidateKey) -> TargetNodeKey {
@@ -118,7 +124,7 @@ impl LexiconService {
     /// 句子专用发现入口：HTTP 只暴露例句语义，匹配事实由内部中性 core 提供。
     pub async fn resolve_sentence_targets_v3(
         &self,
-        actor_id: Uuid,
+        _actor_id: Uuid,
         input: ResolveSentenceTargetsV3Input,
         allow_v3: bool,
     ) -> Result<ResolveSentenceTargetsV3Response, LexiconServiceError> {
@@ -195,30 +201,13 @@ impl LexiconService {
                 })
                 .collect::<Result<HashMap<_, _>, _>>()?;
 
-        let draft_matches = match &input {
+        let include_drafts = matches!(
+            &input,
             ResolveSentenceTargetsV3Input::SelectedSegments {
                 include_drafts: true,
                 ..
-            } => {
-                let normalized = selected
-                    .as_ref()
-                    .expect("selected mode has canonical segments")
-                    .1
-                    .as_str();
-                LexiconRepository::draft_sentence_discovery_targets(
-                    &mut transaction,
-                    &dialect_scopes,
-                    normalized,
-                    actor_id,
-                )
-                .await
-                .map_err(repository_error)?
-                .into_iter()
-                .map(draft_candidate)
-                .collect()
             }
-            _ => Vec::new(),
-        };
+        );
 
         let mut range_results = if let Some((segments, normalized)) = selected {
             let fingerprint =
@@ -232,16 +221,28 @@ impl LexiconService {
                 SentenceTargetMatchKindV3::SeparablePhrase
             };
             let evidence = match_evidence(sentence_text, &segments, &normalized, kind);
+            let published = published_candidates(&surfaces, &targets, Some(evidence.clone()));
+            let mut drafts = if include_drafts {
+                sentence_draft_candidates(&mut transaction, &dialect_scopes, &normalized, evidence)
+                    .await?
+            } else {
+                Vec::new()
+            };
+            remove_published_draft_targets(&mut drafts, &published);
             vec![range_result(
                 sentence_text,
                 segments,
                 normalized,
-                published_candidates(&surfaces, &targets, Some(evidence)),
-                draft_matches,
+                published,
+                drafts,
                 RangeResultPagination {
                     page_size,
                     after,
-                    cursor_context: selected_cursor_context(input.source_dialect(), &fingerprint),
+                    cursor_context: selected_cursor_context(
+                        input.source_dialect(),
+                        &fingerprint,
+                        include_drafts,
+                    ),
                 },
             )?]
         } else {
@@ -272,8 +273,8 @@ impl LexiconService {
 
     /// 成分用词 / 正文关联目标的关键字检索：与 resolve 共用候选组装，把「词面等值」换成
     /// `match` 指定的匹配方式（默认包含，`exact` 为归一化后等值）。默认只回已发布且未归档的词条；
-    /// `include_drafts` 为真时再加上**从未发布**的 V3 草稿（不限创建者，候选没有 `publication_id`），
-    /// 已发布词条只按其当前发布版本出现一次。
+    /// `include_drafts` 为真时再加上当前 V3 草稿（不限创建者，候选没有 `publication_id`），
+    /// 包括已发布词条的新增节点；发布与草稿分别组装，不能按 entry_id 覆盖快照。
     ///
     /// 顺序：词面等于 q 的词条最前、以 q 开头的其次、其余按 headword；同档位已发布优先于草稿
     /// （SQL 与 Rust 两侧同一规则）。游标绑定查询摘要及稳定节点排序键，不绑定词库版本；
@@ -352,11 +353,17 @@ impl LexiconService {
             .iter()
             .chain(&draft_entries)
             .map(|entry| entry.entry_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         let entry_rank = published_entries
             .iter()
-            .chain(&draft_entries)
-            .map(|entry| (entry.entry_id, entry.match_rank))
+            .map(|entry| ((entry.entry_id, false), entry.match_rank))
+            .chain(
+                draft_entries
+                    .iter()
+                    .map(|entry| ((entry.entry_id, true), entry.match_rank)),
+            )
             .collect::<HashMap<_, _>>();
         let published_entry_ids = published_entries
             .iter()
@@ -407,7 +414,7 @@ impl LexiconService {
             } else {
                 Vec::new()
             };
-            let mut targets =
+            let published_targets =
                 LexiconRepository::current_publication_snapshots(&mut transaction, &published_ids)
                     .await
                     .map_err(repository_error)?
@@ -417,37 +424,40 @@ impl LexiconService {
                             .map(|target| (record.entry_id, target))
                     })
                     .collect::<Result<HashMap<_, _>, _>>()?;
-            for target in load_draft_component_targets(&mut transaction, &draft_ids).await? {
-                targets.insert(
-                    target.id,
-                    PublishedAssociationTarget::from_component_target(target)?,
-                );
-            }
-            let headwords = targets
-                .iter()
-                .map(|(entry_id, target)| (*entry_id, Arc::<str>::from(target.headword())))
-                .collect::<HashMap<_, _>>();
-            for surface in published.iter().chain(&drafts) {
-                let Some(target) = targets.get(&surface.entry_id) else {
-                    continue;
-                };
-                let Some(headword) = headwords.get(&surface.entry_id) else {
-                    continue;
-                };
-                for key in target.sentence_discovery_candidate_keys(
-                    surface.publication_id,
-                    surface.pos_id,
-                    surface.matched_form_id,
-                    surface.matched_variant_id,
-                ) {
-                    candidate_index
-                        .entry(key)
-                        .or_insert_with(|| ComponentTargetCandidateIndex {
-                            key,
-                            match_rank: entry_rank.get(&key.entry_id).copied().unwrap_or(2),
-                            draft: key.publication_id.is_none(),
-                            headword: headword.clone(),
+            let draft_targets = load_draft_component_targets(&mut transaction, &draft_ids)
+                .await?
+                .into_iter()
+                .map(|target| {
+                    let id = target.id;
+                    PublishedAssociationTarget::from_component_target(target)
+                        .map(|target| (id, target))
+                })
+                .collect::<Result<HashMap<_, _>, _>>()?;
+            for (surfaces, targets) in [(&published, &published_targets), (&drafts, &draft_targets)]
+            {
+                for surface in surfaces {
+                    let Some(target) = targets.get(&surface.entry_id) else {
+                        continue;
+                    };
+                    let headword = Arc::<str>::from(target.headword());
+                    for key in target.sentence_discovery_candidate_keys(
+                        surface.publication_id,
+                        surface.pos_id,
+                        surface.matched_form_id,
+                        surface.matched_variant_id,
+                    ) {
+                        candidate_index.entry(key).or_insert_with(|| {
+                            ComponentTargetCandidateIndex {
+                                key,
+                                match_rank: entry_rank
+                                    .get(&(key.entry_id, key.publication_id.is_none()))
+                                    .copied()
+                                    .unwrap_or(2),
+                                draft: key.publication_id.is_none(),
+                                headword: headword.clone(),
+                            }
                         });
+                    }
                 }
             }
         }
@@ -513,7 +523,7 @@ impl LexiconService {
         } else {
             Vec::new()
         };
-        let mut page_targets =
+        let page_published_targets =
             LexiconRepository::current_publication_snapshots(&mut transaction, &page_published_ids)
                 .await
                 .map_err(repository_error)?
@@ -523,15 +533,21 @@ impl LexiconService {
                         .map(|target| (record.entry_id, target))
                 })
                 .collect::<Result<HashMap<_, _>, _>>()?;
-        for target in load_draft_component_targets(&mut transaction, &page_draft_ids).await? {
-            page_targets.insert(
-                target.id,
-                PublishedAssociationTarget::from_component_target(target)?,
-            );
-        }
+        let page_draft_targets = load_draft_component_targets(&mut transaction, &page_draft_ids)
+            .await?
+            .into_iter()
+            .map(|target| {
+                let id = target.id;
+                PublishedAssociationTarget::from_component_target(target).map(|target| (id, target))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
         let requested_keys = page_keys.iter().copied().collect::<HashSet<_>>();
-        let mut materialized = published_candidates(&page_published, &page_targets, None);
-        materialized.extend(published_candidates(&page_drafts, &page_targets, None));
+        let mut materialized = published_candidates(&page_published, &page_published_targets, None);
+        materialized.extend(published_candidates(
+            &page_drafts,
+            &page_draft_targets,
+            None,
+        ));
         let mut materialized = materialized
             .into_iter()
             .filter_map(|candidate| {
@@ -635,9 +651,9 @@ fn page_size(input: &ResolveSentenceTargetsV3Input) -> Result<usize, LexiconServ
     Ok(value as usize)
 }
 
-fn selected_cursor_context(dialect: Dialect, fingerprint: &str) -> String {
+fn selected_cursor_context(dialect: Dialect, fingerprint: &str, include_drafts: bool) -> String {
     format!(
-        "sentence:{}:{fingerprint}",
+        "sentence:{}:{fingerprint}:drafts={include_drafts}",
         crate::lexicon::node_identity::dialect_name(dialect)
     )
 }
@@ -645,13 +661,18 @@ fn selected_cursor_context(dialect: Dialect, fingerprint: &str) -> String {
 fn selected_cursor_key(
     input: &ResolveSentenceTargetsV3Input,
     fingerprint: &str,
-) -> Result<Option<TargetNodeKey>, LexiconServiceError> {
-    let ResolveSentenceTargetsV3Input::SelectedSegments { cursor, .. } = input else {
+) -> Result<Option<DiscoveryPageKey>, LexiconServiceError> {
+    let ResolveSentenceTargetsV3Input::SelectedSegments {
+        cursor,
+        include_drafts,
+        ..
+    } = input
+    else {
         return Ok(None);
     };
     decode_discovery_cursor(
         cursor.as_deref(),
-        &selected_cursor_context(input.source_dialect(), fingerprint),
+        &selected_cursor_context(input.source_dialect(), fingerprint, *include_drafts),
     )
 }
 
@@ -808,7 +829,7 @@ fn automatic_range_result(
         RangeResultPagination {
             page_size,
             after: None,
-            cursor_context: selected_cursor_context(source_dialect, &fingerprint),
+            cursor_context: selected_cursor_context(source_dialect, &fingerprint, false),
         },
     )
 }
@@ -863,9 +884,106 @@ fn published_candidates(
     grouped.into_values().collect()
 }
 
+async fn sentence_draft_candidates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    dialect_scopes: &[String],
+    normalized: &str,
+    evidence: SentenceTargetMatchEvidenceV3,
+) -> Result<Vec<PublishedSentenceTargetCandidateV3>, LexiconServiceError> {
+    let entries = LexiconRepository::component_target_entry_matches(
+        tx,
+        dialect_scopes,
+        normalized,
+        None,
+        None,
+        true,
+        true,
+    )
+    .await
+    .map_err(repository_error)?;
+    let ids = entries
+        .iter()
+        .map(|entry| entry.entry_id)
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for batch in ids.chunks(COMPONENT_TARGET_SNAPSHOT_BATCH_SIZE) {
+        let surfaces = LexiconRepository::component_target_surfaces(
+            tx,
+            dialect_scopes,
+            normalized,
+            None,
+            batch,
+            true,
+            true,
+        )
+        .await
+        .map_err(repository_error)?;
+        let targets = load_draft_component_targets(tx, batch)
+            .await?
+            .into_iter()
+            .map(|target| {
+                let id = target.id;
+                PublishedAssociationTarget::from_component_target(target).map(|target| (id, target))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        candidates.extend(published_candidates(
+            &surfaces,
+            &targets,
+            Some(evidence.clone()),
+        ));
+    }
+    Ok(candidates)
+}
+
+fn remove_published_draft_targets(
+    drafts: &mut Vec<PublishedSentenceTargetCandidateV3>,
+    published: &[PublishedSentenceTargetCandidateV3],
+) {
+    let published_nodes = published
+        .iter()
+        .flat_map(|candidate| {
+            let key = target_node_key(published_candidate_key(candidate));
+            let matched = candidate.forms.iter().find(|form| {
+                form.form_id == candidate.matched_form_id
+                    && form.variant_id == candidate.matched_variant_id
+            });
+            candidate
+                .senses
+                .iter()
+                .filter(move |sense| {
+                    matched.is_some_and(|form| {
+                        form.base_form_ids.contains(&candidate.base_form_id)
+                            && form
+                                .allowed_sense_ids
+                                .as_ref()
+                                .is_none_or(|ids| ids.contains(&sense.sense_id))
+                    })
+                })
+                .map(move |sense| (key, sense.sense_id))
+        })
+        .collect::<HashSet<_>>();
+    for candidate in drafts.iter_mut() {
+        let key = target_node_key(published_candidate_key(candidate));
+        let matched = candidate.forms.iter().find(|form| {
+            form.form_id == candidate.matched_form_id
+                && form.variant_id == candidate.matched_variant_id
+        });
+        candidate.senses.retain(|sense| {
+            matched.is_some_and(|form| {
+                form.base_form_ids.contains(&candidate.base_form_id)
+                    && form
+                        .allowed_sense_ids
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&sense.sense_id))
+            }) && !published_nodes.contains(&(key, sense.sense_id))
+        });
+    }
+    drafts.retain(|candidate| !candidate.senses.is_empty());
+}
+
 struct RangeResultPagination {
     page_size: usize,
-    after: Option<TargetNodeKey>,
+    after: Option<DiscoveryPageKey>,
     cursor_context: String,
 }
 
@@ -874,7 +992,7 @@ fn range_result(
     segments: Vec<SourceSegment>,
     normalized_surface: String,
     mut published_matches: Vec<PublishedSentenceTargetCandidateV3>,
-    draft_matches: Vec<DraftSentenceTargetCandidateV3>,
+    draft_matches: Vec<PublishedSentenceTargetCandidateV3>,
     pagination: RangeResultPagination,
 ) -> Result<SentenceTargetRangeResultV3, LexiconServiceError> {
     let source_segments = segments
@@ -888,42 +1006,36 @@ fn range_result(
         })
         .collect::<Vec<_>>();
     let published_total = published_matches.len() as u64;
-    published_matches.sort_by_key(|candidate| target_node_key(published_candidate_key(candidate)));
+    let draft_total = draft_matches.len() as u64;
+    published_matches.extend(draft_matches);
+    published_matches.sort_by_key(discovery_page_key);
     published_matches.retain(|candidate| {
         pagination
             .after
-            .is_none_or(|after| target_node_key(published_candidate_key(candidate)) > after)
+            .is_none_or(|after| discovery_page_key(candidate) > after)
     });
     let has_more = published_matches.len() > pagination.page_size;
     published_matches.truncate(pagination.page_size);
     let next_cursor = has_more.then(|| {
         encode_discovery_cursor(
             &pagination.cursor_context,
-            target_node_key(published_candidate_key(
-                published_matches.last().expect("nonempty page"),
-            )),
+            discovery_page_key(published_matches.last().expect("nonempty page")),
         )
     });
+    let (published_matches, draft_matches) = published_matches
+        .into_iter()
+        .partition(|candidate| candidate.publication_id.is_some());
     Ok(SentenceTargetRangeResultV3 {
         source_segments,
         segments_fingerprint: source_fingerprint(sentence_text, &segments)
             .map_err(|_| invariant_record())?,
         normalized_surface,
         published_total,
+        draft_total,
         published_matches,
         next_cursor,
         draft_matches,
     })
-}
-
-fn draft_candidate(record: SentenceDiscoveryDraftRecord) -> DraftSentenceTargetCandidateV3 {
-    DraftSentenceTargetCandidateV3 {
-        entry_id: record.entry_id,
-        entry_revision: record.entry_revision,
-        headword: record.headword,
-        target_state: SentenceTargetDraftStateV3::Draft,
-        linkability: SentenceTargetDraftLinkabilityV3::PendingOnly,
-    }
 }
 
 #[cfg(test)]
@@ -990,7 +1102,7 @@ mod tests {
             RangeResultPagination {
                 page_size: 1,
                 after: None,
-                cursor_context: selected_cursor_context(Dialect::Uk, &fingerprint),
+                cursor_context: selected_cursor_context(Dialect::Uk, &fingerprint, false),
             },
         )
         .unwrap();
@@ -1004,10 +1116,7 @@ mod tests {
             &fingerprint,
         )
         .unwrap();
-        assert_eq!(
-            after,
-            Some(target_node_key(published_candidate_key(&first)))
-        );
+        assert_eq!(after, Some(discovery_page_key(&first)));
         assert!(
             selected_cursor_key(
                 &selected_input(Dialect::Us, Some(cursor.clone())),
@@ -1033,7 +1142,7 @@ mod tests {
             RangeResultPagination {
                 page_size: 1,
                 after,
-                cursor_context: selected_cursor_context(Dialect::Uk, &fingerprint),
+                cursor_context: selected_cursor_context(Dialect::Uk, &fingerprint, false),
             },
         )
         .unwrap();

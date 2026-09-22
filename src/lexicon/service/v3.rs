@@ -97,7 +97,7 @@ struct V3PresentationRecord {
 struct V3RelationTargetStatusRecord {
     id: Uuid,
     is_archived: bool,
-    is_published: bool,
+    published_sense_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -794,12 +794,14 @@ impl LexiconService {
             r#"
             SELECT entry.id,
                    entry.archived_at IS NOT NULL AS is_archived,
-                   entry.current_publication_id IS NOT NULL AS is_published
+                   ARRAY(
+                       SELECT node.node_id
+                       FROM lexicon.entry_publication_nodes node
+                       WHERE node.entry_id = entry.id
+                         AND node.publication_id = entry.current_publication_id
+                         AND node.node_type = 'sense'
+                   ) AS published_sense_ids
             FROM lexicon.entries entry
-            LEFT JOIN lexicon.entry_presentation_projection presentation
-              ON presentation.entry_id = entry.id
-             AND presentation.content_schema_version = 3
-             AND presentation.source_revision = entry.revision
             WHERE entry.id = ANY($1)
             "#,
         )
@@ -823,7 +825,10 @@ impl LexiconService {
             let status = statuses.get(&target_id).ok_or_else(invariant_record)?;
             relation.target_status = Some(if status.is_archived {
                 AdminWordStatus::Archived
-            } else if status.is_published {
+            } else if relation
+                .target_sense_id
+                .is_some_and(|id| status.published_sense_ids.contains(&id))
+            {
                 AdminWordStatus::Published
             } else {
                 AdminWordStatus::Draft
@@ -1847,22 +1852,12 @@ impl LexiconService {
         } else {
             None
         };
-        let saved_meanings = meanings.clone();
         reconcile_v3_meanings_after_forms(&mut meanings, &input.content);
         super::form_senses::apply_sense_bindings(
             &input.content,
             &mut meanings,
             &input.sense_bindings,
         )?;
-        super::inbound_references::ensure_inbound_references(
-            &mut transaction,
-            entry_id,
-            &input.content,
-            &meanings,
-            super::inbound_references::InboundReferenceCheck::DraftSave,
-            Some((&current_forms, &saved_meanings)),
-        )
-        .await?;
         let aggregate_issues =
             crate::lexicon::v3_contract::validate_aggregate_node_limit(&input.content, &meanings);
         if !aggregate_issues.is_empty() {
@@ -2166,28 +2161,6 @@ impl LexiconService {
                 message: "meanings must belong to a POS in the current V3 forms",
             });
         }
-        let retained_senses = content
-            .pos
-            .iter()
-            .flat_map(|pos| &pos.senses)
-            .map(|sense| sense.id)
-            .collect::<HashSet<_>>();
-        if current_v3_meanings
-            .pos
-            .iter()
-            .flat_map(|pos| &pos.senses)
-            .any(|sense| !retained_senses.contains(&sense.id))
-        {
-            super::inbound_references::ensure_inbound_references(
-                &mut transaction,
-                entry_id,
-                &forms,
-                &content,
-                super::inbound_references::InboundReferenceCheck::DraftSave,
-                Some((&forms, &current_v3_meanings)),
-            )
-            .await?;
-        }
         let binding_issues =
             crate::lexicon::v3_contract::validate_sense_form_groups(&forms, &content, intent);
         if !binding_issues.is_empty() {
@@ -2235,15 +2208,6 @@ impl LexiconService {
         if !aggregate_issues.is_empty() {
             return Err(v3_validation_failed(aggregate_issues));
         }
-        super::inbound_references::ensure_inbound_references(
-            &mut transaction,
-            entry_id,
-            &forms,
-            &canonical_content,
-            super::inbound_references::InboundReferenceCheck::DraftSave,
-            Some((&forms, &current_v3_meanings)),
-        )
-        .await?;
         let proposed = proposed_meaning_nodes(&canonical_content);
         let proposed_ids = sorted_unique_node_ids(proposed.iter().map(|node| node.id));
         LexiconRepository::lock_node_ids(&mut transaction, &proposed_ids)
@@ -2483,6 +2447,23 @@ impl LexiconService {
         )
         .await?;
         issues.extend(reference_resolution.issues);
+        if issues.is_empty() {
+            issues.extend(
+                super::inbound_references::outbound_publication_issues(&mut transaction, &word)
+                    .await?,
+            );
+        }
+        if issues.is_empty() {
+            super::inbound_references::ensure_inbound_references(
+                &mut transaction,
+                entry_id,
+                &word.forms,
+                &word.meanings,
+                super::inbound_references::InboundReferenceCheck::DraftPreview,
+                None,
+            )
+            .await?;
+        }
         transaction.commit().await.map_err(database_error)?;
         Ok(DraftValidationResponseV3 {
             schema_version: 3,
@@ -3084,7 +3065,7 @@ pub(super) async fn resolve_component_target(
     ComponentTargetWord::from_draft_row(row).map(Some)
 }
 
-/// 关键字检索用：批量取从未发布的 V3 草稿目标，不按创建者过滤。
+/// 关键字检索用：批量取当前 V3 草稿目标，不按创建者过滤。
 pub(super) async fn load_draft_component_targets(
     tx: &mut Transaction<'_, Postgres>,
     entry_ids: &[Uuid],

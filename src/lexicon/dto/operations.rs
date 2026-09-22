@@ -495,7 +495,7 @@ pub struct SentenceTargetCandidateFormV3 {
 #[serde(deny_unknown_fields)]
 pub struct PublishedSentenceTargetCandidateV3 {
     pub entry_id: Uuid,
-    /// 命中的发布版本。**缺省即草稿候选**（只在 `include_drafts = true` 时出现）：词条从未发布，
+    /// 命中的发布版本。**缺省即草稿候选**（只在 `include_drafts = true` 时出现），包括已发布词条的当前草稿；
     /// 关联它时 `target_publication_id` 同样留空，保存时按目标当前草稿内容校验。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -528,28 +528,6 @@ pub struct PublishedSentenceTargetCandidateV3 {
     pub senses: Vec<SentenceTargetSenseV3>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SentenceTargetDraftStateV3 {
-    Draft,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SentenceTargetDraftLinkabilityV3 {
-    PendingOnly,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DraftSentenceTargetCandidateV3 {
-    pub entry_id: Uuid,
-    pub entry_revision: i64,
-    pub headword: String,
-    pub target_state: SentenceTargetDraftStateV3,
-    pub linkability: SentenceTargetDraftLinkabilityV3,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SentenceTargetRangeResultV3 {
@@ -558,12 +536,16 @@ pub struct SentenceTargetRangeResultV3 {
     pub segments_fingerprint: String,
     pub normalized_surface: String,
     pub published_total: u64,
+    /// 主动展开时当前可见的未发布具体节点候选数；不包含已发布的同一目标组合。
+    pub draft_total: u64,
     pub published_matches: Vec<PublishedSentenceTargetCandidateV3>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     /// 自动发现或手选详情被截断时返回；下一页改用相同 `selected_segments` 携带此值。
     pub next_cursor: Option<String>,
-    pub draft_matches: Vec<DraftSentenceTargetCandidateV3>,
+    /// 与发布候选共用完整节点结构，publication_id 缺省。保存绑定稳定节点，发布前仍须处理未发布依赖。
+    /// 与 published_matches 共用 page_size_per_range 和 next_cursor，已发布候选优先。
+    pub draft_matches: Vec<PublishedSentenceTargetCandidateV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -610,7 +592,7 @@ pub struct SearchComponentTargetsV3Input {
     #[serde(default, rename = "match", skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub match_mode: Option<ComponentTargetMatchV3>,
-    /// 是否把**从未发布**的 V3 草稿词条（不限创建者）也列为候选；草稿候选没有 `publication_id`。
+    /// 是否把当前 V3 草稿（不限创建者，包括已发布词条的新增节点）也列为候选；草稿候选没有 `publication_id`。
     /// 已发布词条只按其当前发布版本出现，草稿里未发布的改动不作候选。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[schema(default = false)]
@@ -852,6 +834,8 @@ pub struct RelatedSearchQuery {
     pub kind: Option<EntryKind>,
     pub match_mode: Option<RelatedSearchMatchMode>,
     pub exclude_exact: Option<bool>,
+    /// 默认仅搜索发布内容。展开后也返回草稿词义；已发布词条只补当前发布中不存在的词义，
+    /// 同一词条可分别出现 published/draft 结果，消费者应合并词义并保留各自状态。
     pub include_drafts: Option<bool>,
     #[param(minimum = 1, maximum = 100)]
     pub page_size: Option<u32>,

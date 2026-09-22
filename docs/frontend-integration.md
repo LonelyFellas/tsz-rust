@@ -7,6 +7,24 @@
 
 ---
 
+## 词库领域重构第二批剩余功能：配套交付说明
+
+本节对应 `feat/lexicon-domain-batch-2-remaining` 两仓配套 PR，尚未部署；不沿用页首历史部署状态。详情与验证记录见 [design](features/lexicon-domain-refactor/design.md) / [progress](features/lexicon-domain-refactor/progress.md)。
+
+- 入站来源新增 `draft_text_link`；`blocked_references` 改为草稿影响提示，不再阻止保存，发布前必须修复。
+- 句中发现响应新增必填 `draft_total`，`draft_matches` 使用完整节点候选，移除 entry 级 pending-only 元数据。原形/变体/词义身份必须保留，不能按词条是否曾发布推断目标状态。
+- 两种候选共用页容量与稳定游标，游标绑定 include_drafts；切换范围及更新旧页面必须重新查询。
+
+| 组合 | 兼容性依据与处理 |
+| --- | --- |
+| 分页基线前端 + 新 API | 旧严格 schema 不接受新来源枚举、draft_total 和新草稿形状，不允许在线混用 |
+| 新前端 + 分页基线 API | 缺少 draft_total、旧草稿缺少具体节点，新 runtime 校验会拒绝，不允许在线混用 |
+| 新前端 + 新 API | 已通过配套契约测试、HTTP 回归及本地真实浏览器验收 |
+
+发布必须先受控停用受影响的词库编辑/发布入口及流量，再部署两仓配套版本、验证、恢复；两种混合版本均不作为可用过渡态。PR 合并本身不构成部署授权。本次没有 schema migration；回退需两仓成对处理并复验当前数据，源码回退不会撤销已发生的业务写入，不自动执行 down 或清库。
+
+---
+
 ## 1. 环境与基址
 
 | 环境         | API 基址                           | 说明                                                                                        |

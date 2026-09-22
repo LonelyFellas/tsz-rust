@@ -226,6 +226,11 @@ impl LexiconService {
         publication_references.extend(
             super::text_links::validate_targets(&mut tx, entry_id, &mut word.meanings).await?,
         );
+        let outbound_issues =
+            super::inbound_references::outbound_publication_issues(&mut tx, &word).await?;
+        if !outbound_issues.is_empty() {
+            return Err(v3_validation_failed(outbound_issues));
+        }
         super::inbound_references::ensure_inbound_references(
             &mut tx,
             entry_id,
@@ -522,6 +527,11 @@ impl LexiconService {
         }
         let shared_target: AdminWordV3 =
             serde_json::from_value(publication.snapshot.clone()).map_err(serialization_error)?;
+        let outbound_issues =
+            super::inbound_references::outbound_publication_issues(&mut tx, &shared_target).await?;
+        if !outbound_issues.is_empty() {
+            return Err(v3_validation_failed(outbound_issues));
+        }
         super::inbound_references::ensure_inbound_references(
             &mut tx,
             entry_id,
@@ -774,7 +784,7 @@ fn publication_forms_for_activation(
 }
 
 /// B1 期间成分双源并存（变体级尚未退场，释义级已上线），两侧都要产出发布引用。
-fn all_component_usages(
+pub(super) fn all_component_usages(
     forms: &DraftFormsStepContentV3,
     meanings: &DraftMeaningsStepContentV3,
 ) -> Vec<PhraseComponentUsageV3> {

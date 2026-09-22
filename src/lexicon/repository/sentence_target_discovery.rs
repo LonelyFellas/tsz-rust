@@ -104,7 +104,6 @@ impl LexiconRepository {
             r#"JOIN lexicon.entries entry
                   ON entry.id = source.entry_id
                  AND entry.archived_at IS NULL
-                 AND entry.current_publication_id IS NULL
                  AND entry.content_schema_version = 3
                 WHERE source.is_deleted = FALSE
                   AND source.content_scope = 'draft'"#
@@ -164,7 +163,7 @@ impl LexiconRepository {
     /// 返回一个有界词条批次的去重词面标识。排序按等于、前缀、其余词面，与 service 的
     /// 匹配等级一致；event_offset 只取最小值，因为它不参与关键字候选身份。
     /// 关键字检索的词面行。`exact` 为真时 `keyword` 须已是归一化 key，按 `normalized_surface` 等值；
-    /// 否则按 `surface ILIKE '%keyword%'` 包含匹配。`drafts` 为真时查从未发布的 V3 草稿词面
+    /// 否则按 `surface ILIKE '%keyword%'` 包含匹配。`drafts` 为真时查当前 V3 草稿词面
     /// （`content_scope = 'draft'`，不按创建者过滤，`publication_id` 为 NULL），否则查当前发布词面。
     pub(crate) async fn component_target_surfaces(
         tx: &mut Transaction<'_, Postgres>,
@@ -180,7 +179,6 @@ impl LexiconRepository {
             r#"JOIN lexicon.entries entry
                   ON entry.id = source.entry_id
                  AND entry.archived_at IS NULL
-                 AND entry.current_publication_id IS NULL
                  AND entry.content_schema_version = 3
                 WHERE source.is_deleted = FALSE
                   AND source.content_scope = 'draft'"#
@@ -277,7 +275,7 @@ impl LexiconRepository {
         .map_err(map_target_publication_lock_error)
     }
 
-    /// 关键字检索用：批量取从未发布的 V3 草稿目标，不加锁（只读事务）、不按创建者过滤。
+    /// 关键字检索用：批量取当前 V3 草稿目标，不加锁（只读事务）、不按创建者过滤。
     pub(crate) async fn component_target_drafts(
         tx: &mut Transaction<'_, Postgres>,
         entry_ids: &[Uuid],
@@ -291,50 +289,9 @@ impl LexiconRepository {
               AND entry.content_schema_version = 3
               AND entry.kind IN ('word', 'phrase')
               AND entry.archived_at IS NULL
-              AND entry.current_publication_id IS NULL
             ORDER BY entry.id"
         )))
         .bind(entry_ids)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(LexiconRepositoryError::Database)
-    }
-
-    pub(crate) async fn draft_sentence_discovery_targets(
-        tx: &mut Transaction<'_, Postgres>,
-        dialect_scopes: &[String],
-        normalized_surface: &str,
-        draft_created_by: Uuid,
-    ) -> Result<Vec<SentenceDiscoveryDraftRecord>, LexiconRepositoryError> {
-        sqlx::query_as::<_, SentenceDiscoveryDraftRecord>(
-            r#"
-            SELECT DISTINCT
-                   entry.id AS entry_id,
-                   entry.revision AS entry_revision,
-                   COALESCE(presentation.label, source.surface) AS headword
-            FROM lexicon.surface_sources source
-            JOIN lexicon.entries entry
-              ON entry.id = source.entry_id
-             AND entry.archived_at IS NULL
-             AND entry.content_schema_version = 3
-             -- 未发布内容只对词条创建者可见：过滤作用于一切 draft-scope surface，
-             -- 含已发布词条草稿里尚未发布的新词形（从严口径）。
-             AND entry.created_by_admin_id = $4
-            LEFT JOIN lexicon.entry_presentation_projection presentation
-              ON presentation.entry_id = entry.id
-            WHERE source.is_deleted = FALSE
-              AND source.content_scope = 'draft'
-              AND source.language = 'en'
-              AND source.normalization_version = $1
-              AND source.dialect_scope = ANY($2::text[])
-              AND source.normalized_surface = $3
-            ORDER BY entry.id
-            "#,
-        )
-        .bind(HEADWORD_NORMALIZATION_VERSION)
-        .bind(dialect_scopes)
-        .bind(normalized_surface)
-        .bind(draft_created_by)
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)

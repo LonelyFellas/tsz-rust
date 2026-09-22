@@ -2,6 +2,8 @@
 
 ## 状态
 
+**本轮基线已核对：后端 `453bf13`（PR #183）、前端 `294886a`（PR #316）；分页子项已合入并由用户确认部署，不重复开发。当前正在实现剩余候选/引用功能，整批仍未完成。以下旧章节保留历史证据，当前进展见文末“句中发现与本轮验收收尾”。**
+
 **第一批已通过 PR #181 合入并部署（用户确认），合并提交 `cbf2c2632da65962fe96d3284fece2bec08dfa99`。第二批关联搜索分页已通过 PR #182 合入并部署（用户确认），合并提交 `c33b8b2fd32be7fcba711a1de6138929fd848879`。续作新增成分/句中候选稳定键分页，进入独立 PR 交付；整批仍未完成。第三至第五批未开始。**
 
 - Worktree：`/Users/darwish/Dev/tsz-core/tsz-rust-lexicon-domain-refactor`
@@ -214,3 +216,140 @@
 - 恢复是业务状态恢复，不是抹掉测试历史；测试产生的发布版本与审计记录保留。证据 `archive-final-restored.png`、`association-restored-published.png`。
 - 记录独立异常：后台多个标签页曾非预期回到登录页，导致保留的候选首屏被打断。用户确认没有其他人登录；根因未确认，不能归因为异地登录或简单声明正常过期。按用户要求暂缓调查/修复，不将独立验收页未实现 refresh 的 401 与该问题混为一谈。
 - 这次补测只补已实现分页子项的证据，不代表第二批剩余引用规则已实施，也不是全项目全量回归。补测阶段没有提交、推送或部署。
+
+## 第二批剩余功能本轮
+
+### 隔离与授权
+
+- 两仓任务分支：`feat/lexicon-domain-batch-2-remaining`。
+- 后端：`/Users/darwish/Dev/tsz-core/.worktrees/backend/lexicon-domain-batch-2-remaining`，基线 `453bf13`。
+- 前端：`/Users/darwish/Dev/tsz-core/.worktrees/frontend/lexicon-domain-batch-2-remaining`，基线 `294886a`。
+- 原 completion 工作区仍有运行进程，保持源码、服务和测试数据不变；不清理旧 worktree 登记。前端新 worktree 自行安装依赖，未链接旧 node_modules。
+- 本次只实现/测试；未提交、推送、合并、部署或修改远端数据。
+- 独立测试容器 `tsz-lexicon-b2-remaining-pg` / `tsz-lexicon-b2-remaining-redis`，标签 `task=lexicon-domain-batch-2-remaining`；PG 本轮 `127.0.0.1:49708/lexicon_b2_remaining`，Redis 本轮 `127.0.0.1:49709/0`。仅本任务隔离库迁移和 SQLx 测试；同时显式指定 TEST_REDIS_URL / REDIS_URL，不使用 fallback。Cargo 保留共享缓存，无 clean。收尾已停止这两个本轮容器、未删除数据，恢复后须重新核对端口；旧 completion 两仓服务仍运行且工作区干净。
+
+### 当前实现（不是整批完成）
+
+- 关联搜索补已发布词条新增草稿词义；排除已发布词义重复进入草稿结果，前端合并同 entry 的结果并保留具体词义状态。
+- 关联保存回显 `target_status` 按当前发布的具体 sense 判断；保存允许草稿依赖，关联词单独发布和验证拒绝未发布词义。发布失败无发布记录，目标发布后可用原源 revision 重试成功。
+- 成分候选读取发布/草稿独立 map，支持曾发布词条新增节点；相同具体目标前端优先发布快照，草稿依赖标识到叶子，不仅标记整条词条。
+- 关联词和成分默认关闭草稿，主动展开；成分切换范围丢弃旧页/游标及迟到响应，不修改已有关联。
+- 来源节点缺失给出明确反馈；步骤重定向及继续编辑保留 `focus_node`，同页变更定位参数可重新处理。仅提示，不宣称引用已解除。
+- OpenAPI、前端快照和 runtime bundle 同步。本轮 wire 字段形状不变；runtime 来源指向本轮后端，SHA256 `b941455280e03417fc67ef0736d78b3b8a74f37b541a30f08140a372a2bc28c1`，canary 同步更新。
+
+### 验证结果与中间失败
+
+- 缺失来源节点回归先红后修复。步骤跳转测试最初误认为落在 forms，实际 fixture 已满足 forms，按现有规则落在 meanings；修正测试预期，未改变步骤规则。
+- 后端第一轮：98 passed / 2 failed。新自定义错误码不在 V3 闭合集合，改为复用 `relation_target_unavailable`；另发现回显按词条判发布，已改成按具体 sense。
+- 第二轮：99 passed / 1 failed。新增修复用例误将只读关联快照字段回传，修正 fixture 为合法 writable 内容；定向重跑通过。无放宽契约或断言。
+- 首轮前端全量 2893 passed / 4 failed / 2 skipped：三项关联选择器/例句编辑器测试仍断言默认 include_drafts=true，按新规则改为 false；一项无关 `V3PublicationHistory` 异步详情断言失败，未修改其实现/用例，同码定向与第二次全量均通过，根因未确定，保留首轮日志。
+
+候选子项检查点验证（均退出码 0）：
+
+| 范围 | 结果 |
+| --- | --- |
+| 后端 `--lib lexicon::` | 192 passed |
+| 后端 `lexicon_handler` / `lexicon_v3_lifecycle` / `sentence_target_discovery_contract` | 100 / 6 / 3 passed |
+| 新增发布前验证断言后的定向重跑 | 1 passed，原 100 项之一，不重复计数 |
+| clippy all-targets/all-features `-D warnings`、fmt、diff check | 通过 |
+| 隔离库 migrate / `cargo sqlx prepare -- --all-targets --all-features` / `prepare --check` | 通过，`.sqlx` 无差异，无新增 migration |
+| 后端 OpenAPI 导出及前端同步 | 通过；解析后去掉 description 与基线完全一致 |
+| 前端 `pnpm test` | 192 文件、2897 passed、2 skipped |
+| 补充“刷新后仍显示具体草稿依赖”的前端用例后，整个词义步骤测试重跑 | 110 passed（此前为 109 项），不是另一次全量 |
+| 前端全仓 typecheck / lint；最后新增用例后 admin typecheck / 定向 eslint | 通过 |
+
+日志与退出码：`/tmp/lexicon-b2-remaining-back-checks.*`、`back-final.*`、`back-incremental.*`、`frontend-final2.*`（后三者同为 `/tmp/lexicon-b2-remaining-` 前缀）；前端增量日志 `/tmp/lexicon-b2-remaining-ui-incremental.log`。前端首轮失败保留于 `/tmp/lexicon-b2-remaining-frontend-final.log`，后端中间失败保留于 `handler.log` / `handler2.log`（同前缀）。
+
+以上证明当前子项，不证明下列尚未实施的边界；没有把旧行为回归通过当作第二批验收通过。
+
+### 该检查点剩余范围
+
+当时尚未切换引用影响/草稿删除边界、其他引用类型的发布有效性，以及句中发现契约和真实联调。引用边界现已继续实施，最新状态如下。
+
+## 引用边界续作
+
+**整批仍未完成；未提交、推送、PR、合并或部署。沿用上述 remaining 两仓工作区，旧运行工作区没有改动。**
+
+### 已实施
+
+- 入站发布引用不再只校验 sense。读取不可变来源快照补全成分、正文链接和 via-phrase 身份；固定发布号的草稿成分也纳入影响。
+- 新增草稿正文引用采集和 `draft_text_link` 来源类型，直接读取编辑投影，复用原判定/来源描述/节点计数；没有新增引用表或兼容分流。
+- 草稿允许删除被引用的词形、词义、词性；保留稳定身份、墓碑、乐观版本、事务与外键保护。前端撤销引用导致的删除/保存禁用，保留结构限制、确认及引用影响提示，不把草稿内失效说成当前发布已受损。
+- 单独发布与发布前验证、历史激活、恢复均检查当前发布中的具体出站目标。关联、成分、正文和 context 不允许以未发布节点完成发布。已有批次恢复先在事务内恢复所选项，再校验完整目标，失败回滚；没有实现第三批批次发布/新版本回退。
+- 共享例句仍按现有即时编辑及显式 unlink 路径工作，入站影响使用词形/方言/词面规则；正文人工关联使用完整节点身份，不套用共享例句词面等值限制。第四批独立例句版本未扩展。
+- 后端闭环回归：保留 sense、删除被引用的具体词形 → 草稿保存成功、当前发布候选不变 → 发布被拦且版本不变 → 来源仅保存修复仍被旧发布引用拦截 → 发布来源修复后目标可发布。验证墓碑、历史快照保持，以及历史激活不能绕过当前节点校验。
+- 额外验证内部专用组绑定的词义可从草稿删除，绑定关系清除、节点墓碑保留，但不完整草稿仍不可发布。
+
+### 契约与中间失败
+
+- 新来源枚举已同步后端 OpenAPI、前端类型、runtime schema 和标签，新增解码回归同时验证接受新类型、拒绝未知类型。最新输入 SHA256：`08641a4e6c23e73e753bb0ee62994cb96a780b8c3117adbf79ef05fba038a652`。
+- 这次不再是仅 description 更新：旧严格前端会拒绝 `draft_text_link`，配套发布必须按既定停流方案执行。本轮无 migration，SQLx prepare/cache check 无差异。
+- 首轮旧行为测试按预期在“保存必须冲突/删除必须禁用”断言失败，已替换为草稿可保存、引用保留、发布拦截及修复闭环；没有删掉引用/墓碑断言来放行。
+- 共享例句测试旧 fixture 原来在保存前被守卫拦截，进入真实保存后暴露缺失父子身份/entry_pos 关系行，补齐合法 fixture，未放松生产身份与外键校验。调试日志代码已清除。
+- 出站统一检查的初版误将正文人工关联套用例句词面规则，既有正文回归识别后，拆回不同业务判定、共用生命周期检查。
+- 前端全量的旧文案断言及一个级联器异步展开立即查询断言失败；同步新提示文案，后者改为等待出现后仍严格断言禁用和不可选。保留失败日志，不把首次失败抹去。
+
+### 验证
+
+- 本轮复用自有容器，恢复后端口实际为 PG `127.0.0.1:60022/lexicon_b2_remaining`、Redis `127.0.0.1:60023/0`；未连接旧 completion、共享或远端实例。收尾仅停止本轮两个容器、保留数据，恢复须重新核对端口；旧 completion 服务仍运行、两仓工作区仍干净。
+- 后端 `lexicon_handler` **102 passed**；`shared_sentences` **24 passed**；`lexicon_v3_lifecycle` **6 passed**；`sentence_target_discovery_contract` **3 passed**；`--lib lexicon::` **192 passed**；`--lib openapi::` **10 passed**。重复定向重跑不另计。
+- 前端全量 **192 文件、2899 passed、2 skipped**；全仓 typecheck、lint 通过。
+- clippy all-targets/all-features `-D warnings`、fmt、两仓 diff check、SQLx prepare 与 prepare --check 通过。
+- 最新证据：`/tmp/lexicon-b2-reference-handler-final.*`、`final4.log`（handler/lifecycle/discovery，shared fixture 的失败保留）、`final5.*`（shared/lib/clippy/prepare/export）、`schema-final.*`（OpenAPI/cache check）、`front-final3.*`（全前端）；这些文件均使用 `/tmp/lexicon-b2-reference-` 前缀。
+
+### 该检查点之后
+
+用户已确认继续接入现有例句编辑入口。原先待办的句中节点契约、页面接线及真实浏览器补验已继续推进，当前结果如下。
+
+## 句中发现与本轮验收收尾
+
+**本轮剩余功能实现和约定验证已收尾；按用户要求，第二批整批状态不标记完成。未提交、推送、提 PR、合并或部署。**
+
+### 实现
+
+- `sentence-targets/resolve` 的 `draft_matches` 改为完整词形/词义节点候选，增加 `draft_total`，移除旧 entry-only / pending-only 元数据模型及创建者限定查询。其他管理员可发现目标，但 HTTP 回归确认仍不能编辑他人草稿。
+- 已发布词条新增节点可以主动展开；按具体匹配词形、原形、变体及词义可用范围排除已发布的同一组合，不重复把已发布节点标为草稿。
+- 复用原稳定键分页，发布与草稿共用页容量、已发布优先，游标绑定 include_drafts 范围；切换范围不可沿用旧游标。原分页算法的弱一致、插入/归档、自动转手动续页回归仍通过，不重新实现已部署分页子项。
+- `V3SentenceTargetDiscovery` 接入共用 `SentenceEditor`（现有词义内/例句库编辑区，不新增页面）。自动默认仅发布；手动显式展开草稿。查询不写入，选择只改本地编辑内容，点击“完成”才保存。
+- 适配器保留完整稳定身份，词形与词头分开；与手动选择共用标注写入函数。保留原标注、当前词义关联要求、文本/方言变化取消旧结果和请求的保护。
+- 新契约和类型、运行时校验、生成脚本根类型清单全部同步；旧草稿结果明确拒绝而非兼容。当前 spec SHA256：`93d87d405f4957c9744b585f3eb07cf55b2e5674f80b91a19183bc2866e116fa`。
+
+### 最终自动检查
+
+全部退出码 **0**，不同层的重复重跑不另计：
+
+| 检查 | 结果 |
+| --- | --- |
+| 后端 lexicon_handler / shared_sentences / lexicon_v3_lifecycle / sentence_target_discovery_contract | 102 / 24 / 6 / 3 passed |
+| 后端 lexicon 单测 / OpenAPI 单测 | 192 / 10 passed |
+| clippy all-targets/all-features `-D warnings`、fmt、SQLx prepare --check | 通过；`.sqlx` 无变化 |
+| 前端全量 `pnpm test` | 193 文件，2906 passed，2 skipped |
+| 前端全仓 typecheck / lint、两仓 diff check | 通过 |
+
+日志及真实退出码：`/tmp/lexicon-b2-close-back.log` / `.exit`、`/tmp/lexicon-b2-close-front.log` / `.exit`。
+
+同步曾因生成脚本仍登记已删除的草稿元数据 schema 而失败；移除对应旧根类型后重新生成成功，未跳过缺失 schema 校验。记录保留于 `/tmp/lexicon-b2-discovery-sync.log` / `sync2.log`。首次收尾格式化命令超时后单独完成格式化，再启动最终检查，没有把未启动的测试算作通过。
+
+### 真实浏览器证据
+
+- 新隔离环境：前端 `http://lexicon-b2-remaining.localhost:13002`，真实代理到本任务后端 `http://127.0.0.1:18584/api/v1`。后端是本工作区构建后复制的独立二进制，版本/哈希/PID 见私有目录 `/tmp/tsz-lexicon-b2-remaining-local/manifest.json`。没有替换旧 completion 服务。
+- 本轮实际依赖：PG `127.0.0.1:57198/lexicon_b2_remaining`、Redis `127.0.0.1:57199/0`。维护库开始时词条数为 0；本轮只创建隔离验收账号和合成词条/例句，不触碰共享或远端数据。
+- 浏览器正常登录，使用后端原生本地 OTP Mock 通道；词库、词性和 TTS 前端 mock 关闭，不配置付费语音服务。Playwright 新建独立 Chrome 上下文，无 page.route 拦截、无注入登录 token；API 仅用于 fixture 准备和独立读回验证，受测查询/保存/修复/发布均由正式页面点击发起。
+- 已验证：自动发现 ledger 的已发布复数目标；主动展开同词条新增草稿词义，显示具体未发布依赖；选择后数据库未提前改变，点击完成才保存。独立 GET 与页面刷新确认具体 sense/form/variant，草稿绑定未误带旧发布号。
+- 已验证：正式词形页删除被引用的复数并保存草稿；当前发布版本不变；发布检查返回 409 和 2 条可定位例句引用；在两条例句正式编辑器中清除对应关联、保存，保留 notebook 自身关联；目标随后通过检查并发布，旧发布快照仍保留被删词形。
+- 原生页面首次脚本在第二例句的 Radio 控件上选中了隐藏 input，尚未发出该步骤请求；改点可见标签，并核对第一条例句已保存、第二条未变后，从检查点继续，没有重放已完成写入。失败日志/截图保留。
+- 证据：`automatic-response.json`、`draft-expanded-response.json`、`reference-publication-rejected.json`、`browser-resume-result.json`（passed=true）；截图 `discovery-published-selection.png`、`discovery-draft-dependency.png`、`discovery-reloaded.png`、`reference-draft-deletion-saved.png`、`reference-publication-blocked.png`、`reference-repair-published.png`，均在上述私有目录。凭据未写入仓库或报告。
+- 合成 fixture：ledger `01a0c750-abd9-7cb3-9a93-c51fd1d9676c`、notebook `01a0c750-ace0-7f22-bda5-4cbaebbd04ad` 和两条例句。最终 ledger 已发布删除复数后的版本；两条例句仅保留 notebook 关联，测试历史保留。没有修改旧验收 fixture。
+
+### 交付边界与未覆盖项
+
+- 旧 completion 两仓源码和运行服务保持原样；本轮环境与数据保留供复验，不迁移/清理旧 worktree 或共享缓存。
+- 浏览器证明的是上述共享例句闭环；词条来源修复后须发布来源、历史激活/恢复完整目标检查有 HTTP 回归，不宣称每一种组合都做过浏览器操作。
+- 未执行全项目 E2E 或大型真实词库性能基准；第三至第五批功能没有顺带实施。
+- 新来源枚举、必填 draft_total、草稿候选结构变更需要配套受控发布，旧严格前端不能混用。上述验收阶段未执行交付或远端发布。
+
+### 交付授权补记
+
+用户随后明确要求提 PR，授权本任务两仓提交、独立审查、推送和创建配套 PR。继续复用 remaining 工作区，不合并、不部署，不将第二批整批标记完成；精确提交、独立审查和 CI 结果以配套 PR 为准。
+
+交付独立审查发现并修复：当前草稿内部专用组绑定不依赖当前发布快照，发布/历史激活检查不应把它当作外部入站依赖；仅草稿影响预览收集该类内部绑定，外部引用检查保持完整。新增回归先复现历史激活 409，再验证激活成功且草稿内容、revision 和绑定不变；另重跑外部引用阻断与修复回归。前端同时补齐明确关闭句中发现能力时隐藏入口的回归，例句编辑保留。以上增量交由原独立 reviewer 复查。

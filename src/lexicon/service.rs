@@ -32,8 +32,7 @@ use crate::lexicon::{
         FormsSurfaceAcknowledgementRecord, ListFilter, NewPublicationSenseReference,
         PublicationReadRecord, PublicationSenseReferenceKind, PublicationTargetContentScope,
         RegionSurfaceRecord, RelatedSearchFilter, ResolvedRelationTargetRecord,
-        ResolvedSenseTargetRecord, SenseTargetKey, SentenceDiscoveryDraftRecord,
-        SentenceDiscoverySurfaceRecord,
+        ResolvedSenseTargetRecord, SenseTargetKey, SentenceDiscoverySurfaceRecord,
     },
     normalization::{
         HeadwordNormalizationError, NormalizedHeadword, normalize_headword, sha256_json,

@@ -18,7 +18,7 @@ use crate::{
             PublicationReadRecord, PublishedEntrySnapshotRecord, PublishedFormSurfaceRecord,
             RegionEvidenceRecord, RegionSurfaceRecord, RelatedSearchFilter, RelatedSearchRecord,
             ResolvedRelationTargetRecord, ResolvedSenseTargetRecord, SenseTargetKey,
-            SentenceAssociationRecord, SentenceAssociationScanRecord, SentenceDiscoveryDraftRecord,
+            SentenceAssociationRecord, SentenceAssociationScanRecord,
             SentenceDiscoverySurfaceRecord, StatsRecord, SurfaceInboundRelationRecord,
         },
         node_identity::{
