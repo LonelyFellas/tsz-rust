@@ -15388,6 +15388,102 @@ async fn v3_spelling_regularity_round_trips_without_group_or_dialect_leakage(poo
 }
 
 #[sqlx::test]
+async fn history_activation_preserves_unpublished_internal_sense_bindings(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let initial = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let (status, first) = publish_ready_v3(&state, &bearer, &initial).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    let id = first["word"]["id"].as_str().unwrap();
+    let entry_id = Uuid::parse_str(id).unwrap();
+    let first_publication = current_publication_id(&pool, entry_id).await;
+    let mut meanings = writable_v3_meanings(&first);
+    meanings["pos"][0]["senses"][0]["definitions"][0]["content"] = rich_text("第二次发布文案");
+    let second = save_v3_meanings(&state, &bearer, &first, meanings).await;
+    let (status, second) = publish_ready_v3(&state, &bearer, &second).await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    assert_ne!(
+        current_publication_id(&pool, entry_id).await,
+        first_publication
+    );
+    let mut meanings = writable_v3_meanings(&second);
+    let mut new_sense = meanings["pos"][0]["senses"][0].clone();
+    let sense_id = Uuid::now_v7();
+    new_sense["id"] = json!(sense_id);
+    new_sense["definitions"][0]["id"] = json!(Uuid::now_v7());
+    new_sense["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    new_sense["definitions"][0]["content"] = rich_text("仅草稿新增的词义");
+    meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(new_sense);
+    let draft = save_v3_meanings(&state, &bearer, &second, meanings).await;
+    let mut forms = draft["word"]["forms"].clone();
+    forms["pos"][0]["form_groups"][0]["scope"] = json!("dedicated");
+    let bindings =
+        json!([{"sense_id":sense_id,"form_group_ids":[forms["pos"][0]["form_groups"][0]["id"]]}]);
+    let revision = draft["word"]["revision"].as_i64().unwrap();
+    let (status, impact) = call(&state, Method::POST, &format!("{ROOT}/entries/{id}/steps/forms/impact"), &bearer, None,
+        Some(json!({"schema_version":3,"base_revision":revision,"content":forms,"sense_bindings":bindings}))).await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    let mut input = forms_input_after_impact(&impact, revision, "save", forms);
+    input["sense_bindings"] = bindings;
+    let (status, bound) = save_v3_forms_raw(&state, &bearer, id, input).await;
+    assert_eq!(status, StatusCode::OK, "{bound}");
+    let refs = inbound_references_of(&state, &bearer, id).await;
+    assert!(
+        refs["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == "form_group_sense_binding"
+                && item["target"]["sense_id"] == json!(sense_id))
+    );
+    let (status, activated) = activate_v3_history(
+        &state,
+        &bearer,
+        entry_id,
+        first_publication,
+        bound["word"]["revision"].as_i64().unwrap(),
+        bound["word"]["lifecycle_revision"].as_i64().unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "草稿内部绑定不依赖当前发布快照：{activated}"
+    );
+    assert_eq!(
+        current_publication_id(&pool, entry_id).await,
+        first_publication
+    );
+    let (status, current) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{current}");
+    assert_eq!(current["word"]["revision"], bound["word"]["revision"]);
+    assert_eq!(current["word"]["forms"], bound["word"]["forms"]);
+    assert_eq!(current["word"]["meanings"], bound["word"]["meanings"]);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.sense_form_group_bindings WHERE entry_id=$1 AND sense_id=$2",
+    )
+    .bind(entry_id)
+    .bind(sense_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
 async fn draft_sense_deletion_clears_its_own_group_bindings_and_retains_tombstone(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)

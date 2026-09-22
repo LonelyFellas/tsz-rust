@@ -500,7 +500,8 @@ async fn collect_candidates(
         candidates.extend(expand_publication_candidate(candidate, word, entry_id)?);
     }
 
-    // Saved bindings protect sense deletion even when the request omits the sense and its bindings.
+    // 内部绑定属于当前草稿，仅参与草稿影响预览。发布/历史激活不改变草稿，
+    // 不能用候选发布快照判断这些内部绑定是否失效；外部引用仍完整检查。
     let bindings = sqlx::query_as::<_, (Uuid, Uuid, Uuid, i32)>(
         r#"
         WITH bindings AS (
@@ -510,10 +511,12 @@ async fn collect_candidates(
         )
         SELECT binding.sense_id, binding.form_group_id, binding.entry_pos_id, form_group.ordinal
         FROM bindings binding JOIN lexicon.v3_form_groups form_group ON form_group.id = binding.form_group_id
+        WHERE $2
         ORDER BY binding.sense_id, binding.form_group_id
         "#,
     )
     .bind(entry_id)
+    .bind(check == InboundReferenceCheck::DraftPreview)
     .fetch_all(&mut **tx)
     .await
     .map_err(database_error)?;
