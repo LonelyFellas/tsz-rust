@@ -41,6 +41,11 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
         })
         .await
         .expect("seed admin should succeed");
+    sqlx::query("UPDATE admins SET can_publish_lexicon=true WHERE id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 

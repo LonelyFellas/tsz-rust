@@ -223,6 +223,15 @@ pub(super) async fn validate_targets(
     entry_id: Uuid,
     content: &mut DraftMeaningsStepContentV3,
 ) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
+    validate_targets_in(tx, entry_id, content, None).await
+}
+
+pub(super) async fn validate_targets_in(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    content: &mut DraftMeaningsStepContentV3,
+    batch: Option<&super::v3_publication::PublicationBatchContext>,
+) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
     let mut link_ids = HashSet::new();
     let mut groups = BTreeMap::<(Uuid, Option<Uuid>), TargetGroup>::new();
     for variant in content
@@ -270,7 +279,7 @@ pub(super) async fn validate_targets(
     }
     let mut targets = HashMap::<(Uuid, Option<Uuid>), ComponentTargetWord>::new();
     for (key, group) in &groups {
-        let target = resolve_component_target(tx, key.0, key.1, |candidate| {
+        let target = super::v3::resolve_component_target_in(tx, key.0, key.1, batch, |candidate| {
             group
                 .direct
                 .iter()
@@ -355,6 +364,13 @@ pub(super) async fn validate_targets(
     // 发布范围：锁那一版发布并取 source_revision；草稿范围：锁目标词条行并取 entry revision。
     let published = references
         .iter()
+        .filter(|reference| {
+            !batch
+                .and_then(|batch| batch.words.get(&reference.target_entry_id))
+                .is_some_and(|candidate| {
+                    reference.target_publication_id == Some(candidate.publication_id)
+                })
+        })
         .filter_map(|reference| {
             reference.target_publication_id.map(|publication_id| {
                 (
@@ -388,10 +404,24 @@ pub(super) async fn validate_targets(
     if verified.len() != published.len() {
         return Err(LexiconServiceError::ReferenceConflict);
     }
-    let revisions: HashMap<_, _> = verified
+    let mut revisions: HashMap<_, _> = verified
         .into_iter()
         .map(|(entry, publication, sense, revision)| ((entry, Some(publication), sense), revision))
         .collect();
+    for reference in &references {
+        if let Some(candidate) = batch.and_then(|batch| batch.words.get(&reference.target_entry_id))
+            && reference.target_publication_id == Some(candidate.publication_id)
+        {
+            revisions.insert(
+                (
+                    reference.target_entry_id,
+                    reference.target_publication_id,
+                    reference.target_sense_id,
+                ),
+                candidate.word.revision,
+            );
+        }
+    }
     let draft_keys = references
         .iter()
         .filter(|reference| reference.target_publication_id.is_none())

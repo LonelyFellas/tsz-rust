@@ -22,6 +22,7 @@ impl LexiconRepository {
             SELECT publication.id,
                    publication.entry_id,
                    publication.publication_number,
+                   publication.rollback_of_publication_id,
                    publication.source_revision,
                    publication.content_schema_version,
                    publication.snapshot,
@@ -51,6 +52,7 @@ impl LexiconRepository {
             SELECT publication.id,
                    publication.entry_id,
                    publication.publication_number,
+                   publication.rollback_of_publication_id,
                    publication.source_revision,
                    publication.content_schema_version,
                    publication.snapshot,
@@ -475,80 +477,6 @@ impl LexiconRepository {
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)
-    }
-
-    pub(crate) async fn unavailable_outbound_sense_refs_for_publication(
-        tx: &mut Transaction<'_, Postgres>,
-        publication_id: Uuid,
-    ) -> Result<Vec<InboundSenseReferenceRecord>, LexiconRepositoryError> {
-        sqlx::query_as::<_, InboundSenseReferenceRecord>(
-            r#"
-            SELECT sense_ref.target_sense_id,
-                   sense_ref.entry_id AS source_entry_id,
-                   sense_ref.publication_id AS source_publication_id,
-                   sense_ref.source_node_id,
-                   sense_ref.reference_kind
-            FROM lexicon.entry_publication_sense_refs sense_ref
-            JOIN lexicon.entries target_entry
-              ON target_entry.id = sense_ref.target_entry_id
-            LEFT JOIN lexicon.entry_publication_nodes target_node
-              ON target_node.publication_id = target_entry.current_publication_id
-             AND target_node.entry_id = target_entry.id
-             AND target_node.node_id = sense_ref.target_sense_id
-             AND target_node.node_type = 'sense'
-            LEFT JOIN lexicon.nodes target_draft_node
-              ON target_draft_node.id = sense_ref.target_sense_id
-             AND target_draft_node.entry_id = target_entry.id
-             AND target_draft_node.node_type = 'sense'
-            WHERE sense_ref.publication_id = $1
-              AND (
-                   target_entry.archived_at IS NOT NULL
-                   OR (
-                       sense_ref.reference_kind = 'sentence_context'
-                       AND target_node.node_id IS NULL
-                   )
-                   OR (
-                       -- 短语成分与关联词同款：目标词义既不在目标当前发布里、
-                       -- 草稿侧也已消失，这条出引用就悬空了。
-                       sense_ref.reference_kind IN ('relation', 'phrase_component', 'text_link')
-                       AND target_node.node_id IS NULL
-                       AND (
-                           target_draft_node.id IS NULL
-                           OR target_draft_node.removed_from_draft_at IS NOT NULL
-                       )
-                   )
-              )
-            ORDER BY sense_ref.target_sense_id,
-                     sense_ref.entry_id,
-                     sense_ref.source_node_id
-            "#,
-        )
-        .bind(publication_id)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(LexiconRepositoryError::Database)
-    }
-
-    pub(crate) async fn lock_outbound_sense_ref_targets_for_publication(
-        tx: &mut Transaction<'_, Postgres>,
-        publication_id: Uuid,
-    ) -> Result<(), LexiconRepositoryError> {
-        sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT target_entry.id
-            FROM lexicon.entry_publication_sense_refs sense_ref
-            JOIN lexicon.entries target_entry
-              ON target_entry.id = sense_ref.target_entry_id
-            WHERE sense_ref.publication_id = $1
-            ORDER BY target_entry.id
-            FOR SHARE OF target_entry NOWAIT
-            "#,
-        )
-        .bind(publication_id)
-        .fetch_all(&mut **tx)
-        .await
-        .map(|_| ())
-        .map_err(map_target_publication_lock_error)
     }
 
     pub(crate) async fn current_publication_relation_target_entry_ids(

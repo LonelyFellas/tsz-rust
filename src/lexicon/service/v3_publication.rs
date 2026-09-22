@@ -8,16 +8,17 @@ use uuid::Uuid;
 use super::v3::hydrate_audio_asset_metadata;
 use super::*;
 use crate::lexicon::dto::{
-    ActivatePublicationV3Input, AdminWordStatus, AdminWordV3, AdminWordV3Envelope,
-    DraftFormsStepContentV3, DraftMeaningsStepContentV3, PersistedWordStep, PhraseComponentUsageV3,
-    PublishAdminWordV3Input, SentenceAssociationsStateV2, StepSaveIntent, WordRegionalVariantsV3,
+    AdminWordStatus, AdminWordV3, AdminWordV3Envelope, DraftFormsStepContentV3,
+    DraftMeaningsStepContentV3, PersistedWordStep, PhraseComponentUsageV3, PublishAdminWordV3Input,
+    RollbackPublicationV3Input, SentenceAssociationsStateV2, StepSaveIntent,
+    WordRegionalVariantsV3,
 };
 use crate::lexicon::model::{
     NewPublicationSenseReference, PublicationSenseReferenceKind, PublicationTargetContentScope,
 };
 
 const V3_PUBLISH_SCOPE: &str = "lexicon.entry.publish.v3";
-const V3_ACTIVATE_SCOPE: &str = "lexicon.publication.activate.v3";
+const V3_ROLLBACK_SCOPE: &str = "lexicon.publication.rollback.v3";
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct V3PublicationState {
@@ -35,8 +36,17 @@ struct VersionedPublication {
     published_at: DateTime<Utc>,
 }
 
+pub(super) struct PublicationCandidate {
+    pub(super) word: AdminWordV3,
+    pub(super) publication_id: Uuid,
+}
+
+#[derive(Default)]
+pub(super) struct PublicationBatchContext {
+    pub(super) words: HashMap<Uuid, PublicationCandidate>,
+}
+
 impl LexiconService {
-    #[allow(clippy::too_many_arguments)]
     pub async fn publish_v3(
         &self,
         actor_id: Uuid,
@@ -45,7 +55,6 @@ impl LexiconService {
         idempotency_key: Uuid,
         input: PublishAdminWordV3Input,
         allow_automatic_associations: bool,
-        is_super_admin: bool,
     ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         let request_hash = sha256_json(&serde_json::json!({
             "entry_id": entry_id,
@@ -61,6 +70,7 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        let is_super_admin = lock_lexicon_publisher(&mut tx, actor_id).await?;
         lock_v3_idempotency(&mut tx, V3_PUBLISH_SCOPE, actor_id, idempotency_key).await?;
         if let Some(existing) =
             LexiconRepository::idempotency(&mut tx, V3_PUBLISH_SCOPE, actor_id, idempotency_key)
@@ -91,7 +101,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        ensure_draft_writable(&record, actor_id, is_super_admin)?;
+        ensure_publication_owner(&record, actor_id, is_super_admin)?;
         ensure_locked_v3_entry(&record, input.base_revision)?;
         if word.revision != record.revision {
             return Err(LexiconServiceError::RevisionConflict {
@@ -101,145 +111,9 @@ impl LexiconService {
         let state = v3_publication_state_for_update(&mut tx, entry_id).await?;
         ensure_v3_publication_eligibility(&mut tx, entry_id, &state).await?;
 
-        let mut issues =
-            crate::lexicon::v3_contract::validate_forms(&word.forms, StepSaveIntent::Complete);
-        issues.extend(crate::lexicon::v3_contract::validate_meanings(
-            &word.meanings,
-            StepSaveIntent::Complete,
-        ));
-        issues.extend(
-            crate::lexicon::v3_contract::validate_complete_definition_grammar(&word.meanings),
-        );
-        issues.extend(crate::lexicon::v3_contract::validate_aggregate_node_limit(
-            &word.forms,
-            &word.meanings,
-        ));
-        issues.extend(crate::lexicon::v3_contract::validate_sense_form_groups(
-            &word.forms,
-            &word.meanings,
-            StepSaveIntent::Complete,
-        ));
-        let catalog = self
-            .catalog_context_for_reference(&mut tx, &word.forms, &record.kind)
+        let publication_references = self
+            .validate_publication_content(&mut tx, &mut word, None)
             .await?;
-        let rich_text_is_safe = canonicalize_meanings(&mut word.meanings);
-        crate::lexicon::v3_contract::normalize_sentence_translations(&mut word.meanings);
-        let semantic_issues = validate_meanings(
-            entry_id,
-            &word.forms,
-            &word.meanings,
-            &catalog.sub_part_parents,
-        );
-        if !rich_text_is_safe
-            || !meaning_storage_is_safe(
-                entry_id,
-                &word.forms,
-                &word.meanings,
-                &catalog.sub_part_parents,
-            )
-        {
-            issues.extend(meanings_storage_issues(entry_id, semantic_issues));
-        } else {
-            issues.extend(semantic_issues);
-        }
-        if !issues.is_empty() {
-            return Err(v3_validation_failed(issues));
-        }
-        // 固定发布目标先沿用引用锁与归档检查，保留 reference_conflict 的既有语义。
-        // 草稿目标会在校验时升级发布版本，其引用锚点必须在升级之后计算。
-        let pinned_component_references = if all_component_usages(&word.forms, &word.meanings)
-            .iter()
-            .any(|component| {
-                matches!(
-                    component,
-                    PhraseComponentUsageV3::Resolved {
-                        target_publication_id: None,
-                        ..
-                    }
-                )
-            }) {
-            None
-        } else {
-            Some(
-                phrase_component_publication_references(&mut tx, &word.forms, &word.meanings)
-                    .await?,
-            )
-        };
-        // 发布时按当前规则复核所有成分。固定快照虽然不可变，但旧版本保存时
-        // 尚未校验专用组的词义范围，不能沿用当时的放行结论。
-        if !all_component_usages(&word.forms, &word.meanings).is_empty() {
-            // 词形步的成分校验对保存路径报 400 InvalidField；发布路径的失败是「目标草稿事后变了」，
-            // 与释义级一样落成 422 issue，前端才能按发布问题处理。
-            match super::v3::validate_phrase_components(
-                &mut tx,
-                entry_id,
-                word.kind,
-                &mut word.forms,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(LexiconServiceError::InvalidField { field, message }) => {
-                    return Err(v3_validation_failed(vec![DraftValidationIssue {
-                        step: PersistedWordStep::Forms,
-                        node_id: entry_id,
-                        field: field.to_owned(),
-                        code: "phrase_component_target_stale".to_owned(),
-                        message: message.to_owned(),
-                        reference_location: None,
-                        node_location: None,
-                    }]));
-                }
-                Err(error) => return Err(error),
-            }
-            let component_issues = super::v3::validate_sense_phrase_components(
-                &mut tx,
-                entry_id,
-                word.kind,
-                &mut word.meanings,
-            )
-            .await?;
-            if !component_issues.is_empty() {
-                return Err(v3_validation_failed(component_issues));
-            }
-        }
-
-        let reference_resolution = resolve_meaning_references(
-            &mut tx,
-            entry_id,
-            &mut word.meanings,
-            ReferenceResolutionMode::Verify,
-            true,
-        )
-        .await?;
-        if !reference_resolution.issues.is_empty() {
-            return Err(v3_validation_failed(reference_resolution.issues));
-        }
-        let mut publication_references = reference_resolution.publication_references;
-        publication_references.extend(match pinned_component_references {
-            Some(references) => references,
-            None => {
-                phrase_component_publication_references(&mut tx, &word.forms, &word.meanings)
-                    .await?
-            }
-        });
-        publication_references.extend(
-            super::text_links::validate_targets(&mut tx, entry_id, &mut word.meanings).await?,
-        );
-        let outbound_issues =
-            super::inbound_references::outbound_publication_issues(&mut tx, &word).await?;
-        if !outbound_issues.is_empty() {
-            return Err(v3_validation_failed(outbound_issues));
-        }
-        super::inbound_references::ensure_inbound_references(
-            &mut tx,
-            entry_id,
-            &word.forms,
-            &word.meanings,
-            super::inbound_references::InboundReferenceCheck::PublicationContent,
-            None,
-        )
-        .await?;
 
         if let Some(publication) =
             v3_publication_by_revision_for_update(&mut tx, entry_id, word.revision).await?
@@ -392,14 +266,450 @@ impl LexiconService {
         Ok(response)
     }
 
-    pub async fn activate_publication_v3(
+    async fn validate_publication_content(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        word: &mut AdminWordV3,
+        batch: Option<&PublicationBatchContext>,
+    ) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
+        let entry_id = word.id;
+        let mut issues =
+            crate::lexicon::v3_contract::validate_forms(&word.forms, StepSaveIntent::Complete);
+        issues.extend(crate::lexicon::v3_contract::validate_meanings(
+            &word.meanings,
+            StepSaveIntent::Complete,
+        ));
+        issues.extend(
+            crate::lexicon::v3_contract::validate_complete_definition_grammar(&word.meanings),
+        );
+        issues.extend(crate::lexicon::v3_contract::validate_aggregate_node_limit(
+            &word.forms,
+            &word.meanings,
+        ));
+        issues.extend(crate::lexicon::v3_contract::validate_sense_form_groups(
+            &word.forms,
+            &word.meanings,
+            StepSaveIntent::Complete,
+        ));
+        let catalog = self
+            .catalog_context_for_reference(tx, &word.forms, v3_kind_string(word.kind))
+            .await?;
+        super::v3::normalize_pronunciation_audio_assets(tx, entry_id, &mut word.forms).await?;
+        issues.extend(super::v3::validate_audio_assets(tx, entry_id, &word.meanings).await?);
+        let rich_text_is_safe = canonicalize_meanings(&mut word.meanings);
+        crate::lexicon::v3_contract::normalize_sentence_translations(&mut word.meanings);
+        let semantic_issues = validate_meanings(
+            entry_id,
+            &word.forms,
+            &word.meanings,
+            &catalog.sub_part_parents,
+        );
+        if !rich_text_is_safe
+            || !meaning_storage_is_safe(
+                entry_id,
+                &word.forms,
+                &word.meanings,
+                &catalog.sub_part_parents,
+            )
+        {
+            issues.extend(meanings_storage_issues(entry_id, semantic_issues));
+        } else {
+            issues.extend(semantic_issues);
+        }
+        if !issues.is_empty() {
+            return Err(v3_validation_failed(issues));
+        }
+        // 固定发布目标先沿用引用锁与归档检查，保留 reference_conflict 的既有语义。
+        // 草稿目标会在校验时升级发布版本，其引用锚点必须在升级之后计算。
+        let pinned_component_references = if all_component_usages(&word.forms, &word.meanings)
+            .iter()
+            .any(|component| {
+                matches!(
+                    component,
+                    PhraseComponentUsageV3::Resolved {
+                        target_publication_id: None,
+                        ..
+                    }
+                )
+            }) {
+            None
+        } else {
+            Some(
+                phrase_component_publication_references(tx, &word.forms, &word.meanings, batch)
+                    .await?,
+            )
+        };
+        // 发布时按当前规则复核所有成分。固定快照虽然不可变，但旧版本保存时
+        // 尚未校验专用组的词义范围，不能沿用当时的放行结论。
+        if !all_component_usages(&word.forms, &word.meanings).is_empty() {
+            // 词形步的成分校验对保存路径报 400 InvalidField；发布路径的失败是「目标草稿事后变了」，
+            // 与释义级一样落成 422 issue，前端才能按发布问题处理。
+            match super::v3::validate_phrase_components_in(
+                tx,
+                entry_id,
+                word.kind,
+                &mut word.forms,
+                batch,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(LexiconServiceError::InvalidField { field, message }) => {
+                    return Err(v3_validation_failed(vec![DraftValidationIssue {
+                        step: PersistedWordStep::Forms,
+                        node_id: entry_id,
+                        field: field.to_owned(),
+                        code: "phrase_component_target_stale".to_owned(),
+                        message: message.to_owned(),
+                        reference_location: None,
+                        node_location: None,
+                    }]));
+                }
+                Err(error) => return Err(error),
+            }
+            let component_issues = super::v3::validate_sense_phrase_components_in(
+                tx,
+                entry_id,
+                word.kind,
+                &mut word.meanings,
+                batch,
+            )
+            .await?;
+            if !component_issues.is_empty() {
+                return Err(v3_validation_failed(component_issues));
+            }
+        }
+
+        let reference_resolution = super::publishing::resolve_meaning_references_in(
+            tx,
+            entry_id,
+            &mut word.meanings,
+            ReferenceResolutionMode::Verify,
+            true,
+            batch,
+        )
+        .await?;
+        if !reference_resolution.issues.is_empty() {
+            return Err(v3_validation_failed(reference_resolution.issues));
+        }
+        let mut publication_references = reference_resolution.publication_references;
+        publication_references.extend(match pinned_component_references {
+            Some(references) => references,
+            None => {
+                phrase_component_publication_references(tx, &word.forms, &word.meanings, batch)
+                    .await?
+            }
+        });
+        publication_references.extend(
+            super::text_links::validate_targets_in(tx, entry_id, &mut word.meanings, batch).await?,
+        );
+        let outbound_issues =
+            super::inbound_references::outbound_publication_issues_in(tx, word, batch).await?;
+        if !outbound_issues.is_empty() {
+            return Err(v3_validation_failed(outbound_issues));
+        }
+        if let Some(batch) = batch {
+            super::inbound_references::ensure_batch_inbound_references(tx, word, batch).await?;
+        } else {
+            super::inbound_references::ensure_inbound_references(
+                tx,
+                entry_id,
+                &word.forms,
+                &word.meanings,
+                super::inbound_references::InboundReferenceCheck::PublicationContent,
+                None,
+            )
+            .await?;
+        }
+        Ok(publication_references)
+    }
+
+    pub async fn publish_batch_v3(
+        &self,
+        actor_id: Uuid,
+        request_id: Uuid,
+        idempotency_key: Uuid,
+        input: crate::lexicon::dto::BatchPublicationInputV3,
+        allow_automatic_associations: bool,
+    ) -> Result<crate::lexicon::dto::BatchPublicationResponseV3, LexiconServiceError> {
+        use crate::lexicon::dto::BatchPublicationResponseV3;
+        const SCOPE: &str = "lexicon.publication.batch.v3";
+        let mut seen = HashSet::new();
+        if input.items.is_empty()
+            || input.items.len() > 50
+            || input.items.iter().any(|item| {
+                item.entry_id.is_nil()
+                    || !seen.insert(item.entry_id)
+                    || item.base_revision <= 0
+                    || item.base_lifecycle_revision <= 0
+            })
+        {
+            return Err(LexiconServiceError::InvalidField {
+                field: "items",
+                message: "select 1 to 50 distinct entries with positive revisions",
+            });
+        }
+        let hash = sha256_json(&input).map_err(serialization_error)?;
+        let mut tx = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        let is_super_admin = lock_lexicon_publisher(&mut tx, actor_id).await?;
+        lock_v3_idempotency(&mut tx, SCOPE, actor_id, idempotency_key).await?;
+        if let Some(existing) =
+            LexiconRepository::idempotency(&mut tx, SCOPE, actor_id, idempotency_key)
+                .await
+                .map_err(repository_error)?
+        {
+            if existing.request_hash != hash {
+                return Err(LexiconServiceError::IdempotencyConflict);
+            }
+            let response =
+                serde_json::from_value(existing.response_body).map_err(serialization_error)?;
+            tx.commit().await.map_err(database_error)?;
+            return Ok(response);
+        }
+        let mut sorted = input.items.iter().collect::<Vec<_>>();
+        sorted.sort_by_key(|item| item.entry_id);
+        let ids = sorted.iter().map(|item| item.entry_id).collect::<Vec<_>>();
+        // Same order as single publication: publication locks, surface contexts, entry rows.
+        for id in &ids {
+            lock_v3_publication_entry(&mut tx, *id).await?;
+        }
+        LexiconRepository::lock_surface_contexts(&mut tx, &ids)
+            .await
+            .map_err(repository_error)?;
+        let mut loaded = HashMap::new();
+        for item in &sorted {
+            let mut word = self
+                .get_v3(item.entry_id)
+                .await
+                .map_err(|source| batch_error(item.entry_id, source))?;
+            super::v3::canonicalize_forms_pronunciation_extensions(&mut word.forms);
+            loaded.insert(item.entry_id, word);
+        }
+        self.lock_batch_publication_surfaces(
+            &mut tx,
+            &loaded.values().cloned().collect::<Vec<_>>(),
+        )
+        .await?;
+        let mut surface_confirmations = HashMap::new();
+        for item in &sorted {
+            let confirmation = self
+                .confirm_v3_publish_surface(
+                    &mut tx,
+                    actor_id,
+                    item.entry_id,
+                    item.base_revision,
+                    &loaded[&item.entry_id].forms,
+                    item.confirmed_surface_match_token.as_deref(),
+                )
+                .await
+                .map_err(|source| batch_error(item.entry_id, source))?;
+            surface_confirmations.insert(item.entry_id, confirmation);
+        }
+        let mut batch = PublicationBatchContext::default();
+        let mut records = HashMap::new();
+        let mut reused = HashMap::new();
+        for item in &sorted {
+            let result = async {
+                let record = LexiconRepository::entry_by_id_for_update(&mut tx, item.entry_id)
+                    .await
+                    .map_err(repository_error)?
+                    .ok_or(LexiconServiceError::WordNotFound)?;
+                ensure_publication_owner(&record, actor_id, is_super_admin)?;
+                ensure_locked_v3_entry(&record, item.base_revision)?;
+                if record.lifecycle_revision != item.base_lifecycle_revision {
+                    return Err(LexiconServiceError::LifecycleRevisionConflict {
+                        current_lifecycle_revision: record.lifecycle_revision,
+                    });
+                }
+                preflight_v3_publication_eligibility(&mut tx, item.entry_id).await?;
+                let mut word = loaded.remove(&item.entry_id).ok_or_else(invariant_record)?;
+                if word.revision != record.revision {
+                    return Err(LexiconServiceError::RevisionConflict {
+                        current_revision: record.revision,
+                    });
+                }
+                super::v3::canonicalize_forms_pronunciation_extensions(&mut word.forms);
+                let existing =
+                    v3_publication_by_revision_for_update(&mut tx, item.entry_id, word.revision)
+                        .await?;
+                let publication_id = existing
+                    .as_ref()
+                    .map_or_else(Uuid::now_v7, |publication| publication.id);
+                // The overlay for an unchanged revision must be exactly the immutable version reused.
+                let candidate_word = match &existing {
+                    Some(publication) => serde_json::from_value(publication.snapshot.clone())
+                        .map_err(serialization_error)?,
+                    None => word.clone(),
+                };
+                batch.words.insert(
+                    item.entry_id,
+                    PublicationCandidate {
+                        word: candidate_word,
+                        publication_id,
+                    },
+                );
+                if let Some(existing) = existing {
+                    reused.insert(item.entry_id, existing);
+                }
+                records.insert(item.entry_id, (record, word));
+                Ok::<_, LexiconServiceError>(())
+            }
+            .await;
+            result.map_err(|source| batch_error(item.entry_id, source))?;
+        }
+        let mut prepared = Vec::new();
+        for item in &sorted {
+            let (record, mut word) = records
+                .remove(&item.entry_id)
+                .ok_or_else(invariant_record)?;
+            let result = async {
+                let confirmation = surface_confirmations
+                    .remove(&item.entry_id)
+                    .ok_or_else(invariant_record)?;
+                let references = self
+                    .validate_publication_content(&mut tx, &mut word, Some(&batch))
+                    .await?;
+                Self::refresh_sentence_associations(
+                    &mut tx,
+                    word.id,
+                    &word.meanings,
+                    true,
+                    allow_automatic_associations,
+                    None,
+                )
+                .await?;
+                hydrate_audio_asset_metadata(&mut tx, &mut word.meanings).await?;
+                Self::hydrate_v3_sentence_associations_in(&mut tx, word.id, &mut word.meanings)
+                    .await?;
+                word.status = AdminWordStatus::Published;
+                word.published_revision = Some(word.revision);
+                word.has_unpublished_changes = false;
+                word.published_at = Some(Utc::now());
+                word.lifecycle_revision = record.lifecycle_revision + 1;
+                word.updated_at = Utc::now();
+                Ok::<_, LexiconServiceError>((word, references, confirmation))
+            }
+            .await;
+            let (word, references, confirmation) =
+                result.map_err(|source| batch_error(item.entry_id, source))?;
+            prepared.push((record, word, references, confirmation));
+        }
+        let mut publications = HashMap::new();
+        let new_ids = ids
+            .iter()
+            .filter(|id| !reused.contains_key(id))
+            .copied()
+            .collect::<HashSet<_>>();
+        for (_, word, _, _) in &prepared {
+            let publication = match reused.remove(&word.id) {
+                Some(publication) => publication,
+                None => insert_v3_publication_rows(
+                    &mut tx,
+                    actor_id,
+                    word,
+                    batch.words[&word.id].publication_id,
+                )
+                .await
+                .map_err(|source| batch_error(word.id, source))?,
+            };
+            publications.insert(word.id, publication);
+        }
+        // Nodes now exist for every new publication; cyclic foreign keys can be inserted safely.
+        let mut responses = HashMap::new();
+        let mut confirmations = Vec::new();
+        for (record, mut word, references, confirmation) in prepared {
+            let publication = &publications[&word.id];
+            // Existing publications already carry immutable refs; duplicate revision publication is a reuse.
+            let was_new = new_ids.contains(&word.id);
+            if was_new {
+                insert_publication_sense_refs(&mut tx, publication.id, word.id, &references)
+                    .await?;
+            }
+            replace_current_publication_surfaces_v3(
+                &mut tx,
+                publication.id,
+                publication.source_revision,
+                word.kind,
+                &word.forms,
+            )
+            .await?;
+            update_current_publication_pointer(
+                &mut tx,
+                word.id,
+                publication.id,
+                actor_id,
+                record.revision,
+                record.lifecycle_revision,
+                word.lifecycle_revision,
+            )
+            .await?;
+            if was_new {
+                insert_v3_publish_event(&mut tx, word.id, publication).await?;
+            } else {
+                insert_v3_activation_event(
+                    &mut tx,
+                    word.id,
+                    record.current_publication_id,
+                    publication,
+                    word.lifecycle_revision,
+                )
+                .await?;
+            }
+            word.published_at = Some(publication.published_at);
+            if let Some(confirmation) = &confirmation {
+                LexiconRepository::insert_command_surface_confirmation_audits(
+                    &mut tx,
+                    actor_id,
+                    request_id,
+                    word.id,
+                    word.revision,
+                    confirmation,
+                )
+                .await
+                .map_err(repository_error)?;
+            }
+            sqlx::query("INSERT INTO audit.admin_actions (id, actor_admin_id, action, resource_type, resource_id, resource_revision, request_id, metadata) VALUES ($1,$2,'lexicon.publication.batch.v3','lexicon.entry',$3,$4,$5,$6)")
+                .bind(Uuid::now_v7()).bind(actor_id).bind(word.id).bind(word.revision).bind(request_id)
+                .bind(serde_json::json!({"batch_key": idempotency_key, "publication_id": publication.id, "publication_number": publication.publication_number}))
+                .execute(&mut *tx).await.map_err(database_error)?;
+            responses.insert(word.id, word);
+            confirmations.push(confirmation);
+        }
+        let response = BatchPublicationResponseV3 {
+            words: input
+                .items
+                .iter()
+                .map(|item| {
+                    responses
+                        .remove(&item.entry_id)
+                        .ok_or_else(invariant_record)
+                })
+                .collect::<Result<_, _>>()?,
+        };
+        sqlx::query("INSERT INTO platform.idempotency_records (scope,idempotency_key,actor_id,request_hash,resource_id,response_status,response_body,expires_at) VALUES ($1,$2,$3,$4,$5,201,$6,now()+interval '24 hours')")
+            .bind(SCOPE).bind(idempotency_key).bind(actor_id).bind(hash).bind(idempotency_key)
+            .bind(serde_json::to_value(&response).map_err(serialization_error)?)
+            .execute(&mut *tx).await.map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+        for confirmation in confirmations {
+            remove_verified_surface_confirmation(self, confirmation).await;
+        }
+        Ok(response)
+    }
+
+    pub async fn rollback_publication_v3(
         &self,
         actor_id: Uuid,
         request_id: Uuid,
         entry_id: Uuid,
         publication_id: Uuid,
         idempotency_key: Uuid,
-        input: ActivatePublicationV3Input,
+        input: RollbackPublicationV3Input,
     ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         let request_hash = sha256_json(&serde_json::json!({
             "entry_id": entry_id,
@@ -414,9 +724,10 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
-        lock_v3_idempotency(&mut tx, V3_ACTIVATE_SCOPE, actor_id, idempotency_key).await?;
+        let is_super_admin = lock_lexicon_publisher(&mut tx, actor_id).await?;
+        lock_v3_idempotency(&mut tx, V3_ROLLBACK_SCOPE, actor_id, idempotency_key).await?;
         if let Some(existing) =
-            LexiconRepository::idempotency(&mut tx, V3_ACTIVATE_SCOPE, actor_id, idempotency_key)
+            LexiconRepository::idempotency(&mut tx, V3_ROLLBACK_SCOPE, actor_id, idempotency_key)
                 .await
                 .map_err(repository_error)?
         {
@@ -456,6 +767,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_publication_owner(&record, actor_id, is_super_admin)?;
         ensure_locked_v3_entry(&record, input.base_revision)?;
         if record.lifecycle_revision != input.base_lifecycle_revision {
             return Err(LexiconServiceError::LifecycleRevisionConflict {
@@ -470,97 +782,52 @@ impl LexiconService {
         let state = v3_publication_state_for_update(&mut tx, entry_id).await?;
         ensure_v3_publication_eligibility(&mut tx, entry_id, &state).await?;
 
-        if record.current_publication_id == Some(publication.id) {
-            word.status = AdminWordStatus::Published;
-            word.published_revision = Some(publication.source_revision);
-            word.has_unpublished_changes = word.revision != publication.source_revision;
-            word.published_at = Some(publication.published_at);
-            let response = v3_envelope(word);
-            if let Some(confirmation) = verified_surface.as_ref() {
-                LexiconRepository::insert_command_surface_confirmation_audits(
-                    &mut tx,
-                    actor_id,
-                    request_id,
-                    entry_id,
-                    record.revision,
-                    confirmation,
-                )
-                .await
-                .map_err(repository_error)?;
-            }
-            insert_v3_command_response(
-                &mut tx,
-                V3_ACTIVATE_SCOPE,
-                actor_id,
-                request_id,
-                idempotency_key,
-                &request_hash,
-                entry_id,
-                Some(publication.id),
-                200,
-                "lexicon.publication.activate.v3",
-                serde_json::json!({
-                    "publication_id": publication.id,
-                    "no_op": true,
-                }),
-                &response,
-            )
-            .await?;
-            tx.commit().await.map_err(database_error)?;
-            remove_verified_surface_confirmation(self, verified_surface).await;
-            return Ok(response);
-        }
-
-        LexiconRepository::lock_outbound_sense_ref_targets_for_publication(&mut tx, publication.id)
-            .await
-            .map_err(repository_error)?;
-        let unavailable = LexiconRepository::unavailable_outbound_sense_refs_for_publication(
-            &mut tx,
-            publication.id,
-        )
-        .await
-        .map_err(repository_error)?;
-        if !unavailable.is_empty() {
-            return Err(LexiconServiceError::EntryHasUnavailablePublicationRefs(
-                unavailable,
-            ));
-        }
-        let shared_target: AdminWordV3 =
+        let mut historical: AdminWordV3 =
             serde_json::from_value(publication.snapshot.clone()).map_err(serialization_error)?;
-        let outbound_issues =
-            super::inbound_references::outbound_publication_issues(&mut tx, &shared_target).await?;
-        if !outbound_issues.is_empty() {
-            return Err(v3_validation_failed(outbound_issues));
-        }
+        // Preserve reference-conflict diagnostics before validating historical completeness.
         super::inbound_references::ensure_inbound_references(
             &mut tx,
             entry_id,
-            &shared_target.forms,
-            &shared_target.meanings,
+            &historical.forms,
+            &historical.meanings,
             super::inbound_references::InboundReferenceCheck::PublicationContent,
             None,
         )
         .await?;
-
-        replace_current_publication_surfaces_from_snapshot(&mut tx, &publication).await?;
-        let next_lifecycle_revision = record.lifecycle_revision + 1;
-        update_current_publication_pointer(
+        let references = self
+            .validate_publication_content(&mut tx, &mut historical, None)
+            .await?;
+        historical.published_at = Some(Utc::now());
+        historical.updated_at = Utc::now();
+        historical.lifecycle_revision = record.lifecycle_revision + 1;
+        hydrate_audio_asset_metadata(&mut tx, &mut historical.meanings).await?;
+        let source_publication_id = publication.id;
+        let publication = insert_rollback_publication(
             &mut tx,
-            entry_id,
-            publication.id,
             actor_id,
-            record.revision,
-            record.lifecycle_revision,
-            next_lifecycle_revision,
+            &historical,
+            source_publication_id,
+            &references,
         )
         .await?;
+        replace_current_publication_surfaces_from_snapshot(&mut tx, &publication).await?;
+        let next_lifecycle_revision = record.lifecycle_revision + 1;
+        // A rollback only changes publication state. The draft and its base remain untouched.
+        let changed = sqlx::query("UPDATE lexicon.entries SET current_publication_id=$2, lifecycle_revision=$3, updated_by_admin_id=$4, updated_at=now() WHERE id=$1 AND revision=$5 AND lifecycle_revision=$6")
+            .bind(entry_id).bind(publication.id).bind(next_lifecycle_revision).bind(actor_id).bind(record.revision).bind(record.lifecycle_revision)
+            .execute(&mut *tx).await.map_err(database_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(LexiconServiceError::LifecycleRevisionConflict {
+                current_lifecycle_revision: record.lifecycle_revision,
+            });
+        }
         word.status = AdminWordStatus::Published;
         word.published_revision = Some(publication.source_revision);
         word.has_unpublished_changes = word.revision != publication.source_revision;
         word.published_at = Some(publication.published_at);
         word.lifecycle_revision = next_lifecycle_revision;
         word.updated_at = Utc::now();
-        insert_v3_activation_event(
+        insert_v3_rollback_event(
             &mut tx,
             entry_id,
             record.current_publication_id,
@@ -583,18 +850,19 @@ impl LexiconService {
         }
         insert_v3_command_response(
             &mut tx,
-            V3_ACTIVATE_SCOPE,
+            V3_ROLLBACK_SCOPE,
             actor_id,
             request_id,
             idempotency_key,
             &request_hash,
             entry_id,
             Some(publication.id),
-            200,
-            "lexicon.publication.activate.v3",
+            201,
+            "lexicon.publication.rollback.v3",
             serde_json::json!({
                 "publication_id": publication.id,
                 "previous_publication_id": record.current_publication_id,
+                "rollback_of_publication_id": source_publication_id,
                 "content_schema_version": publication.content_schema_version,
             }),
             &response,
@@ -742,6 +1010,7 @@ async fn v3_publication_by_revision_for_update(
         WHERE entry_id = $1
           AND content_schema_version = 3
           AND source_revision = $2
+          AND rollback_of_publication_id IS NULL
         FOR UPDATE
         "#,
     )
@@ -817,8 +1086,34 @@ async fn phrase_component_publication_references(
     tx: &mut Transaction<'_, Postgres>,
     forms: &DraftFormsStepContentV3,
     meanings: &DraftMeaningsStepContentV3,
+    batch: Option<&PublicationBatchContext>,
 ) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
-    let components = all_component_usages(forms, meanings);
+    let mut components = all_component_usages(forms, meanings);
+    let mut batch_references = Vec::new();
+    components.retain(|component| {
+        if let PhraseComponentUsageV3::Resolved {
+            id,
+            target_word_id,
+            target_sense_id,
+            target_publication_id,
+            ..
+        } = component
+            && let Some(candidate) = batch.and_then(|batch| batch.words.get(target_word_id))
+            && (*target_publication_id == Some(candidate.publication_id))
+        {
+            batch_references.push(NewPublicationSenseReference {
+                source_node_id: *id,
+                reference_kind: PublicationSenseReferenceKind::PhraseComponent,
+                target_entry_id: *target_word_id,
+                target_sense_id: *target_sense_id,
+                target_publication_id: Some(candidate.publication_id),
+                target_content_scope: PublicationTargetContentScope::Publication,
+                target_revision: candidate.word.revision,
+            });
+            return false;
+        }
+        true
+    });
     let mut requested = components
         .iter()
         .filter_map(|component| match component {
@@ -926,6 +1221,7 @@ async fn phrase_component_publication_references(
             target_revision,
         });
     }
+    references.extend(batch_references);
     Ok(references)
 }
 
@@ -935,7 +1231,17 @@ async fn insert_v3_publication(
     word: &AdminWordV3,
     sense_references: &[NewPublicationSenseReference],
 ) -> Result<VersionedPublication, LexiconServiceError> {
-    let publication_id = Uuid::now_v7();
+    let publication = insert_v3_publication_rows(tx, actor_id, word, Uuid::now_v7()).await?;
+    insert_publication_sense_refs(tx, publication.id, word.id, sense_references).await?;
+    Ok(publication)
+}
+
+async fn insert_v3_publication_rows(
+    tx: &mut Transaction<'_, Postgres>,
+    actor_id: Uuid,
+    word: &AdminWordV3,
+    publication_id: Uuid,
+) -> Result<VersionedPublication, LexiconServiceError> {
     let publication_number = sqlx::query_scalar::<_, i32>(
         "SELECT COALESCE(MAX(publication_number), 0) + 1 FROM lexicon.entry_publications WHERE entry_id = $1",
     )
@@ -972,7 +1278,6 @@ async fn insert_v3_publication(
     insert_v3_publication_nodes(tx, publication_id, word).await?;
     insert_v3_publication_audio_references(tx, publication_id, word).await?;
     insert_publication_catalog_refs(tx, publication_id, word.id).await?;
-    insert_publication_sense_refs(tx, publication_id, word.id, sense_references).await?;
     sqlx::query(
         "UPDATE lexicon.nodes SET first_published_at = COALESCE(first_published_at, $2) WHERE entry_id = $1 AND removed_from_draft_at IS NULL",
     )
@@ -1612,6 +1917,114 @@ async fn insert_v3_command_response(
 
 fn v3_form_type_name(value: &str) -> &str {
     value
+}
+
+pub(super) async fn lock_lexicon_publisher(
+    tx: &mut Transaction<'_, Postgres>,
+    actor_id: Uuid,
+) -> Result<bool, LexiconServiceError> {
+    crate::admin::publication_permission::lock_publisher(tx, actor_id)
+        .await
+        .map_err(database_error)?
+        .ok_or(LexiconServiceError::EntryPublishForbidden)
+}
+
+pub(super) fn ensure_publication_owner(
+    record: &EntryRecord,
+    actor_id: Uuid,
+    is_super_admin: bool,
+) -> Result<(), LexiconServiceError> {
+    if !is_super_admin && record.created_by_admin_id != actor_id {
+        return Err(LexiconServiceError::EntryPublishForbidden);
+    }
+    Ok(())
+}
+
+fn batch_error(entry_id: Uuid, source: LexiconServiceError) -> LexiconServiceError {
+    LexiconServiceError::BatchPublicationFailed {
+        entry_id,
+        source: Box::new(source),
+    }
+}
+
+async fn insert_v3_rollback_event(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    previous_publication_id: Option<Uuid>,
+    publication: &VersionedPublication,
+    lifecycle_revision: i64,
+) -> Result<(), LexiconServiceError> {
+    sqlx::query(
+        r#"
+        INSERT INTO platform.outbox_events (
+            id, aggregate_type, aggregate_id, aggregate_revision,
+            event_type, payload, occurred_at, available_at
+        ) VALUES (
+            $1, 'lexicon.entry', $2, $3,
+            'lexicon.publication_rolled_back.v3', $4, now(), now()
+        )
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(entry_id)
+    .bind(lifecycle_revision)
+    .bind(serde_json::json!({
+        "entry_id": entry_id,
+        "publication_id": publication.id,
+        "publication_number": publication.publication_number,
+        "content_schema_version": publication.content_schema_version,
+        "previous_publication_id": previous_publication_id,
+        "lifecycle_revision": lifecycle_revision,
+    }))
+    .execute(&mut **tx)
+    .await
+    .map(|_| ())
+    .map_err(database_error)
+}
+
+async fn insert_rollback_publication(
+    tx: &mut Transaction<'_, Postgres>,
+    actor_id: Uuid,
+    word: &AdminWordV3,
+    source_id: Uuid,
+    references: &[NewPublicationSenseReference],
+) -> Result<VersionedPublication, LexiconServiceError> {
+    let id = Uuid::now_v7();
+    let number = sqlx::query_scalar::<_, i32>("SELECT COALESCE(MAX(publication_number),0)+1 FROM lexicon.entry_publications WHERE entry_id=$1")
+        .bind(word.id).fetch_one(&mut **tx).await.map_err(database_error)?;
+    let mut snapshot_word = word.clone();
+    clear_v3_sentence_associations(&mut snapshot_word.meanings);
+    let snapshot = serde_json::to_value(&snapshot_word).map_err(serialization_error)?;
+    let hash = sha256_json(&snapshot_word).map_err(serialization_error)?;
+    let published_at = word.published_at.ok_or_else(invariant_record)?;
+    sqlx::query("INSERT INTO lexicon.entry_publications (id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id,published_at,rollback_of_publication_id) VALUES ($1,$2,$3,$4,3,$5,$6,$7,$8,$9)")
+        .bind(id).bind(word.id).bind(number).bind(word.revision).bind(&snapshot).bind(hash).bind(actor_id).bind(published_at).bind(source_id)
+        .execute(&mut **tx).await.map_err(database_error)?;
+    // Use the historical node set, never today's editable relational projection.
+    for query in [
+        "INSERT INTO lexicon.entry_publication_nodes (publication_id,entry_id,node_id,node_type,content_hash) SELECT $1,entry_id,node_id,node_type,content_hash FROM lexicon.entry_publication_nodes WHERE publication_id=$2",
+        "INSERT INTO lexicon.entry_publication_form_type_refs (publication_id,entry_id,form_type) SELECT $1,entry_id,form_type FROM lexicon.entry_publication_form_type_refs WHERE publication_id=$2",
+        "INSERT INTO lexicon.entry_publication_part_of_speech_refs (publication_id,entry_id,source_node_id,part_of_speech_id) SELECT $1,entry_id,source_node_id,part_of_speech_id FROM lexicon.entry_publication_part_of_speech_refs WHERE publication_id=$2",
+        "INSERT INTO lexicon.entry_publication_sub_part_of_speech_refs (publication_id,entry_id,source_node_id,sub_part_of_speech_id) SELECT $1,entry_id,source_node_id,sub_part_of_speech_id FROM lexicon.entry_publication_sub_part_of_speech_refs WHERE publication_id=$2",
+    ] {
+        sqlx::query(query)
+            .bind(id)
+            .bind(source_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(database_error)?;
+    }
+    insert_v3_publication_audio_references(tx, id, word).await?;
+    insert_publication_sense_refs(tx, id, word.id, references).await?;
+    Ok(VersionedPublication {
+        id,
+        entry_id: word.id,
+        publication_number: number,
+        source_revision: word.revision,
+        content_schema_version: 3,
+        snapshot,
+        published_at,
+    })
 }
 
 #[cfg(test)]

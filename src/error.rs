@@ -890,6 +890,14 @@ impl AppError {
         Self::new(StatusCode::NOT_FOUND, code, message, None)
     }
 
+    pub fn with_word_id(mut self, id: uuid::Uuid) -> Self {
+        self.response
+            .meta
+            .get_or_insert_with(ProblemMeta::default)
+            .word_id = Some(id);
+        self
+    }
+
     pub fn with_meta(mut self, meta: ProblemMeta) -> Self {
         self.response.meta = Some(meta);
         self

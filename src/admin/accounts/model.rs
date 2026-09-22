@@ -17,6 +17,7 @@ pub struct AdminCreatorResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AdminAccountAdminResponse {
+    pub can_publish_lexicon: bool,
     pub id: Uuid,
     pub phone: String,
     pub display_name: String,
@@ -106,6 +107,7 @@ pub(crate) struct AdminAccountAdminListFilter {
 
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct AdminAccountRecord {
+    pub can_publish_lexicon: bool,
     pub id: Uuid,
     pub phone: String,
     pub display_name: String,

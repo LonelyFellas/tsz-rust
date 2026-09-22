@@ -33,6 +33,7 @@ pub const MENU_PERMISSIONS: [&str; 12] = [
 /// GET /profile 的响应：login 的 4 字段概要 + 菜单权限目录 + 个人偏好。
 #[derive(Serialize, ToSchema)]
 pub struct AdminProfileResponse {
+    pub can_publish_lexicon: bool,
     pub id: Uuid,
     pub phone: String,
     pub display_name: String,
@@ -105,6 +106,12 @@ pub async fn admin_profile(
     Ok((
         StatusCode::OK,
         Json(AdminProfileResponse {
+            can_publish_lexicon: crate::admin::publication_permission::effective(
+                &state.pool,
+                admin.id,
+            )
+            .await
+            .map_err(AppError::internal)?,
             id: admin.id,
             phone: admin.phone,
             display_name: admin.display_name,

@@ -1488,7 +1488,36 @@ pub struct PublishAdminWordV3Input {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ActivatePublicationV3Input {
+pub struct BatchPublicationItemV3 {
+    pub entry_id: Uuid,
+    #[schema(minimum = 1)]
+    pub base_revision: i64,
+    #[schema(minimum = 1)]
+    pub base_lifecycle_revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BatchPublicationInputV3 {
+    #[serde(deserialize_with = "deserialize_schema_version_3")]
+    #[schema(schema_with = schema_version_3_schema)]
+    pub schema_version: u8,
+    #[schema(min_items = 1, max_items = 50)]
+    pub items: Vec<BatchPublicationItemV3>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BatchPublicationResponseV3 {
+    pub words: Vec<AdminWordV3>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackPublicationV3Input {
     #[serde(deserialize_with = "deserialize_schema_version_3")]
     #[schema(schema_with = schema_version_3_schema)]
     pub schema_version: u8,
@@ -2402,6 +2431,9 @@ pub struct DetectLexiconSurfaceResponseV3 {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordPublicationV3 {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub rollback_of_publication_id: Option<Uuid>,
     #[serde(deserialize_with = "deserialize_schema_version_3")]
     #[schema(schema_with = schema_version_3_schema)]
     pub schema_version: u8,

@@ -120,6 +120,7 @@ pub(crate) struct FormsSurfaceAcknowledgementRecord {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct PublicationReadRecord {
+    pub rollback_of_publication_id: Option<Uuid>,
     pub id: Uuid,
     pub entry_id: Uuid,
     pub publication_number: i32,

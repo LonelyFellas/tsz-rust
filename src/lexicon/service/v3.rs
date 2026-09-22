@@ -2545,6 +2545,16 @@ pub(super) async fn validate_phrase_components(
     kind: WordEntryKindV3,
     content: &mut DraftFormsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
+    validate_phrase_components_in(tx, entry_id, kind, content, None).await
+}
+
+pub(super) async fn validate_phrase_components_in(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    kind: WordEntryKindV3,
+    content: &mut DraftFormsStepContentV3,
+    batch: Option<&super::v3_publication::PublicationBatchContext>,
+) -> Result<(), LexiconServiceError> {
     ensure_phrase_component_ownership(kind, content)?;
     if kind != WordEntryKindV3::Phrase {
         return Ok(());
@@ -2585,7 +2595,7 @@ pub(super) async fn validate_phrase_components(
     }
     let mut targets = HashMap::<(Uuid, Option<Uuid>), ComponentTargetWord>::new();
     for (key, members) in &groups {
-        let target = resolve_component_target(tx, key.0, key.1, |candidate| {
+        let target = resolve_component_target_in(tx, key.0, key.1, batch, |candidate| {
             members
                 .iter()
                 .all(|member| resolved_component_matches(candidate, member))
@@ -2810,7 +2820,7 @@ fn phrase_component_resolved_target_ids(word: &ComponentTargetWord) -> Vec<Uuid>
 }
 
 /// 目标词义在成分 / 关联里展示的释义：首条中文定义或中文例句释义，没有就空串。
-fn component_target_gloss(
+pub(super) fn component_target_gloss(
     target: &ComponentTargetWord,
     target_pos_id: Uuid,
     target_sense_id: Uuid,
@@ -3021,6 +3031,32 @@ pub(super) async fn resolve_component_target(
     target_publication_id: Option<Uuid>,
     probe: impl Fn(&ComponentTargetWord) -> bool,
 ) -> Result<Option<ComponentTargetWord>, LexiconServiceError> {
+    resolve_component_target_in(tx, target_word_id, target_publication_id, None, probe).await
+}
+
+pub(super) async fn resolve_component_target_in(
+    tx: &mut Transaction<'_, Postgres>,
+    target_word_id: Uuid,
+    target_publication_id: Option<Uuid>,
+    batch: Option<&super::v3_publication::PublicationBatchContext>,
+    probe: impl Fn(&ComponentTargetWord) -> bool,
+) -> Result<Option<ComponentTargetWord>, LexiconServiceError> {
+    if let Some(candidate) = batch
+        .filter(|_| target_publication_id.is_none())
+        .and_then(|batch| batch.words.get(&target_word_id))
+    {
+        return Ok(Some(ComponentTargetWord {
+            id: candidate.word.id,
+            kind: candidate.word.kind,
+            label: candidate.word.presentation.label.clone(),
+            forms: candidate.word.forms.clone(),
+            meanings: candidate.word.meanings.clone(),
+            scope: ComponentTargetScope::Publication {
+                publication_id: candidate.publication_id,
+                revision: candidate.word.revision,
+            },
+        }));
+    }
     if let Some(publication_id) = target_publication_id {
         let row = sqlx::query_as::<_, (Value, i64)>(
             r#"
@@ -3153,6 +3189,16 @@ pub(super) async fn validate_sense_phrase_components(
     kind: WordEntryKindV3,
     content: &mut DraftMeaningsStepContentV3,
 ) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
+    validate_sense_phrase_components_in(tx, entry_id, kind, content, None).await
+}
+
+pub(super) async fn validate_sense_phrase_components_in(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    kind: WordEntryKindV3,
+    content: &mut DraftMeaningsStepContentV3,
+    batch: Option<&super::v3_publication::PublicationBatchContext>,
+) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
     let mut issues = Vec::new();
     if kind != WordEntryKindV3::Phrase {
         for pos in &content.pos {
@@ -3193,7 +3239,7 @@ pub(super) async fn validate_sense_phrase_components(
     let mut targets = HashMap::<(Uuid, Option<Uuid>), Option<ComponentTargetWord>>::new();
     let mut nested = HashMap::<(Uuid, Option<Uuid>), bool>::new();
     for (key, members) in &groups {
-        let target = resolve_component_target(tx, key.0, key.1, |candidate| {
+        let target = resolve_component_target_in(tx, key.0, key.1, batch, |candidate| {
             members
                 .iter()
                 .all(|member| resolved_component_matches(candidate, member))
@@ -3420,7 +3466,7 @@ pub(super) fn requested_pronunciation_audio_assets(
         .collect()
 }
 
-async fn normalize_pronunciation_audio_assets(
+pub(super) async fn normalize_pronunciation_audio_assets(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     forms: &mut DraftFormsStepContentV3,
@@ -3457,7 +3503,7 @@ async fn normalize_pronunciation_audio_assets(
 /// 校验草稿引用的音频资产：条数、变体内不重复、资产存在、且没有被别的词条占用。
 /// 跨词条引用必须拦住——回收是按「还有没有人引用」判定的，允许共享会让一次删除
 /// 波及另一条词条的历史发布。
-async fn validate_audio_assets(
+pub(super) async fn validate_audio_assets(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     content: &DraftMeaningsStepContentV3,

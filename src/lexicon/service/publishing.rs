@@ -49,6 +49,17 @@ pub(super) async fn resolve_meaning_references(
     mode: ReferenceResolutionMode,
     lock_for_publish: bool,
 ) -> Result<MeaningReferenceResolution, LexiconServiceError> {
+    resolve_meaning_references_in(tx, entry_id, meanings, mode, lock_for_publish, None).await
+}
+
+pub(super) async fn resolve_meaning_references_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_id: Uuid,
+    meanings: &mut DraftMeaningsStepContentV3,
+    mode: ReferenceResolutionMode,
+    lock_for_publish: bool,
+    batch: Option<&super::v3_publication::PublicationBatchContext>,
+) -> Result<MeaningReferenceResolution, LexiconServiceError> {
     let active_sense_ids = meanings
         .pos
         .iter()
@@ -120,14 +131,22 @@ pub(super) async fn resolve_meaning_references(
 
     let relation_requested = uses
         .iter()
-        .filter(|usage| usage.kind == ReferenceUseKind::Relation)
+        .filter(|usage| {
+            usage.kind == ReferenceUseKind::Relation
+                && !batch
+                    .is_some_and(|batch| batch.words.contains_key(&usage.target.target_entry_id))
+        })
         .map(|usage| usage.target)
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
     let context_requested = uses
         .iter()
-        .filter(|usage| usage.kind == ReferenceUseKind::SentenceContext)
+        .filter(|usage| {
+            usage.kind == ReferenceUseKind::SentenceContext
+                && !batch
+                    .is_some_and(|batch| batch.words.contains_key(&usage.target.target_entry_id))
+        })
         .map(|usage| usage.target)
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
@@ -175,6 +194,52 @@ pub(super) async fn resolve_meaning_references(
         );
     }
 
+    if let Some(batch) = batch {
+        for usage in &uses {
+            if let Some(candidate) = batch.words.get(&usage.target.target_entry_id)
+                && let Some(sense) = candidate
+                    .word
+                    .meanings
+                    .pos
+                    .iter()
+                    .flat_map(|pos| &pos.senses)
+                    .find(|sense| sense.id == usage.target.target_sense_id)
+            {
+                let target = super::v3::ComponentTargetWord {
+                    id: candidate.word.id,
+                    kind: candidate.word.kind,
+                    label: candidate.word.presentation.label.clone(),
+                    forms: candidate.word.forms.clone(),
+                    meanings: candidate.word.meanings.clone(),
+                    scope: super::v3::ComponentTargetScope::Publication {
+                        publication_id: candidate.publication_id,
+                        revision: candidate.word.revision,
+                    },
+                };
+                let gloss = candidate
+                    .word
+                    .meanings
+                    .pos
+                    .iter()
+                    .find(|pos| pos.senses.iter().any(|value| value.id == sense.id))
+                    .and_then(|pos| {
+                        super::v3::component_target_gloss(&target, pos.pos_id, sense.id)
+                    })
+                    .unwrap_or_default();
+                resolved.insert(
+                    (usage.kind, usage.target),
+                    ResolvedReferenceSnapshot {
+                        target_publication_id: Some(candidate.publication_id),
+                        target_content_scope: PublicationTargetContentScope::Publication,
+                        target_revision: candidate.word.revision,
+                        headword: candidate.word.presentation.label.clone(),
+                        gloss,
+                        available: true,
+                    },
+                );
+            }
+        }
+    }
     for usage in &uses {
         let snapshot = resolved.get(&(usage.kind, usage.target));
         let accepted = snapshot.is_some_and(|snapshot| {

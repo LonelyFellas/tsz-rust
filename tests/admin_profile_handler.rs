@@ -185,7 +185,8 @@ async fn response_leaks_no_sensitive_or_extra_fields(pool: PgPool) {
         );
     }
     // 方言偏好只以 preferences.dialect 出现，不把库里的列名直接抖出去。
-    assert_eq!(obj.len(), 6, "响应应恰为 6 个字段：{body}");
+    assert_eq!(obj.len(), 7, "响应应含独立发布权限字段：{body}");
+    assert!(obj["can_publish_lexicon"].is_boolean());
 }
 
 #[sqlx::test]

@@ -413,6 +413,18 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        let publisher =
+            crate::admin::publication_permission::lock_publisher(&mut transaction, actor_id)
+                .await
+                .map_err(database_error)?;
+        if publisher.is_none() {
+            let ids = targets.iter().map(|target| target.id).collect::<Vec<_>>();
+            let has_published = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id = ANY($1) AND current_publication_id IS NOT NULL)")
+                .bind(&ids).fetch_one(&mut *transaction).await.map_err(database_error)?;
+            if has_published {
+                return Err(LexiconServiceError::EntryPublishForbidden);
+            }
+        }
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("{scope}:{actor_id}:{idempotency_key}"))
             .execute(&mut *transaction)
@@ -457,6 +469,9 @@ impl LexiconService {
                 .ok_or(LexiconServiceError::WordNotFound)?;
             // 整批原子：一条越权就拒掉整批，与 delete_draft_batch 同口径。
             ensure_draft_writable(&record, actor_id, is_super_admin)?;
+            if record.current_publication_id.is_some() && publisher.is_none() {
+                return Err(LexiconServiceError::EntryPublishForbidden);
+            }
             ensure_lifecycle_schema_capability(record.content_schema_version, allow_v3)?;
             let record_revision = record.revision;
             let record_lifecycle_revision = record.lifecycle_revision;

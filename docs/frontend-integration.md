@@ -7,6 +7,18 @@
 
 ---
 
+## 词库领域重构第三批：发布权限、批次与回退（待配套发布）
+
+本节对应两仓 `codex/lexicon-domain-batch-3`，尚未合并或部署。方案及验收见 [第三批设计](features/lexicon-domain-refactor/batch-3-design.md) / [进度](features/lexicon-domain-refactor/progress.md)。
+
+- profile 与管理员治理响应增加 `can_publish_lexicon`。普通管理员默认关闭，超管隐式具备；超管通过 `PATCH /admin/admins/{admin_id}/lexicon-publication-permission` 授予/撤回。菜单权限不代替发布权限。
+- 普通发布者只能发布本人创建的词条草稿，超管例外；不扩大他人未发布草稿的编辑权。已发布词条的归档/恢复也需要发布权。
+- 新增 `POST /admin/lexicon/entries/publications/batch`，携带 UUID Idempotency-Key；1–50 条显式 items 包含 entry_id、base_revision、base_lifecycle_revision、可选同名确认 token。201 返回完整 words 集合；失败整批回滚，meta.word_id 定位失败词条。不自动增加依赖。
+- 旧历史 `/activate` 被 `/rollback` 替换；201 代表新建 publication，原历史和当前草稿不变。历史响应可带 `rollback_of_publication_id`。当前版本也可重新发布成新版本。
+- 新增两组成对迁移：管理员发布授权、历史回退来源与草稿发布 revision 的部分唯一索引。有回退历史时，down 拒绝执行，不允许删历史来撤迁移。
+
+旧前端仍请求 `/activate`，且旧严格历史 schema 拒绝回退来源字段；新前端的新端点不在旧后端中。两种混合组合均不能承载完整新流程。后续发布须先受控停用词库写操作，配套部署前后端、按需授予普通管理员发布权、刷新旧页面并验收后恢复。不能将本地通过视为已经发布；发生新回退记录后，不能仅更换旧二进制回退。
+
 ## 词库领域重构第二批剩余功能：配套交付说明
 
 本节对应 `feat/lexicon-domain-batch-2-remaining` 两仓配套 PR，尚未部署；不沿用页首历史部署状态。详情与验证记录见 [design](features/lexicon-domain-refactor/design.md) / [progress](features/lexicon-domain-refactor/progress.md)。

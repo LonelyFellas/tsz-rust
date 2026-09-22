@@ -65,6 +65,7 @@ use utoipa::{
         crate::admin::accounts::handler::request_create_admin_code,
         crate::admin::accounts::handler::list_admins,
         crate::admin::accounts::handler::set_admin_status,
+        crate::admin::publication_permission::update,
         crate::admin::accounts::handler::reset_admin_password,
         crate::admin::accounts::handler::list_users,
         crate::admin::accounts::handler::get_user,
@@ -107,7 +108,8 @@ use utoipa::{
         crate::lexicon::handler::commands::save_meanings,
         crate::lexicon::handler::commands::validate,
         crate::lexicon::handler::commands::publish,
-        crate::lexicon::handler::commands::activate_publication,
+        crate::lexicon::handler::commands::publish_batch,
+        crate::lexicon::handler::commands::rollback_publication,
         crate::lexicon::handler::query::resolve_sentence_targets,
         crate::lexicon::handler::query::search_component_targets,
         crate::lexicon::audio_assets::handler::create_audio_upload,
@@ -304,7 +306,7 @@ use utoipa::{
             crate::lexicon::dto::SaveMeaningsStepInputV3,
             crate::lexicon::dto::ValidateAdminWordV3Input,
             crate::lexicon::dto::PublishAdminWordV3Input,
-            crate::lexicon::dto::ActivatePublicationV3Input,
+            crate::lexicon::dto::RollbackPublicationV3Input,
             crate::lexicon::dto::FormsImpactResponseV3,
             crate::lexicon::dto::FormsImpactNodeTypeV3,
             crate::lexicon::dto::FormsImpactItemV3,
@@ -2269,8 +2271,8 @@ mod tests {
             ),
             (
                 "post",
-                "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/activate",
-                "ActivatePublicationV3Input",
+                "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/rollback",
+                "RollbackPublicationV3Input",
             ),
         ] {
             assert_eq!(
@@ -2285,7 +2287,7 @@ mod tests {
             "SaveMeaningsStepInputV3",
             "ValidateAdminWordV3Input",
             "PublishAdminWordV3Input",
-            "ActivatePublicationV3Input",
+            "RollbackPublicationV3Input",
         ] {
             assert_eq!(
                 schemas[schema]["properties"]["schema_version"]["enum"],
@@ -2393,7 +2395,7 @@ mod tests {
         for path in [
             "/api/v1/admin/lexicon/entries",
             "/api/v1/admin/lexicon/entries/{id}/publications",
-            "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/activate",
+            "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/rollback",
         ] {
             let parameters = paths[path]["post"]["parameters"]
                 .as_array()
@@ -2433,7 +2435,7 @@ mod tests {
             ("/api/v1/admin/lexicon/entries", "503"),
             ("/api/v1/admin/lexicon/entries/{id}/publications", "409"),
             (
-                "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/activate",
+                "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/rollback",
                 "409",
             ),
         ] {
@@ -2469,7 +2471,7 @@ mod tests {
             "SaveMeaningsStepInputV3",
             "ValidateAdminWordV3Input",
             "PublishAdminWordV3Input",
-            "ActivatePublicationV3Input",
+            "RollbackPublicationV3Input",
             // Representative success/read roots cover aggregate, list, related-search,
             // detection evidence, publication and surface snapshots.
             "DetectLexiconSurfaceResponseV3",

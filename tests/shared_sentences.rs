@@ -27,6 +27,11 @@ async fn admin(pool: &PgPool) -> Uuid {
         })
         .await
         .unwrap();
+    sqlx::query("UPDATE admins SET can_publish_lexicon=true WHERE id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 fn node_id(entry: Uuid, tag: u8) -> Uuid {
@@ -1498,7 +1503,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         actor,
         Method::POST,
         &format!(
-            "/api/v1/admin/lexicon/entries/{source}/publications/{empty_publication}/activate"
+            "/api/v1/admin/lexicon/entries/{source}/publications/{empty_publication}/rollback"
         ),
         Some(json!({"schema_version":3,"base_revision":2,"base_lifecycle_revision":1})),
     )

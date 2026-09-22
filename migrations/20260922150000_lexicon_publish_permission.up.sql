@@ -1,0 +1,1 @@
+ALTER TABLE admins ADD COLUMN can_publish_lexicon BOOLEAN NOT NULL DEFAULT FALSE;

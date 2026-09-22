@@ -591,6 +591,7 @@ fn publication_from_record(
     }
     let word: AdminWordV3 = serde_json::from_value(record.snapshot).map_err(serialization_error)?;
     Ok(AdminWordPublicationV3 {
+        rollback_of_publication_id: record.rollback_of_publication_id,
         schema_version: 3,
         publication_id: record.id,
         entry_id: record.entry_id,

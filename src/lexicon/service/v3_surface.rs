@@ -1364,6 +1364,33 @@ impl LexiconService {
         .map(Some)
     }
 
+    pub(super) async fn lock_batch_publication_surfaces(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        words: &[AdminWordV3],
+    ) -> Result<(), LexiconServiceError> {
+        let ids = words.iter().map(|word| word.id).collect::<Vec<_>>();
+        LexiconRepository::lock_surface_contexts(tx, &ids)
+            .await
+            .map_err(repository_error)?;
+        LexiconRepository::lock_surface_policy_writer(tx)
+            .await
+            .map_err(repository_error)?;
+        let mut keys = Vec::new();
+        for word in words {
+            keys.extend(current_publication_surface_keys_v3(tx, word.id).await?);
+            keys.extend(surface_lock_keys_v3(&forms_surface_keys(
+                word.id,
+                &word.forms,
+            )?));
+        }
+        keys.sort();
+        keys.dedup();
+        LexiconRepository::lock_surface_keys(tx, &keys)
+            .await
+            .map_err(repository_error)
+    }
+
     async fn lock_v3_publication_surface_set(
         &self,
         tx: &mut Transaction<'_, Postgres>,
