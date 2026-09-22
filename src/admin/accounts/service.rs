@@ -181,6 +181,7 @@ impl AdminAccountsService {
 
         Ok((
             AdminAccountAdminResponse {
+                can_publish_lexicon: false,
                 id: admin.id,
                 phone: admin.phone,
                 display_name: admin.display_name,
@@ -479,6 +480,7 @@ fn admin_response_from(record: AdminAccountRecord) -> AdminAccountAdminResponse 
     };
 
     AdminAccountAdminResponse {
+        can_publish_lexicon: record.can_publish_lexicon,
         id: record.id,
         phone: record.phone,
         display_name: record.display_name,

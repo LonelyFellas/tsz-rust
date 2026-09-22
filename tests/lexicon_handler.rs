@@ -47,6 +47,11 @@ async fn seed_admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
         })
         .await
         .expect("seed admin 应成功");
+    sqlx::query("UPDATE admins SET can_publish_lexicon=true WHERE id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 
@@ -662,7 +667,7 @@ async fn live_surface_publication_ids(pool: &PgPool, entry_id: Uuid) -> Vec<Uuid
     .expect("应能读取 surface 投影绑定的 publication")
 }
 
-async fn activate_v3_history(
+async fn rollback_v3_history(
     state: &AppState,
     bearer: &str,
     entry_id: Uuid,
@@ -671,7 +676,7 @@ async fn activate_v3_history(
     base_lifecycle_revision: i64,
 ) -> (StatusCode, Value) {
     let idempotency_key = Uuid::now_v7();
-    let path = format!("{ROOT}/entries/{entry_id}/publications/{publication_id}/activate");
+    let path = format!("{ROOT}/entries/{entry_id}/publications/{publication_id}/rollback");
     let mut body = json!({
         "schema_version": 3,
         "base_revision": base_revision,
@@ -4429,7 +4434,7 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
         .as_i64()
         .unwrap();
     for publication_id in [current_publication_id, second_publication_id] {
-        let (status, activated) = activate_v3_history(
+        let (status, activated) = rollback_v3_history(
             &state,
             &bearer,
             entry_uuid,
@@ -4438,7 +4443,11 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
             lifecycle_revision,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "native A→B→A 激活失败：{activated}");
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "历史内容重新发布失败：{activated}"
+        );
         lifecycle_revision += 1;
         assert_eq!(activated["word"]["lifecycle_revision"], lifecycle_revision);
         let current: Uuid =
@@ -4447,10 +4456,18 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(current, publication_id);
+        assert_ne!(current, publication_id);
+        let source: Uuid = sqlx::query_scalar(
+            "SELECT rollback_of_publication_id FROM lexicon.entry_publications WHERE id=$1",
+        )
+        .bind(current)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(source, publication_id);
         assert_eq!(
             live_surface_publication_ids(&pool, entry_uuid).await,
-            vec![publication_id]
+            vec![current]
         );
     }
 
@@ -4493,10 +4510,18 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(current_after_restore, second_publication_id);
+    assert_ne!(current_after_restore, second_publication_id);
+    let source: Uuid = sqlx::query_scalar(
+        "SELECT rollback_of_publication_id FROM lexicon.entry_publications WHERE id=$1",
+    )
+    .bind(current_after_restore)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(source, second_publication_id);
     assert_eq!(
         live_surface_publication_ids(&pool, entry_uuid).await,
-        vec![second_publication_id]
+        vec![current_after_restore]
     );
 }
 
@@ -8428,7 +8453,7 @@ async fn v3_create_unknown_version_and_publication_paths_fail_closed(pool: PgPoo
     let (status, _, body) = call_problem(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/{entry_id}/publications/{publication_id}/activate"),
+        &format!("{ROOT}/entries/{entry_id}/publications/{publication_id}/rollback"),
         &bearer,
         Some(Uuid::now_v7()),
         json!({
@@ -10321,7 +10346,7 @@ async fn referenced_form_deletion_saves_draft_but_requires_published_source_repa
     let (status, rejected) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/{source_id}/publications/{old_source_publication}/activate"),
+        &format!("{ROOT}/entries/{source_id}/publications/{old_source_publication}/rollback"),
         &bearer,
         Some(Uuid::now_v7()),
         Some(json!({
@@ -14027,7 +14052,7 @@ async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) 
     // 发布清除后的版本，再切回旧版本，人工关联与快照一并恢复。
     let (status, cleared_publication) = publish_ready_v3(&state, &bearer, &cleared).await;
     assert_eq!(status, StatusCode::CREATED, "{cleared_publication}");
-    let (status, restored) = activate_v3_history(
+    let (status, restored) = rollback_v3_history(
         &state,
         &bearer,
         Uuid::parse_str(entry_id).unwrap(),
@@ -14038,8 +14063,8 @@ async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) 
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{restored}");
-    assert_eq!(
+    assert_eq!(status, StatusCode::CREATED, "{restored}");
+    assert_ne!(
         current_publication_id(&pool, Uuid::parse_str(entry_id).unwrap()).await,
         original_publication
     );
@@ -14053,7 +14078,7 @@ async fn text_links_persist_both_english_fields_publish_and_clear(pool: PgPool) 
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{historical}");
-    assert_eq!(historical["publication"]["is_current"], true);
+    assert_eq!(historical["publication"]["is_current"], false);
     check(&historical["publication"]);
     // 激活历史发布只切换生效指针，保留尚在编辑的草稿。
     assert!(restored["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["text_links"].is_null());
@@ -15441,7 +15466,7 @@ async fn history_activation_preserves_unpublished_internal_sense_bindings(pool: 
             .any(|item| item["kind"] == "form_group_sense_binding"
                 && item["target"]["sense_id"] == json!(sense_id))
     );
-    let (status, activated) = activate_v3_history(
+    let (status, activated) = rollback_v3_history(
         &state,
         &bearer,
         entry_id,
@@ -15452,10 +15477,10 @@ async fn history_activation_preserves_unpublished_internal_sense_bindings(pool: 
     .await;
     assert_eq!(
         status,
-        StatusCode::OK,
+        StatusCode::CREATED,
         "草稿内部绑定不依赖当前发布快照：{activated}"
     );
-    assert_eq!(
+    assert_ne!(
         current_publication_id(&pool, entry_id).await,
         first_publication
     );
@@ -15636,4 +15661,453 @@ async fn v3_multi_group_bindings_count_each_source_across_binding_changes(pool: 
         assert_eq!(status, StatusCode::OK, "{deleted}");
         word = deleted;
     }
+}
+
+async fn batch3_word(state: &AppState, bearer: &str, surface: &str) -> Value {
+    let id = create_legacy_v3_empty_skeleton(state, bearer, surface).await;
+    let (_, forms) = save_v3_forms_after_impact(
+        state,
+        bearer,
+        &id.to_string(),
+        1,
+        "complete",
+        v3_forms_fixture_for(surface),
+    )
+    .await;
+    let meanings = complete_v3_meanings_fixture(forms["word"]["forms"]["pos"][0]["pos_id"].clone());
+    save_v3_meanings(state, bearer, &forms, meanings).await
+}
+
+fn batch3_input(words: &[&Value]) -> Value {
+    json!({"schema_version":3,"items":words.iter().map(|value| json!({"entry_id":value["word"]["id"],"base_revision":value["word"]["revision"],"base_lifecycle_revision":value["word"]["lifecycle_revision"]})).collect::<Vec<_>>()})
+}
+
+async fn batch3_state(pool: &PgPool) -> AppState {
+    AppState::for_test_with_redis(
+        pool.clone(),
+        platform::connect_redis(&test_redis_url()).await.unwrap(),
+    )
+    .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled())
+}
+
+#[sqlx::test]
+async fn batch3_cycle_is_atomic_and_idempotent(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let mut a = batch3_word(&state, &bearer, "alpha").await;
+    let mut b = batch3_word(&state, &bearer, "beta").await;
+    let mut content = writable_v3_meanings(&a);
+    content["pos"][0]["senses"][0]["relations"] = json!([{"id":Uuid::now_v7(),"relation":"synonym","score":"80.00","target_word_id":b["word"]["id"],"target_sense_id":b["word"]["meanings"]["pos"][0]["senses"][0]["id"]}]);
+    a = save_v3_meanings(&state, &bearer, &a, content).await;
+    let mut content = writable_v3_meanings(&b);
+    content["pos"][0]["senses"][0]["relations"] = json!([{"id":Uuid::now_v7(),"relation":"synonym","score":"80.00","target_word_id":a["word"]["id"],"target_sense_id":a["word"]["meanings"]["pos"][0]["senses"][0]["id"]}]);
+    b = save_v3_meanings(&state, &bearer, &b, content).await;
+    let (status, _) = publish_ready_v3(&state, &bearer, &a).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let key = Uuid::now_v7();
+    let input = batch3_input(&[&b, &a]);
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/publications/batch"),
+        &bearer,
+        Some(key),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{response}");
+    assert_eq!(response["words"][0]["id"], b["word"]["id"]);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    let bad_refs:i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publication_sense_refs r JOIN lexicon.entries e ON e.id=r.target_entry_id WHERE r.target_publication_id IS DISTINCT FROM e.current_publication_id").fetch_one(&pool).await.unwrap();
+    assert_eq!(bad_refs, 0);
+    let (status, replayed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/publications/batch"),
+        &bearer,
+        Some(key),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed, response);
+    let (status, _) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/publications/batch"),
+        &bearer,
+        Some(key),
+        Some(batch3_input(&[&a])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[sqlx::test]
+async fn batch3_failure_leaves_no_publication_side_effects(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let a = batch3_word(&state, &bearer, "alpha").await;
+    let b = batch3_word(&state, &bearer, "beta").await;
+    // Fail late, after earlier publication headers/nodes have been staged.
+    sqlx::query("CREATE FUNCTION lexicon.reject_batch_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS(SELECT 1 FROM lexicon.entry_publications) THEN RAISE EXCEPTION 'injected batch failure'; END IF; RETURN NEW; END $$").execute(&pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_batch_test BEFORE INSERT ON lexicon.entry_publications FOR EACH ROW EXECUTE FUNCTION lexicon.reject_batch_test()").execute(&pool).await.unwrap();
+    let (status, _) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/publications/batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(batch3_input(&[&a, &b])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let pointers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.entries WHERE current_publication_id IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pointers, 0);
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM platform.outbox_events WHERE event_type='lexicon.entry_published.v3'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 0);
+    let records:i64=sqlx::query_scalar("SELECT count(*) FROM platform.idempotency_records WHERE scope='lexicon.publication.batch.v3'").fetch_one(&pool).await.unwrap();
+    assert_eq!(records, 0);
+}
+
+#[sqlx::test]
+async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let owner = seed_admin(&pool).await;
+    let other = seed_admin(&pool).await;
+    let super_admin = seed_admin_with_role(&pool, AdminRole::SuperAdmin).await;
+    let bearer = token(&state, owner);
+    let word = batch3_word(&state, &bearer, "alpha").await;
+    sqlx::query("UPDATE admins SET can_publish_lexicon=false WHERE id=$1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = publish_ready_v3(&state, &token(&state, other), &word).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let path = format!("/api/v1/admin/admins/{owner}/lexicon-publication-permission");
+    let (status, _) = call(
+        &state,
+        Method::PATCH,
+        &path,
+        &token(&state, other),
+        None,
+        Some(json!({"can_publish_lexicon":true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, response) = call(
+        &state,
+        Method::PATCH,
+        &path,
+        &token(&state, super_admin),
+        None,
+        Some(json!({"can_publish_lexicon":true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let (status, published) = publish_ready_v3(&state, &bearer, &word).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    call(
+        &state,
+        Method::PATCH,
+        &path,
+        &token(&state, super_admin),
+        None,
+        Some(json!({"can_publish_lexicon":false})),
+    )
+    .await;
+    let (status,_) = call(&state,Method::POST,&format!("{ROOT}/entries/{}/archive",word["word"]["id"].as_str().unwrap()),&bearer,Some(Uuid::now_v7()),Some(json!({"base_revision":published["word"]["revision"],"base_lifecycle_revision":published["word"]["lifecycle_revision"]}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let word = batch3_word(&state, &bearer, "alpha").await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &word).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let id = Uuid::parse_str(word["word"]["id"].as_str().unwrap()).unwrap();
+    let original = current_publication_id(&pool, id).await;
+    let snapshot = current_publication_snapshot(&pool, id).await;
+    let mut meanings = writable_v3_meanings(&published);
+    meanings["pos"][0]["senses"][0]["relations"] = json!([{"id":Uuid::now_v7(),"relation":"synonym","score":"80.00","pending_target_headword":"pending","pending_target_gloss":"待定"}]);
+    let draft = save_v3_meanings(&state, &bearer, &published, meanings).await;
+    let before:(Value,Value,i64,Option<Uuid>)=sqlx::query_as("SELECT p.forms,p.meanings,e.revision,e.draft_based_on_publication_id FROM lexicon.entries e JOIN lexicon.entry_editor_projection p ON p.entry_id=e.id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    let key = Uuid::now_v7();
+    let input = json!({"schema_version":3,"base_revision":draft["word"]["revision"],"base_lifecycle_revision":draft["word"]["lifecycle_revision"]});
+    let path = format!("{ROOT}/entries/{id}/publications/{original}/rollback");
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &path,
+        &bearer,
+        Some(key),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{response}");
+    let current = current_publication_id(&pool, id).await;
+    assert_ne!(current, original);
+    let after:(Value,Value,i64,Option<Uuid>)=sqlx::query_as("SELECT p.forms,p.meanings,e.revision,e.draft_based_on_publication_id FROM lexicon.entries e JOIN lexicon.entry_editor_projection p ON p.entry_id=e.id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(before, after);
+    let old: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=$1")
+            .bind(original)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(old, snapshot);
+    let source: Uuid = sqlx::query_scalar(
+        "SELECT rollback_of_publication_id FROM lexicon.entry_publications WHERE id=$1",
+    )
+    .bind(current)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(source, original);
+    let (status, replayed) =
+        call(&state, Method::POST, &path, &bearer, Some(key), Some(input)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(replayed, response);
+    assert_eq!(current_publication_id(&pool, id).await, current);
+    let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, 20260922151000)
+        .await
+        .unwrap_err();
+    assert!(format!("{down_error:#}").contains("cannot revert while rollback publications exist"));
+    let version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(version, 20260922151000);
+    assert_eq!(current_publication_id(&pool, id).await, current);
+}
+
+#[sqlx::test]
+async fn batch3_text_and_via_phrase_use_new_publications(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let bearer = token(&state, seed_admin(&pool).await);
+    let target = batch3_word(&state, &bearer, "alpha").await;
+    let component = resolved_draft_component_json(&target, "uk", "alpha");
+    let phrase = create_v3_phrase_with_sense_components(
+        &state,
+        &bearer,
+        "alpha phrase",
+        json!([component.clone()]),
+    )
+    .await;
+    let mut source = batch3_word(&state, &bearer, "gamma").await;
+    let direct = text_link_json(&component, json!([{"start":0,"end":5,"surface":"alpha"}]));
+    let mut via = direct.clone();
+    via["id"] = json!(Uuid::now_v7());
+    via["via_phrase"] = json!({"word_id":phrase["word"]["id"],"sense_id":phrase["word"]["meanings"]["pos"][0]["senses"][0]["id"],"component_id":component["id"]});
+    let mut meanings = writable_v3_meanings(&source);
+    meanings["pos"][0]["senses"][0]["sentences"] = json!([
+        sentence_with_text_links_json(&source, "alpha is direct.", json!([direct])),
+        sentence_with_text_links_json(&source, "alpha is via.", json!([via]))
+    ]);
+    source = save_v3_meanings(&state, &bearer, &source, meanings).await;
+    // Missing an explicitly selected dependency must fail, with no partial publication.
+    let (status, failed) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/publications/batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(batch3_input(&[&source, &phrase])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{failed}");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/publications/batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(batch3_input(&[&source, &phrase, &target])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let id = Uuid::parse_str(source["word"]["id"].as_str().unwrap()).unwrap();
+    let snapshot = current_publication_snapshot(&pool, id).await;
+    let target_pub = current_publication_id(
+        &pool,
+        Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap(),
+    )
+    .await;
+    let phrase_pub = current_publication_id(
+        &pool,
+        Uuid::parse_str(phrase["word"]["id"].as_str().unwrap()).unwrap(),
+    )
+    .await;
+    let sentences = &snapshot["meanings"]["pos"][0]["senses"][0]["sentences"];
+    assert_eq!(
+        sentences[0]["en_text"]["common"]["text_links"][0]["target_publication_id"],
+        json!(target_pub)
+    );
+    assert_eq!(
+        sentences[1]["en_text"]["common"]["text_links"][0]["via_phrase"]["publication_id"],
+        json!(phrase_pub)
+    );
+    let refs:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publication_sense_refs WHERE entry_id=$1 AND reference_kind='text_link'").bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(refs, 3);
+}
+
+#[sqlx::test]
+async fn batch3_opposite_order_concurrency_preserves_versions(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let bearer = token(&state, seed_admin(&pool).await);
+    let a = batch3_word(&state, &bearer, "alpha").await;
+    let b = batch3_word(&state, &bearer, "beta").await;
+    let path = format!("{ROOT}/entries/publications/batch");
+    let pair = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(
+            call(
+                &state,
+                Method::POST,
+                &path,
+                &bearer,
+                Some(Uuid::now_v7()),
+                Some(batch3_input(&[&a, &b]))
+            ),
+            call(
+                &state,
+                Method::POST,
+                &path,
+                &bearer,
+                Some(Uuid::now_v7()),
+                Some(batch3_input(&[&b, &a]))
+            )
+        )
+    })
+    .await
+    .expect("reverse selections must not deadlock");
+    let statuses = [pair.0.0, pair.1.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CREATED)
+            .count(),
+        1,
+        "{pair:?}"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1,
+        "{pair:?}"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[sqlx::test]
+async fn batch3_replaces_only_selected_published_inbound_sources(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let bearer = token(&state, seed_admin(&pool).await);
+    let mut target = batch3_word(&state, &bearer, "alpha").await;
+    let mut meanings = writable_v3_meanings(&target);
+    let mut retained = meanings["pos"][0]["senses"][0].clone();
+    retained["id"] = json!(Uuid::now_v7());
+    retained["definitions"][0]["id"] = json!(Uuid::now_v7());
+    retained["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(retained);
+    target = save_v3_meanings(&state, &bearer, &target, meanings).await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    target = published;
+    let mut source = batch3_word(&state, &bearer, "beta").await;
+    let relation = json!({"id":Uuid::now_v7(),"relation":"synonym","score":"80.00","target_word_id":target["word"]["id"],"target_sense_id":target["word"]["meanings"]["pos"][0]["senses"][0]["id"]});
+    let mut meanings = writable_v3_meanings(&source);
+    meanings["pos"][0]["senses"][0]["relations"] = json!([relation.clone()]);
+    source = save_v3_meanings(&state, &bearer, &source, meanings).await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &source).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    source = published;
+    let mut target_meanings = writable_v3_meanings(&target);
+    target_meanings["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    target = save_v3_meanings(&state, &bearer, &target, target_meanings).await;
+    let mut source_meanings = writable_v3_meanings(&source);
+    source_meanings["pos"][0]["senses"][0]["relations"] = json!([]);
+    source = save_v3_meanings(&state, &bearer, &source, source_meanings).await;
+    let (status, blocked) = publish_ready_v3(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    // A batch-external saved draft still protects the old published target.
+    let mut external = batch3_word(&state, &bearer, "gamma").await;
+    let mut external_meanings = writable_v3_meanings(&external);
+    let mut external_relation = relation;
+    external_relation["id"] = json!(Uuid::now_v7());
+    external_meanings["pos"][0]["senses"][0]["relations"] = json!([external_relation]);
+    external = save_v3_meanings(&state, &bearer, &external, external_meanings).await;
+    let path = format!("{ROOT}/entries/publications/batch");
+    let (status, blocked) = call(
+        &state,
+        Method::POST,
+        &path,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(batch3_input(&[&target, &source])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{blocked}");
+    let mut repaired = writable_v3_meanings(&external);
+    repaired["pos"][0]["senses"][0]["relations"] = json!([]);
+    save_v3_meanings(&state, &bearer, &external, repaired).await;
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &path,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(batch3_input(&[&target, &source])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 4);
 }

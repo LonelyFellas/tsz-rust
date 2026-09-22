@@ -14,18 +14,19 @@ use crate::{
     lexicon::{
         detection_store::DetectionStore,
         dto::{
-            ActivatePublicationV3Input, AdminWordDraftV3Envelope, AdminWordListQuery,
-            AdminWordListResponse, AdminWordPublicationEnvelope, AdminWordPublicationListResponse,
-            AdminWordStats, AdminWordV3Capabilities, AdminWordV3Envelope, CreateAdminWordV3Input,
-            DeleteDraftInput, DetectLexiconSurfaceResponseV3, DetectLexiconSurfaceV3Input,
-            DraftValidationResponseV3, EntryDeleteBatchInput, EntryDeleteBatchResponse,
-            EntryLifecycleBatchInput, EntryLifecycleBatchResponse, EntryLifecycleInput, EntryPath,
-            FormsImpactResponseV3, InboundReferencesV3, PreviewFormsImpactInputV3, PublicationPath,
+            AdminWordDraftV3Envelope, AdminWordListQuery, AdminWordListResponse,
+            AdminWordPublicationEnvelope, AdminWordPublicationListResponse, AdminWordStats,
+            AdminWordV3Capabilities, AdminWordV3Envelope, CreateAdminWordV3Input, DeleteDraftInput,
+            DetectLexiconSurfaceResponseV3, DetectLexiconSurfaceV3Input, DraftValidationResponseV3,
+            EntryDeleteBatchInput, EntryDeleteBatchResponse, EntryLifecycleBatchInput,
+            EntryLifecycleBatchResponse, EntryLifecycleInput, EntryPath, FormsImpactResponseV3,
+            InboundReferencesV3, PreviewFormsImpactInputV3, PublicationPath,
             PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
-            ResolveSentenceTargetsV3Input, ResolveSentenceTargetsV3Response, SaveFormsStepInputV3,
-            SaveMeaningsStepInputV3, SearchComponentTargetsV3Input,
-            SearchComponentTargetsV3Response, StepSaveIntent, SurfaceMatchPageV3,
-            SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2, ValidateAdminWordV3Input,
+            ResolveSentenceTargetsV3Input, ResolveSentenceTargetsV3Response,
+            RollbackPublicationV3Input, SaveFormsStepInputV3, SaveMeaningsStepInputV3,
+            SearchComponentTargetsV3Input, SearchComponentTargetsV3Response, StepSaveIntent,
+            SurfaceMatchPageV3, SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2,
+            ValidateAdminWordV3Input,
         },
         impact_store::ImpactStore,
         repository::LexiconRepository,
@@ -43,7 +44,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod query;
 
 pub use commands::{
-    activate_publication, create, detect, preview_forms_impact, publish, save_forms, save_meanings,
+    create, detect, preview_forms_impact, publish, rollback_publication, save_forms, save_meanings,
     validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
@@ -282,6 +283,13 @@ pub(crate) fn map_error(error: LexiconServiceError) -> AppError {
         LexiconServiceError::EntryDeleteForbidden => AppError::forbidden(
             ErrorCode::EntryDeleteForbidden,
             "entry can only be deleted by its creator",
+        ),
+        LexiconServiceError::BatchPublicationFailed { entry_id, source } => {
+            map_error(*source).with_word_id(entry_id)
+        }
+        LexiconServiceError::EntryPublishForbidden => AppError::forbidden(
+            ErrorCode::Forbidden,
+            "需要词库发布权限，且仅超管可以发布他人的草稿",
         ),
         LexiconServiceError::EntryEditForbidden => AppError::forbidden(
             ErrorCode::EntryEditForbidden,

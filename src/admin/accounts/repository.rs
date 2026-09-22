@@ -104,6 +104,7 @@ impl AdminAccountsRepository {
                 a.display_name,
                 a.role,
                 a.status,
+                (a.role = 'super_admin' OR a.can_publish_lexicon) AS can_publish_lexicon,
                 creator.id AS created_by_id,
                 creator.display_name AS created_by_display_name,
                 a.created_at,
@@ -150,6 +151,7 @@ impl AdminAccountsRepository {
                 a.display_name AS "display_name!",
                 a.role as "role!: AdminRole",
                 a.status as "status!: AdminStatus",
+                (a.role = 'super_admin' OR a.can_publish_lexicon) AS "can_publish_lexicon!",
                 creator.id AS "created_by_id?",
                 creator.display_name AS "created_by_display_name?",
                 a.created_at AS "created_at!",
@@ -180,7 +182,7 @@ impl AdminAccountsRepository {
                 UPDATE admins
                 SET status = $2, updated_at = NOW()
                 WHERE id = $1
-                RETURNING id, phone, display_name, role, status, created_by_admin_id,
+                RETURNING id, phone, display_name, role, status, can_publish_lexicon, created_by_admin_id,
                           created_at, updated_at
             )
             SELECT
@@ -189,6 +191,7 @@ impl AdminAccountsRepository {
                 u.display_name AS "display_name!",
                 u.role as "role!: AdminRole",
                 u.status as "status!: AdminStatus",
+                (u.role = 'super_admin' OR u.can_publish_lexicon) AS "can_publish_lexicon!",
                 creator.id AS "created_by_id?",
                 creator.display_name AS "created_by_display_name?",
                 u.created_at AS "created_at!",

@@ -11,6 +11,10 @@ pub fn router() -> Router<AppState> {
         .route("/create-code", post(handler::request_create_admin_code))
         .route("/{admin_id}/status", patch(handler::set_admin_status))
         .route(
+            "/{admin_id}/lexicon-publication-permission",
+            patch(crate::admin::publication_permission::update),
+        )
+        .route(
             "/{admin_id}/reset-password",
             post(handler::reset_admin_password),
         )

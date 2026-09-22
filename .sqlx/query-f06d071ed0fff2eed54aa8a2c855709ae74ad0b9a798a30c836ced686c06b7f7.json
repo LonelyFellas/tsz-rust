@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            WITH updated AS (\n                UPDATE admins\n                SET status = $2, updated_at = NOW()\n                WHERE id = $1\n                RETURNING id, phone, display_name, role, status, created_by_admin_id,\n                          created_at, updated_at\n            )\n            SELECT\n                u.id AS \"id!\",\n                u.phone AS \"phone!\",\n                u.display_name AS \"display_name!\",\n                u.role as \"role!: AdminRole\",\n                u.status as \"status!: AdminStatus\",\n                creator.id AS \"created_by_id?\",\n                creator.display_name AS \"created_by_display_name?\",\n                u.created_at AS \"created_at!\",\n                u.updated_at AS \"updated_at!\"\n            FROM updated u\n            LEFT JOIN admins creator\n                ON creator.id = u.created_by_admin_id\n            ",
+  "query": "\n            SELECT\n                a.id AS \"id!\",\n                a.phone AS \"phone!\",\n                a.display_name AS \"display_name!\",\n                a.role as \"role!: AdminRole\",\n                a.status as \"status!: AdminStatus\",\n                (a.role = 'super_admin' OR a.can_publish_lexicon) AS \"can_publish_lexicon!\",\n                creator.id AS \"created_by_id?\",\n                creator.display_name AS \"created_by_display_name?\",\n                a.created_at AS \"created_at!\",\n                a.updated_at AS \"updated_at!\"\n            FROM admins a\n            LEFT JOIN admins creator\n                ON creator.id = a.created_by_admin_id\n            WHERE a.id = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -60,6 +60,12 @@
       },
       {
         "ordinal": 5,
+        "name": "can_publish_lexicon!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
         "name": "created_by_id?",
         "type_info": "Uuid",
         "origin": {
@@ -70,7 +76,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "created_by_display_name?",
         "type_info": "Text",
         "origin": {
@@ -81,7 +87,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "created_at!",
         "type_info": "Timestamptz",
         "origin": {
@@ -92,7 +98,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "updated_at!",
         "type_info": "Timestamptz",
         "origin": {
@@ -105,8 +111,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -115,11 +120,12 @@
       false,
       false,
       false,
+      null,
       true,
       true,
       false,
       false
     ]
   },
-  "hash": "fc03d2641a7108141369893625f58896850cd4de456dacbfbe72b74e0e261e3e"
+  "hash": "f06d071ed0fff2eed54aa8a2c855709ae74ad0b9a798a30c836ced686c06b7f7"
 }

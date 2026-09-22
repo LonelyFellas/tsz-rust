@@ -44,6 +44,10 @@ pub fn router() -> Router<AppState> {
             "/entries/restore-batch",
             axum::routing::post(handler::restore_batch),
         )
+        .route(
+            "/entries/publications/batch",
+            axum::routing::post(handler::commands::publish_batch),
+        )
         .route("/entries/stats", get(handler::stats))
         .route("/entries/related-search", get(handler::related_search))
         .route(
@@ -71,8 +75,8 @@ pub fn router() -> Router<AppState> {
             get(handler::get_publication),
         )
         .route(
-            "/entries/{id}/publications/{publication_id}/activate",
-            axum::routing::post(handler::activate_publication),
+            "/entries/{id}/publications/{publication_id}/rollback",
+            axum::routing::post(handler::rollback_publication),
         )
         // 只有这三条路由承载整步草稿内容，需要高于 axum 默认 2 MiB 的请求体上限。
         // 其余接口的请求体都被自身契约框住（批量最多 100 条、其余是定长字段），

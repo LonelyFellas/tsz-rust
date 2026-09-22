@@ -251,6 +251,14 @@ pub(super) async fn outbound_publication_issues(
     tx: &mut Transaction<'_, Postgres>,
     word: &AdminWordV3,
 ) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
+    outbound_publication_issues_in(tx, word, None).await
+}
+
+pub(super) async fn outbound_publication_issues_in(
+    tx: &mut Transaction<'_, Postgres>,
+    word: &AdminWordV3,
+    batch: Option<&super::v3_publication::PublicationBatchContext>,
+) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
     let mut keys = std::collections::BTreeSet::new();
     for sense in word.meanings.pos.iter().flat_map(|pos| &pos.senses) {
         for relation in &sense.relations {
@@ -298,7 +306,7 @@ pub(super) async fn outbound_publication_issues(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let targets = LexiconRepository::current_publication_snapshots(tx, &target_ids)
+    let mut targets = LexiconRepository::current_publication_snapshots(tx, &target_ids)
         .await
         .map_err(repository_error)?
         .into_iter()
@@ -308,6 +316,11 @@ pub(super) async fn outbound_publication_issues(
                 .map_err(serialization_error)
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
+    if let Some(batch) = batch {
+        for (id, candidate) in &batch.words {
+            targets.insert(*id, candidate.word.clone());
+        }
+    }
     let mut issues = Vec::new();
     for (node_id, kind, entry_id, sense_id) in keys {
         let candidate = Candidate {
@@ -1008,6 +1021,38 @@ impl LexiconService {
             truncated,
         })
     }
+}
+
+pub(super) async fn ensure_batch_inbound_references(
+    tx: &mut Transaction<'_, Postgres>,
+    word: &AdminWordV3,
+    batch: &super::v3_publication::PublicationBatchContext,
+) -> Result<(), LexiconServiceError> {
+    let mut candidates =
+        collect_candidates(tx, word.id, None, InboundReferenceCheck::PublicationContent).await?;
+    candidates.retain(|candidate| {
+        !(candidate.reference.kind == InboundReferenceKindV3::PublicationSenseRef
+            && candidate
+                .reference
+                .source
+                .entry_id
+                .is_some_and(|id| batch.words.contains_key(&id)))
+    });
+    // All candidate sources are separately checked with outbound_publication_issues_in.
+    // Saved draft references and independent shared-sentence sources remain protected.
+    evaluate(&mut candidates, word.id, &word.forms, &word.meanings);
+    let mut violations = candidates
+        .into_iter()
+        .map(|candidate| candidate.reference)
+        .filter(|reference| reference.stale)
+        .collect::<Vec<_>>();
+    if violations.is_empty() {
+        return Ok(());
+    }
+    sort_references(&mut violations);
+    violations.truncate(MAX_INBOUND_REFERENCE_ITEMS);
+    describe_sources(tx, &mut violations).await?;
+    Err(LexiconServiceError::InboundReferenceConflict(violations))
 }
 
 #[cfg(test)]

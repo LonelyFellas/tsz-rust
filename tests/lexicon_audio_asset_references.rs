@@ -49,6 +49,17 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
     id
 }
 
+/// 发布链路显式使用已授权的普通管理员；其余音频测试保留默认无发布权账号。
+async fn seed_publisher(pool: &PgPool) -> Uuid {
+    let id = seed_admin(pool).await;
+    sqlx::query("UPDATE admins SET can_publish_lexicon = TRUE WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("grant test publisher permission should succeed");
+    id
+}
+
 fn bearer(state: &AppState, admin_id: Uuid) -> String {
     state
         .admin_token_manager
@@ -783,7 +794,7 @@ async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(po
     let mut state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let store = configure_audio(&mut state);
-    let admin_id = seed_admin(&pool).await;
+    let admin_id = seed_publisher(&pool).await;
     let bearer = bearer(&state, admin_id);
     let entry = create_entry(&state, &pool, &bearer, "audiopublish").await;
     let asset = upload_asset(&state, &store, &bearer, "published.mp3").await;
@@ -1301,7 +1312,7 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
     let mut state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let store = configure_audio(&mut state);
-    let bearer = bearer(&state, seed_admin(&pool).await);
+    let bearer = bearer(&state, seed_publisher(&pool).await);
     let mut entry = create_entry(&state, &pool, &bearer, "pronunciationeditor").await;
     let asset = upload_asset(&state, &store, &bearer, "pronunciation.mp3").await;
     let (_, fetched) = call(

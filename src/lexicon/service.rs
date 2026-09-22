@@ -127,6 +127,13 @@ pub enum LexiconServiceError {
     EntryDeleteForbidden,
     #[error("unpublished draft can only be edited by its creator")]
     EntryEditForbidden,
+    #[error("lexicon publication permission or entry ownership required")]
+    EntryPublishForbidden,
+    #[error("batch publication failed for {entry_id}: {source}")]
+    BatchPublicationFailed {
+        entry_id: Uuid,
+        source: Box<LexiconServiceError>,
+    },
     #[error("entry annotation can only be edited by its creator")]
     EntryAnnotationForbidden,
     #[error("entry has inbound prebound relations and cannot be deleted")]

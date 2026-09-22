@@ -324,7 +324,6 @@ pub async fn publish(
             idempotency_key,
             input,
             !sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-            admin.is_super_admin(),
         )
         .await
         .map_err(map_error)?;
@@ -337,16 +336,16 @@ pub async fn publish(
 
 #[utoipa::path(
     post,
-    path = "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/activate",
+    path = "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/rollback",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
     params(
         PublicationPath,
         ("Idempotency-Key" = Uuid, Header, description = "历史 publication activation 命令幂等键（UUID）")
     ),
-    request_body = ActivatePublicationV3Input,
+    request_body = RollbackPublicationV3Input,
     responses(
-        (status = 200, description = "指定历史 publication 已切换为当前公开版本", body = AdminWordV3Envelope),
+        (status = 201, description = "历史内容已通过当前校验并发布为新版本，草稿保留", body = AdminWordV3Envelope),
         (status = 400, description = "路径、header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用、必须先改密或词条已归档"),
@@ -357,7 +356,7 @@ pub async fn publish(
         (status = 503, description = "surface 确认服务不可用")
     )
 )]
-pub async fn activate_publication(
+pub async fn rollback_publication(
     State(state): State<AppState>,
     auth: AdminAuth,
     Extension(request_id): Extension<RequestId>,
@@ -368,7 +367,7 @@ pub async fn activate_publication(
     let admin = require_active_admin(&state, &auth).await?;
     let idempotency_key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
     v3_contract::require_schema_version_3(&input)?;
-    let input: ActivatePublicationV3Input = v3_contract::decode_request(input)?;
+    let input: RollbackPublicationV3Input = v3_contract::decode_request(input)?;
     v3_contract::require_positive_revision("base_revision", input.base_revision)?;
     v3_contract::require_positive_revision(
         "base_lifecycle_revision",
@@ -381,7 +380,7 @@ pub async fn activate_publication(
         return Err(v3_storage_unavailable());
     }
     let mut response = service(&state)
-        .activate_publication_v3(
+        .rollback_publication_v3(
             admin.id,
             request_id.as_uuid(),
             path.id,
@@ -395,7 +394,7 @@ pub async fn activate_publication(
         &mut response.word.capabilities,
         state.smart_lexicon_v3_flags,
     );
-    Ok((StatusCode::OK, Json(response)))
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 #[utoipa::path(
@@ -430,4 +429,51 @@ pub async fn update_annotation(
         .await
         .map_err(map_error)?;
     Ok(Json(response))
+}
+
+#[utoipa::path(
+    post, path = "/api/v1/admin/lexicon/entries/publications/batch", tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(("Idempotency-Key" = Uuid, Header, description = "原子批次发布幂等键")),
+    request_body = crate::lexicon::dto::BatchPublicationInputV3,
+    responses(
+        (status = 201, description = "所选词条全部发布", body = crate::lexicon::dto::BatchPublicationResponseV3),
+        (status = 400, description = "选择范围或幂等键非法"),
+        (status = 401, description = "未登录"),
+        (status = 403, description = "无发布权或包含他人草稿"),
+        (status = 404, description = "词条不存在"),
+        (status = 409, description = "版本、引用或同名确认冲突，整批回滚"),
+        (status = 410, description = "同名确认已过期"),
+        (status = 422, description = "内容校验失败，整批回滚"),
+        (status = 503, description = "发布不可用")
+    )
+)]
+pub async fn publish_batch(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    ApiJson(input): ApiJson<Value>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
+    v3_contract::require_schema_version_3(&input)?;
+    let input = v3_contract::decode_request(input)?;
+    if !state.smart_lexicon_v3_flags.publish || !state.smart_lexicon_v3_flags.projection {
+        return Err(v3_storage_unavailable());
+    }
+    let mut response = service(&state)
+        .publish_batch_v3(
+            admin.id,
+            request_id.as_uuid(),
+            key,
+            input,
+            !sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+        )
+        .await
+        .map_err(map_error)?;
+    for word in &mut response.words {
+        apply_capability_flags(&mut word.capabilities, state.smart_lexicon_v3_flags);
+    }
+    Ok((StatusCode::CREATED, Json(response)))
 }
