@@ -216,6 +216,7 @@ fn resolve_response_binds_completeness_generation_and_segment_ranges() {
             "source_segments",
             "segments_fingerprint",
             "published_total",
+            "draft_total",
             "published_matches",
             "draft_matches",
         ],
@@ -317,25 +318,27 @@ fn resolve_candidates_preserve_base_and_sense_identity_and_draft_safety() {
         "sense publication_id must be optional for draft candidates"
     );
 
-    let draft_candidate = component_by_required(
+    let response = response_schema(&spec, operation(&spec, RESOLVE_PATH, "post"), "200");
+    let range = dereference(
         &spec,
-        &["entry_id", "entry_revision", "target_state", "linkability"],
+        schema_property(&spec, response, "range_results")
+            .get("items")
+            .unwrap(),
+    );
+    let draft_candidate = dereference(
+        &spec,
+        schema_property(&spec, range, "draft_matches")
+            .get("items")
+            .unwrap(),
     );
     assert_eq!(
-        draft_candidate
-            .pointer("/properties/target_state")
-            .and_then(|schema| literal(&spec, schema)),
-        Some(Value::String("draft".to_owned()))
+        draft_candidate, base_candidate,
+        "草稿必须共用完整节点候选，不能退回 entry 级 pending-only 元数据"
     );
-    assert_eq!(
-        draft_candidate
-            .pointer("/properties/linkability")
-            .and_then(|schema| literal(&spec, schema)),
-        Some(Value::String("pending_only".to_owned()))
-    );
+    assert!(draft_candidate.pointer("/properties/linkability").is_none());
     assert!(
         draft_candidate
-            .pointer("/properties/publication_id")
+            .pointer("/properties/entry_revision")
             .is_none()
     );
 }

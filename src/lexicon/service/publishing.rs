@@ -177,11 +177,25 @@ pub(super) async fn resolve_meaning_references(
 
     for usage in &uses {
         let snapshot = resolved.get(&(usage.kind, usage.target));
-        let accepted = snapshot.is_some_and(|snapshot| snapshot.available);
+        let accepted = snapshot.is_some_and(|snapshot| {
+            snapshot.available
+                && (matches!(mode, ReferenceResolutionMode::Canonicalize)
+                    || snapshot.target_publication_id.is_some())
+        });
         if accepted {
             continue;
         }
         let (field, code, message) = match usage.kind {
+            ReferenceUseKind::Relation
+                if matches!(mode, ReferenceResolutionMode::Verify)
+                    && snapshot.is_some_and(|snapshot| snapshot.available) =>
+            {
+                (
+                    "target_sense_id",
+                    "relation_target_unavailable",
+                    "关联词目标词义尚未发布，请先发布具体目标词义",
+                )
+            }
             ReferenceUseKind::Relation => (
                 "target_sense_id",
                 "relation_target_unavailable",
@@ -245,7 +259,10 @@ pub(super) async fn resolve_meaning_references(
         let Some(snapshot) = resolved.get(&(usage.kind, usage.target)) else {
             continue;
         };
-        if !snapshot.available {
+        if !snapshot.available
+            || (matches!(mode, ReferenceResolutionMode::Verify)
+                && snapshot.target_publication_id.is_none())
+        {
             continue;
         }
         let reference_kind = match usage.kind {

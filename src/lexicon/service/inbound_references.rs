@@ -1,5 +1,5 @@
 //! 本词条节点的入站引用：多维例句标注、其他词条当前发布版本里的词义引用、草稿关联词、短语成分用词。
-//! 读接口与各写路径共用同一判定（引用在给定内容里是否仍成立），界面禁用与保存拦截口径一致。
+//! 影响预览与发布共用完整目标判定；草稿允许编辑，发布前必须处理破坏性影响。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -13,7 +13,7 @@ use crate::lexicon::{
         DialectVariantRichTextSlotV3, DraftMeaningsStepContentV3, EnglishTextV3,
         InboundReferenceKindV3, InboundReferenceNodeTypeV3, InboundReferenceNodeV3,
         InboundReferenceSourceV3, InboundReferenceTargetV3, InboundReferenceV3,
-        InboundReferencesV3, TextLinkV3,
+        InboundReferencesV3, PhraseComponentUsageV3, TextLinkV3,
     },
     model::InboundSenseReferenceRecord,
     shared_sentences::SentenceTarget,
@@ -23,19 +23,13 @@ const MAX_INBOUND_REFERENCE_ITEMS: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InboundReferenceCheck {
-    /// 词形 / 词义保存：四类都查；被破坏的发布引用来源加共享锁（与原词形保存守卫一致）。
-    DraftSave,
-    /// 词形影响预览：范围同保存，只读不加锁。
+    /// 草稿影响预览：收集全部活跃来源，只读不加锁；不阻止保存。
     DraftPreview,
-    /// 发布与切换版本：只换发布内容。草稿关联与成分用词指向草稿节点，不受影响。
+    /// 发布与切换版本：验证全部活跃来源，破坏性影响必须先修复。
     PublicationContent,
 }
 
 impl InboundReferenceCheck {
-    const fn includes_draft_sources(self) -> bool {
-        matches!(self, Self::DraftSave | Self::DraftPreview)
-    }
-
     const fn locks(self) -> bool {
         !matches!(self, Self::DraftPreview)
     }
@@ -53,6 +47,12 @@ enum Rule {
     PhraseComponent {
         dialect: Option<Dialect>,
         form_type: String,
+    },
+    ViaPhrase {
+        link: Box<TextLinkV3>,
+    },
+    TextLink {
+        link: Box<TextLinkV3>,
     },
 }
 
@@ -133,6 +133,232 @@ fn sentence_text(text: &EnglishTextV3, dialect: &str) -> Option<String> {
     }
 }
 
+fn text_link_candidates(
+    candidate: &Candidate,
+    link: &TextLinkV3,
+    target_entry_id: Uuid,
+    sense_id: Option<Uuid>,
+) -> Vec<Candidate> {
+    let mut expanded = Vec::new();
+    if link.target_word_id == target_entry_id
+        && sense_id.is_none_or(|id| id == link.target_sense_id)
+    {
+        let mut direct = candidate.clone();
+        direct.reference.id = format!("{}:{}:direct", direct.reference.id, link.id);
+        direct.reference.target = InboundReferenceTargetV3 {
+            pos_id: Some(link.target_pos_id),
+            base_form_id: Some(link.target_base_form_id),
+            form_id: Some(link.target_form_id),
+            variant_id: Some(link.target_variant_id),
+            sense_id: Some(link.target_sense_id),
+        };
+        direct.rule = Rule::TextLink {
+            link: Box::new(link.clone()),
+        };
+        expanded.push(direct);
+    }
+    if let Some(phrase) = &link.via_phrase
+        && phrase.word_id == target_entry_id
+        && sense_id.is_none_or(|id| id == phrase.sense_id)
+    {
+        let mut via = candidate.clone();
+        via.reference.id = format!("{}:{}:via", via.reference.id, link.id);
+        via.reference.target.sense_id = Some(phrase.sense_id);
+        via.rule = Rule::ViaPhrase {
+            link: Box::new(link.clone()),
+        };
+        expanded.push(via);
+    }
+    expanded
+}
+
+/// 发布索引只存词义锚点；完整目标从同一不可变来源快照恢复，不能把成分/正文链接降级为词义检查。
+fn expand_publication_candidate(
+    candidate: Candidate,
+    word: &AdminWordV3,
+    target_entry_id: Uuid,
+) -> Result<Vec<Candidate>, LexiconServiceError> {
+    let node_id = candidate
+        .reference
+        .source
+        .node_id
+        .ok_or_else(invariant_record)?;
+    let sense_id = candidate
+        .reference
+        .target
+        .sense_id
+        .ok_or_else(invariant_record)?;
+    match candidate.reference.source.reference_kind.as_deref() {
+        Some("relation" | "sentence_context") => Ok(vec![candidate]),
+        Some("phrase_component") => {
+            for usage in super::v3_publication::all_component_usages(&word.forms, &word.meanings) {
+                if let PhraseComponentUsageV3::Resolved {
+                    id,
+                    target_word_id,
+                    target_pos_id,
+                    target_base_form_id,
+                    target_form_id,
+                    target_variant_id,
+                    target_sense_id,
+                    target_dialect,
+                    target_form_type,
+                    ..
+                } = usage
+                    && id == node_id
+                    && target_word_id == target_entry_id
+                    && target_sense_id == sense_id
+                {
+                    let mut candidate = candidate;
+                    candidate.reference.target = InboundReferenceTargetV3 {
+                        pos_id: Some(target_pos_id),
+                        base_form_id: Some(target_base_form_id),
+                        form_id: Some(target_form_id),
+                        variant_id: Some(target_variant_id),
+                        sense_id: Some(target_sense_id),
+                    };
+                    candidate.rule = Rule::PhraseComponent {
+                        dialect: Some(target_dialect),
+                        form_type: target_form_type,
+                    };
+                    return Ok(vec![candidate]);
+                }
+            }
+            Err(invariant_record())
+        }
+        Some("text_link") => {
+            let variant = super::text_links::variants(&word.meanings)
+                .find(|variant| variant.id == node_id)
+                .ok_or_else(invariant_record)?;
+            let expanded = variant
+                .text_links
+                .iter()
+                .flat_map(|link| {
+                    text_link_candidates(&candidate, link, target_entry_id, Some(sense_id))
+                })
+                .collect::<Vec<_>>();
+            if expanded.is_empty() {
+                return Err(invariant_record());
+            }
+            Ok(expanded)
+        }
+        _ => Err(invariant_record()),
+    }
+}
+
+/// 单独发布的出站目标必须在当前发布内容中成立；与入站影响复用相同完整身份判定。
+/// 固定历史快照仍保留供回放，但不能替代当前目标的有效性校验。
+pub(super) async fn outbound_publication_issues(
+    tx: &mut Transaction<'_, Postgres>,
+    word: &AdminWordV3,
+) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
+    let mut keys = std::collections::BTreeSet::new();
+    for sense in word.meanings.pos.iter().flat_map(|pos| &pos.senses) {
+        for relation in &sense.relations {
+            if let Some((entry, target_sense)) =
+                relation.target_word_id.zip(relation.target_sense_id)
+            {
+                keys.insert((relation.id, "relation", entry, target_sense));
+            }
+        }
+        for sentence in &sense.sentences {
+            for link in &sentence.links {
+                if link.role == "context" && link.word_id != word.id {
+                    keys.insert((sentence.id, "sentence_context", link.word_id, link.sense_id));
+                }
+            }
+        }
+    }
+    for usage in super::v3_publication::all_component_usages(&word.forms, &word.meanings) {
+        if let PhraseComponentUsageV3::Resolved {
+            id,
+            target_word_id,
+            target_sense_id,
+            ..
+        } = usage
+        {
+            keys.insert((id, "phrase_component", target_word_id, target_sense_id));
+        }
+    }
+    for variant in super::text_links::variants(&word.meanings) {
+        for link in &variant.text_links {
+            keys.insert((
+                variant.id,
+                "text_link",
+                link.target_word_id,
+                link.target_sense_id,
+            ));
+            if let Some(via) = &link.via_phrase {
+                keys.insert((variant.id, "text_link", via.word_id, via.sense_id));
+            }
+        }
+    }
+    let target_ids = keys
+        .iter()
+        .map(|key| key.2)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let targets = LexiconRepository::current_publication_snapshots(tx, &target_ids)
+        .await
+        .map_err(repository_error)?
+        .into_iter()
+        .map(|record| {
+            serde_json::from_value::<AdminWordV3>(record.snapshot)
+                .map(|word| (record.entry_id, word))
+                .map_err(serialization_error)
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    let mut issues = Vec::new();
+    for (node_id, kind, entry_id, sense_id) in keys {
+        let candidate = Candidate {
+            reference: reference(
+                format!("outbound:{node_id}:{kind}:{sense_id}"),
+                InboundReferenceKindV3::PublicationSenseRef,
+                InboundReferenceTargetV3 {
+                    sense_id: Some(sense_id),
+                    ..InboundReferenceTargetV3::default()
+                },
+                InboundReferenceSourceV3 {
+                    node_id: Some(node_id),
+                    reference_kind: Some(kind.to_owned()),
+                    ..InboundReferenceSourceV3::default()
+                },
+            ),
+            rule: Rule::Sense,
+        };
+        let mut candidates = expand_publication_candidate(candidate, word, entry_id)?;
+        if let Some(target) = targets.get(&entry_id) {
+            evaluate(&mut candidates, entry_id, &target.forms, &target.meanings);
+            if candidates.iter().all(|item| !item.reference.stale) {
+                continue;
+            }
+        }
+        let (field, code) = match kind {
+            "relation" => ("target_sense_id", "relation_target_unavailable"),
+            "sentence_context" => ("links", "sentence_context_target_unavailable"),
+            "phrase_component" => ("component_usages", "phrase_component_target_unavailable"),
+            _ => ("text_links", "definition_invalid"),
+        };
+        let in_meanings = kind != "phrase_component" || word.meanings.pos.iter().flat_map(|pos| &pos.senses)
+            .flat_map(|sense| &sense.component_usages).any(|usage| matches!(usage, PhraseComponentUsageV3::Resolved { id, .. } if *id == node_id));
+        issues.push(DraftValidationIssue {
+            step: if in_meanings {
+                PersistedWordStep::Meanings
+            } else {
+                PersistedWordStep::Forms
+            },
+            node_id,
+            field: field.to_owned(),
+            code: code.to_owned(),
+            message: "具体引用目标尚未发布或已不在当前发布内容中，请先发布目标或修复引用"
+                .to_owned(),
+            reference_location: None,
+            node_location: None,
+        });
+    }
+    Ok(issues)
+}
+
 async fn collect_candidates(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
@@ -201,12 +427,10 @@ async fn collect_candidates(
     }
 
     // 2. 其他词条当前发布版本里的词义引用：口径同 current_inbound_sense_refs（排除已归档来源）。
-    let publication_refs = match (retained_sense_ids, check.locks()) {
-        (Some(retained), true) => {
-            LexiconRepository::current_inbound_sense_refs(tx, entry_id, retained)
-                .await
-                .map_err(repository_error)?
-        }
+    let publication_refs = match check.locks() {
+        true => LexiconRepository::current_inbound_sense_refs(tx, entry_id, &[])
+            .await
+            .map_err(repository_error)?,
         _ => sqlx::query_as::<_, InboundSenseReferenceRecord>(
             r#"
             SELECT sense_ref.target_sense_id,
@@ -220,18 +444,39 @@ async fn collect_candidates(
              AND source_entry.current_publication_id = sense_ref.publication_id
              AND source_entry.archived_at IS NULL
             WHERE sense_ref.target_entry_id = $1
-              AND ($2::uuid[] IS NULL OR NOT (sense_ref.target_sense_id = ANY($2::uuid[])))
             ORDER BY sense_ref.target_sense_id, sense_ref.entry_id, sense_ref.source_node_id
             "#,
         )
         .bind(entry_id)
-        .bind(retained_sense_ids)
         .fetch_all(&mut **tx)
         .await
         .map_err(database_error)?,
     };
+    let publication_ids = publication_refs
+        .iter()
+        .map(|record| record.source_publication_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let snapshots = sqlx::query_as::<_, (Uuid, Value)>(
+        "SELECT id, snapshot FROM lexicon.entry_publications WHERE id = ANY($1)",
+    )
+    .bind(&publication_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)?
+    .into_iter()
+    .map(|(id, snapshot)| {
+        serde_json::from_value::<AdminWordV3>(snapshot)
+            .map(|word| (id, word))
+            .map_err(serialization_error)
+    })
+    .collect::<Result<HashMap<_, _>, _>>()?;
     for record in publication_refs {
-        candidates.push(Candidate {
+        let word = snapshots
+            .get(&record.source_publication_id)
+            .ok_or_else(invariant_record)?;
+        let candidate = Candidate {
             reference: reference(
                 format!(
                     "publication_sense_ref:{}:{}:{}",
@@ -251,11 +496,8 @@ async fn collect_candidates(
                 },
             ),
             rule: Rule::Sense,
-        });
-    }
-
-    if !check.includes_draft_sources() {
-        return Ok(candidates);
+        };
+        candidates.extend(expand_publication_candidate(candidate, word, entry_id)?);
     }
 
     // Saved bindings protect sense deletion even when the request omits the sense and its bindings.
@@ -339,8 +581,7 @@ async fn collect_candidates(
     }
 
     // 4. 短语草稿的成分用词：变体级 + 释义级 resolved 行，排除已归档来源。
-    // 钉住了发布版本（target_publication_id 非空）的成分引用的是不可变快照，草稿改动伤不到它，
-    // 不算入站引用；短语一旦发布，它会以类型 2 的发布引用出现。
+    // 固定快照保护历史回放，但不能隐藏当前活跃草稿的影响；发布时也要报告这些依赖。
     let components = sqlx::query_as::<_, PhraseComponentRow>(
         r#"
         SELECT usage.id, usage.entry_id, NULL::uuid AS source_sense_id,
@@ -352,7 +593,7 @@ async fn collect_candidates(
           ON source_entry.id = usage.entry_id
          AND source_entry.archived_at IS NULL
         WHERE usage.target_entry_id = $1 AND usage.entry_id <> $1
-          AND usage.state = 'resolved' AND usage.target_publication_id IS NULL
+          AND usage.state = 'resolved'
         UNION ALL
         SELECT usage.id, usage.entry_id, usage.sense_id AS source_sense_id,
                usage.target_pos_id, usage.target_base_form_id, usage.target_form_id,
@@ -363,7 +604,7 @@ async fn collect_candidates(
           ON source_entry.id = usage.entry_id
          AND source_entry.archived_at IS NULL
         WHERE usage.target_entry_id = $1 AND usage.entry_id <> $1
-          AND usage.state = 'resolved' AND usage.target_publication_id IS NULL
+          AND usage.state = 'resolved'
         ORDER BY 2, 1
         "#,
     )
@@ -408,6 +649,39 @@ async fn collect_candidates(
             },
         });
     }
+    // 正文草稿没有独立引用表；从当前编辑投影读取，保留各自业务结构，不建立第二套校验器。
+    let texts = sqlx::query_as::<_, (Uuid, Value)>(r#"
+        SELECT entry.id, editor.meanings
+        FROM lexicon.entries entry
+        JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
+        WHERE entry.archived_at IS NULL AND entry.id <> $1
+          AND (jsonb_path_exists(editor.meanings, '$.**.target_word_id ? (@ == $target)', jsonb_build_object('target', $1::text))
+            OR jsonb_path_exists(editor.meanings, '$.**.via_phrase.word_id ? (@ == $target)', jsonb_build_object('target', $1::text)))
+        ORDER BY entry.id
+    "#).bind(entry_id).fetch_all(&mut **tx).await.map_err(database_error)?;
+    for (source_entry_id, meanings) in texts {
+        let meanings = serde_json::from_value::<DraftMeaningsStepContentV3>(meanings)
+            .map_err(serialization_error)?;
+        for variant in super::text_links::variants(&meanings) {
+            let candidate = Candidate {
+                reference: reference(
+                    format!("draft_text_link:{}:{}", source_entry_id, variant.id),
+                    InboundReferenceKindV3::DraftTextLink,
+                    InboundReferenceTargetV3::default(),
+                    InboundReferenceSourceV3 {
+                        entry_id: Some(source_entry_id),
+                        node_id: Some(variant.id),
+                        reference_kind: Some("text_link".to_owned()),
+                        ..InboundReferenceSourceV3::default()
+                    },
+                ),
+                rule: Rule::Sense,
+            };
+            for link in &variant.text_links {
+                candidates.extend(text_link_candidates(&candidate, link, entry_id, None));
+            }
+        }
+    }
     Ok(candidates)
 }
 
@@ -426,10 +700,15 @@ fn evaluate(
     // 成分用词与短语保存走同一判定函数，它吃的是 ComponentTargetWord；只在确有成分引用时才克隆内容。
     let component_target = candidates
         .iter()
-        .any(|candidate| matches!(candidate.rule, Rule::PhraseComponent { .. }))
+        .any(|candidate| {
+            matches!(
+                candidate.rule,
+                Rule::PhraseComponent { .. } | Rule::ViaPhrase { .. }
+            )
+        })
         .then(|| ComponentTargetWord {
             id: entry_id,
-            kind: WordEntryKindV3::Word,
+            kind: WordEntryKindV3::Phrase,
             label: String::new(),
             forms: forms.clone(),
             meanings: meanings.clone(),
@@ -438,6 +717,12 @@ fn evaluate(
     for candidate in candidates {
         let target = &mut candidate.reference.target;
         let holds = match &candidate.rule {
+            Rule::TextLink { link } => {
+                super::text_links::text_target_matches(forms, meanings, link)
+            }
+            Rule::ViaPhrase { link } => component_target
+                .as_ref()
+                .is_some_and(|word| super::text_links::component_matches(word, link)),
             Rule::SharedSentence { link, dialect } => link.as_ref().is_some_and(|link| {
                 super::text_links::shared_target_matches(forms, meanings, link, dialect)
             }),
@@ -492,6 +777,7 @@ const fn kind_rank(kind: InboundReferenceKindV3) -> u8 {
         InboundReferenceKindV3::DraftRelation => 2,
         InboundReferenceKindV3::PhraseComponent => 3,
         InboundReferenceKindV3::FormGroupSenseBinding => 4,
+        InboundReferenceKindV3::DraftTextLink => 5,
     }
 }
 
@@ -626,10 +912,8 @@ async fn describe_sources(
 
 /// 给定内容下会被破坏（或已失效）的入站引用，带来源摘要，最多 500 条。
 ///
-/// `baseline` 是已保存内容：草稿保存与词形影响预览只拦本次改动破坏的引用（基线里成立、提交后
-/// 失效）。基线里本来就失效的旧引用不挡草稿保存——关联词可以指向只在发布版里还有的词义，来源
-/// 词条归档期间目标删掉节点、之后来源恢复，都会造出目标编辑者自己解不开的失效引用。读接口照常
-/// 标出这些引用；发布与切换版本不传基线，按现状拦。
+/// 词形影响预览传已保存的 `baseline`，只提示本次新增影响；已有失效项由引用读接口展示。
+/// 草稿保存不调用拦截。发布、发布前校验及切换版本不传基线，必须修复所有当前失效引用。
 pub(super) async fn inbound_reference_violations(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,

@@ -487,10 +487,3 @@ pub(crate) struct ComponentTargetEntryMatchRecord {
     pub entry_id: Uuid,
     pub match_rank: i32,
 }
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub(crate) struct SentenceDiscoveryDraftRecord {
-    pub entry_id: Uuid,
-    pub entry_revision: i64,
-    pub headword: String,
-}

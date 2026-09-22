@@ -1334,7 +1334,7 @@ async fn sense_identity_cannot_be_forged_and_legacy_links_require_repair(pool: P
 }
 
 #[sqlx::test]
-async fn referenced_sense_cannot_be_removed_until_unlinked(pool: PgPool) {
+async fn referenced_sense_draft_can_be_removed_and_stale_annotation_can_be_unlinked(pool: PgPool) {
     let actor = admin(&pool).await;
     let source = entry(&pool, actor, "wonderful").await;
     let state = AppState::for_test(pool.clone())
@@ -1344,14 +1344,23 @@ async fn referenced_sense_cannot_be_removed_until_unlinked(pool: PgPool) {
     let path = format!("/api/v1/admin/lexicon/entries/{source}/steps/meanings");
     let input = json!({"schema_version":3,"base_revision":1,"intent":"save","content":{"sense_groups":[],"pos":[{"pos_id":node_id(source,1),"grammar_structures":[],"senses":[]}]}});
     let (status, problem) = call(&state, actor, Method::PUT, &path, Some(input.clone())).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
-    assert_inbound_reference_conflict(&problem, source, id);
+    assert_eq!(status, StatusCode::OK, "{problem}");
+    let (status, impact) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("/api/v1/admin/lexicon/entries/{source}/inbound-references"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert_single_stale_sentence_reference(&impact["items"], source, id);
     let revision: i64 = sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id=$1")
         .bind(source)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(revision, 1);
+    assert_eq!(revision, 2);
     let (status, _) = call(
         &state,
         actor,
@@ -1361,6 +1370,8 @@ async fn referenced_sense_cannot_be_removed_until_unlinked(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    let mut input = input;
+    input["base_revision"] = json!(2);
     let (status, result) = call(&state, actor, Method::PUT, &path, Some(input)).await;
     assert_eq!(status, StatusCode::OK, "{result}");
     let (status,_)=call(&state,actor,Method::POST,ROOT,Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content(source)}))).await;
@@ -1375,6 +1386,26 @@ async fn referenced_sense_cannot_be_removed_until_unlinked(pool: PgPool) {
 async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: PgPool) {
     let actor = admin(&pool).await;
     let source = entry(&pool, actor, "wonderful").await;
+    // 此用例现在真正保存词形，补齐 fixture 原先绕过的关系行与稳定节点父子身份。
+    sqlx::query("INSERT INTO lexicon.entry_pos(id,entry_id,part_of_speech_id,entry_kind,sort_order) SELECT $1,$2,id,'word',0 FROM catalog.parts_of_speech WHERE code='verb'")
+        .bind(node_id(source, 1)).bind(source).execute(&pool).await.unwrap();
+    for (tag, parent, role, stable) in [
+        (1, None, "forms.pos", false),
+        (2, Some(1), "forms.concrete_form", false),
+        (3, Some(2), "forms.form_variant:common", true),
+        (4, Some(1), "meanings.sense", false),
+    ] {
+        sqlx::query(
+            "UPDATE lexicon.nodes SET parent_node_id=$2,node_role=$3,stable_slot=$4 WHERE id=$1",
+        )
+        .bind(node_id(source, tag))
+        .bind(parent.map(|tag| node_id(source, tag)))
+        .bind(role)
+        .bind(stable)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
     let redis_url = std::env::var("TEST_REDIS_URL")
         .or_else(|_| std::env::var("REDIS_URL"))
         .expect("isolated Redis URL");
@@ -1430,8 +1461,16 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         Some(json!({"schema_version":3,"base_revision":1,"intent":"save","content":respelled,"confirmed_impact_token":impact["confirmation_token"]})),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{problem}");
-    assert_inbound_reference_conflict(&problem, source, id);
+    assert_eq!(status, StatusCode::OK, "{problem}");
+    let (_, affected) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("/api/v1/admin/lexicon/entries/{source}/inbound-references"),
+        None,
+    )
+    .await;
+    assert_single_stale_sentence_reference(&affected["items"], source, id);
 
     // TASK#58：单独换掉变体实例 id（common ↔ uk_us 结构漂移的常态）不再让标注失效——
     // 绑定坐标是「词形 + 方言侧」。
@@ -1442,7 +1481,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         actor,
         Method::POST,
         &format!("/api/v1/admin/lexicon/entries/{source}/steps/forms/impact"),
-        Some(json!({"schema_version":3,"base_revision":1,"content":drifted})),
+        Some(json!({"schema_version":3,"base_revision":2,"content":drifted})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{impact}");
@@ -1461,7 +1500,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         &format!(
             "/api/v1/admin/lexicon/entries/{source}/publications/{empty_publication}/activate"
         ),
-        Some(json!({"schema_version":3,"base_revision":1,"base_lifecycle_revision":1})),
+        Some(json!({"schema_version":3,"base_revision":2,"base_lifecycle_revision":1})),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{problem}");
@@ -1474,7 +1513,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         None,
     )
     .await;
-    assert_eq!(current["word"]["revision"], 1);
+    assert_eq!(current["word"]["revision"], 2);
     let (status, _) = call(
         &state,
         actor,
@@ -1484,7 +1523,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status,removed)=call(&state,actor,Method::PUT,&format!("/api/v1/admin/lexicon/entries/{source}/steps/meanings"),Some(json!({"schema_version":3,"base_revision":1,"intent":"save","content":snapshot["meanings"]}))).await;
+    let (status,removed)=call(&state,actor,Method::PUT,&format!("/api/v1/admin/lexicon/entries/{source}/steps/meanings"),Some(json!({"schema_version":3,"base_revision":2,"intent":"save","content":snapshot["meanings"]}))).await;
     assert_eq!(status, StatusCode::OK, "{removed}");
     // The old valid snapshot still contains the sense, but it no longer exists in saved draft.
     body["sentence"]["id"] = json!(Uuid::now_v7());

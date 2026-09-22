@@ -65,7 +65,7 @@ impl LexiconRepository {
                                'strategy_version', presentation.strategy_version
                            ),
                            'forms', editor.forms,
-                           'meanings', editor.meanings
+                           'meanings', draft.meanings
                        ) AS snapshot,
                        'draft'::text AS status,
                        1::smallint AS status_rank,
@@ -78,9 +78,28 @@ impl LexiconRepository {
                   ON presentation.entry_id = entry.id
                  AND presentation.content_schema_version = 3
                  AND presentation.source_revision = entry.revision
+                CROSS JOIN LATERAL (
+                    SELECT jsonb_set(editor.meanings, '{pos}', COALESCE((
+                        SELECT jsonb_agg(jsonb_set(pos.value, '{senses}', COALESCE((
+                            SELECT jsonb_agg(sense.value ORDER BY sense.ordinality)
+                            FROM jsonb_array_elements(pos.value -> 'senses')
+                                WITH ORDINALITY AS sense(value, ordinality)
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM lexicon.entry_publication_nodes node
+                                WHERE node.publication_id = entry.current_publication_id
+                                  AND node.entry_id = entry.id
+                                  AND node.node_type = 'sense'
+                                  AND node.node_id = (sense.value ->> 'id')::uuid
+                            )
+                        ), '[]'::jsonb)) ORDER BY pos.ordinality)
+                        FROM jsonb_array_elements(editor.meanings -> 'pos')
+                            WITH ORDINALITY AS pos(value, ordinality)
+                    ), '[]'::jsonb)) AS meanings
+                ) draft
                 WHERE $11::boolean
                   AND entry.content_schema_version = 3
-                  AND entry.current_publication_id IS NULL
+                  AND (entry.current_publication_id IS NULL
+                       OR jsonb_path_exists(draft.meanings, '$.pos[*].senses[*]'))
                   AND entry.archived_at IS NULL
             )
             SELECT id AS entry_id,

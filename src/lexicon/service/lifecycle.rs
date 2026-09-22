@@ -611,6 +611,26 @@ impl LexiconService {
             affected += 1;
             words_by_id.insert(next.id, next);
         }
+        if target_state == TargetState::Active {
+            // 所选批次先在事务内恢复，再统一检查完整目标，避免批次中的归档目标被误判。
+            // 任一失败仍回滚整个事务，不让恢复绕过发布的词形/变体有效性规则。
+            let snapshots = LexiconRepository::current_publication_snapshots(
+                &mut transaction,
+                &restoring_entries,
+            )
+            .await
+            .map_err(repository_error)?;
+            for record in snapshots {
+                let word = serde_json::from_value::<AdminWordV3>(record.snapshot)
+                    .map_err(serialization_error)?;
+                let issues =
+                    super::inbound_references::outbound_publication_issues(&mut transaction, &word)
+                        .await?;
+                if !issues.is_empty() {
+                    return Err(v3_validation_failed(issues));
+                }
+            }
+        }
         let response = EntryLifecycleBatchResponse {
             words: targets
                 .iter()

@@ -13,7 +13,9 @@ use crate::lexicon::dto::{
 };
 use crate::lexicon::v3_contract::english_text_variants;
 
-fn variants(content: &DraftMeaningsStepContentV3) -> impl Iterator<Item = &RichTextVariantV3> {
+pub(super) fn variants(
+    content: &DraftMeaningsStepContentV3,
+) -> impl Iterator<Item = &RichTextVariantV3> {
     content
         .pos
         .iter()
@@ -108,7 +110,35 @@ pub(crate) fn valid_ranges(variant: &RichTextVariantV3) -> bool {
 }
 
 fn target_gloss(target: &ComponentTargetWord, link: &TextLinkV3) -> Option<String> {
+    if !text_target_matches(&target.forms, &target.meanings, link) {
+        return None;
+    }
     target_content_gloss(&target.forms, &target.meanings, link)
+}
+
+/// 正文人工关联保护完整节点身份，但不套用共享例句的词面等值规则。
+pub(super) fn text_target_matches(
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+    link: &TextLinkV3,
+) -> bool {
+    if target_content_gloss(forms, meanings, link).is_none() {
+        return false;
+    }
+    let Some(form) = forms
+        .pos
+        .iter()
+        .find(|pos| pos.pos_id == link.target_pos_id)
+        .and_then(|pos| pos.forms.iter().find(|form| form.id == link.target_form_id))
+    else {
+        return false;
+    };
+    match &form.regional_variants {
+        WordRegionalVariantsV3::Common { common } => common.id == link.target_variant_id,
+        WordRegionalVariantsV3::UkUs { uk, us } => {
+            uk.id == link.target_variant_id || us.id == link.target_variant_id
+        }
+    }
 }
 
 fn target_content_gloss(
@@ -151,7 +181,7 @@ fn target_content_gloss(
     )
 }
 
-fn component_matches(phrase: &ComponentTargetWord, link: &TextLinkV3) -> bool {
+pub(super) fn component_matches(phrase: &ComponentTargetWord, link: &TextLinkV3) -> bool {
     let Some(via) = &link.via_phrase else {
         return true;
     };
