@@ -256,7 +256,7 @@ impl LexiconService {
         {
             return Err(LexiconServiceError::EntryHasInboundPreboundRelations);
         }
-        let sentence_reference: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations WHERE target_entry_id=$1)")
+        let sentence_reference: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations WHERE target_entry_id=$1 UNION ALL SELECT 1 FROM lexicon.shared_sentence_publication_annotations WHERE target_entry_id=$1)")
             .bind(entry_id).fetch_one(&mut **transaction).await.map_err(database_error)?;
         if sentence_reference {
             return Err(LexiconServiceError::EntryNotDeletable);
@@ -579,7 +579,7 @@ impl LexiconService {
             }
             if target_state == TargetState::Archived {
                 // Shared sentences remain published even when their source word is in this batch.
-                let shared_reference: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a JOIN lexicon.shared_sentences s ON s.id=a.sentence_id WHERE a.target_entry_id=$1 AND s.deleted_at IS NULL)")
+                let shared_reference: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a JOIN lexicon.shared_sentences s ON s.id=a.sentence_id WHERE a.target_entry_id=$1 AND s.deleted_at IS NULL UNION ALL SELECT 1 FROM lexicon.shared_sentence_publication_annotations a JOIN lexicon.shared_sentences s ON s.current_publication_id=a.publication_id WHERE a.target_entry_id=$1 AND s.deleted_at IS NULL AND s.withdrawn_at IS NULL)")
                     .bind(current.id).fetch_one(&mut *transaction).await.map_err(database_error)?;
                 if shared_reference {
                     return Err(LexiconServiceError::EntryHasInboundSharedSentenceRefs);

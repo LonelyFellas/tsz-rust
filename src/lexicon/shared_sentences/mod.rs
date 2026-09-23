@@ -1,4 +1,8 @@
-//! Independently published sentences. Word drafts never write this content.
+//! Shared sentence drafts and independent immutable publications.
+pub(crate) mod publication;
+pub(crate) mod reading;
+pub(crate) mod visibility;
+
 use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,7 +21,7 @@ use crate::{
             WordDefinitionV3, WordSentenceWritableV3,
         },
         normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword},
-        sentence_target_discovery::tokenize,
+        text_tokenization::tokenize,
     },
     state::AppState,
 };
@@ -134,12 +138,6 @@ pub struct SentenceRevision {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct UnlinkSentenceSense {
-    pub base_revision: i64,
-    pub sense_id: Uuid,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct SentenceSenseSummary {
     pub id: Uuid,
     pub gloss: String,
@@ -159,6 +157,11 @@ pub struct SharedSentenceEntry {
 pub struct SharedSentence {
     pub id: Uuid,
     pub revision: i64,
+    pub lifecycle_revision: i64,
+    pub current_publication_id: Option<Uuid>,
+    pub withdrawn_at: Option<DateTime<Utc>>,
+    pub withdrawn_reason: Option<String>,
+    pub view: SentenceView,
     pub content: SharedSentenceContent,
     pub entries: Vec<SharedSentenceEntry>,
     pub created_by: String,
@@ -180,9 +183,28 @@ pub enum SentenceListSort {
     UpdatedAtDesc,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SentenceView {
+    Draft,
+    #[default]
+    Published,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct SentenceReadQuery {
+    #[serde(default)]
+    #[param(inline)]
+    pub view: SentenceView,
+}
+
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct SentenceListQuery {
+    #[serde(default)]
+    #[param(inline)]
+    pub view: SentenceView,
     /// Filter before pagination. Pending and unlinked may overlap.
     #[param(inline)]
     pub association_status: Option<SentenceAssociationStatus>,
@@ -378,7 +400,7 @@ async fn lock_targets(
         .collect();
     let required = ids.clone();
     if let Some(id) = sentence_id {
-        ids.extend(sqlx::query_scalar::<_,Uuid>("SELECT target_entry_id FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 AND target_entry_id IS NOT NULL").bind(id).fetch_all(&mut **tx).await.map_err(AppError::internal)?);
+        ids.extend(sqlx::query_scalar::<_,Uuid>("SELECT target_entry_id FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 AND target_entry_id IS NOT NULL UNION SELECT a.target_entry_id FROM lexicon.shared_sentence_publication_annotations a JOIN lexicon.shared_sentences s ON s.current_publication_id=a.publication_id WHERE s.id=$1 AND a.target_entry_id IS NOT NULL").bind(id).fetch_all(&mut **tx).await.map_err(AppError::internal)?);
     }
     ids.sort_unstable();
     ids.dedup();
@@ -486,51 +508,20 @@ async fn read_on(snapshot: &mut PgConnection, id: Uuid) -> Result<SharedSentence
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
-    let mut entries: Vec<SharedSentenceEntry> = sqlx::query("SELECT e.id,e.kind,COALESCE((SELECT label FROM lexicon.entry_presentation_projection p WHERE p.entry_id=e.id),'') AS headword FROM lexicon.entries e WHERE e.id IN (SELECT target_entry_id FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1) ORDER BY headword,e.id")
-        .bind(id).fetch_all(&mut *snapshot).await.map_err(AppError::internal)?.into_iter().map(|r| SharedSentenceEntry {id:r.get("id"),headword:r.get("headword"),kind:r.get("kind"),senses:vec![]}).collect();
-    let summaries=sqlx::query("SELECT DISTINCT a.target_entry_id,a.target_sense_id,COALESCE(pub.snapshot->'meanings',p.meanings) AS meanings FROM lexicon.shared_sentence_annotations a LEFT JOIN lexicon.entry_editor_projection p ON p.entry_id=a.target_entry_id LEFT JOIN lexicon.entry_publications pub ON pub.entry_id=a.target_entry_id AND pub.id=(a.target_ref->>'target_publication_id')::uuid WHERE a.sentence_id=$1 AND a.target_sense_id IS NOT NULL")
-        .bind(id).fetch_all(&mut *snapshot).await.map_err(AppError::internal)?;
-    for row in summaries {
-        let sense_id: Uuid = row.get("target_sense_id");
-        let meanings: Option<DraftMeaningsStepContentV3> = row
-            .get::<Option<serde_json::Value>, _>("meanings")
-            .and_then(|v| serde_json::from_value(v).ok());
-        let gloss = meanings
-            .as_ref()
-            .and_then(|m| {
-                m.pos
-                    .iter()
-                    .flat_map(|p| &p.senses)
-                    .find(|s| s.id == sense_id)
-            })
-            .and_then(|s| {
-                s.definitions.iter().find_map(|d| match d {
-                    WordDefinitionV3::ZhDefinition { content, .. }
-                    | WordDefinitionV3::ZhSentence { content, .. } => {
-                        Some(content.text().to_owned())
-                    }
-                    _ => None,
-                })
-            })
-            .unwrap_or_default();
-        if let Some(entry) = entries
-            .iter_mut()
-            .find(|e| e.id == row.get::<Uuid, _>("target_entry_id"))
-            && !entry.senses.iter().any(|s| s.id == sense_id)
-        {
-            entry.senses.push(SentenceSenseSummary {
-                id: sense_id,
-                gloss,
-            });
-        }
-    }
+    let content = SharedSentenceContent {
+        sentence: serde_json::from_value(row.get("content")).map_err(AppError::internal)?,
+        annotations,
+    };
+    let entries = reading::summaries(snapshot, &content).await?;
     Ok(SharedSentence {
         id,
         revision: row.get("revision"),
-        content: SharedSentenceContent {
-            sentence: serde_json::from_value(row.get("content")).map_err(AppError::internal)?,
-            annotations,
-        },
+        lifecycle_revision: row.get("lifecycle_revision"),
+        current_publication_id: row.get("current_publication_id"),
+        withdrawn_at: row.get("withdrawn_at"),
+        withdrawn_reason: row.get("withdrawn_reason"),
+        view: SentenceView::Draft,
+        content,
         entries,
         created_by: row.get("created_by"),
         created_at: row.get("created_at"),
@@ -545,6 +536,36 @@ async fn lock(conn: &mut PgConnection, id: Uuid, revision: i64) -> Result<(), Ap
     }
     Ok(())
 }
+async fn writable_sentence(
+    conn: &mut PgConnection,
+    id: Uuid,
+    admin: &Admin,
+    deleting: bool,
+) -> Result<(), AppError> {
+    let row = sqlx::query("SELECT created_by_admin_id,current_publication_id FROM lexicon.shared_sentences WHERE id=$1 AND deleted_at IS NULL FOR UPDATE")
+        .bind(id).fetch_optional(conn).await.map_err(AppError::internal)?.ok_or_else(missing)?;
+    let published = row
+        .get::<Option<Uuid>, _>("current_publication_id")
+        .is_some();
+    if (!published || deleting)
+        && !admin.is_super_admin()
+        && row.get::<Uuid, _>("created_by_admin_id") != admin.id
+    {
+        return Err(AppError::forbidden(
+            ErrorCode::Forbidden,
+            "无权修改他人的未发布例句",
+        ));
+    }
+    if deleting && published {
+        return Err(AppError::conflict(
+            ErrorCode::ReferenceConflict,
+            None,
+            "已有发布历史的例句不能删除，请使用全局下架",
+        ));
+    }
+    Ok(())
+}
+
 async fn bump(conn: &mut PgConnection, id: Uuid) -> Result<(), AppError> {
     sqlx::query(
         "UPDATE lexicon.shared_sentences SET revision=revision+1,updated_at=now() WHERE id=$1",
@@ -578,6 +599,9 @@ pub async fn list(
             "分页或查询参数无效",
         ));
     }
+    if q.view == SentenceView::Published {
+        return Ok(Json(reading::published_list(&state.pool, &q).await?));
+    }
     let mut snapshot = state.pool.begin().await.map_err(AppError::internal)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *snapshot)
@@ -610,7 +634,7 @@ pub async fn list(
         AND ($1::text IS NULL OR s.id::text ILIKE '%'||$1||'%' OR s.content::text ILIKE '%'||$1||'%' OR creator.display_name ILIKE '%'||$1||'%')
         AND ($2::text IS NULL OR s.content->>'level'=$2)
         AND ($3::timestamptz IS NULL OR s.created_at >= $3) AND ($4::timestamptz IS NULL OR s.created_at <= $4)
-        AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.target_entry_id=$5 AND a.target_sense_id IS NOT NULL AND ($6::uuid IS NULL OR a.target_sense_id=$6)))
+        AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.target_entry_id=$5 AND a.target_sense_id IS NOT NULL AND ($6::uuid IS NULL OR a.target_sense_id=$6) AND NOT EXISTS(SELECT 1 FROM lexicon.shared_sentence_draft_hides h WHERE h.entry_id=a.target_entry_id AND h.sense_id=a.target_sense_id AND h.sentence_id=s.id)))
         AND ($7::text IS NULL
           OR ($7='pending' AND EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.pending_kind IS NOT NULL))
           OR ($7='entry_only' AND EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a WHERE a.sentence_id=s.id AND a.target_entry_id IS NOT NULL AND a.target_sense_id IS NULL))
@@ -662,14 +686,23 @@ pub async fn list(
     Ok(Json(SharedSentenceList { items, total }))
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceReadQuery),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
 pub async fn get(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
+    ApiQuery(q): ApiQuery<SentenceReadQuery>,
 ) -> Result<Json<SharedSentence>, AppError> {
     require_active_admin(&state, &auth).await?;
-    Ok(Json(read(&state.pool, id).await?))
+    let mut snapshot = state.pool.begin().await.map_err(AppError::internal)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *snapshot)
+        .await
+        .map_err(AppError::internal)?;
+    Ok(Json(match q.view {
+        SentenceView::Draft => read_on(&mut snapshot, id).await?,
+        SentenceView::Published => reading::published_on(&mut snapshot, id).await?,
+    }))
 }
 
 #[utoipa::path(post,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),request_body=CreateSharedSentence,responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
@@ -764,6 +797,7 @@ pub async fn update(
     )
     .await?;
     lock(&mut tx, id, input.base_revision).await?;
+    writable_sentence(&mut tx, id, &admin, false).await?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
         .bind(id)
         .execute(&mut *tx)
@@ -788,9 +822,11 @@ pub async fn delete(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<SentenceRevision>,
 ) -> Result<StatusCode, AppError> {
-    require_active_admin(&state, &auth).await?;
+    let admin = require_active_admin(&state, &auth).await?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    lock_targets(&mut tx, None, None, Some(id)).await?;
     lock(&mut tx, id, input.base_revision).await?;
+    writable_sentence(&mut tx, id, &admin, true).await?;
     sqlx::query("UPDATE lexicon.shared_sentences SET deleted_at=now(),updated_at=now(),revision=revision+1 WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
         .bind(id)
@@ -802,25 +838,6 @@ pub async fn delete(
         .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    tx.commit().await.map_err(AppError::internal)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-#[utoipa::path(delete,path="/api/v1/admin/lexicon/sentences/{id}/associations/{entry_id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("entry_id"=Uuid,Path)),request_body=UnlinkSentenceSense,responses((status=204,description="解除当前词义全部关联"),(status=400,description="输入无效"),(status=401,description="未登录"),(status=403,description="无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本冲突"),(status=422,description="请求结构无效")))]
-pub async fn unlink(
-    State(state): State<AppState>,
-    auth: AdminAuth,
-    ApiPath((id, entry_id)): ApiPath<(Uuid, Uuid)>,
-    ApiJson(input): ApiJson<UnlinkSentenceSense>,
-) -> Result<StatusCode, AppError> {
-    let admin = require_active_admin(&state, &auth).await?;
-    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    lock_targets(&mut tx, None, Some(entry_id), Some(id)).await?;
-    writable_entry(&mut tx, entry_id, &admin).await?;
-    lock(&mut tx, id, input.base_revision).await?;
-    sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 AND target_entry_id=$2 AND target_sense_id=$3")
-        .bind(id).bind(entry_id).bind(input.sense_id).execute(&mut *tx).await.map_err(AppError::internal)?;
-    bump(&mut tx, id).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(StatusCode::NO_CONTENT)
 }

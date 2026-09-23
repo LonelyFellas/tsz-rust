@@ -84,6 +84,21 @@ async fn call(
         .admin_token_manager
         .generate(actor, AdminRole::Admin.as_str())
         .unwrap();
+    // Existing editing cases inspect the explicit draft view. Publication cases opt in below.
+    let path = if method == Method::GET
+        && path.starts_with(ROOT)
+        && !path.contains("/targets")
+        && !path.contains("/publications")
+        && !path.contains("/withdrawal-impact")
+        && !path.contains("view=")
+    {
+        format!(
+            "{path}{}view=draft",
+            if path.contains('?') { '&' } else { '?' }
+        )
+    } else {
+        path.to_owned()
+    };
     let mut req = Request::builder()
         .method(method)
         .uri(path)
@@ -110,6 +125,37 @@ async fn call(
         },
     )
 }
+async fn remove_sentence_annotation(
+    state: &AppState,
+    actor: Uuid,
+    id: &str,
+    target: Uuid,
+    base_revision: i64,
+) -> (StatusCode, Value) {
+    let (status, draft) = call(
+        state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}/{id}?view=draft"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    let mut content = draft["content"].clone();
+    content["annotations"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|a| a["target"]["target_sense_id"] != json!(sense_id(target)));
+    call(
+        state,
+        actor,
+        Method::PUT,
+        &format!("{ROOT}/{id}"),
+        Some(json!({"base_revision":base_revision,"content":content})),
+    )
+    .await
+}
+
 fn content(target: Uuid) -> Value {
     let translation = Uuid::now_v7();
     json!({"sentence":{"id":Uuid::now_v7(),"level":"B1","en_text":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":{"version":2,"text":"A wonderful flower.","annotations":[]}}},"zh_text_id":translation,"zh_text":{"version":2,"text":"一朵美丽的花。","annotations":[]},"zh_translations":[{"id":translation,"band":"balanced_fluency","language":"zh","content":{"version":2,"text":"一朵美丽的花。","annotations":[]}}],"links":[]},"annotations":[{"id":Uuid::now_v7(),"source_dialect":"common","source_segments":[{"start":2,"end":11,"surface":"wonderful"}],"target":target_ref(target)},{"id":Uuid::now_v7(),"source_dialect":"common","source_segments":[{"start":12,"end":18,"surface":"flower"}],"target":{"state":"pending","kind":"word","headword":"flower","gloss":"花"}}]})
@@ -212,24 +258,10 @@ async fn annotations_define_membership_and_unlink_preserves_shared_content(pool:
     )
     .await;
     assert_eq!(view["items"][0]["content"]["sentence"]["level"], "C1");
-    let (status, _) = call(
-        &state,
-        actor,
-        Method::DELETE,
-        &format!("{ROOT}/{id}/associations/{source}"),
-        Some(json!({"base_revision":1,"sense_id":sense_id(source)})),
-    )
-    .await;
+    let (status, _) = remove_sentence_annotation(&state, actor, id, source, 1).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    let (status, _) = call(
-        &state,
-        actor,
-        Method::DELETE,
-        &format!("{ROOT}/{id}/associations/{source}"),
-        Some(json!({"base_revision":2,"sense_id":sense_id(source)})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = remove_sentence_annotation(&state, actor, id, source, 2).await;
+    assert_eq!(status, StatusCode::OK);
     let (_, replay) = call(&state, actor, Method::POST, ROOT, Some(input.clone())).await;
     assert_eq!(replay["revision"], 3);
     assert_eq!(
@@ -455,6 +487,12 @@ async fn origin_deletion_does_not_lock_or_remove_independently_published_sentenc
 #[sqlx::test]
 async fn shared_schema_can_be_reverted_and_reapplied_in_isolation(pool: PgPool) {
     sqlx::raw_sql(include_str!(
+        "../migrations/20260923030000_shared_sentence_publications.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20260912230000_shared_sentence_senses.down.sql"
     ))
     .execute(&pool)
@@ -486,6 +524,18 @@ async fn shared_schema_can_be_reverted_and_reapplied_in_isolation(pool: PgPool) 
     .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20260912230000_shared_sentence_senses.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260913120000_shared_sentence_targets.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260923030000_shared_sentence_publications.up.sql"
     ))
     .execute(&pool)
     .await
@@ -661,15 +711,8 @@ async fn shared_references_block_single_and_batch_archive_until_explicitly_unlin
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{updated}");
-    let (status, _) = call(
-        &state,
-        owner,
-        Method::DELETE,
-        &format!("{ROOT}/{sentence_id}/associations/{target}"),
-        Some(json!({"base_revision":2,"sense_id":sense_id(target)})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = remove_sentence_annotation(&state, owner, sentence_id, target, 2).await;
+    assert_eq!(status, StatusCode::OK);
     let (status, archived) = call(
         &state,
         owner,
@@ -931,15 +974,8 @@ async fn repeated_links_count_once_and_all_are_removed_by_explicit_unlink(pool: 
     .await;
     assert_eq!(list["total"], 1);
     assert_eq!(list["items"].as_array().unwrap().len(), 1);
-    let (status, _) = call(
-        &state,
-        actor,
-        Method::DELETE,
-        &format!("{ROOT}/{id}/associations/{source}"),
-        Some(json!({"base_revision":1,"sense_id":sense_id(source)})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = remove_sentence_annotation(&state, actor, id, source, 1).await;
+    assert_eq!(status, StatusCode::OK);
     let (_, remaining) = call(&state, actor, Method::GET, &format!("{ROOT}/{id}"), None).await;
     assert_eq!(remaining["content"]["annotations"], json!([]));
     assert_eq!(
@@ -1058,7 +1094,7 @@ async fn global_editor_can_repair_archived_legacy_targets(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn shared_read_and_global_edit_do_not_require_ownership_of_linked_drafts(pool: PgPool) {
+async fn shared_draft_reads_do_not_grant_editing_ownership(pool: PgPool) {
     let owner = admin(&pool).await;
     let other = admin(&pool).await;
     let source = entry(&pool, owner, "wonderful").await;
@@ -1099,9 +1135,16 @@ async fn shared_read_and_global_edit_do_not_require_ownership_of_linked_drafts(p
     .await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "active admins can edit the independently shared entity: {updated}"
+        StatusCode::FORBIDDEN,
+        "reading a shared draft does not grant editing ownership: {updated}"
     );
+    let revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM lexicon.shared_sentences WHERE id=$1")
+            .bind(Uuid::parse_str(id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(revision, 1);
     let (status, _) = call(
         &state,
         other,
@@ -1182,15 +1225,8 @@ async fn sense_membership_is_precise_and_unlink_preserves_other_senses(pool: PgP
         assert_eq!(list["total"], 1);
         assert_eq!(list["items"][0]["id"], id);
     }
-    let (status, _) = call(
-        &state,
-        actor,
-        Method::DELETE,
-        &format!("{ROOT}/{id}/associations/{source}"),
-        Some(json!({"base_revision":1,"sense_id":sense_id(source)})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = remove_sentence_annotation(&state, actor, id, source, 1).await;
+    assert_eq!(status, StatusCode::OK);
     let (_, first) = call(
         &state,
         actor,
@@ -1366,15 +1402,8 @@ async fn referenced_sense_draft_can_be_removed_and_stale_annotation_can_be_unlin
         .await
         .unwrap();
     assert_eq!(revision, 2);
-    let (status, _) = call(
-        &state,
-        actor,
-        Method::DELETE,
-        &format!("{ROOT}/{id}/associations/{source}"),
-        Some(json!({"base_revision":1,"sense_id":sense_id(source)})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = remove_sentence_annotation(&state, actor, id, source, 1).await;
+    assert_eq!(status, StatusCode::OK);
     let mut input = input;
     input["base_revision"] = json!(2);
     let (status, result) = call(&state, actor, Method::PUT, &path, Some(input)).await;
@@ -1519,15 +1548,8 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
     )
     .await;
     assert_eq!(current["word"]["revision"], 2);
-    let (status, _) = call(
-        &state,
-        actor,
-        Method::DELETE,
-        &format!("{ROOT}/{id}/associations/{source}"),
-        Some(json!({"base_revision":1,"sense_id":sense_id(source)})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = remove_sentence_annotation(&state, actor, id, source, 1).await;
+    assert_eq!(status, StatusCode::OK);
     let (status,removed)=call(&state,actor,Method::PUT,&format!("/api/v1/admin/lexicon/entries/{source}/steps/meanings"),Some(json!({"schema_version":3,"base_revision":2,"intent":"save","content":snapshot["meanings"]}))).await;
     assert_eq!(status, StatusCode::OK, "{removed}");
     // The old valid snapshot still contains the sense, but it no longer exists in saved draft.
@@ -1893,7 +1915,7 @@ async fn inbound_references_list_sentence_targets_with_stale_first(pool: PgPool)
     let stale = &items[0];
     assert_eq!(
         stale["id"],
-        json!(format!("shared_sentence:{stale_annotation}"))
+        json!(format!("shared_sentence:draft:{stale_annotation}"))
     );
     assert_eq!(stale["kind"], "shared_sentence");
     assert_eq!(stale["stale"], true, "{stale}");
@@ -1902,7 +1924,7 @@ async fn inbound_references_list_sentence_targets_with_stale_first(pool: PgPool)
     let fresh = &items[1];
     assert_eq!(
         fresh["id"],
-        json!(format!("shared_sentence:{fresh_annotation}"))
+        json!(format!("shared_sentence:draft:{fresh_annotation}"))
     );
     assert_eq!(fresh["stale"], false, "{fresh}");
     assert_eq!(

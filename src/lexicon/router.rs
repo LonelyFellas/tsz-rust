@@ -19,8 +19,33 @@ pub fn router() -> Router<AppState> {
         )
         .route("/sentences/targets", get(super::shared_sentences::targets))
         .route(
-            "/sentences/{id}/associations/{entry_id}",
-            axum::routing::delete(super::shared_sentences::unlink),
+            "/sentences/{id}/publications",
+            get(super::shared_sentences::reading::history)
+                .post(super::shared_sentences::publication::publish),
+        )
+        .route(
+            "/sentences/{id}/publications/{publication_id}",
+            get(super::shared_sentences::reading::historical),
+        )
+        .route(
+            "/sentences/{id}/publications/{publication_id}/rollback",
+            axum::routing::post(super::shared_sentences::publication::rollback),
+        )
+        .route(
+            "/sentences/{id}/withdrawal-impact",
+            get(super::shared_sentences::publication::impact),
+        )
+        .route(
+            "/sentences/{id}/withdraw",
+            axum::routing::post(super::shared_sentences::publication::withdraw),
+        )
+        .route(
+            "/sentences/{id}/restore",
+            axum::routing::post(super::shared_sentences::publication::restore),
+        )
+        .route(
+            "/entries/{entry_id}/sentences/{sentence_id}/visibility",
+            axum::routing::put(super::shared_sentences::visibility::set_visibility),
         )
         .route("/detections", axum::routing::post(handler::detect))
         .route(
@@ -95,10 +120,6 @@ pub fn router() -> Router<AppState> {
             "/entries/{id}/steps/meanings",
             axum::routing::put(handler::save_meanings)
                 .layer(DefaultBodyLimit::max(MAX_STEP_CONTENT_BODY_BYTES)),
-        )
-        .route(
-            "/entries/sentence-targets/resolve",
-            axum::routing::post(handler::resolve_sentence_targets),
         )
         .route(
             "/entries/component-targets/search",

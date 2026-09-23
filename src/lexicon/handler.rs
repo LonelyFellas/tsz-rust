@@ -22,7 +22,6 @@ use crate::{
             EntryLifecycleBatchResponse, EntryLifecycleInput, EntryPath, FormsImpactResponseV3,
             InboundReferencesV3, PreviewFormsImpactInputV3, PublicationPath,
             PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
-            ResolveSentenceTargetsV3Input, ResolveSentenceTargetsV3Response,
             RollbackPublicationV3Input, SaveFormsStepInputV3, SaveMeaningsStepInputV3,
             SearchComponentTargetsV3Input, SearchComponentTargetsV3Response, StepSaveIntent,
             SurfaceMatchPageV3, SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2,
@@ -50,7 +49,7 @@ pub use commands::{
 pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
 pub use query::{
     get, get_publication, inbound_references, list, list_publications, related_search,
-    resolve_sentence_targets, search_component_targets, stats, surface_match_snapshot_page,
+    search_component_targets, stats, surface_match_snapshot_page,
 };
 
 fn service(state: &AppState) -> LexiconService {
@@ -97,7 +96,7 @@ fn sentence_association_enabled(flags: SmartLexiconV3Flags) -> bool {
     flags.read && flags.edit && flags.projection && flags.sentence_associations
 }
 
-fn sentence_target_discovery_enabled(flags: SmartLexiconV3Flags) -> bool {
+fn component_target_search_enabled(flags: SmartLexiconV3Flags) -> bool {
     sentence_association_enabled(flags) && flags.sentence_target_discovery
 }
 
@@ -106,7 +105,6 @@ fn sentence_target_discovery_enabled(flags: SmartLexiconV3Flags) -> bool {
 /// 能力位判断，省得前后端必须同批部署。
 fn apply_capability_flags(capabilities: &mut AdminWordV3Capabilities, flags: SmartLexiconV3Flags) {
     capabilities.sentence_associations = Some(sentence_association_enabled(flags));
-    capabilities.sentence_target_discovery = Some(sentence_target_discovery_enabled(flags));
     capabilities.draft_relation_prebinding = Some(false);
     capabilities.sense_component_usages = Some(true);
 }
@@ -286,6 +284,9 @@ pub(crate) fn map_error(error: LexiconServiceError) -> AppError {
         ),
         LexiconServiceError::BatchPublicationFailed { entry_id, source } => {
             map_error(*source).with_word_id(entry_id)
+        }
+        LexiconServiceError::SentencePublicationFailed { sentence_id, error } => {
+            error.with_sentence_id(sentence_id)
         }
         LexiconServiceError::EntryPublishForbidden => AppError::forbidden(
             ErrorCode::Forbidden,

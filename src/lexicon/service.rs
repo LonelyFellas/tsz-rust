@@ -20,7 +20,6 @@ use crate::lexicon::{
         RelatedSearchLegacyResponse, RelatedSearchMatchMode, RelatedSearchQuery,
         RelatedSearchResponse, RelatedSearchV2Response, RelatedWordMatchV3, RelatedWordResultV3,
         RelatedWordSenseV3, RelationReferencePreviewV2, RelationTypeV2,
-        ResolveSentenceTargetsV3Input, ResolveSentenceTargetsV3Response,
         SentenceAssociationOriginV2, SentenceAssociationStateV1, SentenceAssociationsStateV2,
         SentenceSourceRangeV1, SourceDialect, StepSaveIntent, SurfaceConfirmationReasonV2,
         SurfaceMatchPageV3, SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, WordCreationStep,
@@ -65,7 +64,7 @@ mod sentence_association;
 mod sentence_target_discovery;
 pub(crate) mod text_links;
 mod v3;
-mod v3_publication;
+pub(crate) mod v3_publication;
 mod v3_surface;
 
 use editing::*;
@@ -133,6 +132,11 @@ pub enum LexiconServiceError {
     BatchPublicationFailed {
         entry_id: Uuid,
         source: Box<LexiconServiceError>,
+    },
+    #[error("shared sentence publication failed for {sentence_id}")]
+    SentencePublicationFailed {
+        sentence_id: Uuid,
+        error: Box<crate::error::AppError>,
     },
     #[error("entry annotation can only be edited by its creator")]
     EntryAnnotationForbidden,

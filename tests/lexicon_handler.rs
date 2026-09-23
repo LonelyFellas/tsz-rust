@@ -22,6 +22,9 @@ use tsz_rust::{
     state::AppState,
 };
 
+#[path = "lexicon_handler/batch4.rs"]
+mod batch4;
+
 const ROOT: &str = "/api/v1/admin/lexicon";
 fn test_redis_url() -> String {
     std::env::var("TEST_REDIS_URL")
@@ -2959,88 +2962,6 @@ async fn related_search_exposes_only_new_draft_senses_of_published_entries(pool:
     assert_eq!(draft_result["senses"][0]["sense_id"], new_sense_id);
     assert_eq!(draft_result["senses"][0]["gloss"], "新增未发布词义");
 
-    // 句中发现也按具体节点区分发布/草稿，两个范围共享页容量而不是无界补充草稿。
-    for include_drafts in [false, true] {
-        let mut input = json!({"schema_version":3,"sentence_text":"The harbour is calm.","source_dialect":"common",
-            "mode":"selected_segments","selected_segments":[{"start":4,"end":11,"surface":"harbour"}],
-            "include_drafts":include_drafts,"page_size_per_range":1});
-        let mut seen = HashSet::new();
-        let mut saw_draft = false;
-        let mut finished = false;
-        for page in 0..20 {
-            let (status, response) = call(
-                &state,
-                Method::POST,
-                &format!("{ROOT}/entries/sentence-targets/resolve"),
-                &bearer,
-                None,
-                Some(input.clone()),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{response}");
-            let range = &response["range_results"][0];
-            let pubs = range["published_matches"].as_array().unwrap();
-            let drafts = range["draft_matches"].as_array().unwrap();
-            assert!(pubs.len() + drafts.len() <= 1, "{range}");
-            assert_eq!(range["draft_total"].as_u64().unwrap() > 0, include_drafts);
-            for (is_draft, items) in [(false, pubs), (true, drafts)] {
-                for candidate in items {
-                    saw_draft |= is_draft;
-                    assert_eq!(candidate.get("publication_id").is_none(), is_draft);
-                    assert!(candidate["senses"].as_array().unwrap().iter().any(
-                        |sense| &sense["sense_id"]
-                            == if is_draft {
-                                &new_sense_id
-                            } else {
-                                &old_sense_id
-                            }
-                    ));
-                    if is_draft {
-                        assert!(
-                            candidate["senses"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .all(|sense| sense["sense_id"] != old_sense_id)
-                        );
-                    }
-                    assert!(
-                        seen.insert(format!(
-                            "{}:{}:{}:{}:{is_draft}",
-                            candidate["entry_id"],
-                            candidate["pos_id"],
-                            candidate["base_form_id"],
-                            candidate["matched_variant_id"]
-                        )),
-                        "重复节点：{range}"
-                    );
-                }
-            }
-            let Some(cursor) = range["next_cursor"].as_str() else {
-                finished = true;
-                break;
-            };
-            input["cursor"] = json!(cursor);
-            if include_drafts && page == 0 {
-                let mut changed_scope = input.clone();
-                changed_scope["include_drafts"] = json!(false);
-                let (status, rejected) = call(
-                    &state,
-                    Method::POST,
-                    &format!("{ROOT}/entries/sentence-targets/resolve"),
-                    &bearer,
-                    None,
-                    Some(changed_scope),
-                )
-                .await;
-                assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
-                assert_eq!(rejected["field"], "cursor");
-            }
-        }
-        assert!(finished);
-        assert_eq!(saw_draft, include_drafts);
-    }
-
     for include_drafts in [false, true] {
         let (status, candidates) = search_component_targets(
             &state,
@@ -3173,26 +3094,21 @@ async fn relation_and_discovery_drafts_are_visible_without_granting_edit_rights(
     // 句中候选也覆盖其他管理员草稿，但返回可验证的具体词形/词义身份。
     let discovery_body = json!({
         "schema_version": 3,
-        "sentence_text": "The harbour is calm.",
-        "source_dialect": "common",
-        "mode": "selected_segments",
-        "selected_segments": [{ "start": 4, "end": 11, "surface": "harbour" }],
+        "q": "harbour", "match": "exact",
         "include_drafts": true,
-        "page_size_per_range": 20
+        "page_size": 20
     });
     let (status, outsider_discovery) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &format!("{ROOT}/entries/component-targets/search"),
         &outsider,
         None,
         Some(discovery_body.clone()),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{outsider_discovery}");
-    let draft_matches = outsider_discovery["range_results"][0]["draft_matches"]
-        .as_array()
-        .unwrap();
+    let draft_matches = outsider_discovery["matches"].as_array().unwrap();
     assert!(!draft_matches.is_empty(), "{outsider_discovery}");
     assert!(
         draft_matches
@@ -3227,16 +3143,14 @@ async fn relation_and_discovery_drafts_are_visible_without_granting_edit_rights(
     let (status, owner_discovery) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &format!("{ROOT}/entries/component-targets/search"),
         &owner,
         None,
         Some(discovery_body),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{owner_discovery}");
-    let owner_matches = owner_discovery["range_results"][0]["draft_matches"]
-        .as_array()
-        .unwrap();
+    let owner_matches = owner_discovery["matches"].as_array().unwrap();
     assert!(
         owner_matches
             .iter()
@@ -6196,24 +6110,21 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     let (status, discovered) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &format!("{ROOT}/entries/component-targets/search"),
         &bearer,
         None,
         Some(json!({
             "schema_version": 3,
-            "sentence_text": "A native phrase appears.",
-            "source_dialect": "common",
-            "mode": "all_published_targets",
-            "page_size_per_range": 20
+            "q": "native phrase", "match": "exact",
+            "page_size": 20
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{discovered}");
-    let phrase_candidate = discovered["range_results"]
+    let phrase_candidate = discovered["matches"]
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|range| range["published_matches"].as_array().unwrap())
         .find(|candidate| candidate["entry_id"] == entry_id)
         .expect("discovery must return the published phrase");
     assert_eq!(phrase_candidate["kind"], "phrase");
@@ -6436,21 +6347,18 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
     let (status, resolved) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &format!("{ROOT}/entries/component-targets/search"),
         &bearer,
         None,
         Some(json!({
             "schema_version": 3,
-            "sentence_text": "guard phrase",
-            "source_dialect": "common",
-            "mode": "selected_segments",
-            "selected_segments": [{"start": 0, "end": 12, "surface": "guard phrase"}],
+            "q": "guard phrase", "match": "exact",
             "include_drafts": false
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{resolved}");
-    let phrase_candidate = resolved["range_results"][0]["published_matches"]
+    let phrase_candidate = resolved["matches"]
         .as_array()
         .unwrap()
         .iter()
@@ -6477,21 +6385,18 @@ async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(poo
     let (status, word_resolved) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &format!("{ROOT}/entries/component-targets/search"),
         &bearer,
         None,
         Some(json!({
             "schema_version": 3,
-            "sentence_text": "harbour",
-            "source_dialect": "common",
-            "mode": "selected_segments",
-            "selected_segments": [{"start": 0, "end": 7, "surface": "harbour"}],
+            "q": "harbour", "match": "exact",
             "include_drafts": false
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{word_resolved}");
-    let word_candidate = word_resolved["range_results"][0]["published_matches"]
+    let word_candidate = word_resolved["matches"]
         .as_array()
         .unwrap()
         .iter()
@@ -6788,21 +6693,18 @@ async fn v3_candidate_forms_carry_group_bases_for_cross_group_component_picks(po
     let (status, resolved) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &format!("{ROOT}/entries/component-targets/search"),
         &bearer,
         None,
         Some(json!({
             "schema_version": 3,
-            "sentence_text": "harbour",
-            "source_dialect": "common",
-            "mode": "selected_segments",
-            "selected_segments": [{"start": 0, "end": 7, "surface": "harbour"}],
+            "q": "harbour", "match": "exact",
             "include_drafts": false
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{resolved}");
-    let candidate = resolved["range_results"][0]["published_matches"]
+    let candidate = resolved["matches"]
         .as_array()
         .unwrap()
         .iter()
@@ -7129,24 +7031,21 @@ async fn v3_sense_phrase_components_persist_publish_and_survive_forms_resave(poo
     let (status, discovered) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &format!("{ROOT}/entries/component-targets/search"),
         &bearer,
         None,
         Some(json!({
             "schema_version": 3,
-            "sentence_text": "A native phrase appears.",
-            "source_dialect": "common",
-            "mode": "all_published_targets",
-            "page_size_per_range": 20
+            "q": "native phrase", "match": "exact",
+            "page_size": 20
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{discovered}");
-    let phrase_candidate = discovered["range_results"]
+    let phrase_candidate = discovered["matches"]
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|range| range["published_matches"].as_array().unwrap())
         .find(|candidate| candidate["entry_id"] == entry_id)
         .expect("discovery must return the published phrase");
     assert_eq!(
@@ -7803,24 +7702,21 @@ async fn v3_sense_phrase_components_are_bound_per_sense_not_shared(pool: PgPool)
     let (status, discovered) = call(
         &state,
         Method::POST,
-        &format!("{ROOT}/entries/sentence-targets/resolve"),
+        &format!("{ROOT}/entries/component-targets/search"),
         &bearer,
         None,
         Some(json!({
             "schema_version": 3,
-            "sentence_text": "A split phrase appears.",
-            "source_dialect": "common",
-            "mode": "all_published_targets",
-            "page_size_per_range": 20
+            "q": "split phrase", "match": "exact",
+            "page_size": 20
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{discovered}");
-    let phrase_candidate = discovered["range_results"]
+    let phrase_candidate = discovered["matches"]
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|range| range["published_matches"].as_array().unwrap())
         .find(|candidate| candidate["entry_id"] == entry_id)
         .expect("discovery must return the published phrase");
     let senses = phrase_candidate["senses"].as_array().unwrap();
@@ -11443,34 +11339,10 @@ async fn surface_writes_rebuild_missing_discovery_generation(pool: PgPool) {
         .await
         .unwrap();
     let search_body = json!({"schema_version": 3, "q": "time", "page_size": 50});
-    let resolve_body = json!({
-        "schema_version": 3,
-        "sentence_text": "For the time being we time out.",
-        "source_dialect": "common",
-        "mode": "all_published_targets",
-        "page_size_per_range": 20
-    });
-    let resolve_path = format!("{ROOT}/entries/sentence-targets/resolve");
-
     sqlx::query("DELETE FROM lexicon.sentence_discovery_generation")
         .execute(&pool)
         .await
         .unwrap();
-    let (status, failed) = call(
-        &state,
-        Method::POST,
-        &resolve_path,
-        &bearer,
-        None,
-        Some(resolve_body.clone()),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "句中发现响应仍需代数元数据，缺失时不能伪造：{failed}"
-    );
-
     // 保存草稿写 draft 词面即补回；水位取新时间戳，不回到 1 复用旧游标版本。
     let (_, forms_saved) =
         save_v3_forms_after_impact(&state, &bearer, &draft_id, 1, "complete", forms).await;
@@ -11488,18 +11360,6 @@ async fn surface_writes_rebuild_missing_discovery_generation(pool: PgPool) {
         component_match_entry_ids(&found).contains(&published_id),
         "{found}"
     );
-    let (status, resolved) = call(
-        &state,
-        Method::POST,
-        &resolve_path,
-        &bearer,
-        None,
-        Some(resolve_body.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{resolved}");
-    assert_eq!(resolved["discovery_generation"], saved_generation);
-    assert!(resolved.to_string().contains(&published_id), "{resolved}");
 
     let (status, meanings_saved) = call(
         &state,
@@ -11542,18 +11402,6 @@ async fn surface_writes_rebuild_missing_discovery_generation(pool: PgPool) {
         found_ids.contains(&published_id) && found_ids.contains(&draft_id),
         "{found}"
     );
-    let (status, resolved) = call(
-        &state,
-        Method::POST,
-        &resolve_path,
-        &bearer,
-        None,
-        Some(resolve_body),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{resolved}");
-    assert_eq!(resolved["discovery_generation"], published_generation);
-    assert!(resolved.to_string().contains(&draft_id), "{resolved}");
 }
 
 #[sqlx::test]
@@ -11809,7 +11657,7 @@ async fn component_target_search_matches_published_surfaces_and_hides_drafts_and
 }
 
 #[sqlx::test]
-async fn component_target_search_shares_the_discovery_capability_gate_with_resolve(pool: PgPool) {
+async fn component_target_search_keeps_its_gate_and_discovery_route_is_removed(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -11844,11 +11692,7 @@ async fn component_target_search_shares_the_discovery_capability_gate_with_resol
         })),
     )
     .await;
-    assert_eq!(
-        (status, &resolve_gated["code"]),
-        (StatusCode::SERVICE_UNAVAILABLE, &gated["code"]),
-        "能力门关闭时两条端点必须给同一种拒绝：{resolve_gated}"
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND, "{resolve_gated}");
 }
 
 #[sqlx::test]
@@ -11920,93 +11764,6 @@ async fn component_target_search_deduplicates_more_than_2000_surfaces_without_tr
             .any(|candidate| candidate["entry_id"] == json!(entry_id)),
         "触顶不该把命中的词条整个丢掉：{capped}"
     );
-}
-
-#[sqlx::test]
-async fn sentence_target_cursor_survives_generation_changes_and_earlier_entry_removal(
-    pool: PgPool,
-) {
-    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
-    let state = AppState::for_test_with_redis(pool.clone(), redis)
-        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let admin_id = seed_admin(&pool).await;
-    let bearer = token(&state, admin_id);
-    for _ in 0..2 {
-        let draft = create_ready_v3_annotated_draft_with_sentences(
-            &state,
-            &pool,
-            &bearer,
-            &["The harbour is calm."],
-        )
-        .await;
-        let (status, published) = publish_ready_v3(&state, &bearer, &draft).await;
-        assert_eq!(status, StatusCode::CREATED, "{published}");
-    }
-    let path = format!("{ROOT}/entries/sentence-targets/resolve");
-    let automatic = json!({"schema_version":3, "sentence_text":"harbour", "source_dialect":"common",
-        "mode":"all_published_targets", "page_size_per_range":1});
-    let (status, first) = call(&state, Method::POST, &path, &bearer, None, Some(automatic)).await;
-    assert_eq!(status, StatusCode::OK, "{first}");
-    let range = &first["range_results"][0];
-    let cursor = range["next_cursor"]
-        .as_str()
-        .expect("multiple candidates need pagination");
-    let first_entry = range["published_matches"][0]["entry_id"].as_str().unwrap();
-    let selected = json!({"schema_version":3, "sentence_text":"harbour", "source_dialect":"common",
-        "mode":"selected_segments", "selected_segments":[{"start":0,"end":7,"surface":"harbour"}],
-        "include_drafts":false, "page_size_per_range":100, "cursor":cursor});
-    let (status, before) = call(
-        &state,
-        Method::POST,
-        &path,
-        &bearer,
-        None,
-        Some(selected.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{before}");
-    let expected = before["range_results"][0]["published_matches"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|candidate| candidate["entry_id"].as_str() != Some(first_entry))
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(!expected.is_empty());
-    sqlx::query("UPDATE lexicon.entries SET archived_at = now() WHERE id = $1")
-        .bind(Uuid::parse_str(first_entry).unwrap())
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE lexicon.sentence_discovery_generation SET generation = generation + 1 WHERE singleton = TRUE")
-        .execute(&pool).await.unwrap();
-    let (status, continued) = call(
-        &state,
-        Method::POST,
-        &path,
-        &bearer,
-        None,
-        Some(selected.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{continued}");
-    assert_eq!(
-        continued["range_results"][0]["published_matches"],
-        json!(expected)
-    );
-    assert!(continued["range_results"][0].get("next_cursor").is_none());
-    for (field, value) in [
-        ("source_dialect", json!("uk")),
-        ("cursor", json!("invalid")),
-        ("sentence_text", json!("harbour elsewhere")),
-    ] {
-        let mut changed = selected.clone();
-        changed[field] = value;
-        let (status, rejected) =
-            call(&state, Method::POST, &path, &bearer, None, Some(changed)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
-        assert_eq!(rejected["field"], "cursor");
-    }
 }
 
 #[sqlx::test]
@@ -15896,7 +15653,7 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replayed, response);
     assert_eq!(current_publication_id(&pool, id).await, current);
-    let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, 20260922151000)
+    let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, 20260923030000)
         .await
         .unwrap_err();
     assert!(format!("{down_error:#}").contains("cannot revert while rollback publications exist"));
@@ -15905,7 +15662,7 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(version, 20260922151000);
+    assert_eq!(version, 20260923030000);
     assert_eq!(current_publication_id(&pool, id).await, current);
 }
 

@@ -386,13 +386,23 @@ async fn collect_candidates(
         SELECT annotation.id, annotation.target_ref, annotation.source_segments,
                annotation.source_dialect, sentence.id AS sentence_id,
                sentence.revision AS sentence_revision,
-               sentence.content -> 'en_text' AS en_text
+               sentence.content -> 'en_text' AS en_text, NULL::uuid AS publication_id
         FROM lexicon.shared_sentence_annotations annotation
         JOIN lexicon.shared_sentences sentence ON sentence.id = annotation.sentence_id
         WHERE sentence.deleted_at IS NULL
           AND annotation.target_entry_id = $1
           AND annotation.target_ref IS NOT NULL
-        ORDER BY sentence.id, annotation.id
+        UNION ALL
+        SELECT annotation.id, annotation.target_ref, annotation.source_segments,
+               annotation.source_dialect, sentence.id AS sentence_id,
+               publication.source_revision AS sentence_revision,
+               publication.snapshot -> 'sentence' -> 'en_text' AS en_text, publication.id AS publication_id
+        FROM lexicon.shared_sentence_publication_annotations annotation
+        JOIN lexicon.shared_sentences sentence ON sentence.current_publication_id=annotation.publication_id
+        JOIN lexicon.shared_sentence_publications publication ON publication.id=annotation.publication_id
+        WHERE sentence.deleted_at IS NULL AND sentence.withdrawn_at IS NULL
+          AND annotation.target_entry_id=$1 AND annotation.target_ref IS NOT NULL
+        ORDER BY sentence_id, publication_id, id
         "#,
     )
     .bind(entry_id)
@@ -423,12 +433,17 @@ async fn collect_candidates(
             .and_then(|text| sentence_text(&text, &dialect));
         candidates.push(Candidate {
             reference: reference(
-                format!("shared_sentence:{id}"),
+                format!(
+                    "shared_sentence:{}:{id}",
+                    row.get::<Option<Uuid>, _>("publication_id")
+                        .map_or_else(|| "draft".to_owned(), |id| id.to_string())
+                ),
                 InboundReferenceKindV3::SharedSentence,
                 target,
                 InboundReferenceSourceV3 {
                     sentence_id: Some(row.get("sentence_id")),
                     sentence_revision: Some(row.get("sentence_revision")),
+                    publication_id: row.get("publication_id"),
                     sentence_text: text,
                     source_dialect: parse_dialect(&dialect),
                     segments: Some(segments),
@@ -1037,9 +1052,15 @@ pub(super) async fn ensure_batch_inbound_references(
                 .source
                 .entry_id
                 .is_some_and(|id| batch.words.contains_key(&id)))
+            && !(candidate.reference.kind == InboundReferenceKindV3::SharedSentence
+                && candidate.reference.source.publication_id.is_some()
+                && candidate
+                    .reference
+                    .source
+                    .sentence_id
+                    .is_some_and(|id| batch.sentences.contains(&id)))
     });
-    // All candidate sources are separately checked with outbound_publication_issues_in.
-    // Saved draft references and independent shared-sentence sources remain protected.
+    // Candidate publications replace only selected published sources. Drafts remain protected.
     evaluate(&mut candidates, word.id, &word.forms, &word.meanings);
     let mut violations = candidates
         .into_iter()
