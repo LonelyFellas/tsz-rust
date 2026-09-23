@@ -999,6 +999,7 @@ async fn entries_without_audio_keep_a_byte_identical_shape(pool: PgPool) {
 struct FailingDeleteStore {
     inner: Arc<dyn ObjectStore>,
     delete_calls: Arc<std::sync::Mutex<Vec<String>>>,
+    delete_before_error: bool,
 }
 
 #[async_trait::async_trait]
@@ -1073,6 +1074,9 @@ impl ObjectStore for FailingDeleteStore {
             .lock()
             .unwrap()
             .push(key.as_str().to_owned());
+        if self.delete_before_error {
+            self.inner.delete(key).await?;
+        }
         Err(
             tsz_rust::platform::storage::StorageError::SpaceNotConfigured(
                 self.inner.space().clone(),
@@ -1305,6 +1309,7 @@ async fn a_failing_object_delete_keeps_the_row_and_does_not_burn_the_round(pool:
     let failing: Arc<dyn ObjectStore> = Arc::new(FailingDeleteStore {
         inner: store.clone(),
         delete_calls: delete_calls.clone(),
+        delete_before_error: false,
     });
     let reclaimed = tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &failing)
         .await
@@ -1555,4 +1560,105 @@ async fn pronunciation_editor_rejects_invalid_annotations_and_profiles(pool: PgP
                 [0]["id"]
         );
     }
+}
+
+#[sqlx::test]
+async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let bearer = bearer(&state, seed_admin(&pool).await);
+    let entry = create_entry(&state, &pool, &bearer, "audiouncertaindelete").await;
+    let asset = upload_asset(&state, &store, &bearer, "uncertain.mp3").await;
+    age_asset(&pool, &asset["id"]).await;
+    let failing: Arc<dyn ObjectStore> = Arc::new(FailingDeleteStore {
+        inner: store.clone(),
+        delete_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        delete_before_error: true,
+    });
+    assert_eq!(
+        tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &failing)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(asset_exists(&pool, &asset["id"]).await);
+    let (status, response) = save_meanings(
+        &state,
+        &bearer,
+        &entry,
+        meanings_with_audio(&entry, json!([asset.clone()])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert!(issue_codes(&response).contains(&"audio_asset_invalid".to_owned()));
+    assert!(!object_exists(&store, &pool, &asset["id"]).await);
+    let id = Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+    let marked: bool = sqlx::query_scalar(
+        "SELECT reclamation_started_at IS NOT NULL FROM lexicon.audio_assets WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(marked);
+    let (status, response) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/audio-assets/{id}/url"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{response}");
+    let source_key: String =
+        sqlx::query_scalar("SELECT source_key FROM lexicon.audio_assets WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (status, response) = call(&state, Method::POST, &format!("{ROOT}/audio-assets"),
+        &bearer, None, Some(json!({"key":source_key,"locale":"en-GB","gender":"female","original_name":"uncertain.mp3"}))).await;
+    assert_ne!(status, StatusCode::CREATED, "{response}");
+    // 数据库保护也拒绝绕过新版本校验的引用写入。
+    let error = sqlx::query("INSERT INTO lexicon.v3_audio_asset_references (asset_id,entry_id,scope,variant_id) VALUES ($1,$2,'draft',$3)")
+        .bind(id).bind(entry.id).bind(Uuid::now_v7()).execute(&pool).await.unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().constraint(),
+        Some("audio_asset_not_reclaiming")
+    );
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923030000, 20260923050000)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("cannot remove reclamation state"));
+    let version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(version, 20260923050000);
+    assert_eq!(draft_reference_count(&pool, entry.id).await, 0);
+    assert_eq!(
+        tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(!asset_exists(&pool, &asset["id"]).await);
+}
+
+#[sqlx::test]
+async fn audio_reclamation_schema_can_be_reverted_and_reapplied(pool: PgPool) {
+    tsz_rust::deployment_migrations::undo(&pool, 20260923030000, 20260923050000)
+        .await
+        .unwrap();
+    let absent: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lexicon' AND table_name='audio_assets' AND column_name='reclamation_started_at')")
+        .fetch_one(&pool).await.unwrap();
+    assert!(absent);
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let present: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lexicon' AND table_name='audio_assets' AND column_name='reclamation_started_at')")
+        .fetch_one(&pool).await.unwrap();
+    assert!(present);
 }

@@ -122,7 +122,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20260923030000;
+    const CURRENT_RELEASE_VERSION: i64 = 20260923050000;
 
     #[sqlx::test]
     async fn deployment_undo_preserves_payloads_supported_by_target_and_guards_new_regularity(

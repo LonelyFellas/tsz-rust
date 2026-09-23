@@ -131,3 +131,69 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
         );
     }
 }
+
+#[sqlx::test]
+async fn batch5_legacy_headwords_check_every_materialized_prototype(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let bearer = token(&state, seed_admin(&pool).await);
+    let existing = batch3_word(&state, &bearer, "practise").await;
+    seed_dictionary_word(&pool, "practice").await;
+    seed_dictionary_word(&pool, "practise").await;
+    let dataset_id: i64 =
+        sqlx::query_scalar("SELECT id FROM dictionary.datasets WHERE status = 'active'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE dictionary.terms SET pos=ARRAY['noun','verb'] WHERE dataset_id=$1 AND normalized_term='practice'")
+        .bind(dataset_id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE dictionary.terms SET pos=ARRAY['verb'] WHERE dataset_id=$1 AND normalized_term='practise'")
+        .bind(dataset_id).execute(&pool).await.unwrap();
+    sqlx::query(r#"
+        INSERT INTO dictionary.content_imports
+        (dataset_id,input_sha256,source_locator,source_version,record_count,parser_version)
+        VALUES ($1,repeat('b',64),'https://kaikki.org/test-source','enwiktionary-content-test',3,'forms-sounds-v1')
+    "#).bind(dataset_id).execute(&pool).await.unwrap();
+    sqlx::query(r#"
+        INSERT INTO dictionary.entry_contents
+        (dataset_id,source_key,normalized_term,pos,senses,forms,sounds,source_locator)
+        VALUES
+        ($1,'batch5:practice:noun','practice','noun','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,'https://kaikki.org/test-source'),
+        ($1,'batch5:practice:verb','practice','verb','[]'::jsonb,
+         '[{"form":"practise","tags":["alternative","UK"]}]'::jsonb,'[]'::jsonb,'https://kaikki.org/test-source'),
+        ($1,'batch5:practise:verb','practise','verb','[]'::jsonb,'[]'::jsonb,'[]'::jsonb,'https://kaikki.org/test-source')
+    "#).bind(dataset_id).execute(&pool).await.unwrap();
+    let mut input = entry_annotations_create_body(
+        &state,
+        &bearer,
+        "practice",
+        json!({"mode":"unified","common":"practice"}),
+    )
+    .await;
+    input.as_object_mut().unwrap().remove("headwords");
+    input.as_object_mut().unwrap().remove("homograph_reason");
+    let key = Uuid::now_v7();
+    let (status, conflict) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["code"], "annotation_conflict");
+    input["annotation"] = json!("2");
+    input["annotation_updates"] = entry_annotations_updates(&conflict, &["1"]);
+    let (status, missing) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
+    assert_eq!(missing["field"], "homograph_reason");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entries")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let annotation: Option<String> =
+        sqlx::query_scalar("SELECT annotation FROM lexicon.entries WHERE id=$1")
+            .bind(Uuid::parse_str(existing["word"]["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(annotation.is_none());
+    input["homograph_reason"] = json!("词性原型重合，但含义独立");
+    let (status, created) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_ne!(created["word"]["id"], existing["word"]["id"]);
+}

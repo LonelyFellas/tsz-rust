@@ -11,10 +11,11 @@
 
 - `POST /api/v1/admin/lexicon/entries` 新增可选字符串 `homograph_reason`；同原型组另建时必填。按现有 annotation 同原型组（同 kind、英语、同方言规范化原形、未归档）判定，不把普通词形命中扩大为同形。
 - 提供时 trim 后须为 1–500 个 Unicode 字符，不含控制字符；缺少必填说明或不合法时返回 `400 invalid_request_body`，Problem Details `field=homograph_reason`。现有 annotation 冲突优先返回分组供前端收集数字标注和文本说明。
-- 说明参与规范化后的幂等请求 hash，并与新 ID 创建、旧条标注更新一同提交到 `audit.admin_actions` 的 `lexicon.entry.create.v3` metadata。失败无部分写入；同键不同说明为幂等冲突。没有新增数据库迁移或词条响应展示字段。
+- 说明参与规范化后的幂等请求 hash，并与新 ID 创建、旧条标注更新一同提交到 `audit.admin_actions` 的 `lexicon.entry.create.v3` metadata。失败无部分写入；同键不同说明为幂等冲突。不新增词条响应展示字段；内部音频回收状态新增迁移 `20260923050000`。
 - 前端在后端返回同原型分组的创建弹窗收集说明；失败重试冻结原说明/原 key/body，分组或 surface 刷新保留说明。编辑旧条标注不要求说明。响应继续走原严格 runtime schema。
 - 词条与共享例句冲突展示两侧草稿差异；例句获取最新草稿失败不放行保存，保留/放弃选择后才基于最新 revision 重提，不自动合并。共享例句 DTO 仍无 `audio_assets`。
 - **配套边界**：旧后端 `deny_unknown_fields` 会拒收带新字段的同形创建；新后端会拒绝旧前端缺说明的同原型新建。普通不带说明的新词与响应格式不变。这不是无缝混部兼容；交付时需短暂受控停用同原型新建并配套替换，不能仅凭“字段可选”宣布安全。第五批尚未部署。
+- **音频迁移边界**：先停止旧写入及回收 worker，再迁移并替换后端。新二进制需要新列；旧二进制不理解回收中资产，不支持混跑。回退前用新版本完成所有回收中记录，停止写入/worker 后执行带守卫的 down；存在回收标记时拒绝回退，不可手动清空标记。省略 headwords 的创建也检查实际落库全部 base 原型，普通词形仍不纳入。
 - 当前来源与验证见 [第五批记录](features/lexicon-domain-refactor/batch-5-design.md)。
 
 ## 词库领域重构第四批：共享例句独立发布（已配套部署）
