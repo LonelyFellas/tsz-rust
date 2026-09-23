@@ -70,7 +70,7 @@ pub(crate) fn valid_ranges(variant: &RichTextVariantV3) -> bool {
         return false;
     }
     let chars: Vec<_> = variant.value.text().chars().collect();
-    let tokens = crate::lexicon::sentence_target_discovery::tokenize(variant.value.text());
+    let tokens = crate::lexicon::text_tokenization::tokenize(variant.value.text());
     let mut occupied = HashSet::new();
     let mut ids = HashSet::new();
     for link in &variant.text_links {
@@ -524,7 +524,7 @@ pub(super) fn apply_manual(meanings: &mut DraftMeaningsStepContentV3) {
     }
 }
 
-pub(super) fn shared_target_matches(
+pub(crate) fn shared_target_matches(
     forms: &DraftFormsStepContentV3,
     meanings: &DraftMeaningsStepContentV3,
     link: &TextLinkV3,

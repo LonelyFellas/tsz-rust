@@ -921,7 +921,6 @@ impl LexiconService {
                 pronunciation_normalization_version:
                     PronunciationNormalizationVersionV3::NfkcTrimLowerV1,
                 sentence_associations: None,
-                sentence_target_discovery: None,
                 draft_relation_prebinding: None,
                 sense_component_usages: None,
             },
@@ -1555,7 +1554,6 @@ impl LexiconService {
                 pronunciation_normalization_version:
                     PronunciationNormalizationVersionV3::NfkcTrimLowerV1,
                 sentence_associations: None,
-                sentence_target_discovery: None,
                 draft_relation_prebinding: None,
                 sense_component_usages: None,
             },

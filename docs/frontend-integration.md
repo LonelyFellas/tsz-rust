@@ -7,6 +7,25 @@
 
 ---
 
+## 词库领域重构第四批：共享例句独立发布（待配套发布）
+
+本节对应后端 `feat/lexicon-domain-batch-4` 与前端 `fix/remove-sentence-discovery`，不代表已经部署。实现与本地验证见 [第四批设计](features/lexicon-domain-refactor/batch-4-design.md)。
+
+- 例句保存只更新草稿；编辑请求显式使用 `view=draft`，普通展示使用 `view=published`。响应新增 `lifecycle_revision`、`view`、当前发布与下架元数据。
+- 独立发布、历史回退、全局下架和恢复均使用独立命令、双 revision 与 `Idempotency-Key`；回退生成新版本且保留草稿，下架后发布或回退不会自动恢复。下架还需原因与当前影响指纹。
+- 旧 `DELETE /sentences/{id}/associations/{entry_id}` 移除；局部移除改用宿主 `PUT /entries/{entry_id}/sentences/{sentence_id}/visibility`，携带宿主 revision，随宿主词条发布生效，不删除共享标注。
+- 批次发布增加显式 `sentences`，词条与例句合计 1–50 项，同事务全部成功或全部失败；响应同时含 `words` 与 `sentences`，例句错误通过 `meta.sentence_id` 定位。
+- 产品已取消整块“发现并关联词条”：删除 `/entries/sentence-targets/resolve` 和发现专用能力字段；保留 voice-editor 选文关联、`/entries/component-targets/search`、分词边界校验及共用样式。不新增开关或替代发现入口。
+
+| 组合 | 兼容性与处理 |
+| --- | --- |
+| 第三批前端 + 第四批 API | 不兼容：旧严格例句/批次 schema 不接受新字段，旧解除与发现路径已删除，保存语义改变 |
+| 第四批前端 + 第三批 API | 不兼容：缺少例句双版本/视图字段及独立发布、历史、可见性、下架恢复端点 |
+| 第四批前端 + 第四批 API | 配套严格契约、后端 HTTP 与前端自动化回归通过；真实浏览器联调尚未执行 |
+| 旧组件 + 已迁移/写入第四批历史的数据 | 未验证，不作为可用回退方案；替换二进制不等于恢复 schema 或数据 |
+
+新增迁移 `20260923030000_shared_sentence_publications` 要求没有旧共享例句数据，否则明确拒绝；已有本批草稿、发布历史或隐藏项时 down 拒绝。不得自动清库或删除历史。部署前须明确目标环境及数据处置，并受控停用相关词库操作/流量，完成两端配套替换、刷新旧页面与验收后恢复；两边快速连发不能代替此门禁。提交/PR 不包含合并或部署授权。
+
 ## 词库领域重构第三批：发布权限、批次与回退（待配套发布）
 
 本节对应两仓 `codex/lexicon-domain-batch-3`，尚未合并或部署。方案及验收见 [第三批设计](features/lexicon-domain-refactor/batch-3-design.md) / [进度](features/lexicon-domain-refactor/progress.md)。

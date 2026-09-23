@@ -373,63 +373,6 @@ pub struct PublicationPath {
     pub publication_id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ResolveSentenceTargetsV3Input {
-    AllPublishedTargets {
-        #[schema(schema_with = schema_version_3_schema)]
-        #[serde(deserialize_with = "deserialize_schema_version_3")]
-        schema_version: u8,
-        #[schema(max_length = 1000)]
-        sentence_text: String,
-        source_dialect: Dialect,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schema(nullable = false, minimum = 1, maximum = 100)]
-        page_size_per_range: Option<u32>,
-    },
-    SelectedSegments {
-        #[schema(schema_with = schema_version_3_schema)]
-        #[serde(deserialize_with = "deserialize_schema_version_3")]
-        schema_version: u8,
-        #[schema(max_length = 1000)]
-        sentence_text: String,
-        source_dialect: Dialect,
-        #[schema(min_items = 1, max_items = 20)]
-        selected_segments: Vec<SentenceSourceRangeV1>,
-        include_drafts: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schema(nullable = false, minimum = 1, maximum = 100)]
-        page_size_per_range: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[schema(nullable = false)]
-        /// 由同一位置上一页返回；绑定 source dialect、片段指纹与稳定节点排序键，不绑定词库代数。
-        cursor: Option<String>,
-    },
-}
-
-impl ResolveSentenceTargetsV3Input {
-    pub(crate) fn sentence_text(&self) -> &str {
-        match self {
-            Self::AllPublishedTargets { sentence_text, .. }
-            | Self::SelectedSegments { sentence_text, .. } => sentence_text,
-        }
-    }
-
-    pub(crate) const fn source_dialect(&self) -> Dialect {
-        match self {
-            Self::AllPublishedTargets { source_dialect, .. }
-            | Self::SelectedSegments { source_dialect, .. } => *source_dialect,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SentenceTargetDiscoveryCompletenessV3 {
-    Complete,
-    Overloaded,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SentenceTargetMatchKindV3 {
@@ -526,38 +469,6 @@ pub struct PublishedSentenceTargetCandidateV3 {
     pub component_usages: Vec<PhraseComponentUsageV3>,
     pub matches: Vec<SentenceTargetMatchEvidenceV3>,
     pub senses: Vec<SentenceTargetSenseV3>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SentenceTargetRangeResultV3 {
-    #[schema(min_items = 1, max_items = 20)]
-    pub source_segments: Vec<SentenceSourceRangeV1>,
-    pub segments_fingerprint: String,
-    pub normalized_surface: String,
-    pub published_total: u64,
-    /// 主动展开时当前可见的未发布具体节点候选数；不包含已发布的同一目标组合。
-    pub draft_total: u64,
-    pub published_matches: Vec<PublishedSentenceTargetCandidateV3>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    /// 自动发现或手选详情被截断时返回；下一页改用相同 `selected_segments` 携带此值。
-    pub next_cursor: Option<String>,
-    /// 与发布候选共用完整节点结构，publication_id 缺省。保存绑定稳定节点，发布前仍须处理未发布依赖。
-    /// 与 published_matches 共用 page_size_per_range 和 next_cursor，已发布候选优先。
-    pub draft_matches: Vec<PublishedSentenceTargetCandidateV3>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ResolveSentenceTargetsV3Response {
-    #[schema(schema_with = schema_version_3_schema)]
-    #[serde(deserialize_with = "deserialize_schema_version_3")]
-    pub schema_version: u8,
-    pub sentence_hash: String,
-    pub discovery_generation: i64,
-    pub completeness: SentenceTargetDiscoveryCompletenessV3,
-    pub range_results: Vec<SentenceTargetRangeResultV3>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

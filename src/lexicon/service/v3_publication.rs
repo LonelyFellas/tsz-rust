@@ -36,14 +36,15 @@ struct VersionedPublication {
     published_at: DateTime<Utc>,
 }
 
-pub(super) struct PublicationCandidate {
-    pub(super) word: AdminWordV3,
-    pub(super) publication_id: Uuid,
+pub(crate) struct PublicationCandidate {
+    pub(crate) word: AdminWordV3,
+    pub(crate) publication_id: Uuid,
 }
 
 #[derive(Default)]
-pub(super) struct PublicationBatchContext {
-    pub(super) words: HashMap<Uuid, PublicationCandidate>,
+pub(crate) struct PublicationBatchContext {
+    pub(crate) words: HashMap<Uuid, PublicationCandidate>,
+    pub(crate) sentences: HashSet<Uuid>,
 }
 
 impl LexiconService {
@@ -434,9 +435,18 @@ impl LexiconService {
     ) -> Result<crate::lexicon::dto::BatchPublicationResponseV3, LexiconServiceError> {
         use crate::lexicon::dto::BatchPublicationResponseV3;
         const SCOPE: &str = "lexicon.publication.batch.v3";
+        use crate::lexicon::shared_sentences::publication as sentences;
         let mut seen = HashSet::new();
-        if input.items.is_empty()
-            || input.items.len() > 50
+        let mut seen_sentences = HashSet::new();
+        let total = input.items.len() + input.sentences.len();
+        if total == 0
+            || total > 50
+            || input.sentences.iter().any(|item| {
+                item.sentence_id.is_nil()
+                    || !seen_sentences.insert(item.sentence_id)
+                    || item.base_revision <= 0
+                    || item.base_lifecycle_revision <= 0
+            })
             || input.items.iter().any(|item| {
                 item.entry_id.is_nil()
                     || !seen.insert(item.entry_id)
@@ -446,7 +456,7 @@ impl LexiconService {
         {
             return Err(LexiconServiceError::InvalidField {
                 field: "items",
-                message: "select 1 to 50 distinct entries with positive revisions",
+                message: "select 1 to 50 distinct entries and sentences with positive revisions",
             });
         }
         let hash = sha256_json(&input).map_err(serialization_error)?;
@@ -478,7 +488,15 @@ impl LexiconService {
         for id in &ids {
             lock_v3_publication_entry(&mut tx, *id).await?;
         }
-        LexiconRepository::lock_surface_contexts(&mut tx, &ids)
+        let sentence_ids = input
+            .sentences
+            .iter()
+            .map(|item| item.sentence_id)
+            .collect::<Vec<_>>();
+        let mut context_ids = ids.clone();
+        context_ids.extend(sqlx::query_scalar::<_, Uuid>("SELECT target_entry_id FROM lexicon.shared_sentence_annotations WHERE sentence_id=ANY($1) AND target_entry_id IS NOT NULL UNION SELECT a.target_entry_id FROM lexicon.shared_sentence_publication_annotations a JOIN lexicon.shared_sentences s ON s.current_publication_id=a.publication_id WHERE s.id=ANY($1) AND a.target_entry_id IS NOT NULL")
+            .bind(&sentence_ids).fetch_all(&mut *tx).await.map_err(database_error)?);
+        LexiconRepository::lock_surface_contexts(&mut tx, &context_ids)
             .await
             .map_err(repository_error)?;
         let mut loaded = HashMap::new();
@@ -490,11 +508,13 @@ impl LexiconService {
             super::v3::canonicalize_forms_pronunciation_extensions(&mut word.forms);
             loaded.insert(item.entry_id, word);
         }
-        self.lock_batch_publication_surfaces(
-            &mut tx,
-            &loaded.values().cloned().collect::<Vec<_>>(),
-        )
-        .await?;
+        if !loaded.is_empty() {
+            self.lock_batch_publication_surfaces(
+                &mut tx,
+                &loaded.values().cloned().collect::<Vec<_>>(),
+            )
+            .await?;
+        }
         let mut surface_confirmations = HashMap::new();
         for item in &sorted {
             let confirmation = self
@@ -562,6 +582,17 @@ impl LexiconService {
             .await;
             result.map_err(|source| batch_error(item.entry_id, source))?;
         }
+        let mut sentence_items = input.sentences.iter().collect::<Vec<_>>();
+        sentence_items.sort_by_key(|item| item.sentence_id);
+        let mut prepared_sentences = Vec::new();
+        for item in sentence_items {
+            let prepared =
+                sentences::prepare(&mut tx, actor_id, is_super_admin, item, None, Some(&batch))
+                    .await
+                    .map_err(|error| sentence_batch_error(item.sentence_id, error))?;
+            batch.sentences.insert(item.sentence_id);
+            prepared_sentences.push(prepared);
+        }
         let mut prepared = Vec::new();
         for item in &sorted {
             let (record, mut word) = records
@@ -618,6 +649,11 @@ impl LexiconService {
                 .map_err(|source| batch_error(word.id, source))?,
             };
             publications.insert(word.id, publication);
+        }
+        for sentence in &prepared_sentences {
+            sentences::insert_version(&mut tx, actor_id, sentence)
+                .await
+                .map_err(|error| sentence_batch_error(sentence.id, error))?;
         }
         // Nodes now exist for every new publication; cyclic foreign keys can be inserted safely.
         let mut responses = HashMap::new();
@@ -680,7 +716,23 @@ impl LexiconService {
             responses.insert(word.id, word);
             confirmations.push(confirmation);
         }
+        let mut sentence_responses = HashMap::new();
+        for sentence in prepared_sentences {
+            let response = sentences::activate(&mut tx, actor_id, request_id, &sentence)
+                .await
+                .map_err(|error| sentence_batch_error(sentence.id, error))?;
+            sentence_responses.insert(sentence.id, response);
+        }
         let response = BatchPublicationResponseV3 {
+            sentences: input
+                .sentences
+                .iter()
+                .map(|item| {
+                    sentence_responses
+                        .remove(&item.sentence_id)
+                        .ok_or_else(invariant_record)
+                })
+                .collect::<Result<_, _>>()?,
             words: input
                 .items
                 .iter()
@@ -1276,6 +1328,8 @@ async fn insert_v3_publication_rows(
     .map_err(database_error)?;
 
     insert_v3_publication_nodes(tx, publication_id, word).await?;
+    sqlx::query("INSERT INTO lexicon.shared_sentence_publication_hides(publication_id,entry_id,sense_id,sentence_id) SELECT $1,entry_id,sense_id,sentence_id FROM lexicon.shared_sentence_draft_hides WHERE entry_id=$2")
+        .bind(publication_id).bind(word.id).execute(&mut **tx).await.map_err(database_error)?;
     insert_v3_publication_audio_references(tx, publication_id, word).await?;
     insert_publication_catalog_refs(tx, publication_id, word.id).await?;
     sqlx::query(
@@ -1940,6 +1994,13 @@ pub(super) fn ensure_publication_owner(
     Ok(())
 }
 
+fn sentence_batch_error(sentence_id: Uuid, error: crate::error::AppError) -> LexiconServiceError {
+    LexiconServiceError::SentencePublicationFailed {
+        sentence_id,
+        error: Box::new(error),
+    }
+}
+
 fn batch_error(entry_id: Uuid, source: LexiconServiceError) -> LexiconServiceError {
     LexiconServiceError::BatchPublicationFailed {
         entry_id,
@@ -2002,6 +2063,7 @@ async fn insert_rollback_publication(
         .execute(&mut **tx).await.map_err(database_error)?;
     // Use the historical node set, never today's editable relational projection.
     for query in [
+        "INSERT INTO lexicon.shared_sentence_publication_hides (publication_id,entry_id,sense_id,sentence_id) SELECT $1,entry_id,sense_id,sentence_id FROM lexicon.shared_sentence_publication_hides WHERE publication_id=$2",
         "INSERT INTO lexicon.entry_publication_nodes (publication_id,entry_id,node_id,node_type,content_hash) SELECT $1,entry_id,node_id,node_type,content_hash FROM lexicon.entry_publication_nodes WHERE publication_id=$2",
         "INSERT INTO lexicon.entry_publication_form_type_refs (publication_id,entry_id,form_type) SELECT $1,entry_id,form_type FROM lexicon.entry_publication_form_type_refs WHERE publication_id=$2",
         "INSERT INTO lexicon.entry_publication_part_of_speech_refs (publication_id,entry_id,source_node_id,part_of_speech_id) SELECT $1,entry_id,source_node_id,part_of_speech_id FROM lexicon.entry_publication_part_of_speech_refs WHERE publication_id=$2",

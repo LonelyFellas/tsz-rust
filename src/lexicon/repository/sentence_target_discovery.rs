@@ -22,74 +22,7 @@ const COMPONENT_TARGET_DRAFT_SELECT: &str = r#"
 "#;
 
 impl LexiconRepository {
-    pub(crate) async fn sentence_discovery_generation(
-        tx: &mut Transaction<'_, Postgres>,
-    ) -> Result<i64, LexiconRepositoryError> {
-        // 清库会连带清掉单例；只读事务里补不了，由下一次词面写入的触发器补回。
-        // 缺行时要在日志里点名单例，而不是笼统的 database operation failed。
-        sqlx::query_scalar(
-            "SELECT generation FROM lexicon.sentence_discovery_generation WHERE singleton = TRUE",
-        )
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(LexiconRepositoryError::Database)?
-        .ok_or(LexiconRepositoryError::Invariant(
-            "lexicon.sentence_discovery_generation singleton row is missing",
-        ))
-    }
-
-    pub(crate) async fn published_sentence_discovery_surfaces(
-        tx: &mut Transaction<'_, Postgres>,
-        dialect_scopes: &[String],
-        normalized_surfaces: &[String],
-    ) -> Result<Vec<SentenceDiscoverySurfaceRecord>, LexiconRepositoryError> {
-        if normalized_surfaces.is_empty() {
-            return Ok(Vec::new());
-        }
-        sqlx::query_as::<_, SentenceDiscoverySurfaceRecord>(
-            r#"
-            SELECT DISTINCT
-                   source.normalized_surface,
-                   source.surface,
-                   source.entry_kind,
-                   source.entry_id,
-                   source.publication_id,
-                   source.pos_id,
-                   source.pos,
-                   COALESCE(source.form_id, source.source_node_id) AS matched_form_id,
-                   source.source_node_id AS matched_variant_id,
-                   source.dialect_scope,
-                   source.event_offset
-            FROM lexicon.surface_sources source
-            JOIN lexicon.entries entry
-              ON entry.id = source.entry_id
-             AND entry.archived_at IS NULL
-             AND entry.current_publication_id = source.publication_id
-            WHERE source.is_deleted = FALSE
-              AND source.content_scope = 'current_publication'
-              AND source.language = 'en'
-              AND source.normalization_version = $1
-              AND source.dialect_scope = ANY($2::text[])
-              AND source.normalized_surface = ANY($3::text[])
-              AND source.pos_id IS NOT NULL
-              AND source.pos IS NOT NULL
-              AND COALESCE(source.form_id, source.source_node_id) IS NOT NULL
-            ORDER BY source.normalized_surface, source.entry_id,
-                     source.pos_id, matched_form_id, source.event_offset
-            "#,
-        )
-        .bind(HEADWORD_NORMALIZATION_VERSION)
-        .bind(dialect_scopes)
-        .bind(normalized_surfaces)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(LexiconRepositoryError::Database)
-    }
-
-    /// 关键字检索短语成分目标：与 `published_sentence_discovery_surfaces` 共用同一套
-    /// 「只看当前发布、未归档」的过滤，只把词面等值换成对 `surface` 的大小写不敏感包含匹配。
-    /// 返回完整匹配集的词条身份与最佳匹配档位。每条记录很小；service 只按批读取
-    /// 这些词条的词面与快照，并且只为当前页物化富候选 DTO。
+    /// 按关键字查询当前发布或草稿的完整成分目标。
     pub(crate) async fn component_target_entry_matches(
         tx: &mut Transaction<'_, Postgres>,
         dialect_scopes: &[String],
@@ -295,30 +228,5 @@ impl LexiconRepository {
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[sqlx::test]
-    async fn missing_discovery_generation_names_the_singleton(pool: PgPool) {
-        sqlx::query("DELETE FROM lexicon.sentence_discovery_generation")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        let error = LexiconRepository::sentence_discovery_generation(&mut tx)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, LexiconRepositoryError::Invariant(_)),
-            "{error:?}"
-        );
-        assert!(
-            error.to_string().contains("sentence_discovery_generation"),
-            "日志要能指明单例缺失：{error}"
-        );
     }
 }

@@ -1260,10 +1260,6 @@ pub struct AdminWordV3Capabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub sentence_associations: Option<bool>,
-    /// 句内单词/短语发现的独立运行时能力；旧后端响应可能尚无此字段。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    pub sentence_target_discovery: Option<bool>,
     /// Retired capability; always false. Drafts with senses remain searchable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -1505,14 +1501,18 @@ pub struct BatchPublicationInputV3 {
     #[serde(deserialize_with = "deserialize_schema_version_3")]
     #[schema(schema_with = schema_version_3_schema)]
     pub schema_version: u8,
-    #[schema(min_items = 1, max_items = 50)]
+    #[schema(max_items = 50)]
     pub items: Vec<BatchPublicationItemV3>,
+    #[serde(default)]
+    #[schema(max_items = 50)]
+    pub sentences: Vec<crate::lexicon::shared_sentences::publication::SentenceBatchItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BatchPublicationResponseV3 {
     pub words: Vec<AdminWordV3>,
+    pub sentences: Vec<crate::lexicon::shared_sentences::SharedSentence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

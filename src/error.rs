@@ -747,6 +747,9 @@ pub struct ProblemMeta {
     pub word_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
+    pub sentence_id: Option<uuid::Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
     pub max_reachable_step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -895,6 +898,14 @@ impl AppError {
             .meta
             .get_or_insert_with(ProblemMeta::default)
             .word_id = Some(id);
+        self
+    }
+
+    pub fn with_sentence_id(mut self, id: uuid::Uuid) -> Self {
+        self.response
+            .meta
+            .get_or_insert_with(ProblemMeta::default)
+            .sentence_id = Some(id);
         self
     }
 

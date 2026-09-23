@@ -323,7 +323,7 @@ pub async fn publish(
             path.id,
             idempotency_key,
             input,
-            !sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
+            false,
         )
         .await
         .map_err(map_error)?;
@@ -463,13 +463,7 @@ pub async fn publish_batch(
         return Err(v3_storage_unavailable());
     }
     let mut response = service(&state)
-        .publish_batch_v3(
-            admin.id,
-            request_id.as_uuid(),
-            key,
-            input,
-            !sentence_target_discovery_enabled(state.smart_lexicon_v3_flags),
-        )
+        .publish_batch_v3(admin.id, request_id.as_uuid(), key, input, false)
         .await
         .map_err(map_error)?;
     for word in &mut response.words {
