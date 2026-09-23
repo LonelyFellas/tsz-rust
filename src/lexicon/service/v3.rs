@@ -1330,6 +1330,18 @@ impl LexiconService {
     ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         super::annotations::normalize_annotation(&mut input.annotation)?;
         super::annotations::normalize_updates(&mut input.annotation_updates)?;
+        if let Some(reason) = &mut input.homograph_reason {
+            *reason = reason.trim().to_owned();
+            if reason.is_empty()
+                || reason.chars().count() > 500
+                || reason.chars().any(char::is_control)
+            {
+                return Err(LexiconServiceError::InvalidField {
+                    field: "homograph_reason",
+                    message: "homograph reason must contain 1 to 500 characters without control characters",
+                });
+            }
+        }
         let explicit_headwords = input.headwords.is_some();
         if let Some(headwords) = &mut input.headwords {
             normalize_submitted_headwords(headwords)?;
@@ -1444,6 +1456,7 @@ impl LexiconService {
             &initial_headword_keys,
             &input.annotation,
             &input.annotation_updates,
+            input.homograph_reason.as_deref(),
         )
         .await?;
         let meanings = DraftMeaningsStepContentV3::default();
@@ -1591,6 +1604,7 @@ impl LexiconService {
             serde_json::json!({
                 "schema_version": 3,
                 "explicit_headwords": explicit_headwords,
+                "homograph_reason": input.homograph_reason,
                 "surface_snapshot_id": verified_surface.as_ref().map(|value| value.snapshot_id),
             }),
         )

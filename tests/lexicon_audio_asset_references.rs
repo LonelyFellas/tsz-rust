@@ -854,6 +854,101 @@ async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(po
         publication_refs, 1,
         "发布必须留下引用行，否则回收会删掉已发布的录音"
     );
+
+    let original: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id=$1")
+            .bind(entry.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut without_audio = saved["word"]["meanings"].clone();
+    without_audio["pos"][0]["grammar_structures"][0]["variants"][0]["audio_assets"] = json!([]);
+    let (status, draft) = call(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{}/steps/meanings", entry.id),
+        &bearer,
+        None,
+        Some(json!({"schema_version":3,
+            "base_revision":published["word"]["revision"], "intent":"complete",
+            "content":without_audio})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{draft}");
+    let (status, current) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{}/publications", entry.id),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"base_revision":draft["word"]["revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{current}");
+    assert_eq!(draft_reference_count(&pool, entry.id).await, 0);
+    age_asset(&pool, &asset["id"]).await;
+    assert_eq!(
+        tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(object_exists(&store, &pool, &asset["id"]).await);
+
+    // 当前发布和草稿都已移除录音，只有保留的历史仍保护它；回退必须保留原资产 ID。
+    let before: (Value, i64) = sqlx::query_as(
+        "SELECT p.meanings,e.revision FROM lexicon.entries e JOIN lexicon.entry_editor_projection p ON p.entry_id=e.id WHERE e.id=$1",
+    ).bind(entry.id).fetch_one(&pool).await.unwrap();
+    let (status, rollback) = call(
+        &state,
+        Method::POST,
+        &format!(
+            "{ROOT}/entries/{}/publications/{original}/rollback",
+            entry.id
+        ),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,
+            "base_revision":current["word"]["revision"],
+            "base_lifecycle_revision":current["word"]["lifecycle_revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{rollback}");
+    let after: (Value, i64) = sqlx::query_as(
+        "SELECT p.meanings,e.revision FROM lexicon.entries e JOIN lexicon.entry_editor_projection p ON p.entry_id=e.id WHERE e.id=$1",
+    ).bind(entry.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(before, after, "回退不能覆盖无录音的编辑草稿");
+    let replay: Value = sqlx::query_scalar(
+        "SELECT p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1",
+    ).bind(entry.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        replay["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["audio_assets"][0]["id"],
+        asset["id"]
+    );
+    let old: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=$1")
+            .bind(original)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(old, snapshot, "历史快照不可被回退改写");
+    let (status, url) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/audio-assets/{asset_id}/url"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{url}");
+    assert!(url["url"].as_str().is_some_and(|url| !url.is_empty()));
+    assert_eq!(
+        tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[sqlx::test]

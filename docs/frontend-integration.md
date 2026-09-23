@@ -7,9 +7,19 @@
 
 ---
 
-## 词库领域重构第四批：共享例句独立发布（待配套发布）
+## 词库领域重构第五批：同形说明与并发收口（本地候选）
 
-本节对应后端 `feat/lexicon-domain-batch-4` 与前端 `fix/remove-sentence-discovery`，不代表已经部署。实现与本地验证见 [第四批设计](features/lexicon-domain-refactor/batch-4-design.md)。
+- `POST /api/v1/admin/lexicon/entries` 新增可选字符串 `homograph_reason`；同原型组另建时必填。按现有 annotation 同原型组（同 kind、英语、同方言规范化原形、未归档）判定，不把普通词形命中扩大为同形。
+- 提供时 trim 后须为 1–500 个 Unicode 字符，不含控制字符；缺少必填说明或不合法时返回 `400 invalid_request_body`，Problem Details `field=homograph_reason`。现有 annotation 冲突优先返回分组供前端收集数字标注和文本说明。
+- 说明参与规范化后的幂等请求 hash，并与新 ID 创建、旧条标注更新一同提交到 `audit.admin_actions` 的 `lexicon.entry.create.v3` metadata。失败无部分写入；同键不同说明为幂等冲突。没有新增数据库迁移或词条响应展示字段。
+- 前端在后端返回同原型分组的创建弹窗收集说明；失败重试冻结原说明/原 key/body，分组或 surface 刷新保留说明。编辑旧条标注不要求说明。响应继续走原严格 runtime schema。
+- 词条与共享例句冲突展示两侧草稿差异；例句获取最新草稿失败不放行保存，保留/放弃选择后才基于最新 revision 重提，不自动合并。共享例句 DTO 仍无 `audio_assets`。
+- **配套边界**：旧后端 `deny_unknown_fields` 会拒收带新字段的同形创建；新后端会拒绝旧前端缺说明的同原型新建。普通不带说明的新词与响应格式不变。这不是无缝混部兼容；交付时需短暂受控停用同原型新建并配套替换，不能仅凭“字段可选”宣布安全。第五批尚未部署。
+- 当前来源与验证见 [第五批记录](features/lexicon-domain-refactor/batch-5-design.md)。
+
+## 词库领域重构第四批：共享例句独立发布（已配套部署）
+
+2026-09-23 用户交接确认：后端 PR #186（`3053d09`）和前端 PR #320（`e77738a`）已配套部署至 tshb-test，迁移至 `20260923030000`。以下说明中的旧状态属于实施检查点；第四批全部业务组合的线上人工验收仍未逐项完成。实现与当时本地验证见 [第四批设计](features/lexicon-domain-refactor/batch-4-design.md)。
 
 - 例句保存只更新草稿；编辑请求显式使用 `view=draft`，普通展示使用 `view=published`。响应新增 `lifecycle_revision`、`view`、当前发布与下架元数据。
 - 独立发布、历史回退、全局下架和恢复均使用独立命令、双 revision 与 `Idempotency-Key`；回退生成新版本且保留草稿，下架后发布或回退不会自动恢复。下架还需原因与当前影响指纹。

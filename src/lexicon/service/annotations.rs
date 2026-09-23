@@ -241,6 +241,7 @@ impl LexiconService {
         keys: &[String],
         annotation: &Option<String>,
         updates: &[EntryAnnotationUpdate],
+        homograph_reason: Option<&str>,
     ) -> Result<(), LexiconServiceError> {
         let groups = self.annotation_groups_in(tx, kind, keys).await?;
         let mut conflict = self.annotation_conflict_in(tx, groups, None).await?;
@@ -301,6 +302,12 @@ impl LexiconService {
         if let Some(reason) = fail {
             conflict.reason = reason;
             return Err(LexiconServiceError::AnnotationConflict(Box::new(conflict)));
+        }
+        if !current.is_empty() && homograph_reason.is_none() {
+            return Err(LexiconServiceError::InvalidField {
+                field: "homograph_reason",
+                message: "a reason is required to create a separate entry in an existing prototype group",
+            });
         }
         // Updating an old entry also affects its prototypes outside the new
         // entry's groups. Validate those edges without broadening the create UI.

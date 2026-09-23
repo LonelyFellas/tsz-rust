@@ -90,6 +90,19 @@ pub async fn reclaim_once(
         };
 
         let id: Uuid = row.get("id");
+        // 候选查询的语句快照可能早于并发保存提交。持有资产排他锁后，
+        // 用新的 READ COMMITTED 快照再次确认，不能先删对象再靠 FK 拒绝删行。
+        let referenced: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1)",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if referenced {
+            tx.rollback().await?;
+            skipped.push(id);
+            continue;
+        }
         let object_key: String = row.get("object_key");
         let Ok(key) = ObjectKey::parse(object_key) else {
             // 库里的键不合法说明写入侧出过 bug，删不了也报不出去；留着行以便排查。

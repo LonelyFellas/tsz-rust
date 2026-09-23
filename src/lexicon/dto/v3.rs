@@ -1373,6 +1373,10 @@ pub struct CreateAdminWordV3Input {
     #[schema(schema_with = schema_version_3_schema)]
     pub schema_version: u8,
     pub detection_id: Uuid,
+    /// 同原型组另建词条的区分说明，仅写入创建审计，不替代数字标注。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(min_length = 1, max_length = 500, nullable = false)]
+    pub homograph_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(max_length = 20)]
     pub annotation: Option<String>,
