@@ -24,6 +24,8 @@ use tsz_rust::{
 
 #[path = "lexicon_handler/batch4.rs"]
 mod batch4;
+#[path = "lexicon_handler/batch5.rs"]
+mod batch5;
 
 const ROOT: &str = "/api/v1/admin/lexicon";
 fn test_redis_url() -> String {
@@ -3352,6 +3354,7 @@ async fn surface_machinery_shows_other_admins_drafts(pool: PgPool) {
         "schema_version": 3,
         "detection_id": outsider_detection["detection_id"],
         "kind": "word",
+        "homograph_reason": "同形独立含义测试",
         "annotation": "1"
     });
     if let Some(confirm) =
@@ -3484,6 +3487,7 @@ async fn other_admins_drafts_require_acknowledgement_and_then_coexist(pool: PgPo
         "schema_version": 3,
         "detection_id": outsider_detection["detection_id"],
         "kind": "word",
+        "homograph_reason": "同形独立含义测试",
         "annotation": "1"
     });
     if let Some(token) =
@@ -12575,7 +12579,7 @@ async fn entry_annotations_create_body(
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{detection}");
-    json!({"schema_version":3,"detection_id":detection["detection_id"],"kind":"word","headwords":headwords})
+    json!({"schema_version":3,"detection_id":detection["detection_id"],"kind":"word","headwords":headwords,"homograph_reason":"同形独立含义测试"})
 }
 
 async fn entry_annotations_submit(
@@ -12850,6 +12854,7 @@ async fn create_annotated_fixture(
         response["meta"]["annotation_conflict"]["reason"], "required",
         "{response}"
     );
+    body["homograph_reason"] = json!("同形独立含义测试");
     body["annotation"] = json!(format!("new-{}", &key.simple().to_string()[20..]));
     body["annotation_updates"] = json!(response["meta"]["annotation_conflict"]["entries"].as_array().unwrap().iter().map(|entry| {
         let label = entry["annotation"].as_str().map(str::to_owned).unwrap_or_else(|| format!("old-{}", &entry["entry_id"].as_str().unwrap()[24..]));
@@ -12894,6 +12899,7 @@ async fn entry_annotations_variant_only_and_distinct_create_edit_race(pool: PgPo
         json!({"mode":"unified","common":"harbours"}),
     )
     .await;
+    variant.as_object_mut().unwrap().remove("homograph_reason");
     let (status, created) =
         entry_annotations_submit(&state, &bearer, Uuid::now_v7(), &mut variant).await;
     assert_eq!(
@@ -13010,6 +13016,7 @@ async fn surface_confirm_bugfix_first_explicit_confirmation_http(pool: PgPool) {
         conflict["code"], "annotation_conflict",
         "first explicit confirmation: {conflict}"
     );
+    body["homograph_reason"] = json!("同形独立含义测试");
     body["annotation"] = json!("new harbour");
     body["annotation_updates"] = entry_annotations_updates(&conflict, &["old harbour"]);
     let response = client
@@ -15653,7 +15660,7 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replayed, response);
     assert_eq!(current_publication_id(&pool, id).await, current);
-    let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, 20260923030000)
+    let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, 20260923050000)
         .await
         .unwrap_err();
     assert!(format!("{down_error:#}").contains("cannot revert while rollback publications exist"));
@@ -15662,7 +15669,7 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(version, 20260923030000);
+    assert_eq!(version, 20260923050000);
     assert_eq!(current_publication_id(&pool, id).await, current);
 }
 

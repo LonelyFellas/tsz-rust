@@ -1330,6 +1330,18 @@ impl LexiconService {
     ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         super::annotations::normalize_annotation(&mut input.annotation)?;
         super::annotations::normalize_updates(&mut input.annotation_updates)?;
+        if let Some(reason) = &mut input.homograph_reason {
+            *reason = reason.trim().to_owned();
+            if reason.is_empty()
+                || reason.chars().count() > 500
+                || reason.chars().any(char::is_control)
+            {
+                return Err(LexiconServiceError::InvalidField {
+                    field: "homograph_reason",
+                    message: "homograph reason must contain 1 to 500 characters without control characters",
+                });
+            }
+        }
         let explicit_headwords = input.headwords.is_some();
         if let Some(headwords) = &mut input.headwords {
             normalize_submitted_headwords(headwords)?;
@@ -1435,15 +1447,33 @@ impl LexiconService {
         } else {
             None
         };
+        // 省略 headwords 的兼容创建仍保留多词性原型，不能只查回退原形。
+        let mut annotation_keys = initial_headword_keys.clone();
+        annotation_keys.extend(
+            crate::lexicon::v3_projection::form_variant_sources(entry_id, &forms)
+                .map_err(|_| invariant_record())?
+                .into_iter()
+                .filter(|source| source.form_type == "base")
+                .map(|source| {
+                    format!(
+                        "{}:{}",
+                        source.dialect_scope.as_str(),
+                        source.normalized_surface
+                    )
+                }),
+        );
+        annotation_keys.sort();
+        annotation_keys.dedup();
         self.apply_create_annotations(
             &mut transaction,
             actor_id,
             is_super_admin,
             request_id,
             v3_kind_string(input.kind),
-            &initial_headword_keys,
+            &annotation_keys,
             &input.annotation,
             &input.annotation_updates,
+            input.homograph_reason.as_deref(),
         )
         .await?;
         let meanings = DraftMeaningsStepContentV3::default();
@@ -1591,6 +1621,7 @@ impl LexiconService {
             serde_json::json!({
                 "schema_version": 3,
                 "explicit_headwords": explicit_headwords,
+                "homograph_reason": input.homograph_reason,
                 "surface_snapshot_id": verified_surface.as_ref().map(|value| value.snapshot_id),
             }),
         )
@@ -3551,7 +3582,7 @@ async fn validate_requested_audio_assets(
                    WHERE reference.asset_id = asset.id AND reference.entry_id <> $2
                ) AS taken
         FROM lexicon.audio_assets asset
-        WHERE asset.id = ANY($1)
+        WHERE asset.id = ANY($1) AND asset.reclamation_started_at IS NULL
         -- 与回收 worker 的 FOR UPDATE 串行：不加锁的话，校验通过之后、引用行写入之前，
         -- worker 可能刚好把这条资产的对象删掉，留下引用完好但播不出声的资产。
         FOR SHARE OF asset

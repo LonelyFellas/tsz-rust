@@ -60,7 +60,7 @@ impl AudioAssetRepository {
 
     pub async fn find(&self, id: Uuid) -> Result<Option<AudioAssetRecord>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT object_key, created_by_admin_id FROM lexicon.audio_assets WHERE id = $1",
+            "SELECT object_key, created_by_admin_id FROM lexicon.audio_assets WHERE id = $1 AND reclamation_started_at IS NULL",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -93,7 +93,7 @@ impl AudioAssetRepository {
         let row = sqlx::query(
             r#"SELECT id, locale, gender, content_type, size_bytes, duration_ms,
                       original_name, created_at
-               FROM lexicon.audio_assets WHERE source_key = $1"#,
+               FROM lexicon.audio_assets WHERE source_key = $1 AND reclamation_started_at IS NULL"#,
         )
         .bind(source_key)
         .fetch_optional(&self.pool)

@@ -48,12 +48,13 @@ pub fn run_worker(pool: PgPool, storage: Option<Arc<dyn ObjectStore>>) {
     });
 }
 
-/// 每条资产单独一个事务：`FOR UPDATE` 锁住资产行，再删对象、删行、提交。
+/// 先持锁标记回收并提交，再用独立事务串行删除对象与记录。
 ///
 /// 锁是必须的。不加锁的话，「查到零引用」与「删对象」之间有一个窗口，
 /// 管理员恰好在这一刻把这条资产存进草稿，就会得到一条引用完好、对象已被删掉的资产——
 /// 线上播不出声且不可恢复。保存路径的校验对同一行取 `FOR SHARE`，于是两者必然串行：
-/// 要么保存先拿到锁、worker 随后看到引用而跳过，要么 worker 先删完、保存的校验报「资产不存在」。
+/// 要么保存先拿到锁、worker 随后看到引用而跳过，要么 worker 先标记、保存的校验拒绝该资产。
+/// 标记必须先提交：对象可能已删除但响应丢失，失败回滚不能让资产再次被引用。
 /// 锁只在一次对象删除期间持有，且只挡住引用同一条资产的保存。
 pub async fn reclaim_once(
     pool: &PgPool,
@@ -90,6 +91,19 @@ pub async fn reclaim_once(
         };
 
         let id: Uuid = row.get("id");
+        // 候选查询的语句快照可能早于并发保存提交。持有资产排他锁后，
+        // 用新的 READ COMMITTED 快照再次确认，不能先删对象再靠 FK 拒绝删行。
+        let referenced: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1)",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if referenced {
+            tx.rollback().await?;
+            skipped.push(id);
+            continue;
+        }
         let object_key: String = row.get("object_key");
         let Ok(key) = ObjectKey::parse(object_key) else {
             // 库里的键不合法说明写入侧出过 bug，删不了也报不出去；留着行以便排查。
@@ -102,6 +116,27 @@ pub async fn reclaim_once(
             skipped.push(id);
             continue;
         };
+        sqlx::query(
+            "UPDATE lexicon.audio_assets SET reclamation_started_at = COALESCE(reclamation_started_at, now()) WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        // 另一 worker 可能已接手或删完；只让取得行锁的一方执行对象删除。
+        let mut tx = pool.begin().await?;
+        let locked: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM lexicon.audio_assets WHERE id = $1 AND reclamation_started_at IS NOT NULL FOR UPDATE SKIP LOCKED",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if locked.is_none() {
+            tx.rollback().await?;
+            skipped.push(id);
+            continue;
+        }
         let deleted_object = match tokio::time::timeout(DELETE_TIMEOUT, storage.delete(&key)).await
         {
             Ok(result) => result.map_err(|error| error.to_string()),
