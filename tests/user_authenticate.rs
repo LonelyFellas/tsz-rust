@@ -55,6 +55,33 @@ async fn authenticate_succeeds_with_email_case_insensitive(pool: PgPool) {
     assert_eq!(user.id, id);
 }
 
+#[sqlx::test]
+async fn login_preserves_raw_passwords_and_accepts_web_uppercase_hashes(pool: PgPool) {
+    let svc = service(pool);
+    for (email, stored, supplied) in [
+        ("raw@example.com", "OldPass!", "OldPass!"),
+        ("web@example.com", "PASSWORD123", "passWORD123"),
+    ] {
+        let user = svc
+            .register(RegisterInput {
+                phone: None,
+                email: Some(email.to_owned()),
+                password: stored.to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(svc.authenticate(email, supplied).await.unwrap().id, user.id);
+        assert!(matches!(
+            svc.authenticate(email, "wrongPASSWORD123").await,
+            Err(LoginError::InvalidCredentials)
+        ));
+    }
+    assert!(matches!(
+        svc.authenticate("raw@example.com", "oldpass!").await,
+        Err(LoginError::InvalidCredentials)
+    ));
+}
+
 // ————————————————————— 不可区分：两种失败同一个错 —————————————————————
 
 #[sqlx::test]

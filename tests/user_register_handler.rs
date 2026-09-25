@@ -1,7 +1,4 @@
-//! `POST /api/v1/auth/register` 端到端测试（真 PG + 真 Redis）。
-//!
-//! 当前契约：仅手机号注册；请求包含 `phone/password/code`；验证码用途固定为
-//! `register`；成功后直接返回登录响应并下发 HttpOnly refresh cookie。
+//! 手机号与邮箱验证码注册的真实 PG/Redis 集成测试。
 
 use std::time::Duration;
 
@@ -196,16 +193,196 @@ async fn invalid_phone_and_password_are_400(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn email_only_payload_is_rejected(pool: PgPool) {
-    let (state, _) = AppState::for_test_with_otp_store(pool);
+async fn email_registration_normalizes_and_creates_complete_session(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, "student@example.com").await;
     let (status, cookie, body) = register(
         &state,
-        json!({"email": "user@example.com", "password": PASSWORD, "code": CODE}),
+        json!({"email": "  Student@EXAMPLE.com  ", "password": PASSWORD, "code": CODE}),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(cookie.is_none());
-    assert_eq!(body["code"], "invalid_request_body");
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(cookie.unwrap().contains("HttpOnly"));
+    assert_eq!(body["user"]["email"], "student@example.com");
+    assert!(body["user"]["phone"].is_null());
+    assert_eq!(body["user"]["roles"], json!(["student"]));
+    let id = uuid::Uuid::parse_str(body["user"]["id"].as_str().unwrap()).unwrap();
+    let row: (Option<String>, String) =
+        sqlx::query_as("SELECT phone, password_hash FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(row.0.is_none());
+    assert!(bcrypt::verify(PASSWORD.to_uppercase(), &row.1).unwrap());
+    let roles: i64 = sqlx::query_scalar("SELECT count(*) FROM user_roles WHERE user_id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let sessions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM refresh_tokens WHERE user_id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((roles, sessions), (1, 1));
+
+    save_register_code(&store, "student@example.com").await;
+    let duplicate = register(
+        &state,
+        json!({"email": "STUDENT@example.com", "password": PASSWORD, "code": CODE}),
+    )
+    .await;
+    assert_eq!(duplicate.0, StatusCode::CONFLICT);
+    assert!(duplicate.1.is_none());
+    assert_eq!(duplicate.2["field"], "email");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn invalid_contacts_do_not_consume_registration_code(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, "student@example.com").await;
+    for contact in [
+        json!({}),
+        json!({"email":" "}),
+        json!({"email":"invalid"}),
+        json!({"phone":PHONE,"email":"student@example.com"}),
+    ] {
+        let mut body = contact;
+        body["password"] = json!(PASSWORD);
+        body["code"] = json!(CODE);
+        let result = register(&state, body).await;
+        assert_eq!(result.0, StatusCode::BAD_REQUEST, "{}", result.2);
+        assert!(result.1.is_none());
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    let result = register(
+        &state,
+        json!({"email":"student@example.com","password":PASSWORD,"code":CODE}),
+    )
+    .await;
+    assert_eq!(result.0, StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn email_registration_rejects_wrong_purpose_target_and_replay(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    store
+        .save_code("student@example.com", Purpose::Login, CODE, ttl())
+        .await
+        .unwrap();
+    save_register_code(&store, "other@example.com").await;
+    let body = json!({"email":"student@example.com","password":PASSWORD,"code":CODE});
+    assert_eq!(
+        register(&state, body.clone()).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    save_register_code(&store, "student@example.com").await;
+    assert_eq!(register(&state, body.clone()).await.0, StatusCode::CREATED);
+    assert_eq!(register(&state, body).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test]
+async fn registration_password_policy_is_checked_before_consuming_code(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool);
+    save_register_code(&store, PHONE).await;
+    for password in [
+        "abcdefghi1",
+        "abcdefghijklmnopqrstu1",
+        "abcdefghijk",
+        "12345678901",
+        "abcdefghi1!",
+        "密码abcdefghi1",
+    ] {
+        let result = register(
+            &state,
+            json!({"phone":PHONE,"password":password,"code":CODE}),
+        )
+        .await;
+        assert_eq!(
+            result.0,
+            StatusCode::BAD_REQUEST,
+            "{password}: {}",
+            result.2
+        );
+        assert_eq!(result.2["field"], "password");
+    }
+    assert_eq!(
+        register(
+            &state,
+            json!({"phone":PHONE,"password":PASSWORD,"code":CODE})
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+}
+
+#[sqlx::test]
+async fn concurrent_email_registration_creates_only_one_account(pool: PgPool) {
+    let (first, first_store) = AppState::for_test_with_otp_store(pool.clone());
+    let (second, second_store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&first_store, "student@example.com").await;
+    save_register_code(&second_store, "student@example.com").await;
+    let (a, b) = tokio::join!(
+        register(
+            &first,
+            json!({"email":"STUDENT@example.com","password":PASSWORD,"code":CODE})
+        ),
+        register(
+            &second,
+            json!({"email":"student@example.com","password":PASSWORD,"code":CODE})
+        ),
+    );
+    let mut statuses = [a.0.as_u16(), b.0.as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [201, 409]);
+    for table in ["users", "user_roles", "refresh_tokens"] {
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "{table}");
+    }
+}
+
+#[sqlx::test]
+async fn email_session_failure_rolls_back_user_and_role(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    sqlx::raw_sql("CREATE FUNCTION reject_test_session() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test session unavailable'; END $$; CREATE TRIGGER reject_test_session BEFORE INSERT ON refresh_tokens FOR EACH ROW EXECUTE FUNCTION reject_test_session();")
+        .execute(&pool).await.unwrap();
+    save_register_code(&store, "student@example.com").await;
+    let result = register(
+        &state,
+        json!({"email":"student@example.com","password":PASSWORD,"code":CODE}),
+    )
+    .await;
+    assert!(result.0.is_server_error());
+    assert!(result.1.is_none());
+    for table in ["users", "user_roles", "refresh_tokens"] {
+        let count: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
 }
 
 #[sqlx::test]
