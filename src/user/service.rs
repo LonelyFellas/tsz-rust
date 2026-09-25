@@ -195,12 +195,12 @@ impl UserService {
 }
 
 async fn verify_login_password(password: &str, hash: &str) -> bool {
-    if Password::verify_raw(password.to_owned(), hash.to_owned()).await {
-        return true;
-    }
-    // 历史 API 存原串，web 存大写；不能通过归一化抹掉前者的有效凭据。
+    let raw_matches = Password::verify_raw(password.to_owned(), hash.to_owned()).await;
+    // 不能因匹配 dummy hash 而短路，否则会暴露未知账号与错误密码的耗时差异。
     let normalized = password.to_ascii_uppercase();
-    normalized != password && Password::verify_raw(normalized, hash.to_owned()).await
+    let normalized_matches =
+        normalized != password && Password::verify_raw(normalized, hash.to_owned()).await;
+    raw_matches || normalized_matches
 }
 
 #[cfg(test)]

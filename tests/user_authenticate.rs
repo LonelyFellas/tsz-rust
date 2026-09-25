@@ -102,15 +102,13 @@ async fn wrong_password_is_invalid_credentials(pool: PgPool) {
 #[sqlx::test]
 async fn unknown_identifier_is_invalid_credentials(pool: PgPool) {
     let svc = service(pool);
-    // 库里没有这个号：必须返回【和密码错完全相同】的错误，不能泄露「查无此人」。
-    let err = svc
-        .authenticate("19999999999", "password123")
-        .await
-        .expect_err("未知用户应失败");
-    assert!(
-        matches!(err, LoginError::InvalidCredentials),
-        "未知 identifier 应是 InvalidCredentials（和密码错不可区分），实际 {err:?}"
-    );
+    for password in ["password123", "timing-balance", "TIMING-BALANCE"] {
+        let err = svc
+            .authenticate("19999999999", password)
+            .await
+            .expect_err("未知用户应失败");
+        assert!(matches!(err, LoginError::InvalidCredentials));
+    }
 }
 
 // ————————————————————— 先验密码、再查状态 —————————————————————
