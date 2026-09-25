@@ -30,6 +30,26 @@ impl AdminAccountsRepository {
         Self { pool }
     }
 
+    pub(crate) async fn update_display_name(
+        &self,
+        id: &Uuid,
+        display_name: &str,
+    ) -> Result<AdminAccountRecord, AdminAccountsRepositoryError> {
+        let result =
+            sqlx::query("UPDATE admins SET display_name = $2, updated_at = NOW() WHERE id = $1")
+                .bind(id)
+                .bind(display_name)
+                .execute(&self.pool)
+                .await
+                .map_err(AdminAccountsRepositoryError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(AdminAccountsRepositoryError::NotFound);
+        }
+        self.find_by_id(id)
+            .await?
+            .ok_or(AdminAccountsRepositoryError::NotFound)
+    }
+
     pub async fn create(&self, admin: NewAdmin) -> Result<Admin, AdminAccountsRepositoryError> {
         sqlx::query_as!(
             Admin,

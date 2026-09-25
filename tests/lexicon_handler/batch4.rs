@@ -28,6 +28,11 @@ async fn batch4_revocation_wins_against_waiting_publisher(pool: PgPool) {
     let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED);
     let draft = sentence(&state, &bearer, &word).await;
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
     let mut revoke = pool.begin().await.unwrap();
     sqlx::query("UPDATE admins SET can_publish_lexicon=false WHERE id=$1")
         .bind(actor)
@@ -324,7 +329,7 @@ async fn batch4_sentence_publication_isolated_history_and_idempotency(pool: PgPo
     .await;
     assert_eq!(history.as_array().unwrap().len(), 3);
     assert_eq!(history[0]["rollback_of_publication_id"], first);
-    sqlx::query("UPDATE admins SET can_publish_lexicon=false WHERE id=$1")
+    sqlx::query("UPDATE admins SET role='admin', can_publish_lexicon=false WHERE id=$1")
         .bind(actor)
         .execute(&pool)
         .await
@@ -362,7 +367,7 @@ async fn batch4_withdrawal_requires_owner_confirmation_and_explicit_restore(pool
     let state = batch3_state(&pool).await;
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
-    let other = seed_admin(&pool).await;
+    let other = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let other_bearer = token(&state, other);
     let word = batch3_word(&state, &bearer, "alpha").await;
     let (status, _) = publish_ready_v3(&state, &bearer, &word).await;

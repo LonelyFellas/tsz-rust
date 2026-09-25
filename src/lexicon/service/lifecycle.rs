@@ -467,8 +467,9 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?
                 .ok_or(LexiconServiceError::WordNotFound)?;
-            // 整批原子：一条越权就拒掉整批，与 delete_draft_batch 同口径。
-            ensure_draft_writable(&record, actor_id, is_super_admin)?;
+            if !is_super_admin && record.current_publication_id.is_none() {
+                return Err(LexiconServiceError::EntryEditForbidden);
+            }
             if record.current_publication_id.is_some() && publisher.is_none() {
                 return Err(LexiconServiceError::EntryPublishForbidden);
             }

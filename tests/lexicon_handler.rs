@@ -35,7 +35,7 @@ fn test_redis_url() -> String {
 }
 
 async fn seed_admin(pool: &PgPool) -> Uuid {
-    seed_admin_with_role(pool, AdminRole::Admin).await
+    seed_admin_with_role(pool, AdminRole::SuperAdmin).await
 }
 
 async fn seed_admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
@@ -3052,7 +3052,7 @@ async fn relation_and_discovery_drafts_are_visible_without_granting_edit_rights(
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner_id = seed_admin(&pool).await;
     let owner = token(&state, owner_id);
-    let outsider_id = seed_admin(&pool).await;
+    let outsider_id = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let outsider = token(&state, outsider_id);
 
     let owner_forms = create_v3_with_complete_forms(&state, &pool, &owner).await;
@@ -3355,7 +3355,12 @@ async fn surface_machinery_shows_other_admins_drafts(pool: PgPool) {
         "detection_id": outsider_detection["detection_id"],
         "kind": "word",
         "homograph_reason": "同形独立含义测试",
-        "annotation": "1"
+        "annotation": "1",
+        "annotation_updates": [{
+            "entry_id": owner_entry_id,
+            "annotation": "2",
+            "base_annotation_revision": owner_forms["word"]["annotation_revision"]
+        }]
     });
     if let Some(confirm) =
         outsider_detection["surface_match_page"]["surface_confirmation_token"].as_str()
@@ -3488,7 +3493,12 @@ async fn other_admins_drafts_require_acknowledgement_and_then_coexist(pool: PgPo
         "detection_id": outsider_detection["detection_id"],
         "kind": "word",
         "homograph_reason": "同形独立含义测试",
-        "annotation": "1"
+        "annotation": "1",
+        "annotation_updates": [{
+            "entry_id": owner_entry_id,
+            "annotation": "2",
+            "base_annotation_revision": owner_forms["word"]["annotation_revision"]
+        }]
     });
     if let Some(token) =
         outsider_detection["surface_match_page"]["surface_confirmation_token"].as_str()
@@ -13449,14 +13459,14 @@ async fn empty_draft_bugfix_visibility_race_archive_and_resume(pool: PgPool) {
     }
 }
 
-/// 标注的修改权限：超管可以改任何词条，其他管理员只能改自己创建的。
+/// 标注修改需要超管身份，词条归属不会授予普通管理员写权限。
 #[sqlx::test]
-async fn entry_annotation_edit_is_limited_to_creator_or_super_admin(pool: PgPool) {
+async fn entry_annotation_edit_requires_super_admin(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner = token(&state, seed_admin(&pool).await);
-    let outsider = token(&state, seed_admin(&pool).await);
+    let outsider = token(&state, seed_admin_with_role(&pool, AdminRole::Admin).await);
     let super_admin = token(
         &state,
         seed_admin_with_role(&pool, AdminRole::SuperAdmin).await,
@@ -13477,9 +13487,9 @@ async fn entry_annotation_edit_is_limited_to_creator_or_super_admin(pool: PgPool
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
-    assert_eq!(denied["code"], "entry_annotation_forbidden", "{denied}");
+    assert_eq!(denied["code"], "forbidden", "{denied}");
 
-    // 正向对照：创建者本人不受影响（防「一律拒绝」的空实现全绿）。
+    // 正向对照：具有超管身份的创建者仍可编辑。
     let (status, saved) = call(
         &state,
         Method::PATCH,
@@ -13589,7 +13599,8 @@ async fn entry_annotations_other_admins_drafts_are_read_only_and_unique(pool: Pg
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let owner = token(&state, seed_admin(&pool).await);
-    let outsider = token(&state, seed_admin(&pool).await);
+    let outsider_id = seed_admin(&pool).await;
+    let outsider = token(&state, outsider_id);
     let first = create_v3_with_complete_forms(&state, &pool, &owner).await;
     // owner 那条已经带标注，排除「因为对方没标注才不要求」的解释。
     let (status, labeled) = call(
@@ -13622,17 +13633,28 @@ async fn entry_annotations_other_admins_drafts_are_read_only_and_unique(pool: Pg
         first["word"]["id"]
     );
     body["annotation"] = json!("1");
+    body["annotation_updates"] = entry_annotations_updates(&required, &["1"]);
     let (status, duplicate) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
     assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
     assert_eq!(
         duplicate["meta"]["annotation_conflict"]["reason"],
         "duplicate"
     );
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(outsider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     body["annotation_updates"] = entry_annotations_updates(&required, &["3"]);
     let (status, denied) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    sqlx::query("UPDATE admins SET role='super_admin' WHERE id=$1")
+        .bind(outsider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     body["annotation"] = json!("2");
-    body["annotation_updates"] = json!([]);
+    body["annotation_updates"] = entry_annotations_updates(&required, &["1"]);
     let (status, created) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["word"]["annotation"], "2");
@@ -15559,11 +15581,11 @@ async fn batch3_failure_leaves_no_publication_side_effects(pool: PgPool) {
 async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
     let state = batch3_state(&pool).await;
     let owner = seed_admin(&pool).await;
-    let other = seed_admin(&pool).await;
+    let other = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let super_admin = seed_admin_with_role(&pool, AdminRole::SuperAdmin).await;
     let bearer = token(&state, owner);
     let word = batch3_word(&state, &bearer, "alpha").await;
-    sqlx::query("UPDATE admins SET can_publish_lexicon=false WHERE id=$1")
+    sqlx::query("UPDATE admins SET role='admin', can_publish_lexicon=false WHERE id=$1")
         .bind(owner)
         .execute(&pool)
         .await
@@ -15593,6 +15615,37 @@ async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{response}");
+    for action in ["archive", "restore"] {
+        for batch in [false, true] {
+            let entry_id = word["word"]["id"].as_str().unwrap();
+            let target = json!({"id": entry_id, "base_revision": word["word"]["revision"], "base_lifecycle_revision": word["word"]["lifecycle_revision"]});
+            let (path, input) = if batch {
+                (
+                    format!("{ROOT}/entries/{action}-batch"),
+                    json!({"entries": [target]}),
+                )
+            } else {
+                (
+                    format!("{ROOT}/entries/{entry_id}/{action}"),
+                    json!({"base_revision": target["base_revision"], "base_lifecycle_revision": target["base_lifecycle_revision"]}),
+                )
+            };
+            let (status, response) = call(
+                &state,
+                Method::POST,
+                &path,
+                &bearer,
+                Some(Uuid::now_v7()),
+                Some(input),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "发布权不得授予草稿生命周期写权限：{response}"
+            );
+        }
+    }
     let (status, published) = publish_ready_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     call(

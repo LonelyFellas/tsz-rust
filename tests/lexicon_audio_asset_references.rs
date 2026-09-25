@@ -40,7 +40,7 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
             phone: format!("audio-ref-{}", id.simple()),
             display_name: "Audio reference tester".to_owned(),
             password_hash: "hashed-password".to_owned(),
-            role: AdminRole::Admin,
+            role: AdminRole::SuperAdmin,
             must_change_password: false,
             created_by_admin_id: None,
         })
@@ -49,7 +49,6 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
     id
 }
 
-/// 发布链路显式使用已授权的普通管理员；其余音频测试保留默认无发布权账号。
 async fn seed_publisher(pool: &PgPool) -> Uuid {
     let id = seed_admin(pool).await;
     sqlx::query("UPDATE admins SET can_publish_lexicon = TRUE WHERE id = $1")

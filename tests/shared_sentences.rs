@@ -14,6 +14,10 @@ use uuid::Uuid;
 const ROOT: &str = "/api/v1/admin/lexicon/sentences";
 
 async fn admin(pool: &PgPool) -> Uuid {
+    admin_with_role(pool, AdminRole::SuperAdmin).await
+}
+
+async fn admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
     let id = Uuid::now_v7();
     AdminRepository::new(pool.clone())
         .create(NewAdmin {
@@ -21,7 +25,7 @@ async fn admin(pool: &PgPool) -> Uuid {
             phone: format!("shared-{id}"),
             display_name: "例句测试".into(),
             password_hash: "hashed".into(),
-            role: AdminRole::Admin,
+            role,
             must_change_password: false,
             created_by_admin_id: None,
         })
@@ -303,7 +307,7 @@ async fn annotations_define_membership_and_unlink_preserves_shared_content(pool:
 #[sqlx::test]
 async fn rejects_invalid_targets_positions_and_foreign_draft_without_partial_writes(pool: PgPool) {
     let owner = admin(&pool).await;
-    let other = admin(&pool).await;
+    let other = admin_with_role(&pool, AdminRole::Admin).await;
     let source = entry(&pool, owner, "wonderful").await;
     let state = AppState::for_test(pool.clone());
     let original = content(source);
@@ -1096,7 +1100,7 @@ async fn global_editor_can_repair_archived_legacy_targets(pool: PgPool) {
 #[sqlx::test]
 async fn shared_draft_reads_do_not_grant_editing_ownership(pool: PgPool) {
     let owner = admin(&pool).await;
-    let other = admin(&pool).await;
+    let other = admin_with_role(&pool, AdminRole::Admin).await;
     let source = entry(&pool, owner, "wonderful").await;
     let state = AppState::for_test(pool.clone());
     let (status, saved) = call(

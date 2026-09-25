@@ -74,6 +74,199 @@ async fn stored_status(pool: &PgPool, id: Uuid) -> AdminStatus {
 }
 
 #[sqlx::test]
+async fn admin_profile_edit_is_super_admin_only_and_cannot_change_privileges(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let target = seed_admin(&pool, AdminRole::Admin, false).await;
+    let initial = AdminRepository::new(pool.clone())
+        .get_by_id(&target)
+        .await
+        .unwrap();
+    for (caller, role, id, input, expected) in [
+        (
+            actor,
+            AdminRole::SuperAdmin,
+            target,
+            json!({"display_name": " 新昵称 "}),
+            StatusCode::OK,
+        ),
+        (
+            target,
+            AdminRole::Admin,
+            target,
+            json!({"display_name": "越权修改"}),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            actor,
+            AdminRole::SuperAdmin,
+            actor,
+            json!({"display_name": "修改超管"}),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            actor,
+            AdminRole::SuperAdmin,
+            Uuid::now_v7(),
+            json!({"display_name": "不存在"}),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            actor,
+            AdminRole::SuperAdmin,
+            target,
+            json!({"display_name": " "}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            actor,
+            AdminRole::SuperAdmin,
+            target,
+            json!({"display_name": "越权字段", "role": "super_admin"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            actor,
+            AdminRole::SuperAdmin,
+            target,
+            json!({"display_name": "越权字段", "can_publish_lexicon": true}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let bearer = token(&state, caller, role);
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!("/api/v1/admin/admins/{id}"))
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(input.to_string()))
+            .unwrap();
+        let response = tsz_rust::router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{input}");
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        if expected == StatusCode::OK {
+            assert_eq!(body["display_name"], "新昵称");
+            assert!(body.get("password_hash").is_none());
+        }
+        let stored = AdminRepository::new(pool.clone())
+            .get_by_id(&target)
+            .await
+            .unwrap();
+        assert_eq!(stored.display_name, "新昵称");
+        assert_eq!(stored.phone, initial.phone);
+        assert_eq!(stored.role, AdminRole::Admin);
+        assert_eq!(stored.status, initial.status);
+    }
+}
+
+#[sqlx::test]
+async fn default_admin_can_read_but_cannot_mutate_business_data(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool, AdminRole::Admin, false).await;
+    let bearer = token(&state, admin, AdminRole::Admin);
+    let id = Uuid::now_v7();
+    for (method, path, expected) in [
+        ("GET", "/api/v1/admin/profile".to_owned(), StatusCode::OK),
+        (
+            "GET",
+            "/api/v1/admin/lexicon/entries".to_owned(),
+            StatusCode::OK,
+        ),
+        (
+            "POST",
+            "/api/v1/admin/lexicon/entries".to_owned(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "PUT",
+            format!("/api/v1/admin/lexicon/entries/{id}/steps/forms"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "PATCH",
+            format!("/api/v1/admin/lexicon/entries/{id}/annotation"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "DELETE",
+            format!("/api/v1/admin/lexicon/entries/{id}"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "POST",
+            format!("/api/v1/admin/lexicon/entries/{id}/publications"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "POST",
+            "/api/v1/admin/lexicon/sentences".to_owned(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "POST",
+            "/api/v1/admin/lexicon/audio-assets/upload-url".to_owned(),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "POST",
+            "/api/v1/admin/settings/parts-of-speech".to_owned(),
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let request = Request::builder()
+            .method(method)
+            .uri(&path)
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = tsz_rust::router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{method} {path}");
+    }
+}
+
+#[sqlx::test]
+async fn disabled_admin_cannot_use_existing_access_token(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let target = seed_admin(&pool, AdminRole::Admin, false).await;
+    let old_bearer = token(&state, target, AdminRole::Admin);
+    let actor_bearer = token(&state, actor, AdminRole::SuperAdmin);
+    let (status, body) = patch_status(
+        &state,
+        target,
+        Some(&actor_bearer),
+        json!({"status": "disabled"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for path in ["/api/v1/admin/profile", "/api/v1/admin/lexicon/entries"] {
+        let request = Request::builder()
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {old_bearer}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = tsz_rust::router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["code"], "account_disabled");
+    }
+}
+
+#[sqlx::test]
 async fn super_admin_disables_plain_admin_and_change_is_persisted(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let actor = seed_admin(&pool, AdminRole::SuperAdmin, false).await;

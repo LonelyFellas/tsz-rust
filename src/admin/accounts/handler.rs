@@ -142,6 +142,47 @@ pub async fn list_admins(
     Ok((StatusCode::OK, Json(response)))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAdminRequest {
+    pub display_name: String,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/admin/admins/{admin_id}",
+    tag = "admin-accounts",
+    security(("bearer_auth" = [])),
+    params(AdminIdPath),
+    request_body = UpdateAdminRequest,
+    responses(
+        (status = 200, description = "管理员资料已更新", body = AdminAccountAdminResponse),
+        (status = 400, description = "路径参数或显示名称非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "仅超级管理员可编辑普通管理员"),
+        (status = 404, description = "管理员不存在"),
+        (status = 422, description = "请求字段非法"),
+        (status = 500, description = "数据库更新失败")
+    )
+)]
+pub async fn update_admin(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(path): ApiPath<AdminIdPath>,
+    ApiJson(req): ApiJson<UpdateAdminRequest>,
+) -> Result<Json<AdminAccountAdminResponse>, AppError> {
+    require_super_admin(&state, &auth).await?;
+    let display_name = DisplayName::parse(&req.display_name)
+        .map_err(map_display_name_error)?
+        .into_string();
+    let service = AdminAccountsService::new(AdminAccountsRepository::new(state.pool.clone()), None);
+    let admin = service
+        .update_display_name(&path.admin_id, &display_name)
+        .await
+        .map_err(|error| map_governance_error(error, "cannot edit a super admin"))?;
+    Ok(Json(admin))
+}
+
 /// GET /api/v1/admin/users
 /// 查询 C 端用户列表。
 #[utoipa::path(
@@ -346,9 +387,7 @@ pub struct ResetAdminPasswordResponse {
 
 /// PATCH /api/v1/admin/admins/{admin_id}/status
 ///
-/// 超级管理员启用/禁用普通管理员。目标是超管一律 403——治理顶点互不可管
-/// （设计 §9，含超管改自己）。禁用不即时踢线，接受一个 access TTL 的延迟
-/// （user-mgmt-D6），但会让后续 refresh 被拒。
+/// 超级管理员启用/禁用普通管理员；禁用状态由受保护接口逐次核验。
 #[utoipa::path(
     patch,
     path = "/api/v1/admin/admins/{admin_id}/status",

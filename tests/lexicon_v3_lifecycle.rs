@@ -35,7 +35,7 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
             phone: format!("v3-lifecycle-{}", id.simple()),
             display_name: "V3 lifecycle tester".to_owned(),
             password_hash: "hashed-password".to_owned(),
-            role: AdminRole::Admin,
+            role: AdminRole::SuperAdmin,
             must_change_password: false,
             created_by_admin_id: None,
         })
