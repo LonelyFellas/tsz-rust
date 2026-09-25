@@ -1,5 +1,5 @@
 use axum::{
-    Router,
+    Router, middleware,
     routing::{get, patch},
 };
 
@@ -9,7 +9,17 @@ use crate::{
     state::AppState,
 };
 
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
+    let business = Router::new()
+        .nest("/settings/parts-of-speech", catalog::router::router())
+        .nest("/settings/form-types", catalog::form_types::router())
+        .nest("/lexicon", lexicon::router::router())
+        .nest("/speech", speech::preview::router::router())
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            admin::authorization::enforce_business_access,
+        ));
+
     Router::new()
         .route("/profile", get(admin::profile::handler::admin_profile))
         .route(
@@ -27,8 +37,5 @@ pub fn router() -> Router<AppState> {
         )
         .nest("/auth", admin::auth::router())
         .nest("/admins", admin::accounts::router())
-        .nest("/settings/parts-of-speech", catalog::router::router())
-        .nest("/settings/form-types", catalog::form_types::router())
-        .nest("/lexicon", lexicon::router::router())
-        .nest("/speech", speech::preview::router::router())
+        .merge(business)
 }

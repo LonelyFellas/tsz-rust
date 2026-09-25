@@ -138,8 +138,8 @@ async fn user_list_uses_admin_users_path_and_documents_contract(pool: PgPool) {
     let (old_status, _) = get(&state, "/api/v1/admin/admins/users", &token).await;
     assert_eq!(
         old_status,
-        StatusCode::NOT_FOUND,
-        "用户列表不应误挂在 /api/v1/admin/admins/users"
+        StatusCode::METHOD_NOT_ALLOWED,
+        "管理员资料路径仅允许 PATCH，不能从此读取用户列表"
     );
 }
 

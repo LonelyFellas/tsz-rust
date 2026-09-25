@@ -55,7 +55,7 @@ pub fn router(state: AppState) -> Router {
         //     user::USER_MOUNT,
         //     Router::new().route("/register", post(user::handler::register)),
         // )
-        .nest(admin::ADMIN_MOUNT, admin::router())
+        .nest(admin::ADMIN_MOUNT, admin::router(state.clone()))
         .nest(
             auth::AUTH_MOUNT,
             Router::new()

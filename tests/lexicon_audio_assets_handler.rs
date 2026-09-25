@@ -30,7 +30,7 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
             phone: format!("audio-{}", id.simple()),
             display_name: "Audio Admin".to_owned(),
             password_hash: "hash".to_owned(),
-            role: AdminRole::Admin,
+            role: AdminRole::SuperAdmin,
             must_change_password: false,
             created_by_admin_id: None,
         })

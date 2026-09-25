@@ -149,6 +149,20 @@ impl AdminAccountsService {
         self.session_repository = Some(session_repository);
         self
     }
+    pub async fn update_display_name(
+        &self,
+        target_id: &Uuid,
+        display_name: &str,
+    ) -> Result<AdminAccountAdminResponse, AdminAccountsServiceError> {
+        self.governable_target(target_id).await?;
+        let record = self
+            .repository
+            .update_display_name(target_id, display_name)
+            .await
+            .map_err(map_repository_error)?;
+        Ok(admin_response_from(record))
+    }
+
     pub async fn provision(
         &self,
         id: Uuid,
