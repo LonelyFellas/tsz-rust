@@ -3,7 +3,7 @@ use crate::{
     auth::{AUTH_MOUNT, REFRESH_TOKEN_COOKIE, extract::AuthUser},
     error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
-    platform::{Password, PasswordError, Phone, PhoneError},
+    platform::{Email, Password, PasswordError, Phone, PhoneError},
     session::{
         repository::RefreshTokenRepository,
         service::{SessionError, SessionService},
@@ -140,37 +140,35 @@ pub async fn login_otp(
     Ok((jar, Json(resp)))
 }
 
-/// 手机号注册请求。当前不支持邮箱注册；验证码须由 `/api/v1/otp/send`
-/// 以 `purpose=register` 发送。
+/// 联系方式恰好提供一种；验证码用途为 register。
 #[derive(Deserialize, ToSchema)]
 pub struct RegisterRequest {
-    /// 中国大陆手机号
     #[schema(example = "13800138000")]
-    phone: String,
-    /// 登录密码（8–72 字节）
-    #[schema(example = "P@ssw0rd!")]
+    phone: Option<String>,
+    #[schema(example = "student@example.com")]
+    email: Option<String>,
+    /// 11–20 位字母数字组合，不区分大小写。
+    #[schema(example = "Password123")]
     password: String,
-    /// 注册短信验证码（6 位）
+    /// 注册验证码（6 位）
     #[schema(example = "123456")]
     code: String,
 }
 
 /// POST /api/v1/auth/register
-///
-/// 验证手机号、密码与注册用途短信验证码，创建 student 用户，并直接颁发
-/// access token 与 HttpOnly refresh cookie。注册成功无需再次调用登录接口。
 #[utoipa::path(
     post,
     path = "/api/v1/auth/register",
     tag = "auth",
+    description = "验证手机或邮箱注册验证码并建立会话；注册成功无需再次调用登录接口。",
     request_body = RegisterRequest,
     responses(
         (status = 201, description = "注册成功并建立登录会话", body = LoginResponse,
             headers(("Set-Cookie" = String,
                 description = "refresh_token cookie（HttpOnly; SameSite=Lax; Path=/api/v1/auth; Max-Age=refresh TTL 秒）"))),
-        (status = 400, description = "手机号或密码格式不合法"),
+        (status = 400, description = "联系方式须二选一且格式有效；密码须符合注册规则"),
         (status = 401, description = "注册验证码无效或已过期"),
-        (status = 409, description = "手机号已被占用"),
+        (status = 409, description = "手机号或邮箱已被占用"),
         (status = 429, description = "验证码校验请求过于频繁"),
         (status = 500, description = "数据库或令牌签发失败"),
         (status = 503, description = "密码哈希或验证码基础设施不可用"),
@@ -183,18 +181,49 @@ pub async fn register(
     headers: HeaderMap,
     ApiJson(payload): ApiJson<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // 1) 解析并归一化手机号。
-    let phone = Phone::parse(&payload.phone)
-        .map_err(map_phone_error)?
-        .into_string();
+    let (identifier, field) = match (payload.phone.as_deref(), payload.email.as_deref()) {
+        (Some(phone), None) => (
+            Phone::parse(phone).map_err(map_phone_error)?.into_string(),
+            "phone",
+        ),
+        (None, Some(email)) => (
+            Email::parse(email)
+                .map_err(|_| {
+                    AppError::validation(ErrorCode::InvalidEmail, "email", "invalid email")
+                })?
+                .into_string(),
+            "email",
+        ),
+        _ => {
+            return Err(AppError::bad_request(
+                ErrorCode::InvalidIdentifier,
+                "provide exactly one phone or email",
+            ));
+        }
+    };
 
-    // 2) 先做低成本密码格式校验，避免格式错误消耗一次验证码。
-    let psd = Password::parse(&payload.password).map_err(map_password_error)?;
+    if payload.password.len() < 11 {
+        return Err(map_password_error(PasswordError::TooShort));
+    }
+    if payload.password.len() > 20 {
+        return Err(map_password_error(PasswordError::TooLong));
+    }
+    if !payload.password.bytes().all(|c| c.is_ascii_alphanumeric())
+        || !payload.password.bytes().any(|c| c.is_ascii_alphabetic())
+        || !payload.password.bytes().any(|c| c.is_ascii_digit())
+    {
+        return Err(AppError::validation(
+            ErrorCode::InvalidPassword,
+            "password",
+            "password must contain letters and digits only",
+        ));
+    }
+    let psd =
+        Password::parse(&payload.password.to_ascii_uppercase()).map_err(map_password_error)?;
 
-    // 3) 发码端同样以归一化手机号作为 Redis key。
     state
         .otp_service
-        .verify(&phone, Purpose::Register, &payload.code)
+        .verify(&identifier, Purpose::Register, &payload.code)
         .await
         .map_err(map_login_otp_error)?;
 
@@ -211,9 +240,15 @@ pub async fn register(
     // 5) 用户、初始角色和 refresh token 同事务提交。
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let user = service
-        .register_verified_phone_in(&mut tx, phone, password_hash, client_ip(&headers))
+        .register_verified_in(
+            &mut tx,
+            (field == "phone").then(|| identifier.clone()),
+            (field == "email").then_some(identifier),
+            password_hash,
+            client_ip(&headers),
+        )
         .await
-        .map_err(map_register_error)?;
+        .map_err(|error| map_register_error(error, field))?;
 
     let profile = UserProfile {
         id: user.id,
@@ -705,12 +740,12 @@ fn map_login_error(err: LoginError) -> AppError {
     }
 }
 
-fn map_register_error(err: RegisterError) -> AppError {
+fn map_register_error(err: RegisterError, field: &'static str) -> AppError {
     match err {
         // 手机 / 邮箱 已被占用
         RegisterError::Register(SubjectError::UserAlreadyExists) => AppError::conflict(
             ErrorCode::UserAlreadyExists,
-            Some("phone"),
+            Some(field),
             "user already exists",
         ),
         // 手机号 / 邮箱 格式为空

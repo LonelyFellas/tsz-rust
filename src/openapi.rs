@@ -897,22 +897,24 @@ mod tests {
         let register_required = json["components"]["schemas"]["RegisterRequest"]["required"]
             .as_array()
             .expect("RegisterRequest 应声明必填字段");
-        for field in ["phone", "password", "code"] {
+        for field in ["password", "code"] {
             assert!(
                 register_required.iter().any(|value| value == field),
                 "RegisterRequest 应要求 {field}"
             );
         }
+        for field in ["phone", "email"] {
+            assert!(!register_required.iter().any(|value| value == field));
+            assert_eq!(
+                json["components"]["schemas"]["RegisterRequest"]["properties"][field]["type"],
+                serde_json::json!(["string", "null"])
+            );
+        }
         assert!(
-            json["components"]["schemas"]["RegisterRequest"]["properties"]
-                .get("email")
-                .is_none(),
-            "当前注册契约不应暴露 email"
-        );
-        assert_eq!(
-            json["components"]["schemas"]["RegisterRequest"]["properties"]["phone"]["description"],
-            "中国大陆手机号",
-            "注册 phone 描述应明确当前只支持手机号"
+            json["components"]["schemas"]["RegisterRequest"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("恰好提供一种")
         );
         let change_password = &json["paths"]["/api/v1/admin/auth/change-password"]["post"];
         assert_eq!(

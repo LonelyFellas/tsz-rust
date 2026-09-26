@@ -55,6 +55,33 @@ async fn authenticate_succeeds_with_email_case_insensitive(pool: PgPool) {
     assert_eq!(user.id, id);
 }
 
+#[sqlx::test]
+async fn login_preserves_raw_passwords_and_accepts_web_uppercase_hashes(pool: PgPool) {
+    let svc = service(pool);
+    for (email, stored, supplied) in [
+        ("raw@example.com", "OldPass!", "OldPass!"),
+        ("web@example.com", "PASSWORD123", "passWORD123"),
+    ] {
+        let user = svc
+            .register(RegisterInput {
+                phone: None,
+                email: Some(email.to_owned()),
+                password: stored.to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(svc.authenticate(email, supplied).await.unwrap().id, user.id);
+        assert!(matches!(
+            svc.authenticate(email, "wrongPASSWORD123").await,
+            Err(LoginError::InvalidCredentials)
+        ));
+    }
+    assert!(matches!(
+        svc.authenticate("raw@example.com", "oldpass!").await,
+        Err(LoginError::InvalidCredentials)
+    ));
+}
+
 // ————————————————————— 不可区分：两种失败同一个错 —————————————————————
 
 #[sqlx::test]
@@ -75,15 +102,13 @@ async fn wrong_password_is_invalid_credentials(pool: PgPool) {
 #[sqlx::test]
 async fn unknown_identifier_is_invalid_credentials(pool: PgPool) {
     let svc = service(pool);
-    // 库里没有这个号：必须返回【和密码错完全相同】的错误，不能泄露「查无此人」。
-    let err = svc
-        .authenticate("19999999999", "password123")
-        .await
-        .expect_err("未知用户应失败");
-    assert!(
-        matches!(err, LoginError::InvalidCredentials),
-        "未知 identifier 应是 InvalidCredentials（和密码错不可区分），实际 {err:?}"
-    );
+    for password in ["password123", "timing-balance", "TIMING-BALANCE"] {
+        let err = svc
+            .authenticate("19999999999", password)
+            .await
+            .expect_err("未知用户应失败");
+        assert!(matches!(err, LoginError::InvalidCredentials));
+    }
 }
 
 // ————————————————————— 先验密码、再查状态 —————————————————————

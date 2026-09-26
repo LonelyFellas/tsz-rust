@@ -99,36 +99,28 @@ impl UserService {
         .await
     }
 
-    /// 已在 HTTP 编排层验证手机号、密码和 OTP 后，在调用方事务中创建手机号用户。
-    pub async fn register_verified_phone_in(
+    pub async fn register_verified_in(
         &self,
         connection: &mut sqlx::PgConnection,
-        phone: String,
+        phone: Option<String>,
+        email: Option<String>,
         password_hash: String,
         registration_ip: Option<String>,
     ) -> Result<User, RegisterError> {
         UserRepository::create_in(
             connection,
-            Self::verified_phone_input(phone, password_hash, registration_ip),
+            NewUser {
+                id: Uuid::now_v7(),
+                phone,
+                email,
+                password_hash,
+                display_name: generate_display_name(),
+                first_role: UserRole::Student,
+                registration_ip,
+            },
         )
         .await
         .map_err(Self::map_create_error)
-    }
-
-    fn verified_phone_input(
-        phone: String,
-        password_hash: String,
-        registration_ip: Option<String>,
-    ) -> NewUser {
-        NewUser {
-            id: Uuid::now_v7(),
-            phone: Some(phone),
-            email: None,
-            password_hash,
-            display_name: generate_display_name(),
-            first_role: UserRole::Student,
-            registration_ip,
-        }
     }
 
     async fn create(&self, input: NewUser) -> Result<User, RegisterError> {
@@ -153,7 +145,7 @@ impl UserService {
         match self.repository.get_by_identifier(&id).await {
             Ok(user) => {
                 // 先验证密码（不透明验哈希，不跑注册策略——见 Password::verify_raw 注释）
-                if !Password::verify_raw(password.to_string(), user.password_hash.clone()).await {
+                if !verify_login_password(password, &user.password_hash).await {
                     return Err(LoginError::InvalidCredentials);
                 }
                 // 密码对了，身份已证实 -> 再看状态（禁用只透传给证明了拥有改账号的人）
@@ -162,9 +154,9 @@ impl UserService {
                 }
                 Ok(user)
             }
-            // 查无此人：也跑一次假 verify 平衡时序，然后返回【和密码错同一个】错误
+            // 未知账号也执行相同的凭据比较，避免泄露账号是否存在。
             Err(UserError::NotFound) => {
-                Password::verify_raw(password.to_string(), dummy_hash().to_string()).await;
+                verify_login_password(password, dummy_hash()).await;
                 Err(LoginError::InvalidCredentials)
             }
             // 其余底层错 -> 如实透传
@@ -200,6 +192,15 @@ impl UserService {
     ) -> Result<bool, UserError> {
         UserRepository::delete_account_in(connection, user_id).await
     }
+}
+
+async fn verify_login_password(password: &str, hash: &str) -> bool {
+    let raw_matches = Password::verify_raw(password.to_owned(), hash.to_owned()).await;
+    // 不能因匹配 dummy hash 而短路，否则会暴露未知账号与错误密码的耗时差异。
+    let normalized = password.to_ascii_uppercase();
+    let normalized_matches =
+        normalized != password && Password::verify_raw(normalized, hash.to_owned()).await;
+    raw_matches || normalized_matches
 }
 
 #[cfg(test)]
