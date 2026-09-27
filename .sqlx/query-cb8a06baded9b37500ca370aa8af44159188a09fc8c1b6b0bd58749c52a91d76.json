@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            WITH updated AS (\n                UPDATE users\n                SET status = COALESCE($2::text, status),\n                    display_name = COALESCE($3::text, display_name),\n                    updated_at = NOW()\n                WHERE id = $1\n                RETURNING id, phone, email, display_name, avatar_url, status,\n                          created_at, updated_at\n            )\n            SELECT\n                u.id AS \"id!\",\n                u.phone,\n                u.email,\n                u.display_name AS \"display_name!\",\n                u.avatar_url AS \"avatar_url!\",\n                u.status as \"status!: UserStatus\",\n                ARRAY(\n                    SELECT ur.role\n                    FROM user_roles ur\n                    WHERE ur.user_id = u.id\n                    ORDER BY CASE ur.role WHEN 'student' THEN 1 ELSE 2 END\n                ) AS \"roles!: Vec<UserRole>\",\n                u.created_at AS \"created_at!\",\n                u.updated_at AS \"updated_at!\"\n            FROM updated u\n            ",
+  "query": "\n            WITH updated AS (\n                UPDATE users\n                SET status = COALESCE($2::text, status),\n                    display_name = COALESCE($3::text, display_name),\n                    updated_at = NOW()\n                WHERE id = $1\n                RETURNING id, phone, email, display_name, avatar_url, status,\n                          created_at, updated_at\n            )\n            SELECT\n                u.id AS \"id!\",\n                u.phone,\n                u.email,\n                u.display_name AS \"display_name!\",\n                u.avatar_url AS \"avatar_url!\",\n                u.status as \"status!: UserStatus\",\n                ARRAY(\n                    SELECT ur.role\n                    FROM user_roles ur\n                    WHERE ur.user_id = u.id\n                    ORDER BY CASE ur.role WHEN 'student' THEN 1 ELSE 2 END\n                ) AS \"roles!: Vec<UserRole>\",\n                EXISTS (\n                    SELECT 1 FROM teacher_profiles tp WHERE tp.user_id = u.id AND tp.verified\n                ) AS \"teacher_verified!\",\n                u.created_at AS \"created_at!\",\n                u.updated_at AS \"updated_at!\"\n            FROM updated u\n            ",
   "describe": {
     "columns": [
       {
@@ -77,6 +77,12 @@
       },
       {
         "ordinal": 7,
+        "name": "teacher_verified!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
         "name": "created_at!",
         "type_info": "Timestamptz",
         "origin": {
@@ -87,7 +93,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "updated_at!",
         "type_info": "Timestamptz",
         "origin": {
@@ -113,9 +119,10 @@
       false,
       false,
       null,
+      null,
       false,
       false
     ]
   },
-  "hash": "e77a692609a0313a977ffffea9715a95a88be5016c9fb99c1dcdacebef967d92"
+  "hash": "cb8a06baded9b37500ca370aa8af44159188a09fc8c1b6b0bd58749c52a91d76"
 }

@@ -144,6 +144,34 @@ async fn user_list_uses_admin_users_path_and_documents_contract(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn user_list_reads_teacher_verification_without_inferring_from_roles(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool).await;
+    let verified = seed_user(&pool, "已认证", &["student", "teacher"]).await;
+    let unverified = seed_user(&pool, "未认证", &["teacher"]).await;
+    let no_profile = seed_user(&pool, "无教师资料", &["student"]).await;
+    for (id, value) in [(verified, true), (unverified, false)] {
+        sqlx::query("INSERT INTO teacher_profiles (user_id, verified) VALUES ($1, $2)")
+            .bind(id)
+            .bind(value)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let (status, body) = get(&state, "/api/v1/admin/users", &admin_token(&state, admin)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    let items = response["items"].as_array().unwrap();
+    for (id, expected) in [(verified, true), (unverified, false), (no_profile, false)] {
+        let item = items
+            .iter()
+            .find(|item| item["id"] == id.to_string())
+            .unwrap();
+        assert_eq!(item["teacher_verified"], expected, "{item}");
+    }
+}
+
+#[sqlx::test]
 async fn user_list_rejects_inverted_registration_interval(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin_id = seed_admin(&pool).await;

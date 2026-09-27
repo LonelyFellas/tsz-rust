@@ -153,6 +153,45 @@ async fn plain_admin_can_read_user_detail(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn teacher_verification_is_preserved_by_detail_and_updates(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool, AdminRole::SuperAdmin).await;
+    let user = seed_user(&pool, "已认证教师", &["student", "teacher"]).await;
+    let bearer = token(&state, admin, AdminRole::SuperAdmin);
+    sqlx::query("INSERT INTO teacher_profiles (user_id, verified) VALUES ($1, true)")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for (method, path, body) in [
+        ("GET", format!("/api/v1/admin/users/{user}"), None),
+        (
+            "PATCH",
+            format!("/api/v1/admin/users/{user}"),
+            Some(json!({"display_name": "新昵称"})),
+        ),
+        (
+            "PATCH",
+            format!("/api/v1/admin/users/{user}/status"),
+            Some(json!({"status": "disabled"})),
+        ),
+        (
+            "PATCH",
+            format!("/api/v1/admin/users/{user}/status"),
+            Some(json!({"status": "active"})),
+        ),
+    ] {
+        let (status, body) = request(&state, method, &path, Some(&bearer), body).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let response: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(response["teacher_verified"], true, "{body}");
+        assert_eq!(response["roles"], json!(["student", "teacher"]));
+        assert_eq!(response["phone"], user.as_u128().to_string());
+    }
+}
+
+#[sqlx::test]
 async fn detail_omits_missing_contact_keys(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin = seed_admin(&pool, AdminRole::Admin).await;
@@ -296,6 +335,120 @@ async fn super_admin_reenables_user(pool: PgPool) {
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(stored_user(&pool, user).await.1, "active");
+}
+
+#[sqlx::test]
+async fn disabled_user_cannot_login_refresh_or_access_protected_routes_and_can_recover(
+    pool: PgPool,
+) {
+    use tsz_rust::{
+        session::{repository::RefreshTokenRepository, service::SessionService},
+        user::{
+            repository::UserRepository,
+            service::{RegisterInput, UserService},
+        },
+    };
+
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool, AdminRole::SuperAdmin).await;
+    let bearer = token(&state, admin, AdminRole::SuperAdmin);
+    let user = UserService::new(UserRepository::new(pool.clone()))
+        .register(RegisterInput {
+            phone: Some("13800138000".to_owned()),
+            email: None,
+            password: "Password123".to_owned(),
+        })
+        .await
+        .unwrap();
+    let login_body = json!({"identifier": "13800138000", "password": "Password123"});
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/api/v1/auth/login",
+        None,
+        Some(login_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let login: Value = serde_json::from_str(&body).unwrap();
+    let access = login["access_token"].as_str().unwrap();
+    let refresh = SessionService::new(RefreshTokenRepository::new(pool.clone()), state.refresh_ttl)
+        .issue(user.id)
+        .await
+        .unwrap();
+    let (status, body) = request(&state, "GET", "/api/v1/auth/me", Some(access), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before: Value = serde_json::from_str(&body).unwrap();
+    let uri = format!("/api/v1/admin/users/{}/status", user.id);
+
+    let (status, body) = request(
+        &state,
+        "PATCH",
+        &uri,
+        Some(&bearer),
+        Some(json!({"status": "disabled"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = request(&state, "GET", "/api/v1/auth/me", Some(access), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = request(
+        &state,
+        "POST",
+        "/api/v1/auth/login",
+        None,
+        Some(login_body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["code"],
+        "account_disabled"
+    );
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header(
+                    header::COOKIE,
+                    format!("refresh_token={}", refresh.plaintext),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let (status, body) = request(
+        &state,
+        "PATCH",
+        &uri,
+        Some(&bearer),
+        Some(json!({"status": "active"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) =
+        request(&state, "POST", "/api/v1/auth/login", None, Some(login_body)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let login: Value = serde_json::from_str(&body).unwrap();
+    let (status, body) = request(
+        &state,
+        "GET",
+        "/api/v1/auth/me",
+        login["access_token"].as_str(),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let after: Value = serde_json::from_str(&body).unwrap();
+    for field in ["id", "phone", "email", "roles", "display_name"] {
+        assert_eq!(after[field], before[field], "{field}");
+    }
+    assert_eq!(after["phone"], "13800138000");
+    assert_eq!(after["roles"], json!(["student"]));
 }
 
 #[sqlx::test]

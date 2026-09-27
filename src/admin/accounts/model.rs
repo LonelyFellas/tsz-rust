@@ -40,6 +40,7 @@ pub struct AdminAccountUserResponse {
     pub display_name: String,
     pub avatar_url: String,
     pub roles: Vec<UserRole>,
+    pub teacher_verified: bool,
     pub status: UserStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
