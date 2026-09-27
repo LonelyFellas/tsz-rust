@@ -11,6 +11,7 @@ use crate::{
 pub struct AuthUser {
     pub subject: Uuid,
     pub role: String,
+    pub security_version: i64,
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -42,10 +43,20 @@ impl FromRequestParts<AppState> for AuthUser {
             .token_manager
             .parse(token)
             .map_err(|_| invalid_token())?;
-        // 4) Ok(AuthUser { subject: claims.subject, role: claims.role })
+        let version = sqlx::query_scalar::<_, i64>(
+            "SELECT security_version FROM users WHERE id = $1 AND status = 'active'",
+        )
+        .bind(user.subject)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::internal)?;
+        if version != Some(user.security_version) {
+            return Err(invalid_token());
+        }
         Ok(AuthUser {
             subject: user.subject,
             role: user.role,
+            security_version: user.security_version,
         })
     }
 }

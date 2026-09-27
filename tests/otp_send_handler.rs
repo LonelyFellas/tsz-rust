@@ -258,7 +258,12 @@ async fn public_send_still_mints_public_purpose_code(pool: PgPool) {
     assert_eq!(status, StatusCode::ACCEPTED, "公开用途 login 应 202");
     assert!(
         store
-            .code_exists("13800138000", Purpose::Login)
+            .code_exists(
+                &tsz_rust::auth::security::login_code_target(&state, "13800138000")
+                    .await
+                    .unwrap(),
+                Purpose::Login
+            )
             .await
             .unwrap(),
         "login 应真正落码（对照 code_exists 机制本身工作正常）"

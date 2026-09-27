@@ -13,6 +13,7 @@ pub struct Claims {
     pub subject: Uuid,
     pub realm: Realm,
     pub role: String,
+    pub security_version: i64,
 }
 
 #[derive(Copy, Clone)]
@@ -56,6 +57,8 @@ struct TokenPayload {
     role: String,
     iat: i64,
     exp: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    security_version: Option<i64>,
 }
 
 impl TokenManager {
@@ -71,6 +74,15 @@ impl TokenManager {
 
     /// 生成令牌
     pub fn generate(&self, subject: Uuid, role: &str) -> Result<String, TokenError> {
+        self.generate_with_version(subject, role, 0)
+    }
+
+    pub fn generate_with_version(
+        &self,
+        subject: Uuid,
+        role: &str,
+        security_version: i64,
+    ) -> Result<String, TokenError> {
         let now = chrono::Utc::now();
         let payload = TokenPayload {
             sub: subject.to_string(),
@@ -78,6 +90,10 @@ impl TokenManager {
             role: role.to_string(),
             iat: now.timestamp(),
             exp: now.timestamp() + self.ttl.num_seconds(),
+            security_version: match self.realm {
+                Realm::Web => Some(security_version),
+                Realm::Admin => None,
+            },
         };
 
         encode(&Header::new(Algorithm::HS256), &payload, &self.encoding_key)
@@ -95,6 +111,7 @@ impl TokenManager {
             subject: Uuid::parse_str(&data.claims.sub).map_err(|_| TokenError::Invalid)?,
             realm: self.realm,
             role: data.claims.role,
+            security_version: data.claims.security_version.unwrap_or(0),
         })
     }
 

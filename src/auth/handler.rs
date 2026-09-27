@@ -3,7 +3,7 @@ use crate::{
     auth::{AUTH_MOUNT, REFRESH_TOKEN_COOKIE, extract::AuthUser},
     error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
-    platform::{Email, Password, PasswordError, Phone, PhoneError},
+    platform::{Email, PasswordError, Phone, PhoneError},
     session::{
         repository::RefreshTokenRepository,
         service::{SessionError, SessionService},
@@ -25,7 +25,6 @@ use axum_extra::extract::{
     CookieJar,
     cookie::{Cookie, SameSite},
 };
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use time::Duration;
 use utoipa::ToSchema;
@@ -122,18 +121,17 @@ pub async fn login_otp(
             "invalid identifier",
         )
     })?;
+    let user = super::security::optional_user(&state, &id).await?;
+    let storage_target = super::security::login_scope(user.as_ref(), &id);
     state
         .otp_service
-        .verify(&id, Purpose::Login, &req.code)
+        .verify(&storage_target, Purpose::Login, &req.code)
         .await
         .map_err(map_login_otp_error)?;
-
-    // 2) 查活跃用户
-    let user_sve = UserService::new(UserRepository::new(state.pool.clone()));
-    let user = user_sve
-        .find_active_by_identifier(&id)
-        .await
-        .map_err(map_login_error)?;
+    let user = user.ok_or_else(|| map_login_error(LoginError::InvalidCredentials))?;
+    if user.status != UserStatus::Active {
+        return Err(map_login_error(LoginError::AccountDisabled));
+    }
 
     // 3) 查角色 + 发 token + 拼响应 + 发 refresh cookie（与 login 共用）
     let (jar, resp) = build_login_response(&state, user, jar).await?;
@@ -202,24 +200,7 @@ pub async fn register(
         }
     };
 
-    if payload.password.len() < 11 {
-        return Err(map_password_error(PasswordError::TooShort));
-    }
-    if payload.password.len() > 20 {
-        return Err(map_password_error(PasswordError::TooLong));
-    }
-    if !payload.password.bytes().all(|c| c.is_ascii_alphanumeric())
-        || !payload.password.bytes().any(|c| c.is_ascii_alphabetic())
-        || !payload.password.bytes().any(|c| c.is_ascii_digit())
-    {
-        return Err(AppError::validation(
-            ErrorCode::InvalidPassword,
-            "password",
-            "password must contain letters and digits only",
-        ));
-    }
-    let psd =
-        Password::parse(&payload.password.to_ascii_uppercase()).map_err(map_password_error)?;
+    let psd = super::security::new_password(&payload.password)?;
 
     state
         .otp_service
@@ -304,14 +285,30 @@ async fn build_login_response(
     let token = generate_token(state, &user)
         .await
         .map_err(map_session_error)?;
-    let (jar, refresh_token_expires_at) = issue_refresh_cookie(state, jar, user.id).await?;
+    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let version = sqlx::query_scalar::<_, i64>(
+        "SELECT security_version FROM users WHERE id = $1 AND status = 'active' FOR UPDATE",
+    )
+    .bind(user.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    if version != Some(user.security_version) {
+        return Err(invalid_access_token());
+    }
+    let refresh = session_service(state)
+        .issue_in(&mut tx, user.id)
+        .await
+        .map_err(map_session_error)?;
+    tx.commit().await.map_err(AppError::internal)?;
+    let jar = jar.add(refresh_cookie(refresh.plaintext, state));
 
     Ok((
         jar,
         LoginResponse {
             user: profile,
             token,
-            refresh_token_expires_at: refresh_token_expires_at.timestamp(),
+            refresh_token_expires_at: refresh.expires_at.timestamp(),
         },
     ))
 }
@@ -351,7 +348,7 @@ async fn generate_token(state: &AppState, user: &User) -> Result<Token, SessionE
     // 2) 生成 access token
     let access_token = state
         .token_manager
-        .generate(user.id, role)
+        .generate_with_version(user.id, role, user.security_version)
         .map_err(SessionError::Signing)?;
 
     Ok(Token {
@@ -367,23 +364,6 @@ fn session_service(state: &AppState) -> SessionService {
         RefreshTokenRepository::new(state.pool.clone()),
         state.refresh_ttl,
     )
-}
-
-/// 签发一枚新 refresh（落库）并挂上 cookie。`login` / `login_otp`（将来 register
-/// 自动登录）共用；refresh 轮换**不**走这里——新枚由 `rotate` 原子产出，handler 只管装 cookie。
-async fn issue_refresh_cookie(
-    state: &AppState,
-    jar: CookieJar,
-    user_id: Uuid,
-) -> Result<(CookieJar, DateTime<Utc>), AppError> {
-    let refresh = session_service(state)
-        .issue(user_id)
-        .await
-        .map_err(map_session_error)?;
-    Ok((
-        jar.add(refresh_cookie(refresh.plaintext, state)),
-        refresh.expires_at,
-    ))
 }
 
 /// refresh cookie 的唯一构造点：安全属性（HttpOnly/SameSite/Path/Secure/Max-Age）全在这，
@@ -611,7 +591,7 @@ pub async fn confirm_account_deletion(
 
 /// `jar.remove` 按「名字 + Path」生成删除 cookie（Max-Age=0 由它自己设），
 /// 只需这两项与下发时一致；Path 不匹配则浏览器视为另一枚 cookie，清不掉。
-fn clean_refresh_token_cookie() -> Cookie<'static> {
+pub(super) fn clean_refresh_token_cookie() -> Cookie<'static> {
     Cookie::build(REFRESH_TOKEN_COOKIE).path(AUTH_MOUNT).build()
 }
 
@@ -779,7 +759,7 @@ fn map_phone_error(error: PhoneError) -> AppError {
     AppError::validation(ErrorCode::InvalidPhone, "phone", message)
 }
 
-fn map_password_error(error: PasswordError) -> AppError {
+pub(super) fn map_password_error(error: PasswordError) -> AppError {
     let (code, message) = match error {
         PasswordError::Empty => (ErrorCode::PasswordMissing, "password is missing"),
         PasswordError::TooShort => (ErrorCode::PasswordTooShort, "password is too short"),

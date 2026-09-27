@@ -75,7 +75,14 @@ async fn valid_code_active_user_gets_tokens(pool: PgPool) {
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     register_user(&pool, "13800138000").await;
     store
-        .save_code("13800138000", Purpose::Login, CODE, ttl())
+        .save_code(
+            &tsz_rust::auth::security::login_code_target(&state, "13800138000")
+                .await
+                .unwrap(),
+            Purpose::Login,
+            CODE,
+            ttl(),
+        )
         .await
         .unwrap();
 
@@ -116,7 +123,14 @@ async fn wrong_code_is_401(pool: PgPool) {
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     register_user(&pool, "13800138000").await;
     store
-        .save_code("13800138000", Purpose::Login, CODE, ttl())
+        .save_code(
+            &tsz_rust::auth::security::login_code_target(&state, "13800138000")
+                .await
+                .unwrap(),
+            Purpose::Login,
+            CODE,
+            ttl(),
+        )
         .await
         .unwrap();
 
@@ -134,7 +148,14 @@ async fn unknown_identifier_is_401(pool: PgPool) {
     // 且与错码**同一个** 401，不泄露注册状态；这里连账号都不建。
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     store
-        .save_code("13900139000", Purpose::Login, CODE, ttl())
+        .save_code(
+            &tsz_rust::auth::security::login_code_target(&state, "13900139000")
+                .await
+                .unwrap(),
+            Purpose::Login,
+            CODE,
+            ttl(),
+        )
         .await
         .unwrap();
 
@@ -156,7 +177,14 @@ async fn disabled_account_is_403(pool: PgPool) {
         .await
         .unwrap();
     store
-        .save_code("13800138000", Purpose::Login, CODE, ttl())
+        .save_code(
+            &tsz_rust::auth::security::login_code_target(&state, "13800138000")
+                .await
+                .unwrap(),
+            Purpose::Login,
+            CODE,
+            ttl(),
+        )
         .await
         .unwrap();
 
@@ -234,7 +262,14 @@ async fn email_login_otp_is_case_insensitive(pool: PgPool) {
         .expect("注册应成功");
     // 码存在归一化后的小写邮箱下（send_otp 现在就是这么存的）
     store
-        .save_code("user@x.com", Purpose::Login, CODE, ttl())
+        .save_code(
+            &tsz_rust::auth::security::login_code_target(&state, "user@x.com")
+                .await
+                .unwrap(),
+            Purpose::Login,
+            CODE,
+            ttl(),
+        )
         .await
         .unwrap();
 
