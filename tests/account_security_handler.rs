@@ -476,6 +476,42 @@ async fn password_policy_is_shared_and_unchanged_password_rejected(pool: PgPool)
 }
 
 #[sqlx::test]
+async fn public_password_reset_codes_can_reset_phone_and_email_accounts(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    user(&pool, Some("13800138000"), None).await;
+    user(&pool, None, Some("known@example.com")).await;
+    for (field, identifier) in [("phone", "13800138000"), ("email", "KNOWN@example.com")] {
+        let (status, body, _) = post(
+            &state,
+            "/otp/send",
+            None,
+            json!({field: identifier, "purpose": "password_reset"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let request = json!({
+            "identifier": identifier,
+            "code": "000000",
+            "new_password": "Another12345"
+        });
+        let (status, body, _) = post(&state, "/auth/password/reset", None, request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            post(&state, "/auth/password/reset", None, request).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, body, _) = post(
+            &state,
+            "/auth/login",
+            None,
+            json!({"identifier": identifier, "password": "another12345"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+}
+
+#[sqlx::test]
 async fn reset_has_uniform_forgot_responses_and_revokes_old_sessions(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let u = user(&pool, None, Some("known@example.com")).await;

@@ -224,8 +224,7 @@ pub async fn forgot_password(
     ApiJson(input): ApiJson<PasswordForgotRequest>,
 ) -> Result<Json<PasswordStatus>, AppError> {
     let target = normalize(&input.identifier)?;
-    let user = optional_user(&state, &target).await?;
-    let scope = reset_scope(user.as_ref(), &target);
+    let scope = reset_code_target(&state, &target).await?;
     // 所有格式合法目标走相同发送与限流路径，不能用频控响应枚举账号。
     state
         .otp_service
@@ -431,6 +430,11 @@ pub(crate) fn login_scope(user: Option<&User>, target: &str) -> String {
         ])
         .to_string(),
     )
+}
+
+pub(crate) async fn reset_code_target(state: &AppState, target: &str) -> Result<String, AppError> {
+    let user = optional_user(state, target).await?;
+    Ok(reset_scope(user.as_ref(), target))
 }
 
 fn reset_scope(user: Option<&User>, target: &str) -> String {
