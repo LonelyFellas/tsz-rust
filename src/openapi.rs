@@ -288,6 +288,7 @@ use utoipa::{
             crate::lexicon::dto::VoiceProfileV3,
             crate::lexicon::dto::DialectVariantRichTextSlotV3,
             crate::lexicon::dto::EnglishTextV3,
+            crate::lexicon::dto::GrammarFormLinkV3,
             crate::lexicon::dto::GrammarVariantV3,
             crate::lexicon::dto::GrammarStructureV3,
             crate::lexicon::dto::WordDefinitionV3,

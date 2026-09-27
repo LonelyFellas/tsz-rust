@@ -777,10 +777,29 @@ pub enum EnglishTextV3 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct GrammarFormLinkV3 {
+    pub id: Uuid,
+    #[schema(min_items = 1, max_items = 1)]
+    pub source_segments: Vec<SentenceSourceRangeV1>,
+    pub target_word_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub target_publication_id: Option<Uuid>,
+    pub target_pos_id: Uuid,
+    pub target_form_id: Uuid,
+    pub target_variant_id: Uuid,
+    pub target_dialect: Dialect,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GrammarVariantV3 {
     pub id: Uuid,
     pub dialect: Dialect,
     pub content: RichTextV3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_items = 100)]
+    pub form_links: Option<Vec<GrammarFormLinkV3>>,
     /// 缺省即「没配过」。未配置时不上 wire，存量内容重新序列化后逐字节不变。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -1598,6 +1617,7 @@ pub enum InboundReferenceKindV3 {
     FormGroupSenseBinding,
     /// 其他词条草稿正文中的直接或经短语成分关联。
     DraftTextLink,
+    GrammarFormLink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
@@ -1752,6 +1772,7 @@ pub enum V3ValidationIssueCode {
     DuplicatePosMeanings,
     GrammarRequired,
     GrammarVariantsInvalid,
+    GrammarFormLinkInvalid,
     SenseRequired,
     LevelInvalid,
     SubPosRequired,
@@ -1835,6 +1856,7 @@ impl V3ValidationIssueCode {
             Self::DuplicatePosMeanings => "duplicate_pos_meanings",
             Self::GrammarRequired => "grammar_required",
             Self::GrammarVariantsInvalid => "grammar_variants_invalid",
+            Self::GrammarFormLinkInvalid => "grammar_form_link_invalid",
             Self::SenseRequired => "sense_required",
             Self::LevelInvalid => "level_invalid",
             Self::SubPosRequired => "sub_pos_required",
@@ -1918,6 +1940,7 @@ impl V3ValidationIssueCode {
             "duplicate_pos_meanings" => Self::DuplicatePosMeanings,
             "grammar_required" => Self::GrammarRequired,
             "grammar_variants_invalid" => Self::GrammarVariantsInvalid,
+            "grammar_form_link_invalid" => Self::GrammarFormLinkInvalid,
             "sense_required" => Self::SenseRequired,
             "level_invalid" => Self::LevelInvalid,
             "sub_pos_required" => Self::SubPosRequired,
@@ -2508,6 +2531,22 @@ pub struct RelatedWordResultV3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grammar_form_links_round_trip_without_senses() {
+        let id = Uuid::new_v4();
+        let legacy = serde_json::json!({"id": id, "dialect": "common", "content": {"version": 2, "text": "a job", "annotations": []}});
+        let old: GrammarVariantV3 = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(old).unwrap(), legacy);
+        let mut linked = legacy;
+        linked["form_links"] = serde_json::json!([{
+            "id": Uuid::new_v4(), "source_segments": [{"start": 2, "end": 5, "surface": "job"}],
+            "target_word_id": id, "target_pos_id": id, "target_form_id": id,
+            "target_variant_id": id, "target_dialect": "common"
+        }]);
+        let parsed: GrammarVariantV3 = serde_json::from_value(linked.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), linked);
+    }
 
     #[test]
     fn old_band_values_still_deserialize_but_never_serialize_back() {

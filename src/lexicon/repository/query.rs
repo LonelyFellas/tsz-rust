@@ -48,59 +48,6 @@ impl LexiconRepository {
                   ON publication.id = entry.current_publication_id
                  AND publication.entry_id = entry.id
                 WHERE entry.archived_at IS NULL
-
-                UNION ALL
-
-                SELECT entry.id,
-                       entry.kind,
-                       NULL::uuid AS publication_id,
-                       entry.revision AS source_revision,
-                       3::smallint AS content_schema_version,
-                       jsonb_build_object(
-                           'id', entry.id,
-                           'kind', entry.kind,
-                           'presentation', jsonb_build_object(
-                               'label', presentation.label,
-                               'matched_surfaces', presentation.matched_surfaces,
-                               'strategy_version', presentation.strategy_version
-                           ),
-                           'forms', editor.forms,
-                           'meanings', draft.meanings
-                       ) AS snapshot,
-                       'draft'::text AS status,
-                       1::smallint AS status_rank,
-                       presentation.label AS sort_headword
-                FROM lexicon.entries entry
-                JOIN lexicon.entry_editor_projection editor
-                  ON editor.entry_id = entry.id
-                 AND editor.rebuilt_revision = entry.revision
-                JOIN lexicon.entry_presentation_projection presentation
-                  ON presentation.entry_id = entry.id
-                 AND presentation.content_schema_version = 3
-                 AND presentation.source_revision = entry.revision
-                CROSS JOIN LATERAL (
-                    SELECT jsonb_set(editor.meanings, '{pos}', COALESCE((
-                        SELECT jsonb_agg(jsonb_set(pos.value, '{senses}', COALESCE((
-                            SELECT jsonb_agg(sense.value ORDER BY sense.ordinality)
-                            FROM jsonb_array_elements(pos.value -> 'senses')
-                                WITH ORDINALITY AS sense(value, ordinality)
-                            WHERE NOT EXISTS (
-                                SELECT 1 FROM lexicon.entry_publication_nodes node
-                                WHERE node.publication_id = entry.current_publication_id
-                                  AND node.entry_id = entry.id
-                                  AND node.node_type = 'sense'
-                                  AND node.node_id = (sense.value ->> 'id')::uuid
-                            )
-                        ), '[]'::jsonb)) ORDER BY pos.ordinality)
-                        FROM jsonb_array_elements(editor.meanings -> 'pos')
-                            WITH ORDINALITY AS pos(value, ordinality)
-                    ), '[]'::jsonb)) AS meanings
-                ) draft
-                WHERE $11::boolean
-                  AND entry.content_schema_version = 3
-                  AND (entry.current_publication_id IS NULL
-                       OR jsonb_path_exists(draft.meanings, '$.pos[*].senses[*]'))
-                  AND entry.archived_at IS NULL
             )
             SELECT id AS entry_id,
                    kind,
@@ -118,13 +65,6 @@ impl LexiconRepository {
                            WHERE searchable_entry.status = 'published'
                              AND pos_ref.publication_id = searchable_entry.publication_id
                              AND pos_ref.entry_id = searchable_entry.id
-                           UNION
-                           SELECT part.code
-                           FROM lexicon.entry_pos pos
-                           JOIN catalog.parts_of_speech part
-                             ON part.id = pos.part_of_speech_id
-                           WHERE searchable_entry.status = 'draft'
-                             AND pos.entry_id = searchable_entry.id
                        ) labels
                    ), ARRAY[]::text[]) AS pos_labels,
                    sort_headword,
@@ -137,19 +77,8 @@ impl LexiconRepository {
                         FROM lexicon.surface_sources surface
                         WHERE surface.entry_id = searchable_entry.id
                           AND surface.content_schema_version = searchable_entry.content_schema_version
-                          AND (
-                              (
-                                  searchable_entry.status = 'published'
-                                  AND surface.publication_id = searchable_entry.publication_id
-                                  AND surface.content_scope = 'current_publication'
-                              )
-                              OR (
-                                  searchable_entry.status = 'draft'
-                                  AND surface.publication_id IS NULL
-                                  AND surface.content_scope = 'draft'
-                                  AND surface.source_revision = searchable_entry.source_revision
-                              )
-                          )
+                          AND surface.publication_id = searchable_entry.publication_id
+                          AND surface.content_scope = 'current_publication'
                           AND (
                               (searchable_entry.content_schema_version = 2
                                   AND surface.source_kind = 'headword')
@@ -181,19 +110,8 @@ impl LexiconRepository {
                         FROM lexicon.surface_sources surface
                         WHERE surface.entry_id = searchable_entry.id
                           AND surface.content_schema_version = searchable_entry.content_schema_version
-                          AND (
-                              (
-                                  searchable_entry.status = 'published'
-                                  AND surface.publication_id = searchable_entry.publication_id
-                                  AND surface.content_scope = 'current_publication'
-                              )
-                              OR (
-                                  searchable_entry.status = 'draft'
-                                  AND surface.publication_id IS NULL
-                                  AND surface.content_scope = 'draft'
-                                  AND surface.source_revision = searchable_entry.source_revision
-                              )
-                          )
+                          AND surface.publication_id = searchable_entry.publication_id
+                          AND surface.content_scope = 'current_publication'
                           AND (
                               (searchable_entry.content_schema_version = 2
                                   AND surface.source_kind = 'headword')
@@ -225,7 +143,6 @@ impl LexiconRepository {
         .bind(filter.last_word_id)
         .bind(filter.limit)
         .bind(filter.include_v3)
-        .bind(filter.include_drafts)
         .fetch_all(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)
