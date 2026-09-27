@@ -266,10 +266,7 @@ pub async fn get_user(
     Ok((StatusCode::OK, Json(user)))
 }
 
-/// PATCH /api/v1/admin/users/{id}/status
-///
-/// 超级管理员启用/禁用 C 端用户。禁用**不即时踢线**——接受一个 access TTL 的延迟
-/// （user-mgmt-D6）；该用户的 refresh 轮换会在下一次被账号状态挡下。
+/// 停用状态由登录、refresh 和受保护接口逐次核验。
 #[utoipa::path(
     patch,
     path = "/api/v1/admin/users/{id}/status",
