@@ -7,6 +7,13 @@
 
 ---
 
+## 关联候选仅使用发布内容（本地变更，未部署）
+
+- 已移除例句、词形与拓展词关联查询的草稿候选开关及 `include_drafts` 参数；下文历史批次中的草稿候选说明不再适用。
+- `GET /admin/lexicon/entries/related-search` 与 `POST /admin/lexicon/entries/component-targets/search` 仅返回未归档词条的当前发布内容，不返回从未发布词条或发布后的草稿新增节点。传入已移除参数时，GET 返回 400，POST 返回 422 `invalid_request_body`。
+- 不删除已有草稿引用，不改变草稿保存和既有发布校验。已关联草稿的只读回显按已知目标 ID 读取，不通过候选搜索获取。
+- 无数据库迁移。旧前端发送该参数会被新后端拒绝，需先更新前端并刷新旧页面，再替换后端；新前端不带参数时兼容旧后端的默认发布查询。旧分页游标需重新查询首页。
+
 ## 词库领域重构第五批：同形说明与并发收口（本地候选）
 
 - `POST /api/v1/admin/lexicon/entries` 新增可选字符串 `homograph_reason`；同原型组另建时必填。按现有 annotation 同原型组（同 kind、英语、同方言规范化原形、未归档）判定，不把普通词形命中扩大为同形。

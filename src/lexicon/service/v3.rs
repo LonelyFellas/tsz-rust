@@ -2098,6 +2098,7 @@ impl LexiconService {
         preserve_missing_sentence_translations(&mut content, &compatibility_source.meanings);
         preserve_missing_sense_component_usages(&mut content, &compatibility_source.meanings);
         super::text_links::preserve_missing(&mut content, &compatibility_source.meanings)?;
+        super::grammar_form_links::preserve_missing(&mut content, &compatibility_source.meanings)?;
         let mut issues = crate::lexicon::v3_contract::validate_meanings(&content, intent);
         if intent == StepSaveIntent::Complete {
             issues.extend(
@@ -2155,6 +2156,16 @@ impl LexiconService {
             return Err(v3_validation_failed(audio_issues));
         }
         super::text_links::validate_targets(&mut transaction, entry_id, &mut content).await?;
+        super::grammar_form_links::validate_targets(
+            &mut transaction,
+            entry_id,
+            compatibility_source.kind,
+            &forms,
+            &mut content,
+            None,
+            false,
+        )
+        .await?;
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
         let mut current_v3_meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
@@ -2493,12 +2504,28 @@ impl LexiconService {
             )
             .await?;
         }
+        let mut issues = crate::lexicon::v3_contract::v3_issues(&issues);
+        match super::grammar_form_links::validate_targets(
+            &mut transaction,
+            entry_id,
+            word.kind,
+            &word.forms,
+            &mut word.meanings,
+            None,
+            true,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(LexiconServiceError::ValidationFailedV3(link_issues)) => issues.extend(link_issues),
+            Err(error) => return Err(error),
+        }
         transaction.commit().await.map_err(database_error)?;
         Ok(DraftValidationResponseV3 {
             schema_version: 3,
             validated_revision: word.revision,
             valid: issues.is_empty(),
-            issues: crate::lexicon::v3_contract::v3_issues(&issues),
+            issues,
         })
     }
 }
@@ -2999,7 +3026,6 @@ pub(super) enum ComponentTargetScope {
 /// 校验成分用词 / 正文关联所需的目标内容，发布快照与草稿投影都能组装成它。
 #[derive(Debug, Clone)]
 pub(super) struct ComponentTargetWord {
-    pub(super) id: Uuid,
     pub(super) kind: WordEntryKindV3,
     pub(super) label: String,
     pub(super) forms: DraftFormsStepContentV3,
@@ -3018,7 +3044,6 @@ impl ComponentTargetWord {
     fn from_snapshot(snapshot: Value, publication_id: Uuid, revision: i64) -> Option<Self> {
         let word = serde_json::from_value::<AdminWordV3>(snapshot).ok()?;
         Some(Self {
-            id: word.id,
             kind: word.kind,
             label: word.presentation.label,
             forms: word.forms,
@@ -3037,7 +3062,6 @@ impl ComponentTargetWord {
             serde_json::from_value(row.meanings).map_err(serialization_error)?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
         Ok(Self {
-            id: row.id,
             kind,
             label: row.label,
             forms,
@@ -3075,7 +3099,6 @@ pub(super) async fn resolve_component_target_in(
         .and_then(|batch| batch.words.get(&target_word_id))
     {
         return Ok(Some(ComponentTargetWord {
-            id: candidate.word.id,
             kind: candidate.word.kind,
             label: candidate.word.presentation.label.clone(),
             forms: candidate.word.forms.clone(),
@@ -3128,29 +3151,6 @@ pub(super) async fn resolve_component_target_in(
         return Ok(Some(published));
     }
     ComponentTargetWord::from_draft_row(row).map(Some)
-}
-
-/// 关键字检索用：批量取当前 V3 草稿目标，不按创建者过滤。
-pub(super) async fn load_draft_component_targets(
-    tx: &mut Transaction<'_, Postgres>,
-    entry_ids: &[Uuid],
-) -> Result<Vec<ComponentTargetWord>, LexiconServiceError> {
-    // 一份坏投影只该少一条候选，不该让整个检索 500：记日志后跳过。
-    Ok(LexiconRepository::component_target_drafts(tx, entry_ids)
-        .await
-        .map_err(repository_error)?
-        .into_iter()
-        .filter_map(|row| {
-            let entry_id = row.id;
-            match ComponentTargetWord::from_draft_row(row) {
-                Ok(target) => Some(target),
-                Err(error) => {
-                    tracing::warn!(%entry_id, %error, "skipping unreadable draft component target");
-                    None
-                }
-            }
-        })
-        .collect())
 }
 
 /// 短语套短语只放一层：目标短语自身的成分不得再指向另一个短语。

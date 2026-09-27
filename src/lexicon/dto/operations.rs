@@ -438,8 +438,7 @@ pub struct SentenceTargetCandidateFormV3 {
 #[serde(deny_unknown_fields)]
 pub struct PublishedSentenceTargetCandidateV3 {
     pub entry_id: Uuid,
-    /// 命中的发布版本。**缺省即草稿候选**（只在 `include_drafts = true` 时出现），包括已发布词条的当前草稿；
-    /// 关联它时 `target_publication_id` 同样留空，保存时按目标当前草稿内容校验。
+    /// 命中的发布版本；缺省仅兼容已有草稿引用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub publication_id: Option<Uuid>,
@@ -491,7 +490,7 @@ pub struct SearchComponentTargetsV3Input {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub entry_id: Option<Uuid>,
-    /// 上一页返回的 `next_cursor`。绑定 `q` / `kind` / `match` / `include_drafts` / `entry_id`
+    /// 上一页返回的 `next_cursor`。绑定 `q` / `kind` / `match` / `entry_id`
     /// 及最后返回的稳定节点排序键；查询条件改变或游标无效返回 400 `invalid_query`。
     /// 无关保存、发布及归档不会使游标失效；并发修改下搜索弱一致，保存/发布仍严格验证。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -503,11 +502,6 @@ pub struct SearchComponentTargetsV3Input {
     #[serde(default, rename = "match", skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub match_mode: Option<ComponentTargetMatchV3>,
-    /// 是否把当前 V3 草稿（不限创建者，包括已发布词条的新增节点）也列为候选；草稿候选没有 `publication_id`。
-    /// 已发布词条只按其当前发布版本出现，草稿里未发布的改动不作候选。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[schema(default = false)]
-    pub include_drafts: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -739,15 +733,13 @@ pub struct AdminWordListQuery {
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
 pub struct RelatedSearchQuery {
     pub q: Option<String>,
     pub kind: Option<EntryKind>,
     pub match_mode: Option<RelatedSearchMatchMode>,
     pub exclude_exact: Option<bool>,
-    /// 默认仅搜索发布内容。展开后也返回草稿词义；已发布词条只补当前发布中不存在的词义，
-    /// 同一词条可分别出现 published/draft 结果，消费者应合并词义并保留各自状态。
-    pub include_drafts: Option<bool>,
     #[param(minimum = 1, maximum = 100)]
     pub page_size: Option<u32>,
     #[param(default = 20, minimum = 1, maximum = 100)]

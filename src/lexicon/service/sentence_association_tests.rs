@@ -505,9 +505,7 @@ fn v3_snapshot_derives_form_group_bases_for_candidate_inventory() {
 }
 
 #[test]
-fn draft_and_published_candidates_follow_member_reordering_without_changing_identity() {
-    use super::v3::{ComponentTargetScope, ComponentTargetWord};
-
+fn published_candidates_follow_member_reordering_without_changing_identity() {
     let mut fixture = v3_fixture(3);
     let ids = fixture.form_ids.clone();
     // 同组配置与创建顺序相反；随后再调序，候选身份和词义范围必须保持不变。
@@ -517,20 +515,8 @@ fn draft_and_published_candidates_follow_member_reordering_without_changing_iden
         "members": ([ids[2], ids[0], ids[1]].map(|id| json!({"id": Uuid::now_v7(), "form_id": id})))
     }]);
     let mut word: AdminWordV3 = serde_json::from_value(fixture.snapshot).unwrap();
-    let inventory = |word: &AdminWordV3, published: bool| {
-        let target = if published {
-            PublishedAssociationTarget::from_v3(word.clone()).unwrap()
-        } else {
-            PublishedAssociationTarget::from_component_target(ComponentTargetWord {
-                id: word.id,
-                kind: word.kind,
-                label: word.presentation.label.clone(),
-                forms: word.forms.clone(),
-                meanings: word.meanings.clone(),
-                scope: ComponentTargetScope::Draft { revision: 1 },
-            })
-            .unwrap()
-        };
+    let inventory = |word: &AdminWordV3| {
+        let target = PublishedAssociationTarget::from_v3(word.clone()).unwrap();
         target.sentence_discovery_candidates(
             None,
             fixture.pos_id,
@@ -550,19 +536,19 @@ fn draft_and_published_candidates_follow_member_reordering_without_changing_iden
         })
         .collect::<Vec<_>>()
     };
-    let before = inventory(&word, false);
+    let before = inventory(&word);
     assert_eq!(
         before.iter().map(|form| form.0).collect::<Vec<_>>(),
         vec![ids[2], ids[0], ids[1]]
     );
-    assert_eq!(inventory(&word, true), before);
+    assert_eq!(inventory(&word), before);
     word.forms.pos[0].form_groups[0].members.swap(0, 2);
-    let after = inventory(&word, false);
+    let after = inventory(&word);
     assert_eq!(
         after,
         vec![before[2].clone(), before[1].clone(), before[0].clone()]
     );
-    assert_eq!(inventory(&word, true), after);
+    assert_eq!(inventory(&word), after);
     assert_eq!(
         word.forms.pos[0]
             .forms
@@ -637,7 +623,6 @@ fn dedicated_forms_limit_candidates_and_saved_targets_to_bound_senses_in_the_sam
     assert_eq!(wire["allowed_sense_ids"], json!([]));
 
     let component_target = ComponentTargetWord {
-        id: word.id,
         kind: word.kind,
         label: word.presentation.label.clone(),
         forms: word.forms.clone(),
@@ -756,7 +741,6 @@ mod dialect_structure_drift {
     fn component_target(snapshot: &Value) -> (AdminWordV3, ComponentTargetWord) {
         let word: AdminWordV3 = serde_json::from_value(snapshot.clone()).unwrap();
         let target = ComponentTargetWord {
-            id: word.id,
             kind: word.kind,
             label: word.presentation.label.clone(),
             forms: word.forms.clone(),

@@ -4,10 +4,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::lexicon::dto::{
-    DraftFormsStepContentV3, DraftMeaningsStepContentV3, EntryPresentationV3, RelatedWordStatusV3,
-    WordEntryKindV3,
-};
+use crate::lexicon::dto::DraftFormsStepContentV3;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RelatedSearchCursor {
@@ -17,7 +14,6 @@ struct RelatedSearchCursor {
     match_mode: RelatedSearchMatchMode,
     exclude_exact: bool,
     include_v3: bool,
-    include_drafts: bool,
     page_size: u32,
     consumed: u64,
     last_kind: Option<EntryKind>,
@@ -30,15 +26,6 @@ struct RelatedSearchCursor {
 struct RelatedSearchCursorEnvelope {
     payload: String,
     signature: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DraftRelatedSearchSnapshotV3 {
-    id: Uuid,
-    kind: WordEntryKindV3,
-    presentation: EntryPresentationV3,
-    forms: DraftFormsStepContentV3,
-    meanings: DraftMeaningsStepContentV3,
 }
 
 fn encode_related_search_cursor(cursor: &RelatedSearchCursor, key: &[u8]) -> String {
@@ -197,10 +184,6 @@ impl LexiconService {
         query: RelatedSearchQuery,
         include_v3: bool,
     ) -> Result<RelatedSearchResponse, LexiconServiceError> {
-        let include_drafts = query.include_drafts.unwrap_or(false);
-        if include_drafts && !include_v3 {
-            return Err(LexiconServiceError::V3StorageUnavailable);
-        }
         if query.page_size.is_some() && query.limit.is_some() {
             return Err(LexiconServiceError::InvalidField {
                 field: "page_size",
@@ -221,7 +204,6 @@ impl LexiconService {
         }
         let v2 = query.match_mode.is_some()
             || query.exclude_exact.is_some()
-            || query.include_drafts.is_some()
             || query.page_size.is_some()
             || query.cursor.is_some();
         let q = query.q.unwrap_or_default();
@@ -249,15 +231,12 @@ impl LexiconService {
                     field: "cursor",
                     message: "cursor is invalid",
                 })?;
-            // actor_id 只保证游标不跨管理员复用，不再是可见性过滤：草稿候选现在对
-            // 所有管理员开放，结果集与 actor 无关。
             if cursor.actor_id != actor_id
                 || cursor.q != normalized_q
                 || cursor.kind != query.kind
                 || cursor.match_mode != match_mode
                 || cursor.exclude_exact != exclude_exact
                 || cursor.include_v3 != include_v3
-                || cursor.include_drafts != include_drafts
                 || cursor.page_size != page_size
             {
                 return Err(LexiconServiceError::InvalidField {
@@ -274,7 +253,6 @@ impl LexiconService {
                 match_mode,
                 exclude_exact,
                 include_v3,
-                include_drafts,
                 page_size,
                 consumed: 0,
                 last_kind: None,
@@ -291,7 +269,6 @@ impl LexiconService {
                 q: &normalized_q,
                 kind: query.kind,
                 include_v3,
-                include_drafts,
                 exact: match_mode == RelatedSearchMatchMode::Exact,
                 exclude_exact,
                 limit: i64::from(page_size),
@@ -320,31 +297,16 @@ impl LexiconService {
                     ));
                 }
                 {
-                    let (entry_id, kind, presentation, forms, meanings, status) = if record.status
-                        == "draft"
-                    {
-                        let word: DraftRelatedSearchSnapshotV3 =
-                            serde_json::from_value(record.snapshot).map_err(serialization_error)?;
-                        (
-                            word.id,
-                            word.kind,
-                            word.presentation,
-                            word.forms,
-                            word.meanings,
-                            Some(RelatedWordStatusV3::Draft),
-                        )
-                    } else {
-                        let word: AdminWordV3 =
-                            serde_json::from_value(record.snapshot).map_err(serialization_error)?;
-                        (
-                            word.id,
-                            word.kind,
-                            word.presentation,
-                            word.forms,
-                            word.meanings,
-                            include_drafts.then_some(RelatedWordStatusV3::Published),
-                        )
-                    };
+                    let word: AdminWordV3 =
+                        serde_json::from_value(record.snapshot).map_err(serialization_error)?;
+                    let (entry_id, kind, presentation, forms, meanings) = (
+                        word.id,
+                        word.kind,
+                        word.presentation,
+                        word.forms,
+                        word.meanings,
+                    );
+                    let status = None;
                     if entry_id != record.entry_id || v3_kind_string(kind) != record.kind {
                         return Err(repository_error(LexiconRepositoryError::Invariant(
                             "related-search snapshot identity does not match its entry",
@@ -688,7 +650,6 @@ mod related_search_cursor_tests {
             match_mode: RelatedSearchMatchMode::Exact,
             exclude_exact: false,
             include_v3: true,
-            include_drafts: true,
             page_size: 20,
             consumed: 20,
             last_kind: Some(EntryKind::Word),

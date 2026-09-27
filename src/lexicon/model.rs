@@ -158,7 +158,6 @@ pub(crate) struct SenseTargetKey {
 /// 成分用词 / 正文关联的草稿目标：当前草稿内容、展示词面，以及（若有）当前发布快照。
 #[derive(Debug, sqlx::FromRow)]
 pub(crate) struct ComponentTargetDraftRecord {
-    pub id: Uuid,
     pub kind: String,
     pub revision: i64,
     pub label: String,
@@ -287,7 +286,6 @@ pub(crate) struct RelatedSearchRecord {
     pub kind: String,
     pub content_schema_version: i16,
     pub snapshot: Value,
-    pub status: String,
     pub status_rank: i16,
     pub sort_headword: String,
     pub total: i64,
@@ -297,7 +295,6 @@ pub(crate) struct RelatedSearchFilter<'a> {
     pub q: &'a str,
     pub kind: Option<crate::lexicon::dto::EntryKind>,
     pub include_v3: bool,
-    pub include_drafts: bool,
     pub exact: bool,
     pub exclude_exact: bool,
     pub limit: i64,

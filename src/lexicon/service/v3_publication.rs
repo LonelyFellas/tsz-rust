@@ -404,6 +404,16 @@ impl LexiconService {
         publication_references.extend(
             super::text_links::validate_targets_in(tx, entry_id, &mut word.meanings, batch).await?,
         );
+        super::grammar_form_links::validate_targets(
+            tx,
+            entry_id,
+            word.kind,
+            &word.forms,
+            &mut word.meanings,
+            batch,
+            true,
+        )
+        .await?;
         let outbound_issues =
             super::inbound_references::outbound_publication_issues_in(tx, word, batch).await?;
         if !outbound_issues.is_empty() {

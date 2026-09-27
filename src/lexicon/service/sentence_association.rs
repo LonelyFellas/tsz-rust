@@ -1,7 +1,6 @@
 use super::*;
 use std::collections::HashSet;
 
-use super::v3::ComponentTargetWord;
 use crate::lexicon::{
     dto::{
         DialectVariantRichTextSlotV3, DraftMeaningsStepContentV3, EnglishTextV3,
@@ -360,13 +359,6 @@ impl PublishedAssociationTarget {
             &word.forms,
             &word.meanings,
         )
-    }
-
-    /// 从未发布的草稿目标：内容来自草稿投影，没有发布版本。
-    pub(super) fn from_component_target(
-        word: ComponentTargetWord,
-    ) -> Result<Self, LexiconServiceError> {
-        Self::from_v3_parts(word.id, word.kind, word.label, &word.forms, &word.meanings)
     }
 
     fn from_v3_parts(

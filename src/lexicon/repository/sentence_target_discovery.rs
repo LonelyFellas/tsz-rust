@@ -22,7 +22,7 @@ const COMPONENT_TARGET_DRAFT_SELECT: &str = r#"
 "#;
 
 impl LexiconRepository {
-    /// 按关键字查询当前发布或草稿的完整成分目标。
+    /// 按关键字查询当前发布的成分目标。
     pub(crate) async fn component_target_entry_matches(
         tx: &mut Transaction<'_, Postgres>,
         dialect_scopes: &[String],
@@ -30,24 +30,14 @@ impl LexiconRepository {
         kind: Option<EntryKind>,
         entry_id: Option<Uuid>,
         exact: bool,
-        drafts: bool,
     ) -> Result<Vec<ComponentTargetEntryMatchRecord>, LexiconRepositoryError> {
         let lowered = keyword.to_lowercase();
-        let scope_join = if drafts {
-            r#"JOIN lexicon.entries entry
-                  ON entry.id = source.entry_id
-                 AND entry.archived_at IS NULL
-                 AND entry.content_schema_version = 3
-                WHERE source.is_deleted = FALSE
-                  AND source.content_scope = 'draft'"#
-        } else {
-            r#"JOIN lexicon.entries entry
+        let scope_join = r#"JOIN lexicon.entries entry
                   ON entry.id = source.entry_id
                  AND entry.archived_at IS NULL
                  AND entry.current_publication_id = source.publication_id
                 WHERE source.is_deleted = FALSE
-                  AND source.content_scope = 'current_publication'"#
-        };
+                  AND source.content_scope = 'current_publication'"#;
         let match_predicate = if exact {
             "source.normalized_surface = $3"
         } else {
@@ -93,11 +83,7 @@ impl LexiconRepository {
             .map_err(LexiconRepositoryError::Database)
     }
 
-    /// 返回一个有界词条批次的去重词面标识。排序按等于、前缀、其余词面，与 service 的
-    /// 匹配等级一致；event_offset 只取最小值，因为它不参与关键字候选身份。
-    /// 关键字检索的词面行。`exact` 为真时 `keyword` 须已是归一化 key，按 `normalized_surface` 等值；
-    /// 否则按 `surface ILIKE '%keyword%'` 包含匹配。`drafts` 为真时查当前 V3 草稿词面
-    /// （`content_scope = 'draft'`，不按创建者过滤，`publication_id` 为 NULL），否则查当前发布词面。
+    /// 关键字按归一化词面等值或包含匹配，仅查询当前发布词面。
     pub(crate) async fn component_target_surfaces(
         tx: &mut Transaction<'_, Postgres>,
         dialect_scopes: &[String],
@@ -105,24 +91,14 @@ impl LexiconRepository {
         kind: Option<EntryKind>,
         entry_ids: &[Uuid],
         exact: bool,
-        drafts: bool,
     ) -> Result<Vec<SentenceDiscoverySurfaceRecord>, LexiconRepositoryError> {
         let lowered = keyword.to_lowercase();
-        let scope_join = if drafts {
-            r#"JOIN lexicon.entries entry
-                  ON entry.id = source.entry_id
-                 AND entry.archived_at IS NULL
-                 AND entry.content_schema_version = 3
-                WHERE source.is_deleted = FALSE
-                  AND source.content_scope = 'draft'"#
-        } else {
-            r#"JOIN lexicon.entries entry
+        let scope_join = r#"JOIN lexicon.entries entry
                   ON entry.id = source.entry_id
                  AND entry.archived_at IS NULL
                  AND entry.current_publication_id = source.publication_id
                 WHERE source.is_deleted = FALSE
-                  AND source.content_scope = 'current_publication'"#
-        };
+                  AND source.content_scope = 'current_publication'"#;
         let match_predicate = if exact {
             "source.normalized_surface = $3"
         } else {
@@ -206,27 +182,5 @@ impl LexiconRepository {
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_target_publication_lock_error)
-    }
-
-    /// 关键字检索用：批量取当前 V3 草稿目标，不加锁（只读事务）、不按创建者过滤。
-    pub(crate) async fn component_target_drafts(
-        tx: &mut Transaction<'_, Postgres>,
-        entry_ids: &[Uuid],
-    ) -> Result<Vec<ComponentTargetDraftRecord>, LexiconRepositoryError> {
-        if entry_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        sqlx::query_as::<_, ComponentTargetDraftRecord>(sqlx::AssertSqlSafe(format!(
-            "{COMPONENT_TARGET_DRAFT_SELECT}
-            WHERE entry.id = ANY($1)
-              AND entry.content_schema_version = 3
-              AND entry.kind IN ('word', 'phrase')
-              AND entry.archived_at IS NULL
-            ORDER BY entry.id"
-        )))
-        .bind(entry_ids)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(LexiconRepositoryError::Database)
     }
 }

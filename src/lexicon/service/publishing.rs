@@ -206,7 +206,6 @@ pub(super) async fn resolve_meaning_references_in(
                     .find(|sense| sense.id == usage.target.target_sense_id)
             {
                 let target = super::v3::ComponentTargetWord {
-                    id: candidate.word.id,
                     kind: candidate.word.kind,
                     label: candidate.word.presentation.label.clone(),
                     forms: candidate.word.forms.clone(),

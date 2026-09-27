@@ -250,6 +250,12 @@ impl LexiconService {
         if record.current_publication_id.is_some() {
             return Err(LexiconServiceError::EntryNotDeletable);
         }
+        super::inbound_references::ensure_no_grammar_form_references(
+            transaction,
+            entry_id,
+            batch_members,
+        )
+        .await?;
         if LexiconRepository::has_inbound_prebound_relations(transaction, entry_id)
             .await
             .map_err(repository_error)?
@@ -579,6 +585,12 @@ impl LexiconService {
                 continue;
             }
             if target_state == TargetState::Archived {
+                super::inbound_references::ensure_no_grammar_form_references(
+                    &mut transaction,
+                    current.id,
+                    &excluded_sources,
+                )
+                .await?;
                 // Shared sentences remain published even when their source word is in this batch.
                 let shared_reference: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.shared_sentence_annotations a JOIN lexicon.shared_sentences s ON s.id=a.sentence_id WHERE a.target_entry_id=$1 AND s.deleted_at IS NULL UNION ALL SELECT 1 FROM lexicon.shared_sentence_publication_annotations a JOIN lexicon.shared_sentences s ON s.current_publication_id=a.publication_id WHERE a.target_entry_id=$1 AND s.deleted_at IS NULL AND s.withdrawn_at IS NULL)")
                     .bind(current.id).fetch_one(&mut *transaction).await.map_err(database_error)?;
@@ -630,6 +642,25 @@ impl LexiconService {
         if target_state == TargetState::Active {
             // 所选批次先在事务内恢复，再统一检查完整目标，避免批次中的归档目标被误判。
             // 任一失败仍回滚整个事务，不让恢复绕过发布的词形/变体有效性规则。
+            for entry_id in &restoring_entries {
+                if let Some(mut draft) =
+                    super::v3::resolve_component_target(&mut transaction, *entry_id, None, |_| {
+                        false
+                    })
+                    .await?
+                {
+                    super::grammar_form_links::validate_targets(
+                        &mut transaction,
+                        *entry_id,
+                        draft.kind,
+                        &draft.forms,
+                        &mut draft.meanings,
+                        None,
+                        false,
+                    )
+                    .await?;
+                }
+            }
             let snapshots = LexiconRepository::current_publication_snapshots(
                 &mut transaction,
                 &restoring_entries,
@@ -637,8 +668,18 @@ impl LexiconService {
             .await
             .map_err(repository_error)?;
             for record in snapshots {
-                let word = serde_json::from_value::<AdminWordV3>(record.snapshot)
+                let mut word = serde_json::from_value::<AdminWordV3>(record.snapshot)
                     .map_err(serialization_error)?;
+                super::grammar_form_links::validate_targets(
+                    &mut transaction,
+                    word.id,
+                    word.kind,
+                    &word.forms,
+                    &mut word.meanings,
+                    None,
+                    true,
+                )
+                .await?;
                 let issues =
                     super::inbound_references::outbound_publication_issues(&mut transaction, &word)
                         .await?;
