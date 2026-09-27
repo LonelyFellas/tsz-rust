@@ -1032,6 +1032,7 @@ pub(super) async fn inbound_reference_violations(
         .flat_map(|pos| pos.senses.iter().map(|sense| sense.id))
         .collect::<Vec<_>>();
     let mut candidates = collect_candidates(tx, entry_id, Some(&retained_sense_ids), check).await?;
+    candidates.extend(grammar_form_candidates(entry_id, None, meanings, entry_id));
     // 判定会就地补全 target 并改写 stale，基线要在副本上判，不能和提交内容共用一份。
     let already_stale = match baseline {
         Some((baseline_forms, baseline_meanings)) => {
@@ -1120,6 +1121,12 @@ impl LexiconService {
         let mut candidates =
             collect_candidates(&mut tx, entry_id, None, InboundReferenceCheck::DraftPreview)
                 .await?;
+        candidates.extend(grammar_form_candidates(
+            entry_id,
+            None,
+            &word.meanings,
+            entry_id,
+        ));
         evaluate(&mut candidates, &word.forms, &word.meanings);
         let mut items = candidates
             .into_iter()

@@ -1771,6 +1771,74 @@ async fn v3_grammar_form_links_save_first_pronunciation_and_clear(pool: PgPool) 
         fetched["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0],
         *variant
     );
+    let mut removed_form = saved["word"]["forms"].clone();
+    removed_form["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    removed_form["pos"][0]["form_groups"][0]["members"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|member| member["form_id"] != form["id"]);
+    let impact = preview_v3_forms_impact(
+        &state,
+        &bearer,
+        entry_id,
+        saved["word"]["revision"].as_i64().unwrap(),
+        &removed_form,
+    )
+    .await;
+    assert!(
+        impact["blocked_references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reference| {
+                reference["kind"] == "grammar_form_link"
+                    && reference["source"]["entry_id"] == entry_id
+                    && reference["target"]["form_id"] == form["id"]
+            }),
+        "自身语法结构引用必须进入词形删除影响：{impact}"
+    );
+    let (status, self_references) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}/inbound-references"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{self_references}");
+    assert!(
+        self_references["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reference| {
+                reference["kind"] == "grammar_form_link"
+                    && reference["source"]["entry_id"] == entry_id
+            })
+    );
+    let removed_pos = preview_v3_forms_impact(
+        &state,
+        &bearer,
+        entry_id,
+        saved["word"]["revision"].as_i64().unwrap(),
+        &json!({"pos": []}),
+    )
+    .await;
+    assert!(
+        !removed_pos["blocked_references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reference| {
+                reference["kind"] == "grammar_form_link"
+                    && reference["source"]["entry_id"] == entry_id
+            }),
+        "随词性移除的语法结构不得产生自身引用影响：{removed_pos}"
+    );
     let mut cleared = writable_v3_meanings(&saved);
     cleared["pos"][0]["grammar_structures"][0]["variants"][0]["form_links"] = json!([]);
     let cleared = save_v3_meanings(&state, &bearer, &saved, cleared).await;
