@@ -49,6 +49,15 @@ impl OtpService {
     }
 
     pub async fn request(&self, target: &str, purpose: Purpose) -> Result<(), OtpServiceError> {
+        self.request_scoped(target, target, purpose).await
+    }
+
+    pub async fn request_scoped(
+        &self,
+        target: &str,
+        storage_target: &str,
+        purpose: Purpose,
+    ) -> Result<(), OtpServiceError> {
         // 先 fail-close，避免未配置真实 provider 时写入无人可收取的验证码或消耗限额。
         self.sender.ensure_available_for(purpose)?;
 
@@ -80,7 +89,7 @@ impl OtpService {
 
         // 4) 先存后发（send 失败无害：码自然过期，重试受冷却约束——otp-design §6）
         self.store
-            .save_code(target, purpose, &code, self.ttl)
+            .save_code(storage_target, purpose, &code, self.ttl)
             .await?;
 
         // 5) 发

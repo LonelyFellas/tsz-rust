@@ -4,7 +4,7 @@
 //! - 合法 `Bearer <jwt>` → `Ok(AuthUser)`，且 subject/role 与签发时一致
 //! - 缺头 / 错 scheme / 乱码 / 过期 / 过短的头 → **401**（且**绝不 panic**）
 //!
-//! 提取器只碰 `token_manager.parse`，不碰 PG/Redis；用 `#[sqlx::test]` 只是为了拿 pool 造 AppState。
+//! 提取器同时校验数据库中的账号状态与安全版本。
 
 use axum::extract::FromRequestParts;
 use axum::http::{Request, StatusCode};
@@ -39,6 +39,8 @@ async fn status(state: &AppState, value: Option<&str>) -> StatusCode {
 async fn valid_bearer_token_yields_authuser(pool: PgPool) {
     let state = AppState::for_test(pool);
     let subject = Uuid::now_v7();
+    sqlx::query("INSERT INTO users (id, phone, password_hash, display_name) VALUES ($1, '13800138000', 'hash', 'test')")
+        .bind(subject).execute(&state.pool).await.unwrap();
     // 用 state 自己的 token_manager 签，才能被同一 manager parse 通过。
     let token = state.token_manager.generate(subject, "student").unwrap();
 
@@ -58,10 +60,10 @@ async fn lowercase_scheme_is_accepted(pool: PgPool) {
     // 决策：scheme 大小写不敏感（RFC 7235）。`bearer`/`BEARER` 与 `Bearer` 同等有效。
     // 钉死这条，防止有人把 eq_ignore_ascii_case 改回严格 `!=`。
     let state = AppState::for_test(pool);
-    let token = state
-        .token_manager
-        .generate(Uuid::now_v7(), "student")
-        .unwrap();
+    let subject = Uuid::now_v7();
+    sqlx::query("INSERT INTO users (id, phone, password_hash, display_name) VALUES ($1, '13800138000', 'hash', 'test')")
+        .bind(subject).execute(&state.pool).await.unwrap();
+    let token = state.token_manager.generate(subject, "student").unwrap();
     assert_eq!(
         status(&state, Some(&format!("bearer {token}"))).await,
         StatusCode::OK,

@@ -194,7 +194,7 @@ impl UserService {
     }
 }
 
-async fn verify_login_password(password: &str, hash: &str) -> bool {
+pub(crate) async fn verify_login_password(password: &str, hash: &str) -> bool {
     let raw_matches = Password::verify_raw(password.to_owned(), hash.to_owned()).await;
     // 不能因匹配 dummy hash 而短路，否则会暴露未知账号与错误密码的耗时差异。
     let normalized = password.to_ascii_uppercase();

@@ -62,9 +62,17 @@ pub async fn send_otp(
         }
     }?;
 
+    let purpose = req.purpose.into();
+    let storage_target = if purpose == crate::otp::model::Purpose::Login {
+        crate::auth::security::login_code_target(&state, &target).await?
+    } else if purpose == crate::otp::model::Purpose::PasswordReset {
+        crate::auth::security::reset_code_target(&state, &target).await?
+    } else {
+        target.clone()
+    };
     state
         .otp_service
-        .request(&target, req.purpose.into())
+        .request_scoped(&target, &storage_target, purpose)
         .await
         .map_err(map_otp_error)?;
     Ok(StatusCode::ACCEPTED) // 202

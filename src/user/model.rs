@@ -85,7 +85,7 @@ pub enum SubjectError {
     Repository(#[from] UserError),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
     pub phone: Option<String>,
@@ -93,6 +93,7 @@ pub struct User {
     pub status: UserStatus,
     pub last_active_role: Option<UserRole>,
     pub password_hash: String,
+    pub security_version: i64,
     pub display_name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

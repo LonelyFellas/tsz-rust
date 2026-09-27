@@ -1,5 +1,6 @@
 pub mod extract;
 pub mod handler;
+pub mod security;
 mod token;
 
 pub use token::{Claims, Realm, TokenError, TokenManager};

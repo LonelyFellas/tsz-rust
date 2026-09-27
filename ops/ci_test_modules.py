@@ -12,6 +12,7 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
     "admin": ("admin_*",),
     "identity": (
         "account_deletion_handler",
+        "account_security_handler",
         "auth_*",
         "otp_*",
         "refresh_tokens_schema",

@@ -97,6 +97,7 @@ impl UserRepository {
             phone: input.phone,
             email: input.email,
             password_hash: input.password_hash,
+            security_version: 0,
             display_name: input.display_name,
             last_active_role: Some(input.first_role),
             status: UserStatus::Active,
@@ -110,30 +111,23 @@ impl UserRepository {
 
     /// 通过手机号/邮箱进行查询用户
     pub async fn get_by_identifier(&self, identifier: &str) -> Result<User, UserError> {
-        sqlx::query_as!(
-            User,
-            r#"
-            SELECT id, phone, email, password_hash, display_name, last_active_role as "last_active_role: UserRole", created_at, updated_at, status AS "status: UserStatus", avatar_url
-            FROM users
-            WHERE phone = $1 OR email = $1
-            "#,
-            identifier
+        sqlx::query_as::<_, User>(
+            "SELECT id, phone, email, password_hash, security_version, display_name, \
+             last_active_role, created_at, updated_at, status, avatar_url \
+             FROM users WHERE phone = $1 OR email = $1",
         )
+        .bind(identifier)
         .fetch_optional(&self.pool)
         .await?
         .ok_or(UserError::NotFound)
     }
     /// 通过user_id 查询用户
     pub async fn get_by_id(&self, id: &Uuid) -> Result<User, UserError> {
-        let user = sqlx::query_as!(
-            User,
-            r#"
-                SELECT id, phone, email, password_hash, display_name, last_active_role as "last_active_role: UserRole", created_at, updated_at, status AS "status: UserStatus", avatar_url
-                FROM users
-                WHERE id = $1
-            "#,
-            id
+        let user = sqlx::query_as::<_, User>(
+            "SELECT id, phone, email, password_hash, security_version, display_name, \
+             last_active_role, created_at, updated_at, status, avatar_url FROM users WHERE id = $1",
         )
+        .bind(id)
         .fetch_optional(&self.pool)
         .await?
         .ok_or(UserError::NotFound)?;

@@ -1628,7 +1628,7 @@ async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool
         error.as_database_error().unwrap().constraint(),
         Some("audio_asset_not_reclaiming")
     );
-    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923030000, 20260923050000)
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923030000, 20260927010000)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("cannot remove reclamation state"));
@@ -1637,7 +1637,7 @@ async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(version, 20260923050000);
+    assert_eq!(version, 20260927010000);
     assert_eq!(draft_reference_count(&pool, entry.id).await, 0);
     assert_eq!(
         tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
@@ -1650,7 +1650,7 @@ async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool
 
 #[sqlx::test]
 async fn audio_reclamation_schema_can_be_reverted_and_reapplied(pool: PgPool) {
-    tsz_rust::deployment_migrations::undo(&pool, 20260923030000, 20260923050000)
+    tsz_rust::deployment_migrations::undo(&pool, 20260923030000, 20260927010000)
         .await
         .unwrap();
     let absent: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lexicon' AND table_name='audio_assets' AND column_name='reclamation_started_at')")

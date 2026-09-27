@@ -29,6 +29,17 @@ impl RefreshTokenRepository {
         expires_at: DateTime<Utc>,
     ) -> Result<Option<Uuid>, RefreshTokenError> {
         let mut tx = self.pool.begin().await?;
+        // 安全变更与轮换统一先锁用户，避免吊销期间插入新的 refresh session。
+        let owner = sqlx::query_scalar::<_, Uuid>(
+            "SELECT u.id FROM users u JOIN refresh_tokens r ON r.user_id = u.id \
+             WHERE r.token_hash = $1 FOR UPDATE OF u",
+        )
+        .bind(old_hash)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if owner.is_none() {
+            return Ok(None);
+        }
         let user_id = sqlx::query_scalar!(
             r#"UPDATE refresh_tokens SET rotated_at = NOW()
                WHERE token_hash = $1 AND rotated_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()

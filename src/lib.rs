@@ -71,8 +71,22 @@ pub fn router(state: AppState) -> Router {
                     axum::routing::delete(auth::handler::confirm_account_deletion),
                 )
                 .route("/register", post(auth::handler::register))
+                .route("/password/forgot", post(auth::security::forgot_password))
+                .route("/password/reset", post(auth::security::reset_password))
+                .route("/password/change", post(auth::security::change_password))
                 .route("/login-otp", post(auth::handler::login_otp))
                 .route("/me", get(auth::handler::me)),
+        )
+        .nest(
+            "/api/v1/me/contact",
+            Router::new()
+                .route(
+                    "/verification-code",
+                    post(auth::security::verification_code),
+                )
+                .route("/bind-code", post(auth::security::bind_code))
+                .route("/bind", post(auth::security::bind))
+                .route("/unbind", post(auth::security::unbind)),
         )
         .nest(
             otp::OTP_MOUNT,
