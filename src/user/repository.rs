@@ -202,6 +202,9 @@ impl UserRepository {
                     WHERE ur.user_id = u.id
                     ORDER BY CASE ur.role WHEN 'student' THEN 1 ELSE 2 END
                 ) AS "roles!: Vec<UserRole>",
+                EXISTS (
+                    SELECT 1 FROM teacher_profiles tp WHERE tp.user_id = u.id AND tp.verified
+                ) AS "teacher_verified!",
                 u.created_at,
                 u.updated_at
             FROM users u
@@ -217,9 +220,6 @@ impl UserRepository {
     /// admin 侧的用户局部更新：只改传了值的列，回读 admin 视图。两个可选参数各自
     /// 对应一条端点（启禁用 / 改昵称），合成一条 SQL 是为了让「改什么」与「回读什么」
     /// 只有一处定义——列清单再多一份拷贝就迟早漂移。
-    ///
-    /// **不吊销该用户的会话**：即时踢线是记录在案的非目标（user-mgmt-D6），
-    /// 接受一个 access TTL 的延迟。
     ///
     /// ⚠️ 被改的列必须从 CTE 的 RETURNING 里取（下面把 CTE 别名成 `u`）。写成
     /// `FROM updated JOIN users u` 会读到语句开始时的旧快照——数据修改型 CTE 的写入
@@ -256,6 +256,9 @@ impl UserRepository {
                     WHERE ur.user_id = u.id
                     ORDER BY CASE ur.role WHEN 'student' THEN 1 ELSE 2 END
                 ) AS "roles!: Vec<UserRole>",
+                EXISTS (
+                    SELECT 1 FROM teacher_profiles tp WHERE tp.user_id = u.id AND tp.verified
+                ) AS "teacher_verified!",
                 u.created_at AS "created_at!",
                 u.updated_at AS "updated_at!"
             FROM updated u
@@ -333,6 +336,9 @@ impl UserRepository {
                     WHERE ur.user_id = a.id
                     ORDER BY CASE ur.role WHEN 'student' THEN 1 ELSE 2 END
                 ) AS roles,
+                EXISTS (
+                    SELECT 1 FROM teacher_profiles tp WHERE tp.user_id = a.id AND tp.verified
+                ) AS teacher_verified,
                 a.created_at,
                 a.updated_at
             FROM users a

@@ -480,6 +480,7 @@ fn user_response_from(record: UserListRecord) -> AdminAccountUserResponse {
         display_name: record.display_name,
         avatar_url: record.avatar_url,
         roles: record.roles,
+        teacher_verified: record.teacher_verified,
         status: record.status,
         created_at: record.created_at,
         updated_at: record.updated_at,

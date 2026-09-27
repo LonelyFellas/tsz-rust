@@ -1051,8 +1051,8 @@ pub(super) async fn ensure_batch_inbound_references(
                 .reference
                 .source
                 .entry_id
-                .is_some_and(|id| batch.words.contains_key(&id)))
-            && !(candidate.reference.kind == InboundReferenceKindV3::SharedSentence
+                .is_some_and(|id| batch.words.contains_key(&id))
+            || candidate.reference.kind == InboundReferenceKindV3::SharedSentence
                 && candidate.reference.source.publication_id.is_some()
                 && candidate
                     .reference
