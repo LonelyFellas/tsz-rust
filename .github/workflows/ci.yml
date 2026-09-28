@@ -114,7 +114,7 @@ jobs:
         run: python3 -m unittest ops/test_deployment_preflight.py
 
       - name: Test deploy skill artifact contract
-        run: python3 -m unittest ops/test_deploy_skill.py
+        run: python3 -m unittest ops/test_deploy_skill.py ops/test_deployment_auth_smoke.py
 
       - name: Run Clippy
         run: >-
