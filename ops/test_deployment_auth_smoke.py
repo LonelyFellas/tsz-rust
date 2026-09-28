@@ -19,8 +19,10 @@ SCRIPT = ROOT / "ops/deployment_auth_smoke.py"
 
 
 @contextlib.contextmanager
-def serving(handler):
+def serving(handler, tls_context=None):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    if tls_context is not None:
+        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -62,6 +64,11 @@ class DeploymentAuthSmokeTests(unittest.TestCase):
         self.login_status = 200
         self.redirect = False
         self.logout_clears = True
+        self.duplicate_cookie = False
+        self.login_error_cookie = False
+        self.refresh_status = 200
+        self.logout_status = 204
+        self.problem_body = {"status": 401, "type": "about:blank", "title": "Unauthorized", "code": "invalid_refresh_token"}
         outer = self
 
         class API(http.server.BaseHTTPRequestHandler):
@@ -86,15 +93,16 @@ class DeploymentAuthSmokeTests(unittest.TestCase):
                         status = 422
                     else:
                         status = outer.login_status
-                        token = "first-token" if status == 200 else None
+                        token = "first-token" if status == 200 or outer.login_error_cookie else None
                 elif self.path.endswith("/refresh"):
                     if value is None:
-                        status, body = 401, {"status": 401, "type": "about:blank", "title": "Unauthorized", "code": "invalid_refresh_token"}
+                        status, body = 401, outer.problem_body
                     else:
+                        status = outer.refresh_status
                         token = "second-token" if outer.rotate else "first-token"
                 elif self.path.endswith("/logout"):
-                    status = 204
-                    token = "" if outer.logout_clears else None
+                    status = outer.logout_status
+                    token = "" if outer.logout_clears and status == 204 else None
                 else:
                     status = 404
                 if outer.redirect and self.path.endswith("/login"):
@@ -109,7 +117,11 @@ class DeploymentAuthSmokeTests(unittest.TestCase):
                         attributes += "; Secure"
                     if token == "":
                         attributes += "; Max-Age=0"
-                    self.send_header("Set-Cookie", "refresh_token=" + token + attributes)
+                    if outer.duplicate_cookie and token:
+                        self.send_header("Set-Cookie", "refresh_token=" + token + "; Secure; HttpOnly; SameSite=Lax; Path=/old")
+                        self.send_header("Set-Cookie", "refresh_token=" + token + "; Path=/api/v1/auth")
+                    else:
+                        self.send_header("Set-Cookie", "refresh_token=" + token + attributes)
                 self.end_headers()
                 if status != 204:
                     self.wfile.write(json.dumps(body).encode())
@@ -134,6 +146,64 @@ class DeploymentAuthSmokeTests(unittest.TestCase):
             ("/api/v1/auth/refresh", "first-token"),
             ("/api/v1/auth/logout", "second-token"),
         ])
+
+    def test_duplicate_cookie_attributes_cannot_be_combined_into_pass(self):
+        self.duplicate_cookie = True
+        with self.assertRaises(self.smoke.SmokeFailure):
+            self.run_chain()
+        self.assertNotIn(("/api/v1/auth/refresh", "first-token"), self.calls)
+
+    def test_failed_login_with_cookie_still_logs_out(self):
+        self.login_status = 500
+        self.login_error_cookie = True
+        with self.assertRaises(self.smoke.SmokeFailure):
+            self.run_chain()
+        self.assertEqual(self.calls[-1], ("/api/v1/auth/logout", "first-token"))
+
+    def test_login_body_read_failure_still_cleans_up_received_cookie(self):
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.load_cert_chain(self.cert, self.key)
+        original_read = http.client.HTTPResponse.read
+
+        def interrupted_read(response, *args, **kwargs):
+            if "first-token" in response.getheader("Set-Cookie", ""):
+                raise OSError("fixture read interrupted")
+            return original_read(response, *args, **kwargs)
+
+        with serving(self.handler) as health, serving(self.handler, tls_context) as api, \
+             mock.patch.object(http.client.HTTPResponse, "read", interrupted_read):
+            with self.assertRaises(self.smoke.SmokeFailure) as result:
+                self.smoke.run_smoke(
+                    f"https://localhost:{api.server_port}", health.server_port,
+                    {"identifier": "fixture@example.invalid", "password": "test-only-secret"}, context=self.context,
+                )
+        self.assertEqual(str(result.exception), "invalid_response_or_transport")
+        self.assertEqual(self.calls[-1], ("/api/v1/auth/logout", "first-token"))
+
+    def test_cleanup_failure_preserves_original_failure(self):
+        self.refresh_status = 500
+        self.logout_status = 500
+        with self.assertRaises(self.smoke.SmokeFailure) as result:
+            self.run_chain()
+        self.assertEqual(str(result.exception), "refresh_status_500")
+        self.assertEqual(result.exception.cleanup_stage, "cleanup_logout_failed")
+
+    def test_non_object_problem_body_returns_smoke_failure(self):
+        for body in (None, []):
+            with self.subTest(body=body):
+                self.problem_body = body
+                with self.assertRaises(self.smoke.SmokeFailure):
+                    self.run_chain()
+
+    def test_preflight_rejects_insecure_configuration(self):
+        self.assertTrue(hasattr(self.smoke, "preflight"), "pre-stop TLS preflight missing")
+        output = io.StringIO()
+        with mock.patch.object(self.smoke.sys, "argv", [str(SCRIPT), "--mode", "preflight", "--owner", "11111111-1111-4111-8111-111111111111"]), \
+             mock.patch.dict(self.smoke.os.environ, {"COOKIE_SECURE": "false"}), \
+             contextlib.redirect_stdout(output):
+            result = self.smoke.main()
+        self.assertEqual(result, 1)
+        self.assertEqual(json.loads(output.getvalue())["stage"], "cookie_secure_required")
 
     def test_recovery_without_original_remote_lock_cannot_report_success(self):
         output = io.StringIO()

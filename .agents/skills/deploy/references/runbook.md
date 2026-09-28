@@ -227,6 +227,21 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
    这一项必须排在下面的 manifest 核对**之前**：ssh 连不上时 `cat` 会失败并被兜底成
    空 JSON，看起来就像「服务器没有 manifest」，从而放行一次本该被拦下的空跑。
 
+   **TLS / Secure Cookie 只读预检**：在任何正式服务停止、制品替换或迁移前，从服务器 `.env`
+   加载候选将使用的实际配置，运行确定性 preflight。该模式不读取冒烟凭据、不登录、不修改文件；
+   验证 COOKIE_SECURE 为 true（缺省默认 true）、证书私钥匹配及真实 TLS 握手的系统 CA/域名校验。
+   配置为 false、证书不可用或验证失败立即停止，不为满足验收改配置。
+   ```bash
+   set -euo pipefail
+   set +x
+   set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+   test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
+   [[ "$deploy_session" =~ ^[0-9a-f-]{36}$ ]]
+   test -s "$tools/deployment_auth_smoke.py"
+   ssh tshb-test "set -eu; set +x; set -a; . /opt/tsz-rust/.env; set +a; python3 - --mode preflight --owner '$deploy_session'" \
+     < "$tools/deployment_auth_smoke.py"
+   ```
+
 3. **数据库只读预检（动服务器状态之前必做）**：必须运行仓库内的确定性工具，不能把
    多个 `SELECT` 拼进一个 `psql -c` 后再把空输出解释成 0。工具会对每个标量独立调用
    psql，并把空值、非整数、多行或查询失败全部视为阻断；只输出计数 JSON，不输出 DSN：
@@ -342,6 +357,10 @@ test "$latest_run_id" = "$ci_run_id"
 test "$latest_attempt" = "$ci_run_attempt"
 test "$latest_status" = completed
 test "$latest_conclusion" = success
+
+[[ "$deploy_session" =~ ^[0-9a-f-]{36}$ ]]
+ssh tshb-test "set -eu; set +x; set -a; . /opt/tsz-rust/.env; set +a; python3 - --mode preflight --owner '$deploy_session'" \
+  < "$tools/deployment_auth_smoke.py"
 
 # 1) artifact 已在第 3 节下载并完整验证。现在才取得服务器互斥锁，这是本流程第一次
 #    服务器写入；已有锁只读报告 owner 后停止，绝不抢锁。

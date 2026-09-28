@@ -5,6 +5,7 @@ import http.cookiejar
 import http.cookies
 import http.server
 import json
+import os
 import pathlib
 import re
 import socket
@@ -24,7 +25,9 @@ TIMEOUT = 10
 
 
 class SmokeFailure(Exception):
-    pass
+    def __init__(self, stage):
+        super().__init__(stage)
+        self.cleanup_stage = None
 
 
 def require(condition, stage):
@@ -130,8 +133,10 @@ def run_smoke(base_url, health_port, credentials, *, context=None, loopback=Fals
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), handler,
                                         urllib.request.HTTPCookieProcessor(jar), NoRedirect())
     authenticated = False
+    failure = None
 
     def request(endpoint, payload=None):
+        nonlocal authenticated
         body = json.dumps(payload or {}).encode()
         req = urllib.request.Request(base_url.rstrip("/") + AUTH_PATH + endpoint, data=body,
                                      headers={"Content-Type": "application/json"}, method="POST")
@@ -142,17 +147,27 @@ def run_smoke(base_url, health_port, credentials, *, context=None, loopback=Fals
         except (OSError, urllib.error.URLError, http.client.HTTPException):
             raise SmokeFailure("auth_transport_failed") from None
         with response:
+            if endpoint == "/login" and response.status == 200:
+                authenticated = True
             return response.status, response.headers, response.read(1048576)
 
     def refresh_cookie(headers):
-        cookies = http.cookies.SimpleCookie()
+        matches = []
         for value in headers.get_all("Set-Cookie", []):
-            cookies.load(value)
-        require("refresh_token" in cookies, "refresh_cookie_missing")
-        cookie = cookies["refresh_token"]
+            require(len(re.findall(r"(?:^|[;,])\s*refresh_token\s*=", value)) <= 1,
+                    "duplicate_refresh_cookie")
+            cookies = http.cookies.SimpleCookie(value)
+            if "refresh_token" in cookies:
+                matches.append(cookies["refresh_token"])
+        require(len(matches) == 1, "refresh_cookie_missing_or_duplicate")
+        cookie = matches[0]
         require(cookie["secure"] and cookie["httponly"] and cookie["samesite"].lower() == "lax"
                 and cookie["path"] == AUTH_PATH and cookie.value, "refresh_cookie_attributes")
-        require(any(item.name == "refresh_token" and item.value == cookie.value for item in jar),
+        accepted = [item for item in jar if item.name == "refresh_token"]
+        require(len(accepted) == 1 and accepted[0].value == cookie.value
+                and accepted[0].secure and accepted[0].path == AUTH_PATH
+                and accepted[0].has_nonstandard_attr("HttpOnly")
+                and accepted[0].get_nonstandard_attr("SameSite", "").lower() == "lax",
                 "refresh_cookie_rejected")
         return cookie.value
 
@@ -165,7 +180,7 @@ def run_smoke(base_url, health_port, credentials, *, context=None, loopback=Fals
         status, headers, body = request("/refresh")
         require(status == 401 and headers.get_content_type() == "application/problem+json", "anonymous_refresh")
         problem = json.loads(body)
-        require(problem.get("status") == 401 and problem.get("code") == "invalid_refresh_token"
+        require(isinstance(problem, dict) and problem.get("status") == 401 and problem.get("code") == "invalid_refresh_token"
                 and problem.get("type") and problem.get("title"), "anonymous_refresh_problem")
         status, headers, _ = request("/login", credentials)
         require(status == 200, f"login_status_{status}")
@@ -178,15 +193,22 @@ def run_smoke(base_url, health_port, credentials, *, context=None, loopback=Fals
         require(status == 204, f"logout_status_{status}")
         require(not any(item.name == "refresh_token" for item in jar), "logout_cookie_not_cleared")
         authenticated = False
+    except SmokeFailure as error:
+        failure = error
     except (ValueError, OSError, http.client.HTTPException, http.cookies.CookieError):
-        raise SmokeFailure("invalid_response_or_transport") from None
+        failure = SmokeFailure("invalid_response_or_transport")
     finally:
-        if authenticated:
-            if any(item.name == "refresh_token" for item in jar):
+        if authenticated or any(item.name == "refresh_token" for item in jar):
+            try:
+                require(any(item.name == "refresh_token" for item in jar), "cleanup_cookie_unavailable")
                 status, _, _ = request("/logout")
                 require(status == 204 and not any(item.name == "refresh_token" for item in jar), "cleanup_logout_failed")
-            else:
-                raise SmokeFailure("cleanup_cookie_unavailable")
+            except (SmokeFailure, ValueError, OSError, http.client.HTTPException, http.cookies.CookieError) as error:
+                if failure is None:
+                    failure = SmokeFailure("cleanup_failed")
+                failure.cleanup_stage = str(error) if isinstance(error, SmokeFailure) else "cleanup_transport_failed"
+    if failure is not None:
+        raise failure
 
 
 def check_candidate(lock):
@@ -216,14 +238,28 @@ def check_candidate(lock):
             and f"pid={pid}," in " ".join(fields[5:]), "candidate_listener")
 
 
+def preflight():
+    require(os.environ.get("COOKIE_SECURE", "true") == "true", "cookie_secure_required")
+    certificate = pathlib.Path("/etc/letsencrypt/live") / HOST
+    context = ssl.create_default_context()
+    with candidate_tls(18383, certificate / "fullchain.pem", certificate / "privkey.pem") as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT) as connection:
+            with context.wrap_socket(connection, server_hostname=HOST):
+                pass
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("candidate", "recovery", "existing"), required=True)
+    parser.add_argument("--mode", choices=("candidate", "recovery", "existing", "preflight"), required=True)
     parser.add_argument("--owner", required=True)
     parser.add_argument("--expected-sha")
     args = parser.parse_args()
     try:
         require(str(uuid.UUID(args.owner)) == args.owner, "invalid_owner")
+        if args.mode == "preflight":
+            preflight()
+            print(json.dumps({"mode": "preflight", "tls": "PASS", "cookie_secure": "PASS"}))
+            return 0
         lock = pathlib.Path("/opt/tsz-rust/deploy.lock")
         owner_file = lock / "owner"
         locked = lock.exists()
@@ -252,7 +288,10 @@ def main():
         print(json.dumps({"mode": args.mode, "health": "PASS", "ready": "PASS", "auth": "PASS"}))
         return 0
     except SmokeFailure as error:
-        print(json.dumps({"result": "FAIL", "stage": str(error)}))
+        result = {"result": "FAIL", "stage": str(error)}
+        if error.cleanup_stage is not None:
+            result["cleanup_stage"] = error.cleanup_stage
+        print(json.dumps(result))
     except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
         print(json.dumps({"result": "FAIL", "stage": "precondition_failed"}))
     return 1
