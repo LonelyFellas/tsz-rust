@@ -192,6 +192,7 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
      ops/ci_fingerprint.py \
      ops/ci_metrics.py \
      ops/deployment_manifest.py \
+     ops/deployment_auth_smoke.py \
      ops/deployment_preflight.py \
      ops/release_artifact_manifest.py
    do
@@ -225,6 +226,21 @@ printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
 
    这一项必须排在下面的 manifest 核对**之前**：ssh 连不上时 `cat` 会失败并被兜底成
    空 JSON，看起来就像「服务器没有 manifest」，从而放行一次本该被拦下的空跑。
+
+   **TLS / Secure Cookie 只读预检**：在任何正式服务停止、制品替换或迁移前，从服务器 `.env`
+   加载候选将使用的实际配置，运行确定性 preflight。该模式不读取冒烟凭据、不登录、不修改文件；
+   验证 COOKIE_SECURE 为 true（缺省默认 true）、证书私钥匹配及真实 TLS 握手的系统 CA/域名校验。
+   配置为 false、证书不可用或验证失败立即停止，不为满足验收改配置。
+   ```bash
+   set -euo pipefail
+   set +x
+   set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+   test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
+   [[ "$deploy_session" =~ ^[0-9a-f-]{36}$ ]]
+   test -s "$tools/deployment_auth_smoke.py"
+   ssh tshb-test "set -eu; set +x; set -a; . /opt/tsz-rust/.env; set +a; python3 - --mode preflight --owner '$deploy_session'" \
+     < "$tools/deployment_auth_smoke.py"
+   ```
 
 3. **数据库只读预检（动服务器状态之前必做）**：必须运行仓库内的确定性工具，不能把
    多个 `SELECT` 拼进一个 `psql -c` 后再把空输出解释成 0。工具会对每个标量独立调用
@@ -341,6 +357,10 @@ test "$latest_run_id" = "$ci_run_id"
 test "$latest_attempt" = "$ci_run_attempt"
 test "$latest_status" = completed
 test "$latest_conclusion" = success
+
+[[ "$deploy_session" =~ ^[0-9a-f-]{36}$ ]]
+ssh tshb-test "set -eu; set +x; set -a; . /opt/tsz-rust/.env; set +a; python3 - --mode preflight --owner '$deploy_session'" \
+  < "$tools/deployment_auth_smoke.py"
 
 # 1) artifact 已在第 3 节下载并完整验证。现在才取得服务器互斥锁，这是本流程第一次
 #    服务器写入；已有锁只读报告 owner 后停止，绝不抢锁。
@@ -475,31 +495,66 @@ manifest 中的原始 binary 字节数。两者分别是压缩上传包与二进
 
 ## 5. 冒烟验证（部署不验证 = 没部署）
 
-先对隔离候选进程执行完整冒烟，服务器本机
-`B=http://127.0.0.1:$candidate_port/api/v1`；此时正式 `tsz-rust` service 保持停止，外部 API
-不能写业务数据：
+先运行本节的确定性工具，不再手拼 Cookie 或按 HTTP 非 Secure Cookie 验收。保持
+`COOKIE_SECURE=true`（未显式设置时为服务默认值），不得为冒烟降级、使用 `-k` 或关闭证书校验。
 
-1. `healthz` → `{"status":"ok"}`；
-2. `readyz` → **200 `{"status":"ready"}`**，同时证明 DB 与 Redis 可用；
-3. `POST $B/auth/refresh`（无 cookie）→ **401 RFC 9457 Problem，稳定判据是
-   `code == "invalid_refresh_token"`**（响应体早已迁到 Problem Details，不再是
-   `{"error":...}`；判断形状而不是逐字比对 `detail`）。若拿到 422 或旧的
-   `{"error":...}` 形状，说明跑的不是本次构建；注意 422 现在的语义是
-   `invalid_request_body`，见 `docs/api-errors.md`；
-4. 全链路（使用常驻冒烟账号；先执行
-   `set -a; source ~/.config/tsz-rust/deploy-smoke.env; set +a`，再从环境变量
-   `TSZ_SMOKE_IDENTIFIER` / `TSZ_SMOKE_PASSWORD` 读取凭据；禁止写入仓库、命令参数或日志）：
-   login 请求体字段是 **`identifier`**（统一承接手机号/邮箱，不叫 `phone`——用错必 422）：
-   ```json
-   { "identifier": "$TSZ_SMOKE_IDENTIFIER", "password": "$TSZ_SMOKE_PASSWORD" }
-   ```
-   login 200 且 Set-Cookie 含 `HttpOnly; SameSite=Lax; Path=/api/v1/auth`（**不含
-   Secure**——服务器 .env 设了 COOKIE_SECURE=false，见下）→ 拿 cookie 刷新 200 且
-   轮换出新值 → 带新 cookie logout 204；
-5. 若本次改动含**新迁移**：在本 session 的 `$candidate_log` 确认
-   「database migrations applied」（候选启动自动迁移，连的是外部 RDS）。
+- `candidate`：正式服务保持停止，候选仍为 `127.0.0.1:18383` 且关闭后台 worker。工具在服务器进程内
+  临时监听 `127.0.0.1` 的随机 TLS 端口，只转发 login/refresh/logout 到候选；复用
+  `/etc/letsencrypt/live/test.tianshengzhi.com/{fullchain.pem,privkey.pem}`，不复制私钥、不修改 nginx。
+  客户端只把 TCP 目的地固定到 loopback，仍验证 `test.tianshengzhi.com` 的主机名、证书链与有效期。
+  不重定向外部业务流量；工具结束或失败后关闭临时监听，进程退出时由系统释放 socket。
+- `recovery`：用于持原事务两端锁的旧版本恢复，health/ready 访问本机 `8383`，认证通过
+  `https://test.tianshengzhi.com/api/v1/auth`。执行前确认现有 nginx `/api/v1/` upstream 为该正式服务。
+  根域名 `/healthz`、`/readyz` 可能是前端页面，不能用它们代替本机健康 JSON。
 
-把冒烟结果整理成表格报告给用户。
+- `existing`：仅用于第 3 节同 SHA 已部署检查，传输与 recovery 相同；必须尚无远端锁并传入
+  `--expected-sha "$deploy_sha"`，工具核对正式 manifest 来源匹配该 SHA，前后均检查远端锁未出现。
+  这不能替代第 3 节实际二进制哈希与 CI 校验，也不能用来恢复旧事务。
+
+candidate/recovery 都必须持有匹配 owner 的两端锁。下列代码的 `smoke_mode` 在旧事务恢复时
+改为 `recovery`，仅在第 3 节同 SHA 检查时改为 `existing`；不得用正式服务结果替代候选验收：
+
+```bash
+set -euo pipefail
+set +x
+set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
+test -n "${deploy_checkout:-}"
+cd "$deploy_checkout"
+test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
+test "$(git rev-parse HEAD)" = "$deploy_sha"
+[[ "$deploy_session" =~ ^[0-9a-f-]{36}$ ]]
+[[ "$deploy_sha" =~ ^[0-9a-f]{40}$ ]]
+test -s "$tools/deployment_auth_smoke.py"
+smoke_mode=candidate
+set -a; source ~/.config/tsz-rust/deploy-smoke.env; set +a
+python3 -c '
+import json,os,pathlib,sys
+json.dump({"source":pathlib.Path(sys.argv[1]).read_text(),
+           "credentials":{"identifier":os.environ["TSZ_SMOKE_IDENTIFIER"],
+                          "password":os.environ["TSZ_SMOKE_PASSWORD"]}},sys.stdout)
+' "$tools/deployment_auth_smoke.py" | ssh tshb-test \
+  "python3 -c 'import io,json,sys; p=json.load(sys.stdin); sys.stdin=io.StringIO(json.dumps(p[\"credentials\"])); exec(compile(p[\"source\"],\"<deployment_auth_smoke>\",\"exec\"))' --mode '$smoke_mode' --owner '$deploy_session' --expected-sha '$deploy_sha'"
+```
+
+代码仅从已验证 SHA 导出的 `$tools` 读取工具，经 SSH stdin 在服务器内存执行，不落地凭据、token 或
+工具临时文件。不得开启 shell tracing、打印管道输入或原始响应；正常数据库审计不作修改。
+TLS 证书/私钥、系统 CA、Python ssl 模块与既有 HTTPS upstream 必须在停止正式服务前只读核实可用，
+缺失时停止，不能自动改服务器配置。工具只输出固定失败阶段或 PASS JSON，不重试登录。
+
+旧事务的 `$tools` 若尚无此工具，不修改旧 checkout、`deploy_sha`、owner 或备份记录来伪装来源。
+由用户批准恢复工具更新后，先核实含修复的 GitHub main 精确 SHA/最新 CI 成功，从该 SHA 单独导出
+`ops/deployment_auth_smoke.py` 到本地事务专用目录，记录该恢复工具的 SHA、CI run/attempt 和文件摘要；
+仅将上述调用中的工具文件路径指向该导出文件，原事务其余 state 与恢复门禁不变。不得取未提交文件、
+修改旧 `$tools` 或把新的工具来源写成旧二进制来源；新发布仍从自己的精确目标 SHA 导出工具。
+
+完整判据为本机 health/ready 的精确 JSON；无 Cookie refresh 的 401 Problem Details
+（`status=401`、`code=invalid_refresh_token`、含 type/title）；login 200 且 Cookie 含
+`Secure; HttpOnly; SameSite=Lax; Path=/api/v1/auth`；通过正常 CookieJar 刷新 200 且 token 轮换；
+携带新 Cookie logout 204 且 Cookie 被清除。工具中途失败时尝试用已接收 Cookie 登出；无法清理时
+明确报告失败，保留锁与现场，不直接删除数据库会话，不把 cleanup 成功当作完整验收成功。
+
+若本次含新迁移，仍须在 `$candidate_log` 确认 `database migrations applied`。原有精确 main/CI、
+制品、迁移恢复、manifest 与解锁门禁保持不变。把冒烟结果整理成表格报告给用户。
 
 ### 5.1 发布并验证 API 部署 manifest
 
@@ -648,7 +703,7 @@ ssh tshb-test "set -eu
 
 restore 会先验证备份组，再撤下正式 manifest，以同目录临时文件 + `os.replace` 原子换回二进制，最后才恢复旧 manifest；这避免覆盖运行中二进制的 `Text file busy` 和半恢复错配。第 4 节撤下旧 manifest 后，编译、重启、任一 smoke、create 或 verify 失败都必须进入本节按已验证的恢复边界处理，不得保留“新二进制 + 旧 manifest”。如果 down migration 因检测到新正文关联、重复译文或音频资产而拒绝，保留服务停止状态与两端锁，不能丢数据后强行恢复旧二进制。
 
-回退后重跑 health/ready/auth smoke；若恢复了 `api.json`，必须执行 `deployment_manifest.py verify`。若旧部署没有 manifest，回退后的来源状态明确为 UNKNOWN/BLOCKED，不能伪造一个 SHA。只有回退 smoke/manifest 全部通过后，才按第 5.1 节相同的 owner 校验顺序释放服务器锁和本地锁；失败时保留锁、state、staging 与 backup 供恢复，绝不自动抢锁。
+回退后运行第 5 节 `recovery` 模式的本机 health/ready 与 HTTPS auth smoke；若恢复了 `api.json`，必须执行 `deployment_manifest.py verify`。若旧部署没有 manifest，回退后的来源状态明确为 UNKNOWN/BLOCKED，不能伪造一个 SHA。只有回退 smoke/manifest 全部通过后，才按第 5.1 节相同的 owner 校验顺序释放服务器锁和本地锁；失败时保留锁、state、staging 与 backup 供恢复，绝不自动抢锁。
 
 服务器上不再用源码构建，`/opt/tsz-rust` 下也不再保留源码树（旧版部署残留的源码、`target/` 下除 `release/tsz-rust` 外的构建产物与 import/seed 等旧工具二进制、根目录的手工二进制备份，已于 2026-09-15 清理），运行只需要二进制与 `.env`；含迁移的发布只有已验证安全时才由候选二进制撤回数据库；否则保持停止状态等待恢复决定，不换回不兼容的旧二进制。只有数据库
 已经处于部署前 migration 版本时，二进制恢复才构成完整回退。
@@ -658,7 +713,7 @@ restore 会先验证备份组，再撤下正式 manifest，以同目录临时文
 `/opt/tsz-rust/.env`（部署只推送二进制与部署工具，从不触碰它；改它只能 ssh 手动）当前含以下键（2026-09-15 只读核对键名，不含取值）：
 
 - 基础与鉴权：PORT / DATABASE_URL（外部 Aliyun RDS）/ REDIS_URL / JWT_SECRET / ADMIN_JWT_SECRET（必须不同于 JWT_SECRET）
-- **COOKIE_SECURE=false**（测试服的 IP 直连入口仍是纯 HTTP，Secure cookie 会被浏览器拒收；两个域名已由 nginx + certbot 提供 HTTPS，关闭 IP 直连入口后删除此项恢复默认 true；生产禁止 false）
+- **COOKIE_SECURE=true**：认证验收走 HTTPS，必须保留 Secure Cookie；未显式配置时使用默认 true。纯 HTTP 只用于服务器本机无凭据 health/ready，不以 IP 直连 HTTP 进行认证，也不为部署验收降级。
 - Azure TTS：AZURE_SPEECH_ENABLED / AZURE_SPEECH_REGION / AZURE_SPEECH_KEY / AZURE_SPEECH_CONNECT_TIMEOUT_MS / AZURE_SPEECH_REQUEST_TIMEOUT_MS / AZURE_SPEECH_MAX_RESPONSE_BYTES
 - 对象存储：OBJECT_STORAGE_SPACES，以及 speech 空间的 OBJECT_STORAGE_SPEECH_BACKEND / OBJECT_STORAGE_SPEECH_OSS_ENDPOINT / OBJECT_STORAGE_SPEECH_OSS_REGION / OBJECT_STORAGE_SPEECH_OSS_BUCKET / OBJECT_STORAGE_SPEECH_OSS_ROOT / OBJECT_STORAGE_SPEECH_OSS_ACCESS_KEY_ID / OBJECT_STORAGE_SPEECH_OSS_ACCESS_KEY_SECRET / OBJECT_STORAGE_SPEECH_PRIVACY / OBJECT_STORAGE_SPEECH_MAX_OBJECT_SIZE_BYTES / OBJECT_STORAGE_SPEECH_PRESIGN_TTL_SECONDS / OBJECT_STORAGE_SPEECH_CACHE_CONTROL
 - 智能词库 V3 开关（默认 false，取值只接受小写 true/false）：SMART_LEXICON_V3_READ / SMART_LEXICON_V3_CREATE / SMART_LEXICON_V3_EDIT / SMART_LEXICON_V3_PUBLISH / SMART_LEXICON_V3_PROJECTION / SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS / SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY；另有 SMART_LEXICON_V3_LEGACY_BRIDGE_READ / SMART_LEXICON_V3_SENSE_COMPONENT_USAGES，配置结构里已无对应字段，不被读取
