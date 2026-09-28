@@ -33,9 +33,12 @@ pub struct TeacherApplicationDetail {
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 pub struct ListQuery {
+    #[param(minimum = 1)]
     pub page: Option<u32>,
+    #[param(minimum = 1, maximum = 100)]
     pub page_size: Option<u32>,
     pub status: Option<String>,
 }

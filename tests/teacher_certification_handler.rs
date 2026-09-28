@@ -743,3 +743,119 @@ async fn oversized_material_returns_problem_details(pool: PgPool) {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(body["code"], "payload_too_large");
 }
+
+#[test]
+fn certification_openapi_query_parameters_match_runtime() {
+    use utoipa::OpenApi;
+    let spec = serde_json::to_value(tsz_rust::openapi::ApiDoc::openapi()).unwrap();
+    for path in [
+        "/api/v1/admin/teacher-applications",
+        "/api/v1/me/notifications",
+    ] {
+        let params = spec["paths"][path]["get"]["parameters"].as_array().unwrap();
+        for name in ["page", "page_size"] {
+            let param = params.iter().find(|p| p["name"] == name).unwrap();
+            assert_eq!(param["in"], "query");
+            assert_eq!(param["required"], false);
+            assert_eq!(param["schema"]["minimum"], 1);
+            if name == "page_size" {
+                assert_eq!(param["schema"]["maximum"], 100);
+            }
+        }
+        assert!(params.iter().all(|p| p["in"] == "query"));
+    }
+    let kind = &spec["paths"]["/api/v1/me/teacher-certification/files"]["post"]["parameters"][0];
+    assert_eq!(kind["name"], "kind");
+    assert_eq!(kind["in"], "query");
+    assert_eq!(kind["required"], true);
+}
+
+#[test]
+fn certification_openapi_only_declares_supported_image_media() {
+    use utoipa::OpenApi;
+    let spec = serde_json::to_value(tsz_rust::openapi::ApiDoc::openapi()).unwrap();
+    let upload =
+        &spec["paths"]["/api/v1/me/teacher-certification/files"]["post"]["requestBody"]["content"];
+    let own = &spec["paths"]["/api/v1/me/teacher-certification/files/{id}"]["get"]["responses"]["200"]
+        ["content"];
+    let admin = &spec["paths"]["/api/v1/admin/teacher-certification/files/{id}"]["get"]["responses"]
+        ["200"]["content"];
+    for content in [upload, own, admin] {
+        assert_eq!(content.as_object().unwrap().len(), 3);
+        for mime in ["image/jpeg", "image/png", "image/webp"] {
+            assert!(content.get(mime).is_some(), "missing {mime}");
+            assert_eq!(content[mime]["schema"]["type"], "string");
+            assert_eq!(content[mime]["schema"]["format"], "binary");
+        }
+    }
+}
+
+#[sqlx::test]
+async fn revoking_legacy_teacher_only_account_keeps_student_membership(pool: PgPool) {
+    let owner = user(&pool).await;
+    let reviewer = admin(&pool, AdminRole::SuperAdmin).await;
+    sqlx::query("UPDATE user_roles SET role='teacher' WHERE user_id=$1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET last_active_role='teacher' WHERE id=$1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO teacher_profiles (user_id,verified) VALUES ($1,true)")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = AppState::for_test(pool.clone());
+    let token = state
+        .admin_token_manager
+        .generate(reviewer, "super_admin")
+        .unwrap();
+    let path = format!("/api/v1/admin/users/{owner}/teacher-certification");
+    assert_eq!(
+        send(
+            &state,
+            "DELETE",
+            &path,
+            &token,
+            json!({"reason":"历史资格复核"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let roles: Vec<String> =
+        sqlx::query_scalar("SELECT role::text FROM user_roles WHERE user_id=$1 ORDER BY role")
+            .bind(owner)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(roles, vec!["student"]);
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)")
+        .bind(owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(exists);
+    assert_eq!(
+        send(
+            &state,
+            "DELETE",
+            &path,
+            &token,
+            json!({"reason":"重复撤销"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM user_notifications WHERE user_id=$1")
+        .bind(owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}

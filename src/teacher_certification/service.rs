@@ -174,6 +174,13 @@ pub async fn revoke(
     }
     let application = sqlx::query_scalar::<_, Uuid>("UPDATE teacher_applications SET status = 'revoked', revoked_at = now(), revoked_by = $2, revoke_reason = $3 WHERE user_id = $1 AND status = 'approved' RETURNING id")
         .bind(owner).bind(reviewer).bind(reason).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query(
+        "INSERT INTO user_roles (user_id,role) VALUES ($1,'student') ON CONFLICT DO NOTHING",
+    )
+    .bind(owner)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
     sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND role = 'teacher'")
         .bind(owner)
         .execute(&mut *tx)

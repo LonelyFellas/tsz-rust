@@ -23,9 +23,14 @@ use uuid::Uuid;
 pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct UploadQuery {
     pub kind: String,
 }
+
+#[derive(ToSchema)]
+#[schema(value_type = String, format = Binary)]
+pub struct CertificationImage(pub Vec<u8>);
 
 #[derive(Serialize, FromRow, ToSchema)]
 pub struct CertificationFile {
@@ -54,7 +59,7 @@ fn unavailable() -> AppError {
 }
 
 #[utoipa::path(post, path = "/api/v1/me/teacher-certification/files", tag = "teacher-certification",
-    params(UploadQuery), request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    params(UploadQuery), request_body(content((inline(CertificationImage) = "image/jpeg"), (inline(CertificationImage) = "image/png"), (inline(CertificationImage) = "image/webp"))),
     responses((status = 201, body = CertificationFile), (status = 401), (status = 409), (status = 413), (status = 422), (status = 503)), security(("bearer_auth" = [])))]
 pub async fn upload(
     State(state): State<AppState>,
@@ -178,7 +183,7 @@ async fn read(state: &AppState, id: Uuid, owner: Option<Uuid>) -> Result<Respons
 }
 
 #[utoipa::path(get, path = "/api/v1/me/teacher-certification/files/{id}", tag = "teacher-certification",
-    params(("id" = Uuid, Path)), responses((status = 200, body = Vec<u8>, content_type = "application/octet-stream"), (status = 401), (status = 404)), security(("bearer_auth" = [])))]
+    params(("id" = Uuid, Path)), responses((status = 200, content((inline(CertificationImage) = "image/jpeg"), (inline(CertificationImage) = "image/png"), (inline(CertificationImage) = "image/webp"))), (status = 401), (status = 404)), security(("bearer_auth" = [])))]
 pub async fn read_own(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -188,7 +193,7 @@ pub async fn read_own(
 }
 
 #[utoipa::path(get, path = "/api/v1/admin/teacher-certification/files/{id}", tag = "teacher-certification",
-    params(("id" = Uuid, Path)), responses((status = 200, body = Vec<u8>, content_type = "application/octet-stream"), (status = 403), (status = 404)), security(("bearer_auth" = [])))]
+    params(("id" = Uuid, Path)), responses((status = 200, content((inline(CertificationImage) = "image/jpeg"), (inline(CertificationImage) = "image/png"), (inline(CertificationImage) = "image/webp"))), (status = 403), (status = 404)), security(("bearer_auth" = [])))]
 pub async fn read_admin(
     State(state): State<AppState>,
     auth: AdminAuth,
