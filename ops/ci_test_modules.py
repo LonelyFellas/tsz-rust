@@ -20,6 +20,7 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
         "session_*",
         "student_profiles_schema",
         "teacher_profiles_schema",
+        "teacher_certification_handler",
         "user_*",
         "users_schema",
     ),

@@ -2206,3 +2206,31 @@ forms impact/save 使用相同规范化，GET 与发布快照保留新字段。
 不能任意单独上线。上线前需先发布只接受/保留新字段但不启用写入口的兼容前端，再发布后端，
 最后发布启用本次编辑功能的前端，并处理旧编辑会话。本次 PR 不包含该兼容过渡版本或部署授权；
 不能用两边快速连发替代兼容验证。设计和验证记录位于前端 `docs/features/form-spelling-regularity/`。
+
+## 2026-09-28：第五批教师认证与身份
+
+本批是同账号新增教师身份，学生身份与既有数据保留，不创建第二个账号。浏览器按用户 ID 保存工作台偏好，不修改 JWT、refresh 或用户全局 `last_active_role`；该偏好不授予任何权限。撤销以数据库资格为准，不等 access token 过期。前端在重新核验、聚焦或进入教师路由时发现撤销后回到学生工作台；离线页面不保证即时变化。
+
+### 接口与权限
+
+以下路径均以 `/api/v1` 为前缀，字段以本任务 `docs/openapi.json` 为准：
+
+- `GET /me/teacher-certification`：本人资格、最新申请与材料元数据。
+- `POST /me/teacher-certification/files?kind=...`：鉴权二进制上传，实际 `Content-Type` 为 JPEG/PNG/WebP 图片 MIME；每张最多 10 MiB，解码尺寸不超过 8192×8192。
+- `GET|DELETE /me/teacher-certification/files/{id}`：本人读取／删除未提交材料；已提交材料不能删除。返回元数据不含对象 key 或公开 URL。
+- `POST /me/teacher-certification/applications`：姓名、联系方式、说明、身份证正反面、学历和语言证明全部必填；后两类各 1–10 张。待审／已认证时拒绝重复提交（409）。
+- `GET /me/teacher-certification/applications/{id}`：本人历史申请，不用最新申请代替通知关联的旧申请。
+- `GET /me/notifications`、`PATCH /me/notifications/{id}/read`：本人分页通知与幂等标已读。
+- `GET /admin/teacher-applications`、`GET /admin/teacher-applications/{id}`、`GET /admin/teacher-certification/files/{id}`：仅超管；列表支持 page/page_size/status，材料必须已关联申请。
+- `POST /admin/teacher-applications/{id}/review`：超管 approve/reject，驳回必须填写原因。
+- `DELETE /admin/users/{id}/teacher-certification`：超管撤销，必须填写原因；兼容没有申请记录的历史已认证用户。
+
+普通管理员只从用户列表／详情查看认证状态，以上管理接口均拒绝其访问。审核、资格变动、角色成员关系及站内通知同事务提交；重复审核返回 409，不重复发通知。驳回、撤销允许重新申请，保留历次记录。材料响应为 `Cache-Control: no-store`，前端使用 Blob URL，切换账号或卸载时释放。
+
+### 私有存储与回退边界
+
+配置空间名为 `teacher-certification`，完整配置示例见 `.env.example`。未配置或配置为 public 时材料服务拒绝操作，不降级为公开存储。`PRIVACY=private` 只是应用策略，**不等于 OSS bucket ACL 已验收**：上线前必须核对独立私有 bucket／root、最小 RAM 权限、匿名读取拒绝、服务重启后的材料持久可读。勿复用公共图片 CDN。内存适配器测试不能证明这些外部条件。
+
+未提交材料 24 小时过期；每分钟回收无申请引用的过期、待删及注销账号材料。正在上传的材料保留记录，直到上传结束或过期，删除失败保留 `delete_pending` 供后续重试。真实证件只用于获授权的环境，本地验收使用明确标记的合成测试图片。
+
+先发布新增迁移和后端接口，再发布新前端；新前端不支持旧后端缺失的认证接口。旧前端原占位申请接口仍不可用，发布间隙不承诺申请入口可用；原登录／刷新协议未变。迁移 down 在已有认证申请、材料或通知时明确拒绝，防止删除存储追踪记录；此时回退应用但保留新增表，不能强制清空认证数据来回退。
