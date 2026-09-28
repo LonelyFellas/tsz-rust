@@ -741,7 +741,7 @@ async fn security_migration_cannot_be_rolled_back_after_credentials_change(pool:
         .execute(&pool)
         .await
         .unwrap();
-    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923050000, 20260927010000)
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923050000, 20260928010000)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("cannot remove security_version"));

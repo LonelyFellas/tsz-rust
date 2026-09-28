@@ -14,6 +14,7 @@ pub mod request_id;
 pub mod session;
 pub mod speech;
 pub mod state;
+pub mod teacher_certification;
 pub mod user;
 
 use std::sync::Arc;
@@ -55,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         //     user::USER_MOUNT,
         //     Router::new().route("/register", post(user::handler::register)),
         // )
+        .merge(teacher_certification::router())
         .nest(admin::ADMIN_MOUNT, admin::router(state.clone()))
         .nest(
             auth::AUTH_MOUNT,
@@ -249,6 +251,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     };
 
     if !config.deployment_smoke_only {
+        crate::teacher_certification::cleanup::run_worker(state.clone());
         crate::speech::preview::run_worker(state.pool.clone());
         crate::lexicon::audio_assets::run_worker(
             state.pool.clone(),
