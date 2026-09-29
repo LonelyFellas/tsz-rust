@@ -476,7 +476,7 @@ pub struct SearchComponentTargetsV3Input {
     #[schema(schema_with = schema_version_3_schema)]
     #[serde(deserialize_with = "deserialize_schema_version_3")]
     pub schema_version: u8,
-    /// 关键字：对已发布词面做大小写不敏感的包含匹配，1..=100 码点且两端不留空白。
+    /// 关键字：对词面做大小写不敏感的包含匹配，1..=100 码点且两端不留空白。
     #[schema(min_length = 1, max_length = 100)]
     pub q: String,
     /// 只要单词或只要短语；不传则两者都返回。
@@ -490,7 +490,7 @@ pub struct SearchComponentTargetsV3Input {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub entry_id: Option<Uuid>,
-    /// 上一页返回的 `next_cursor`。绑定 `q` / `kind` / `match` / `entry_id`
+    /// 上一页返回的 `next_cursor`。绑定 `q` / `kind` / `match` / `entry_id` / `include_drafts`
     /// 及最后返回的稳定节点排序键；查询条件改变或游标无效返回 400 `invalid_query`。
     /// 无关保存、发布及归档不会使游标失效；并发修改下搜索弱一致，保存/发布仍严格验证。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -502,6 +502,9 @@ pub struct SearchComponentTargetsV3Input {
     #[serde(default, rename = "match", skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub match_mode: Option<ComponentTargetMatchV3>,
+    /// 同时查询已保存的草稿节点；缺省仅查询已发布内容。
+    #[serde(default)]
+    pub include_drafts: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

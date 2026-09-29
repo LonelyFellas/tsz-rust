@@ -1887,6 +1887,11 @@ impl LexiconService {
             &mut meanings,
             &input.sense_bindings,
         )?;
+        super::inbound_references::ensure_self_text_link_references(
+            entry_id,
+            &input.content,
+            &meanings,
+        )?;
         let aggregate_issues =
             crate::lexicon::v3_contract::validate_aggregate_node_limit(&input.content, &meanings);
         if !aggregate_issues.is_empty() {
@@ -2155,7 +2160,14 @@ impl LexiconService {
         if !audio_issues.is_empty() {
             return Err(v3_validation_failed(audio_issues));
         }
-        super::text_links::validate_targets(&mut transaction, entry_id, &mut content).await?;
+        super::text_links::validate_targets(
+            &mut transaction,
+            entry_id,
+            &forms,
+            &compatibility_source.presentation.label,
+            &mut content,
+        )
+        .await?;
         super::grammar_form_links::validate_targets(
             &mut transaction,
             entry_id,

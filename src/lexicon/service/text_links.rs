@@ -110,35 +110,50 @@ pub(crate) fn valid_ranges(variant: &RichTextVariantV3) -> bool {
 }
 
 fn target_gloss(target: &ComponentTargetWord, link: &TextLinkV3) -> Option<String> {
-    if !text_target_matches(&target.forms, &target.meanings, link) {
-        return None;
-    }
-    target_content_gloss(&target.forms, &target.meanings, link)
+    text_target_gloss(&target.forms, &target.meanings, link)
 }
 
-/// 正文人工关联保护完整节点身份，但不套用共享例句的词面等值规则。
 pub(super) fn text_target_matches(
     forms: &DraftFormsStepContentV3,
     meanings: &DraftMeaningsStepContentV3,
     link: &TextLinkV3,
 ) -> bool {
-    if target_content_gloss(forms, meanings, link).is_none() {
-        return false;
-    }
-    let Some(form) = forms
+    text_target_gloss(forms, meanings, link).is_some()
+}
+
+pub(super) fn text_publication_target_matches(
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+    link: &TextLinkV3,
+) -> bool {
+    text_target_matches(forms, meanings, link)
+        && (link.target_publication_id.is_some()
+            || link.via_phrase.is_some()
+            || shared_target_matches(forms, meanings, link, "common"))
+}
+
+fn text_target_gloss(
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+    link: &TextLinkV3,
+) -> Option<String> {
+    let form = forms
         .pos
         .iter()
-        .find(|pos| pos.pos_id == link.target_pos_id)
-        .and_then(|pos| pos.forms.iter().find(|form| form.id == link.target_form_id))
-    else {
-        return false;
-    };
-    match &form.regional_variants {
+        .find(|pos| pos.pos_id == link.target_pos_id)?
+        .forms
+        .iter()
+        .find(|form| form.id == link.target_form_id)?;
+    let matches_variant = match &form.regional_variants {
         WordRegionalVariantsV3::Common { common } => common.id == link.target_variant_id,
         WordRegionalVariantsV3::UkUs { uk, us } => {
             uk.id == link.target_variant_id || us.id == link.target_variant_id
         }
+    };
+    if !matches_variant {
+        return None;
     }
+    target_content_gloss(forms, meanings, link)
 }
 
 fn target_content_gloss(
@@ -221,18 +236,23 @@ struct TargetGroup {
 pub(super) async fn validate_targets(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
+    forms: &DraftFormsStepContentV3,
+    label: &str,
     content: &mut DraftMeaningsStepContentV3,
 ) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
-    validate_targets_in(tx, entry_id, content, None).await
+    validate_targets_in(tx, entry_id, forms, label, content, None).await
 }
 
 pub(super) async fn validate_targets_in(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
+    forms: &DraftFormsStepContentV3,
+    label: &str,
     content: &mut DraftMeaningsStepContentV3,
     batch: Option<&super::v3_publication::PublicationBatchContext>,
 ) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
     let mut link_ids = HashSet::new();
+    let mut self_glosses = HashMap::new();
     let mut groups = BTreeMap::<(Uuid, Option<Uuid>), TargetGroup>::new();
     for variant in content
         .pos
@@ -250,13 +270,23 @@ pub(super) async fn validate_targets_in(
             if !link_ids.insert(link.id) {
                 return Err(invalid(variant.id, "关联标识重复，请重新选择"));
             }
-            if link.target_word_id == entry_id
-                || link
-                    .via_phrase
-                    .as_ref()
-                    .is_some_and(|via| via.word_id == entry_id)
+            if link
+                .via_phrase
+                .as_ref()
+                .is_some_and(|via| via.word_id == entry_id)
+                || (link.target_word_id == entry_id && link.via_phrase.is_some())
             {
-                return Err(invalid(variant.id, "不能关联当前正在编辑的词条"));
+                return Err(invalid(
+                    variant.id,
+                    "当前词条请直接关联，不通过短语成分中转",
+                ));
+            }
+            if link.target_word_id == entry_id {
+                let gloss = text_target_gloss(forms, content, link).ok_or_else(|| {
+                    invalid(variant.id, "关联的词形或词义已不在当前词条里，请重新选择")
+                })?;
+                self_glosses.insert(link.id, gloss);
+                continue;
             }
             let group = groups
                 .entry((link.target_word_id, link.target_publication_id))
@@ -280,14 +310,12 @@ pub(super) async fn validate_targets_in(
     let mut targets = HashMap::<(Uuid, Option<Uuid>), ComponentTargetWord>::new();
     for (key, group) in &groups {
         let target = super::v3::resolve_component_target_in(tx, key.0, key.1, batch, |candidate| {
-            group
-                .direct
+            group.direct.iter().all(|link| {
+                text_publication_target_matches(&candidate.forms, &candidate.meanings, link)
+            }) && group
+                .via
                 .iter()
-                .all(|link| target_gloss(candidate, link).is_some())
-                && group
-                    .via
-                    .iter()
-                    .all(|link| component_matches(candidate, link))
+                .all(|link| component_matches(candidate, link))
         })
         .await?
         .ok_or_else(|| invalid(group.variant_id, "关联目标已不可用，请重新选择"))?;
@@ -303,6 +331,13 @@ pub(super) async fn validate_targets_in(
         .flat_map(english_text_variants_mut)
     {
         for link in &mut variant.text_links {
+            if let Some(gloss) = self_glosses.get(&link.id) {
+                // 自关联随所属内容保存和发布，不生成跨词条的发布依赖。
+                link.target_publication_id = None;
+                link.target_headword = Some(label.to_owned());
+                link.target_gloss = Some(gloss.clone());
+                continue;
+            }
             let target = &targets[&(link.target_word_id, link.target_publication_id)];
             // 草稿目标已发布：回填发布版本，之后与发布目标无异。
             if link.target_publication_id.is_none() {

@@ -48,6 +48,15 @@ fn voice_editor_target_search_keeps_full_node_identity() {
             .get("post")
             .is_some()
     );
+    let input = &spec["components"]["schemas"]["SearchComponentTargetsV3Input"];
+    assert_eq!(input["properties"]["include_drafts"]["type"], "boolean");
+    assert!(
+        !input["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "include_drafts")
+    );
     let candidate = &spec["components"]["schemas"]["PublishedSentenceTargetCandidateV3"];
     for field in [
         "entry_id",

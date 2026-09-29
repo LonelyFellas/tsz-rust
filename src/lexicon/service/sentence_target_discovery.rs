@@ -28,7 +28,7 @@ struct ComponentTargetCandidateIndex {
 
 // Revisions and publication IDs are not stable pagination identities.
 type TargetNodeKey = (Uuid, Uuid, Uuid, Uuid);
-type ComponentPageKey = (i32, String, TargetNodeKey);
+type ComponentPageKey = (i32, bool, String, TargetNodeKey);
 
 fn target_node_key(key: PublishedAssociationCandidateKey) -> TargetNodeKey {
     (
@@ -42,6 +42,7 @@ fn target_node_key(key: PublishedAssociationCandidateKey) -> TargetNodeKey {
 fn component_page_key(candidate: &ComponentTargetCandidateIndex) -> ComponentPageKey {
     (
         candidate.match_rank,
+        candidate.key.publication_id.is_none(),
         candidate.headword.to_string(),
         target_node_key(candidate.key),
     )
@@ -101,7 +102,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 }
 
 impl LexiconService {
-    /// 成分目标检索仅使用当前发布快照，游标绑定查询和稳定节点排序键。
+    /// 成分目标检索按请求包含草稿，游标绑定查询范围和稳定节点排序键。
     pub async fn search_component_targets_v3(
         &self,
         input: SearchComponentTargetsV3Input,
@@ -125,8 +126,13 @@ impl LexiconService {
             keyword.to_owned()
         };
         let page_size = component_target_page_size(input.page_size)?;
-        let cursor_digest =
-            component_target_cursor_digest(keyword, input.kind, match_mode, input.entry_id)?;
+        let cursor_digest = component_target_cursor_digest(
+            keyword,
+            input.kind,
+            match_mode,
+            input.entry_id,
+            input.include_drafts,
+        )?;
         // 关键字检索没有句子，也就没有 source dialect 可依；英美两个 scope 都查。
         let dialect_scopes = discovery_scopes(Dialect::Common);
         let mut transaction = self
@@ -139,80 +145,65 @@ impl LexiconService {
             .execute(&mut *transaction)
             .await
             .map_err(database_error)?;
-        let published_entries = LexiconRepository::component_target_entry_matches(
-            &mut transaction,
-            &dialect_scopes,
-            &lookup,
-            input.kind,
-            input.entry_id,
-            exact,
-        )
-        .await
-        .map_err(repository_error)?;
-        // 精确 total 需要遍历完整匹配集，但只积累轻量身份；forms / senses 等富 DTO
-        // 留到分页后、只为当前页物化。entry 查询已按词条去重，快照再分批读取。
-        let entry_ids = published_entries
-            .iter()
-            .map(|entry| entry.entry_id)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let entry_rank = published_entries
-            .iter()
-            .map(|entry| (entry.entry_id, entry.match_rank))
-            .collect::<HashMap<_, _>>();
-        let published_entry_ids = published_entries
-            .iter()
-            .map(|entry| entry.entry_id)
-            .collect::<HashSet<_>>();
         let after: Option<ComponentPageKey> =
             decode_discovery_cursor(input.cursor.as_deref(), &cursor_digest)?;
         let mut candidate_index =
             HashMap::<PublishedAssociationCandidateKey, ComponentTargetCandidateIndex>::new();
-        for batch in entry_ids.chunks(COMPONENT_TARGET_SNAPSHOT_BATCH_SIZE) {
-            let published_ids = batch
-                .iter()
-                .copied()
-                .filter(|entry_id| published_entry_ids.contains(entry_id))
-                .collect::<Vec<_>>();
-            let published = LexiconRepository::component_target_surfaces(
+        for drafts in [false, true]
+            .into_iter()
+            .filter(|drafts| !drafts || input.include_drafts)
+        {
+            let entries = LexiconRepository::component_target_entry_matches(
                 &mut transaction,
                 &dialect_scopes,
                 &lookup,
                 input.kind,
-                &published_ids,
+                input.entry_id,
                 exact,
+                drafts,
             )
             .await
             .map_err(repository_error)?;
-            let published_targets =
-                LexiconRepository::current_publication_snapshots(&mut transaction, &published_ids)
-                    .await
-                    .map_err(repository_error)?
-                    .into_iter()
-                    .map(|record| {
-                        PublishedAssociationTarget::from_snapshot(record.snapshot, true)
-                            .map(|target| (record.entry_id, target))
-                    })
-                    .collect::<Result<HashMap<_, _>, _>>()?;
-            for surface in &published {
-                let Some(target) = published_targets.get(&surface.entry_id) else {
-                    continue;
-                };
-                let headword = Arc::<str>::from(target.headword());
-                for key in target.sentence_discovery_candidate_keys(
-                    surface.publication_id,
-                    surface.pos_id,
-                    surface.matched_form_id,
-                    surface.matched_variant_id,
-                ) {
-                    candidate_index
-                        .entry(key)
-                        .or_insert_with(|| ComponentTargetCandidateIndex {
-                            key,
-                            match_rank: entry_rank.get(&key.entry_id).copied().unwrap_or(2),
-                            headword: headword.clone(),
+            let entry_ids = entries
+                .iter()
+                .map(|entry| entry.entry_id)
+                .collect::<Vec<_>>();
+            let entry_rank = entries
+                .iter()
+                .map(|entry| (entry.entry_id, entry.match_rank))
+                .collect::<HashMap<_, _>>();
+            for batch in entry_ids.chunks(COMPONENT_TARGET_SNAPSHOT_BATCH_SIZE) {
+                let surfaces = LexiconRepository::component_target_surfaces(
+                    &mut transaction,
+                    &dialect_scopes,
+                    &lookup,
+                    input.kind,
+                    batch,
+                    exact,
+                    drafts,
+                )
+                .await
+                .map_err(repository_error)?;
+                let targets = component_target_snapshots(&mut transaction, batch, drafts).await?;
+                for surface in &surfaces {
+                    let Some(target) = targets.get(&surface.entry_id) else {
+                        continue;
+                    };
+                    let headword = Arc::<str>::from(target.headword());
+                    for key in target.sentence_discovery_candidate_keys(
+                        surface.publication_id,
+                        surface.pos_id,
+                        surface.matched_form_id,
+                        surface.matched_variant_id,
+                    ) {
+                        candidate_index.entry(key).or_insert_with(|| {
+                            ComponentTargetCandidateIndex {
+                                key,
+                                match_rank: entry_rank.get(&key.entry_id).copied().unwrap_or(2),
+                                headword: headword.clone(),
+                            }
                         });
+                    }
                 }
             }
         }
@@ -242,33 +233,36 @@ impl LexiconService {
             .iter()
             .map(|key| key.entry_id)
             .collect::<BTreeSet<_>>();
-        let page_published_ids = page_keys
-            .iter()
-            .filter(|key| key.publication_id.is_some())
-            .map(|key| key.entry_id)
-            .collect::<Vec<_>>();
-        let page_published = LexiconRepository::component_target_surfaces(
-            &mut transaction,
-            &dialect_scopes,
-            &lookup,
-            input.kind,
-            &page_published_ids,
-            exact,
-        )
-        .await
-        .map_err(repository_error)?;
-        let page_published_targets =
-            LexiconRepository::current_publication_snapshots(&mut transaction, &page_published_ids)
-                .await
-                .map_err(repository_error)?
+        let mut materialized = Vec::new();
+        for drafts in [false, true]
+            .into_iter()
+            .filter(|drafts| !drafts || input.include_drafts)
+        {
+            let ids = page_keys
+                .iter()
+                .filter(|key| key.publication_id.is_none() == drafts)
+                .map(|key| key.entry_id)
+                .collect::<BTreeSet<_>>()
                 .into_iter()
-                .map(|record| {
-                    PublishedAssociationTarget::from_snapshot(record.snapshot, true)
-                        .map(|target| (record.entry_id, target))
-                })
-                .collect::<Result<HashMap<_, _>, _>>()?;
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                continue;
+            }
+            let surfaces = LexiconRepository::component_target_surfaces(
+                &mut transaction,
+                &dialect_scopes,
+                &lookup,
+                input.kind,
+                &ids,
+                exact,
+                drafts,
+            )
+            .await
+            .map_err(repository_error)?;
+            let targets = component_target_snapshots(&mut transaction, &ids, drafts).await?;
+            materialized.extend(published_candidates(&surfaces, &targets, None));
+        }
         let requested_keys = page_keys.iter().copied().collect::<HashSet<_>>();
-        let materialized = published_candidates(&page_published, &page_published_targets, None);
         let mut materialized = materialized
             .into_iter()
             .filter_map(|candidate| {
@@ -298,6 +292,34 @@ impl LexiconService {
     }
 }
 
+async fn component_target_snapshots(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    entry_ids: &[Uuid],
+    drafts: bool,
+) -> Result<HashMap<Uuid, PublishedAssociationTarget>, LexiconServiceError> {
+    if drafts {
+        LexiconRepository::component_target_drafts(tx, entry_ids)
+            .await
+            .map_err(repository_error)?
+            .into_iter()
+            .map(|row| {
+                let id = row.id;
+                PublishedAssociationTarget::from_draft(row).map(|target| (id, target))
+            })
+            .collect()
+    } else {
+        LexiconRepository::current_publication_snapshots(tx, entry_ids)
+            .await
+            .map_err(repository_error)?
+            .into_iter()
+            .map(|row| {
+                PublishedAssociationTarget::from_snapshot(row.snapshot, true)
+                    .map(|target| (row.entry_id, target))
+            })
+            .collect()
+    }
+}
+
 /// 与 `component_target_surfaces` 的 `ORDER BY CASE` 同一规则，两处必须同步改。
 #[cfg(test)]
 fn component_target_rank(normalized_surface: &str, lowered_keyword: &str) -> u8 {
@@ -315,9 +337,11 @@ fn component_target_cursor_digest(
     kind: Option<EntryKind>,
     match_mode: ComponentTargetMatchV3,
     entry_id: Option<Uuid>,
+    include_drafts: bool,
 ) -> Result<String, LexiconServiceError> {
     Ok(hex_digest(
-        &sha256_json(&(q, kind, match_mode, entry_id)).map_err(serialization_error)?,
+        &sha256_json(&(q, kind, match_mode, entry_id, include_drafts))
+            .map_err(serialization_error)?,
     ))
 }
 
@@ -427,29 +451,47 @@ mod tests {
 
     #[test]
     fn component_target_cursor_binds_query_and_kind_not_dataset_generation() {
-        let digest =
-            component_target_cursor_digest("give", None, ComponentTargetMatchV3::Contains, None)
-                .unwrap();
+        let digest = component_target_cursor_digest(
+            "give",
+            None,
+            ComponentTargetMatchV3::Contains,
+            None,
+            false,
+        )
+        .unwrap();
         assert_ne!(
             digest,
             component_target_cursor_digest(
                 "give",
                 Some(EntryKind::Phrase),
                 ComponentTargetMatchV3::Contains,
-                None
+                None,
+                false
             )
             .unwrap(),
             "kind 不同的搜索不能共用游标"
         );
         assert_ne!(
             digest,
-            component_target_cursor_digest("gave", None, ComponentTargetMatchV3::Contains, None)
-                .unwrap()
+            component_target_cursor_digest(
+                "gave",
+                None,
+                ComponentTargetMatchV3::Contains,
+                None,
+                false
+            )
+            .unwrap()
         );
         assert_ne!(
             digest,
-            component_target_cursor_digest("give", None, ComponentTargetMatchV3::Exact, None)
-                .unwrap(),
+            component_target_cursor_digest(
+                "give",
+                None,
+                ComponentTargetMatchV3::Exact,
+                None,
+                false
+            )
+            .unwrap(),
             "匹配方式不同的搜索不能共用游标"
         );
         assert_ne!(
@@ -458,13 +500,15 @@ mod tests {
                 "give",
                 None,
                 ComponentTargetMatchV3::Contains,
-                Some(Uuid::now_v7())
+                Some(Uuid::now_v7()),
+                false
             )
             .unwrap(),
             "限定词条不同的搜索不能共用游标"
         );
         let key: ComponentPageKey = (
             0,
+            false,
             "give".to_owned(),
             (
                 Uuid::now_v7(),

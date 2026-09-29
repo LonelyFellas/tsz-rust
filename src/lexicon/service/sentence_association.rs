@@ -361,6 +361,20 @@ impl PublishedAssociationTarget {
         )
     }
 
+    pub(super) fn from_draft(
+        row: crate::lexicon::model::ComponentTargetDraftCandidateRecord,
+    ) -> Result<Self, LexiconServiceError> {
+        let kind = match row.kind.as_str() {
+            "word" => WordEntryKindV3::Word,
+            "phrase" => WordEntryKindV3::Phrase,
+            _ => return Err(invariant_record()),
+        };
+        let forms = serde_json::from_value(row.forms).map_err(serialization_error)?;
+        let mut meanings = serde_json::from_value(row.meanings).map_err(serialization_error)?;
+        crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
+        Self::from_v3_parts(row.id, kind, row.label, &forms, &meanings)
+    }
+
     fn from_v3_parts(
         id: Uuid,
         kind: WordEntryKindV3,
