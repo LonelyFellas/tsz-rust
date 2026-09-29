@@ -168,6 +168,15 @@ pub(crate) struct ComponentTargetDraftRecord {
     pub current_revision: Option<i64>,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+pub(crate) struct ComponentTargetDraftCandidateRecord {
+    pub id: Uuid,
+    pub kind: String,
+    pub label: String,
+    pub forms: Value,
+    pub meanings: Value,
+}
+
 /// 发布时核验草稿范围的目标词义：锁目标词条行，带回当时的 entry revision 与可用性。
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct DraftSenseTargetRecord {

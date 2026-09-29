@@ -103,6 +103,55 @@ fn grammar_form_candidates(
         .collect()
 }
 
+fn draft_text_link_candidates(
+    source_entry_id: Uuid,
+    meanings: &DraftMeaningsStepContentV3,
+    target_entry_id: Uuid,
+) -> Vec<Candidate> {
+    super::text_links::variants(meanings)
+        .flat_map(|variant| {
+            let candidate = Candidate {
+                reference: reference(
+                    format!("draft_text_link:{}:{}", source_entry_id, variant.id),
+                    InboundReferenceKindV3::DraftTextLink,
+                    InboundReferenceTargetV3::default(),
+                    InboundReferenceSourceV3 {
+                        entry_id: Some(source_entry_id),
+                        node_id: Some(variant.id),
+                        reference_kind: Some("text_link".to_owned()),
+                        ..InboundReferenceSourceV3::default()
+                    },
+                ),
+                rule: Rule::Sense,
+            };
+            variant
+                .text_links
+                .iter()
+                .flat_map(move |link| text_link_candidates(&candidate, link, target_entry_id, None))
+        })
+        .collect()
+}
+
+pub(super) fn ensure_self_text_link_references(
+    entry_id: Uuid,
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+) -> Result<(), LexiconServiceError> {
+    let mut candidates = draft_text_link_candidates(entry_id, meanings, entry_id);
+    evaluate(&mut candidates, forms, meanings);
+    let violations = candidates
+        .into_iter()
+        .map(|candidate| candidate.reference)
+        .filter(|reference| reference.stale)
+        .take(MAX_INBOUND_REFERENCE_ITEMS)
+        .collect::<Vec<_>>();
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(LexiconServiceError::InboundReferenceConflict(violations))
+    }
+}
+
 #[derive(Clone)]
 struct Candidate {
     reference: InboundReferenceV3,
@@ -350,6 +399,7 @@ pub(super) async fn outbound_publication_issues_in(
     let target_ids = keys
         .iter()
         .map(|key| key.2)
+        .filter(|id| *id != word.id)
         .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -387,8 +437,25 @@ pub(super) async fn outbound_publication_issues_in(
             rule: Rule::Sense,
         };
         let mut candidates = expand_publication_candidate(candidate, word, entry_id)?;
-        if let Some(target) = targets.get(&entry_id) {
+        let target = if entry_id == word.id {
+            Some(word)
+        } else {
+            targets.get(&entry_id)
+        };
+        if let Some(target) = target {
             evaluate(&mut candidates, &target.forms, &target.meanings);
+            if entry_id != word.id {
+                for candidate in &mut candidates {
+                    if let Rule::TextLink { link } = &candidate.rule {
+                        candidate.reference.stale =
+                            !super::text_links::text_publication_target_matches(
+                                &target.forms,
+                                &target.meanings,
+                                link,
+                            );
+                    }
+                }
+            }
             if candidates.iter().all(|item| !item.reference.stale) {
                 continue;
             }
@@ -746,25 +813,11 @@ async fn collect_candidates(
             &meanings,
             entry_id,
         ));
-        for variant in super::text_links::variants(&meanings) {
-            let candidate = Candidate {
-                reference: reference(
-                    format!("draft_text_link:{}:{}", source_entry_id, variant.id),
-                    InboundReferenceKindV3::DraftTextLink,
-                    InboundReferenceTargetV3::default(),
-                    InboundReferenceSourceV3 {
-                        entry_id: Some(source_entry_id),
-                        node_id: Some(variant.id),
-                        reference_kind: Some("text_link".to_owned()),
-                        ..InboundReferenceSourceV3::default()
-                    },
-                ),
-                rule: Rule::Sense,
-            };
-            for link in &variant.text_links {
-                candidates.extend(text_link_candidates(&candidate, link, entry_id, None));
-            }
-        }
+        candidates.extend(draft_text_link_candidates(
+            source_entry_id,
+            &meanings,
+            entry_id,
+        ));
     }
     let published = sqlx::query_as::<_, (Uuid, Uuid, Value)>(r#"
         SELECT entry.id, publication.id, publication.snapshot->'meanings'
@@ -1033,6 +1086,7 @@ pub(super) async fn inbound_reference_violations(
         .collect::<Vec<_>>();
     let mut candidates = collect_candidates(tx, entry_id, Some(&retained_sense_ids), check).await?;
     candidates.extend(grammar_form_candidates(entry_id, None, meanings, entry_id));
+    candidates.extend(draft_text_link_candidates(entry_id, meanings, entry_id));
     // 判定会就地补全 target 并改写 stale，基线要在副本上判，不能和提交内容共用一份。
     let already_stale = match baseline {
         Some((baseline_forms, baseline_meanings)) => {
@@ -1124,6 +1178,11 @@ impl LexiconService {
         candidates.extend(grammar_form_candidates(
             entry_id,
             None,
+            &word.meanings,
+            entry_id,
+        ));
+        candidates.extend(draft_text_link_candidates(
+            entry_id,
             &word.meanings,
             entry_id,
         ));

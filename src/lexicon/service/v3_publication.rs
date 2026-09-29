@@ -402,7 +402,15 @@ impl LexiconService {
             }
         });
         publication_references.extend(
-            super::text_links::validate_targets_in(tx, entry_id, &mut word.meanings, batch).await?,
+            super::text_links::validate_targets_in(
+                tx,
+                entry_id,
+                &word.forms,
+                &word.presentation.label,
+                &mut word.meanings,
+                batch,
+            )
+            .await?,
         );
         super::grammar_form_links::validate_targets(
             tx,

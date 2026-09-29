@@ -1,5 +1,5 @@
 use super::*;
-use crate::lexicon::model::ComponentTargetEntryMatchRecord;
+use crate::lexicon::model::{ComponentTargetDraftCandidateRecord, ComponentTargetEntryMatchRecord};
 
 /// 成分用词 / 正文关联草稿目标的取数：当前草稿投影 + 展示词面 + （若有）当前发布快照。
 /// SQL 只由常量片段拼成，绑定值全部走参数。
@@ -22,7 +22,7 @@ const COMPONENT_TARGET_DRAFT_SELECT: &str = r#"
 "#;
 
 impl LexiconRepository {
-    /// 按关键字查询当前发布的成分目标。
+    /// 按关键字查询指定范围的成分目标。
     pub(crate) async fn component_target_entry_matches(
         tx: &mut Transaction<'_, Postgres>,
         dialect_scopes: &[String],
@@ -30,14 +30,23 @@ impl LexiconRepository {
         kind: Option<EntryKind>,
         entry_id: Option<Uuid>,
         exact: bool,
+        drafts: bool,
     ) -> Result<Vec<ComponentTargetEntryMatchRecord>, LexiconRepositoryError> {
         let lowered = keyword.to_lowercase();
-        let scope_join = r#"JOIN lexicon.entries entry
+        let scope_join = if drafts {
+            r#"JOIN lexicon.entries entry
+                  ON entry.id = source.entry_id
+                 AND entry.archived_at IS NULL
+                WHERE source.is_deleted = FALSE
+                  AND source.content_scope = 'draft'"#
+        } else {
+            r#"JOIN lexicon.entries entry
                   ON entry.id = source.entry_id
                  AND entry.archived_at IS NULL
                  AND entry.current_publication_id = source.publication_id
                 WHERE source.is_deleted = FALSE
-                  AND source.content_scope = 'current_publication'"#;
+                  AND source.content_scope = 'current_publication'"#
+        };
         let match_predicate = if exact {
             "source.normalized_surface = $3"
         } else {
@@ -83,7 +92,7 @@ impl LexiconRepository {
             .map_err(LexiconRepositoryError::Database)
     }
 
-    /// 关键字按归一化词面等值或包含匹配，仅查询当前发布词面。
+    /// 关键字按归一化词面等值或包含匹配，查询发布或草稿词面。
     pub(crate) async fn component_target_surfaces(
         tx: &mut Transaction<'_, Postgres>,
         dialect_scopes: &[String],
@@ -91,14 +100,23 @@ impl LexiconRepository {
         kind: Option<EntryKind>,
         entry_ids: &[Uuid],
         exact: bool,
+        drafts: bool,
     ) -> Result<Vec<SentenceDiscoverySurfaceRecord>, LexiconRepositoryError> {
         let lowered = keyword.to_lowercase();
-        let scope_join = r#"JOIN lexicon.entries entry
+        let scope_join = if drafts {
+            r#"JOIN lexicon.entries entry
+                  ON entry.id = source.entry_id
+                 AND entry.archived_at IS NULL
+                WHERE source.is_deleted = FALSE
+                  AND source.content_scope = 'draft'"#
+        } else {
+            r#"JOIN lexicon.entries entry
                   ON entry.id = source.entry_id
                  AND entry.archived_at IS NULL
                  AND entry.current_publication_id = source.publication_id
                 WHERE source.is_deleted = FALSE
-                  AND source.content_scope = 'current_publication'"#;
+                  AND source.content_scope = 'current_publication'"#
+        };
         let match_predicate = if exact {
             "source.normalized_surface = $3"
         } else {
@@ -161,6 +179,30 @@ impl LexiconRepository {
             .fetch_all(&mut **tx)
             .await
             .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn component_target_drafts(
+        tx: &mut Transaction<'_, Postgres>,
+        entry_ids: &[Uuid],
+    ) -> Result<Vec<ComponentTargetDraftCandidateRecord>, LexiconRepositoryError> {
+        sqlx::query_as::<_, ComponentTargetDraftCandidateRecord>(
+            r#"
+            SELECT entry.id, entry.kind, COALESCE(presentation.label, '') AS label,
+                   projection.forms, projection.meanings
+            FROM lexicon.entries entry
+            JOIN lexicon.entry_editor_projection projection ON projection.entry_id = entry.id
+            LEFT JOIN lexicon.entry_presentation_projection presentation
+              ON presentation.entry_id = entry.id AND presentation.content_schema_version = 3
+            WHERE entry.id = ANY($1)
+              AND entry.content_schema_version = 3
+              AND entry.kind IN ('word', 'phrase')
+              AND entry.archived_at IS NULL
+        "#,
+        )
+        .bind(entry_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)
     }
 
     /// 成分用词 / 正文关联的草稿目标（单条，事务内加共享锁）：与发布时锁目标同款

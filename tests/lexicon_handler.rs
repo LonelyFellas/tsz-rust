@@ -3206,7 +3206,7 @@ async fn candidate_searches_keep_published_senses_and_reject_removed_draft_param
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
-        let (status, rejected) = search_component_targets(
+        let (status, found) = search_component_targets(
             &state,
             &bearer,
             json!({
@@ -3215,8 +3215,20 @@ async fn candidate_searches_keep_published_senses_and_reject_removed_draft_param
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
-        assert_eq!(rejected["code"], "invalid_request_body");
+        assert_eq!(status, StatusCode::OK, "{found}");
+        assert_eq!(
+            found["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|candidate| candidate["senses"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|sense| sense["sense_id"] == new_sense_id)),
+            include_drafts,
+            "{found}"
+        );
     }
 
     let (status, candidates) = search_component_targets(
@@ -10535,15 +10547,305 @@ async fn current_publication_snapshot(pool: &PgPool, entry_id: Uuid) -> Value {
 }
 
 #[sqlx::test]
-async fn component_target_search_hides_drafts_until_publication_and_rejects_removed_parameter(
-    pool: PgPool,
-) {
+async fn definition_links_discover_draft_words_and_phrases(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let word =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let phrase =
+        create_v3_phrase_with_sense_components(&state, &bearer, "harbour club", json!([])).await;
+    for (draft, q, kind) in [
+        (&word, "harbour", "word"),
+        (&phrase, "harbour club", "phrase"),
+    ] {
+        let (status, found) = search_component_targets(
+            &state,
+            &bearer,
+            json!({"schema_version":3,"q":q,"kind":kind,"match":"exact","include_drafts":true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{found}");
+        assert_eq!(
+            component_match_entry_ids(&found),
+            HashSet::from([draft["word"]["id"].as_str().unwrap().to_owned()])
+        );
+        assert!(
+            found["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|candidate| candidate.get("publication_id").is_none()
+                    && !candidate["senses"].as_array().unwrap().is_empty()),
+            "{found}"
+        );
+    }
+    let (status, published) = publish_ready_v3(&state, &bearer, &word).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let query = json!({"schema_version":3,"q":"harbour","include_drafts":true});
+    let (status, all) = search_component_targets(&state, &bearer, query.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    let mut cursor = Value::Null;
+    let mut paged = Vec::new();
+    loop {
+        let mut input = query.clone();
+        input["page_size"] = json!(1);
+        if !cursor.is_null() {
+            input["cursor"] = cursor.clone();
+        }
+        let (status, page) = search_component_targets(&state, &bearer, input).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        paged.extend(page["matches"].as_array().unwrap().iter().cloned());
+        assert!(paged.len() <= all["total"].as_u64().unwrap() as usize);
+        cursor = page["next_cursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert_eq!(paged, *all["matches"].as_array().unwrap());
+    assert!(
+        paged
+            .iter()
+            .any(|candidate| candidate["publication_id"].is_string())
+    );
+    assert!(
+        paged
+            .iter()
+            .any(|candidate| candidate.get("publication_id").is_none())
+    );
+    sqlx::query("UPDATE lexicon.entries SET archived_at=now() WHERE id=$1")
+        .bind(Uuid::parse_str(phrase["word"]["id"].as_str().unwrap()).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, found) = search_component_targets(&state, &bearer, query).await;
+    assert!(!component_match_entry_ids(&found).contains(phrase["word"]["id"].as_str().unwrap()));
+}
+
+#[sqlx::test]
+async fn definition_links_allow_self_word_and_phrase_through_publication(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let word =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let phrase =
+        create_v3_phrase_with_sense_components(&state, &bearer, "harbour club", json!([])).await;
+    for source in [word, phrase] {
+        let text = source["word"]["presentation"]["label"].as_str().unwrap();
+        let link = text_link_json(
+            &resolved_draft_component_json(&source, "uk", text),
+            json!([{"start":0,"end":text.chars().count(),"surface":text}]),
+        );
+        let mut meanings = writable_v3_meanings(&source);
+        meanings["pos"][0]["senses"][0]["definitions"][0]["content"] =
+            rich_text("更新后的本词释义");
+        let grammar_id = meanings["pos"][0]["grammar_structures"][0]["id"].clone();
+        meanings["pos"][0]["senses"][0]["definitions"].as_array_mut().unwrap().push(json!({
+            "id":Uuid::now_v7(),"level":"B1","grammar_structure_id":grammar_id,"definition_mode":"en_sentence",
+            "content":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":rich_text(text),"text_links":[link]}}
+        }));
+        let saved = save_v3_meanings(&state, &bearer, &source, meanings).await;
+        let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+        assert_eq!(status, StatusCode::CREATED, "{published}");
+        let saved_link = &published["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][1]["content"]
+            ["common"]["text_links"][0];
+        assert_eq!(saved_link["target_word_id"], source["word"]["id"]);
+        assert_eq!(
+            saved_link["target_sense_id"],
+            source["word"]["meanings"]["pos"][0]["senses"][0]["id"]
+        );
+        assert!(saved_link.get("via_phrase").is_none());
+        assert_eq!(saved_link["target_gloss"], "更新后的本词释义");
+        assert!(saved_link.get("target_publication_id").is_none());
+        let mut invalid = writable_v3_meanings(&published);
+        let bad_link = &mut invalid["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["text_links"]
+            [0];
+        bad_link.as_object_mut().unwrap().remove("target_headword");
+        bad_link.as_object_mut().unwrap().remove("target_gloss");
+        bad_link["target_sense_id"] = json!(Uuid::now_v7());
+        let (status, rejected) = save_v3_meanings_raw(
+            &state,
+            &bearer,
+            published["word"]["id"].as_str().unwrap(),
+            published["word"]["revision"].as_i64().unwrap(),
+            invalid,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    }
+}
+
+async fn self_linked_definition_draft(state: &AppState, pool: &PgPool, bearer: &str) -> Value {
+    let source =
+        create_ready_v3_draft_with_sentences(state, pool, bearer, &["The harbour is calm."]).await;
+    let link = text_link_json(
+        &resolved_draft_component_json(&source, "uk", "harbour"),
+        json!([{"start":0,"end":7,"surface":"harbour"}]),
+    );
+    let mut meanings = writable_v3_meanings(&source);
+    let grammar_id = meanings["pos"][0]["grammar_structures"][0]["id"].clone();
+    meanings["pos"][0]["senses"][0]["definitions"].as_array_mut().unwrap().push(json!({
+        "id":Uuid::now_v7(),"level":"B1","grammar_structure_id":grammar_id,"definition_mode":"en_sentence",
+        "content":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":rich_text("harbour"),"text_links":[link]}}
+    }));
+    save_v3_meanings(state, bearer, &source, meanings).await
+}
+
+#[sqlx::test]
+async fn definition_links_self_references_block_destructive_form_edits(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let source = self_linked_definition_draft(&state, &pool, &bearer).await;
+    let entry_id = source["word"]["id"].as_str().unwrap();
+    let revision = source["word"]["revision"].as_i64().unwrap();
+    let mut forms = source["word"]["forms"].clone();
+    forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["id"] = json!(Uuid::now_v7());
+    let impact = preview_v3_forms_impact(&state, &bearer, entry_id, revision, &forms).await;
+    assert!(
+        impact["blocked_references"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["kind"] == "draft_text_link")),
+        "{impact}"
+    );
+    let (status, rejected) = save_v3_forms_raw(
+        &state,
+        &bearer,
+        entry_id,
+        forms_input_after_impact(&impact, revision, "save", forms),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(
+        entry_revision(&pool, Uuid::parse_str(entry_id).unwrap()).await,
+        revision
+    );
+    let inbound = inbound_references_of(&state, &bearer, entry_id).await;
+    assert!(inbound["items"].as_array().unwrap().iter().any(|item| item["kind"] == "draft_text_link" && item["source"]["entry_id"] == entry_id));
+}
+
+#[sqlx::test]
+async fn definition_links_self_preflight_rejects_stale_variants(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let source = self_linked_definition_draft(&state, &pool, &bearer).await;
+    let entry_id = source["word"]["id"].as_str().unwrap();
+    let mut meanings = source["word"]["meanings"].clone();
+    meanings["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["text_links"][0]["target_variant_id"] =
+        json!(Uuid::now_v7());
+    sqlx::query("UPDATE lexicon.entry_editor_projection SET meanings=$2 WHERE entry_id=$1")
+        .bind(Uuid::parse_str(entry_id).unwrap())
+        .bind(meanings)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, validation) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{entry_id}/validate"),
+        &bearer,
+        None,
+        Some(json!({"schema_version":3,"base_revision":source["word"]["revision"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{validation}");
+    assert_eq!(validation["valid"], false, "{validation}");
+    assert!(
+        validation["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["field"] == "text_links"),
+        "{validation}"
+    );
+}
+
+#[sqlx::test]
+async fn definition_links_keep_changed_draft_spelling_until_matching_publication(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let (target, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "harbour club", json!([])).await;
+    let mut forms = target["word"]["forms"].clone();
+    forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["spelling"] = json!("harbour guild");
+    let (status, target) = save_v3_forms_draft(
+        &state,
+        &bearer,
+        target["word"]["id"].as_str().unwrap(),
+        target["word"]["revision"].as_i64().unwrap(),
+        forms,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{target}");
+    let (_, found) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version":3,"q":"harbour guild","match":"exact","include_drafts":true}),
+    )
+    .await;
+    assert!(!found["matches"].as_array().unwrap().is_empty(), "{found}");
+    assert!(
+        found["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|candidate| candidate.get("publication_id").is_none())
+    );
+    let source =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["harbour guild"]).await;
+    let link = text_link_json(
+        &resolved_draft_component_json(&target, "uk", "harbour guild"),
+        json!([{"start":0,"end":13,"surface":"harbour guild"}]),
+    );
+    let mut meanings = writable_v3_meanings(&source);
+    meanings["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["text_links"] =
+        json!([link]);
+    let saved = save_v3_meanings(&state, &bearer, &source, meanings).await;
+    let link = &saved["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]
+        ["text_links"][0];
+    assert!(link.get("target_publication_id").is_none(), "{link}");
+    let (status, rejected) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    let (status, published) = publish_ready_v3(&state, &bearer, &target).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let resaved = save_v3_meanings(
+        &state,
+        &bearer,
+        &saved,
+        writable_v3_meanings_with_links(&saved),
+    )
+    .await;
+    assert_eq!(
+        resaved["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["text_links"]
+            [0]["target_publication_id"],
+        json!(
+            current_publication_id(
+                &pool,
+                Uuid::parse_str(target["word"]["id"].as_str().unwrap()).unwrap()
+            )
+            .await
+        )
+    );
+}
+
+#[sqlx::test]
+async fn component_target_search_excludes_drafts_by_default_and_binds_search_scope(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    // 草稿由一位管理员创建，另一位来搜：未发布节点不得成为候选。
+    // 草稿由一位管理员创建，另一位来搜：缺省只返回已发布节点。
     let author_bearer = token(&state, seed_admin(&pool).await);
     let bearer = token(&state, seed_admin(&pool).await);
     let (draft, plural_id) =
@@ -10590,14 +10892,17 @@ async fn component_target_search_hides_drafts_until_publication_and_rejects_remo
         }
     }
     for include_drafts in [false, true] {
-        let (status, rejected) = search_component_targets(
+        let (status, found) = search_component_targets(
             &state,
             &bearer,
             json!({"schema_version": 3, "q": "harbour", "include_drafts": include_drafts}),
         )
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
-        assert_eq!(rejected["code"], "invalid_request_body");
+        assert_eq!(status, StatusCode::OK, "{found}");
+        assert_eq!(
+            component_match_entry_ids(&found).contains(&draft_entry_id),
+            include_drafts
+        );
     }
 
     let (status, published) = publish_ready_v3(&state, &author_bearer, &draft).await;
@@ -10684,7 +10989,7 @@ async fn component_target_search_hides_drafts_until_publication_and_rejects_remo
     assert_eq!(order.first(), Some(&draft_entry_id), "{both}");
     assert!(order.contains(&phrase_entry_id), "{both}");
 
-    // 游标仍绑定匹配方式，移除的参数即使带着合法游标也不被接受。
+    // 游标绑定匹配方式与是否包含草稿。
     let (status, first) = search_component_targets(
         &state,
         &bearer,
@@ -10711,8 +11016,18 @@ async fn component_target_search_hides_drafts_until_publication_and_rejects_remo
             json!({"schema_version": 3, "q": "harbour", "page_size": 1, "cursor": cursor, "include_drafts": include_drafts}),
         )
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
-        assert_eq!(rejected["code"], "invalid_request_body");
+        assert_eq!(
+            status,
+            if include_drafts {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::OK
+            },
+            "{rejected}"
+        );
+        if include_drafts {
+            assert_eq!(rejected["field"], "cursor");
+        }
     }
 }
 
