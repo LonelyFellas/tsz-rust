@@ -37,4 +37,4 @@ Linux 用 `ss -ltnp`、`/proc/<pid>/cwd`、`/proc/<pid>/exe`；权限不足标�
 登录、refresh、草稿创建等会改变会话或数据。明确真实验收范围后可使用已有授权，不为每次请求重复确认；仅诊断时不自动写业务数据。
 隔离库/Redis DB 或键空间仍有其他任务数据时不能整库清理。只删除本任务确实创建且可识别的 fixture；保留共享服务。
 
-`docs/features/entry-annotations/local-dev-integration.md` 曾记录「代码已更新，但 8583 旧进程未重启」，可用于解释为何要查来源；其中具体 PID、端口、数据库及 Redis DB 都不是本技能的默认设置。
+代码更新不代表运行进程已重启，必须核对进程与制品来源；旧验收记录中的 PID、端口、数据库及 Redis DB 不是本技能的默认设置。

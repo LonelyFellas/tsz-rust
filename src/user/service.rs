@@ -243,8 +243,7 @@ mod default_display_name_tests {
 mod display_name_tests {
     //! `DisplayName::parse` 的规格测试（纯函数，无需 DB）。
     //!
-    //! 来源：user-service-test-checklist §A（display_name 校验）+ §0 第 9 条
-    //! （display_name 防注入不变量）。对齐 go 的 rune 语义：**长度按 Unicode
+    //! 昵称校验与防注入约束：**长度按 Unicode
     //! code point（Rust `char`）数，不是字节**。
     //!
     //! 只依赖 `DisplayName::parse` 与 `DisplayName::as_str`——错误分支用 `matches!`

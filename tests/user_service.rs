@@ -2,7 +2,7 @@
 //!
 //! 沿用「不搞 trait/fake」的决定：register 真调 `UserRepository::create`，所以
 //! 整条走真库；断言的是**业务行为 + 「约束冲突→领域错误」的映射**，不重测裸 DB
-//! 约束（那些在 `tests/*_schema.rs`）。来源：user-service-test-checklist §A + §0。
+//! 约束（那些在 `tests/*_schema.rs`）。用户域规则见 docs/user-domain-reference.md。
 //!
 //! ⚠️ 本文件对齐的 register 契约：
 //!

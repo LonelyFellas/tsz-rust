@@ -28,4 +28,4 @@
 - [词形类型与方言解锁](features/form-type-dialect-unlock/)：待实施方案。
 - 定级测试[产品方案](placement-product-plan.md)与[前端方案](placement-frontend-guide.md)：待评审，当前没有对应接口。
 
-完成的一次性任务文档和过时方案直接删除，历史通过 Git 查询，不再新增归档副本。产品范围与品牌规范统一见[总文档](../../docs/README.md)。
+完成的一次性任务文档和过时方案直接删除，历史通过 Git 查询，不再新增归档副本。产品范围与品牌规范统一维护在配套总文档仓库；该仓库暂无远端，需取得本地 checkout。

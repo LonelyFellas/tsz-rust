@@ -7,7 +7,7 @@
 - [openapi.json](openapi.json)：请求、响应、枚举、字段可空性及状态码的权威定义，不在本文再维护一份 TypeScript 类型或完整接口表。
 - [api-errors.md](api-errors.md)：RFC 9457 错误格式与机器错误码；前端不再兼容旧 `{error: ...}`。
 - [词库模型](word-data-model.md)、[用户域](user-domain-reference.md)：按业务主题查实现与数据约束。
-- [前端契约同步技能](../../tsz/.agents/skills/contract-sync/SKILL.md)：同步与消费者验证入口。
+- [前端契约同步技能](https://github.com/LonelyFellas/tsz/blob/main/.agents/skills/contract-sync/SKILL.md)：同步与消费者验证入口。
 
 前端 `packages/types` 的 wire 字段保持 `snake_case`。`packages/api-client` 的快照来自后端 OpenAPI，不以旧 Go 文档或历史前端类型反向决定新接口。
 
