@@ -1,7 +1,7 @@
 //! refresh token **重放检测**的规格测试（真库，`#[sqlx::test]`）。
 //!
 //! 先于实现写下的验收标准，现已落地于 `SessionService::rotate`（src/session/service.rs），
-//! 本组测试即其行为契约。详见 docs/frontend-contract-alignment.md §T3。
+//! 本组测试即其行为契约。详见 docs/session-refresh-design.md 的重放检测约定。
 //!
 //! 契约（RFC 9700 §4.14.2）：
 //!   rotate 落空 → find_by_hash 兜底 → 命中且 `rotated_at IS NOT NULL` 且未吊销 = 重放

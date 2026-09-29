@@ -1,7 +1,7 @@
 # 定级测试 · 前端施工指南
 
-> 配套文档:[产品方案](placement-product-plan.md) · 交互参照:[原型源码](prototype/placement-prototype.html)(浏览器直接打开可跑)
-> 分工:你写实现,我 review 交互边界与状态逻辑。本文只给结构、契约和验收标准,不含实现代码。
+> 待实施方案：配套[产品方案](placement-product-plan.md)尚待评审，本文的目录、接口和验收标准均为设计建议，不是当前实现。
+> 原先引用的 `prototype/placement-prototype.html` 未在当前仓库中提供，不能按原链接启动原型；后续实施需重新确认设计输入。
 
 ---
 

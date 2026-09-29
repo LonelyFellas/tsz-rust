@@ -70,7 +70,7 @@ Content-Type: application/problem+json
 `duplicate`，不能仅以当前表格找重复行。所有失败均回滚旧标注与新词条。
 标注长度/控制字符、非法修订、重复更新 ID 沿用词库字段校验：
 `400 invalid_request_body`；DTO无法反序列化仍为 `422 invalid_request_body`。
-请求、修订及兼容规则见 [词条标注设计](features/entry-annotations/design.md)。
+请求与修订字段见 [OpenAPI](openapi.json)，并发与业务约束以当前词库服务及测试为准。
 
 `403 entry_annotation_forbidden` 表示越权改标注：超管可以改任何词条的标注，其他管理员
 只能改**自己创建**的词条（含自己的草稿）。两条写路径同判：
