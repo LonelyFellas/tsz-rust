@@ -11009,26 +11009,62 @@ async fn component_target_search_excludes_drafts_by_default_and_binds_search_sco
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
     assert_eq!(rejected["field"], "cursor", "{rejected}");
-    for include_drafts in [false, true] {
-        let (status, rejected) = search_component_targets(
-            &state,
-            &bearer,
-            json!({"schema_version": 3, "q": "harbour", "page_size": 1, "cursor": cursor, "include_drafts": include_drafts}),
-        )
-        .await;
-        assert_eq!(
-            status,
-            if include_drafts {
-                StatusCode::BAD_REQUEST
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let candidate = &first["matches"][0];
+    // 旧版本对 [q, kind, match, entry_id] 做 SHA-256，排序键没有草稿标记。
+    let legacy_cursor = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&json!({
+            "context": "253cc123a09e488d1f235dbf2e1b97b1520ab73d98c9f322adc8a79c3527d13c",
+            "after": [0, candidate["headword"], [
+                candidate["entry_id"], candidate["pos_id"],
+                candidate["base_form_id"], candidate["matched_variant_id"]
+            ]]
+        }))
+        .unwrap(),
+    );
+    let (status, draft_page) = search_component_targets(
+        &state,
+        &bearer,
+        json!({"schema_version": 3, "q": "harbour", "page_size": 1, "include_drafts": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{draft_page}");
+    let draft_cursor = draft_page["next_cursor"].as_str().unwrap();
+    for (cursor, draft_mode) in [
+        (legacy_cursor.as_str(), false),
+        (cursor.as_str(), false),
+        (draft_cursor, true),
+    ] {
+        for include_drafts in [None, Some(false), Some(true)] {
+            let mut input = json!({
+                "schema_version": 3, "q": "harbour", "page_size": 1, "cursor": cursor
+            });
+            if let Some(include_drafts) = include_drafts {
+                input["include_drafts"] = json!(include_drafts);
+            }
+            let (status, page) = search_component_targets(&state, &bearer, input).await;
+            if include_drafts.unwrap_or(false) == draft_mode {
+                assert_eq!(status, StatusCode::OK, "{page}");
+                assert_eq!(page["matches"], json!([both["matches"][1].clone()]));
+                assert_eq!(
+                    page["total"],
+                    if draft_mode {
+                        draft_page["total"].clone()
+                    } else {
+                        both["total"].clone()
+                    }
+                );
             } else {
-                StatusCode::OK
-            },
-            "{rejected}"
-        );
-        if include_drafts {
-            assert_eq!(rejected["field"], "cursor");
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{page}");
+                assert_eq!(page["field"], "cursor", "{page}");
+            }
         }
     }
+    let decoded: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&cursor).unwrap()).unwrap();
+    let legacy: Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&legacy_cursor).unwrap()).unwrap();
+    assert_eq!(decoded, legacy, "非草稿模式仍应生成旧版可读的游标");
 }
 
 #[sqlx::test]

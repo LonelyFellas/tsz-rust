@@ -145,8 +145,15 @@ impl LexiconService {
             .execute(&mut *transaction)
             .await
             .map_err(database_error)?;
-        let after: Option<ComponentPageKey> =
-            decode_discovery_cursor(input.cursor.as_deref(), &cursor_digest)?;
+        let after: Option<ComponentPageKey> = if input.include_drafts {
+            decode_discovery_cursor(input.cursor.as_deref(), &cursor_digest)?
+        } else {
+            decode_discovery_cursor::<(i32, String, TargetNodeKey)>(
+                input.cursor.as_deref(),
+                &cursor_digest,
+            )?
+            .map(|(rank, headword, node)| (rank, false, headword, node))
+        };
         let mut candidate_index =
             HashMap::<PublishedAssociationCandidateKey, ComponentTargetCandidateIndex>::new();
         for drafts in [false, true]
@@ -218,10 +225,12 @@ impl LexiconService {
         let has_more = candidate_index.len() > page_size;
         candidate_index.truncate(page_size);
         let next_cursor = has_more.then(|| {
-            encode_discovery_cursor(
-                &cursor_digest,
-                component_page_key(candidate_index.last().expect("nonempty page")),
-            )
+            let key = component_page_key(candidate_index.last().expect("nonempty page"));
+            if input.include_drafts {
+                encode_discovery_cursor(&cursor_digest, key)
+            } else {
+                encode_discovery_cursor(&cursor_digest, (key.0, key.2, key.3))
+            }
         });
         let page_keys = candidate_index
             .iter()
@@ -339,10 +348,13 @@ fn component_target_cursor_digest(
     entry_id: Option<Uuid>,
     include_drafts: bool,
 ) -> Result<String, LexiconServiceError> {
-    Ok(hex_digest(
-        &sha256_json(&(q, kind, match_mode, entry_id, include_drafts))
-            .map_err(serialization_error)?,
-    ))
+    let digest = if include_drafts {
+        sha256_json(&(q, kind, match_mode, entry_id, include_drafts))
+    } else {
+        // 非草稿模式保留旧版摘要，已有游标及回退版本均依赖此格式。
+        sha256_json(&(q, kind, match_mode, entry_id))
+    };
+    Ok(hex_digest(&digest.map_err(serialization_error)?))
 }
 
 fn component_target_keyword(q: &str) -> Result<&str, LexiconServiceError> {
@@ -447,6 +459,29 @@ mod tests {
         // 点 me：acme 只是包含，me 本身必须是 0 档，不能被字典序压到后面。
         assert_eq!(component_target_rank("acme", "me"), 2);
         assert_eq!(component_target_rank("me", "me"), 0);
+    }
+
+    #[test]
+    fn component_target_cursor_preserves_legacy_digest_without_drafts() {
+        for (q, kind, match_mode, entry_id) in [
+            ("harbour", None, ComponentTargetMatchV3::Contains, None),
+            (
+                "give up",
+                Some(EntryKind::Phrase),
+                ComponentTargetMatchV3::Exact,
+                Some(Uuid::from_u128(1)),
+            ),
+        ] {
+            let legacy_digest = hex_digest(&sha256_json(&(q, kind, match_mode, entry_id)).unwrap());
+            let published_digest =
+                component_target_cursor_digest(q, kind, match_mode, entry_id, false).unwrap();
+            assert_eq!(published_digest, legacy_digest);
+            assert_ne!(
+                component_target_cursor_digest(q, kind, match_mode, entry_id, true).unwrap(),
+                legacy_digest,
+                "草稿模式不能复用旧版发布候选游标"
+            );
+        }
     }
 
     #[test]
