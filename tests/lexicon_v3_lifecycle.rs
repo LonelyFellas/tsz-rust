@@ -507,7 +507,7 @@ async fn v3_single_lifecycle_delete_and_legacy_bridge_are_versioned(pool: PgPool
 }
 
 #[sqlx::test]
-async fn empty_v3_restore_uses_initial_headword_conflicts_for_single_batch_and_locks(pool: PgPool) {
+async fn empty_v3_restore_allows_same_headwords_for_single_batch_and_locks(pool: PgPool) {
     let state = AppState::for_test_with_smart_lexicon_v3_flags(
         pool.clone(),
         SmartLexiconV3Flags::all_enabled(),
@@ -529,9 +529,10 @@ async fn empty_v3_restore_uses_initial_headword_conflicts_for_single_batch_and_l
         Some(restore_body.clone()),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
-    assert_eq!(duplicate["code"], "duplicate_word");
+    assert_eq!(status, StatusCode::OK, "{duplicate}");
 
+    let restoring = seed_v3_empty_skeleton(&pool, admin_id, &surface).await;
+    archive_v3_entry(&state, &bearer, restoring).await;
     let mut key_lock = pool.begin().await.unwrap();
     sqlx::query(
         r#"
@@ -574,8 +575,7 @@ async fn empty_v3_restore_uses_initial_headword_conflicts_for_single_batch_and_l
         .await
         .expect("restore should resume after the initial-headword key lock")
         .unwrap();
-    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
-    assert_eq!(duplicate["code"], "duplicate_word");
+    assert_eq!(status, StatusCode::OK, "{duplicate}");
 
     let batch_surface = format!("restore-hidden-batch-{}", admin_id.simple());
     let first = seed_v3_empty_skeleton(&pool, admin_id, &batch_surface).await;
@@ -596,8 +596,7 @@ async fn empty_v3_restore_uses_initial_headword_conflicts_for_single_batch_and_l
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{batch_duplicate}");
-    assert_eq!(batch_duplicate["code"], "duplicate_word");
+    assert_eq!(status, StatusCode::OK, "{batch_duplicate}");
     let still_archived: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM lexicon.entries WHERE id = ANY($1) AND archived_at IS NOT NULL",
     )
@@ -605,7 +604,7 @@ async fn empty_v3_restore_uses_initial_headword_conflicts_for_single_batch_and_l
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(still_archived, 2);
+    assert_eq!(still_archived, 0);
 }
 
 #[sqlx::test]

@@ -467,7 +467,7 @@ impl LexiconService {
                 }
                 {
                     {
-                        let presentation = match (
+                        let mut presentation = match (
                             record.presentation_label,
                             record.presentation_surfaces,
                             record.presentation_strategy,
@@ -489,6 +489,20 @@ impl LexiconService {
                                 .map_err(|_| invariant_record())?
                             }
                         };
+                        // 空词形仍是可找回的草稿；初始名称只用于展示，不生成词面匹配。
+                        if presentation.matched_surfaces.is_empty() {
+                            if let Some(headwords) = record.initial_headwords {
+                                let headwords: WordHeadwordsV2 = serde_json::from_value(headwords)
+                                    .map_err(serialization_error)?;
+                                presentation.label = ordered_headword_sides(&headwords)
+                                    .into_iter()
+                                    .map(|(_, spelling)| spelling)
+                                    .collect::<Vec<_>>()
+                                    .join(" / ");
+                            } else if let Some(surface) = record.detection_surface {
+                                presentation.label = surface;
+                            }
+                        }
                         Ok(AdminWordListItemV3 {
                             schema_version: 3,
                             id: record.id,

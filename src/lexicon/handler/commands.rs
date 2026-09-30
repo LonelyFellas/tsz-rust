@@ -47,7 +47,7 @@ pub async fn detect(
         (status = 400, description = "主词为空、过长、含控制字符，或不是英文词条（含非拉丁字符或不含字母）"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用、必须先改密，或 annotation_updates 里带了非超管无权改的他人词条"),
-        (status = 409, description = "词头重复或幂等键冲突"),
+        (status = 409, description = "匹配确认、标注、版本或幂等键冲突"),
         (status = 410, description = "检测上下文已过期"),
         (status = 422, description = "请求结构非法、检测上下文不匹配、词典不可用或 schema_version 不是 3"),
         (status = 503, description = "检测上下文存储不可用")

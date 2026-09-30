@@ -160,6 +160,8 @@ impl LexiconRepository {
                    entry.revision,
                    entry.lifecycle_revision, entry.annotation, entry.annotation_revision,
                    editor.forms,
+                   state.initial_headwords,
+                   entry.detection_snapshot ->> 'normalized_surface' AS detection_surface,
                    presentation.label AS presentation_label,
                    presentation.matched_surfaces AS presentation_surfaces,
                    presentation.strategy_version AS presentation_strategy,
@@ -210,6 +212,7 @@ impl LexiconRepository {
                    count(*) OVER() AS total
             FROM lexicon.entries entry
             JOIN admins creator ON creator.id = entry.created_by_admin_id
+            LEFT JOIN lexicon.v3_entry_state state ON state.entry_id = entry.id
             JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
             LEFT JOIN lexicon.entry_publications publication
                 ON publication.id = entry.current_publication_id
@@ -223,38 +226,18 @@ impl LexiconRepository {
                     OR ($6 = 'archived' AND entry.archived_at IS NOT NULL)
                   )
               AND ($11::boolean OR entry.content_schema_version = 2)
-              -- Native V3 empty shells remain addressable by ID, but they are not
-              -- dictionary rows until the current draft projects a real surface.
-              -- Published V3 entries stay visible even while a newer draft is incomplete.
-              AND (
-                    entry.content_schema_version = 2
-                    OR entry.current_publication_id IS NOT NULL
-                    OR EXISTS (
-                        SELECT 1
-                        FROM lexicon.surface_sources visible_surface
-                        WHERE visible_surface.entry_id = entry.id
-                          AND visible_surface.content_schema_version = 3
-                          AND visible_surface.content_scope = 'draft'
-                          AND visible_surface.source_revision = entry.revision
-                          AND visible_surface.source_kind = 'form_variant'
-                          AND visible_surface.is_deleted = FALSE
-                    )
-                    -- V3 建条必然先落一条只有词面摘要的草稿，词形要到第 2 步才填。
-                    -- 只认 form_variant 词面的话，内置词典没收录的词一建完就从列表消失，
-                    -- 管理员只能靠重新检测同一词面找回。展示投影里留有管理员确认过的
-                    -- 词面摘要（matched_surfaces）的，按在途草稿照常列出；空拼写骨架的
-                    -- 摘要是空的、label 退化成「未命名词条」，仍然不算词库行。
-                    OR EXISTS (
-                        SELECT 1
-                        FROM lexicon.entry_presentation_projection draft_label
-                        WHERE draft_label.entry_id = entry.id
-                          AND draft_label.source_revision = entry.revision
-                          AND COALESCE(
-                              array_length(draft_label.matched_surfaces, 1), 0
-                          ) > 0
-                    )
-                  )
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
+                   -- 空草稿按初始名称找回；已有有效词面的词条沿用当前词面搜索。
+                   OR (NOT EXISTS (
+                       SELECT 1 FROM lexicon.surface_sources source
+                       WHERE source.entry_id = entry.id AND source.is_deleted = FALSE
+                   ) AND (
+                       state.initial_headwords ->> 'common' ILIKE '%' || $1 || '%'
+                       OR state.initial_headwords ->> 'uk' ILIKE '%' || $1 || '%'
+                       OR state.initial_headwords ->> 'us' ILIKE '%' || $1 || '%'
+                       OR (state.initial_headwords IS NULL
+                           AND entry.detection_snapshot ->> 'normalized_surface' ILIKE '%' || $1 || '%')
+                   ))
                    OR EXISTS (
                        SELECT 1 FROM lexicon.surface_sources surface
                        WHERE surface.entry_id = entry.id
@@ -316,6 +299,7 @@ impl LexiconRepository {
             SELECT count(*)::bigint
             FROM lexicon.entries entry
             JOIN admins creator ON creator.id = entry.created_by_admin_id
+            LEFT JOIN lexicon.v3_entry_state state ON state.entry_id = entry.id
             -- 列表主查询对编辑投影是 INNER JOIN，没有投影行的词条根本不会出现在
             -- 结果里；这里不带同样的条件，翻到空页时回退算出的总数会比实际多。
             WHERE EXISTS (
@@ -330,35 +314,18 @@ impl LexiconRepository {
                     OR ($6 = 'archived' AND entry.archived_at IS NOT NULL)
                   )
               AND ($9::boolean OR entry.content_schema_version = 2)
-              AND (
-                    entry.content_schema_version = 2
-                    OR entry.current_publication_id IS NOT NULL
-                    OR EXISTS (
-                        SELECT 1
-                        FROM lexicon.surface_sources visible_surface
-                        WHERE visible_surface.entry_id = entry.id
-                          AND visible_surface.content_schema_version = 3
-                          AND visible_surface.content_scope = 'draft'
-                          AND visible_surface.source_revision = entry.revision
-                          AND visible_surface.source_kind = 'form_variant'
-                          AND visible_surface.is_deleted = FALSE
-                    )
-                    -- V3 建条必然先落一条只有词面摘要的草稿，词形要到第 2 步才填。
-                    -- 只认 form_variant 词面的话，内置词典没收录的词一建完就从列表消失，
-                    -- 管理员只能靠重新检测同一词面找回。展示投影里留有管理员确认过的
-                    -- 词面摘要（matched_surfaces）的，按在途草稿照常列出；空拼写骨架的
-                    -- 摘要是空的、label 退化成「未命名词条」，仍然不算词库行。
-                    OR EXISTS (
-                        SELECT 1
-                        FROM lexicon.entry_presentation_projection draft_label
-                        WHERE draft_label.entry_id = entry.id
-                          AND draft_label.source_revision = entry.revision
-                          AND COALESCE(
-                              array_length(draft_label.matched_surfaces, 1), 0
-                          ) > 0
-                    )
-                  )
               AND ($1::text IS NULL OR creator.display_name ILIKE '%' || $1 || '%'
+                   -- 空草稿按初始名称找回；已有有效词面的词条沿用当前词面搜索。
+                   OR (NOT EXISTS (
+                       SELECT 1 FROM lexicon.surface_sources source
+                       WHERE source.entry_id = entry.id AND source.is_deleted = FALSE
+                   ) AND (
+                       state.initial_headwords ->> 'common' ILIKE '%' || $1 || '%'
+                       OR state.initial_headwords ->> 'uk' ILIKE '%' || $1 || '%'
+                       OR state.initial_headwords ->> 'us' ILIKE '%' || $1 || '%'
+                       OR (state.initial_headwords IS NULL
+                           AND entry.detection_snapshot ->> 'normalized_surface' ILIKE '%' || $1 || '%')
+                   ))
                    OR EXISTS (
                        SELECT 1 FROM lexicon.surface_sources surface
                        WHERE surface.entry_id = entry.id
@@ -425,20 +392,6 @@ impl LexiconRepository {
             FROM lexicon.entries entry
             WHERE entry.archived_at IS NULL
               AND ($1 OR entry.content_schema_version = 2)
-              AND (
-                    entry.content_schema_version = 2
-                    OR entry.current_publication_id IS NOT NULL
-                    OR EXISTS (
-                        SELECT 1
-                        FROM lexicon.surface_sources visible_surface
-                        WHERE visible_surface.entry_id = entry.id
-                          AND visible_surface.content_schema_version = 3
-                          AND visible_surface.content_scope = 'draft'
-                          AND visible_surface.source_revision = entry.revision
-                          AND visible_surface.source_kind = 'form_variant'
-                          AND visible_surface.is_deleted = FALSE
-                    )
-                  )
             "#,
         )
         .bind(include_v3)

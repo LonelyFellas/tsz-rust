@@ -1392,10 +1392,6 @@ pub struct CreateAdminWordV3Input {
     #[schema(schema_with = schema_version_3_schema)]
     pub schema_version: u8,
     pub detection_id: Uuid,
-    /// 同原型组另建词条的区分说明，仅写入创建审计，不替代数字标注。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(min_length = 1, max_length = 500, nullable = false)]
-    pub homograph_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(max_length = 20)]
     pub annotation: Option<String>,
@@ -2171,6 +2167,7 @@ pub struct MatchedEntryContextV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub created_by: Option<Uuid>,
+    pub created_by_name: String,
     pub presentation: EntryPresentationV3,
     #[schema(max_items = 5)]
     pub pos_labels: Vec<String>,
@@ -2432,7 +2429,7 @@ pub enum BuiltinDictionaryEvidenceV3 {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DetectLexiconSurfaceResponseV3 {
-    /// Own unfinished V3 draft without saved surface sources; not a surface match.
+    /// An existing unfinished V3 draft without saved surface sources; informational only and does not prevent creating another entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub existing_draft_id: Option<Uuid>,
@@ -2645,6 +2642,7 @@ mod tests {
             annotation_revision: 1,
             entry_id: Uuid::now_v7(),
             created_by,
+            created_by_name: "词库测试管理员".to_owned(),
             presentation: EntryPresentationV3 {
                 label: "harbour".to_owned(),
                 matched_surfaces: vec!["harbour".to_owned()],

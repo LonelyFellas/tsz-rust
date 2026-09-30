@@ -1306,7 +1306,7 @@ impl LexiconService {
             .map_err(database_error)?;
         // Empty drafts are visible across creators, just like the surface matches.
         detection.existing_draft_id = self
-            .v3_empty_draft_conflict_in(&mut tx, input.kind, &keys, None)
+            .v3_existing_empty_draft_in(&mut tx, input.kind, &keys, None)
             .await?;
         tx.commit().await.map_err(database_error)?;
         detection.requires_acknowledgement = !matches.is_empty();
@@ -1330,18 +1330,6 @@ impl LexiconService {
     ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         super::annotations::normalize_annotation(&mut input.annotation)?;
         super::annotations::normalize_updates(&mut input.annotation_updates)?;
-        if let Some(reason) = &mut input.homograph_reason {
-            *reason = reason.trim().to_owned();
-            if reason.is_empty()
-                || reason.chars().count() > 500
-                || reason.chars().any(char::is_control)
-            {
-                return Err(LexiconServiceError::InvalidField {
-                    field: "homograph_reason",
-                    message: "homograph reason must contain 1 to 500 characters without control characters",
-                });
-            }
-        }
         let explicit_headwords = input.headwords.is_some();
         if let Some(headwords) = &mut input.headwords {
             normalize_submitted_headwords(headwords)?;
@@ -1422,7 +1410,6 @@ impl LexiconService {
                     actor_id,
                     detection.detection_id,
                     entry_id,
-                    input.kind,
                     &forms,
                     &confirmed_headwords,
                     (confirmed_headwords == suggested_headwords)
@@ -1436,7 +1423,6 @@ impl LexiconService {
                     &mut transaction,
                     actor_id,
                     detection.detection_id,
-                    input.kind,
                     &detection.normalized_surface,
                     &forms,
                     &initial_headword_keys,
@@ -1473,7 +1459,6 @@ impl LexiconService {
             &annotation_keys,
             &input.annotation,
             &input.annotation_updates,
-            input.homograph_reason.as_deref(),
         )
         .await?;
         let meanings = DraftMeaningsStepContentV3::default();
@@ -1621,7 +1606,6 @@ impl LexiconService {
             serde_json::json!({
                 "schema_version": 3,
                 "explicit_headwords": explicit_headwords,
-                "homograph_reason": input.homograph_reason,
                 "surface_snapshot_id": verified_surface.as_ref().map(|value| value.snapshot_id),
             }),
         )
@@ -1866,7 +1850,6 @@ impl LexiconService {
                     &mut transaction,
                     actor_id,
                     entry_id,
-                    parse_v3_kind(&record.kind).ok_or_else(invariant_record)?,
                     record.revision,
                     next_revision,
                     &current_forms,

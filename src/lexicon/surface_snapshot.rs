@@ -23,10 +23,9 @@ use crate::{
     platform::{generate_token_plaintext, hash_token},
 };
 
-// v2 后缀是存储布局版本，不是 schema_version：快照从「一个 String 存整个 bundle」改成
-// 「一个 Hash 存两半」，两种布局对同名 key 会 WRONGTYPE 互撞。换前缀让灰度期间新旧进程各写各的，
-// 旧 key 自带 TTL 会自行消失；代价只是部署瞬间在途的确认令牌要重新确认一次。
-const SNAPSHOT_PREFIX: &str = "lexicon:surface-snapshot:v2:";
+// 后缀是存储格式版本，不是 schema_version。v3 的词条上下文必含创建人姓名，
+// 旧快照按过期处理并重新检测；旧 key 随 TTL 清理，不兼容解析旧结构。
+const SNAPSHOT_PREFIX: &str = "lexicon:surface-snapshot:v3:";
 /// 快照 Hash 的两个字段：不可变半（items/contexts/owner_bundle…）与游标半。
 ///
 /// Redis 内置的 cjson **把空数组编码成 `{}`**（且这个版本没有 `encode_empty_table_as_object`
@@ -2202,6 +2201,7 @@ mod tests {
                 .map(|index| {
                     serde_json::from_value(json!({
                         "entry_id": Uuid::from_u128(0x1000 + index),
+                        "created_by_name": "词库测试管理员",
                         "presentation": {
                             "label": format!("workspace-{index}"),
                             "matched_surfaces": ["workspace"],
@@ -2247,6 +2247,10 @@ mod tests {
             SurfaceMatchItemV3::FormVariantV3(_)
         ));
         assert_eq!(first.page.matched_entry_contexts.len(), 1);
+        assert_eq!(
+            first.page.matched_entry_contexts[0].created_by_name,
+            "词库测试管理员"
+        );
         assert_eq!(first.next_cursor, "cursor-1");
 
         let terminal_v2 = advance_bundle(

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::lexicon::dto::DetectLexiconSurfaceResponseV3;
 
-const DETECTION_PREFIX: &str = "lexicon:detection:";
+const DETECTION_PREFIX: &str = "lexicon:detection:v3:";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DetectionStoreError {

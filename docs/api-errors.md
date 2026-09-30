@@ -90,17 +90,14 @@ Content-Type: application/problem+json
 点不下去的灰按钮而不是提交后的报错。
 
 
-## 重复词条与草稿续建
+## 同名词条与草稿提示
 
-建条撞上已有词条仍是 `409 duplicate_word`。当且仅当被撞的是**当前管理员自己**、
-可继续编辑的 V3 空草稿时，`meta.word_id` 带上该草稿的 entry id，供前端直接跳
-`/words/{id}/v3/wizard/forms`。
+允许创建多个原形相同的独立词条，同名未完成草稿不再返回 `409 duplicate_word`。
+检测响应的 `existing_draft_id` 指向一条已有空草稿（不限创建管理员），仅作查看或续编提示；
+不参与有效原形匹配，不签发或消费 surface 确认，也不阻止新建、清空词形或恢复草稿。
+多个空草稿共存时该字段返回最早创建的匹配草稿；所有草稿都可在词条列表中查询。
 
-没有 `meta.word_id` 时只提示无法重复创建：**不得**据此搜索或展示他人草稿，也不得自动重试。
-这个字段是可继续目标的指针，不是「存在同名词条」的信号——两次查询之间并发保存词形会让
-第二次查询落空，从而退化成不带 `word_id` 的 `duplicate_word`，重试即自愈。
-
-检测响应的 `existing_draft_id` 同理：只指向当前管理员自己的可继续草稿，不参与原型匹配，
-不签发或消费 surface 确认。契约见
-[frontend-integration.md §23](frontend-integration.md)。
-
+同名空草稿也参与同原型标注分组，创建时返回 `409 annotation_conflict`，填写数字标注后可另建。
+已有有效原形还须通过 surface 确认；标注创建、编辑查重与列表角标使用同一分组口径。
+不同创建命令使用独立幂等键，同一命令重放仍返回原词条，不额外建档。
+查看草稿不会授予编辑权限。契约见 [frontend-integration.md §23](frontend-integration.md)。
