@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::DateTime;
 use serde::Serialize;
@@ -57,12 +57,15 @@ struct V3SurfaceContextRecord {
     forms: Value,
     meanings: Value,
     label: String,
+    initial_headwords: Option<Value>,
+    detection_surface: Option<String>,
     matched_surfaces: Vec<String>,
     strategy_version: String,
     updated_at: DateTime<Utc>,
     annotation: Option<String>,
     annotation_revision: i64,
     created_by: Uuid,
+    created_by_name: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -359,7 +362,6 @@ impl LexiconService {
         pending: &[(EntryLifecycleTarget, AdminWordV3, bool)],
     ) -> Result<V3RestoreSurfaceContribution, LexiconServiceError> {
         let mut contribution = V3RestoreSurfaceContribution::default();
-        let mut hidden_initial_owners = BTreeMap::<(String, String, String), Uuid>::new();
         for (target, word, already_active) in pending {
             if *already_active {
                 continue;
@@ -375,30 +377,6 @@ impl LexiconService {
                     }),
             );
             let initial_keys = self.v3_initial_headword_query_keys(tx, word.id).await?;
-            if keys.is_empty() && !initial_keys.is_empty() {
-                let encoded_initial_keys = initial_keys
-                    .iter()
-                    .map(|key| format!("{}:{}", key.dialect_scope, key.normalized_surface))
-                    .collect::<Vec<_>>();
-                self.reject_hidden_v3_initial_headword_conflict(
-                    tx,
-                    word.kind,
-                    &encoded_initial_keys,
-                    None,
-                    false,
-                )
-                .await?;
-                for key in &initial_keys {
-                    let identity = (
-                        v3_kind_string(word.kind).to_owned(),
-                        key.dialect_scope.clone(),
-                        key.normalized_surface.clone(),
-                    );
-                    if hidden_initial_owners.insert(identity, word.id).is_some() {
-                        return Err(LexiconServiceError::DuplicateWord);
-                    }
-                }
-            }
             keys.extend(initial_keys);
             keys.sort();
             keys.dedup();
@@ -681,7 +659,6 @@ impl LexiconService {
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
         detection_id: Uuid,
-        entry_kind: WordEntryKindV3,
         normalized_surface: &str,
         forms: &DraftFormsStepContentV3,
         initial_headword_keys: &[String],
@@ -694,14 +671,6 @@ impl LexiconService {
         LexiconRepository::lock_surface_keys(tx, &surface_lock_keys_v3(&keys))
             .await
             .map_err(repository_error)?;
-        self.reject_hidden_v3_initial_headword_conflict(
-            tx,
-            entry_kind,
-            initial_headword_keys,
-            None,
-            true,
-        )
-        .await?;
         let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
         if material.matches.is_empty() {
             let Some(token) = token else {
@@ -748,7 +717,6 @@ impl LexiconService {
         actor_id: Uuid,
         detection_id: Uuid,
         entry_id: Uuid,
-        entry_kind: WordEntryKindV3,
         forms: &DraftFormsStepContentV3,
         headwords: &WordHeadwordsV2,
         equivalent_detection_surface: Option<&str>,
@@ -762,14 +730,6 @@ impl LexiconService {
         LexiconRepository::lock_surface_keys(tx, &surface_lock_keys_v3(&keys))
             .await
             .map_err(repository_error)?;
-        self.reject_hidden_v3_initial_headword_conflict(
-            tx,
-            entry_kind,
-            initial_headword_keys,
-            None,
-            true,
-        )
-        .await?;
         let material = self.v3_surface_material_in(tx, &keys, None, true).await?;
         if material.matches.is_empty() {
             let Some(token) = token else {
@@ -842,36 +802,7 @@ impl LexiconService {
             .map(Some)
     }
 
-    /// 撞上一条「已建档但还没存词形」的空草稿时怎么回话。
-    ///
-    /// 2026-09-08 起不再按创建者区分：以前只有撞上**自己**的空草稿才给得出词条 ID，
-    /// 撞上别人的就退化成一个不说明理由的 `duplicate_word`——管理员既看不到是谁在建，
-    /// 也无从判断该等谁。草稿现在对所有管理员可见，就把 ID 一并给出（别人的草稿点进去
-    /// 是只读的，写权限另有守卫）。
-    ///
-    /// `offer_resume` 仍然分场景：建档路径给出续做/查看入口，而正在编辑自有词条的路径
-    /// （词形保存、发布前确认）不该把人引去别的词条，只报冲突。
-    async fn reject_hidden_v3_initial_headword_conflict(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        entry_kind: WordEntryKindV3,
-        initial_headword_keys: &[String],
-        excluded_entry_id: Option<Uuid>,
-        offer_resume: bool,
-    ) -> Result<(), LexiconServiceError> {
-        let Some(id) = self
-            .v3_empty_draft_conflict_in(tx, entry_kind, initial_headword_keys, excluded_entry_id)
-            .await?
-        else {
-            return Ok(());
-        };
-        if offer_resume {
-            return Err(LexiconServiceError::ExistingEmptyDraft(id));
-        }
-        Err(LexiconServiceError::DuplicateWord)
-    }
-
-    pub(super) async fn v3_empty_draft_conflict_in(
+    pub(super) async fn v3_existing_empty_draft_in(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         entry_kind: WordEntryKindV3,
@@ -996,7 +927,6 @@ impl LexiconService {
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
         entry_id: Uuid,
-        entry_kind: WordEntryKindV3,
         base_revision: i64,
         next_revision: i64,
         previous: &DraftFormsStepContentV3,
@@ -1011,7 +941,9 @@ impl LexiconService {
         LexiconRepository::lock_surface_policy_writer(tx)
             .await
             .map_err(repository_error)?;
-        let initial_keys = if keys.is_empty() {
+        // Initial keys contribute to annotation groups while forms are empty;
+        // lock them both when leaving that group and when returning to it.
+        let initial_keys = if previous_keys.is_empty() || keys.is_empty() {
             self.v3_initial_headword_query_keys(tx, entry_id).await?
         } else {
             Vec::new()
@@ -1027,20 +959,6 @@ impl LexiconService {
         LexiconRepository::lock_surface_keys(tx, &surface_lock_keys_v3(&lock_keys))
             .await
             .map_err(repository_error)?;
-        if !initial_keys.is_empty() {
-            let encoded_initial_keys = initial_keys
-                .iter()
-                .map(|key| format!("{}:{}", key.dialect_scope, key.normalized_surface))
-                .collect::<Vec<_>>();
-            self.reject_hidden_v3_initial_headword_conflict(
-                tx,
-                entry_kind,
-                &encoded_initial_keys,
-                Some(entry_id),
-                false,
-            )
-            .await?;
-        }
         let material = self
             .v3_surface_material_in(tx, &keys, Some(entry_id), true)
             .await?;
@@ -1773,13 +1691,17 @@ impl LexiconService {
             r#"
             SELECT entry.id AS entry_id, entry.content_schema_version,
                    editor.forms, editor.meanings,
-                   presentation.label,
+                   presentation.label, state.initial_headwords,
+                   entry.detection_snapshot ->> 'normalized_surface' AS detection_surface,
                    presentation.matched_surfaces,
                    presentation.strategy_version,
                    entry.updated_at, entry.annotation, entry.annotation_revision,
-                   entry.created_by_admin_id AS created_by
+                   entry.created_by_admin_id AS created_by,
+                   creator.display_name AS created_by_name
             FROM lexicon.entries entry
+            JOIN admins creator ON creator.id = entry.created_by_admin_id
             JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
+            LEFT JOIN lexicon.v3_entry_state state ON state.entry_id = entry.id
             LEFT JOIN lexicon.entry_presentation_projection presentation
               ON presentation.entry_id = entry.id
              AND presentation.content_schema_version = 3
@@ -1798,7 +1720,20 @@ impl LexiconService {
         let mut relation_summaries = self.v3_inbound_relation_summaries_in(tx, entry_ids).await?;
         records
             .into_iter()
-            .map(|record| {
+            .map(|mut record| {
+                if record.matched_surfaces.is_empty() {
+                    if let Some(headwords) = record.initial_headwords {
+                        let headwords: WordHeadwordsV2 =
+                            serde_json::from_value(headwords).map_err(serialization_error)?;
+                        record.label = ordered_headword_sides(&headwords)
+                            .into_iter()
+                            .map(|(_, spelling)| spelling)
+                            .collect::<Vec<_>>()
+                            .join(" / ");
+                    } else if let Some(surface) = record.detection_surface {
+                        record.label = surface;
+                    }
+                }
                 let (mut pos_labels, mut gloss_previews) = match record.content_schema_version {
                     3 => {
                         let forms: DraftFormsStepContentV3 =
@@ -1830,6 +1765,7 @@ impl LexiconService {
                     annotation: record.annotation,
                     annotation_revision: record.annotation_revision,
                     created_by: Some(record.created_by),
+                    created_by_name: record.created_by_name,
                     presentation: EntryPresentationV3 {
                         label: record.label,
                         matched_surfaces: record.matched_surfaces,

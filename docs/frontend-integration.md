@@ -48,6 +48,17 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 这不删除已有草稿引用，也不改变草稿保存和既有发布校验；已知目标 ID 的只读回显不依赖候选搜索。配套更新时，先更新不再发送该参数的前端并刷新旧页面，再替换后端；旧分页游标应重新从首页查询。
 
+### 同原形词条创建与标注
+
+同名空草稿在列表中可查询，也参与数字标注分组；`existing_draft_id` 只提供打开入口，不阻止创建独立词条。
+创建请求删除 `homograph_reason`，不再校验或写入区分说明；历史审计不变。
+`MatchedEntryContextV3.created_by_name` 为必填创建人姓名，标注冲突与匹配页面共用该结构。
+前端须从本次 OpenAPI 同步严格 runtime schema。快照存储前缀升至 v3，旧在途快照按过期处理，重新检测即可。
+
+旧前端会拒绝新增响应字段或发送已删除请求字段；新前端也不能消费旧后端缺少姓名的冲突上下文，且旧后端仍有同名空草稿阻断。
+两种混合版本都不能完成本次创建流程，不能在线任意滚动发布。后续发布须在暂停词库创编的维护窗口切换配套前后端并刷新页面，再验收恢复；单端回退同样不受支持。
+本次无数据库迁移，不修改登录或会话协议。
+
 ### 专题入口
 
 - [词性配置](part-of-speech-config-design.md)、[对象存储](object-storage-design.md)、[IPA/UPS](ipa-ups-integration.md)。

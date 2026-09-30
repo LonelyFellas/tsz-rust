@@ -13,7 +13,8 @@ use tsz_rust::lexicon::{
     surface_policy::SurfacePolicyStore,
     surface_snapshot::{
         CreateSurfaceSnapshot, ExpectedSurfaceConfirmation, SurfaceConfirmationBinding,
-        SurfaceConsumptionCommand, SurfaceSnapshotStore, surface_owner_bundle_digest,
+        SurfaceConsumptionCommand, SurfaceSnapshotError, SurfaceSnapshotStore,
+        snapshot_key_for_test, surface_owner_bundle_digest,
     },
 };
 use uuid::Uuid;
@@ -106,6 +107,7 @@ fn owner_bundle() -> Value {
             "matched_entry_contexts": (0..3)
                 .map(|index: usize| json!({
                     "entry_id": Uuid::from_u128(0x1000 + index as u128),
+                    "created_by_name": "词库管理员",
                     "presentation": {
                         "label": "workspace",
                         "matched_surfaces": ["workspace"],
@@ -257,4 +259,50 @@ async fn paging_to_the_terminal_page_signs_a_token_without_corrupting_the_snapsh
         .remove_verified(&verified)
         .await
         .expect("消费后清理不该失败");
+}
+
+#[tokio::test]
+async fn previous_storage_version_expires_instead_of_decoding_old_contexts() {
+    let redis = tsz_rust::platform::connect_redis(&test_redis_url())
+        .await
+        .unwrap();
+    let prefix = format!("test:surface-policy:{}:", Uuid::now_v7());
+    let policy = SurfacePolicyStore::with_prefix_for_test(redis.clone(), prefix.clone())
+        .policy(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
+        .await
+        .unwrap();
+    let store = SurfaceSnapshotStore::with_policy_prefix_for_test(redis.clone(), prefix);
+    let actor = Uuid::now_v7();
+    let created = store
+        .create(CreateSurfaceSnapshot {
+            binding: binding(actor, policy.epoch),
+            policy_enabled: true,
+            policy_block_code: None,
+            items: (0..3).map(match_item).collect(),
+            matched_entry_contexts: (0..3).map(matched_context).collect(),
+            confirmation_reasons: vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches],
+            owner_bundle: owner_bundle(),
+            page_size: 1,
+        })
+        .await
+        .unwrap();
+    let retired_key = format!("lexicon:surface-snapshot:v2:{}", created.snapshot_id);
+    let mut connection = redis.get().await.unwrap();
+    deadpool_redis::redis::cmd("RENAME")
+        .arg(snapshot_key_for_test(created.snapshot_id))
+        .arg(&retired_key)
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .page(actor, created.snapshot_id, &v2_next_cursor(&created.page))
+            .await,
+        Err(SurfaceSnapshotError::Expired)
+    ));
+    deadpool_redis::redis::cmd("DEL")
+        .arg(retired_key)
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
 }

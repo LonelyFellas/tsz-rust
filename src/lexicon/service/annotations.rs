@@ -59,20 +59,52 @@ pub(super) async fn lock_annotation_commands(
     Ok(())
 }
 
+// Empty native drafts use their confirmed initial headwords until saved surface
+// sources take over. All annotation reads and writes must use the same groups.
+// Query composition below interpolates only this constant; request values stay bound.
+const ANNOTATION_BASES: &str = r#"
+    SELECT source.entry_id, entry.kind, source.language,
+           source.dialect_scope, source.normalized_surface, entry.archived_at
+    FROM lexicon.surface_sources source
+    JOIN lexicon.entries entry ON entry.id = source.entry_id
+    WHERE source.is_deleted = FALSE
+      AND ((source.content_schema_version = 3 AND source.source_kind = 'form_variant' AND source.form_type = 'base')
+        OR (source.content_schema_version = 2 AND source.source_kind = 'headword'))
+      AND (source.content_scope = 'draft'
+        OR (source.content_scope = 'current_publication' AND source.publication_id = entry.current_publication_id))
+    UNION ALL
+    SELECT state.entry_id, entry.kind, entry.language,
+           split_part(key, ':', 1), substring(key from position(':' in key) + 1), entry.archived_at
+    FROM lexicon.v3_entry_state state
+    JOIN lexicon.entries entry ON entry.id = state.entry_id
+    CROSS JOIN LATERAL unnest(COALESCE(state.initial_headword_keys,
+        CASE WHEN state.initial_headwords IS NULL
+          AND NULLIF(entry.detection_snapshot ->> 'normalized_surface', '') IS NOT NULL
+        THEN ARRAY['uk:' || (entry.detection_snapshot ->> 'normalized_surface'),
+                   'us:' || (entry.detection_snapshot ->> 'normalized_surface')]
+        ELSE ARRAY[]::text[] END)) AS headword(key)
+    WHERE state.origin = 'native'
+      AND NOT EXISTS (
+          SELECT 1 FROM lexicon.surface_sources source
+          WHERE source.entry_id = state.entry_id AND source.is_deleted = FALSE
+      )
+"#;
+
 async fn base_keys(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
 ) -> Result<Vec<String>, LexiconServiceError> {
-    sqlx::query_scalar(
-        r#"SELECT DISTINCT source.dialect_scope || ':' || source.normalized_surface
-        FROM lexicon.surface_sources source
-        JOIN lexicon.entries entry ON entry.id = source.entry_id
-        WHERE source.entry_id = $1 AND source.is_deleted = FALSE
-          AND (source.content_scope = 'draft' OR (source.content_scope = 'current_publication' AND source.publication_id = entry.current_publication_id))
-          AND ((source.content_schema_version = 3 AND source.form_type = 'base')
-            OR (source.content_schema_version = 2 AND source.source_kind = 'headword'))
-        ORDER BY 1"#,
-    ).bind(id).fetch_all(&mut **tx).await.map_err(database_error)
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        r#"
+        WITH annotation_bases AS NOT MATERIALIZED ({ANNOTATION_BASES})
+        SELECT DISTINCT dialect_scope || ':' || normalized_surface
+        FROM annotation_bases WHERE entry_id = $1 ORDER BY 1
+    "#
+    )))
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(database_error)
 }
 
 /// 标注的可写集合：超管可以改任何词条的标注，其他管理员只能改自己创建的词条
@@ -129,28 +161,23 @@ impl LexiconService {
         if entry_ids.is_empty() {
             return Ok(BTreeSet::new());
         }
-        // 内联 CTE 让请求的 ID 约束目标侧扫描。
-        let ids = sqlx::query_scalar::<_, Uuid>(r#"
-            WITH visible_bases AS NOT MATERIALIZED (
-                SELECT source.entry_id, entry.kind, source.language,
-                       source.dialect_scope, source.normalized_surface
-                FROM lexicon.surface_sources source
-                JOIN lexicon.entries entry ON entry.id = source.entry_id
-                WHERE source.language = 'en' AND source.is_deleted = FALSE
-                  AND entry.archived_at IS NULL
-                  AND ((source.content_schema_version = 3 AND source.source_kind = 'form_variant' AND source.form_type = 'base')
-                    OR (source.content_schema_version = 2 AND source.source_kind = 'headword'))
-                  AND (source.content_scope = 'draft'
-                    OR (source.content_scope = 'current_publication' AND source.publication_id = entry.current_publication_id))
-            )
+        let ids = sqlx::query_scalar::<_, Uuid>(sqlx::AssertSqlSafe(format!(
+            r#"
+            WITH visible_bases AS NOT MATERIALIZED ({ANNOTATION_BASES})
             SELECT DISTINCT target.entry_id
             FROM visible_bases target
             JOIN visible_bases peer ON peer.entry_id <> target.entry_id
               AND peer.language = target.language AND peer.kind = target.kind
               AND peer.dialect_scope = target.dialect_scope
               AND peer.normalized_surface = target.normalized_surface
-            WHERE target.entry_id = ANY($1)
-        "#).bind(entry_ids).fetch_all(self.repository.pool()).await.map_err(database_error)?;
+            WHERE target.entry_id = ANY($1) AND target.language = 'en'
+              AND target.archived_at IS NULL AND peer.archived_at IS NULL
+        "#
+        )))
+        .bind(entry_ids)
+        .fetch_all(self.repository.pool())
+        .await
+        .map_err(database_error)?;
         Ok(ids.into_iter().collect())
     }
 
@@ -167,26 +194,27 @@ impl LexiconService {
             dialects.push(dialect);
             surfaces.push(surface);
         }
-        let rows = sqlx::query_as::<_, BaseMatch>(r#"
+        let rows = sqlx::query_as::<_, BaseMatch>(sqlx::AssertSqlSafe(format!(
+            r#"
             WITH requested AS (
                 SELECT DISTINCT dialect_scope, normalized_surface
                 FROM unnest($1::text[], $2::text[]) AS value(dialect_scope, normalized_surface)
-            )
+            ), annotation_bases AS NOT MATERIALIZED ({ANNOTATION_BASES})
             SELECT DISTINCT source.entry_id, source.dialect_scope, source.normalized_surface
             FROM requested
-            JOIN lexicon.surface_sources source ON source.language = 'en'
+            JOIN annotation_bases source ON source.language = 'en'
               AND source.dialect_scope = requested.dialect_scope
               AND source.normalized_surface = requested.normalized_surface
-              AND source.is_deleted = FALSE
-            JOIN lexicon.entries entry ON entry.id = source.entry_id
-            WHERE entry.archived_at IS NULL AND entry.kind = $3
-              AND ((source.content_schema_version = 3 AND source.source_kind = 'form_variant' AND source.form_type = 'base')
-                OR (source.content_schema_version = 2 AND source.source_kind = 'headword'))
-              AND (source.content_scope = 'draft'
-                OR (source.content_scope = 'current_publication' AND source.publication_id = entry.current_publication_id))
+            WHERE source.archived_at IS NULL AND source.kind = $3
             ORDER BY source.dialect_scope, source.normalized_surface, source.entry_id
-        "#).bind(dialects).bind(surfaces).bind(kind)
-          .fetch_all(&mut **tx).await.map_err(database_error)?;
+        "#
+        )))
+        .bind(dialects)
+        .bind(surfaces)
+        .bind(kind)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
         let mut groups: BTreeMap<(String, String), Vec<Uuid>> = BTreeMap::new();
         for row in rows {
             groups
@@ -241,7 +269,6 @@ impl LexiconService {
         keys: &[String],
         annotation: &Option<String>,
         updates: &[EntryAnnotationUpdate],
-        homograph_reason: Option<&str>,
     ) -> Result<(), LexiconServiceError> {
         let groups = self.annotation_groups_in(tx, kind, keys).await?;
         let mut conflict = self.annotation_conflict_in(tx, groups, None).await?;
@@ -302,12 +329,6 @@ impl LexiconService {
         if let Some(reason) = fail {
             conflict.reason = reason;
             return Err(LexiconServiceError::AnnotationConflict(Box::new(conflict)));
-        }
-        if !current.is_empty() && homograph_reason.is_none() {
-            return Err(LexiconServiceError::InvalidField {
-                field: "homograph_reason",
-                message: "a reason is required to create a separate entry in an existing prototype group",
-            });
         }
         // Updating an old entry also affects its prototypes outside the new
         // entry's groups. Validate those edges without broadening the create UI.

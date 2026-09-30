@@ -323,6 +323,8 @@ pub(crate) struct ListEntryRecord {
     pub annotation: Option<String>,
     pub annotation_revision: i64,
     pub forms: Value,
+    pub initial_headwords: Option<Value>,
+    pub detection_surface: Option<String>,
     pub presentation_label: Option<String>,
     pub presentation_surfaces: Option<Vec<String>>,
     pub presentation_strategy: Option<String>,

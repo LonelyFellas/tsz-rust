@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use anyhow::Context;
 use serde::Serialize;
@@ -34,7 +34,6 @@ pub struct InitialHeadwordBackfillReport {
 struct Candidate {
     entry_id: Uuid,
     entry_kind: String,
-    active_hidden: bool,
     headwords: WordHeadwordsV2,
     keys: Vec<String>,
 }
@@ -108,18 +107,12 @@ fn derive_headwords(detection: &DetectLexiconSurfaceResponseV3) -> anyhow::Resul
 async fn candidates(
     tx: &mut Transaction<'_, Postgres>,
 ) -> anyhow::Result<(Vec<Candidate>, Vec<InitialHeadwordBackfillBlocker>)> {
-    let rows = sqlx::query_as::<_, (Uuid, Value, String, bool)>(
+    let rows = sqlx::query_as::<_, (Uuid, Value, String)>(
         r#"
         SELECT
             state.entry_id,
             entry.detection_snapshot,
-            entry.kind,
-            entry.archived_at IS NULL AND NOT EXISTS (
-                SELECT 1
-                FROM lexicon.surface_sources source
-                WHERE source.entry_id = state.entry_id
-                  AND source.is_deleted = FALSE
-            ) AS active_hidden
+            entry.kind
         FROM lexicon.v3_entry_state state
         JOIN lexicon.entries entry ON entry.id = state.entry_id
         WHERE state.origin = 'native'
@@ -132,7 +125,7 @@ async fn candidates(
     .await?;
     let mut ready = Vec::new();
     let mut blockers = Vec::new();
-    for (entry_id, snapshot, entry_kind, active_hidden) in rows {
+    for (entry_id, snapshot, entry_kind) in rows {
         let derived = (|| -> anyhow::Result<Candidate> {
             let detection: DetectLexiconSurfaceResponseV3 =
                 serde_json::from_value(snapshot).context("invalid_detection_snapshot")?;
@@ -141,7 +134,6 @@ async fn candidates(
             Ok(Candidate {
                 entry_id,
                 entry_kind,
-                active_hidden,
                 headwords,
                 keys,
             })
@@ -153,65 +145,6 @@ async fn candidates(
                 reason: format!("{error:#}"),
             }),
         }
-    }
-    let existing = sqlx::query_as::<_, (Uuid, String, Vec<String>)>(
-        r#"
-        SELECT state.entry_id, entry.kind, state.initial_headword_keys
-        FROM lexicon.v3_entry_state state
-        JOIN lexicon.entries entry ON entry.id = state.entry_id
-        WHERE state.origin = 'native'
-          AND state.initial_headword_keys IS NOT NULL
-          AND entry.archived_at IS NULL
-          AND NOT EXISTS (
-              SELECT 1
-              FROM lexicon.surface_sources source
-              WHERE source.entry_id = state.entry_id
-                AND source.is_deleted = FALSE
-          )
-        ORDER BY state.entry_id
-        "#,
-    )
-    .fetch_all(&mut **tx)
-    .await?;
-    let mut owners = BTreeMap::<(String, String), BTreeSet<Uuid>>::new();
-    for (entry_id, entry_kind, keys) in existing {
-        for key in keys {
-            owners
-                .entry((entry_kind.clone(), key))
-                .or_default()
-                .insert(entry_id);
-        }
-    }
-    for candidate in ready.iter().filter(|candidate| candidate.active_hidden) {
-        for key in &candidate.keys {
-            owners
-                .entry((candidate.entry_kind.clone(), key.clone()))
-                .or_default()
-                .insert(candidate.entry_id);
-        }
-    }
-    let conflicted = owners
-        .values()
-        .filter(|entry_ids| entry_ids.len() > 1)
-        .flatten()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    if !conflicted.is_empty() {
-        ready.retain(|candidate| !conflicted.contains(&candidate.entry_id));
-        let mut blocked_entry_ids = blockers
-            .iter()
-            .map(|blocker| blocker.entry_id)
-            .collect::<BTreeSet<_>>();
-        for entry_id in conflicted {
-            if !blocked_entry_ids.insert(entry_id) {
-                continue;
-            }
-            blockers.push(InitialHeadwordBackfillBlocker {
-                entry_id,
-                reason: "duplicate_active_empty_skeleton".to_owned(),
-            });
-        }
-        blockers.sort_by_key(|blocker| blocker.entry_id);
     }
     Ok((ready, blockers))
 }

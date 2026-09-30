@@ -97,10 +97,6 @@ pub enum LexiconServiceError {
     DetectionMismatch,
     #[error("detection expired")]
     DetectionExpired,
-    #[error("headword already exists")]
-    DuplicateWord,
-    #[error("an unfinished draft already exists")]
-    ExistingEmptyDraft(Uuid),
     #[error("idempotency key was reused with a different request")]
     IdempotencyConflict,
     #[error("word not found")]

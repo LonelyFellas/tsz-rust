@@ -2,7 +2,7 @@ use super::*;
 use std::time::Instant;
 
 #[sqlx::test]
-async fn batch5_homograph_reason_is_required_atomic_and_audited(pool: PgPool) {
+async fn batch5_duplicate_creation_only_requires_annotations(pool: PgPool) {
     let state = batch3_state(&pool).await;
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
@@ -14,45 +14,34 @@ async fn batch5_homograph_reason_is_required_atomic_and_audited(pool: PgPool) {
         json!({"mode":"unified","common":"harbour"}),
     )
     .await;
-    input.as_object_mut().unwrap().remove("homograph_reason");
     let key = Uuid::now_v7();
-    let (_, conflict) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
+    let (status, conflict) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(conflict["code"], "annotation_conflict");
     input["annotation"] = json!("2");
     input["annotation_updates"] = entry_annotations_updates(&conflict, &["1"]);
-    let (status, rejected) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
-    assert_eq!(rejected["field"], "homograph_reason");
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entries")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 1);
-    let annotation: Option<String> =
-        sqlx::query_scalar("SELECT annotation FROM lexicon.entries WHERE id=$1")
-            .bind(Uuid::parse_str(first["word"]["id"].as_str().unwrap()).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!(annotation.is_none(), "拒绝不能改写原有词条标注");
-    for invalid in ["   ".to_owned(), "x".repeat(501), "bad\nreason".to_owned()] {
-        input["homograph_reason"] = json!(invalid);
-        let (status, rejected) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
-    }
-    input["homograph_reason"] = json!("  独立含义，不应合并到原词条  ");
     let (status, created) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_ne!(created["word"]["id"], first["word"]["id"]);
     let metadata: Value = sqlx::query_scalar("SELECT metadata FROM audit.admin_actions WHERE action='lexicon.entry.create.v3' AND resource_id=$1")
         .bind(Uuid::parse_str(created["word"]["id"].as_str().unwrap()).unwrap()).fetch_one(&pool).await.unwrap();
-    assert_eq!(metadata["homograph_reason"], "独立含义，不应合并到原词条");
+    assert!(metadata.get("homograph_reason").is_none(), "{metadata}");
     let (status, replay) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
     assert_eq!(status, StatusCode::CREATED, "{replay}");
     assert_eq!(replay, created);
-    input["homograph_reason"] = json!("不同理由");
+    input["annotation"] = json!("3");
     let (status, changed) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
     assert_eq!(status, StatusCode::CONFLICT, "{changed}");
     assert_eq!(changed["code"], "idempotency_conflict");
+    input["homograph_reason"] = json!("obsolete field");
+    let (status, rejected) =
+        entry_annotations_submit(&state, &bearer, Uuid::now_v7(), &mut input).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entries")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2, "已删除的字段不能进入创建流程");
 }
 
 #[sqlx::test]
@@ -170,29 +159,12 @@ async fn batch5_legacy_headwords_check_every_materialized_prototype(pool: PgPool
     )
     .await;
     input.as_object_mut().unwrap().remove("headwords");
-    input.as_object_mut().unwrap().remove("homograph_reason");
     let key = Uuid::now_v7();
     let (status, conflict) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
     assert_eq!(conflict["code"], "annotation_conflict");
     input["annotation"] = json!("2");
     input["annotation_updates"] = entry_annotations_updates(&conflict, &["1"]);
-    let (status, missing) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
-    assert_eq!(missing["field"], "homograph_reason");
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.entries")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 1);
-    let annotation: Option<String> =
-        sqlx::query_scalar("SELECT annotation FROM lexicon.entries WHERE id=$1")
-            .bind(Uuid::parse_str(existing["word"]["id"].as_str().unwrap()).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!(annotation.is_none());
-    input["homograph_reason"] = json!("词性原型重合，但含义独立");
     let (status, created) = entry_annotations_submit(&state, &bearer, key, &mut input).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_ne!(created["word"]["id"], existing["word"]["id"]);
