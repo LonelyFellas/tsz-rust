@@ -16678,6 +16678,8 @@ async fn initial_headword_backfill_preserves_duplicate_empty_drafts(pool: PgPool
     }
     sqlx::query("UPDATE lexicon.v3_entry_state SET initial_headwords=NULL, initial_headword_keys=NULL WHERE entry_id=ANY($1)")
         .bind(&ids[..2]).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE lexicon.entries SET detection_snapshot=jsonb_set(detection_snapshot, '{surface_match_page}', $2) WHERE id=$1")
+        .bind(ids[0]).bind(historical_detection_page_without_creator_name(ids[2])).execute(&pool).await.unwrap();
     let report = tsz_rust::lexicon::v3_initial_headword_backfill::dry_run(&pool)
         .await
         .unwrap();
@@ -16691,6 +16693,97 @@ async fn initial_headword_backfill_preserves_duplicate_empty_drafts(pool: PgPool
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lexicon.v3_entry_state WHERE entry_id=ANY($1) AND initial_headwords ->> 'common'='backfillduplicateprobe'")
         .bind(&ids).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 3);
+}
+
+fn historical_detection_page_without_creator_name(entry_id: Uuid) -> Value {
+    let mut page = json!({
+        "schema_version": 3,
+        "snapshot_id": Uuid::now_v7(),
+        "items": [],
+        "total": 1,
+        "matched_entry_contexts": [{
+            "entry_id": entry_id,
+            "created_by_name": "词库管理员",
+            "presentation": {"label":"center","matched_surfaces":["center"],"strategy_version":"surface_summary_v1"},
+            "pos_labels": ["noun"],
+            "gloss_previews": [],
+            "updated_at": "2026-09-29T00:00:00Z",
+            "inbound_relations": {"total":0,"by_type":{"synonym":0,"antonym":0,"derivative":0},"previews":[],"truncated":false}
+        }],
+        "confirmation_reasons": ["unacknowledged_surface_matches"],
+        "policy_name": "surface_warning_acknowledgement",
+        "policy_epoch": 1,
+        "continuation_policy": "enabled",
+        "next_cursor": null,
+        "surface_confirmation_token": "fixture-token"
+    });
+    serde_json::from_value::<tsz_rust::lexicon::dto::SurfaceMatchPageV3>(page.clone()).unwrap();
+    page["matched_entry_contexts"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("created_by_name");
+    page
+}
+
+#[sqlx::test]
+async fn retired_detection_cache_requires_redetection_instead_of_returning_unavailable(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis.clone())
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let surface = "retireddetectionprobe";
+    let (status, mut detection) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/detections"),
+        &bearer,
+        None,
+        Some(json!({"schema_version":3,"language":"en","kind":"word","surface":surface})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detection}");
+    let detection_id = detection["detection_id"].as_str().unwrap().to_owned();
+    detection["surface_match_page"] =
+        historical_detection_page_without_creator_name(Uuid::now_v7());
+    let retired_key = format!("lexicon:detection:{actor}:{detection_id}");
+    let mut connection = redis.get().await.unwrap();
+    deadpool_redis::redis::cmd("DEL")
+        .arg(format!("lexicon:detection:v3:{actor}:{detection_id}"))
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
+    deadpool_redis::redis::cmd("SET")
+        .arg(&retired_key)
+        .arg(serde_json::to_string(&detection).unwrap())
+        .arg("EX")
+        .arg(60)
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
+    let (status, rejected) = call(
+        &state, Method::POST, &format!("{ROOT}/entries"), &bearer, Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"detection_id":detection_id,"kind":"word","headwords":{"mode":"unified","common":surface}})),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+    assert_eq!(rejected["code"], "detection_mismatch");
+    let mut body = entry_annotations_create_body(
+        &state,
+        &bearer,
+        surface,
+        json!({"mode":"unified","common":surface}),
+    )
+    .await;
+    let (status, created) =
+        entry_annotations_submit(&state, &bearer, Uuid::now_v7(), &mut body).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    deadpool_redis::redis::cmd("DEL")
+        .arg(retired_key)
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
 }
 
 #[sqlx::test]

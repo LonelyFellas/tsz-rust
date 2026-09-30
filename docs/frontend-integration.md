@@ -53,7 +53,8 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 同名空草稿在列表中可查询，也参与数字标注分组；`existing_draft_id` 只提供打开入口，不阻止创建独立词条。
 创建请求删除 `homograph_reason`，不再校验或写入区分说明；历史审计不变。
 `MatchedEntryContextV3.created_by_name` 为必填创建人姓名，标注冲突与匹配页面共用该结构。
-前端须从本次 OpenAPI 同步严格 runtime schema。快照存储前缀升至 v3，旧在途快照按过期处理，重新检测即可。
+前端须从本次 OpenAPI 同步严格 runtime schema。检测缓存使用 `lexicon:detection:v3:`，匹配快照使用 `lexicon:surface-snapshot:v3:`；旧在途检测与快照失效，重新检测即可。
+历史检测快照的主词回填只读取主词推导字段，不解析匹配页面上下文。
 
 旧前端会拒绝新增响应字段或发送已删除请求字段；新前端也不能消费旧后端缺少姓名的冲突上下文，且旧后端仍有同名空草稿阻断。
 两种混合版本都不能完成本次创建流程，不能在线任意滚动发布。后续发布须在暂停词库创编的维护窗口切换配套前后端并刷新页面，再验收恢复；单端回退同样不受支持。

@@ -1,14 +1,14 @@
 use std::collections::BTreeSet;
 
 use anyhow::Context;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::{
     dto::{
-        BuiltinDictionaryEvidenceV3, DetectLexiconSurfaceResponseV3, SourceDialect,
+        BuiltinDictionaryEvidenceV3, DetectionSurfaceRequestEchoV3, SourceDialect,
         SuggestedRegionalVariantsV3, WordHeadwordsV2,
     },
     normalization::{NormalizedHeadword, normalize_headword, sha256_json},
@@ -38,6 +38,13 @@ struct Candidate {
     keys: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct HeadwordDetectionSnapshot {
+    request: DetectionSurfaceRequestEchoV3,
+    normalized_surface: String,
+    builtin_dictionary: BuiltinDictionaryEvidenceV3,
+}
+
 fn initial_keys(headwords: &WordHeadwordsV2) -> anyhow::Result<Vec<String>> {
     match headwords {
         WordHeadwordsV2::Unified { common } => {
@@ -51,7 +58,7 @@ fn initial_keys(headwords: &WordHeadwordsV2) -> anyhow::Result<Vec<String>> {
     }
 }
 
-fn derive_headwords(detection: &DetectLexiconSurfaceResponseV3) -> anyhow::Result<WordHeadwordsV2> {
+fn derive_headwords(detection: &HeadwordDetectionSnapshot) -> anyhow::Result<WordHeadwordsV2> {
     let mut candidates = BTreeSet::new();
     if let BuiltinDictionaryEvidenceV3::Matched {
         suggested_forms, ..
@@ -127,7 +134,7 @@ async fn candidates(
     let mut blockers = Vec::new();
     for (entry_id, snapshot, entry_kind) in rows {
         let derived = (|| -> anyhow::Result<Candidate> {
-            let detection: DetectLexiconSurfaceResponseV3 =
+            let detection: HeadwordDetectionSnapshot =
                 serde_json::from_value(snapshot).context("invalid_detection_snapshot")?;
             let headwords = derive_headwords(&detection)?;
             let keys = initial_keys(&headwords)?;
@@ -268,7 +275,7 @@ mod tests {
 
     #[test]
     fn ambiguous_historical_base_suggestions_are_blocked_instead_of_guessed() {
-        let detection: DetectLexiconSurfaceResponseV3 = serde_json::from_value(json!({
+        let detection: HeadwordDetectionSnapshot = serde_json::from_value(json!({
             "schema_version": 3,
             "detection_id": "00000000-0000-4000-8000-000000000001",
             "expires_at": "2026-08-30T00:05:00Z",
