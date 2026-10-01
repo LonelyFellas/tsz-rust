@@ -259,17 +259,34 @@ pub async fn reset_password(
         None => None,
     };
     let scope = reset_scope(user.as_ref(), &target);
+    // 先证明持有验证码，再检查其他绑定信息，避免密码错误成为联系方式枚举探针。
+    state
+        .otp_service
+        .verify_without_consuming(&scope, Purpose::PasswordReset, &input.code)
+        .await
+        .map_err(otp_error)?;
+    let user = user.filter(|u| {
+        u.status == UserStatus::Active
+            && (u.phone.as_deref() == Some(&target) || u.email.as_deref() == Some(&target))
+    });
+    let password = if let Some(user) = &user {
+        Password::parse_for_subjects(
+            &input.new_password,
+            &[
+                user.phone.as_deref().unwrap_or(""),
+                user.email.as_deref().unwrap_or(""),
+            ],
+        )
+        .map_err(|error| super::handler::map_password_field_error(error, "new_password"))?
+    } else {
+        password
+    };
     state
         .otp_service
         .verify(&scope, Purpose::PasswordReset, &input.code)
         .await
         .map_err(otp_error)?;
-    let user = user
-        .filter(|u| {
-            u.status == UserStatus::Active
-                && (u.phone.as_deref() == Some(&target) || u.email.as_deref() == Some(&target))
-        })
-        .ok_or_else(invalid_code)?;
+    let user = user.ok_or_else(invalid_code)?;
     let hash = password.hash().await.map_err(hash_error)?;
     update_password(&mut tx, user.id, &hash).await?;
     tx.commit().await.map_err(AppError::internal)?;

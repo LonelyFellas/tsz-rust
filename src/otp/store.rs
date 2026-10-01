@@ -66,6 +66,30 @@ impl OtpStore {
         submitted: &str,
         max_attempts: u8,
     ) -> Result<bool, OtpStoreError> {
+        self.verify_code_inner(target, purpose, submitted, max_attempts, true)
+            .await
+    }
+
+    /// 用于校验账号关联密码策略前证明验证码；成功保留码，失败仍计次数并锁定。
+    pub(crate) async fn verify_code_without_consuming(
+        &self,
+        target: &str,
+        purpose: Purpose,
+        submitted: &str,
+        max_attempts: u8,
+    ) -> Result<bool, OtpStoreError> {
+        self.verify_code_inner(target, purpose, submitted, max_attempts, false)
+            .await
+    }
+
+    async fn verify_code_inner(
+        &self,
+        target: &str,
+        purpose: Purpose,
+        submitted: &str,
+        max_attempts: u8,
+        consume: bool,
+    ) -> Result<bool, OtpStoreError> {
         let key = self.code_key(target, purpose);
         let mut conn = self.redis.get().await?;
 
@@ -74,7 +98,7 @@ impl OtpStore {
             local stored = redis.call('HGET', KEYS[1], 'code')
             if not stored then return 0 end
             if stored == ARGV[1] then
-                redis.call('DEL', KEYS[1])
+                if ARGV[3] == '1' then redis.call('DEL', KEYS[1]) end
                 return 1
             end
             local n = redis.call('HINCRBY', KEYS[1], 'attempts', 1)
@@ -89,6 +113,7 @@ impl OtpStore {
             .key(&key) // → KEYS[1]
             .arg(submitted) // → ARGV[1]
             .arg(max_attempts) // → ARGV[2]（u8 会以字符串 "3" 传入，Lua 里 tonumber 还原）
+            .arg(u8::from(consume)) // → ARGV[3]：证明阶段保留，最终校验单次消费
             .invoke_async(&mut conn)
             .await?;
 

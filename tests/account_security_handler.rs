@@ -1053,3 +1053,61 @@ async fn session_write_failure_rolls_back_password_and_security_version(pool: Pg
         StatusCode::OK
     );
 }
+
+#[sqlx::test]
+async fn reset_checks_both_contacts_after_otp_proof_without_consuming_rejected_code(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    user(&pool, Some("13800138000"), Some("owner@example.com")).await;
+    for (identifier, weak) in [
+        ("owner@example.com", "Safe!13800138000Cloud"),
+        ("13800138000", "Owner20261001!Cloud"),
+    ] {
+        assert_eq!(
+            post(
+                &state,
+                "/auth/password/forgot",
+                None,
+                json!({"identifier":identifier})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        // 没有有效证明，不能通过错误码探测另一联系方式。
+        let invalid = post(
+            &state,
+            "/auth/password/reset",
+            None,
+            json!({"identifier":identifier,"code":"111111","new_password":weak}),
+        )
+        .await;
+        assert_eq!(invalid.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(invalid.1["code"], "invalid_otp_code");
+        let rejected = post(
+            &state,
+            "/auth/password/reset",
+            None,
+            json!({"identifier":identifier,"code":"000000","new_password":weak}),
+        )
+        .await;
+        assert_eq!(rejected.0, StatusCode::BAD_REQUEST);
+        assert_eq!(rejected.1["code"], "password_too_weak");
+        assert_eq!(rejected.1["field"], "new_password");
+        let valid = post(
+            &state,
+            "/auth/password/reset",
+            None,
+            json!({"identifier":identifier,"code":"000000","new_password":"Another!River73Cloud"}),
+        )
+        .await;
+        assert_eq!(valid.0, StatusCode::OK);
+        let replay = post(
+            &state,
+            "/auth/password/reset",
+            None,
+            json!({"identifier":identifier,"code":"000000","new_password":"Silver!River92Cloud"}),
+        )
+        .await;
+        assert_eq!(replay.0, StatusCode::UNAUTHORIZED);
+    }
+}
