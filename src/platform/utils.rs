@@ -1,12 +1,12 @@
 use std::sync::OnceLock;
 
+use super::Password;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use bcrypt::{DEFAULT_COST, hash};
 use sha2::{Digest, Sha256};
 
 pub fn dummy_hash() -> &'static str {
     static H: OnceLock<String> = OnceLock::new();
-    H.get_or_init(|| hash("timing-balance", DEFAULT_COST).expect("系统错误：dummy hash 生成失败"))
+    H.get_or_init(|| Password::hash_raw("timing-balance").expect("系统错误：dummy hash 生成失败"))
 }
 
 /// 生成 refresh token 明文：32 字节系统级 CSPRNG → base64url（无 padding，43 字符）。

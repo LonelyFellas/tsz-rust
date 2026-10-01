@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 use crate::{
     admin::{
-        AdminRefreshTokenError, AdminRefreshTokenRepository, AdminRole, AdminStatus, NewAdmin,
+        AdminRole, AdminStatus, NewAdmin,
         accounts::{
             AdminAccountAdminResponse, AdminAccountsRepository, AdminAccountsRepositoryError,
             model::{
@@ -24,9 +24,6 @@ use crate::{
 pub enum AdminAccountsServiceError {
     #[error("user repository is none")]
     UserRepositoryNone,
-
-    #[error("session repository is none")]
-    SessionRepositoryNone,
 
     #[error("{0}")]
     InvalidQuery(String),
@@ -56,9 +53,6 @@ pub enum AdminAccountsServiceError {
 
     #[error("user repository failure")]
     UserRepository(#[source] UserError),
-
-    #[error("admin session repository failure")]
-    SessionRepository(#[source] AdminRefreshTokenError),
 }
 
 fn normalize_search_pattern(value: Option<String>) -> Option<String> {
@@ -83,8 +77,6 @@ fn escape_like_literal(value: &str) -> String {
 pub struct AdminAccountsService {
     repository: AdminAccountsRepository,
     user_repository: Option<UserRepository>,
-    /// 只有重置密码需要踢会话，其余端点注入 `None`——与 `user_repository` 同惯例。
-    session_repository: Option<AdminRefreshTokenRepository>,
 }
 
 // 排除 0/O、1/I/l 等容易看错的字符
@@ -137,18 +129,9 @@ impl AdminAccountsService {
         Self {
             repository,
             user_repository,
-            session_repository: None,
         }
     }
 
-    /// 重置密码专用装配：额外注入会话仓库，用于先踢目标的全部会话。
-    pub fn with_session_repository(
-        mut self,
-        session_repository: AdminRefreshTokenRepository,
-    ) -> Self {
-        self.session_repository = Some(session_repository);
-        self
-    }
     pub async fn update_display_name(
         &self,
         target_id: &Uuid,
@@ -298,11 +281,6 @@ impl AdminAccountsService {
         &self,
         target_id: &Uuid,
     ) -> Result<String, AdminAccountsServiceError> {
-        let session_repository = self
-            .session_repository
-            .as_ref()
-            .ok_or(AdminAccountsServiceError::SessionRepositoryNone)?;
-
         let target = self.governable_target(target_id).await?;
 
         let temporary_password = generate_temporary_password(&target.phone)?;
@@ -312,20 +290,11 @@ impl AdminAccountsService {
             .await
             .map_err(AdminAccountsServiceError::PasswordHash)?;
 
-        let revoked = session_repository
-            .revoke_all_by_admin_id(target_id)
-            .await
-            .map_err(AdminAccountsServiceError::SessionRepository)?;
-
         self.repository
             .reset_password(target_id, &password_hash)
             .await
             .map_err(map_repository_error)?;
-
-        tracing::info!(
-            admin_id = %target_id, revoked,
-            "admin password reset by super admin; all sessions revoked"
-        );
+        tracing::info!(admin_id = %target_id, "admin password reset by super admin; all sessions revoked");
 
         Ok(temporary_password)
     }

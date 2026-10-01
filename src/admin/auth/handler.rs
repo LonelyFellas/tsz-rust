@@ -18,7 +18,7 @@ use crate::{
     api::ApiJson,
     error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
-    platform::{Password, Phone, validate_password},
+    platform::{Password, Phone},
     state::AppState,
 };
 
@@ -34,8 +34,8 @@ pub struct ChangePasswordRequest {
     /// 当前密码，用于在改密前重新验证管理员身份
     #[schema(example = "CurrentPassword123!")]
     current_password: String,
-    /// 符合管理员密码策略的新密码
-    #[schema(example = "NewStrongPassword456!")]
+    /// 15–128 个 Unicode 字符，区分大小写，支持符号与空格；须通过弱密码与泄露检查。
+    #[schema(min_length = 15, max_length = 128)]
     new_password: String,
 }
 
@@ -47,7 +47,7 @@ pub struct ChangePasswordRequest {
     security(("bearer_auth" = [])),
     request_body = ChangePasswordRequest,
     responses(
-        (status = 204, description = "密码修改成功，must_change_password 标志已清除"),
+        (status = 204, description = "密码修改成功，must_change_password 标志已清除，全部会话失效"),
         (status = 400, description = "新旧密码相同，或新密码不符合管理员密码策略"),
         (status = 401, description = "缺少/无效/过期 token，账号不存在，或当前密码错误"),
     )
@@ -55,6 +55,7 @@ pub struct ChangePasswordRequest {
 pub async fn change_password(
     State(state): State<AppState>,
     auth: AdminAuth,
+    jar: CookieJar,
     ApiJson(req): ApiJson<ChangePasswordRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let repo = AdminRepository::new(state.pool.clone());
@@ -63,6 +64,12 @@ pub async fn change_password(
         .await
         .map_err(map_admin_error)?;
 
+    if admin.security_version != auth.security_version {
+        return Err(AppError::unauthorized(
+            ErrorCode::InvalidToken,
+            "invalid token",
+        ));
+    }
     let current_password_valid =
         Password::verify_raw(req.current_password, admin.password_hash.clone()).await;
     if !current_password_valid {
@@ -82,20 +89,11 @@ pub async fn change_password(
         ));
     }
 
-    validate_password(&req.new_password, &admin.phone).map_err(|error| {
-        AppError::validation(
-            ErrorCode::InvalidPassword,
-            "new_password",
-            error.to_string(),
-        )
-    })?;
-    let password = Password::parse(&req.new_password).map_err(|_| {
-        AppError::validation(
-            ErrorCode::InvalidPassword,
-            "new_password",
-            "new password is invalid",
-        )
-    })?;
+    let password =
+        Password::parse_for_subjects(&req.new_password, &[&admin.phone, &admin.display_name])
+            .map_err(|error| {
+                crate::auth::handler::map_password_field_error(error, "new_password")
+            })?;
     let password_hash = password.hash().await.map_err(|error| {
         AppError::unavailable_with_source(
             ErrorCode::PasswordHashUnavailable,
@@ -115,7 +113,10 @@ pub async fn change_password(
         ));
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok((
+        jar.remove(clean_admin_refresh_cookie()),
+        StatusCode::NO_CONTENT,
+    ))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -419,7 +420,8 @@ async fn build_admin_login_response(
 ) -> Result<(CookieJar, AdminLoginResponse), AppError> {
     let admin_profile = build_admin_profile(&admin);
     let token = generate_admin_token(state, &admin).map_err(map_admin_session_error)?;
-    let (jar, refresh_token_expires_at) = issue_admin_refresh_cookie(state, jar, admin.id).await?;
+    let (jar, refresh_token_expires_at) =
+        issue_admin_refresh_cookie(state, jar, admin.id, admin.security_version).await?;
 
     Ok((
         jar,
@@ -444,7 +446,7 @@ fn build_admin_profile(admin: &Admin) -> AdminProfile {
 fn generate_admin_token(state: &AppState, admin: &Admin) -> Result<AdminToken, AdminSessionError> {
     let access_token = state
         .admin_token_manager
-        .generate(admin.id, admin.role.as_str())
+        .generate_with_version(admin.id, admin.role.as_str(), admin.security_version)
         .map_err(AdminSessionError::Signing)?;
 
     Ok(AdminToken {
@@ -467,9 +469,10 @@ async fn issue_admin_refresh_cookie(
     state: &AppState,
     jar: CookieJar,
     admin_id: Uuid,
+    security_version: i64,
 ) -> Result<(CookieJar, DateTime<Utc>), AppError> {
     let refresh = admin_session_svc(state)
-        .issue(&admin_id)
+        .issue(&admin_id, security_version)
         .await
         .map_err(map_admin_session_error)?;
     Ok((
@@ -535,6 +538,9 @@ fn map_admin_login_error(err: AdminLoginError) -> AppError {
 
 fn map_admin_session_error(err: AdminSessionError) -> AppError {
     match err {
+        AdminSessionError::Repository(
+            crate::admin::AdminRefreshTokenError::AuthenticationChanged,
+        ) => AppError::unauthorized(ErrorCode::InvalidCredentials, "invalid credentials"),
         AdminSessionError::InvalidRefreshToken => invalid_refresh_token(),
         AdminSessionError::Repository(e) => AppError::internal(e),
         AdminSessionError::Signing(e) => AppError::internal(e),

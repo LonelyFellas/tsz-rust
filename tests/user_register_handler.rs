@@ -13,7 +13,7 @@ use tsz_rust::otp::{model::Purpose, store::OtpStore};
 use tsz_rust::state::AppState;
 
 const PHONE: &str = "13800138000";
-const PASSWORD: &str = "password123";
+const PASSWORD: &str = "Violet!River7294Cloud";
 const CODE: &str = "123456";
 
 fn ttl() -> Duration {
@@ -214,7 +214,7 @@ async fn email_registration_normalizes_and_creates_complete_session(pool: PgPool
             .await
             .unwrap();
     assert!(row.0.is_none());
-    assert!(bcrypt::verify(PASSWORD.to_uppercase(), &row.1).unwrap());
+    assert!(tsz_rust::platform::Password::verify_raw(PASSWORD.to_owned(), row.1).await);
     let roles: i64 = sqlx::query_scalar("SELECT count(*) FROM user_roles WHERE user_id = $1")
         .bind(id)
         .fetch_one(&pool)
@@ -303,11 +303,12 @@ async fn registration_password_policy_is_checked_before_consuming_code(pool: PgP
     save_register_code(&store, PHONE).await;
     for password in [
         "abcdefghi1",
-        "abcdefghijklmnopqrstu1",
+        "abcabcabcabcabcabc",
         "abcdefghijk",
         "12345678901",
         "abcdefghi1!",
-        "密码abcdefghi1",
+        "12345678901234567890",
+        "Safe!13800138000Cloud",
     ] {
         let result = register(
             &state,

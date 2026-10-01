@@ -17,13 +17,13 @@ use tsz_rust::state::AppState;
 use tsz_rust::user::repository::UserRepository;
 use tsz_rust::user::service::{RegisterInput, UserService};
 
-/// 注册一个用户（密码 "password123"），返回 id。
+/// 注册一个用户（密码 "Violet!River7294Cloud"），返回 id。
 async fn register_user(pool: &PgPool, phone: &str) -> uuid::Uuid {
     UserService::new(UserRepository::new(pool.clone()))
         .register(RegisterInput {
             phone: Some(phone.to_owned()),
             email: None,
-            password: "password123".to_owned(),
+            password: "Violet!River7294Cloud".to_owned(),
         })
         .await
         .expect("注册应成功")
@@ -82,7 +82,7 @@ async fn login_for_refresh(pool: &PgPool, phone: &str) -> String {
         pool.clone(),
         "/api/v1/auth/login",
         None,
-        Some(json!({ "identifier": phone, "password": "password123" })),
+        Some(json!({ "identifier": phone, "password": "Violet!River7294Cloud" })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "预置登录应成功");

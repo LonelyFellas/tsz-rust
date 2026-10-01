@@ -57,7 +57,7 @@ async fn issue_session(pool: &PgPool, admin_id: Uuid) {
         AdminRefreshTokenRepository::new(pool.clone()),
         Duration::days(7),
     )
-    .issue(&admin_id)
+    .issue(&admin_id, 0)
     .await
     .expect("签发测试 refresh 应成功");
 }
@@ -243,4 +243,159 @@ async fn anonymous_request_is_unauthorized(pool: PgPool) {
         .await
         .expect("目标管理员应存在");
     assert_eq!(stored.password_hash, "old-hash");
+}
+
+#[sqlx::test]
+async fn own_password_change_revokes_access_refresh_and_preserves_raw_password(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let old = " Original!密码 river cloud ";
+    let new = " New!密码🙂 silver orchard ";
+    let hash = Password::parse(old).unwrap().hash().await.unwrap();
+    let id = seed_admin(&pool, AdminRole::Admin, &hash, false).await;
+    let old_access = token(&state, id, AdminRole::Admin);
+    let session = AdminSessionService::new(
+        AdminRefreshTokenRepository::new(pool.clone()),
+        Duration::days(7),
+    );
+    let old_refresh = session.issue(&id, 0).await.unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/admin/auth/change-password")
+                .header(header::AUTHORIZATION, format!("Bearer {old_access}"))
+                .header(
+                    header::COOKIE,
+                    format!("admin_refresh_token={}", old_refresh.plaintext),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"current_password":old,"new_password":new}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    assert_eq!(active_session_count(&pool, id).await, 0);
+    assert!(session.rotate(&old_refresh.plaintext).await.is_err());
+    let after = AdminRepository::new(pool.clone())
+        .get_by_id(&id)
+        .await
+        .unwrap();
+    assert_eq!(after.security_version, 1);
+    assert!(Password::verify_raw(new.to_owned(), after.password_hash.clone()).await);
+    assert!(!Password::verify_raw(new.to_uppercase(), after.password_hash.clone()).await);
+    for (access, expected) in [
+        (old_access, StatusCode::UNAUTHORIZED),
+        (
+            state
+                .admin_token_manager
+                .generate_with_version(id, AdminRole::Admin.as_str(), after.security_version)
+                .unwrap(),
+            StatusCode::OK,
+        ),
+    ] {
+        let response = tsz_rust::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/profile")
+                    .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    // 旧密码认证后晚到的登录签发，不能在改密后建立新 refresh。
+    assert!(session.issue(&id, 0).await.is_err());
+    assert_eq!(active_session_count(&pool, id).await, 0);
+}
+
+#[sqlx::test]
+async fn password_and_session_revocation_roll_back_together(pool: PgPool) {
+    let id = seed_admin(&pool, AdminRole::Admin, "old-hash", false).await;
+    issue_session(&pool, id).await;
+    sqlx::raw_sql("CREATE FUNCTION reject_password_revocation() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'test revocation failure'; END; $$ LANGUAGE plpgsql; CREATE TRIGGER reject_password_revocation BEFORE UPDATE ON admin_refresh_tokens FOR EACH ROW EXECUTE FUNCTION reject_password_revocation();")
+        .execute(&pool).await.unwrap();
+    assert!(
+        AdminRepository::new(pool.clone())
+            .set_password(&id, "new-hash", false)
+            .await
+            .is_err()
+    );
+    let after = AdminRepository::new(pool.clone())
+        .get_by_id(&id)
+        .await
+        .unwrap();
+    assert_eq!(after.password_hash, "old-hash");
+    assert_eq!(after.security_version, 0);
+    assert_eq!(active_session_count(&pool, id).await, 1);
+}
+
+#[sqlx::test]
+async fn refresh_waits_for_password_change_and_cannot_escape_revocation(pool: PgPool) {
+    let id = seed_admin(&pool, AdminRole::Admin, "old-hash", false).await;
+    let session = AdminSessionService::new(
+        AdminRefreshTokenRepository::new(pool.clone()),
+        Duration::days(7),
+    );
+    let old = session.issue(&id, 0).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE admins SET security_version = security_version + 1 WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let rotate = tokio::spawn(async move { session.rotate(&old.plaintext).await });
+    // 使用第二连接的实际锁等待证据，避免以睡眠推断轮换到达锁点。
+    let mut observed_wait = false;
+    for _ in 0..100 {
+        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE OF a%')").fetch_one(&pool).await.unwrap();
+        if waiting {
+            observed_wait = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(observed_wait, "轮换必须实际进入管理员行锁等待");
+    sqlx::query("UPDATE admin_refresh_tokens SET revoked_at = NOW() WHERE admin_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(rotate.await.unwrap().is_err());
+    assert_eq!(active_session_count(&pool, id).await, 0);
+}
+
+#[sqlx::test]
+async fn admin_security_version_cannot_be_removed_after_password_change(pool: PgPool) {
+    let id = seed_admin(&pool, AdminRole::Admin, "old-hash", false).await;
+    AdminRepository::new(pool.clone())
+        .set_password(&id, "new-hash", false)
+        .await
+        .unwrap();
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260928010000, 20261001000000)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("cannot remove admin security_version"));
+    assert_eq!(
+        AdminRepository::new(pool)
+            .get_by_id(&id)
+            .await
+            .unwrap()
+            .security_version,
+        1
+    );
 }

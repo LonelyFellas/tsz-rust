@@ -56,7 +56,7 @@ impl AdminAccountsRepository {
             r#"
             INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, phone, display_name, password_hash,
+            RETURNING id, phone, display_name, password_hash, security_version,
                       role as "role: AdminRole",
                       status as "status: AdminStatus",
                       must_change_password, failed_login_count, locked_until,
@@ -237,23 +237,20 @@ impl AdminAccountsRepository {
         id: &Uuid,
         password_hash: &str,
     ) -> Result<(), AdminAccountsRepositoryError> {
-        let result = sqlx::query!(
-            r#"
-            UPDATE admins
-            SET password_hash = $2, must_change_password = TRUE, updated_at = NOW()
-            WHERE id = $1
-            "#,
-            id,
-            password_hash,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(AdminAccountsRepositoryError::Database)?;
-
-        if result.rows_affected() == 0 {
-            return Err(AdminAccountsRepositoryError::NotFound);
-        }
-        Ok(())
+        crate::admin::AdminRepository::new(self.pool.clone())
+            .set_password(id, password_hash, true)
+            .await
+            .map_err(|error| match error {
+                crate::admin::AdminRepositoryError::NotFound => {
+                    AdminAccountsRepositoryError::NotFound
+                }
+                crate::admin::AdminRepositoryError::Db(error) => {
+                    AdminAccountsRepositoryError::Database(error)
+                }
+                other => {
+                    AdminAccountsRepositoryError::Database(sqlx::Error::Protocol(other.to_string()))
+                }
+            })
     }
 }
 

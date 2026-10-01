@@ -31,7 +31,7 @@ impl AdminRepository {
             r#"
             INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, phone, display_name, password_hash,
+            RETURNING id, phone, display_name, password_hash, security_version,
                       role as "role: AdminRole",
                       status as "status: AdminStatus",
                       must_change_password, failed_login_count, locked_until,
@@ -55,7 +55,7 @@ impl AdminRepository {
         sqlx::query_as!(
             Admin,
             r#"
-            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", created_at, updated_at
+            SELECT id, phone, display_name, password_hash, security_version, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", created_at, updated_at
             FROM admins
             WHERE id = $1
             "#,
@@ -70,7 +70,7 @@ impl AdminRepository {
         sqlx::query_as!(
             Admin,
             r#"
-            SELECT id, phone, display_name, password_hash, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", created_at, updated_at
+            SELECT id, phone, display_name, password_hash, security_version, role as "role: AdminRole", status as "status: AdminStatus", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as "dialect_preference: AdminDialectPreference", created_at, updated_at
             FROM admins
             WHERE phone = $1
             "#,
@@ -126,23 +126,16 @@ impl AdminRepository {
         password_hash: &str,
         must_change_password: bool,
     ) -> Result<(), AdminRepositoryError> {
-        let result = sqlx::query!(
-            r#"
-                   UPDATE admins
-                   SET password_hash = $2, must_change_password = $3, updated_at = NOW()
-                   WHERE id = $1
-                   "#,
-            id,
-            password_hash,
-            must_change_password,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        ensure_found(result)
+        let affected = self
+            .set_password_transaction(id, None, password_hash, must_change_password)
+            .await?;
+        if affected == 0 {
+            return Err(AdminRepositoryError::NotFound);
+        }
+        Ok(())
     }
 
-    /// 用户自主改密，带旧哈希CAS
+    /// 密码 CAS、安全版本递增和全部 refresh 吊销必须同事务。
     pub async fn set_password_if_unchanged(
         &self,
         id: &Uuid,
@@ -150,21 +143,32 @@ impl AdminRepository {
         new_password_hash: &str,
         must_change_password: bool,
     ) -> Result<u64, AdminRepositoryError> {
-        let result = sqlx::query!(
-            r#"
-            UPDATE admins
-            SET password_hash = $2, must_change_password = $3, updated_at = NOW()
-            WHERE id = $1 AND password_hash = $4
-            "#,
+        self.set_password_transaction(
             id,
+            Some(current_password_hash),
             new_password_hash,
             must_change_password,
-            current_password_hash
         )
-        .execute(&self.pool)
-        .await?;
+        .await
+    }
 
-        Ok(result.rows_affected())
+    async fn set_password_transaction(
+        &self,
+        id: &Uuid,
+        current_hash: Option<&str>,
+        new_hash: &str,
+        must_change: bool,
+    ) -> Result<u64, AdminRepositoryError> {
+        let mut tx = self.pool.begin().await?;
+        let affected = sqlx::query("UPDATE admins SET password_hash = $2, must_change_password = $3, security_version = security_version + 1, updated_at = NOW() WHERE id = $1 AND ($4::text IS NULL OR password_hash = $4)")
+            .bind(id).bind(new_hash).bind(must_change).bind(current_hash)
+            .execute(&mut *tx).await?.rows_affected();
+        if affected > 0 {
+            sqlx::query("UPDATE admin_refresh_tokens SET revoked_at = NOW() WHERE admin_id = $1 AND revoked_at IS NULL")
+                .bind(id).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(affected)
     }
 
     pub async fn register_failed_login(

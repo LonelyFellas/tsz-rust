@@ -86,7 +86,15 @@ impl UserService {
             return Err(RegisterError::Register(SubjectError::PhoneOrEmailMissing));
         }
 
-        let password_hash = Password::parse(&input.password)?.hash().await?;
+        let password_hash = Password::parse_for_subjects(
+            &input.password,
+            &[
+                phone.as_deref().unwrap_or(""),
+                email.as_deref().unwrap_or(""),
+            ],
+        )?
+        .hash()
+        .await?;
         self.create(NewUser {
             id: Uuid::now_v7(),
             phone,
@@ -195,12 +203,7 @@ impl UserService {
 }
 
 pub(crate) async fn verify_login_password(password: &str, hash: &str) -> bool {
-    let raw_matches = Password::verify_raw(password.to_owned(), hash.to_owned()).await;
-    // 不能因匹配 dummy hash 而短路，否则会暴露未知账号与错误密码的耗时差异。
-    let normalized = password.to_ascii_uppercase();
-    let normalized_matches =
-        normalized != password && Password::verify_raw(normalized, hash.to_owned()).await;
-    raw_matches || normalized_matches
+    Password::verify_raw(password.to_owned(), hash.to_owned()).await
 }
 
 #[cfg(test)]

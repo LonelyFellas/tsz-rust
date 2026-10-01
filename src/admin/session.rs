@@ -48,6 +48,8 @@ pub struct NewAdminRefreshToken {
 pub enum AdminRefreshTokenError {
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+    #[error("authentication changed")]
+    AuthenticationChanged,
 }
 
 /// ⚠️ 边界：repository 只搬 SQL——不做哈希（token_hash 原样存）、不判过期语义
@@ -95,17 +97,21 @@ impl AdminRefreshTokenRepository {
     pub async fn revoke_all_and_insert(
         &self,
         row: NewAdminRefreshToken,
+        security_version: i64,
     ) -> Result<u64, AdminRefreshTokenError> {
         let mut tx = self.pool.begin().await?;
 
         // 取锁：同一 admin 的并发 issue 在此排队（admin 行必存在——login 刚认证过；
         // 万一被并发删，后续 INSERT 的 FK 会挡）。只为拿锁，不用结果。
-        sqlx::query_scalar!(
-            r#"SELECT id FROM admins WHERE id = $1 FOR UPDATE"#,
-            row.admin_id
+        let current_version = sqlx::query_scalar::<_, i64>(
+            "SELECT security_version FROM admins WHERE id = $1 FOR UPDATE",
         )
+        .bind(row.admin_id)
         .fetch_optional(&mut *tx)
         .await?;
+        if current_version != Some(security_version) {
+            return Err(AdminRefreshTokenError::AuthenticationChanged);
+        }
 
         let displaced = sqlx::query!(
             r#"UPDATE admin_refresh_tokens SET revoked_at = NOW()
@@ -160,6 +166,9 @@ impl AdminRefreshTokenRepository {
         new_hash: &str,
         new_id: Uuid,
     ) -> Result<Option<(Uuid, DateTime<Utc>)>, AdminRefreshTokenError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT a.id FROM admins a JOIN admin_refresh_tokens r ON r.admin_id = a.id WHERE r.token_hash = $1 FOR UPDATE OF a")
+            .bind(old_hash).fetch_optional(&mut *tx).await?;
         let row = sqlx::query!(
             r#"
             WITH consumed AS (
@@ -175,9 +184,10 @@ impl AdminRefreshTokenRepository {
             new_hash,
             new_id
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
+        tx.commit().await?;
         Ok(row.map(|r| (r.admin_id, r.expires_at)))
     }
 
@@ -261,19 +271,26 @@ impl AdminSessionService {
     /// **Q1 严格单登录**：吊销该 admin 全部既有会话（重新登录即挤掉旧会话）+ 落库新枚，
     /// 由 `revoke_all_and_insert` 在一个事务内带 admins 行锁**原子**完成——并发登录也
     /// 恒余一枚活跃。任意时刻活跃会话数 ≤ 1。
-    pub async fn issue(&self, admin_id: &Uuid) -> Result<IssuedAdminRefresh, AdminSessionError> {
+    pub async fn issue(
+        &self,
+        admin_id: &Uuid,
+        security_version: i64,
+    ) -> Result<IssuedAdminRefresh, AdminSessionError> {
         let plaintext = generate_token_plaintext();
         let token_hash = hash_token(&plaintext);
         let expires_at = Utc::now() + self.refresh_ttl;
 
         let displaced = self
             .repository
-            .revoke_all_and_insert(NewAdminRefreshToken {
-                id: Uuid::now_v7(),
-                admin_id: *admin_id,
-                token_hash,
-                expires_at,
-            })
+            .revoke_all_and_insert(
+                NewAdminRefreshToken {
+                    id: Uuid::now_v7(),
+                    admin_id: *admin_id,
+                    token_hash,
+                    expires_at,
+                },
+                security_version,
+            )
             .await?;
         if displaced > 0 {
             tracing::info!(admin_id = %admin_id, displaced, "admin re-login displaced prior sessions");

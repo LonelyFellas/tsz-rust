@@ -137,7 +137,7 @@ async fn logout_all_kills_the_caller_own_refresh_and_clears_the_cookie(pool: PgP
     let state = AppState::for_test(pool.clone());
     let admin = seed_admin(&pool, false).await;
     let issued = session_service(&pool)
-        .issue(&admin)
+        .issue(&admin, 0)
         .await
         .expect("签发 refresh 应成功");
     let bearer = token(&state, admin);

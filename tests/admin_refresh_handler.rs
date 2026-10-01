@@ -51,7 +51,7 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
 /// 为 admin 预铸一枚 refresh（落库 + 返回明文/死线），供后续塞 Cookie。
 async fn issue_refresh(pool: &PgPool, ttl: Duration, admin_id: Uuid) -> IssuedAdminRefresh {
     AdminSessionService::new(AdminRefreshTokenRepository::new(pool.clone()), ttl)
-        .issue(&admin_id)
+        .issue(&admin_id, 0)
         .await
         .expect("issue refresh 应成功")
 }

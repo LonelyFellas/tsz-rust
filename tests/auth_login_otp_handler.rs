@@ -37,7 +37,7 @@ async fn register_user(pool: &PgPool, phone: &str) -> uuid::Uuid {
         .register(RegisterInput {
             phone: Some(phone.to_owned()),
             email: None,
-            password: "password123".to_owned(),
+            password: "Violet!River7294Cloud".to_owned(),
         })
         .await
         .expect("注册应成功")
@@ -256,7 +256,7 @@ async fn email_login_otp_is_case_insensitive(pool: PgPool) {
         .register(RegisterInput {
             phone: None,
             email: Some("User@X.com".to_owned()),
-            password: "password123".to_owned(),
+            password: "Violet!River7294Cloud".to_owned(),
         })
         .await
         .expect("注册应成功");

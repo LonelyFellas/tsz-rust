@@ -18,7 +18,7 @@ use tsz_rust::admin::{
 };
 use tsz_rust::platform::{Password, PasswordError};
 
-const PASSWORD: &str = "S3cure-Pa55word";
+const PASSWORD: &str = "S3cure-Pa55word!River";
 /// 存量账号的"假哈希"——repository 不做 bcrypt，原样落库，正好用来断言"未被覆盖"。
 const EXISTING_HASH: &str = "existing-hash";
 const EXISTING_NAME: &str = "存量管理员";

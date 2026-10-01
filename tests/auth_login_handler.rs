@@ -14,13 +14,13 @@ use tsz_rust::state::AppState;
 use tsz_rust::user::repository::UserRepository;
 use tsz_rust::user::service::{RegisterInput, UserService};
 
-/// 先注册一个用户（密码 "password123"），返回 id。
+/// 先注册一个用户（密码 "Violet!River7294Cloud"），返回 id。
 async fn register_user(pool: &PgPool, phone: &str) -> uuid::Uuid {
     UserService::new(UserRepository::new(pool.clone()))
         .register(RegisterInput {
             phone: Some(phone.to_owned()),
             email: None,
-            password: "password123".to_owned(),
+            password: "Violet!River7294Cloud".to_owned(),
         })
         .await
         .expect("注册应成功")
@@ -64,7 +64,7 @@ async fn login_returns_200_with_tokens(pool: PgPool) {
 
     let (status, set_cookie, body) = login(
         pool.clone(),
-        json!({ "identifier": "13800138000", "password": "password123" }),
+        json!({ "identifier": "13800138000", "password": "Violet!River7294Cloud" }),
     )
     .await;
 
@@ -236,7 +236,7 @@ async fn login_unknown_user_is_identical_401(pool: PgPool) {
     // 用户不存在
     let (s_unknown, _, b_unknown) = login(
         pool,
-        json!({ "identifier": "19999999999", "password": "password123" }),
+        json!({ "identifier": "19999999999", "password": "Violet!River7294Cloud" }),
     )
     .await;
 
@@ -262,7 +262,7 @@ async fn login_disabled_account_is_403(pool: PgPool) {
 
     let (status, set_cookie, _) = login(
         pool,
-        json!({ "identifier": "13800138000", "password": "password123" }),
+        json!({ "identifier": "13800138000", "password": "Violet!River7294Cloud" }),
     )
     .await;
 
@@ -287,7 +287,7 @@ async fn login_returns_all_roles_from_table(pool: PgPool) {
 
     let (status, _, body) = login(
         pool,
-        json!({ "identifier": "13800138000", "password": "password123" }),
+        json!({ "identifier": "13800138000", "password": "Violet!River7294Cloud" }),
     )
     .await;
 
@@ -319,14 +319,14 @@ async fn login_email_only_user_omits_phone_field(pool: PgPool) {
         .register(RegisterInput {
             phone: None,
             email: Some("a@b.com".to_owned()),
-            password: "password123".to_owned(),
+            password: "Violet!River7294Cloud".to_owned(),
         })
         .await
         .expect("注册应成功");
 
     let (status, _, body) = login(
         pool,
-        json!({ "identifier": "a@b.com", "password": "password123" }),
+        json!({ "identifier": "a@b.com", "password": "Violet!River7294Cloud" }),
     )
     .await;
 

@@ -75,6 +75,8 @@ pub struct PasswordForgotRequest {
 pub struct PasswordResetRequest {
     identifier: String,
     code: String,
+    /// 15–128 个 Unicode 字符，区分大小写，支持符号与空格；须通过弱密码与泄露检查。
+    #[schema(min_length = 15, max_length = 128)]
     new_password: String,
 }
 
@@ -82,6 +84,8 @@ pub struct PasswordResetRequest {
 #[serde(deny_unknown_fields)]
 pub struct PasswordChangeRequest {
     current_password: String,
+    /// 15–128 个 Unicode 字符，区分大小写，支持符号与空格；须通过弱密码与泄露检查。
+    #[schema(min_length = 15, max_length = 128)]
     new_password: String,
 }
 
@@ -245,7 +249,8 @@ pub async fn reset_password(
     ApiJson(input): ApiJson<PasswordResetRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let target = normalize(&input.identifier)?;
-    let password = new_password(&input.new_password)?;
+    let password = Password::parse_for_subjects(&input.new_password, &[&target])
+        .map_err(|error| super::handler::map_password_field_error(error, "new_password"))?;
     validate_code(&input.code)?;
     let found = optional_user(&state, &target).await?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
@@ -285,10 +290,18 @@ pub async fn change_password(
     jar: CookieJar,
     ApiJson(input): ApiJson<PasswordChangeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let password = new_password(&input.new_password)?;
+    new_password(&input.new_password)?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let user = lock_user(&mut tx, auth.subject).await?;
     check_session(&user, &auth)?;
+    let password = Password::parse_for_subjects(
+        &input.new_password,
+        &[
+            user.phone.as_deref().unwrap_or(""),
+            user.email.as_deref().unwrap_or(""),
+        ],
+    )
+    .map_err(|error| super::handler::map_password_field_error(error, "new_password"))?;
     if !verify_login_password(&input.current_password, &user.password_hash).await {
         return Err(AppError::unauthorized(
             ErrorCode::InvalidCredentials,
@@ -309,23 +322,8 @@ pub async fn change_password(
 }
 
 pub(crate) fn new_password(value: &str) -> Result<Password, AppError> {
-    if value.len() < 11 {
-        return Err(super::handler::map_password_error(PasswordError::TooShort));
-    }
-    if value.len() > 20 {
-        return Err(super::handler::map_password_error(PasswordError::TooLong));
-    }
-    if !value.bytes().all(|c| c.is_ascii_alphanumeric())
-        || !value.bytes().any(|c| c.is_ascii_alphabetic())
-        || !value.bytes().any(|c| c.is_ascii_digit())
-    {
-        return Err(AppError::validation(
-            ErrorCode::InvalidPassword,
-            "password",
-            "password must contain letters and digits only",
-        ));
-    }
-    Password::parse(&value.to_ascii_uppercase()).map_err(super::handler::map_password_error)
+    Password::parse(value)
+        .map_err(|error| super::handler::map_password_field_error(error, "new_password"))
 }
 
 async fn current_user(state: &AppState, auth: &AuthUser) -> Result<User, AppError> {
