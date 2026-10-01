@@ -249,7 +249,7 @@ mod password_tests {
             Err(PasswordError::TooWeak)
         ));
         assert!(matches!(
-            Password::parse_for_subjects("My!15257294120Safe", &["15257294120"]),
+            Password::parse_for_subjects("My!13800138000Safe", &["13800138000"]),
             Err(PasswordError::TooWeak)
         ));
         assert!(
