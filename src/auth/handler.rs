@@ -3,7 +3,7 @@ use crate::{
     auth::{AUTH_MOUNT, REFRESH_TOKEN_COOKIE, extract::AuthUser},
     error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
-    platform::{Email, PasswordError, Phone, PhoneError},
+    platform::{Email, Password, PasswordError, Phone, PhoneError},
     session::{
         repository::RefreshTokenRepository,
         service::{SessionError, SessionService},
@@ -145,8 +145,8 @@ pub struct RegisterRequest {
     phone: Option<String>,
     #[schema(example = "student@example.com")]
     email: Option<String>,
-    /// 11–20 位字母数字组合，不区分大小写。
-    #[schema(example = "Password123")]
+    /// 15–128 个 Unicode 字符，区分大小写，支持符号与空格；拒绝弱密码和已知泄露密码。
+    #[schema(min_length = 15, max_length = 128, example = "Violet!River7294Cloud")]
     password: String,
     /// 注册验证码（6 位）
     #[schema(example = "123456")]
@@ -200,7 +200,8 @@ pub async fn register(
         }
     };
 
-    let psd = super::security::new_password(&payload.password)?;
+    let psd = Password::parse_for_subjects(&payload.password, &[&identifier])
+        .map_err(map_password_error)?;
 
     state
         .otp_service
@@ -208,7 +209,7 @@ pub async fn register(
         .await
         .map_err(map_login_otp_error)?;
 
-    // 4) 只有持有有效验证码的请求才执行昂贵的 bcrypt。
+    // 4) 只有持有有效验证码的请求才执行昂贵的 Argon2id。
     let password_hash = psd.hash().await.map_err(|error| {
         AppError::unavailable_with_source(
             ErrorCode::PasswordHashUnavailable,
@@ -759,11 +760,20 @@ fn map_phone_error(error: PhoneError) -> AppError {
     AppError::validation(ErrorCode::InvalidPhone, "phone", message)
 }
 
-pub(super) fn map_password_error(error: PasswordError) -> AppError {
+pub(crate) fn map_password_error(error: PasswordError) -> AppError {
+    map_password_field_error(error, "password")
+}
+
+pub(crate) fn map_password_field_error(error: PasswordError, field: &'static str) -> AppError {
     let (code, message) = match error {
         PasswordError::Empty => (ErrorCode::PasswordMissing, "password is missing"),
         PasswordError::TooShort => (ErrorCode::PasswordTooShort, "password is too short"),
         PasswordError::TooLong => (ErrorCode::PasswordTooLong, "password is too long"),
+        PasswordError::TooWeak => (ErrorCode::PasswordTooWeak, "password is too weak"),
+        PasswordError::Compromised => (
+            ErrorCode::PasswordCompromised,
+            "password has appeared in a compromised-password list",
+        ),
         PasswordError::HashFailed => (
             ErrorCode::PasswordHashUnavailable,
             "password hash unavailable",
@@ -772,7 +782,7 @@ pub(super) fn map_password_error(error: PasswordError) -> AppError {
     if matches!(error, PasswordError::HashFailed) {
         AppError::unavailable(code, message)
     } else {
-        AppError::validation(code, "password", message)
+        AppError::validation(code, field, message)
     }
 }
 

@@ -10,6 +10,7 @@ use crate::{
 
 pub struct AdminAuth {
     pub subject: Uuid,
+    pub security_version: i64,
     /// 目前无人消费；二期 `RequireSuperAdmin` 门禁从这里读，勿删。
     pub role: AdminRole,
 }
@@ -47,8 +48,19 @@ impl FromRequestParts<AppState> for AdminAuth {
         // 4) role claim 认不出 = token 伪造或版本漂移，同样 fail-closed 成 401。
         let role = AdminRole::parse(claims.role.as_str()).ok_or_else(invalid_token)?;
 
+        let current_version =
+            sqlx::query_scalar::<_, i64>("SELECT security_version FROM admins WHERE id = $1")
+                .bind(claims.subject)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(AppError::internal)?;
+        if current_version != Some(claims.security_version) {
+            return Err(invalid_token());
+        }
+
         Ok(AdminAuth {
             subject: claims.subject,
+            security_version: claims.security_version,
             role,
         })
     }

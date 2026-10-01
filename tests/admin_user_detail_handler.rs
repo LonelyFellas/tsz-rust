@@ -356,11 +356,11 @@ async fn disabled_user_cannot_login_refresh_or_access_protected_routes_and_can_r
         .register(RegisterInput {
             phone: Some("13800138000".to_owned()),
             email: None,
-            password: "Password123".to_owned(),
+            password: "Violet!River7294Cloud".to_owned(),
         })
         .await
         .unwrap();
-    let login_body = json!({"identifier": "13800138000", "password": "Password123"});
+    let login_body = json!({"identifier": "13800138000", "password": "Violet!River7294Cloud"});
     let (status, body) = request(
         &state,
         "POST",

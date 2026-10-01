@@ -67,6 +67,7 @@ axum-extra = { version = "0.12.6", features = ["cookie"] }
 time = "0.3.53"
 regex = "1.13.1"
 tower-http = { version = "0.7.0", features = ["trace"] }
+argon2 = { version = "0.6", features = ["getrandom"] }
 
 [features]
 # 开启后在 /swagger-ui 暴露可交互 API 文档。默认关闭：release 二进制不含 UI 资源、不暴露接口清单。

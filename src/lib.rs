@@ -195,7 +195,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         .await?;
     tracing::info!("database migrations applied");
 
-    // 预热 dummy_hash 的 OnceLock：它是 not-found 登录分支做时序平衡用的 bcrypt 哈希，
+    // 预热 dummy_hash 的 OnceLock：它是 not-found 登录分支做时序平衡用的 Argon2id 哈希，
     // 首次调用会同步算 ~250ms。放在 bind 之前、于启动线程上一次性付清，
     // 免得第一个打到不存在账号的登录请求在 async worker 上现算、拖慢当时的在途请求。
     let _ = platform::dummy_hash();

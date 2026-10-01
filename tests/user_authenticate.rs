@@ -16,12 +16,12 @@ fn service(pool: PgPool) -> UserService {
     UserService::new(UserRepository::new(pool))
 }
 
-/// 造一个已注册用户，返回其 id。密码固定 "password123"。
+/// 造一个已注册用户，返回其 id。密码固定 "Violet!River7294Cloud"。
 async fn register_user(svc: &UserService, phone: Option<&str>, email: Option<&str>) -> Uuid {
     svc.register(RegisterInput {
         phone: phone.map(str::to_owned),
         email: email.map(str::to_owned),
-        password: "password123".to_owned(),
+        password: "Violet!River7294Cloud".to_owned(),
     })
     .await
     .expect("注册应成功")
@@ -36,7 +36,7 @@ async fn authenticate_succeeds_with_phone(pool: PgPool) {
     let id = register_user(&svc, Some("13800138000"), None).await;
 
     let user = svc
-        .authenticate("13800138000", "password123")
+        .authenticate("13800138000", "Violet!River7294Cloud")
         .await
         .expect("正确手机号+密码应登录成功");
     assert_eq!(user.id, id);
@@ -49,37 +49,34 @@ async fn authenticate_succeeds_with_email_case_insensitive(pool: PgPool) {
 
     // 登录用大写邮箱：normalize_identifier 会小写化，应命中入库的小写邮箱。
     let user = svc
-        .authenticate("Alice@Example.com", "password123")
+        .authenticate("Alice@Example.com", "Violet!River7294Cloud")
         .await
         .expect("邮箱应大小写不敏感");
     assert_eq!(user.id, id);
 }
 
 #[sqlx::test]
-async fn login_preserves_raw_passwords_and_accepts_web_uppercase_hashes(pool: PgPool) {
+async fn login_preserves_raw_passwords_and_is_case_sensitive(pool: PgPool) {
     let svc = service(pool);
-    for (email, stored, supplied) in [
-        ("raw@example.com", "OldPass!", "OldPass!"),
-        ("web@example.com", "PASSWORD123", "passWORD123"),
-    ] {
-        let user = svc
-            .register(RegisterInput {
-                phone: None,
-                email: Some(email.to_owned()),
-                password: stored.to_owned(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(svc.authenticate(email, supplied).await.unwrap().id, user.id);
+    let raw = " Mixed!密码🙂 river cloud ";
+    let user = svc
+        .register(RegisterInput {
+            phone: None,
+            email: Some("raw@example.com".to_owned()),
+            password: raw.to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        svc.authenticate("raw@example.com", raw).await.unwrap().id,
+        user.id
+    );
+    for supplied in [raw.to_uppercase(), raw.trim().to_owned()] {
         assert!(matches!(
-            svc.authenticate(email, "wrongPASSWORD123").await,
+            svc.authenticate("raw@example.com", &supplied).await,
             Err(LoginError::InvalidCredentials)
         ));
     }
-    assert!(matches!(
-        svc.authenticate("raw@example.com", "oldpass!").await,
-        Err(LoginError::InvalidCredentials)
-    ));
 }
 
 // ————————————————————— 不可区分：两种失败同一个错 —————————————————————
@@ -102,7 +99,7 @@ async fn wrong_password_is_invalid_credentials(pool: PgPool) {
 #[sqlx::test]
 async fn unknown_identifier_is_invalid_credentials(pool: PgPool) {
     let svc = service(pool);
-    for password in ["password123", "timing-balance", "TIMING-BALANCE"] {
+    for password in ["Violet!River7294Cloud", "timing-balance", "TIMING-BALANCE"] {
         let err = svc
             .authenticate("19999999999", password)
             .await
@@ -126,7 +123,7 @@ async fn disabled_account_with_correct_password_is_account_disabled(pool: PgPool
 
     // 密码【正确】→ 过了密码校验 → 才暴露 AccountDisabled。
     let err = svc
-        .authenticate("13800138000", "password123")
+        .authenticate("13800138000", "Violet!River7294Cloud")
         .await
         .expect_err("禁用账号应失败");
     assert!(

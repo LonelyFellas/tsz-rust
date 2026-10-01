@@ -158,7 +158,8 @@ impl AdminService {
         display_name: &str,
     ) -> Result<SeedOutcome, AdminSeedError> {
         let phone = Phone::parse(phone).map_err(AdminSeedError::Phone)?;
-        let psd = Password::parse(password).map_err(AdminSeedError::Password)?;
+        let psd = Password::parse_for_subjects(password, &[phone.as_str(), display_name])
+            .map_err(AdminSeedError::Password)?;
         match self
             .repository
             .get_by_phone(&phone.clone().into_string())

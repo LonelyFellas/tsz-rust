@@ -22,13 +22,13 @@ use tsz_rust::state::AppState;
 use tsz_rust::user::repository::UserRepository;
 use tsz_rust::user::service::{RegisterInput, UserService};
 
-/// 注册一个用户（密码 "password123"，只绑手机），返回 id。
+/// 注册一个用户（密码 "Violet!River7294Cloud"，只绑手机），返回 id。
 async fn register_user(pool: &PgPool, phone: &str) -> Uuid {
     UserService::new(UserRepository::new(pool.clone()))
         .register(RegisterInput {
             phone: Some(phone.to_owned()),
             email: None,
-            password: "password123".to_owned(),
+            password: "Violet!River7294Cloud".to_owned(),
         })
         .await
         .expect("注册应成功")

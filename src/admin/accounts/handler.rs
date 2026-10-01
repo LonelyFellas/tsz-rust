@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 
 use crate::{
     admin::{
-        AdminAuth, AdminRefreshTokenRepository, AdminStatus,
+        AdminAuth, AdminStatus,
         accounts::{
             AdminAccountAdminResponse, AdminAccountUserResponse, AdminAccountsRepository,
             AdminAccountsService, AdminListQueryParams, AdminUserListResponse,
@@ -446,8 +446,7 @@ pub async fn reset_admin_password(
 ) -> Result<impl IntoResponse, AppError> {
     require_super_admin(&state, &auth).await?;
 
-    let service = AdminAccountsService::new(AdminAccountsRepository::new(state.pool.clone()), None)
-        .with_session_repository(AdminRefreshTokenRepository::new(state.pool.clone()));
+    let service = AdminAccountsService::new(AdminAccountsRepository::new(state.pool.clone()), None);
     let temporary_password = service
         .reset_password(&path.admin_id)
         .await

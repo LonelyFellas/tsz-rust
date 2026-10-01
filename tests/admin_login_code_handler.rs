@@ -30,7 +30,7 @@ use tsz_rust::otp::store::OtpStore;
 use tsz_rust::state::AppState;
 
 const PHONE: &str = "13800138000";
-const PASSWORD: &str = "password123";
+const PASSWORD: &str = "Violet!River7294Cloud";
 
 /// 建一个可登录的 active admin（与 admin_login_handler 同款 helper）。
 async fn create_admin(pool: &PgPool, phone: &str) -> uuid::Uuid {

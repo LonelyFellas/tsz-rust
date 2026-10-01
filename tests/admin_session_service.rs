@@ -70,7 +70,7 @@ async fn issue_persists_hashed_token_and_returns_plaintext(pool: PgPool) {
     let svc = service(pool.clone(), Duration::days(7));
 
     let before = Utc::now();
-    let issued = svc.issue(&admin_id).await.expect("issue 应成功");
+    let issued = svc.issue(&admin_id, 0).await.expect("issue 应成功");
     let after = Utc::now();
 
     // 死线 ≈ now + 7 天（夹逼；1s 余量容 DB 微秒截断与时钟粒度）
@@ -109,7 +109,7 @@ async fn concurrent_issue_keeps_single_live_session(pool: PgPool) {
     for round in 0..5 {
         let a = service(pool.clone(), Duration::days(7));
         let b = service(pool.clone(), Duration::days(7));
-        let (ra, rb) = tokio::join!(a.issue(&admin_id), b.issue(&admin_id));
+        let (ra, rb) = tokio::join!(a.issue(&admin_id, 0), b.issue(&admin_id, 0));
         ra.unwrap_or_else(|e| panic!("第 {round} 轮并发 issue A 应成功：{e:?}"));
         rb.unwrap_or_else(|e| panic!("第 {round} 轮并发 issue B 应成功：{e:?}"));
 
@@ -137,10 +137,10 @@ async fn issue_revokes_all_prior_sessions_of_that_admin(pool: PgPool) {
     let bystander = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
-    let first = svc.issue(&admin_id).await.expect("首次登录应成功");
-    let other = svc.issue(&bystander).await.expect("路人登录应成功");
+    let first = svc.issue(&admin_id, 0).await.expect("首次登录应成功");
+    let other = svc.issue(&bystander, 0).await.expect("路人登录应成功");
 
-    let second = svc.issue(&admin_id).await.expect("重新登录应成功");
+    let second = svc.issue(&admin_id, 0).await.expect("重新登录应成功");
     assert_ne!(first.plaintext, second.plaintext, "两次 issue 明文应不同");
 
     // 旧会话被挤掉：行已吊销、rotate 被拒
@@ -199,7 +199,7 @@ async fn rotate_consumes_issued_token_and_keeps_deadline(pool: PgPool) {
     let repo = AdminRefreshTokenRepository::new(pool.clone());
     let svc = service(pool, Duration::days(7));
 
-    let issued = svc.issue(&admin_id).await.unwrap();
+    let issued = svc.issue(&admin_id, 0).await.unwrap();
     // 死线基准取 DB 落库值（微秒精度），不拿内存值比对——TIMESTAMPTZ 截断纳秒会假红
     let deadline = repo
         .find_by_hash(&expected_hash(&issued.plaintext))
@@ -278,7 +278,7 @@ async fn rotate_same_token_twice_is_rejected(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool, Duration::days(7));
 
-    let issued = svc.issue(&admin_id).await.unwrap();
+    let issued = svc.issue(&admin_id, 0).await.unwrap();
     svc.rotate(&issued.plaintext)
         .await
         .expect("首次 rotate 应成功");
@@ -341,7 +341,7 @@ async fn logged_out_token_cannot_be_rotated(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool, Duration::days(7));
 
-    let issued = svc.issue(&admin_id).await.unwrap();
+    let issued = svc.issue(&admin_id, 0).await.unwrap();
     svc.logout(&issued.plaintext).await.expect("logout 应成功");
 
     let err = svc
@@ -358,7 +358,7 @@ async fn logout_is_idempotent_and_silent_on_unknown(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool, Duration::days(7));
 
-    let issued = svc.issue(&admin_id).await.unwrap();
+    let issued = svc.issue(&admin_id, 0).await.unwrap();
     svc.logout(&issued.plaintext)
         .await
         .expect("首次 logout 应 Ok");
@@ -380,7 +380,7 @@ async fn peek_admin_id_finds_owner_without_consuming(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool, Duration::days(7));
 
-    let issued = svc.issue(&admin_id).await.unwrap();
+    let issued = svc.issue(&admin_id, 0).await.unwrap();
 
     let got = svc
         .peek_admin_id(&issued.plaintext)

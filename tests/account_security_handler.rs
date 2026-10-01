@@ -20,7 +20,7 @@ async fn user(pool: &PgPool, phone: Option<&str>, email: Option<&str>) -> User {
         .register(RegisterInput {
             phone: phone.map(str::to_owned),
             email: email.map(str::to_owned),
-            password: "Original1234".into(),
+            password: "Original!River42Cloud".into(),
         })
         .await
         .unwrap()
@@ -104,7 +104,7 @@ async fn bind_email_requires_both_proofs_and_revokes_sessions(pool: PgPool) {
         &state,
         "/auth/login",
         None,
-        json!({"identifier":"13800138000","password":"Original1234"}),
+        json!({"identifier":"13800138000","password":"Original!River42Cloud"}),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -145,7 +145,7 @@ async fn bind_email_requires_both_proofs_and_revokes_sessions(pool: PgPool) {
         &state,
         "/auth/login",
         None,
-        json!({"identifier":"test@example.com","password":"Original1234"}),
+        json!({"identifier":"test@example.com","password":"Original!River42Cloud"}),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{new_login}");
@@ -358,14 +358,14 @@ async fn rate_limit_is_shared_across_scopes_for_the_real_recipient(pool: PgPool)
 }
 
 #[sqlx::test]
-async fn change_password_accepts_legacy_case_and_invalidates_both_tokens(pool: PgPool) {
+async fn change_password_is_case_sensitive_and_invalidates_both_tokens(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let u = user(&pool, Some("13800138000"), None).await;
     let (_, login, cookie) = post(
         &state,
         "/auth/login",
         None,
-        json!({"identifier":"13800138000","password":"Original1234"}),
+        json!({"identifier":"13800138000","password":"Original!River42Cloud"}),
     )
     .await;
     let token = login["access_token"].as_str().unwrap();
@@ -374,7 +374,7 @@ async fn change_password_accepts_legacy_case_and_invalidates_both_tokens(pool: P
             &state,
             "/auth/password/change",
             Some(token),
-            json!({"current_password":"wrong","new_password":"Another12345"})
+            json!({"current_password":"wrong","new_password":"Another!River73Cloud"})
         )
         .await
         .0,
@@ -384,7 +384,7 @@ async fn change_password_accepts_legacy_case_and_invalidates_both_tokens(pool: P
         &state,
         "/auth/password/change",
         Some(token),
-        json!({"current_password":"Original1234","new_password":"Another12345"}),
+        json!({"current_password":"Original!River42Cloud","new_password":"Another!River73Cloud"}),
     )
     .await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{b}");
@@ -413,7 +413,7 @@ async fn change_password_accepts_legacy_case_and_invalidates_both_tokens(pool: P
             &state,
             "/auth/login",
             None,
-            json!({"identifier":"13800138000","password":"Original1234"})
+            json!({"identifier":"13800138000","password":"Original!River42Cloud"})
         )
         .await
         .0,
@@ -424,7 +424,7 @@ async fn change_password_accepts_legacy_case_and_invalidates_both_tokens(pool: P
             &state,
             "/auth/login",
             None,
-            json!({"identifier":"13800138000","password":"another12345"})
+            json!({"identifier":"13800138000","password":"Another!River73Cloud"})
         )
         .await
         .0,
@@ -447,17 +447,17 @@ async fn password_policy_is_shared_and_unchanged_password_rejected(pool: PgPool)
     let token = access(&state, &u);
     for password in [
         "short1",
-        "LettersOnlyHere",
+        "LettersOnly",
         "123456789012",
-        "Symbols12345!",
-        "VeryLongPassword123456",
+        "abcabcabcabcabcabc",
+        "12345678901234567890",
     ] {
         assert_eq!(
             post(
                 &state,
                 "/auth/password/change",
                 Some(&token),
-                json!({"current_password":"Original1234","new_password":password})
+                json!({"current_password":"Original!River42Cloud","new_password":password})
             )
             .await
             .0,
@@ -468,7 +468,7 @@ async fn password_policy_is_shared_and_unchanged_password_rejected(pool: PgPool)
         &state,
         "/auth/password/change",
         Some(&token),
-        json!({"current_password":"Original1234","new_password":"Original1234"}),
+        json!({"current_password":"Original!River42Cloud","new_password":"Original!River42Cloud"}),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
@@ -492,7 +492,7 @@ async fn public_password_reset_codes_can_reset_phone_and_email_accounts(pool: Pg
         let request = json!({
             "identifier": identifier,
             "code": "000000",
-            "new_password": "Another12345"
+            "new_password": "Another!River73Cloud"
         });
         let (status, body, _) = post(&state, "/auth/password/reset", None, request.clone()).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -504,7 +504,7 @@ async fn public_password_reset_codes_can_reset_phone_and_email_accounts(pool: Pg
             &state,
             "/auth/login",
             None,
-            json!({"identifier": identifier, "password": "another12345"}),
+            json!({"identifier": identifier, "password": "Another!River73Cloud"}),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -538,14 +538,12 @@ async fn reset_has_uniform_forgot_responses_and_revokes_old_sessions(pool: PgPoo
             StatusCode::TOO_MANY_REQUESTS
         );
     }
-    let body =
-        json!({"identifier":"unknown@example.com","code":"000000","new_password":"Another12345"});
+    let body = json!({"identifier":"unknown@example.com","code":"000000","new_password":"Another!River73Cloud"});
     assert_eq!(
         post(&state, "/auth/password/reset", None, body).await.0,
         StatusCode::UNAUTHORIZED
     );
-    let body =
-        json!({"identifier":"KNOWN@example.com","code":"000000","new_password":"Another12345"});
+    let body = json!({"identifier":"KNOWN@example.com","code":"000000","new_password":"Another!River73Cloud"});
     assert_eq!(
         post(&state, "/auth/password/reset", None, body.clone())
             .await
@@ -567,7 +565,7 @@ async fn reset_has_uniform_forgot_responses_and_revokes_old_sessions(pool: PgPoo
             &state,
             "/auth/login",
             None,
-            json!({"identifier":"known@example.com","password":"Another12345"})
+            json!({"identifier":"known@example.com","password":"Another!River73Cloud"})
         )
         .await
         .0,
@@ -665,8 +663,7 @@ async fn expired_and_wrong_purpose_reset_codes_cannot_change_password(pool: PgPo
         .0,
         StatusCode::ACCEPTED
     );
-    let body =
-        json!({"identifier":"owner@example.com","code":"000000","new_password":"Another12345"});
+    let body = json!({"identifier":"owner@example.com","code":"000000","new_password":"Another!River73Cloud"});
     assert_eq!(
         post(&state, "/auth/password/reset", None, body.clone())
             .await
@@ -715,7 +712,7 @@ async fn disabled_and_unknown_reset_targets_have_identical_public_responses(pool
             &state,
             "/auth/password/reset",
             None,
-            json!({"identifier":target,"code":"000000","new_password":"Another12345"}),
+            json!({"identifier":target,"code":"000000","new_password":"Another!River73Cloud"}),
         )
         .await;
         responses.push((requested.0, requested.1, reset.0, reset.1));
@@ -741,7 +738,7 @@ async fn security_migration_cannot_be_rolled_back_after_credentials_change(pool:
         .execute(&pool)
         .await
         .unwrap();
-    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923050000, 20260928010000)
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923050000, 20261001000000)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("cannot remove security_version"));
@@ -793,7 +790,7 @@ async fn change_password_clears_secure_cookie_at_the_auth_path(pool: PgPool) {
         &state,
         "/auth/password/change",
         Some(&token),
-        json!({"current_password":"Original1234","new_password":"Another12345"}),
+        json!({"current_password":"Original!River42Cloud","new_password":"Another!River73Cloud"}),
     )
     .await;
     assert_eq!(s, StatusCode::NO_CONTENT, "{b}");
@@ -850,7 +847,7 @@ async fn refresh_waiting_on_user_lock_cannot_outlive_a_security_change(pool: PgP
         &state,
         "/auth/login",
         None,
-        json!({"identifier":"13800138000","password":"Original1234"}),
+        json!({"identifier":"13800138000","password":"Original!River42Cloud"}),
     )
     .await;
     let old_token = login["access_token"].as_str().unwrap().to_owned();
@@ -937,7 +934,7 @@ async fn phone_password_reset_rejects_wrong_codes_then_accepts_the_normalized_pa
         &state,
         "/auth/password/reset",
         None,
-        json!({"identifier":"13800138000","code":"111111","new_password":"Another12345"}),
+        json!({"identifier":"13800138000","code":"111111","new_password":"Another!River73Cloud"}),
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -947,7 +944,7 @@ async fn phone_password_reset_rejects_wrong_codes_then_accepts_the_normalized_pa
             &state,
             "/auth/password/reset",
             None,
-            json!({"identifier":"13800138000","code":"000000","new_password":"Another12345"})
+            json!({"identifier":"13800138000","code":"000000","new_password":"Another!River73Cloud"})
         )
         .await
         .0,
@@ -958,7 +955,7 @@ async fn phone_password_reset_rejects_wrong_codes_then_accepts_the_normalized_pa
             &state,
             "/auth/login",
             None,
-            json!({"identifier":"13800138000","password":"another12345"})
+            json!({"identifier":"13800138000","password":"Another!River73Cloud"})
         )
         .await
         .0,
@@ -969,7 +966,7 @@ async fn phone_password_reset_rejects_wrong_codes_then_accepts_the_normalized_pa
             &state,
             "/auth/login",
             None,
-            json!({"identifier":"13800138000","password":"Original1234"})
+            json!({"identifier":"13800138000","password":"Original!River42Cloud"})
         )
         .await
         .0,
@@ -995,7 +992,7 @@ async fn authenticated_password_login_cannot_issue_a_session_after_a_concurrent_
             &state2,
             "/auth/login",
             None,
-            json!({"identifier":"13800138000","password":"Original1234"}),
+            json!({"identifier":"13800138000","password":"Original!River42Cloud"}),
         )
         .await
     });
@@ -1029,7 +1026,7 @@ async fn session_write_failure_rolls_back_password_and_security_version(pool: Pg
         &state,
         "/auth/login",
         None,
-        json!({"identifier":"13800138000","password":"Original1234"}),
+        json!({"identifier":"13800138000","password":"Original!River42Cloud"}),
     )
     .await;
     let token = login["access_token"].as_str().unwrap();
@@ -1040,7 +1037,7 @@ async fn session_write_failure_rolls_back_password_and_security_version(pool: Pg
             &state,
             "/auth/password/change",
             Some(token),
-            json!({"current_password":"Original1234","new_password":"Another12345"})
+            json!({"current_password":"Original!River42Cloud","new_password":"Another!River73Cloud"})
         )
         .await
         .0,
@@ -1055,4 +1052,62 @@ async fn session_write_failure_rolls_back_password_and_security_version(pool: Pg
             .0,
         StatusCode::OK
     );
+}
+
+#[sqlx::test]
+async fn reset_checks_both_contacts_after_otp_proof_without_consuming_rejected_code(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    user(&pool, Some("13800138000"), Some("owner@example.com")).await;
+    for (identifier, weak) in [
+        ("owner@example.com", "Safe!13800138000Cloud"),
+        ("13800138000", "Owner20261001!Cloud"),
+    ] {
+        assert_eq!(
+            post(
+                &state,
+                "/auth/password/forgot",
+                None,
+                json!({"identifier":identifier})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        // 没有有效证明，不能通过错误码探测另一联系方式。
+        let invalid = post(
+            &state,
+            "/auth/password/reset",
+            None,
+            json!({"identifier":identifier,"code":"111111","new_password":weak}),
+        )
+        .await;
+        assert_eq!(invalid.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(invalid.1["code"], "invalid_otp_code");
+        let rejected = post(
+            &state,
+            "/auth/password/reset",
+            None,
+            json!({"identifier":identifier,"code":"000000","new_password":weak}),
+        )
+        .await;
+        assert_eq!(rejected.0, StatusCode::BAD_REQUEST);
+        assert_eq!(rejected.1["code"], "password_too_weak");
+        assert_eq!(rejected.1["field"], "new_password");
+        let valid = post(
+            &state,
+            "/auth/password/reset",
+            None,
+            json!({"identifier":identifier,"code":"000000","new_password":"Another!River73Cloud"}),
+        )
+        .await;
+        assert_eq!(valid.0, StatusCode::OK);
+        let replay = post(
+            &state,
+            "/auth/password/reset",
+            None,
+            json!({"identifier":identifier,"code":"000000","new_password":"Silver!River92Cloud"}),
+        )
+        .await;
+        assert_eq!(replay.0, StatusCode::UNAUTHORIZED);
+    }
 }

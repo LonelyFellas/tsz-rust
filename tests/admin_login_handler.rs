@@ -33,7 +33,7 @@ use tsz_rust::otp::store::OtpStore;
 use tsz_rust::state::AppState;
 
 const PHONE: &str = "13800138000";
-const PASSWORD: &str = "password123";
+const PASSWORD: &str = "Violet!River7294Cloud";
 const CODE: &str = "123456";
 const WRONG_CODE: &str = "000000";
 /// 与 `for_test_with_otp_store` 的 max_attempts 镜像（码注入后测试内最多验 1-2 次，远不触锁死）

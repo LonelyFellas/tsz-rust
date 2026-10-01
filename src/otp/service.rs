@@ -98,6 +98,24 @@ impl OtpService {
         Ok(())
     }
 
+    /// 成功时不消费 OTP，最终写入凭证前仍必须调用 verify 单次消费。
+    pub(crate) async fn verify_without_consuming(
+        &self,
+        target: &str,
+        purpose: Purpose,
+        code: &str,
+    ) -> Result<(), OtpServiceError> {
+        if self
+            .store
+            .verify_code_without_consuming(target, purpose, code, self.max_attempts)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(OtpServiceError::InvalidCode)
+        }
+    }
+
     pub async fn verify(
         &self,
         target: &str,

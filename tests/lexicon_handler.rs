@@ -16450,7 +16450,7 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replayed, response);
     assert_eq!(current_publication_id(&pool, id).await, current);
-    let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, 20260928010000)
+    let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, 20261001000000)
         .await
         .unwrap_err();
     assert!(format!("{down_error:#}").contains("cannot revert while rollback publications exist"));
@@ -16459,7 +16459,7 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(version, 20260928010000);
+    assert_eq!(version, 20261001000000);
     assert_eq!(current_publication_id(&pool, id).await, current);
 }
 

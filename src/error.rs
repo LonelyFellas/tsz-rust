@@ -33,6 +33,8 @@ pub enum ErrorCode {
     PasswordMissing,
     PasswordTooShort,
     PasswordTooLong,
+    PasswordTooWeak,
+    PasswordCompromised,
     PasswordUnchanged,
     InvalidDisplayName,
     InvalidOtpCode,
@@ -122,7 +124,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 99] = [
+    pub const ALL: [Self; 101] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -145,6 +147,8 @@ impl ErrorCode {
         Self::PasswordMissing,
         Self::PasswordTooShort,
         Self::PasswordTooLong,
+        Self::PasswordTooWeak,
+        Self::PasswordCompromised,
         Self::PasswordUnchanged,
         Self::InvalidDisplayName,
         Self::InvalidOtpCode,
@@ -310,6 +314,16 @@ impl ErrorCode {
             Self::PasswordTooLong => (
                 "password_too_long",
                 "Password too long",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::PasswordTooWeak => (
+                "password_too_weak",
+                "Password too weak",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::PasswordCompromised => (
+                "password_compromised",
+                "Password compromised",
                 StatusCode::BAD_REQUEST,
             ),
             Self::PasswordUnchanged => (

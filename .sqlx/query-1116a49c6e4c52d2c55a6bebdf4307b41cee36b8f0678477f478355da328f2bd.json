@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, phone, display_name, password_hash, role as \"role: AdminRole\", status as \"status: AdminStatus\", must_change_password, failed_login_count, locked_until, created_by_admin_id, dialect_preference as \"dialect_preference: AdminDialectPreference\", created_at, updated_at\n            FROM admins\n            WHERE phone = $1\n            ",
+  "query": "\n            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            RETURNING id, phone, display_name, password_hash, security_version,\n                      role as \"role: AdminRole\",\n                      status as \"status: AdminStatus\",\n                      must_change_password, failed_login_count, locked_until,\n                      created_by_admin_id,\n                      dialect_preference as \"dialect_preference: AdminDialectPreference\",\n                      created_at, updated_at\n            ",
   "describe": {
     "columns": [
       {
@@ -49,6 +49,17 @@
       },
       {
         "ordinal": 4,
+        "name": "security_version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "admins",
+            "name": "security_version"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "role: AdminRole",
         "type_info": "Text",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "status: AdminStatus",
         "type_info": "Text",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "must_change_password",
         "type_info": "Bool",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "failed_login_count",
         "type_info": "Int4",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "locked_until",
         "type_info": "Timestamptz",
         "origin": {
@@ -103,7 +114,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "created_by_admin_id",
         "type_info": "Uuid",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "dialect_preference: AdminDialectPreference",
         "type_info": "Text",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -136,7 +147,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -149,10 +160,17 @@
     ],
     "parameters": {
       "Left": [
-        "Text"
+        "Uuid",
+        "Varchar",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Uuid"
       ]
     },
     "nullable": [
+      false,
       false,
       false,
       false,
@@ -168,5 +186,5 @@
       false
     ]
   },
-  "hash": "964653f1870e7047171c89708c1399bcddc2a5bbddce09499cefd5c2a2f49eaf"
+  "hash": "1116a49c6e4c52d2c55a6bebdf4307b41cee36b8f0678477f478355da328f2bd"
 }

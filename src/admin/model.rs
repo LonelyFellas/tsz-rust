@@ -53,6 +53,7 @@ pub enum AdminDialectPreference {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Admin {
+    pub security_version: i64,
     pub id: Uuid,
     pub display_name: String,
     pub phone: String,
@@ -112,6 +113,7 @@ mod tests {
     /// 只关心 locked_until，其余字段填占位——is_locked 不看它们。
     fn admin_with_lock(locked_until: Option<DateTime<Utc>>) -> Admin {
         Admin {
+            security_version: 0,
             id: Uuid::now_v7(),
             display_name: "占位".into(),
             phone: "13800138000".into(),

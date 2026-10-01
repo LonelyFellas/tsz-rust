@@ -23,7 +23,7 @@ const CODE: &str = "123456";
 
 async fn seed_super_admin(pool: &PgPool, phone: &str) -> Uuid {
     let outcome = AdminService::for_seed(AdminRepository::new(pool.clone()))
-        .seed_super_admin(phone, "password123", "测试超管")
+        .seed_super_admin(phone, "Violet!River7294Cloud", "测试超管")
         .await
         .expect("seed 超管应成功");
     match outcome {

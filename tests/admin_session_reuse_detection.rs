@@ -107,7 +107,7 @@ async fn replaying_rotated_token_revokes_the_live_session(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
-    let a = svc.issue(&admin_id).await.unwrap();
+    let a = svc.issue(&admin_id, 0).await.unwrap();
     let a_prime = svc
         .rotate(&a.plaintext)
         .await
@@ -149,11 +149,11 @@ async fn reuse_detection_is_scoped_to_the_victim(pool: PgPool) {
     let bystander = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
-    let stolen = svc.issue(&victim).await.unwrap();
+    let stolen = svc.issue(&victim, 0).await.unwrap();
     svc.rotate(&stolen.plaintext).await.unwrap();
     backdate_rotated_at(&pool, &stolen.plaintext, GRACE_SECS + 5).await;
 
-    let innocent = svc.issue(&bystander).await.unwrap();
+    let innocent = svc.issue(&bystander, 0).await.unwrap();
 
     svc.rotate(&stolen.plaintext)
         .await
@@ -181,7 +181,7 @@ async fn unknown_token_does_not_trigger_mass_revocation(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
-    let live = svc.issue(&admin_id).await.unwrap();
+    let live = svc.issue(&admin_id, 0).await.unwrap();
 
     svc.rotate("definitely-not-a-real-token")
         .await
@@ -205,7 +205,7 @@ async fn expired_token_is_not_treated_as_reuse(pool: PgPool) {
     let svc = service(pool.clone(), Duration::days(7));
 
     // 先建活跃会话，再直插过期行——顺序反过来会被严格单登录的 issue 清场吊销掉
-    let live = svc.issue(&admin_id).await.unwrap();
+    let live = svc.issue(&admin_id, 0).await.unwrap();
     let expired = "known-plaintext-expired-never-used";
     repo.insert(NewAdminRefreshToken {
         id: Uuid::now_v7(),
@@ -235,8 +235,8 @@ async fn displaced_session_replay_is_not_treated_as_reuse(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
-    let old_login = svc.issue(&admin_id).await.unwrap();
-    let new_login = svc.issue(&admin_id).await.unwrap(); // 单登录：old_login 在此被吊销
+    let old_login = svc.issue(&admin_id, 0).await.unwrap();
+    let new_login = svc.issue(&admin_id, 0).await.unwrap(); // 单登录：old_login 在此被吊销
 
     svc.rotate(&old_login.plaintext)
         .await
@@ -262,7 +262,7 @@ async fn all_rejection_paths_return_the_same_opaque_error(pool: PgPool) {
     let svc = service(pool.clone(), Duration::days(7));
 
     // (a) 窗口外重放
-    let reused = svc.issue(&admin_id).await.unwrap();
+    let reused = svc.issue(&admin_id, 0).await.unwrap();
     svc.rotate(&reused.plaintext).await.unwrap();
     backdate_rotated_at(&pool, &reused.plaintext, GRACE_SECS + 5).await;
     let reuse_err = svc
@@ -322,7 +322,7 @@ async fn in_grace_replay_is_401_without_revocation(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
-    let a = svc.issue(&admin_id).await.unwrap();
+    let a = svc.issue(&admin_id, 0).await.unwrap();
     let a_prime = svc
         .rotate(&a.plaintext)
         .await
@@ -352,7 +352,7 @@ async fn in_grace_replay_mints_nothing(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
-    let a = svc.issue(&admin_id).await.unwrap();
+    let a = svc.issue(&admin_id, 0).await.unwrap();
     svc.rotate(&a.plaintext).await.expect("首次 rotate 应成功");
 
     let live_before = count_live(&pool, admin_id).await;
@@ -370,7 +370,7 @@ async fn grace_does_not_resurrect_logged_out_tokens(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
-    let t = svc.issue(&admin_id).await.unwrap();
+    let t = svc.issue(&admin_id, 0).await.unwrap();
     svc.logout(&t.plaintext).await.expect("logout 应成功");
 
     let live_before = count_live(&pool, admin_id).await;

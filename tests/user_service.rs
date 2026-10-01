@@ -49,7 +49,7 @@ fn valid_input(phone: Option<&str>, email: Option<&str>) -> RegisterInput {
     RegisterInput {
         phone: phone.map(str::to_owned),
         email: email.map(str::to_owned),
-        password: "password123".to_owned(),
+        password: "Violet!River7294Cloud".to_owned(),
     }
 }
 
@@ -84,15 +84,19 @@ async fn register_persists_user_with_role_and_hashed_password(pool: PgPool) {
     // 注册永远是 student（老师须系统内申请，注册无从选 role）
     assert_eq!(user.last_active_role, Some(UserRole::Student));
 
-    // 密码：绝不明文存储，且能 bcrypt 验证回原文
+    // 密码：绝不明文存储，且能原样验证回原文
     assert_ne!(
-        user.password_hash, "password123",
+        user.password_hash, "Violet!River7294Cloud",
         "password_hash 不能是明文"
     );
     assert!(!user.password_hash.is_empty(), "password_hash 不能为空");
     assert!(
-        bcrypt::verify("password123", &user.password_hash).expect("hash 应可被 bcrypt 解析"),
-        "存的哈希应能通过 bcrypt::verify 验回原密码"
+        tsz_rust::platform::Password::verify_raw(
+            "Violet!River7294Cloud".to_owned(),
+            user.password_hash.clone()
+        )
+        .await,
+        "存的哈希应能通过 Argon2id 验回原密码"
     );
 
     // 真落库了（另查一次），且 user_roles 记下了 student 角色
@@ -212,13 +216,13 @@ async fn register_missing_identifier_is_rejected(pool: PgPool) {
     assert_eq!(count, 0, "校验失败不应落任何用户");
 }
 
-/// 明文密码 > 72 字节（bcrypt 上限）→ Password(TooLong)，且不落半个用户。
-/// 显式按字节数拦截，别让 bcrypt 0.19 静默截断到 72（否则 73/72 字节哈希相同）。
+/// 明文密码 > 128 个 Unicode 字符→ Password(TooLong)，且不落半个用户。
+/// 不能按 UTF-8 字节或 UTF-16 单元计数。
 #[sqlx::test]
-async fn register_rejects_password_over_72_bytes(pool: PgPool) {
+async fn register_rejects_password_over_128_characters(pool: PgPool) {
     let svc = service(pool.clone());
     let mut input = valid_input(Some("13800138000"), None);
-    input.password = "a".repeat(73); // 73 字节 > 72
+    input.password = "界".repeat(129); // 按 Unicode 字符计数
 
     let err = svc.register(input).await.expect_err("超长密码应被拒");
     assert!(

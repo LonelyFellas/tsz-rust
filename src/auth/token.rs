@@ -90,10 +90,7 @@ impl TokenManager {
             role: role.to_string(),
             iat: now.timestamp(),
             exp: now.timestamp() + self.ttl.num_seconds(),
-            security_version: match self.realm {
-                Realm::Web => Some(security_version),
-                Realm::Admin => None,
-            },
+            security_version: Some(security_version),
         };
 
         encode(&Header::new(Algorithm::HS256), &payload, &self.encoding_key)
