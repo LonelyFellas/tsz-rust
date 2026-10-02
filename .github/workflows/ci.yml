@@ -229,6 +229,7 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/tsz_rust
       REDIS_URL: redis://localhost:6379/0
+      TEST_REDIS_URL: redis://localhost:6379/0
 
     services:
       postgres:

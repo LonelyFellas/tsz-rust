@@ -33,6 +33,14 @@ class CiWorkflowTests(unittest.TestCase):
                 self.assertIn("DATABASE_URL:", job)
                 self.assertIn("REDIS_URL:", job)
 
+    def test_ci16_integration_exposes_explicit_test_redis_url(self) -> None:
+        integration = self._job("integration")
+
+        self.assertRegex(
+            integration,
+            r"(?m)^      TEST_REDIS_URL: redis://localhost:6379/0$",
+        )
+
     def test_ci09_summary_depends_on_every_required_job(self) -> None:
         summary = self._job("ci-summary")
 
