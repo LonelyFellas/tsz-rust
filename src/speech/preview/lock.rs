@@ -71,7 +71,10 @@ mod tests {
     use super::*;
 
     fn pool() -> Pool {
-        deadpool_redis::Config::from_url("redis://127.0.0.1:6379/0")
+        let url = std::env::var("TEST_REDIS_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .expect("isolated test Redis required");
+        deadpool_redis::Config::from_url(url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .unwrap()
     }

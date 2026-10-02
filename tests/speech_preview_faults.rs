@@ -34,6 +34,7 @@ struct RepoState {
     stale: Option<CacheRecord>,
     save_result: SaveResult,
     save_calls: usize,
+    saved_request_hash: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -79,6 +80,13 @@ impl FakeRepository {
         (state.active.clone(), state.stale.clone(), state.save_calls)
     }
 
+    fn saved_lock_key(&self) -> String {
+        let state = self.state.lock().unwrap();
+        let hash = state.saved_request_hash.as_ref().expect("缓存已写入");
+        let encoded: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!("speech:preview:lock:{encoded}")
+    }
+
     /// 清掉命中缓存，迫使下一次请求重新走 Redis 锁。
     fn clear_active(&self) {
         self.state.lock().unwrap().active = None;
@@ -121,7 +129,7 @@ impl PreviewRepositoryPort for FakeRepository {
 
     async fn save_cache(
         &self,
-        _request_hash: &[u8],
+        request_hash: &[u8],
         _content_hash: &[u8],
         _voice_id: Uuid,
         object_key: &str,
@@ -129,6 +137,7 @@ impl PreviewRepositoryPort for FakeRepository {
     ) -> Result<Option<String>, sqlx::Error> {
         let mut state = self.state.lock().unwrap();
         state.save_calls += 1;
+        state.saved_request_hash = Some(request_hash.to_vec());
         let result = std::mem::take(&mut state.save_result);
         match result {
             SaveResult::Store => {
@@ -167,6 +176,11 @@ impl SpeechProvider for FakeProvider {
     }
 }
 
+struct PresignGate {
+    started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    proceed: tokio::sync::Notify,
+}
+
 struct FaultStore {
     inner: Arc<dyn ObjectStore>,
     put_errors: Mutex<VecDeque<StorageError>>,
@@ -176,6 +190,7 @@ struct FaultStore {
     presign_keys: Mutex<Vec<String>>,
     delete_keys: Mutex<Vec<String>>,
     revoke_on_presign: Mutex<Option<(sqlx::PgPool, Uuid)>>,
+    presign_gate: Mutex<Option<Arc<PresignGate>>>,
 }
 
 impl FaultStore {
@@ -192,6 +207,7 @@ impl FaultStore {
             presign_keys: Mutex::new(vec![]),
             delete_keys: Mutex::new(vec![]),
             revoke_on_presign: Mutex::new(None),
+            presign_gate: Mutex::new(None),
         }
     }
 
@@ -241,6 +257,14 @@ impl ObjectStore for FaultStore {
             return Err(error);
         }
         let signed = self.inner.presign_read(key).await?;
+        let gate = self.presign_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let started = gate.started.lock().unwrap().take();
+            if let Some(started) = started {
+                started.send(()).unwrap();
+            }
+            gate.proceed.notified().await;
+        }
         let revoke = self.revoke_on_presign.lock().unwrap().take();
         if let Some((pool, admin_id)) = revoke {
             revoke_generate(&pool, admin_id).await;
@@ -657,11 +681,18 @@ async fn cancelled_request_still_completes_generation_and_releases_lock(pool: sq
         delay: Duration::from_millis(400),
         calls: AtomicUsize::new(0),
     });
+    let (presigning_tx, presigning_rx) = tokio::sync::oneshot::channel();
+    let gate = Arc::new(PresignGate {
+        started: Mutex::new(Some(presigning_tx)),
+        proceed: tokio::sync::Notify::new(),
+    });
     let store = Arc::new(FaultStore::new(Duration::from_secs(73)));
+    *store.presign_gate.lock().unwrap() = Some(gate.clone());
+    let redis = redis_pool();
     let service = PreviewService::new(
         pool.clone(),
         repo.clone(),
-        redis_pool(),
+        redis.clone(),
         Some(provider.clone()),
         Some(store.clone()),
     );
@@ -681,6 +712,19 @@ async fn cancelled_request_still_completes_generation_and_releases_lock(pool: sq
     })
     .await;
 
+    tokio::time::timeout(Duration::from_secs(3), presigning_rx)
+        .await
+        .expect("后台任务必须进入签名阶段")
+        .expect("缓存已写入，但签名阶段仍在执行");
+    let key = repo.saved_lock_key();
+    let mut connection = redis.get().await.unwrap();
+    let held: bool = deadpool_redis::redis::cmd("EXISTS")
+        .arg(&key)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert!(held, "缓存写入不代表后台任务已释放锁");
+
     let (active, _, saves) = repo.snapshot();
     assert_eq!(saves, 1, "已经付过费的合成结果必须落缓存");
     assert!(active.is_some(), "缓存行应当可被后续请求命中");
@@ -690,8 +734,25 @@ async fn cancelled_request_still_completes_generation_and_releases_lock(pool: sq
         "不应留下需要补偿删除的对象"
     );
 
-    // 锁必须已经释放：清掉命中缓存，迫使同一 fingerprint 重新走锁。
-    // 若锁泄漏，这里会短轮询后返回 InProgress 而不是重新生成。
+    // 缓存写入后仍有签名及权限复核；只等待 save_cache 会与后台收尾竞态。
+    // 放行签名，等待这个 fingerprint 的真实 Redis 锁消失，再清缓存验证重新生成。
+    gate.proceed.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let held: bool = deadpool_redis::redis::cmd("EXISTS")
+                .arg(&key)
+                .query_async(&mut connection)
+                .await
+                .unwrap();
+            if !held {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("后台任务完成后必须释放锁，不能等待租约到期");
+    drop(connection);
     repo.clear_active();
     let response = service
         .create_preview(admin_id, request(&label))
