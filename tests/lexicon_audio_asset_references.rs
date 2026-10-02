@@ -1744,10 +1744,15 @@ async fn permission_audio_sentence_access_does_not_read_word_only_references(poo
         StatusCode::FORBIDDEN,
         "两种基础读取都没有时403：{response}"
     );
-    let creator_sentence_only =
-        seed_permission_admin(&pool, &["sentences.access", "sentences.edit"]).await;
+    let creator_sentence_only = seed_permission_admin(
+        &pool,
+        &["sentences.access", "sentences.edit", "words.access"],
+    )
+    .await;
     let creator_token = bearer(&state, creator_sentence_only);
     let own = upload_asset(&state, &store, &creator_token, "creator.mp3").await;
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key IN ('sentences.edit','words.access')")
+        .bind(creator_sentence_only).execute(&pool).await.unwrap();
     let own_path = format!("{ROOT}/audio-assets/{}/url", own["id"].as_str().unwrap());
     let (status, response) = call(&state, Method::GET, &own_path, &creator_token, None, None).await;
     assert_eq!(

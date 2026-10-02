@@ -524,8 +524,11 @@ async fn ordinary_with_audio_permissions(pool: &PgPool, keys: &[&str]) -> Uuid {
         .execute(pool)
         .await
         .unwrap();
+    let mut grants = keys.iter().map(|key| (*key).to_owned()).collect();
+    tsz_rust::admin::permissions::catalog::expand_grants(&mut grants);
+    let grants: Vec<_> = grants.into_iter().collect();
     sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest($2::text[]), $1")
-        .bind(id).bind(keys).execute(pool).await.unwrap();
+        .bind(id).bind(&grants).execute(pool).await.unwrap();
     id
 }
 
@@ -553,12 +556,8 @@ async fn audio_write_anyof_and_read_anyof_preserve_private_creator_boundary(pool
         );
         let (status, response, _) = call(&state, Method::GET, &path, Some(&bearer), None).await;
         assert_eq!(status, StatusCode::OK, "{action}: {response}");
-        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key=$2")
-            .bind(owner)
-            .bind(action)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key IN ('words.create','words.edit','sentences.create','sentences.edit')")
+            .bind(owner).execute(&pool).await.unwrap();
         let (status, response, _) = call(
             &state,
             Method::POST,

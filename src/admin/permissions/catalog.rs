@@ -121,7 +121,7 @@ pub const CATALOG: &[PermissionDefinition] = &[
         "sentences",
         "编辑本人共享例句",
         "action",
-        ["sentences.access"],
+        ["sentences.access", "words.access"],
         "medium"
     ),
     permission!(
@@ -402,6 +402,84 @@ mod tests {
         .unwrap();
         assert_eq!(preview.dependency_revocations, vec!["sentences.create"]);
         assert_eq!(preview.after, vec!["sentences.access", "words.access"]);
+    }
+
+    #[test]
+    fn sentence_edit_preview_includes_target_reads_and_revocation_cascades() {
+        use crate::admin::{
+            authorization::{RoutePolicy, route_policy},
+            permissions::{AdminAuthorization, service::preview_change},
+        };
+
+        let actor = uuid::Uuid::nil();
+        let preview = preview_change(
+            actor,
+            0,
+            &BTreeSet::new(),
+            &["sentences.edit".to_owned()],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            preview.after,
+            vec!["sentences.access", "sentences.edit", "words.access"]
+        );
+        assert_eq!(
+            preview.dependency_grants,
+            vec!["sentences.access", "words.access"]
+        );
+        let permissions = preview.after.into_iter().collect();
+        let authorization = AdminAuthorization {
+            admin_id: actor,
+            is_super_admin: false,
+            permission_version: 1,
+            permissions,
+        };
+        let Some(RoutePolicy::All(required)) = route_policy(
+            "POST",
+            "/api/v1/admin/lexicon/entries/component-targets/search",
+        ) else {
+            panic!("sentence association picker needs an explicit target-read policy");
+        };
+        for key in required {
+            authorization.require(key).unwrap();
+        }
+        authorization
+            .require_owned_action("sentences.edit", actor)
+            .unwrap();
+        assert!(
+            authorization
+                .require_owned_action("sentences.edit", uuid::Uuid::now_v7())
+                .is_err()
+        );
+        assert!(!authorization.has("words.edit"));
+        assert!(!authorization.has("words.publish"));
+
+        let expanded = preview_change(
+            actor,
+            1,
+            &authorization.permissions,
+            &[
+                "sentences.edit_others".to_owned(),
+                "sentences.publish".to_owned(),
+            ],
+            &[],
+        )
+        .unwrap();
+        let before = expanded.after.into_iter().collect();
+        let revoked = preview_change(actor, 2, &before, &[], &["words.access".to_owned()]).unwrap();
+        assert_eq!(
+            revoked.dependency_revocations,
+            vec!["sentences.edit", "sentences.edit_others"]
+        );
+        assert_eq!(revoked.after, vec!["sentences.access", "sentences.publish"]);
+        assert!(
+            validate_closed(&BTreeSet::from([
+                "sentences.access".to_owned(),
+                "sentences.edit".to_owned(),
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
