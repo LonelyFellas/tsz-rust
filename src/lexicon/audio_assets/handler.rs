@@ -48,7 +48,7 @@ pub async fn create_audio_upload(
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
     let response = service(&state)
-        .create_upload(request)
+        .create_upload(auth.subject, request)
         .await
         .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
@@ -114,6 +114,7 @@ pub async fn audio_asset_url(
 
 fn map_error(error: AudioAssetServiceError) -> AppError {
     match error {
+        AudioAssetServiceError::Authorization(error) => error,
         AudioAssetServiceError::StorageNotConfigured => AppError::request_error(
             ErrorCode::AudioStorageNotConfigured,
             "audio storage is not configured",
@@ -126,9 +127,10 @@ fn map_error(error: AudioAssetServiceError) -> AppError {
             ErrorCode::AudioFileTooLarge,
             "audio file exceeds the size limit",
         ),
-        AudioAssetServiceError::InvalidKey => {
-            AppError::request_error(ErrorCode::InvalidAudioKey, "invalid audio upload key")
-        }
+        AudioAssetServiceError::InvalidKey => AppError::request_error(
+            ErrorCode::InvalidAudioKey,
+            "invalid or unowned audio upload key; request a new upload URL and upload again",
+        ),
         AudioAssetServiceError::UploadNotCompleted => AppError::request_error(
             ErrorCode::AudioUploadNotCompleted,
             "audio upload was not completed",

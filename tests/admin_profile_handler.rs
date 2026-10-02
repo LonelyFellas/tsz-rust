@@ -12,10 +12,9 @@
 //! ③ disabled                           ⇒ 403（对齐 admin refresh 的拍板）
 //! ④ must_change_password = true        ⇒ 403 + code（前端跳改密页的硬契约；
 //!    守卫内联在 handler——唯一守卫组端点，middleware 等多端点批次再抽）
-//! ⑤ 成功 ⇒ 200 {id, phone, display_name, role, permissions, preferences}
-//!    permissions 恒返全量 12 个菜单 key 死数据（Q4/Q10），顺序即侧栏顺序；
-//!    **只在 profile 下发、login 不带**（2026-07-26 拍板：F5 会话恢复走
-//!    refresh→profile，login 一次性下发撑不住该链路；login 侧有防回潮钉子）
+//! ⑤ 成功 ⇒ 当前身份、本人生效权限、授权与目录版本及个人偏好。
+//!    新普通管理员没有业务授权；超管获得已实现目录全集。
+//!    权限只在 profile 下发，不写入登录响应或长期 token。
 //! ```
 //!
 //! 刻意**不查** locked_until（有正向测试钉死）：锁定语义 = 挡新登录/refresh 轮换
@@ -35,22 +34,36 @@ use tsz_rust::admin::{AdminRepository, AdminRole, NewAdmin};
 use tsz_rust::auth::{Realm, TokenManager};
 use tsz_rust::state::AppState;
 
-/// 侧栏菜单 key 的镜像常量（与 `admin/handler.rs` 的 `MENU_PERMISSIONS` 独立抄写，
-/// **刻意不 import**——import 会让断言变成恒真式。顺序即侧栏顺序，是契约的一部分；
-/// 改实现常量必须同步改这里（对照前端 @tsz/types MenuPermission 联合类型）。
-const EXPECTED_MENU_KEYS: [&str; 12] = [
-    "users.access",
-    "classes.access",
+const EXPECTED_PERMISSION_KEYS: [&str; 29] = [
+    "words.detect",
+    "words.validate",
     "words.access",
-    "customdict.access",
+    "words.create",
+    "words.edit",
+    "words.edit_others",
+    "words.publish",
+    "words.archive",
+    "words.restore",
+    "words.rollback",
     "sentences.access",
-    "wordlists.access",
-    "customwordlist.access",
-    "tasks.access",
-    "reviews.access",
+    "sentences.create",
+    "sentences.edit",
+    "sentences.edit_others",
+    "sentences.publish",
+    "sentences.withdraw",
+    "sentences.restore",
+    "sentences.rollback",
+    "users.access",
+    "users.edit",
+    "users.set_status",
+    "users.read_sensitive",
     "teacherapply.access",
-    "comments.access",
-    "coins.access",
+    "teacherapply.review",
+    "teacherapply.revoke",
+    "teacherapply.read_sensitive",
+    "lexicon_settings.access",
+    "lexicon_settings.edit",
+    "speech.generate",
 ];
 
 /// 造一个 active 管理员，返回 id。
@@ -118,16 +131,18 @@ async fn valid_token_returns_full_profile(pool: PgPool) {
         "字段名统一 role（Q11），值为 snake_case"
     );
 
-    // permissions：恰 12 个、顺序逐位对（顺序即侧栏顺序，是契约的一部分）。
-    let perms: Vec<&str> = json["permissions"]
+    let perms: std::collections::BTreeSet<&str> = json["permissions"]
         .as_array()
         .expect("permissions 应恒为数组")
         .iter()
         .map(|v| v.as_str().expect("permission key 应为字符串"))
         .collect();
-    assert_eq!(
-        perms, EXPECTED_MENU_KEYS,
-        "permissions 应为全量 12 个菜单 key 且顺序逐位一致"
+    assert_eq!(perms, EXPECTED_PERMISSION_KEYS.into_iter().collect());
+    assert_eq!(json["permission_version"], 0);
+    assert!(
+        json["catalog_version"]
+            .as_str()
+            .is_some_and(|version| version.len() == 64)
     );
 
     // preferences：字段恒在，从未设置过的管理员拿到后端默认值（英式）。
@@ -140,8 +155,7 @@ async fn valid_token_returns_full_profile(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn plain_admin_gets_same_full_permissions(pool: PgPool) {
-    // Q10 无 RBAC：permissions 是死数据，不随身份变化——admin 与 super_admin 拿到同一份。
+async fn plain_admin_without_grants_has_no_business_permissions(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let id = seed_admin(&pool, AdminRole::Admin, false).await;
     let token = admin_token(&state, id, AdminRole::Admin);
@@ -151,16 +165,13 @@ async fn plain_admin_gets_same_full_permissions(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "普通 admin 应同样 200：{body}");
     let json: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(json["role"].as_str(), Some("admin"));
-    assert_eq!(
-        json["permissions"].as_array().map(Vec::len),
-        Some(EXPECTED_MENU_KEYS.len()),
-        "普通 admin 的 permissions 也应是全量死数据"
-    );
+    assert_eq!(json["permissions"], serde_json::json!([]));
+    assert_eq!(json["permission_version"], 0);
 }
 
 #[sqlx::test]
 async fn response_leaks_no_sensitive_or_extra_fields(pool: PgPool) {
-    // 防「序列化整个 Admin 本体」：响应必须是手挑的 6 个字段，一个不多。
+    // 身份响应不序列化数据库实体。
     let state = AppState::for_test(pool.clone());
     let id = seed_admin(&pool, AdminRole::Admin, false).await;
     let token = admin_token(&state, id, AdminRole::Admin);
@@ -185,7 +196,7 @@ async fn response_leaks_no_sensitive_or_extra_fields(pool: PgPool) {
         );
     }
     // 方言偏好只以 preferences.dialect 出现，不把库里的列名直接抖出去。
-    assert_eq!(obj.len(), 7, "响应应含独立发布权限字段：{body}");
+    assert_eq!(obj.len(), 9, "身份、权限及版本字段：{body}");
     assert!(obj["can_publish_lexicon"].is_boolean());
 }
 

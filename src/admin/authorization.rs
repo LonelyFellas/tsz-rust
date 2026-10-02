@@ -1,18 +1,26 @@
 use axum::{
-    extract::{MatchedPath, Request, State},
-    http::Method,
+    extract::{FromRequestParts, MatchedPath, Request, State},
     middleware::Next,
     response::Response,
 };
 
 use crate::{
-    admin::{Admin, AdminAuth, AdminRepository, AdminRepositoryError},
+    admin::{Admin, AdminAuth, AdminRepository, AdminRepositoryError, permissions},
     error::{AppError, ErrorCode},
     state::AppState,
 };
 
-/// 每次都按 token subject 回库核对最新状态，不信任可能过期的 role claim。
 pub(crate) async fn require_active_admin(
+    state: &AppState,
+    auth: &AdminAuth,
+) -> Result<Admin, AppError> {
+    auth.active_admin
+        .get_or_try_init(|| load_active_admin(state, auth))
+        .await
+        .cloned()
+}
+
+pub(crate) async fn load_active_admin(
     state: &AppState,
     auth: &AdminAuth,
 ) -> Result<Admin, AppError> {
@@ -20,7 +28,12 @@ pub(crate) async fn require_active_admin(
         .get_by_id(&auth.subject)
         .await
         .map_err(map_admin_error)?;
-
+    if admin.security_version != auth.security_version {
+        return Err(AppError::unauthorized(
+            ErrorCode::InvalidToken,
+            "invalid token",
+        ));
+    }
     if !admin.is_active() {
         return Err(AppError::forbidden(ErrorCode::AccountDisabled, "forbidden"));
     }
@@ -39,68 +52,462 @@ pub(crate) async fn require_super_admin(
 ) -> Result<Admin, AppError> {
     let admin = require_active_admin(state, auth).await?;
     if !admin.is_super_admin() {
-        return Err(AppError::forbidden(ErrorCode::Forbidden, "forbidden"));
+        return Err(AppError::forbidden(
+            ErrorCode::Forbidden,
+            "super admin required",
+        ));
     }
     Ok(admin)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum RoutePolicy {
+    SessionFlow,
+    ActiveSession,
+    SuperAdmin,
+    All(&'static [&'static str]),
+    Any(&'static [&'static str]),
+}
+
+pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
+    ("POST", "/auth/login", RoutePolicy::SessionFlow),
+    ("POST", "/auth/login-code", RoutePolicy::SessionFlow),
+    ("POST", "/auth/refresh", RoutePolicy::SessionFlow),
+    ("POST", "/auth/logout", RoutePolicy::SessionFlow),
+    ("POST", "/auth/logout-all", RoutePolicy::SessionFlow),
+    ("POST", "/auth/change-password", RoutePolicy::SessionFlow),
+    ("GET", "/profile", RoutePolicy::ActiveSession),
+    ("PATCH", "/profile/preferences", RoutePolicy::ActiveSession),
+    ("GET", "/admins", RoutePolicy::SuperAdmin),
+    ("POST", "/admins", RoutePolicy::SuperAdmin),
+    ("POST", "/admins/create-code", RoutePolicy::SuperAdmin),
+    ("PATCH", "/admins/{admin_id}", RoutePolicy::SuperAdmin),
+    (
+        "PATCH",
+        "/admins/{admin_id}/status",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "POST",
+        "/admins/{admin_id}/reset-password",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "PATCH",
+        "/admins/{admin_id}/lexicon-publication-permission",
+        RoutePolicy::SuperAdmin,
+    ),
+    ("GET", "/permissions", RoutePolicy::SuperAdmin),
+    (
+        "GET",
+        "/admins/{admin_id}/permissions",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "GET",
+        "/permissions/{permission_key}/admins",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "POST",
+        "/permission-changes/preview",
+        RoutePolicy::SuperAdmin,
+    ),
+    ("POST", "/permission-changes", RoutePolicy::SuperAdmin),
+    ("GET", "/permission-tags", RoutePolicy::SuperAdmin),
+    ("POST", "/permission-tags", RoutePolicy::SuperAdmin),
+    (
+        "PATCH",
+        "/permission-tags/{tag_id}",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "DELETE",
+        "/permission-tags/{tag_id}",
+        RoutePolicy::SuperAdmin,
+    ),
+    ("POST", "/permission-tag-changes", RoutePolicy::SuperAdmin),
+    ("GET", "/permission-audits", RoutePolicy::SuperAdmin),
+    ("GET", "/users", RoutePolicy::All(&["users.access"])),
+    ("GET", "/users/{id}", RoutePolicy::All(&["users.access"])),
+    ("PATCH", "/users/{id}", RoutePolicy::All(&["users.edit"])),
+    (
+        "PATCH",
+        "/users/{id}/status",
+        RoutePolicy::All(&["users.set_status"]),
+    ),
+    (
+        "GET",
+        "/teacher-applications",
+        RoutePolicy::All(&["teacherapply.access"]),
+    ),
+    (
+        "GET",
+        "/teacher-applications/{id}",
+        RoutePolicy::All(&["teacherapply.access"]),
+    ),
+    (
+        "POST",
+        "/teacher-applications/{id}/review",
+        RoutePolicy::All(&["teacherapply.review"]),
+    ),
+    (
+        "DELETE",
+        "/users/{id}/teacher-certification",
+        RoutePolicy::All(&["teacherapply.revoke"]),
+    ),
+    (
+        "GET",
+        "/teacher-certification/files/{id}",
+        RoutePolicy::All(&["teacherapply.read_sensitive"]),
+    ),
+    (
+        "GET",
+        "/settings/parts-of-speech",
+        RoutePolicy::All(&["lexicon_settings.access"]),
+    ),
+    (
+        "GET",
+        "/settings/parts-of-speech/catalog",
+        RoutePolicy::Any(&[
+            "lexicon_settings.access",
+            "words.access",
+            "sentences.access",
+        ]),
+    ),
+    (
+        "GET",
+        "/settings/parts-of-speech/{id}/sub-parts",
+        RoutePolicy::All(&["lexicon_settings.access"]),
+    ),
+    (
+        "GET",
+        "/settings/form-types",
+        RoutePolicy::Any(&[
+            "lexicon_settings.access",
+            "words.create",
+            "words.edit",
+            "sentences.create",
+            "sentences.edit",
+        ]),
+    ),
+    (
+        "POST",
+        "/settings/parts-of-speech",
+        RoutePolicy::All(&["lexicon_settings.edit"]),
+    ),
+    (
+        "PATCH",
+        "/settings/parts-of-speech/{id}",
+        RoutePolicy::All(&["lexicon_settings.edit"]),
+    ),
+    (
+        "DELETE",
+        "/settings/parts-of-speech/{id}",
+        RoutePolicy::All(&["lexicon_settings.edit"]),
+    ),
+    (
+        "POST",
+        "/settings/parts-of-speech/{id}/sub-parts",
+        RoutePolicy::All(&["lexicon_settings.edit"]),
+    ),
+    (
+        "PATCH",
+        "/settings/parts-of-speech/{id}/sub-parts/{sub_id}",
+        RoutePolicy::All(&["lexicon_settings.edit"]),
+    ),
+    (
+        "DELETE",
+        "/settings/parts-of-speech/{id}/sub-parts/{sub_id}",
+        RoutePolicy::All(&["lexicon_settings.edit"]),
+    ),
+    (
+        "POST",
+        "/settings/form-types",
+        RoutePolicy::All(&["lexicon_settings.edit"]),
+    ),
+    (
+        "PATCH",
+        "/settings/form-types/{id}",
+        RoutePolicy::All(&["lexicon_settings.edit"]),
+    ),
+    (
+        "DELETE",
+        "/settings/form-types/{id}",
+        RoutePolicy::All(&["lexicon_settings.edit"]),
+    ),
+    (
+        "GET",
+        "/lexicon/entries",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/entries/stats",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/entries/related-search",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/entries/{id}",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/entries/{id}/inbound-references",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/entries/{id}/publications",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/entries/{id}/publications/{publication_id}",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/surface-match-snapshots/{snapshot_id}",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon/detections",
+        RoutePolicy::Any(&["words.create", "words.detect"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/component-targets/search",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/{id}/steps/forms/impact",
+        RoutePolicy::Any(&["words.edit", "words.publish", "words.validate"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/{id}/validate",
+        RoutePolicy::Any(&["words.edit", "words.publish", "words.validate"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries",
+        RoutePolicy::All(&["words.create"]),
+    ),
+    (
+        "PUT",
+        "/lexicon/entries/{id}/steps/forms",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "PUT",
+        "/lexicon/entries/{id}/steps/meanings",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "PATCH",
+        "/lexicon/entries/{id}/annotation",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "PUT",
+        "/lexicon/entries/{entry_id}/sentences/{sentence_id}/visibility",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/{id}/publications",
+        RoutePolicy::All(&["words.publish"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/publications/batch",
+        RoutePolicy::Any(&["words.publish", "sentences.publish"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/{id}/publications/{publication_id}/rollback",
+        RoutePolicy::All(&["words.rollback"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/{id}/archive",
+        RoutePolicy::All(&["words.archive"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/archive-batch",
+        RoutePolicy::All(&["words.archive"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/{id}/restore",
+        RoutePolicy::All(&["words.restore"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/restore-batch",
+        RoutePolicy::All(&["words.restore"]),
+    ),
+    ("DELETE", "/lexicon/entries/{id}", RoutePolicy::SuperAdmin),
+    (
+        "POST",
+        "/lexicon/entries/delete-batch",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "GET",
+        "/lexicon/sentences",
+        RoutePolicy::All(&["sentences.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/sentences/{id}",
+        RoutePolicy::All(&["sentences.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/sentences/{id}/publications",
+        RoutePolicy::All(&["sentences.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/sentences/{id}/publications/{publication_id}",
+        RoutePolicy::All(&["sentences.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/sentences/{id}/withdrawal-impact",
+        RoutePolicy::All(&["sentences.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/sentences/targets",
+        RoutePolicy::All(&["sentences.access", "words.access"]),
+    ),
+    (
+        "POST",
+        "/lexicon/sentences",
+        RoutePolicy::All(&["sentences.create"]),
+    ),
+    (
+        "PUT",
+        "/lexicon/sentences/{id}",
+        RoutePolicy::All(&["sentences.edit"]),
+    ),
+    ("DELETE", "/lexicon/sentences/{id}", RoutePolicy::SuperAdmin),
+    (
+        "POST",
+        "/lexicon/sentences/{id}/publications",
+        RoutePolicy::All(&["sentences.publish"]),
+    ),
+    (
+        "POST",
+        "/lexicon/sentences/{id}/publications/{publication_id}/rollback",
+        RoutePolicy::All(&["sentences.rollback"]),
+    ),
+    (
+        "POST",
+        "/lexicon/sentences/{id}/withdraw",
+        RoutePolicy::All(&["sentences.withdraw"]),
+    ),
+    (
+        "POST",
+        "/lexicon/sentences/{id}/restore",
+        RoutePolicy::All(&["sentences.restore"]),
+    ),
+    (
+        "GET",
+        "/speech/voices",
+        RoutePolicy::Any(&["words.access", "sentences.access"]),
+    ),
+    (
+        "POST",
+        "/speech/previews",
+        RoutePolicy::All(&["speech.generate"]),
+    ),
+    (
+        "POST",
+        "/lexicon/audio-assets/upload-url",
+        RoutePolicy::Any(&[
+            "words.create",
+            "words.edit",
+            "sentences.create",
+            "sentences.edit",
+        ]),
+    ),
+    (
+        "POST",
+        "/lexicon/audio-assets",
+        RoutePolicy::Any(&[
+            "words.create",
+            "words.edit",
+            "sentences.create",
+            "sentences.edit",
+        ]),
+    ),
+    (
+        "GET",
+        "/lexicon/audio-assets/{id}/url",
+        RoutePolicy::Any(&["words.access", "sentences.access"]),
+    ),
+];
+
+pub fn route_policy(method: &str, path: &str) -> Option<RoutePolicy> {
+    let method = if method == "HEAD" { "GET" } else { method };
+    let path = path.strip_prefix("/api/v1/admin")?;
+    ROUTE_POLICIES
+        .iter()
+        .find(|(verb, route, _)| *verb == method && *route == path)
+        .map(|(_, _, policy)| *policy)
+}
+
 pub(crate) async fn enforce_business_access(
     State(state): State<AppState>,
-    auth: AdminAuth,
     path: MatchedPath,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let admin = require_active_admin(&state, &auth).await?;
-    if !business_access_allowed(
-        admin.is_super_admin(),
-        false,
-        request.method(),
-        path.as_str(),
-    ) {
-        let can_publish = crate::admin::publication_permission::effective(&state.pool, admin.id)
-            .await
-            .map_err(AppError::internal)?;
-        if !business_access_allowed(false, can_publish, request.method(), path.as_str()) {
-            return Err(AppError::forbidden(ErrorCode::Forbidden, "forbidden"));
+    if !path.as_str().starts_with("/api/v1/admin/") {
+        return Ok(next.run(request).await);
+    }
+    let policy = route_policy(request.method().as_str(), path.as_str())
+        .ok_or_else(|| AppError::forbidden(ErrorCode::Forbidden, "unregistered admin route"))?;
+    if matches!(policy, RoutePolicy::SessionFlow) {
+        return Ok(next.run(request).await);
+    }
+    let (mut parts, body) = request.into_parts();
+    let auth = AdminAuth::from_request_parts(&mut parts, &state).await?;
+    let authorization = permissions::load(&state, &auth).await?;
+    match policy {
+        RoutePolicy::SuperAdmin if !authorization.is_super_admin => {
+            return Err(AppError::forbidden(
+                ErrorCode::Forbidden,
+                "super admin required",
+            ));
         }
+        RoutePolicy::All(keys) => {
+            for key in keys {
+                authorization.require(key)?;
+            }
+        }
+        RoutePolicy::Any(keys) if !keys.iter().any(|key| authorization.has(key)) => {
+            return Err(AppError::forbidden(
+                ErrorCode::Forbidden,
+                "permission required",
+            ));
+        }
+        _ => {}
     }
-    Ok(next.run(request).await)
-}
-
-fn business_access_allowed(
-    is_super_admin: bool,
-    can_publish_lexicon: bool,
-    method: &Method,
-    path: &str,
-) -> bool {
-    if is_super_admin || matches!(*method, Method::GET | Method::HEAD) {
-        return true;
-    }
-    if method != Method::POST {
-        return false;
-    }
-    if path.ends_with("/lexicon/entries/component-targets/search") {
-        return true;
-    }
-    can_publish_lexicon
-        && [
-            "/lexicon/entries/{id}/publications",
-            "/lexicon/entries/{id}/validate",
-            "/lexicon/entries/{id}/steps/forms/impact",
-            "/lexicon/entries/{id}/archive",
-            "/lexicon/entries/{id}/restore",
-            "/lexicon/entries/archive-batch",
-            "/lexicon/entries/restore-batch",
-            "/lexicon/entries/publications/batch",
-            "/lexicon/entries/{id}/publications/{publication_id}/rollback",
-            "/lexicon/sentences/{id}/publications",
-            "/lexicon/sentences/{id}/publications/{publication_id}/rollback",
-            "/lexicon/sentences/{id}/withdraw",
-            "/lexicon/sentences/{id}/restore",
-        ]
-        .iter()
-        .any(|suffix| path.ends_with(suffix))
+    parts.extensions.insert(authorization);
+    Ok(next.run(Request::from_parts(parts, body)).await)
 }
 
 fn map_admin_error(error: AdminRepositoryError) -> AppError {
@@ -114,58 +521,129 @@ fn map_admin_error(error: AdminRepositoryError) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::business_access_allowed;
-    use axum::http::Method;
+    use super::*;
+    use std::collections::BTreeSet;
+    use utoipa::OpenApi;
 
     #[test]
-    fn default_admin_can_only_read_business_data() {
-        let entry = "/api/v1/admin/lexicon/entries/{id}";
-        assert!(business_access_allowed(false, false, &Method::GET, entry));
-        assert!(business_access_allowed(false, false, &Method::HEAD, entry));
-        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
-            assert!(!business_access_allowed(false, false, &method, entry));
-            assert!(business_access_allowed(true, false, &method, entry));
+    fn actual_registered_routes_and_policies_match() {
+        let sources = [
+            (include_str!("router.rs"), ""),
+            (include_str!("accounts/router.rs"), "/admins"),
+            (include_str!("auth/router.rs"), "/auth"),
+            (include_str!("permissions/handler.rs"), ""),
+            (
+                include_str!("../catalog/router.rs"),
+                "/settings/parts-of-speech",
+            ),
+            (
+                include_str!("../catalog/form_types.rs"),
+                "/settings/form-types",
+            ),
+            (include_str!("../lexicon/router.rs"), "/lexicon"),
+            (include_str!("../speech/preview/router.rs"), "/speech"),
+            (include_str!("../teacher_certification/mod.rs"), ""),
+        ];
+        let mut registered = BTreeSet::new();
+        for (source, mount) in sources {
+            let mut remaining = source;
+            while let Some(start) = remaining.find(".route(") {
+                remaining = &remaining[start + 7..];
+                let mut depth = 1;
+                let mut quoted = false;
+                let mut escaped = false;
+                let end = remaining
+                    .char_indices()
+                    .find_map(|(index, character)| {
+                        if escaped {
+                            escaped = false;
+                            return None;
+                        }
+                        if quoted && character == '\\' {
+                            escaped = true;
+                            return None;
+                        }
+                        if character == '"' {
+                            quoted = !quoted;
+                        }
+                        if !quoted {
+                            if character == '(' {
+                                depth += 1;
+                            }
+                            if character == ')' {
+                                depth -= 1;
+                            }
+                        }
+                        (depth == 0).then_some(index)
+                    })
+                    .expect("balanced route registration");
+                let route = &remaining[..end];
+                let path = route.split('"').nth(1).expect("literal route path");
+                let path = if let Some(relative) = path.strip_prefix("/api/v1/admin") {
+                    relative.to_owned()
+                } else if path.starts_with("/api/") {
+                    remaining = &remaining[end + 1..];
+                    continue;
+                } else {
+                    format!("{mount}{}", if path == "/" { "" } else { path })
+                };
+                for method in [
+                    "get", "post", "put", "patch", "delete", "head", "options", "trace",
+                ] {
+                    if route.contains(&format!("{method}(")) {
+                        registered.insert((method.to_uppercase(), path.clone()));
+                    }
+                }
+                remaining = &remaining[end + 1..];
+            }
         }
-        assert!(business_access_allowed(
-            false,
-            false,
-            &Method::POST,
-            "/api/v1/admin/lexicon/entries/component-targets/search"
-        ));
-        assert!(!business_access_allowed(
-            false,
-            false,
-            &Method::POST,
-            "/api/v1/admin/lexicon/audio-assets/upload-url"
-        ));
+        let expected: BTreeSet<_> = ROUTE_POLICIES
+            .iter()
+            .map(|(method, path, _)| (method.to_string(), path.to_string()))
+            .collect();
+        assert_eq!(
+            registered, expected,
+            "registered admin routes need an explicit policy and OpenAPI operation"
+        );
     }
 
     #[test]
-    fn existing_publication_grant_does_not_grant_editing() {
-        let publication = "/api/v1/admin/lexicon/entries/{id}/publications";
-        assert!(!business_access_allowed(
-            false,
-            false,
-            &Method::POST,
-            publication
-        ));
-        assert!(business_access_allowed(
-            false,
-            true,
-            &Method::POST,
-            publication
-        ));
-        assert!(!business_access_allowed(
-            false,
-            true,
-            &Method::PUT,
-            "/api/v1/admin/lexicon/entries/{id}/steps/forms"
-        ));
-        assert!(!business_access_allowed(
-            false,
-            true,
-            &Method::POST,
-            "/api/v1/admin/lexicon/entries"
-        ));
+    fn every_admin_openapi_operation_has_an_explicit_policy() {
+        let spec = serde_json::to_value(crate::openapi::ApiDoc::openapi()).unwrap();
+        let mut actual = BTreeSet::new();
+        for (path, item) in spec["paths"].as_object().unwrap() {
+            if path.starts_with("/api/v1/admin/") {
+                for method in item.as_object().unwrap().keys() {
+                    if ["get", "post", "put", "patch", "delete"].contains(&method.as_str()) {
+                        assert!(
+                            route_policy(&method.to_uppercase(), path).is_some(),
+                            "missing policy: {method} {path}"
+                        );
+                        actual.insert((
+                            method.to_uppercase(),
+                            path.trim_start_matches("/api/v1/admin").to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        let expected: BTreeSet<_> = ROUTE_POLICIES
+            .iter()
+            .map(|(method, path, _)| (method.to_string(), path.to_string()))
+            .collect();
+        assert_eq!(expected.len(), ROUTE_POLICIES.len(), "duplicate policies");
+        assert_eq!(actual, expected);
+        for (_, _, policy) in ROUTE_POLICIES {
+            if let RoutePolicy::All(keys) | RoutePolicy::Any(keys) = policy {
+                for key in *keys {
+                    assert!(
+                        permissions::catalog::definition(key).is_some(),
+                        "unknown route permission: {key}"
+                    );
+                }
+            }
+        }
+        assert!(route_policy("GET", "/api/v1/admin/new-unregistered-route").is_none());
+        assert!(route_policy("HEAD", "/api/v1/admin/lexicon/entries").is_some());
     }
 }

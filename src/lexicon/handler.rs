@@ -264,9 +264,10 @@ pub(crate) fn map_error(error: LexiconServiceError) -> AppError {
             None,
             "only never-published entries without inbound references can be deleted",
         ),
+        LexiconServiceError::Authorization(error) => error,
         LexiconServiceError::EntryDeleteForbidden => AppError::forbidden(
             ErrorCode::EntryDeleteForbidden,
-            "entry can only be deleted by its creator",
+            "only a super admin may permanently delete entries",
         ),
         LexiconServiceError::BatchPublicationFailed { entry_id, source } => {
             map_error(*source).with_word_id(entry_id)
@@ -280,11 +281,11 @@ pub(crate) fn map_error(error: LexiconServiceError) -> AppError {
         ),
         LexiconServiceError::EntryEditForbidden => AppError::forbidden(
             ErrorCode::EntryEditForbidden,
-            "an unpublished draft can only be edited by its creator or a super admin",
+            "entry editing requires ownership or words.edit_others",
         ),
         LexiconServiceError::EntryAnnotationForbidden => AppError::forbidden(
             ErrorCode::EntryAnnotationForbidden,
-            "only a super admin may edit annotations on entries created by someone else",
+            "annotation editing requires ownership or words.edit_others",
         ),
         LexiconServiceError::EntryHasInboundPreboundRelations => AppError::conflict(
             ErrorCode::EntryHasInboundPreboundRelations,

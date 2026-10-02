@@ -1,6 +1,6 @@
 use super::service::{conflict, invalid};
 use crate::{
-    admin::{AdminAuth, authorization::require_super_admin},
+    admin::{AdminAuth, permissions},
     api::{ApiPath, ApiQuery},
     auth::extract::AuthUser,
     error::{AppError, ErrorCode},
@@ -199,8 +199,15 @@ pub async fn read_admin(
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Response, AppError> {
-    require_super_admin(&state, &auth).await?;
-    read(&state, id, None).await
+    permissions::load(&state, &auth)
+        .await?
+        .require("teacherapply.read_sensitive")?;
+    let response = read(&state, id, None).await?;
+    // 对象存储读取可能耗时；交付字节前再次核验撤权、禁用及会话状态。
+    permissions::reload(&state, &auth)
+        .await?
+        .require("teacherapply.read_sensitive")?;
+    Ok(response)
 }
 
 #[utoipa::path(delete, path = "/api/v1/me/teacher-certification/files/{id}", tag = "teacher-certification",

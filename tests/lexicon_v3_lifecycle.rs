@@ -41,11 +41,6 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
         })
         .await
         .expect("seed admin should succeed");
-    sqlx::query("UPDATE admins SET can_publish_lexicon=true WHERE id=$1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .unwrap();
     id
 }
 
@@ -276,6 +271,127 @@ async fn seed_v3_empty_skeleton(pool: &PgPool, admin_id: Uuid, surface: &str) ->
         .await
         .unwrap();
     entry_id
+}
+
+#[sqlx::test]
+async fn v3_step_saves_complete_concurrently_with_a_single_connection(pool: PgPool) {
+    use tsz_rust::lexicon::{
+        detection_store::DetectionStore,
+        dto::{SaveFormsStepInputV3, SaveMeaningsStepInputV3},
+        impact_store::ImpactStore,
+        repository::LexiconRepository,
+        service::LexiconService,
+        surface_policy::SurfacePolicyStore,
+        surface_snapshot::SurfaceSnapshotStore,
+    };
+    let forms_actor = seed_admin(&pool).await;
+    let meanings_actor = seed_admin(&pool).await;
+    let forms_entry = seed_v3_empty_skeleton(&pool, forms_actor, "forms-pool-test").await;
+    let meanings_entry = seed_v3_empty_skeleton(&pool, meanings_actor, "meanings-pool-test").await;
+    let small_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(1))
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let redis = deadpool_redis::Config::from_url(test_redis_url())
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .unwrap();
+    let state = AppState::for_test_with_redis(small_pool.clone(), redis);
+    let service = LexiconService::new(
+        LexiconRepository::new(small_pool.clone()),
+        DetectionStore::new(state.redis.clone()),
+        ImpactStore::new(state.redis.clone()),
+        SurfaceSnapshotStore::new(
+            state.redis.clone(),
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+        ),
+        SurfacePolicyStore::new(state.redis.clone()),
+        std::sync::Arc::from(&b"permission-test-key"[..]),
+    );
+    let forms_input: SaveFormsStepInputV3 = serde_json::from_value(json!({
+        "schema_version": 3, "base_revision": 1, "intent": "save", "content": {"pos": []}
+    }))
+    .unwrap();
+    let meanings_input: SaveMeaningsStepInputV3 = serde_json::from_value(json!({
+        "schema_version": 3, "base_revision": 1, "intent": "save", "content": {"pos": [], "sense_groups": []}
+    })).unwrap();
+    let (forms, meanings) = tokio::join!(
+        service.save_forms_v3(
+            forms_actor,
+            Uuid::now_v7(),
+            forms_entry,
+            forms_input,
+            false,
+            false
+        ),
+        service.save_meanings_v3(
+            meanings_actor,
+            Uuid::now_v7(),
+            meanings_entry,
+            meanings_input,
+            false
+        ),
+    );
+    assert!(
+        forms.is_ok(),
+        "forms save must not acquire a second connection: {forms:?}"
+    );
+    assert!(
+        meanings.is_ok(),
+        "meanings save must not acquire a second connection: {meanings:?}"
+    );
+    assert_eq!(forms.unwrap().word.revision, 2);
+    assert_eq!(meanings.unwrap().word.revision, 2);
+    sqlx::query("DELETE FROM lexicon.v3_entry_state WHERE entry_id = ANY($1)")
+        .bind(vec![forms_entry, meanings_entry])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let forms_input: SaveFormsStepInputV3 = serde_json::from_value(json!({
+        "schema_version": 3, "base_revision": 2, "intent": "save", "content": {"pos": []}
+    }))
+    .unwrap();
+    let meanings_input: SaveMeaningsStepInputV3 = serde_json::from_value(json!({
+        "schema_version": 3, "base_revision": 2, "intent": "save", "content": {"pos": [], "sense_groups": []}
+    })).unwrap();
+    let (forms, meanings) = tokio::join!(
+        service.save_forms_v3(
+            forms_actor,
+            Uuid::now_v7(),
+            forms_entry,
+            forms_input,
+            false,
+            false
+        ),
+        service.save_meanings_v3(
+            meanings_actor,
+            Uuid::now_v7(),
+            meanings_entry,
+            meanings_input,
+            false
+        ),
+    );
+    for result in [forms, meanings] {
+        assert!(matches!(
+            result,
+            Err(tsz_rust::lexicon::service::LexiconServiceError::Repository(
+                tsz_rust::lexicon::repository::LexiconRepositoryError::Invariant(_)
+            ))
+        ));
+    }
+    let revisions: i64 =
+        sqlx::query_scalar("SELECT sum(revision)::bigint FROM lexicon.entries WHERE id=ANY($1)")
+            .bind(vec![forms_entry, meanings_entry])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        revisions, 4,
+        "invalid V3 state must be rejected before any write"
+    );
+    small_pool.close().await;
 }
 
 async fn archive_v3_entry(state: &AppState, bearer: &str, entry_id: Uuid) -> Value {

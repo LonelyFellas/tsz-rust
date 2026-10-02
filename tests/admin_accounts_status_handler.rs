@@ -74,6 +74,98 @@ async fn stored_status(pool: &PgPool, id: Uuid) -> AdminStatus {
 }
 
 #[sqlx::test]
+async fn legacy_publication_wire_flag_uses_complete_effective_grants_for_all_admin_views(
+    pool: PgPool,
+) {
+    use tsz_rust::admin::permissions::{LEGACY_PUBLICATION_KEYS, catalog};
+
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let bearer = token(&state, actor, AdminRole::SuperAdmin);
+    let mut complete = LEGACY_PUBLICATION_KEYS
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect();
+    catalog::expand_grants(&mut complete);
+    let complete: Vec<String> = complete.into_iter().collect();
+    let partial: Vec<String> = complete
+        .iter()
+        .filter(|key| key.as_str() != "words.rollback")
+        .cloned()
+        .collect();
+    let missing_dependency: Vec<String> = complete
+        .iter()
+        .filter(|key| key.as_str() != "words.access")
+        .cloned()
+        .collect();
+    let mut cases = Vec::new();
+    for (old_flag, keys, expected) in [
+        (true, Vec::new(), false),
+        (false, complete, true),
+        (true, partial, false),
+        (false, missing_dependency, false),
+    ] {
+        let target = seed_admin(&pool, AdminRole::Admin, false).await;
+        sqlx::query("UPDATE admins SET can_publish_lexicon=$2 WHERE id=$1")
+            .bind(target)
+            .bind(old_flag)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1,key,$3 FROM unnest($2::text[]) AS key")
+            .bind(target).bind(keys).bind(actor).execute(&pool).await.unwrap();
+        cases.push((target, expected));
+    }
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/admins")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let list: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    for (target, expected) in cases.iter().copied().chain([(actor, true)]) {
+        let item = list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == target.to_string())
+            .unwrap();
+        assert_eq!(item["can_publish_lexicon"], expected, "{item}");
+    }
+    for (target, expected) in cases {
+        let response = tsz_rust::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/admin/admins/{target}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"display_name":"回包测试"}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let updated: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(updated["can_publish_lexicon"], expected, "{updated}");
+        let (status, body) =
+            patch_status(&state, target, Some(&bearer), json!({"status":"disabled"})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let updated: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(updated["can_publish_lexicon"], expected, "{body}");
+        assert_eq!(stored_status(&pool, target).await, AdminStatus::Disabled);
+    }
+}
+
+#[sqlx::test]
 async fn admin_profile_edit_is_super_admin_only_and_cannot_change_privileges(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let actor = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
@@ -165,7 +257,7 @@ async fn admin_profile_edit_is_super_admin_only_and_cannot_change_privileges(poo
 }
 
 #[sqlx::test]
-async fn default_admin_can_read_but_cannot_mutate_business_data(pool: PgPool) {
+async fn default_admin_has_profile_but_no_ungranted_business_access(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin = seed_admin(&pool, AdminRole::Admin, false).await;
     let bearer = token(&state, admin, AdminRole::Admin);
@@ -175,7 +267,7 @@ async fn default_admin_can_read_but_cannot_mutate_business_data(pool: PgPool) {
         (
             "GET",
             "/api/v1/admin/lexicon/entries".to_owned(),
-            StatusCode::OK,
+            StatusCode::FORBIDDEN,
         ),
         (
             "POST",

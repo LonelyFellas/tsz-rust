@@ -12,7 +12,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
-    admin::{Admin, AdminAuth, authorization::require_active_admin},
+    admin::{AdminAuth, authorization::require_active_admin},
     api::{ApiJson, ApiPath, ApiQuery},
     error::{AppError, ErrorCode},
     lexicon::{
@@ -165,6 +165,7 @@ pub struct SharedSentence {
     pub content: SharedSentenceContent,
     pub entries: Vec<SharedSentenceEntry>,
     pub created_by: String,
+    pub created_by_admin_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -357,25 +358,25 @@ fn validate(content: &SharedSentenceContent) -> Result<(), AppError> {
     Ok(())
 }
 
-async fn writable_entry(conn: &mut PgConnection, id: Uuid, admin: &Admin) -> Result<(), AppError> {
-    let row = sqlx::query("SELECT created_by_admin_id,current_publication_id,archived_at FROM lexicon.entries WHERE id=$1 FOR SHARE")
-        .bind(id).fetch_optional(&mut *conn).await.map_err(AppError::internal)?.ok_or_else(|| AppError::not_found("词条不存在"))?;
+async fn writable_entry(
+    conn: &mut PgConnection,
+    id: Uuid,
+    authorization: &crate::admin::permissions::AdminAuthorization,
+) -> Result<(), AppError> {
+    let row = sqlx::query(
+        "SELECT created_by_admin_id,archived_at FROM lexicon.entries WHERE id=$1 FOR SHARE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(AppError::internal)?
+    .ok_or_else(|| AppError::not_found("词条不存在"))?;
+    authorization.require_owned_action("words.edit", row.get("created_by_admin_id"))?;
     if row.get::<Option<DateTime<Utc>>, _>("archived_at").is_some() {
         return Err(AppError::conflict(
             ErrorCode::EntryArchived,
             None,
             "词条已归档",
-        ));
-    }
-    if row
-        .get::<Option<Uuid>, _>("current_publication_id")
-        .is_none()
-        && row.get::<Uuid, _>("created_by_admin_id") != admin.id
-        && !admin.is_super_admin()
-    {
-        return Err(AppError::forbidden(
-            ErrorCode::EntryEditForbidden,
-            "无权修改此草稿词条",
         ));
     }
     Ok(())
@@ -524,6 +525,7 @@ async fn read_on(snapshot: &mut PgConnection, id: Uuid) -> Result<SharedSentence
         content,
         entries,
         created_by: row.get("created_by"),
+        created_by_admin_id: row.get("created_by_admin_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -539,7 +541,7 @@ async fn lock(conn: &mut PgConnection, id: Uuid, revision: i64) -> Result<(), Ap
 async fn writable_sentence(
     conn: &mut PgConnection,
     id: Uuid,
-    admin: &Admin,
+    authorization: &crate::admin::permissions::AdminAuthorization,
     deleting: bool,
 ) -> Result<(), AppError> {
     let row = sqlx::query("SELECT created_by_admin_id,current_publication_id FROM lexicon.shared_sentences WHERE id=$1 AND deleted_at IS NULL FOR UPDATE")
@@ -547,14 +549,15 @@ async fn writable_sentence(
     let published = row
         .get::<Option<Uuid>, _>("current_publication_id")
         .is_some();
-    if (!published || deleting)
-        && !admin.is_super_admin()
-        && row.get::<Uuid, _>("created_by_admin_id") != admin.id
-    {
-        return Err(AppError::forbidden(
-            ErrorCode::Forbidden,
-            "无权修改他人的未发布例句",
-        ));
+    if deleting {
+        if !authorization.is_super_admin {
+            return Err(AppError::forbidden(
+                ErrorCode::Forbidden,
+                "仅超管可以永久删除例句",
+            ));
+        }
+    } else {
+        authorization.require_owned_action("sentences.edit", row.get("created_by_admin_id"))?;
     }
     if deleting && published {
         return Err(AppError::conflict(
@@ -583,7 +586,9 @@ pub async fn list(
     auth: AdminAuth,
     ApiQuery(q): ApiQuery<SentenceListQuery>,
 ) -> Result<Json<SharedSentenceList>, AppError> {
-    require_active_admin(&state, &auth).await?;
+    crate::admin::permissions::load(&state, &auth)
+        .await?
+        .require("sentences.access")?;
     let page = q.page.unwrap_or(1);
     let size = q.page_size.unwrap_or(10);
     if (q.sense_id.is_some() && q.entry_id.is_none())
@@ -693,7 +698,9 @@ pub async fn get(
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(q): ApiQuery<SentenceReadQuery>,
 ) -> Result<Json<SharedSentence>, AppError> {
-    require_active_admin(&state, &auth).await?;
+    crate::admin::permissions::load(&state, &auth)
+        .await?
+        .require("sentences.access")?;
     let mut snapshot = state.pool.begin().await.map_err(AppError::internal)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *snapshot)
@@ -722,6 +729,8 @@ pub async fn create(
             .collect::<String>()
     };
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let authorization = crate::admin::permissions::lock(&mut tx, admin.id).await?;
+    authorization.require("sentences.create")?;
     lock_targets(
         &mut tx,
         Some(&input.content),
@@ -729,7 +738,7 @@ pub async fn create(
         None,
     )
     .await?;
-    writable_entry(&mut tx, input.source_entry_id, &admin).await?;
+    writable_entry(&mut tx, input.source_entry_id, &authorization).await?;
     validate_targets(
         &mut tx,
         &input.content,
@@ -779,6 +788,8 @@ pub async fn update(
         return Err(invalid("例句 ID 不可更改"));
     }
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let authorization = crate::admin::permissions::lock(&mut tx, admin.id).await?;
+    authorization.require("sentences.edit")?;
     lock_targets(
         &mut tx,
         Some(&input.content),
@@ -787,8 +798,9 @@ pub async fn update(
     )
     .await?;
     if let Some(context) = input.context_entry_id {
-        writable_entry(&mut tx, context, &admin).await?;
+        writable_entry(&mut tx, context, &authorization).await?;
     }
+    writable_sentence(&mut tx, id, &authorization, false).await?;
     validate_targets(
         &mut tx,
         &input.content,
@@ -797,7 +809,6 @@ pub async fn update(
     )
     .await?;
     lock(&mut tx, id, input.base_revision).await?;
-    writable_sentence(&mut tx, id, &admin, false).await?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
         .bind(id)
         .execute(&mut *tx)
@@ -824,9 +835,16 @@ pub async fn delete(
 ) -> Result<StatusCode, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let authorization = crate::admin::permissions::lock(&mut tx, admin.id).await?;
+    if !authorization.is_super_admin {
+        return Err(AppError::forbidden(
+            ErrorCode::Forbidden,
+            "仅超管可以永久删除例句",
+        ));
+    }
     lock_targets(&mut tx, None, None, Some(id)).await?;
     lock(&mut tx, id, input.base_revision).await?;
-    writable_sentence(&mut tx, id, &admin, true).await?;
+    writable_sentence(&mut tx, id, &authorization, true).await?;
     sqlx::query("UPDATE lexicon.shared_sentences SET deleted_at=now(),updated_at=now(),revision=revision+1 WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
         .bind(id)
@@ -1014,7 +1032,8 @@ pub async fn targets(
     auth: AdminAuth,
     ApiQuery(q): ApiQuery<SentenceTargetQuery>,
 ) -> Result<Json<SentenceEntryTargets>, AppError> {
-    let admin = require_active_admin(&state, &auth).await?;
+    let authorization = crate::admin::permissions::load(&state, &auth).await?;
+    authorization.require("sentences.access")?;
     let page = q.page.unwrap_or(1);
     if !(1..=100000).contains(&page)
         || (q.entry_id.is_none() && q.q.is_none())
@@ -1029,7 +1048,7 @@ pub async fn targets(
     }
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     if let Some(id) = q.context_entry_id {
-        writable_entry(&mut tx, id, &admin).await?;
+        writable_entry(&mut tx, id, &authorization).await?;
     }
     Ok(Json(
         target_forms(&mut tx, q.context_entry_id, q.entry_id, Some(&q)).await?,

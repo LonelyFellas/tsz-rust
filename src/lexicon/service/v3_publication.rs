@@ -71,7 +71,8 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
-        let is_super_admin = lock_lexicon_publisher(&mut tx, actor_id).await?;
+        let authorization = lock_lexicon_publisher(&mut tx, actor_id, "words.publish").await?;
+        let is_super_admin = authorization.is_super_admin;
         lock_v3_idempotency(&mut tx, V3_PUBLISH_SCOPE, actor_id, idempotency_key).await?;
         if let Some(existing) =
             LexiconRepository::idempotency(&mut tx, V3_PUBLISH_SCOPE, actor_id, idempotency_key)
@@ -113,7 +114,7 @@ impl LexiconService {
         ensure_v3_publication_eligibility(&mut tx, entry_id, &state).await?;
 
         let publication_references = self
-            .validate_publication_content(&mut tx, &mut word, None)
+            .validate_publication_content(&mut tx, &authorization, &mut word, None)
             .await?;
 
         if let Some(publication) =
@@ -270,6 +271,7 @@ impl LexiconService {
     async fn validate_publication_content(
         &self,
         tx: &mut Transaction<'_, Postgres>,
+        authorization: &crate::admin::permissions::AdminAuthorization,
         word: &mut AdminWordV3,
         batch: Option<&PublicationBatchContext>,
     ) -> Result<Vec<NewPublicationSenseReference>, LexiconServiceError> {
@@ -295,8 +297,16 @@ impl LexiconService {
         let catalog = self
             .catalog_context_for_reference(tx, &word.forms, v3_kind_string(word.kind))
             .await?;
-        super::v3::normalize_pronunciation_audio_assets(tx, entry_id, &mut word.forms).await?;
-        issues.extend(super::v3::validate_audio_assets(tx, entry_id, &word.meanings).await?);
+        super::v3::normalize_pronunciation_audio_assets(
+            tx,
+            authorization,
+            entry_id,
+            &mut word.forms,
+        )
+        .await?;
+        issues.extend(
+            super::v3::validate_audio_assets(tx, authorization, entry_id, &word.meanings).await?,
+        );
         let rich_text_is_safe = canonicalize_meanings(&mut word.meanings);
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut word.meanings);
         let semantic_issues = validate_meanings(
@@ -484,7 +494,14 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
-        let is_super_admin = lock_lexicon_publisher(&mut tx, actor_id).await?;
+        let authorization = crate::admin::permissions::lock(&mut tx, actor_id).await?;
+        if !input.items.is_empty() {
+            authorization.require("words.publish")?;
+        }
+        if !input.sentences.is_empty() {
+            authorization.require("sentences.publish")?;
+        }
+        let is_super_admin = authorization.is_super_admin;
         lock_v3_idempotency(&mut tx, SCOPE, actor_id, idempotency_key).await?;
         if let Some(existing) =
             LexiconRepository::idempotency(&mut tx, SCOPE, actor_id, idempotency_key)
@@ -494,8 +511,16 @@ impl LexiconService {
             if existing.request_hash != hash {
                 return Err(LexiconServiceError::IdempotencyConflict);
             }
-            let response =
-                serde_json::from_value(existing.response_body).map_err(serialization_error)?;
+            let mut response_body = existing.response_body;
+            if let Some(cached_sentences) = response_body
+                .get_mut("sentences")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                sentences::backfill_cached_creators(&mut tx, cached_sentences)
+                    .await
+                    .map_err(LexiconServiceError::Authorization)?;
+            }
+            let response = serde_json::from_value(response_body).map_err(serialization_error)?;
             tx.commit().await.map_err(database_error)?;
             return Ok(response);
         }
@@ -621,7 +646,7 @@ impl LexiconService {
                     .remove(&item.entry_id)
                     .ok_or_else(invariant_record)?;
                 let references = self
-                    .validate_publication_content(&mut tx, &mut word, Some(&batch))
+                    .validate_publication_content(&mut tx, &authorization, &mut word, Some(&batch))
                     .await?;
                 Self::refresh_sentence_associations(
                     &mut tx,
@@ -794,7 +819,8 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
-        let is_super_admin = lock_lexicon_publisher(&mut tx, actor_id).await?;
+        let authorization = lock_lexicon_publisher(&mut tx, actor_id, "words.rollback").await?;
+        let is_super_admin = authorization.is_super_admin;
         lock_v3_idempotency(&mut tx, V3_ROLLBACK_SCOPE, actor_id, idempotency_key).await?;
         if let Some(existing) =
             LexiconRepository::idempotency(&mut tx, V3_ROLLBACK_SCOPE, actor_id, idempotency_key)
@@ -865,7 +891,7 @@ impl LexiconService {
         )
         .await?;
         let references = self
-            .validate_publication_content(&mut tx, &mut historical, None)
+            .validate_publication_content(&mut tx, &authorization, &mut historical, None)
             .await?;
         historical.published_at = Some(Utc::now());
         historical.updated_at = Utc::now();
@@ -1994,11 +2020,9 @@ fn v3_form_type_name(value: &str) -> &str {
 pub(super) async fn lock_lexicon_publisher(
     tx: &mut Transaction<'_, Postgres>,
     actor_id: Uuid,
-) -> Result<bool, LexiconServiceError> {
-    crate::admin::publication_permission::lock_publisher(tx, actor_id)
-        .await
-        .map_err(database_error)?
-        .ok_or(LexiconServiceError::EntryPublishForbidden)
+    action: &str,
+) -> Result<crate::admin::permissions::AdminAuthorization, LexiconServiceError> {
+    lock_action(tx, actor_id, action).await
 }
 
 pub(super) fn ensure_publication_owner(

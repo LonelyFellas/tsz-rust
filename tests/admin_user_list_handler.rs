@@ -29,6 +29,8 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
         })
         .await
         .expect("seed admin 应成功");
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.access',$1),($1,'users.read_sensitive',$1)")
+        .bind(id).execute(pool).await.unwrap();
     id
 }
 
@@ -106,6 +108,68 @@ async fn get(state: &AppState, uri: &str, token: &str) -> (StatusCode, String) {
 }
 
 #[sqlx::test]
+async fn user_list_redacts_contacts_and_does_not_search_them_without_sensitive_permission(
+    pool: PgPool,
+) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool).await;
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_sensitive'")
+        .bind(admin).execute(&pool).await.unwrap();
+    let phone_user = seed_user(&pool, "Alice", &["student"]).await;
+    let email_user = seed_email_user(&pool, "Bob", &["student"]).await;
+    let bearer = admin_token(&state, admin);
+    let (status, body) = get(&state, "/api/v1/admin/users", &bearer).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    for item in response["items"].as_array().unwrap() {
+        assert!(item.get("phone").is_none(), "{item}");
+        assert!(item.get("email").is_none(), "{item}");
+    }
+    for query in [
+        phone_user.as_u128().to_string(),
+        format!("{email_user}@example.test"),
+    ] {
+        let (status, body) = get(&state, &format!("/api/v1/admin/users?q={query}"), &bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let response: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(response["page"]["total"], 0);
+        assert_eq!(response["items"], serde_json::json!([]));
+    }
+    let (status, body) = get(&state, "/api/v1/admin/users?q=Alice", &bearer).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["page"]["total"],
+        1
+    );
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.read_sensitive',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = get(
+        &state,
+        &format!("/api/v1/admin/users?q={}", phone_user.as_u128()),
+        &bearer,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["page"]["total"], 1);
+    assert_eq!(
+        response["items"][0]["phone"],
+        phone_user.as_u128().to_string()
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1")
+        .bind(admin)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = get(&state, "/api/v1/admin/users", &bearer).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["code"],
+        "forbidden"
+    );
+}
+
+#[sqlx::test]
 async fn user_list_uses_admin_users_path_and_documents_contract(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin_id = seed_admin(&pool).await;
@@ -138,8 +202,8 @@ async fn user_list_uses_admin_users_path_and_documents_contract(pool: PgPool) {
     let (old_status, _) = get(&state, "/api/v1/admin/admins/users", &token).await;
     assert_eq!(
         old_status,
-        StatusCode::METHOD_NOT_ALLOWED,
-        "管理员资料路径仅允许 PATCH，不能从此读取用户列表"
+        StatusCode::FORBIDDEN,
+        "普通业务授权不能访问管理员治理路径，即使请求方法本身不支持"
     );
 }
 

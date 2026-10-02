@@ -50,12 +50,18 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
 }
 
 async fn seed_publisher(pool: &PgPool) -> Uuid {
+    seed_admin(pool).await
+}
+
+async fn seed_permission_admin(pool: &PgPool, keys: &[&str]) -> Uuid {
     let id = seed_admin(pool).await;
-    sqlx::query("UPDATE admins SET can_publish_lexicon = TRUE WHERE id = $1")
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
         .bind(id)
         .execute(pool)
         .await
-        .expect("grant test publisher permission should succeed");
+        .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest($2::text[]), $1")
+        .bind(id).bind(keys).execute(pool).await.unwrap();
     id
 }
 
@@ -1628,7 +1634,12 @@ async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool
         error.as_database_error().unwrap().constraint(),
         Some("audio_asset_not_reclaiming")
     );
-    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923030000, 20261001000000)
+    let current_version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923030000, current_version)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("cannot remove reclamation state"));
@@ -1637,7 +1648,7 @@ async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(version, 20261001000000);
+    assert_eq!(version, current_version);
     assert_eq!(draft_reference_count(&pool, entry.id).await, 0);
     assert_eq!(
         tsz_rust::lexicon::audio_assets::reclaim_once(&pool, &store)
@@ -1650,7 +1661,12 @@ async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool
 
 #[sqlx::test]
 async fn audio_reclamation_schema_can_be_reverted_and_reapplied(pool: PgPool) {
-    tsz_rust::deployment_migrations::undo(&pool, 20260923030000, 20261001000000)
+    let current_version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    tsz_rust::deployment_migrations::undo(&pool, 20260923030000, current_version)
         .await
         .unwrap();
     let absent: bool = sqlx::query_scalar("SELECT NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lexicon' AND table_name='audio_assets' AND column_name='reclamation_started_at')")
@@ -1660,4 +1676,353 @@ async fn audio_reclamation_schema_can_be_reverted_and_reapplied(pool: PgPool) {
     let present: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='lexicon' AND table_name='audio_assets' AND column_name='reclamation_started_at')")
         .fetch_one(&pool).await.unwrap();
     assert!(present);
+}
+
+#[sqlx::test]
+async fn permission_audio_sentence_access_does_not_read_word_only_references(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let owner = seed_admin(&pool).await;
+    let owner_token = bearer(&state, owner);
+    let reader = seed_permission_admin(&pool, &["sentences.access"]).await;
+    let reader_token = bearer(&state, reader);
+    let entry = create_entry(&state, &pool, &owner_token, "audioaccessboundary").await;
+    let asset = upload_asset(&state, &store, &owner_token, "word-only.mp3").await;
+    let path = format!("{ROOT}/audio-assets/{}/url", asset["id"].as_str().unwrap());
+    let (status, response) = call(&state, Method::GET, &path, &reader_token, None, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "未引用资产仍是创建者私有：{response}"
+    );
+    let (status, saved) = save_meanings(
+        &state,
+        &owner_token,
+        &entry,
+        meanings_with_audio(&entry, json!([asset.clone()])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, response) = call(&state, Method::GET, &path, &reader_token, None, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "仅sentences.access不能读取词条引用资产：{response}"
+    );
+    assert_eq!(response["code"], "audio_asset_not_found");
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.access',$1)")
+        .bind(reader).execute(&pool).await.unwrap();
+    let (status, response) = call(&state, Method::GET, &path, &reader_token, None, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "words.access与真实词条引用同时成立即可读取：{response}"
+    );
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.access'",
+    )
+    .bind(reader)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, response) = call(&state, Method::GET, &path, &reader_token, None, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "撤销词条读取后，保留例句读取不能绕过：{response}"
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1")
+        .bind(reader)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, response) = call(&state, Method::GET, &path, &reader_token, None, None).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "两种基础读取都没有时403：{response}"
+    );
+    let creator_sentence_only =
+        seed_permission_admin(&pool, &["sentences.access", "sentences.edit"]).await;
+    let creator_token = bearer(&state, creator_sentence_only);
+    let own = upload_asset(&state, &store, &creator_token, "creator.mp3").await;
+    let own_path = format!("{ROOT}/audio-assets/{}/url", own["id"].as_str().unwrap());
+    let (status, response) = call(&state, Method::GET, &own_path, &creator_token, None, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "保留例句管理员本人上传的私有资产读取：{response}"
+    );
+    let (status, response) = call(&state, Method::GET, &own_path, &owner_token, None, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "超管也不豁免未引用私有资产：{response}"
+    );
+}
+
+async fn save_permission_audio_asset(
+    state: &AppState,
+    token: &str,
+    entry: &Entry,
+    asset: &Value,
+    forms: bool,
+) -> (StatusCode, Value) {
+    if !forms {
+        return call(state, Method::PUT, &format!("{ROOT}/entries/{}/steps/meanings", entry.id), token, None,
+            Some(json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":complete_meanings(entry,json!([asset.clone()]))}))).await;
+    }
+    let (status, fetched) = call(
+        state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", entry.id),
+        token,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{fetched}");
+    let mut content = fetched["word"]["forms"].clone();
+    content["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]["audio_assets"] =
+        json!([asset.clone()]);
+    let (status, impact) = call(
+        state,
+        Method::POST,
+        &format!("{ROOT}/entries/{}/steps/forms/impact", entry.id),
+        token,
+        None,
+        Some(json!({"schema_version":3,"base_revision":entry.revision,"content":content.clone()})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    let mut input = json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":content});
+    if let Some(token) = impact["confirmation_token"].as_str() {
+        input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["impact_confirmation_token"].as_str() {
+        input["confirmed_impact_token"] = json!(token);
+    }
+    if let Some(token) = impact["surface_match_page"]["surface_confirmation_token"].as_str() {
+        input["confirmed_surface_match_token"] = json!(token);
+    }
+    call(
+        state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{}/steps/forms", entry.id),
+        token,
+        None,
+        Some(input),
+    )
+    .await
+}
+
+async fn assert_private_audio_binding(pool: PgPool, forms: bool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let uploader = seed_admin(&pool).await;
+    let uploader_token = bearer(&state, uploader);
+    let writer = seed_permission_admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "words.publish",
+        ],
+    )
+    .await;
+    let writer_token = bearer(&state, writer);
+    let other_super = seed_admin(&pool).await;
+    let mut entry = create_entry(
+        &state,
+        &pool,
+        &writer_token,
+        if forms {
+            "audioprivateforms"
+        } else {
+            "audioprivatemeanings"
+        },
+    )
+    .await;
+    let (status, complete) = call(&state, Method::PUT, &format!("{ROOT}/entries/{}/steps/meanings", entry.id), &writer_token, None,
+        Some(json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":complete_meanings(&entry,json!([]))}))).await;
+    assert_eq!(status, StatusCode::OK, "{complete}");
+    entry.revision = complete["word"]["revision"].as_i64().unwrap();
+    let private = upload_asset(&state, &store, &uploader_token, "foreign-private.mp3").await;
+    let private_path = format!(
+        "{ROOT}/audio-assets/{}/url",
+        private["id"].as_str().unwrap()
+    );
+    for token in [&writer_token, &bearer(&state, other_super)] {
+        let (status, response) = call(&state, Method::GET, &private_path, token, None, None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "不能直接读取他人私有资产：{response}"
+        );
+        let (status, response) =
+            save_permission_audio_asset(&state, token, &entry, &private, forms).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "不能先绑定他人未引用资产，再获取读取资格：{response}"
+        );
+        assert!(
+            issue_codes(&response).contains(&"audio_asset_invalid".to_owned()),
+            "{response}"
+        );
+        assert_eq!(
+            draft_reference_count(&pool, entry.id).await,
+            0,
+            "拒绝必须先于引用写入"
+        );
+        let (status, response) = call(&state, Method::GET, &private_path, token, None, None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "绑定失败后仍不可读取：{response}"
+        );
+    }
+    let (status, legitimate) =
+        save_permission_audio_asset(&state, &uploader_token, &entry, &private, forms).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "资产创建者可合法将本人资产交给可操作词条：{legitimate}"
+    );
+    entry.revision = legitimate["word"]["revision"].as_i64().unwrap();
+    assert_eq!(draft_reference_count(&pool, entry.id).await, 1);
+    let editor =
+        seed_permission_admin(&pool, &["words.access", "words.edit", "words.edit_others"]).await;
+    let (status, edited) =
+        save_permission_audio_asset(&state, &bearer(&state, editor), &entry, &private, forms).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "编辑他人词条时可保留该词条已有的合法资产：{edited}"
+    );
+    entry.revision = edited["word"]["revision"].as_i64().unwrap();
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{}/publications", entry.id),
+        &writer_token,
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"base_revision":entry.revision})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "发布者不是上传者，已有合法词条归属仍可发布：{published}"
+    );
+    entry.revision = published["word"]["revision"].as_i64().unwrap();
+    let own = upload_asset(&state, &store, &writer_token, "writer-own.mp3").await;
+    let (status, own_saved) =
+        save_permission_audio_asset(&state, &writer_token, &entry, &own, forms).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "普通管理员可绑定本人新上传资产：{own_saved}"
+    );
+}
+
+#[sqlx::test]
+async fn permission_audio_meanings_cannot_claim_foreign_unreferenced_assets(pool: PgPool) {
+    assert_private_audio_binding(pool, false).await;
+}
+
+#[sqlx::test]
+async fn permission_audio_forms_cannot_claim_foreign_unreferenced_assets(pool: PgPool) {
+    assert_private_audio_binding(pool, true).await;
+}
+
+#[sqlx::test]
+async fn permission_audio_publication_rejects_foreign_unreferenced_assets_before_refs(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let store = configure_audio(&mut state);
+    let uploader = seed_admin(&pool).await;
+    let writer = seed_permission_admin(
+        &pool,
+        &[
+            "words.access",
+            "words.create",
+            "words.edit",
+            "words.publish",
+        ],
+    )
+    .await;
+    let writer_token = bearer(&state, writer);
+    let entry = create_entry(&state, &pool, &writer_token, "audioprivatepublish").await;
+    let (status, complete) = call(&state, Method::PUT, &format!("{ROOT}/entries/{}/steps/meanings", entry.id), &writer_token, None,
+        Some(json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":complete_meanings(&entry,json!([]))}))).await;
+    assert_eq!(status, StatusCode::OK, "{complete}");
+    let private = upload_asset(
+        &state,
+        &store,
+        &bearer(&state, uploader),
+        "foreign-publish.mp3",
+    )
+    .await;
+    // 模拟历史脏数据：内容里有资产ID，但没有任何可信资产引用。发布必须独立拒绝。
+    sqlx::query("UPDATE lexicon.entry_editor_projection SET meanings=$2 WHERE entry_id=$1")
+        .bind(entry.id)
+        .bind(complete_meanings(&entry, json!([private.clone()])))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let other_super = seed_admin(&pool).await;
+    for token in [&writer_token, &bearer(&state, other_super)] {
+        let (status, response) = call(
+            &state,
+            Method::POST,
+            &format!("{ROOT}/entries/{}/publications", entry.id),
+            token,
+            Some(Uuid::now_v7()),
+            Some(json!({"schema_version":3,"base_revision":complete["word"]["revision"]})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "发布不能为不可读的未引用资产洗白：{response}"
+        );
+        assert!(
+            issue_codes(&response).contains(&"audio_asset_invalid".to_owned()),
+            "{response}"
+        );
+        assert_eq!(draft_reference_count(&pool, entry.id).await, 0);
+        let publications: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM lexicon.entry_publications WHERE entry_id=$1")
+                .bind(entry.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(publications, 0);
+        let (status, response) = call(
+            &state,
+            Method::GET,
+            &format!(
+                "{ROOT}/audio-assets/{}/url",
+                private["id"].as_str().unwrap()
+            ),
+            token,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "发布拒绝后不可读性不变：{response}"
+        );
+    }
 }

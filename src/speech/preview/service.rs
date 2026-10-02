@@ -20,6 +20,8 @@ use super::{
 
 #[derive(Debug, Error)]
 pub enum PreviewServiceError {
+    #[error(transparent)]
+    Authorization(#[from] crate::error::AppError),
     #[error("voice not found")]
     VoiceNotFound,
     #[error("invalid speech preview request")]
@@ -44,6 +46,7 @@ pub enum PreviewServiceError {
 
 #[derive(Clone)]
 pub struct PreviewService {
+    authorization_pool: sqlx::PgPool,
     repository: Arc<dyn PreviewRepositoryPort>,
     redis: RedisPool,
     provider: Option<Arc<dyn SpeechProvider>>,
@@ -52,6 +55,7 @@ pub struct PreviewService {
 
 impl PreviewService {
     pub fn new<R>(
+        authorization_pool: sqlx::PgPool,
         repository: R,
         redis: RedisPool,
         provider: Option<Arc<dyn SpeechProvider>>,
@@ -61,6 +65,7 @@ impl PreviewService {
         R: PreviewRepositoryPort + 'static,
     {
         Self {
+            authorization_pool,
             repository: Arc::new(repository),
             redis,
             provider,
@@ -68,14 +73,37 @@ impl PreviewService {
         }
     }
 
-    pub async fn list_voices(&self) -> Result<VoiceListResponse, PreviewServiceError> {
+    async fn authorize(
+        &self,
+        actor_id: uuid::Uuid,
+        generate: bool,
+    ) -> Result<(), PreviewServiceError> {
+        let mut tx = self.authorization_pool.begin().await?;
+        let authorization = crate::admin::permissions::lock(&mut tx, actor_id).await?;
+        if generate {
+            authorization.require("words.access")?;
+            authorization.require("speech.generate")?;
+        } else if !authorization.has("words.access") {
+            authorization.require("sentences.access")?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_voices(
+        &self,
+        actor_id: uuid::Uuid,
+    ) -> Result<VoiceListResponse, PreviewServiceError> {
+        self.authorize(actor_id, false).await?;
         Ok(self.repository.list_voices().await?)
     }
 
     pub async fn create_preview(
         &self,
+        actor_id: uuid::Uuid,
         input: CreatePreviewRequest,
     ) -> Result<PreviewResponse, PreviewServiceError> {
+        self.authorize(actor_id, true).await?;
         let voice = self
             .repository
             .voice_by_alias(&input.voice_alias)
@@ -107,7 +135,9 @@ impl PreviewService {
         ))?;
 
         if let Some(cache) = self.repository.active_cache(&request_hash).await? {
-            return signed_response(&storage, cache, PreviewCacheStatus::Hit).await;
+            return self
+                .signed_response(actor_id, &storage, cache, PreviewCacheStatus::Hit)
+                .await;
         }
 
         let lease = self
@@ -125,7 +155,9 @@ impl PreviewService {
             for _ in 0..10 {
                 wait_interval().await;
                 if let Some(cache) = self.repository.active_cache(&request_hash).await? {
-                    return signed_response(&storage, cache, PreviewCacheStatus::Hit).await;
+                    return self
+                        .signed_response(actor_id, &storage, cache, PreviewCacheStatus::Hit)
+                        .await;
                 }
             }
             return Err(PreviewServiceError::InProgress);
@@ -141,7 +173,14 @@ impl PreviewService {
         let generation = tokio::spawn(
             async move {
                 let result = service
-                    .generate_locked(&request_hash, &content_hash, voice_id, &request, storage)
+                    .generate_locked(
+                        actor_id,
+                        &request_hash,
+                        &content_hash,
+                        voice_id,
+                        &request,
+                        storage,
+                    )
                     .await;
                 if let Err(error) = lock.release().await {
                     tracing::warn!(
@@ -159,6 +198,7 @@ impl PreviewService {
 
     async fn generate_locked(
         &self,
+        actor_id: uuid::Uuid,
         request_hash: &[u8; 32],
         content_hash: &[u8; 32],
         voice_id: uuid::Uuid,
@@ -166,7 +206,9 @@ impl PreviewService {
         storage: Arc<dyn ObjectStore>,
     ) -> Result<PreviewResponse, PreviewServiceError> {
         if let Some(cache) = self.repository.active_cache(request_hash).await? {
-            return signed_response(&storage, cache, PreviewCacheStatus::Hit).await;
+            return self
+                .signed_response(actor_id, &storage, cache, PreviewCacheStatus::Hit)
+                .await;
         }
         let provider = self
             .provider
@@ -175,6 +217,7 @@ impl PreviewService {
         if provider.provider_name() != request.voice().provider() {
             return Err(PreviewServiceError::ProviderMismatch);
         }
+        self.authorize(actor_id, true).await?;
         let audio = provider.synthesize(request).await?;
         if audio.bytes.is_empty() || audio.content_type != "audio/mpeg" {
             return Err(PreviewServiceError::Provider(SpeechError::new(
@@ -187,6 +230,7 @@ impl PreviewService {
             .expect("constant speech preview namespace and extension are valid");
         let size_bytes = i64::try_from(audio.bytes.len())
             .map_err(|_| PreviewServiceError::InvalidRequest(SpeechModelError::InvalidRichText))?;
+        self.authorize(actor_id, true).await?;
         storage
             .put(
                 &key,
@@ -215,7 +259,8 @@ impl PreviewService {
                 {
                     compensate_delete(&storage, &stale_key).await;
                 }
-                signed_response(
+                self.signed_response(
+                    actor_id,
                     &storage,
                     CacheRecord {
                         object_key: key.to_string(),
@@ -232,7 +277,8 @@ impl PreviewService {
                     .active_cache(request_hash)
                     .await?
                     .ok_or(PreviewServiceError::InProgress)?;
-                signed_response(&storage, cache, PreviewCacheStatus::Hit).await
+                self.signed_response(actor_id, &storage, cache, PreviewCacheStatus::Hit)
+                    .await
             }
             Err(error) => {
                 compensate_delete(&storage, &key).await;
@@ -240,24 +286,28 @@ impl PreviewService {
             }
         }
     }
-}
 
-async fn signed_response(
-    storage: &Arc<dyn ObjectStore>,
-    cache: CacheRecord,
-    cache_status: PreviewCacheStatus,
-) -> Result<PreviewResponse, PreviewServiceError> {
-    let key = ObjectKey::parse(cache.object_key)
-        .map_err(|error| PreviewServiceError::Database(sqlx::Error::Decode(Box::new(error))))?;
-    let signed = storage.presign_read(&key).await?;
-    let ttl = signed.expires_in();
-    let expires_at = DateTime::<Utc>::from(std::time::SystemTime::now() + ttl);
-    Ok(PreviewResponse {
-        cache_status,
-        audio_url: signed.url().to_owned(),
-        expires_at,
-        url_expires_in_seconds: ttl.as_secs(),
-    })
+    async fn signed_response(
+        &self,
+        actor_id: uuid::Uuid,
+        storage: &Arc<dyn ObjectStore>,
+        cache: CacheRecord,
+        cache_status: PreviewCacheStatus,
+    ) -> Result<PreviewResponse, PreviewServiceError> {
+        self.authorize(actor_id, true).await?;
+        let key = ObjectKey::parse(cache.object_key)
+            .map_err(|error| PreviewServiceError::Database(sqlx::Error::Decode(Box::new(error))))?;
+        let signed = storage.presign_read(&key).await?;
+        self.authorize(actor_id, true).await?;
+        let ttl = signed.expires_in();
+        let expires_at = DateTime::<Utc>::from(std::time::SystemTime::now() + ttl);
+        Ok(PreviewResponse {
+            cache_status,
+            audio_url: signed.url().to_owned(),
+            expires_at,
+            url_expires_in_seconds: ttl.as_secs(),
+        })
+    }
 }
 
 async fn compensate_delete(storage: &Arc<dyn ObjectStore>, key: &ObjectKey) {

@@ -234,7 +234,7 @@ async fn upload_ticket_enforces_whitelist_and_size_then_signs_a_pending_key(pool
     assert_eq!(status, StatusCode::OK);
     let upload = &body["upload"];
     let key = upload["key"].as_str().unwrap();
-    assert!(key.starts_with("uploads/"), "{key}");
+    assert!(key.starts_with(&format!("uploads/{admin_id}/")), "{key}");
     assert!(key.ends_with(".mp3"), "{key}");
     // 客户端必须原样回发签名 headers，否则 OSS 验签失败。断言**完整键集合**：
     // 签名头增减会直接改变 bucket CORS 的放行清单，逐键取值发现不了新增的那个。
@@ -364,12 +364,12 @@ async fn confirm_rejects_foreign_keys_and_incomplete_uploads(pool: PgPool) {
     }
 
     // 形状合法但对象不存在 = 客户端还没 PUT 成功。
-    let (status, body, _) = confirm(format!("uploads/{}.mp3", Uuid::now_v7())).await;
+    let (status, body, _) = confirm(format!("uploads/{admin_id}/{}.mp3", Uuid::now_v7())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "audio_upload_not_completed");
 
     // 展示名的长度上限在应用层挡住，不能一路撞到数据库 CHECK 变成 500。
-    let named_key = ObjectKey::parse(format!("uploads/{}.mp3", Uuid::now_v7())).unwrap();
+    let named_key = ObjectKey::parse(format!("uploads/{admin_id}/{}.mp3", Uuid::now_v7())).unwrap();
     store
         .put(
             &named_key,
@@ -405,7 +405,7 @@ async fn confirm_rejects_foreign_keys_and_incomplete_uploads(pool: PgPool) {
     }
 
     // 0 字节对象同样按「没传完」处理，不落库。
-    let empty_key = ObjectKey::parse(format!("uploads/{}.mp3", Uuid::now_v7())).unwrap();
+    let empty_key = ObjectKey::parse(format!("uploads/{admin_id}/{}.mp3", Uuid::now_v7())).unwrap();
     store
         .put(
             &empty_key,
@@ -515,4 +515,751 @@ async fn confirm_is_idempotent_for_a_replayed_key(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(rows.0, 1, "重放不得登记出第二份资产");
+}
+
+async fn ordinary_with_audio_permissions(pool: &PgPool, keys: &[&str]) -> Uuid {
+    let id = seed_admin(pool).await;
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest($2::text[]), $1")
+        .bind(id).bind(keys).execute(pool).await.unwrap();
+    id
+}
+
+#[sqlx::test]
+async fn audio_write_anyof_and_read_anyof_preserve_private_creator_boundary(pool: PgPool) {
+    let mut state = AppState::for_test(pool.clone());
+    let store = configure_audio(&mut state);
+    for action in [
+        "words.create",
+        "words.edit",
+        "sentences.create",
+        "sentences.edit",
+    ] {
+        let access = if action.starts_with("words.") {
+            "words.access"
+        } else {
+            "sentences.access"
+        };
+        let owner = ordinary_with_audio_permissions(&pool, &[access, action]).await;
+        let bearer = token(&state, owner);
+        let asset = upload_asset(&state, &store, &bearer, vec![9; 8]).await;
+        let path = format!(
+            "{ASSETS_URL}/{}/url",
+            asset["asset"]["id"].as_str().unwrap()
+        );
+        let (status, response, _) = call(&state, Method::GET, &path, Some(&bearer), None).await;
+        assert_eq!(status, StatusCode::OK, "{action}: {response}");
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key=$2")
+            .bind(owner)
+            .bind(action)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, response, _) = call(
+            &state,
+            Method::POST,
+            UPLOAD_URL,
+            Some(&bearer),
+            Some(json!({"content_type":"audio/mpeg","size":8})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "仅access不得上传：{response}"
+        );
+        let private_reader = ordinary_with_audio_permissions(&pool, &[access]).await;
+        let (status, response, _) = call(
+            &state,
+            Method::GET,
+            &path,
+            Some(&token(&state, private_reader)),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "读取动作不泄漏他人私有资产：{response}"
+        );
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AudioRevokePhase {
+    Stat,
+    Copy,
+    ReadSignature,
+    WriteSignature,
+    WordReadSignature,
+    RemoveWordReference,
+}
+
+struct RevokingAudioStore {
+    inner: Arc<dyn ObjectStore>,
+    pool: PgPool,
+    admin_id: Uuid,
+    phase: AudioRevokePhase,
+    fired: std::sync::atomic::AtomicBool,
+    stats: std::sync::atomic::AtomicUsize,
+    copies: std::sync::atomic::AtomicUsize,
+    deleted: std::sync::Mutex<Vec<String>>,
+}
+
+impl RevokingAudioStore {
+    async fn revoke(&self, phase: AudioRevokePhase) {
+        if self.phase != phase || self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let mut tx = self.pool.begin().await.unwrap();
+        sqlx::query("UPDATE admins SET permission_version=permission_version+1 WHERE id=$1")
+            .bind(self.admin_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND NOT($2::boolean AND permission_key='sentences.access')")
+            .bind(self.admin_id)
+            .bind(phase == AudioRevokePhase::WordReadSignature)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for RevokingAudioStore {
+    fn space(&self) -> &StorageSpace {
+        self.inner.space()
+    }
+    fn policy(&self) -> &StoragePolicy {
+        self.inner.policy()
+    }
+    async fn put(
+        &self,
+        key: &ObjectKey,
+        body: Vec<u8>,
+        options: PutOptions,
+    ) -> Result<
+        tsz_rust::platform::storage::ObjectMetadata,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        self.inner.put(key, body, options).await
+    }
+    async fn read(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<Vec<u8>, tsz_rust::platform::storage::StorageError> {
+        self.inner.read(key).await
+    }
+    async fn stat(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<
+        tsz_rust::platform::storage::ObjectMetadata,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        self.stats.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let metadata = self.inner.stat(key).await?;
+        self.revoke(AudioRevokePhase::Stat).await;
+        Ok(metadata)
+    }
+    async fn copy(
+        &self,
+        source: &ObjectKey,
+        destination: &ObjectKey,
+    ) -> Result<
+        tsz_rust::platform::storage::ObjectMetadata,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        self.copies
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let metadata = self.inner.copy(source, destination).await?;
+        self.revoke(AudioRevokePhase::Copy).await;
+        Ok(metadata)
+    }
+    async fn delete(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<(), tsz_rust::platform::storage::StorageError> {
+        self.deleted.lock().unwrap().push(key.to_string());
+        self.inner.delete(key).await
+    }
+    async fn presign_read(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<
+        tsz_rust::platform::storage::PresignedRequest,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        let signed = self.inner.presign_read(key).await?;
+        self.revoke(AudioRevokePhase::ReadSignature).await;
+        self.revoke(AudioRevokePhase::WordReadSignature).await;
+        if self.phase == AudioRevokePhase::RemoveWordReference
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let id = Uuid::parse_str(
+                key.as_str()
+                    .strip_prefix("assets/")
+                    .unwrap()
+                    .strip_suffix(".mp3")
+                    .unwrap(),
+            )
+            .unwrap();
+            sqlx::query("DELETE FROM lexicon.v3_audio_asset_references WHERE asset_id=$1")
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+        Ok(signed)
+    }
+    async fn presign_write(
+        &self,
+        key: &ObjectKey,
+        length: u64,
+        options: PutOptions,
+    ) -> Result<
+        tsz_rust::platform::storage::PresignedRequest,
+        tsz_rust::platform::storage::StorageError,
+    > {
+        let signed = self.inner.presign_write(key, length, options).await?;
+        self.revoke(AudioRevokePhase::WriteSignature).await;
+        Ok(signed)
+    }
+}
+
+#[sqlx::test]
+async fn audio_detached_promotion_rechecks_before_copy_and_delivery_without_undoing_completion(
+    pool: PgPool,
+) {
+    let mut state = AppState::for_test(pool.clone());
+    let inner = configure_audio(&mut state);
+    for phase in [AudioRevokePhase::Stat, AudioRevokePhase::Copy] {
+        let admin_id =
+            ordinary_with_audio_permissions(&pool, &["sentences.access", "sentences.create"]).await;
+        let pending_key =
+            ObjectKey::parse(format!("uploads/{admin_id}/{}.mp3", Uuid::now_v7())).unwrap();
+        inner
+            .put(
+                &pending_key,
+                vec![1; 8],
+                PutOptions::new(Some(ObjectContentType::parse("audio/mpeg").unwrap())),
+            )
+            .await
+            .unwrap();
+        let store = Arc::new(RevokingAudioStore {
+            inner: inner.clone(),
+            pool: pool.clone(),
+            admin_id,
+            phase,
+            fired: std::sync::atomic::AtomicBool::new(false),
+            stats: std::sync::atomic::AtomicUsize::new(0),
+            copies: std::sync::atomic::AtomicUsize::new(0),
+            deleted: std::sync::Mutex::new(vec![]),
+        });
+        state.object_storage =
+            StorageRegistry::from_stores([store.clone() as Arc<dyn ObjectStore>]).unwrap();
+        let input = json!({"key":pending_key.as_str(),"locale":"en-GB","gender":"female","original_name":"revocation.mp3"});
+        let bearer = token(&state, admin_id);
+        let (status, response, _) = call(
+            &state,
+            Method::POST,
+            ASSETS_URL,
+            Some(&bearer),
+            Some(input.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+        assert_eq!(response["code"], "forbidden");
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT object_key FROM lexicon.audio_assets WHERE created_by_admin_id=$1",
+        )
+        .bind(admin_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        if phase == AudioRevokePhase::Stat {
+            assert_eq!(store.copies.load(std::sync::atomic::Ordering::SeqCst), 0);
+            assert!(keys.is_empty());
+            assert!(store.deleted.lock().unwrap().is_empty());
+            assert!(inner.stat(&pending_key).await.is_ok());
+        } else {
+            assert_eq!(store.copies.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(keys.len(), 1, "完成的登记副作用不得被撤权回滚");
+            assert!(
+                inner
+                    .stat(&ObjectKey::parse(&keys[0]).unwrap())
+                    .await
+                    .is_ok()
+            );
+            assert_eq!(
+                *store.deleted.lock().unwrap(),
+                vec![pending_key.to_string()],
+                "只能清理暂存对象"
+            );
+            let (status, response, _) =
+                call(&state, Method::POST, ASSETS_URL, Some(&bearer), Some(input)).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "无权重放不得交付已登记资产：{response}"
+            );
+        }
+    }
+}
+
+#[sqlx::test]
+async fn audio_first_confirm_cannot_claim_another_admins_pending_upload(pool: PgPool) {
+    let mut state = AppState::for_test(pool.clone());
+    let inner = configure_audio(&mut state);
+    let uploader = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
+    let intruder = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
+    let uploader_token = token(&state, uploader);
+    let intruder_token = token(&state, intruder);
+    let store = Arc::new(RevokingAudioStore {
+        inner: inner.clone(),
+        pool: pool.clone(),
+        admin_id: uploader,
+        phase: AudioRevokePhase::ReadSignature,
+        fired: std::sync::atomic::AtomicBool::new(false),
+        stats: std::sync::atomic::AtomicUsize::new(0),
+        copies: std::sync::atomic::AtomicUsize::new(0),
+        deleted: std::sync::Mutex::new(vec![]),
+    });
+    state.object_storage =
+        StorageRegistry::from_stores([store.clone() as Arc<dyn ObjectStore>]).unwrap();
+    let (status, ticket, _) = call(
+        &state,
+        Method::POST,
+        UPLOAD_URL,
+        Some(&uploader_token),
+        Some(json!({"content_type":"audio/mpeg","size":3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ticket}");
+    let pending = ObjectKey::parse(ticket["upload"]["key"].as_str().unwrap()).unwrap();
+    inner
+        .put(
+            &pending,
+            vec![1, 2, 3],
+            PutOptions::new(Some(ObjectContentType::parse("audio/mpeg").unwrap())),
+        )
+        .await
+        .unwrap();
+    let input = json!({"key":pending.as_str(),"locale":"en-GB","gender":"female","original_name":"owner.mp3"});
+    let (status, rejected, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&intruder_token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "别人先confirm不能抢占签发人的上传：{rejected}"
+    );
+    assert_eq!(rejected["code"], "forbidden");
+    assert_eq!(
+        store.stats.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "归属检查必须先于stat"
+    );
+    assert_eq!(store.copies.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(store.deleted.lock().unwrap().is_empty());
+    let assets: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.audio_assets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(assets, 0, "拒绝必须先于copy和资产登记");
+    assert_eq!(
+        inner.read(&pending).await.unwrap(),
+        vec![1, 2, 3],
+        "原对象必须保留"
+    );
+    assert!(
+        pending
+            .as_str()
+            .starts_with(&format!("uploads/{uploader}/")),
+        "新key绑定签发人且保留固定临时prefix"
+    );
+    let (status, confirmed, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&uploader_token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "A的合法确认仍应成功：{confirmed}"
+    );
+    assert_eq!(store.copies.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let asset_id = Uuid::parse_str(confirmed["asset"]["id"].as_str().unwrap()).unwrap();
+    let creator: Uuid =
+        sqlx::query_scalar("SELECT created_by_admin_id FROM lexicon.audio_assets WHERE id=$1")
+            .bind(asset_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(creator, uploader);
+    let (status, replay, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&uploader_token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert_eq!(replay, confirmed);
+    assert_eq!(
+        store.copies.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "重放不应再次copy"
+    );
+    let (status, denied, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&intruder_token),
+        Some(input),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "已确认资产仍以真实creator保护重放：{denied}"
+    );
+}
+
+#[sqlx::test]
+async fn audio_first_confirm_rejects_ownerless_legacy_pending_but_replays_confirmed_legacy(
+    pool: PgPool,
+) {
+    let mut state = AppState::for_test(pool.clone());
+    let inner = configure_audio(&mut state);
+    let uploader = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
+    let intruder = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
+    let uploader_token = token(&state, uploader);
+    let store = Arc::new(RevokingAudioStore {
+        inner: inner.clone(),
+        pool: pool.clone(),
+        admin_id: uploader,
+        phase: AudioRevokePhase::ReadSignature,
+        fired: std::sync::atomic::AtomicBool::new(false),
+        stats: std::sync::atomic::AtomicUsize::new(0),
+        copies: std::sync::atomic::AtomicUsize::new(0),
+        deleted: std::sync::Mutex::new(vec![]),
+    });
+    state.object_storage =
+        StorageRegistry::from_stores([store.clone() as Arc<dyn ObjectStore>]).unwrap();
+    let legacy = ObjectKey::parse(format!("uploads/{}.mp3", Uuid::now_v7())).unwrap();
+    inner
+        .put(
+            &legacy,
+            vec![4; 3],
+            PutOptions::new(Some(ObjectContentType::parse("audio/mpeg").unwrap())),
+        )
+        .await
+        .unwrap();
+    let input = json!({"key":legacy.as_str(),"locale":"en-GB","gender":"female","original_name":"legacy.mp3"});
+    let (status, response, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&uploader_token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "未知owner的旧待确认key必须拒绝：{response}"
+    );
+    assert_eq!(response["code"], "invalid_audio_key");
+    assert!(
+        response["detail"].as_str().unwrap().contains("new upload"),
+        "应提示重新申请上传：{response}"
+    );
+    assert_eq!(store.stats.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(store.copies.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(store.deleted.lock().unwrap().is_empty());
+    assert_eq!(inner.read(&legacy).await.unwrap(), vec![4; 3]);
+    let assets: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.audio_assets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(assets, 0);
+    // 已确认的旧key用数据库creator作归属证据，不能因为没有新namespace就破坏幂等重放。
+    let id = Uuid::now_v7();
+    let asset_key = ObjectKey::parse(format!("assets/{id}.mp3")).unwrap();
+    inner
+        .put(
+            &asset_key,
+            vec![4; 3],
+            PutOptions::new(Some(ObjectContentType::parse("audio/mpeg").unwrap())),
+        )
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,'audio/mpeg',3,'en-GB','female','legacy.mp3',$4)")
+        .bind(id).bind(asset_key.as_str()).bind(legacy.as_str()).bind(uploader).execute(&pool).await.unwrap();
+    inner.delete(&legacy).await.unwrap();
+    let (status, replay, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&uploader_token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert_eq!(replay["asset"]["id"], id.to_string());
+    assert_eq!(
+        store.stats.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "旧已确认重放无须stat已清理的源"
+    );
+    assert_eq!(
+        store.copies.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "旧已确认重放不触碰原对象"
+    );
+    assert!(store.deleted.lock().unwrap().is_empty());
+    let (status, denied, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&token(&state, intruder)),
+        Some(input),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "旧已确认key仍不可由B重放：{denied}"
+    );
+}
+
+#[sqlx::test]
+async fn audio_first_confirm_and_replay_require_current_permissions(pool: PgPool) {
+    let mut state = AppState::for_test(pool.clone());
+    let inner = configure_audio(&mut state);
+    let uploader = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
+    let uploader_token = token(&state, uploader);
+    let store = Arc::new(RevokingAudioStore {
+        inner: inner.clone(),
+        pool: pool.clone(),
+        admin_id: uploader,
+        phase: AudioRevokePhase::ReadSignature,
+        fired: std::sync::atomic::AtomicBool::new(false),
+        stats: std::sync::atomic::AtomicUsize::new(0),
+        copies: std::sync::atomic::AtomicUsize::new(0),
+        deleted: std::sync::Mutex::new(vec![]),
+    });
+    state.object_storage =
+        StorageRegistry::from_stores([store.clone() as Arc<dyn ObjectStore>]).unwrap();
+    let (status, ticket, _) = call(
+        &state,
+        Method::POST,
+        UPLOAD_URL,
+        Some(&uploader_token),
+        Some(json!({"content_type":"audio/mpeg","size":3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ticket}");
+    let pending = ObjectKey::parse(ticket["upload"]["key"].as_str().unwrap()).unwrap();
+    inner
+        .put(
+            &pending,
+            vec![1; 3],
+            PutOptions::new(Some(ObjectContentType::parse("audio/mpeg").unwrap())),
+        )
+        .await
+        .unwrap();
+    let input = json!({"key":pending.as_str(),"locale":"en-GB","gender":"female","original_name":"revoked.mp3"});
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.create'",
+    )
+    .bind(uploader)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, denied, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&uploader_token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "签发后撤权不得首次confirm：{denied}"
+    );
+    assert_eq!(store.stats.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(store.copies.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(store.deleted.lock().unwrap().is_empty());
+    assert_eq!(inner.read(&pending).await.unwrap(), vec![1; 3]);
+    let assets: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.audio_assets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(assets, 0);
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.create',$1)")
+        .bind(uploader).execute(&pool).await.unwrap();
+    let (status, confirmed, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&uploader_token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{confirmed}");
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.create'",
+    )
+    .bind(uploader)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, denied, _) = call(
+        &state,
+        Method::POST,
+        ASSETS_URL,
+        Some(&uploader_token),
+        Some(input),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "已确认重放同样必须验证当前写权限：{denied}"
+    );
+    assert_eq!(store.copies.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let assets: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.audio_assets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(assets, 1, "撤权不回滚已完成登记");
+}
+
+#[sqlx::test]
+async fn audio_word_reference_and_word_access_are_rechecked_before_url_delivery(pool: PgPool) {
+    let mut state = AppState::for_test(pool.clone());
+    let inner = configure_audio(&mut state);
+    for phase in [
+        AudioRevokePhase::WordReadSignature,
+        AudioRevokePhase::RemoveWordReference,
+    ] {
+        let uploader = seed_admin(&pool).await;
+        let uploader_token = token(&state, uploader);
+        let asset = upload_asset(&state, &inner, &uploader_token, vec![7; 8]).await;
+        let asset_id = Uuid::parse_str(asset["asset"]["id"].as_str().unwrap()).unwrap();
+        let entry_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,revision,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word',1,'{}',$2,$2)")
+            .bind(entry_id).bind(uploader).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO lexicon.v3_audio_asset_references(asset_id,entry_id,scope,variant_id) VALUES($1,$2,'draft',$3)")
+            .bind(asset_id).bind(entry_id).bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+        let reader =
+            ordinary_with_audio_permissions(&pool, &["words.access", "sentences.access"]).await;
+        let reader_token = token(&state, reader);
+        let path = format!("{ASSETS_URL}/{asset_id}/url");
+        let (status, response, _) =
+            call(&state, Method::GET, &path, Some(&reader_token), None).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "前置：词条权限和真实引用同时成立：{response}"
+        );
+        let store = Arc::new(RevokingAudioStore {
+            inner: inner.clone(),
+            pool: pool.clone(),
+            admin_id: reader,
+            phase,
+            fired: std::sync::atomic::AtomicBool::new(false),
+            stats: std::sync::atomic::AtomicUsize::new(0),
+            copies: std::sync::atomic::AtomicUsize::new(0),
+            deleted: std::sync::Mutex::new(vec![]),
+        });
+        state.object_storage =
+            StorageRegistry::from_stores([store as Arc<dyn ObjectStore>]).unwrap();
+        let (status, response, _) =
+            call(&state, Method::GET, &path, Some(&reader_token), None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "签名期间撤销词条读取或真实引用，交付前必须复核具体条件：{response}"
+        );
+        assert_eq!(response["code"], "audio_asset_not_found");
+        let sentences_retained: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.access')")
+            .bind(reader).fetch_one(&pool).await.unwrap();
+        assert!(sentences_retained, "基础AnyOf仍成立，不能仅重查AnyOf");
+        let (status, response, _) =
+            call(&state, Method::GET, &path, Some(&uploader_token), None).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "引用改变不剥夺创建者本人读取：{response}"
+        );
+    }
+}
+
+#[sqlx::test]
+async fn audio_signatures_recheck_before_delivery(pool: PgPool) {
+    let mut state = AppState::for_test(pool.clone());
+    let inner = configure_audio(&mut state);
+    for phase in [
+        AudioRevokePhase::WriteSignature,
+        AudioRevokePhase::ReadSignature,
+    ] {
+        let admin_id =
+            ordinary_with_audio_permissions(&pool, &["sentences.access", "sentences.create"]).await;
+        let asset = upload_asset(&state, &inner, &token(&state, admin_id), vec![7; 8]).await;
+        let store = Arc::new(RevokingAudioStore {
+            inner: inner.clone(),
+            pool: pool.clone(),
+            admin_id,
+            phase,
+            fired: std::sync::atomic::AtomicBool::new(false),
+            stats: std::sync::atomic::AtomicUsize::new(0),
+            copies: std::sync::atomic::AtomicUsize::new(0),
+            deleted: std::sync::Mutex::new(vec![]),
+        });
+        state.object_storage =
+            StorageRegistry::from_stores([store as Arc<dyn ObjectStore>]).unwrap();
+        let bearer = token(&state, admin_id);
+        let (status, response, _) = if phase == AudioRevokePhase::WriteSignature {
+            call(
+                &state,
+                Method::POST,
+                UPLOAD_URL,
+                Some(&bearer),
+                Some(json!({"content_type":"audio/mpeg","size":8})),
+            )
+            .await
+        } else {
+            let path = format!(
+                "{ASSETS_URL}/{}/url",
+                asset["asset"]["id"].as_str().unwrap()
+            );
+            call(&state, Method::GET, &path, Some(&bearer), None).await
+        };
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "签名生成期间撤权须在交付前阻断：{response}"
+        );
+        assert_eq!(response["code"], "forbidden");
+    }
 }

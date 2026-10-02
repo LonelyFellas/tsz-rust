@@ -39,6 +39,7 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
 }
 
 async fn seed_admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
+    let ordinary = role == AdminRole::Admin;
     let id = Uuid::now_v7();
     AdminRepository::new(pool.clone())
         .create(NewAdmin {
@@ -52,11 +53,10 @@ async fn seed_admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
         })
         .await
         .expect("seed admin 应成功");
-    sqlx::query("UPDATE admins SET can_publish_lexicon=true WHERE id=$1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .unwrap();
+    if ordinary {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest(ARRAY['words.access','words.create','words.edit','words.publish','words.archive','words.restore','words.rollback','words.detect','words.validate','sentences.access','sentences.create','sentences.edit','sentences.publish','sentences.withdraw','sentences.restore','sentences.rollback','speech.generate']), $1")
+            .bind(id).execute(pool).await.unwrap();
+    }
     id
 }
 
@@ -14195,14 +14195,15 @@ async fn empty_draft_bugfix_visibility_race_archive_and_resume(pool: PgPool) {
     }
 }
 
-/// 标注修改需要超管身份，词条归属不会授予普通管理员写权限。
+/// 标注遵守词条编辑动作与归属范围，范围扩展不等于超管身份。
 #[sqlx::test]
-async fn entry_annotation_edit_requires_super_admin(pool: PgPool) {
+async fn entry_annotation_edit_requires_action_and_ownership_scope(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
-    let owner = token(&state, seed_admin(&pool).await);
-    let outsider = token(&state, seed_admin_with_role(&pool, AdminRole::Admin).await);
+    let owner = token(&state, seed_admin_with_role(&pool, AdminRole::Admin).await);
+    let outsider_id = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    let outsider = token(&state, outsider_id);
     let super_admin = token(
         &state,
         seed_admin_with_role(&pool, AdminRole::SuperAdmin).await,
@@ -14223,9 +14224,9 @@ async fn entry_annotation_edit_requires_super_admin(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
-    assert_eq!(denied["code"], "forbidden", "{denied}");
+    assert_eq!(denied["code"], "entry_annotation_forbidden", "{denied}");
 
-    // 正向对照：具有超管身份的创建者仍可编辑。
+    // 具有编辑动作的普通创建者可以编辑自己的标注。
     let (status, saved) = call(
         &state,
         Method::PATCH,
@@ -14236,6 +14237,26 @@ async fn entry_annotation_edit_requires_super_admin(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.edit_others',$1)")
+        .bind(outsider_id).execute(&pool).await.unwrap();
+    let (status, scoped) = call(
+        &state,
+        Method::PATCH,
+        &path,
+        &outsider,
+        None,
+        Some(
+            json!({"annotation":"scoped","base_annotation_revision":saved["annotation_revision"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{scoped}");
+    let role: String = sqlx::query_scalar("SELECT role FROM admins WHERE id=$1")
+        .bind(outsider_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(role, "admin");
 
     let (status, overridden) = call(
         &state,
@@ -14243,7 +14264,7 @@ async fn entry_annotation_edit_requires_super_admin(pool: PgPool) {
         &path,
         &super_admin,
         None,
-        Some(json!({"annotation":"2","base_annotation_revision":saved["annotation_revision"]})),
+        Some(json!({"annotation":"2","base_annotation_revision":scoped["annotation_revision"]})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "超管可以改任何词条：{overridden}");
@@ -16317,13 +16338,19 @@ async fn batch3_failure_leaves_no_publication_side_effects(pool: PgPool) {
 #[sqlx::test]
 async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
     let state = batch3_state(&pool).await;
-    let owner = seed_admin(&pool).await;
+    let owner = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let other = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let super_admin = seed_admin_with_role(&pool, AdminRole::SuperAdmin).await;
     let bearer = token(&state, owner);
     let word = batch3_word(&state, &bearer, "alpha").await;
-    sqlx::query("UPDATE admins SET role='admin', can_publish_lexicon=false WHERE id=$1")
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
         .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key=ANY($2)")
+        .bind(owner)
+        .bind(tsz_rust::admin::permissions::LEGACY_PUBLICATION_KEYS)
         .execute(&pool)
         .await
         .unwrap();
@@ -16331,27 +16358,30 @@ async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = publish_ready_v3(&state, &token(&state, other), &word).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let path = format!("/api/v1/admin/admins/{owner}/lexicon-publication-permission");
+    let path = "/api/v1/admin/permission-changes".to_owned();
+    let grant = json!({"catalog_version":tsz_rust::admin::permissions::catalog::catalog_version(),"targets":[{"admin_id":owner,"expected_version":0,"grant":["words.publish"],"revoke":[]}]});
     let (status, _) = call(
         &state,
-        Method::PATCH,
+        Method::POST,
         &path,
         &token(&state, other),
         None,
-        Some(json!({"can_publish_lexicon":true})),
+        Some(grant.clone()),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, response) = call(
         &state,
-        Method::PATCH,
+        Method::POST,
         &path,
         &token(&state, super_admin),
         None,
-        Some(json!({"can_publish_lexicon":true})),
+        Some(grant),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{response}");
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key=ANY(ARRAY['words.archive','words.restore'])")
+        .bind(owner).execute(&pool).await.unwrap();
     for action in ["archive", "restore"] {
         for batch in [false, true] {
             let entry_id = word["word"]["id"].as_str().unwrap();
@@ -16379,21 +16409,28 @@ async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
             assert_eq!(
                 status,
                 StatusCode::FORBIDDEN,
-                "发布权不得授予草稿生命周期写权限：{response}"
+                "发布权限不替代草稿归档/恢复动作权限：{response}"
             );
         }
     }
     let (status, published) = publish_ready_v3(&state, &bearer, &word).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
-    call(
+    let (status, revoked) = call(
         &state,
-        Method::PATCH,
+        Method::POST,
         &path,
         &token(&state, super_admin),
         None,
-        Some(json!({"can_publish_lexicon":false})),
+        Some(json!({"catalog_version":tsz_rust::admin::permissions::catalog::catalog_version(),"targets":[{"admin_id":owner,"expected_version":response["targets"][0]["permission_version"],"grant":[],"revoke":["words.publish"]}]})),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    let (status, denied) = publish_ready_v3(&state, &bearer, &published).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "撤销具体发布权限立即生效：{denied}"
+    );
     let (status,_) = call(&state,Method::POST,&format!("{ROOT}/entries/{}/archive",word["word"]["id"].as_str().unwrap()),&bearer,Some(Uuid::now_v7()),Some(json!({"base_revision":published["word"]["revision"],"base_lifecycle_revision":published["word"]["lifecycle_revision"]}))).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
@@ -16450,16 +16487,24 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replayed, response);
     assert_eq!(current_publication_id(&pool, id).await, current);
-    let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, 20261001000000)
+    let current_version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let down_error = tsz_rust::deployment_migrations::undo(&pool, 20260917180000, current_version)
         .await
         .unwrap_err();
-    assert!(format!("{down_error:#}").contains("cannot revert while rollback publications exist"));
+    assert!(
+        format!("{down_error:#}").contains("cannot revert while rollback publications exist"),
+        "{down_error:#}"
+    );
     let version: i64 =
         sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(version, 20261001000000);
+    assert_eq!(version, current_version);
     assert_eq!(current_publication_id(&pool, id).await, current);
 }
 
@@ -16988,17 +17033,26 @@ async fn empty_draft_annotations_respect_dialect_kind_and_ownership(pool: PgPool
         "super admin must label the existing empty draft: {incomplete}"
     );
     body["annotation_updates"] = entry_annotations_updates(&required, &["001"]);
+    let mut ordinary_body = entry_annotations_create_body(
+        &state,
+        &ordinary,
+        "annukprobe",
+        json!({"mode":"unified","common":"annukprobe"}),
+    )
+    .await;
+    ordinary_body["annotation"] = body["annotation"].clone();
+    ordinary_body["annotation_updates"] = body["annotation_updates"].clone();
     let (status, forbidden) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries"),
         &ordinary,
         Some(Uuid::now_v7()),
-        Some(body.clone()),
+        Some(ordinary_body),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(forbidden["code"], "forbidden");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{forbidden}");
+    assert_eq!(forbidden["code"], "entry_annotation_forbidden");
     let (status, created) = entry_annotations_submit(&state, &outsider, key, &mut body).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
 }

@@ -11,6 +11,110 @@ use tsz_rust::{
     state::AppState,
 };
 use uuid::Uuid;
+#[sqlx::test]
+async fn minimum_sentence_creation_grant_supports_owned_source_and_cascades_revocation(
+    pool: PgPool,
+) {
+    use tsz_rust::admin::permissions::{catalog, model::*, service};
+    let state = AppState::for_test(pool.clone());
+    let super_id = admin(&pool).await;
+    let actor = admin_with_role(&pool, AdminRole::Admin).await;
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id = $1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let source = entry(&pool, actor, "wonderful").await;
+    let grant = service::preview(
+        &pool,
+        super_id,
+        PreviewRequest {
+            catalog_version: catalog::catalog_version(),
+            targets: vec![PreviewTarget {
+                admin_id: actor,
+                expected_version: Some(0),
+            }],
+            grant: vec!["sentences.create".into()],
+            revoke: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let change = &grant.targets[0];
+    service::apply(
+        &pool,
+        super_id,
+        Uuid::now_v7(),
+        ChangeRequest {
+            catalog_version: catalog::catalog_version(),
+            targets: vec![ChangeTarget {
+                admin_id: actor,
+                expected_version: 0,
+                grant: change.grant.clone(),
+                revoke: change.revoke.clone(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let input = json!({"source_entry_id": source, "source_sense_id": sense_id(source), "content": content(source)});
+    let (status, body) = call(&state, actor, Method::POST, ROOT, Some(input)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "minimum previewed grant must allow creation: {body}"
+    );
+    assert_eq!(body["revision"], 1);
+    assert_eq!(body["entries"][0]["id"], source.to_string());
+    let other_source = entry(&pool, super_id, "wonderful").await;
+    let (status, body) = call(&state, actor, Method::POST, ROOT, Some(json!({"source_entry_id": other_source, "source_sense_id": sense_id(other_source), "content": content(other_source)}))).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "source ownership guard must remain: {body}"
+    );
+    let revoked = service::preview(
+        &pool,
+        super_id,
+        PreviewRequest {
+            catalog_version: catalog::catalog_version(),
+            targets: vec![PreviewTarget {
+                admin_id: actor,
+                expected_version: Some(1),
+            }],
+            grant: vec![],
+            revoke: vec!["words.edit".into()],
+        },
+    )
+    .await
+    .unwrap();
+    let change = &revoked.targets[0];
+    assert_eq!(change.dependency_revocations, vec!["sentences.create"]);
+    let result = service::apply(
+        &pool,
+        super_id,
+        Uuid::now_v7(),
+        ChangeRequest {
+            catalog_version: catalog::catalog_version(),
+            targets: vec![ChangeTarget {
+                admin_id: actor,
+                expected_version: 1,
+                grant: change.grant.clone(),
+                revoke: change.revoke.clone(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.targets[0].permissions, change.after);
+    let (status, body) = call(&state, actor, Method::POST, ROOT, Some(json!({"source_entry_id": source, "source_sense_id": sense_id(source), "content": content(source)}))).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "new request must observe revocation: {body}"
+    );
+}
+
 const ROOT: &str = "/api/v1/admin/lexicon/sentences";
 
 async fn admin(pool: &PgPool) -> Uuid {
@@ -18,6 +122,7 @@ async fn admin(pool: &PgPool) -> Uuid {
 }
 
 async fn admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
+    let ordinary = role == AdminRole::Admin;
     let id = Uuid::now_v7();
     AdminRepository::new(pool.clone())
         .create(NewAdmin {
@@ -31,11 +136,10 @@ async fn admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
         })
         .await
         .unwrap();
-    sqlx::query("UPDATE admins SET can_publish_lexicon=true WHERE id=$1")
-        .bind(id)
-        .execute(pool)
-        .await
-        .unwrap();
+    if ordinary {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest(ARRAY['words.access','words.create','words.edit','words.publish','words.archive','words.restore','words.rollback','sentences.access','sentences.create','sentences.edit','sentences.publish','sentences.withdraw','sentences.restore','sentences.rollback']), $1")
+            .bind(id).execute(pool).await.unwrap();
+    }
     id
 }
 fn node_id(entry: Uuid, tag: u8) -> Uuid {
@@ -84,6 +188,17 @@ async fn call(
     path: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    call_with_key(state, actor, method, path, body, Uuid::now_v7()).await
+}
+
+async fn call_with_key(
+    state: &AppState,
+    actor: Uuid,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    idempotency_key: Uuid,
+) -> (StatusCode, Value) {
     let token = state
         .admin_token_manager
         .generate(actor, AdminRole::Admin.as_str())
@@ -107,7 +222,7 @@ async fn call(
         .method(method)
         .uri(path)
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header("Idempotency-Key", Uuid::now_v7().to_string());
+        .header("Idempotency-Key", idempotency_key.to_string());
     let body = if let Some(body) = body {
         req = req.header(header::CONTENT_TYPE, "application/json");
         Body::from(body.to_string())
@@ -186,6 +301,205 @@ fn assert_inbound_reference_conflict(problem: &Value, source: Uuid, sentence_id:
         &problem["meta"]["inbound_references"],
         source,
         sentence_id,
+    );
+}
+
+fn assert_sentence_creator(value: &Value, actor: Uuid) {
+    assert_eq!(value["created_by_admin_id"], json!(actor), "{value}");
+    assert_eq!(
+        value["created_by"], "例句测试",
+        "display name must stay unchanged"
+    );
+}
+
+#[sqlx::test]
+async fn sentence_creator_uuid_is_stable_across_read_write_and_publication_responses(pool: PgPool) {
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let publisher = admin(&pool).await;
+    let flags = tsz_rust::config::SmartLexiconV3Flags {
+        create: true,
+        projection: true,
+        publish: true,
+        ..tsz_rust::config::SmartLexiconV3Flags::all_disabled()
+    };
+    let state = AppState::for_test_with_smart_lexicon_v3_flags(pool.clone(), flags);
+    let input = json!({"source_entry_id": source, "source_sense_id": sense_id(source), "content": content(source)});
+    let (status, created) = call(&state, actor, Method::POST, ROOT, Some(input.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_sentence_creator(&created, actor);
+    let id = created["id"].as_str().unwrap();
+    let (status, replay) = call(&state, actor, Method::POST, ROOT, Some(input)).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_sentence_creator(&replay, actor);
+    let mut changed = created["content"].clone();
+    changed["annotations"] = json!([]);
+    let (status, updated) = call(
+        &state,
+        actor,
+        Method::PUT,
+        &format!("{ROOT}/{id}"),
+        Some(json!({"base_revision": 1, "content": changed})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_sentence_creator(&updated, actor);
+    for view in ["draft", "published"] {
+        if view == "published" {
+            let publish_key = Uuid::now_v7();
+            let publish_input = json!({"base_revision": updated["revision"], "base_lifecycle_revision": updated["lifecycle_revision"]});
+            let path = format!("{ROOT}/{id}/publications");
+            let (status, published) = call_with_key(
+                &state,
+                publisher,
+                Method::POST,
+                &path,
+                Some(publish_input.clone()),
+                publish_key,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{published}");
+            assert_sentence_creator(&published, actor);
+            sqlx::query("UPDATE platform.idempotency_records SET response_body = response_body - 'created_by_admin_id' WHERE actor_id=$1 AND idempotency_key=$2")
+                .bind(publisher).bind(publish_key).execute(&pool).await.unwrap();
+            let (status, replay) = call_with_key(
+                &state,
+                publisher,
+                Method::POST,
+                &path,
+                Some(publish_input),
+                publish_key,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "old stored publication response must remain replayable: {replay}"
+            );
+            assert_eq!(
+                replay, published,
+                "only the creator field may be backfilled"
+            );
+        }
+        let (status, detail) = call(
+            &state,
+            actor,
+            Method::GET,
+            &format!("{ROOT}/{id}?view={view}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_sentence_creator(&detail, actor);
+        let (status, list) = call(
+            &state,
+            actor,
+            Method::GET,
+            &format!("{ROOT}?view={view}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_sentence_creator(&list["items"][0], actor);
+    }
+    let (status, history) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}/{id}/publications"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    assert_eq!(history[0]["created_by_admin_id"], json!(actor));
+    assert_eq!(history[0]["published_by_admin_id"], json!(publisher));
+    let publication_id = history[0]["id"].as_str().unwrap();
+    let (status, historical) = call(
+        &state,
+        actor,
+        Method::GET,
+        &format!("{ROOT}/{id}/publications/{publication_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{historical}");
+    assert_eq!(historical["created_by_admin_id"], json!(actor));
+    let (_, current) = call(&state, actor, Method::GET, &format!("{ROOT}/{id}"), None).await;
+    let (status, second) = call(
+        &state,
+        publisher,
+        Method::POST,
+        ROOT,
+        Some(json!({"source_entry_id": source, "source_sense_id": sense_id(source), "content": content(source)})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let second_id = second["id"].as_str().unwrap();
+    let mut second_content = second["content"].clone();
+    second_content["annotations"] = json!([]);
+    let (status, second) = call(
+        &state,
+        publisher,
+        Method::PUT,
+        &format!("{ROOT}/{second_id}"),
+        Some(json!({"base_revision": 1, "content": second_content})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let batch_key = Uuid::now_v7();
+    let batch_input = json!({"schema_version": 3, "items": [], "sentences": [
+        {"sentence_id": id, "base_revision": current["revision"], "base_lifecycle_revision": current["lifecycle_revision"]},
+        {"sentence_id": second["id"], "base_revision": second["revision"], "base_lifecycle_revision": second["lifecycle_revision"]}
+    ]});
+    let batch_path = "/api/v1/admin/lexicon/entries/publications/batch";
+    let (status, batch) = call_with_key(
+        &state,
+        publisher,
+        Method::POST,
+        batch_path,
+        Some(batch_input.clone()),
+        batch_key,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{batch}");
+    assert_sentence_creator(&batch["sentences"][0], actor);
+    assert_sentence_creator(&batch["sentences"][1], publisher);
+    sqlx::query("UPDATE platform.idempotency_records SET response_body=jsonb_set(response_body,'{sentences}',(SELECT jsonb_agg(item - 'created_by_admin_id') FROM jsonb_array_elements(response_body->'sentences') AS item)) WHERE actor_id=$1 AND idempotency_key=$2")
+        .bind(publisher).bind(batch_key).execute(&pool).await.unwrap();
+    let (status, replay) = call_with_key(
+        &state,
+        publisher,
+        Method::POST,
+        batch_path,
+        Some(batch_input.clone()),
+        batch_key,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "old stored batch response must remain replayable: {replay}"
+    );
+    assert_eq!(
+        replay, batch,
+        "backfilling owners must preserve the frozen result"
+    );
+    let unavailable = Uuid::now_v7();
+    sqlx::query("UPDATE platform.idempotency_records SET response_body=jsonb_set(response_body,'{sentences,0,id}',to_jsonb($3::text)) WHERE actor_id=$1 AND idempotency_key=$2")
+        .bind(publisher).bind(batch_key).bind(unavailable.to_string()).execute(&pool).await.unwrap();
+    let (status, denied) = call_with_key(
+        &state,
+        publisher,
+        Method::POST,
+        batch_path,
+        Some(batch_input),
+        batch_key,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an unavailable creator cannot be guessed from publisher: {denied}"
     );
 }
 

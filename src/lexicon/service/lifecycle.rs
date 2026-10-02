@@ -46,7 +46,7 @@ impl LexiconService {
         entry_id: Uuid,
         input: DeleteDraftInput,
         allow_v3: bool,
-        is_super_admin: bool,
+        _is_super_admin: bool,
     ) -> Result<(), LexiconServiceError> {
         if input.base_revision < 1 {
             return Err(LexiconServiceError::UnprocessableField {
@@ -66,6 +66,10 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        let authorization = crate::admin::permissions::lock(&mut transaction, actor_id).await?;
+        if !authorization.is_super_admin {
+            return Err(LexiconServiceError::EntryDeleteForbidden);
+        }
         LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
             .await
             .map_err(repository_error)?;
@@ -80,7 +84,7 @@ impl LexiconService {
             input.base_revision,
             input.base_lifecycle_revision,
             allow_v3,
-            is_super_admin,
+            authorization.is_super_admin,
             &[],
         )
         .await?;
@@ -98,7 +102,7 @@ impl LexiconService {
         idempotency_key: Uuid,
         targets: Vec<EntryLifecycleTarget>,
         allow_v3: bool,
-        is_super_admin: bool,
+        _is_super_admin: bool,
     ) -> Result<EntryDeleteBatchResponse, LexiconServiceError> {
         validate_targets(&targets)?;
         let request_hash = sha256_json(&serde_json::json!({
@@ -117,6 +121,10 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        let authorization = crate::admin::permissions::lock(&mut transaction, actor_id).await?;
+        if !authorization.is_super_admin {
+            return Err(LexiconServiceError::EntryDeleteForbidden);
+        }
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("{DELETE_BATCH_SCOPE}:{actor_id}:{idempotency_key}"))
             .execute(&mut *transaction)
@@ -160,7 +168,7 @@ impl LexiconService {
                 target.base_revision,
                 target.base_lifecycle_revision,
                 allow_v3,
-                is_super_admin,
+                authorization.is_super_admin,
                 &entry_ids,
             )
             .await?;
@@ -405,7 +413,7 @@ impl LexiconService {
         targets: Vec<EntryLifecycleTarget>,
         confirmed_surface_match_token: Option<&str>,
         allow_v3: bool,
-        is_super_admin: bool,
+        _is_super_admin: bool,
     ) -> Result<EntryLifecycleBatchResponse, LexiconServiceError> {
         validate_targets(&targets)?;
         let request_hash = sha256_json(&serde_json::json!({
@@ -419,18 +427,12 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
-        let publisher =
-            crate::admin::publication_permission::lock_publisher(&mut transaction, actor_id)
-                .await
-                .map_err(database_error)?;
-        if publisher.is_none() {
-            let ids = targets.iter().map(|target| target.id).collect::<Vec<_>>();
-            let has_published = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM lexicon.entries WHERE id = ANY($1) AND current_publication_id IS NOT NULL)")
-                .bind(&ids).fetch_one(&mut *transaction).await.map_err(database_error)?;
-            if has_published {
-                return Err(LexiconServiceError::EntryPublishForbidden);
-            }
-        }
+        let authorization = crate::admin::permissions::lock(&mut transaction, actor_id).await?;
+        let action = match target_state {
+            TargetState::Archived => "words.archive",
+            TargetState::Active => "words.restore",
+        };
+        authorization.require(action)?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("{scope}:{actor_id}:{idempotency_key}"))
             .execute(&mut *transaction)
@@ -473,12 +475,9 @@ impl LexiconService {
                 .await
                 .map_err(repository_error)?
                 .ok_or(LexiconServiceError::WordNotFound)?;
-            if !is_super_admin && record.current_publication_id.is_none() {
-                return Err(LexiconServiceError::EntryEditForbidden);
-            }
-            if record.current_publication_id.is_some() && publisher.is_none() {
-                return Err(LexiconServiceError::EntryPublishForbidden);
-            }
+            authorization
+                .require_owned_action(action, record.created_by_admin_id)
+                .map_err(|_| LexiconServiceError::EntryPublishForbidden)?;
             ensure_lifecycle_schema_capability(record.content_schema_version, allow_v3)?;
             let record_revision = record.revision;
             let record_lifecycle_revision = record.lifecycle_revision;

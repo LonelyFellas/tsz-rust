@@ -21,6 +21,8 @@ mod query;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogServiceError {
+    #[error("admin authorization failed")]
+    Authorization(#[from] crate::error::AppError),
     #[error("invalid part of speech field {field}: {message}")]
     InvalidPart {
         field: &'static str,

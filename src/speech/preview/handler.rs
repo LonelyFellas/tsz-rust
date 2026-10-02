@@ -18,6 +18,7 @@ use crate::{
 fn service(state: &AppState) -> PreviewService {
     let speech_space = StorageSpace::parse("speech").expect("constant space is valid");
     PreviewService::new(
+        state.pool.clone(),
         PreviewRepository::new(state.pool.clone()),
         state.redis.clone(),
         state.speech_provider.clone(),
@@ -42,7 +43,10 @@ pub async fn list_voices(
     auth: AdminAuth,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
-    let response = service(&state).list_voices().await.map_err(map_error)?;
+    let response = service(&state)
+        .list_voices(auth.subject)
+        .await
+        .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -72,7 +76,7 @@ pub async fn create_preview(
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
     let response = service(&state)
-        .create_preview(request)
+        .create_preview(auth.subject, request)
         .await
         .map_err(map_error)?;
     tracing::info!(cache_status = ?response.cache_status, "speech preview served");
@@ -81,6 +85,7 @@ pub async fn create_preview(
 
 fn map_error(error: PreviewServiceError) -> AppError {
     match error {
+        PreviewServiceError::Authorization(error) => error,
         PreviewServiceError::VoiceNotFound => {
             AppError::not_found_with_code(ErrorCode::SpeechVoiceNotFound, "speech voice not found")
         }

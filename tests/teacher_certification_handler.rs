@@ -59,6 +59,158 @@ async fn get(state: AppState, uri: &str, token: Option<String>) -> (StatusCode, 
     )
 }
 
+async fn grant(pool: &PgPool, id: Uuid, keys: &[&str]) {
+    for key in keys {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,$2,$1)")
+            .bind(id).bind(key).execute(pool).await.unwrap();
+    }
+}
+
+#[sqlx::test]
+async fn delegated_teacher_access_review_revoke_do_not_imply_sensitive_materials(pool: PgPool) {
+    let owner = user(&pool).await;
+    let reviewer = admin(&pool, AdminRole::Admin).await;
+    grant(
+        &pool,
+        reviewer,
+        &["teacherapply.access", "teacherapply.review"],
+    )
+    .await;
+    let state = AppState::for_test(pool.clone());
+    let owner_token = state.token_manager.generate(owner, "student").unwrap();
+    let bearer = state
+        .admin_token_manager
+        .generate(reviewer, "admin")
+        .unwrap();
+    let payload = application_body(&pool, owner).await;
+    let file = payload["id_front"].as_str().unwrap().to_owned();
+    let (_, submitted) = send(
+        &state,
+        "POST",
+        "/api/v1/me/teacher-certification/applications",
+        &owner_token,
+        payload,
+    )
+    .await;
+    let application = submitted["id"].as_str().unwrap();
+    let detail_path = format!("/api/v1/admin/teacher-applications/{application}");
+    for path in [
+        "/api/v1/admin/teacher-applications".to_owned(),
+        detail_path.clone(),
+    ] {
+        let (status, body) = get(state.clone(), &path, Some(bearer.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let app = if path == detail_path {
+            &body["application"]
+        } else {
+            &body["items"][0]
+        };
+        for field in ["real_name", "contact", "statement"] {
+            assert_eq!(app[field], "", "{body}");
+        }
+        assert_eq!(app["review_reason"], Value::Null);
+        if path == detail_path {
+            assert_eq!(body["files"], json!([]));
+        }
+    }
+    let file_path = format!("/api/v1/admin/teacher-certification/files/{file}");
+    assert_eq!(
+        get(state.clone(), &file_path, Some(bearer.clone())).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, reviewed) = send(
+        &state,
+        "POST",
+        &format!("{detail_path}/review"),
+        &bearer,
+        json!({"decision":"approve"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reviewed}");
+    assert_eq!(reviewed["status"], "approved");
+    assert_eq!(reviewed["contact"], "");
+    let revoke_path = format!("/api/v1/admin/users/{owner}/teacher-certification");
+    assert_eq!(
+        send(
+            &state,
+            "DELETE",
+            &revoke_path,
+            &bearer,
+            json!({"reason":"复核"})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    grant(&pool, reviewer, &["teacherapply.read_sensitive"]).await;
+    let (status, detail) = get(state.clone(), &detail_path, Some(bearer.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["application"]["contact"], "teacher@example.test");
+    assert_eq!(detail["files"].as_array().unwrap().len(), 4);
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key IN ('teacherapply.review','teacherapply.read_sensitive')")
+        .bind(reviewer).execute(&pool).await.unwrap();
+    grant(&pool, reviewer, &["teacherapply.revoke"]).await;
+    assert_eq!(
+        send(
+            &state,
+            "DELETE",
+            &revoke_path,
+            &bearer,
+            json!({"reason":"复核"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (status, error) = send(
+        &state,
+        "POST",
+        &format!("{detail_path}/review"),
+        &bearer,
+        json!({"decision":"reject","reason":"撤权后不应审核"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    assert_eq!(error["code"], "forbidden");
+    // 有 revoke 但状态已撤销时仍保留原业务冲突，不误报权限。
+    let (status, error) = send(
+        &state,
+        "DELETE",
+        &revoke_path,
+        &bearer,
+        json!({"reason":"复核"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{error}");
+    assert_eq!(error["code"], "revision_conflict");
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='teacherapply.revoke'")
+        .bind(reviewer).execute(&pool).await.unwrap();
+    let (status, error) = send(
+        &state,
+        "DELETE",
+        &revoke_path,
+        &bearer,
+        json!({"reason":"撤权后复核"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    assert_eq!(error["code"], "forbidden");
+    let (_, own) = get(
+        state.clone(),
+        "/api/v1/me/teacher-certification",
+        Some(owner_token),
+    )
+    .await;
+    assert_eq!(own["application"]["contact"], "teacher@example.test");
+    assert_eq!(own["files"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        get(state, "/api/v1/me/teacher-certification", Some(bearer))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 #[sqlx::test]
 async fn certification_requires_login(pool: PgPool) {
     let (status, _) = get(
@@ -356,6 +508,183 @@ fn with_storage(mut state: AppState) -> AppState {
     )])
     .unwrap();
     state
+}
+
+use tsz_rust::platform::storage::{
+    ObjectKey, ObjectMetadata, ObjectStore, PresignedRequest, PutOptions, StorageError,
+    StoragePolicy, StorageRegistry, StorageSpace,
+};
+
+struct PausedMaterialStore {
+    inner: std::sync::Arc<dyn ObjectStore>,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for PausedMaterialStore {
+    fn space(&self) -> &StorageSpace {
+        self.inner.space()
+    }
+    fn policy(&self) -> &StoragePolicy {
+        self.inner.policy()
+    }
+    async fn put(
+        &self,
+        key: &ObjectKey,
+        body: Vec<u8>,
+        options: PutOptions,
+    ) -> Result<ObjectMetadata, StorageError> {
+        self.inner.put(key, body, options).await
+    }
+    async fn read(&self, key: &ObjectKey) -> Result<Vec<u8>, StorageError> {
+        let body = self.inner.read(key).await?;
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(body)
+    }
+    async fn stat(&self, key: &ObjectKey) -> Result<ObjectMetadata, StorageError> {
+        self.inner.stat(key).await
+    }
+    async fn presign_read(&self, key: &ObjectKey) -> Result<PresignedRequest, StorageError> {
+        self.inner.presign_read(key).await
+    }
+    async fn presign_write(
+        &self,
+        key: &ObjectKey,
+        length: u64,
+        options: PutOptions,
+    ) -> Result<PresignedRequest, StorageError> {
+        self.inner.presign_write(key, length, options).await
+    }
+    async fn copy(
+        &self,
+        source: &ObjectKey,
+        destination: &ObjectKey,
+    ) -> Result<ObjectMetadata, StorageError> {
+        self.inner.copy(source, destination).await
+    }
+    async fn delete(&self, key: &ObjectKey) -> Result<(), StorageError> {
+        self.inner.delete(key).await
+    }
+}
+
+#[sqlx::test]
+async fn admin_material_read_requires_submission_and_rechecks_revocation_after_storage_await(
+    pool: PgPool,
+) {
+    let owner = user(&pool).await;
+    let reviewer = admin(&pool, AdminRole::Admin).await;
+    grant(
+        &pool,
+        reviewer,
+        &["teacherapply.access", "teacherapply.read_sensitive"],
+    )
+    .await;
+    let mut state = with_storage(AppState::for_test(pool.clone()));
+    let owner_token = state.token_manager.generate(owner, "student").unwrap();
+    let bearer = state
+        .admin_token_manager
+        .generate(reviewer, "admin")
+        .unwrap();
+    let (_, file) = upload(&state, &owner_token, "image/png", PNG).await;
+    let file_id: Uuid = file["id"].as_str().unwrap().parse().unwrap();
+    let path = format!("/api/v1/admin/teacher-certification/files/{file_id}");
+    assert_eq!(
+        get(state.clone(), &path, Some(bearer.clone())).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let application = Uuid::now_v7();
+    sqlx::query("INSERT INTO teacher_applications(id,user_id,real_name,contact,statement) VALUES ($1,$2,'教师','teacher@example.test','任教')")
+        .bind(application).bind(owner).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO teacher_application_files(application_id,file_id,position) VALUES ($1,$2,0)",
+    )
+    .bind(application)
+    .bind(file_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        PNG
+    );
+    let paused = std::sync::Arc::new(PausedMaterialStore {
+        inner: state
+            .object_storage
+            .get(&StorageSpace::parse("teacher-certification").unwrap())
+            .unwrap(),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    state.object_storage =
+        StorageRegistry::from_stores([paused.clone() as std::sync::Arc<dyn ObjectStore>]).unwrap();
+    for (mutation, expected) in [
+        (
+            "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='teacherapply.read_sensitive'",
+            "forbidden",
+        ),
+        (
+            "UPDATE admins SET status='disabled' WHERE id=$1",
+            "account_disabled",
+        ),
+        (
+            "UPDATE admins SET must_change_password=true WHERE id=$1",
+            "must_change_password",
+        ),
+    ] {
+        sqlx::query("UPDATE admins SET status='active',must_change_password=false WHERE id=$1")
+            .bind(reviewer)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'teacherapply.read_sensitive',$1) ON CONFLICT DO NOTHING")
+            .bind(reviewer).execute(&pool).await.unwrap();
+        let request_state = state.clone();
+        let request_path = path.clone();
+        let request_token = bearer.clone();
+        let request =
+            tokio::spawn(
+                async move { get(request_state, &request_path, Some(request_token)).await },
+            );
+        tokio::time::timeout(std::time::Duration::from_secs(5), paused.started.notified())
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM admins WHERE id=$1 FOR UPDATE")
+            .bind(reviewer)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(mutation)
+            .bind(reviewer)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        paused.release.notify_one();
+        let (status, body) = request.await.unwrap();
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], expected);
+    }
 }
 
 const PNG: &[u8] = &[

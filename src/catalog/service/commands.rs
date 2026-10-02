@@ -28,6 +28,9 @@ impl CatalogService {
             .begin()
             .await
             .map_err(database_error)?;
+        crate::admin::permissions::lock(&mut tx, actor_id)
+            .await?
+            .require("lexicon_settings.edit")?;
         CatalogRepository::insert_part(&mut tx, &value)
             .await
             .map_err(map_repository_error)?;
@@ -64,6 +67,9 @@ impl CatalogService {
             .begin()
             .await
             .map_err(database_error)?;
+        crate::admin::permissions::lock(&mut tx, actor_id)
+            .await?
+            .require("lexicon_settings.edit")?;
         let updated =
             CatalogRepository::update_part(&mut tx, id, request.base_revision, actor_id, &changes)
                 .await
@@ -85,6 +91,7 @@ impl CatalogService {
 
     pub async fn delete_part(
         &self,
+        actor_id: Uuid,
         id: Uuid,
         base_revision: i64,
     ) -> Result<(), CatalogServiceError> {
@@ -94,6 +101,9 @@ impl CatalogService {
             .begin()
             .await
             .map_err(database_error)?;
+        crate::admin::permissions::lock(&mut tx, actor_id)
+            .await?
+            .require("lexicon_settings.edit")?;
         let Some((current_revision, code)) = CatalogRepository::part_revision(&mut tx, id, true)
             .await
             .map_err(map_repository_error)?
@@ -167,6 +177,9 @@ impl CatalogService {
             .begin()
             .await
             .map_err(database_error)?;
+        crate::admin::permissions::lock(&mut tx, actor_id)
+            .await?
+            .require("lexicon_settings.edit")?;
         // 父词性必须存在；挂在哪个词性下不再设限，任意基本词性都能扩展细分词性。
         if CatalogRepository::part_revision(&mut tx, part_id, false)
             .await
@@ -213,6 +226,9 @@ impl CatalogService {
             .begin()
             .await
             .map_err(database_error)?;
+        crate::admin::permissions::lock(&mut tx, actor_id)
+            .await?
+            .require("lexicon_settings.edit")?;
         // 编码是词条引用的口径，改了就等于换了一个细分词性：已被词义引用时不放行。
         if let Some(code) = &changes.code {
             let Some((current_revision, current_code)) =
@@ -275,6 +291,7 @@ impl CatalogService {
 
     pub async fn delete_sub_part(
         &self,
+        actor_id: Uuid,
         part_id: Uuid,
         sub_id: Uuid,
         base_revision: i64,
@@ -285,6 +302,9 @@ impl CatalogService {
             .begin()
             .await
             .map_err(database_error)?;
+        crate::admin::permissions::lock(&mut tx, actor_id)
+            .await?
+            .require("lexicon_settings.edit")?;
         let Some((current_revision, code)) =
             CatalogRepository::sub_part_revision(&mut tx, part_id, sub_id, true)
                 .await

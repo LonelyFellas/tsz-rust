@@ -944,6 +944,15 @@ impl LexiconService {
         source_revision: i64,
         forms: &DraftFormsStepContentV3,
     ) -> Result<EntryPresentationV3, LexiconServiceError> {
+        Self::v3_presentation_on(self.repository.pool(), entry_id, source_revision, forms).await
+    }
+
+    async fn v3_presentation_on<'e>(
+        executor: impl sqlx::Executor<'e, Database = Postgres>,
+        entry_id: Uuid,
+        source_revision: i64,
+        forms: &DraftFormsStepContentV3,
+    ) -> Result<EntryPresentationV3, LexiconServiceError> {
         let projected = sqlx::query_as::<_, V3PresentationRecord>(
             r#"
             SELECT label, matched_surfaces, strategy_version
@@ -955,7 +964,7 @@ impl LexiconService {
         )
         .bind(entry_id)
         .bind(source_revision)
-        .fetch_optional(self.repository.pool())
+        .fetch_optional(executor)
         .await
         .map_err(database_error)?;
         if let Some(projected) = projected {
@@ -1086,6 +1095,8 @@ impl LexiconService {
         actor_id: Uuid,
         input: DetectLexiconSurfaceV3Input,
     ) -> Result<DetectLexiconSurfaceResponseV3, LexiconServiceError> {
+        self.authorize_any_action(actor_id, &["words.create", "words.detect"])
+            .await?;
         let normalized = NormalizedHeadword::parse(&input.surface).map_err(map_surface_error)?;
         let active_term = self
             .repository
@@ -1322,7 +1333,7 @@ impl LexiconService {
     pub async fn create_v3(
         &self,
         actor_id: Uuid,
-        is_super_admin: bool,
+        _is_super_admin: bool,
         request_id: Uuid,
         idempotency_key: Uuid,
         mut input: CreateAdminWordV3Input,
@@ -1341,6 +1352,10 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        let authorization = lock_action(&mut transaction, actor_id, "words.create").await?;
+        if !input.annotation_updates.is_empty() {
+            authorization.require("words.edit")?;
+        }
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("{V3_CREATE_SCOPE}:{actor_id}:{idempotency_key}"))
             .execute(&mut *transaction)
@@ -1453,7 +1468,7 @@ impl LexiconService {
         self.apply_create_annotations(
             &mut transaction,
             actor_id,
-            is_super_admin,
+            &authorization,
             request_id,
             v3_kind_string(input.kind),
             &annotation_keys,
@@ -1626,6 +1641,8 @@ impl LexiconService {
         mut input: PreviewFormsImpactInputV3,
         read_projection: bool,
     ) -> Result<FormsImpactResponseV3, LexiconServiceError> {
+        self.authorize_any_action(actor_id, &["words.edit", "words.publish", "words.validate"])
+            .await?;
         input.sense_bindings.sort_by_key(|binding| binding.sense_id);
         canonicalize_v3_forms(&mut input.content)?;
         let current = self.get_v3(entry_id).await?;
@@ -1752,25 +1769,37 @@ impl LexiconService {
         entry_id: Uuid,
         mut input: SaveFormsStepInputV3,
         write_projection: bool,
-        is_super_admin: bool,
+        _is_super_admin: bool,
     ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         input.sense_bindings.sort_by_key(|binding| binding.sense_id);
         canonicalize_v3_forms(&mut input.content)?;
-        let compatibility_source = self.get_v3(entry_id).await?;
-        ensure_v3_active(&compatibility_source)?;
-        ensure_v3_revision(&compatibility_source, input.base_revision)?;
-        preserve_missing_component_usages(&mut input.content, &compatibility_source.forms)?;
-        normalize_form_regularity(&mut input.content, Some(&compatibility_source.forms));
-        let issues = crate::lexicon::v3_contract::validate_forms(&input.content, input.intent);
-        if !issues.is_empty() {
-            return Err(v3_validation_failed(issues));
-        }
         let mut transaction = self
             .repository
             .pool()
             .begin()
             .await
             .map_err(database_error)?;
+        let authorization = lock_action(&mut transaction, actor_id, "words.edit").await?;
+        let record = LexiconRepository::entry_by_id_on(&mut *transaction, entry_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, &authorization)?;
+        ensure_native_v3_entry_in(&mut transaction, &record).await?;
+        if record.revision != input.base_revision {
+            return Err(LexiconServiceError::RevisionConflict {
+                current_revision: record.revision,
+            });
+        }
+        let mut compatibility_forms: DraftFormsStepContentV3 =
+            serde_json::from_value(record.forms).map_err(serialization_error)?;
+        normalize_form_regularity(&mut compatibility_forms, None);
+        preserve_missing_component_usages(&mut input.content, &compatibility_forms)?;
+        normalize_form_regularity(&mut input.content, Some(&compatibility_forms));
+        let issues = crate::lexicon::v3_contract::validate_forms(&input.content, input.intent);
+        if !issues.is_empty() {
+            return Err(v3_validation_failed(issues));
+        }
         if write_projection {
             LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
                 .await
@@ -1780,7 +1809,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        ensure_draft_writable(&record, actor_id, is_super_admin)?;
+        ensure_draft_writable(&record, &authorization)?;
         ensure_v3_record_active(&record)?;
         let entry_kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
         ensure_phrase_component_ownership(entry_kind, &input.content)?;
@@ -1791,8 +1820,13 @@ impl LexiconService {
                 current_revision: record.revision,
             });
         }
-        normalize_pronunciation_audio_assets(&mut transaction, entry_id, &mut input.content)
-            .await?;
+        normalize_pronunciation_audio_assets(
+            &mut transaction,
+            &authorization,
+            entry_id,
+            &mut input.content,
+        )
+        .await?;
         let current_forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
         let current_form_pos_ids = current_forms
@@ -2072,7 +2106,7 @@ impl LexiconService {
         request_id: Uuid,
         entry_id: Uuid,
         input: SaveMeaningsStepInputV3,
-        is_super_admin: bool,
+        _is_super_admin: bool,
     ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
         let SaveMeaningsStepInputV3 {
             base_revision,
@@ -2080,13 +2114,31 @@ impl LexiconService {
             mut content,
             ..
         } = input;
-        let compatibility_source = self.get_v3(entry_id).await?;
-        ensure_v3_active(&compatibility_source)?;
-        ensure_v3_revision(&compatibility_source, base_revision)?;
-        preserve_missing_sentence_translations(&mut content, &compatibility_source.meanings);
-        preserve_missing_sense_component_usages(&mut content, &compatibility_source.meanings);
-        super::text_links::preserve_missing(&mut content, &compatibility_source.meanings)?;
-        super::grammar_form_links::preserve_missing(&mut content, &compatibility_source.meanings)?;
+        let mut transaction = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        let authorization = lock_action(&mut transaction, actor_id, "words.edit").await?;
+        let record = LexiconRepository::entry_by_id_on(&mut *transaction, entry_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(LexiconServiceError::WordNotFound)?;
+        ensure_draft_writable(&record, &authorization)?;
+        ensure_native_v3_entry_in(&mut transaction, &record).await?;
+        if record.revision != base_revision {
+            return Err(LexiconServiceError::RevisionConflict {
+                current_revision: record.revision,
+            });
+        }
+        let mut compatibility_meanings: DraftMeaningsStepContentV3 =
+            serde_json::from_value(record.meanings).map_err(serialization_error)?;
+        crate::lexicon::v3_contract::normalize_sentence_translations(&mut compatibility_meanings);
+        preserve_missing_sentence_translations(&mut content, &compatibility_meanings);
+        preserve_missing_sense_component_usages(&mut content, &compatibility_meanings);
+        super::text_links::preserve_missing(&mut content, &compatibility_meanings)?;
+        super::grammar_form_links::preserve_missing(&mut content, &compatibility_meanings)?;
         let mut issues = crate::lexicon::v3_contract::validate_meanings(&content, intent);
         if intent == StepSaveIntent::Complete {
             issues.extend(
@@ -2101,12 +2153,6 @@ impl LexiconService {
         // 规范化译文后刷新展示别名，但不从关系投影重建完整内容。
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut content);
         super::v3_publication::clear_v3_sentence_associations(&mut content);
-        let mut transaction = self
-            .repository
-            .pool()
-            .begin()
-            .await
-            .map_err(database_error)?;
         LexiconRepository::lock_surface_contexts(&mut transaction, &[entry_id])
             .await
             .map_err(repository_error)?;
@@ -2114,7 +2160,7 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        ensure_draft_writable(&record, actor_id, is_super_admin)?;
+        ensure_draft_writable(&record, &authorization)?;
         ensure_v3_record_active(&record)?;
         if record.revision != base_revision {
             return Err(LexiconServiceError::RevisionConflict {
@@ -2128,18 +2174,18 @@ impl LexiconService {
         }
         let forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
-        let component_issues = validate_sense_phrase_components(
-            &mut transaction,
-            entry_id,
-            compatibility_source.kind,
-            &mut content,
-        )
-        .await?;
+        let entry_kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
+        let presentation =
+            Self::v3_presentation_on(&mut *transaction, entry_id, record.revision, &forms).await?;
+        let component_issues =
+            validate_sense_phrase_components(&mut transaction, entry_id, entry_kind, &mut content)
+                .await?;
         if !component_issues.is_empty() {
             return Err(v3_validation_failed(component_issues));
         }
 
-        let audio_issues = validate_audio_assets(&mut transaction, entry_id, &content).await?;
+        let audio_issues =
+            validate_audio_assets(&mut transaction, &authorization, entry_id, &content).await?;
         if !audio_issues.is_empty() {
             return Err(v3_validation_failed(audio_issues));
         }
@@ -2147,14 +2193,14 @@ impl LexiconService {
             &mut transaction,
             entry_id,
             &forms,
-            &compatibility_source.presentation.label,
+            &presentation.label,
             &mut content,
         )
         .await?;
         super::grammar_form_links::validate_targets(
             &mut transaction,
             entry_id,
-            compatibility_source.kind,
+            entry_kind,
             &forms,
             &mut content,
             None,
@@ -2434,9 +2480,12 @@ impl LexiconService {
 
     pub async fn validate_v3(
         &self,
+        actor_id: Uuid,
         entry_id: Uuid,
         input: ValidateAdminWordV3Input,
     ) -> Result<DraftValidationResponseV3, LexiconServiceError> {
+        self.authorize_any_action(actor_id, &["words.edit", "words.publish", "words.validate"])
+            .await?;
         let mut word = self.get_v3(entry_id).await?;
         ensure_v3_active(&word)?;
         ensure_v3_revision(&word, input.base_revision)?;
@@ -2556,6 +2605,27 @@ fn ensure_v3_record_active(record: &EntryRecord) -> Result<(), LexiconServiceErr
     }
     if record.archived_at.is_some() {
         return Err(LexiconServiceError::EntryArchived);
+    }
+    Ok(())
+}
+
+async fn ensure_native_v3_entry_in(
+    tx: &mut Transaction<'_, Postgres>,
+    record: &EntryRecord,
+) -> Result<(), LexiconServiceError> {
+    ensure_v3_record_active(record)?;
+    if record.language != "en" || parse_v3_kind(&record.kind).is_none() {
+        return Err(invariant_record());
+    }
+    let origin = sqlx::query_scalar::<_, String>(
+        "SELECT origin FROM lexicon.v3_entry_state WHERE entry_id = $1",
+    )
+    .bind(record.id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_error)?;
+    if origin.as_deref() != Some("native") {
+        return Err(invariant_record());
     }
     Ok(())
 }
@@ -3492,11 +3562,13 @@ pub(super) fn requested_pronunciation_audio_assets(
 
 pub(super) async fn normalize_pronunciation_audio_assets(
     tx: &mut Transaction<'_, Postgres>,
+    authorization: &crate::admin::permissions::AdminAuthorization,
     entry_id: Uuid,
     forms: &mut DraftFormsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
     let requested = requested_pronunciation_audio_assets(forms);
-    let mut issues = validate_requested_audio_assets(tx, entry_id, &requested).await?;
+    let mut issues =
+        validate_requested_audio_assets(tx, authorization, entry_id, &requested).await?;
     for problem in &mut issues {
         problem.step = PersistedWordStep::Forms;
         problem.field = "dict_phonetic".into();
@@ -3524,19 +3596,28 @@ pub(super) async fn normalize_pronunciation_audio_assets(
     Ok(())
 }
 
-/// 校验草稿引用的音频资产：条数、变体内不重复、资产存在、且没有被别的词条占用。
+/// 校验草稿引用的音频资产：条数、变体内不重复、未回收、操作者归属及单词条占用。
+/// 新资产须由操作者上传；编辑已有资产则须已属于当前可操作词条，超管也不豁免。
 /// 跨词条引用必须拦住——回收是按「还有没有人引用」判定的，允许共享会让一次删除
 /// 波及另一条词条的历史发布。
 pub(super) async fn validate_audio_assets(
     tx: &mut Transaction<'_, Postgres>,
+    authorization: &crate::admin::permissions::AdminAuthorization,
     entry_id: Uuid,
     content: &DraftMeaningsStepContentV3,
 ) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
-    validate_requested_audio_assets(tx, entry_id, &requested_audio_assets(content)).await
+    validate_requested_audio_assets(
+        tx,
+        authorization,
+        entry_id,
+        &requested_audio_assets(content),
+    )
+    .await
 }
 
 async fn validate_requested_audio_assets(
     tx: &mut Transaction<'_, Postgres>,
+    authorization: &crate::admin::permissions::AdminAuthorization,
     entry_id: Uuid,
     requested: &[(Uuid, Vec<Uuid>)],
 ) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
@@ -3572,6 +3653,10 @@ async fn validate_requested_audio_assets(
     let rows = sqlx::query(
         r#"
         SELECT asset.id,
+               (asset.created_by_admin_id = $3 OR EXISTS (
+                   SELECT 1 FROM lexicon.v3_audio_asset_references reference
+                   WHERE reference.asset_id = asset.id AND reference.entry_id = $2
+               )) AS accessible,
                EXISTS (
                    SELECT 1 FROM lexicon.v3_audio_asset_references reference
                    WHERE reference.asset_id = asset.id AND reference.entry_id <> $2
@@ -3585,6 +3670,7 @@ async fn validate_requested_audio_assets(
     )
     .bind(&unique_ids)
     .bind(entry_id)
+    .bind(authorization.admin_id)
     .fetch_all(&mut **tx)
     .await
     .map_err(database_error)?;
@@ -3595,7 +3681,9 @@ async fn validate_requested_audio_assets(
         if row.get::<bool, _>("taken") {
             taken.insert(id);
         }
-        known.insert(id);
+        if row.get::<bool, _>("accessible") {
+            known.insert(id);
+        }
     }
 
     for (variant_id, asset_ids) in requested {

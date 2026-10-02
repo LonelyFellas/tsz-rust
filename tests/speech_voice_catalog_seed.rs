@@ -187,13 +187,27 @@ async fn product_catalog_reads_locally_when_azure_is_unavailable(pool: PgPool) {
     let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .unwrap();
+    let admin_id = uuid::Uuid::now_v7();
+    tsz_rust::admin::AdminRepository::new(pool.clone())
+        .create(tsz_rust::admin::NewAdmin {
+            id: admin_id,
+            phone: format!("speech-catalog-{}", admin_id.simple()),
+            display_name: "Speech Admin".to_owned(),
+            password_hash: "hash".to_owned(),
+            role: tsz_rust::admin::AdminRole::SuperAdmin,
+            must_change_password: false,
+            created_by_admin_id: None,
+        })
+        .await
+        .unwrap();
     let service = PreviewService::new(
+        pool.clone(),
         PreviewRepository::new(pool.clone()),
         redis,
         Some(std::sync::Arc::new(OfflineCatalogProvider)),
         None,
     );
-    let listed = service.list_voices().await.unwrap();
+    let listed = service.list_voices(admin_id).await.unwrap();
     assert_eq!(
         listed.items.len(),
         tsz_rust::speech::catalog_snapshot().len()
@@ -208,7 +222,7 @@ async fn product_catalog_reads_locally_when_azure_is_unavailable(pool: PgPool) {
         }])
         .await
         .unwrap();
-    let listed = service.list_voices().await.unwrap();
+    let listed = service.list_voices(admin_id).await.unwrap();
     assert_eq!(
         listed.items.len(),
         tsz_rust::speech::catalog_snapshot().len()
@@ -231,7 +245,7 @@ async fn product_catalog_reads_locally_when_azure_is_unavailable(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(
-        service.list_voices().await.unwrap().items.len(),
+        service.list_voices(admin_id).await.unwrap().items.len(),
         tsz_rust::speech::catalog_snapshot().len() - 1
     );
 }

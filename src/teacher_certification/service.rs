@@ -1,5 +1,6 @@
 use super::model::*;
 use crate::{
+    admin::permissions,
     auth::extract::AuthUser,
     error::{AppError, ErrorCode},
     platform::{Email, Phone},
@@ -119,6 +120,8 @@ pub async fn review(
         return Err(invalid("原因不得超过2000字"));
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
+    let authorization = permissions::lock(&mut tx, reviewer).await?;
+    authorization.require("teacherapply.review")?;
     let owner =
         sqlx::query_scalar::<_, Uuid>("SELECT user_id FROM teacher_applications WHERE id = $1")
             .bind(id)
@@ -147,6 +150,10 @@ pub async fn review(
     }
     notify(&mut tx, owner, Some(id), kind, reason, reviewer).await?;
     tx.commit().await.map_err(AppError::internal)?;
+    let mut application = application;
+    if !authorization.has("teacherapply.read_sensitive") {
+        application.redact_sensitive();
+    }
     Ok(application)
 }
 
@@ -161,6 +168,9 @@ pub async fn revoke(
         return Err(invalid("撤销原因需填写1至2000字"));
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
+    permissions::lock(&mut tx, reviewer)
+        .await?
+        .require("teacherapply.revoke")?;
     lock_user(&mut tx, owner).await?;
     let changed =
         sqlx::query("UPDATE teacher_profiles SET verified = false WHERE user_id = $1 AND verified")
@@ -213,4 +223,55 @@ async fn notify(
         .bind(Uuid::now_v7()).bind(user).bind(application).bind(kind).bind(reason).bind(actor)
         .execute(connection).await.map_err(AppError::internal)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[sqlx::test]
+    async fn teacher_service_checks_authorization_before_business_objects(pool: PgPool) {
+        let actor = Uuid::now_v7();
+        sqlx::query("INSERT INTO admins(id,phone,display_name,password_hash,role,must_change_password) VALUES ($1,$2,'审核员','hash','admin',false)")
+            .bind(actor).bind(actor.to_string()).execute(&pool).await.unwrap();
+        let target = Uuid::now_v7();
+        let error = review(
+            &pool,
+            target,
+            actor,
+            ReviewApplication {
+                decision: ReviewDecision::Approve,
+                reason: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Forbidden);
+        let error = revoke(&pool, target, actor, "复核").await.unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Forbidden);
+        sqlx::query("UPDATE admins SET status='disabled' WHERE id=$1")
+            .bind(actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = review(
+            &pool,
+            target,
+            actor,
+            ReviewApplication {
+                decision: ReviewDecision::Approve,
+                reason: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::AccountDisabled);
+        sqlx::query("UPDATE admins SET status='active',must_change_password=true WHERE id=$1")
+            .bind(actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = revoke(&pool, target, actor, "复核").await.unwrap_err();
+        assert_eq!(error.code(), ErrorCode::MustChangePassword);
+    }
 }

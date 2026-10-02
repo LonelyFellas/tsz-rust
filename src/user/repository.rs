@@ -217,61 +217,6 @@ impl UserRepository {
         .map_err(UserError::Db)
     }
 
-    /// admin 侧的用户局部更新：只改传了值的列，回读 admin 视图。两个可选参数各自
-    /// 对应一条端点（启禁用 / 改昵称），合成一条 SQL 是为了让「改什么」与「回读什么」
-    /// 只有一处定义——列清单再多一份拷贝就迟早漂移。
-    ///
-    /// ⚠️ 被改的列必须从 CTE 的 RETURNING 里取（下面把 CTE 别名成 `u`）。写成
-    /// `FROM updated JOIN users u` 会读到语句开始时的旧快照——数据修改型 CTE 的写入
-    /// 对同一语句的其余部分不可见，回读会原样吐出**改动前**的值。`user_roles`
-    /// 本条语句没动过，子查询读它是安全的。
-    pub(crate) async fn update_admin_view(
-        &self,
-        id: &Uuid,
-        status: Option<UserStatus>,
-        display_name: Option<&str>,
-    ) -> Result<Option<UserListRecord>, UserError> {
-        sqlx::query_as!(
-            UserListRecord,
-            r#"
-            WITH updated AS (
-                UPDATE users
-                SET status = COALESCE($2::text, status),
-                    display_name = COALESCE($3::text, display_name),
-                    updated_at = NOW()
-                WHERE id = $1
-                RETURNING id, phone, email, display_name, avatar_url, status,
-                          created_at, updated_at
-            )
-            SELECT
-                u.id AS "id!",
-                u.phone,
-                u.email,
-                u.display_name AS "display_name!",
-                u.avatar_url AS "avatar_url!",
-                u.status as "status!: UserStatus",
-                ARRAY(
-                    SELECT ur.role
-                    FROM user_roles ur
-                    WHERE ur.user_id = u.id
-                    ORDER BY CASE ur.role WHEN 'student' THEN 1 ELSE 2 END
-                ) AS "roles!: Vec<UserRole>",
-                EXISTS (
-                    SELECT 1 FROM teacher_profiles tp WHERE tp.user_id = u.id AND tp.verified
-                ) AS "teacher_verified!",
-                u.created_at AS "created_at!",
-                u.updated_at AS "updated_at!"
-            FROM updated u
-            "#,
-            id,
-            status.map(|status| status.as_str()),
-            display_name,
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(UserError::Db)
-    }
-
     pub(crate) async fn user_list(
         &self,
         filter: &UserListFilter,

@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use axum::extract::FromRequestParts;
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::{
@@ -8,11 +11,14 @@ use crate::{
     state::AppState,
 };
 
+#[derive(Clone)]
 pub struct AdminAuth {
     pub subject: Uuid,
     pub security_version: i64,
-    /// 目前无人消费；二期 `RequireSuperAdmin` 门禁从这里读，勿删。
+    /// Token role is not trusted for current authorization; database identity is reused below.
     pub role: AdminRole,
+    pub(crate) active_admin: Arc<OnceCell<crate::admin::Admin>>,
+    pub(crate) authorization: Arc<OnceCell<crate::admin::permissions::AdminAuthorization>>,
 }
 
 impl FromRequestParts<AppState> for AdminAuth {
@@ -22,6 +28,9 @@ impl FromRequestParts<AppState> for AdminAuth {
         parts: &mut axum::http::request::Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        if let Some(auth) = parts.extensions.get::<Self>() {
+            return Ok(auth.clone());
+        }
         // 1) 取Authorization 头 -> 缺 -> Error(Unauthenticated)
         let header_value = parts
             .headers
@@ -58,11 +67,15 @@ impl FromRequestParts<AppState> for AdminAuth {
             return Err(invalid_token());
         }
 
-        Ok(AdminAuth {
+        let auth = AdminAuth {
             subject: claims.subject,
             security_version: claims.security_version,
             role,
-        })
+            active_admin: Arc::new(OnceCell::new()),
+            authorization: Arc::new(OnceCell::new()),
+        };
+        parts.extensions.insert(auth.clone());
+        Ok(auth)
     }
 }
 

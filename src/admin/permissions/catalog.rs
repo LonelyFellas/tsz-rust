@@ -1,0 +1,421 @@
+use std::collections::BTreeSet;
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use utoipa::ToSchema;
+
+use crate::error::{AppError, ErrorCode};
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PermissionDefinition {
+    pub key: &'static str,
+    pub module_key: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub kind: &'static str,
+    pub requires: &'static [&'static str],
+    pub risk_level: &'static str,
+}
+
+macro_rules! permission {
+    ($key:literal, $module:literal, $label:literal, $kind:literal, [$($requires:literal),*], $risk:literal) => {
+        PermissionDefinition {
+            key: $key, module_key: $module, label: $label, description: $label,
+            kind: $kind, requires: &[$($requires),*], risk_level: $risk,
+        }
+    };
+}
+
+pub const CATALOG: &[PermissionDefinition] = &[
+    permission!("words.access", "words", "查看后台词条", "page", [], "low"),
+    permission!(
+        "words.detect",
+        "words",
+        "检测词形并准备新词条",
+        "action",
+        ["words.access"],
+        "medium"
+    ),
+    permission!(
+        "words.validate",
+        "words",
+        "校验词条与预览形态影响",
+        "action",
+        ["words.access"],
+        "low"
+    ),
+    permission!(
+        "words.create",
+        "words",
+        "创建本人词条",
+        "action",
+        ["words.access"],
+        "medium"
+    ),
+    permission!(
+        "words.edit",
+        "words",
+        "编辑本人词条及修订",
+        "action",
+        ["words.access"],
+        "medium"
+    ),
+    permission!(
+        "words.edit_others",
+        "words",
+        "编辑他人词条及已发布内容的修订，不包含发布或删除",
+        "scope",
+        ["words.edit"],
+        "high"
+    ),
+    permission!(
+        "words.publish",
+        "words",
+        "发布本人词条",
+        "action",
+        ["words.access"],
+        "high"
+    ),
+    permission!(
+        "words.archive",
+        "words",
+        "归档本人词条",
+        "action",
+        ["words.access"],
+        "high"
+    ),
+    permission!(
+        "words.restore",
+        "words",
+        "恢复本人词条",
+        "action",
+        ["words.access"],
+        "high"
+    ),
+    permission!(
+        "words.rollback",
+        "words",
+        "回滚本人词条发布版本",
+        "action",
+        ["words.access"],
+        "high"
+    ),
+    permission!(
+        "sentences.access",
+        "sentences",
+        "查看后台共享例句",
+        "page",
+        [],
+        "low"
+    ),
+    permission!(
+        "sentences.create",
+        "sentences",
+        "创建本人共享例句",
+        "action",
+        ["sentences.access", "words.edit"],
+        "medium"
+    ),
+    permission!(
+        "sentences.edit",
+        "sentences",
+        "编辑本人共享例句",
+        "action",
+        ["sentences.access"],
+        "medium"
+    ),
+    permission!(
+        "sentences.edit_others",
+        "sentences",
+        "编辑他人共享例句，不包含发布或删除",
+        "scope",
+        ["sentences.edit"],
+        "high"
+    ),
+    permission!(
+        "sentences.publish",
+        "sentences",
+        "发布本人共享例句",
+        "action",
+        ["sentences.access"],
+        "high"
+    ),
+    permission!(
+        "sentences.withdraw",
+        "sentences",
+        "撤回本人共享例句",
+        "action",
+        ["sentences.access"],
+        "high"
+    ),
+    permission!(
+        "sentences.restore",
+        "sentences",
+        "恢复本人共享例句",
+        "action",
+        ["sentences.access"],
+        "high"
+    ),
+    permission!(
+        "sentences.rollback",
+        "sentences",
+        "回滚本人共享例句发布版本",
+        "action",
+        ["sentences.access"],
+        "high"
+    ),
+    permission!(
+        "users.access",
+        "users",
+        "查看用户管理列表和资料",
+        "page",
+        [],
+        "medium"
+    ),
+    permission!(
+        "users.read_sensitive",
+        "users",
+        "查看用户完整手机号和邮箱",
+        "action",
+        ["users.access"],
+        "high"
+    ),
+    permission!(
+        "users.edit",
+        "users",
+        "编辑用户资料",
+        "action",
+        ["users.access"],
+        "high"
+    ),
+    permission!(
+        "users.set_status",
+        "users",
+        "变更用户状态",
+        "action",
+        ["users.access"],
+        "high"
+    ),
+    permission!(
+        "teacherapply.access",
+        "teacherapply",
+        "查看教师认证申请",
+        "page",
+        [],
+        "medium"
+    ),
+    permission!(
+        "teacherapply.review",
+        "teacherapply",
+        "审核教师认证申请",
+        "action",
+        ["teacherapply.access"],
+        "high"
+    ),
+    permission!(
+        "teacherapply.revoke",
+        "teacherapply",
+        "撤销教师认证资格",
+        "action",
+        ["teacherapply.access"],
+        "high"
+    ),
+    permission!(
+        "teacherapply.read_sensitive",
+        "teacherapply",
+        "查看教师认证原件",
+        "action",
+        ["teacherapply.access"],
+        "high"
+    ),
+    permission!(
+        "lexicon_settings.access",
+        "lexicon_settings",
+        "查看词性和形态配置",
+        "page",
+        [],
+        "low"
+    ),
+    permission!(
+        "lexicon_settings.edit",
+        "lexicon_settings",
+        "编辑词性和形态配置",
+        "action",
+        ["lexicon_settings.access"],
+        "high"
+    ),
+    permission!(
+        "speech.generate",
+        "speech",
+        "生成语音预览，消耗语音服务资源",
+        "action",
+        ["words.access"],
+        "medium"
+    ),
+];
+
+pub fn definition(key: &str) -> Option<&'static PermissionDefinition> {
+    CATALOG.iter().find(|permission| permission.key == key)
+}
+
+pub fn catalog_version() -> String {
+    let bytes = serde_json::to_vec(CATALOG).expect("static permission catalog serializes");
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub fn all_keys() -> BTreeSet<String> {
+    CATALOG
+        .iter()
+        .map(|permission| permission.key.to_owned())
+        .collect()
+}
+
+pub fn validate_keys(keys: &[String]) -> Result<BTreeSet<String>, AppError> {
+    if keys.len() > CATALOG.len() || keys.iter().any(|key| definition(key).is_none()) {
+        return Err(invalid("unknown permission or excessive selection"));
+    }
+    let set: BTreeSet<_> = keys.iter().cloned().collect();
+    if set.len() != keys.len() {
+        return Err(invalid("duplicate permission"));
+    }
+    Ok(set)
+}
+
+pub fn validate_closed(keys: &BTreeSet<String>) -> Result<(), AppError> {
+    for key in keys {
+        let permission = definition(key).ok_or_else(|| invalid("unknown permission"))?;
+        if permission
+            .requires
+            .iter()
+            .any(|required| !keys.contains(*required))
+        {
+            return Err(invalid("permission dependency missing"));
+        }
+    }
+    Ok(())
+}
+
+pub fn effective_keys(stored: impl IntoIterator<Item = String>) -> BTreeSet<String> {
+    let mut keys: BTreeSet<_> = stored
+        .into_iter()
+        .filter(|key| {
+            if definition(key).is_some() {
+                true
+            } else {
+                tracing::warn!(
+                    permission_key = key,
+                    "unknown administrator permission ignored"
+                );
+                false
+            }
+        })
+        .collect();
+    loop {
+        let invalid: Vec<_> = keys
+            .iter()
+            .filter(|key| {
+                definition(key).is_some_and(|permission| {
+                    permission
+                        .requires
+                        .iter()
+                        .any(|required| !keys.contains(*required))
+                })
+            })
+            .cloned()
+            .collect();
+        if invalid.is_empty() {
+            return keys;
+        }
+        for key in invalid {
+            keys.remove(&key);
+        }
+    }
+}
+
+pub fn expand_grants(keys: &mut BTreeSet<String>) {
+    loop {
+        let required: Vec<_> = keys
+            .iter()
+            .flat_map(|key| {
+                definition(key)
+                    .into_iter()
+                    .flat_map(|permission| permission.requires)
+            })
+            .map(|key| (*key).to_owned())
+            .collect();
+        let before = keys.len();
+        keys.extend(required);
+        if keys.len() == before {
+            break;
+        }
+    }
+}
+
+pub fn invalid(message: &str) -> AppError {
+    AppError::unprocessable(ErrorCode::InvalidRequestBody, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_is_unique_closed_and_acyclic() {
+        assert_eq!(all_keys().len(), CATALOG.len());
+        validate_closed(&all_keys()).unwrap();
+        for permission in CATALOG {
+            let mut visited = BTreeSet::new();
+            fn visit(key: &str, visited: &mut BTreeSet<String>) {
+                assert!(visited.insert(key.to_owned()), "cyclic dependency: {key}");
+                for required in definition(key).unwrap().requires {
+                    visit(required, visited);
+                }
+                visited.remove(key);
+            }
+            visit(permission.key, &mut visited);
+        }
+    }
+
+    #[test]
+    fn sentence_creation_requires_source_entry_edit_without_expanding_ownership() {
+        let mut keys = BTreeSet::from(["sentences.create".to_owned()]);
+        expand_grants(&mut keys);
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "sentences.access".to_owned(),
+                "sentences.create".to_owned(),
+                "words.access".to_owned(),
+                "words.edit".to_owned(),
+            ])
+        );
+        let preview = crate::admin::permissions::service::preview_change(
+            uuid::Uuid::nil(),
+            0,
+            &keys,
+            &[],
+            &["words.edit".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(preview.dependency_revocations, vec!["sentences.create"]);
+        assert_eq!(preview.after, vec!["sentences.access", "words.access"]);
+    }
+
+    #[test]
+    fn scope_requires_edit_and_does_not_imply_publish() {
+        let mut keys = BTreeSet::from(["words.edit_others".to_owned()]);
+        expand_grants(&mut keys);
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "words.access".to_owned(),
+                "words.edit".to_owned(),
+                "words.edit_others".to_owned()
+            ])
+        );
+        assert!(effective_keys(["words.edit_others".to_owned(), "unknown".to_owned()]).is_empty());
+    }
+}

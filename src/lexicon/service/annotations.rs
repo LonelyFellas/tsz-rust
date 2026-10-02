@@ -107,22 +107,23 @@ async fn base_keys(
     .map_err(database_error)
 }
 
-/// 标注的可写集合：超管可以改任何词条的标注，其他管理员只能改自己创建的词条
-/// （含自己的草稿）。别人的词条在列表和冲突弹窗里照常可见，只是没有编辑入口。
+/// 编辑权限与范围授权决定标注可写集合，不把范围授权当作超管。
 async fn writable_annotation_ids(
     tx: &mut Transaction<'_, Postgres>,
-    actor_id: Uuid,
-    is_super_admin: bool,
+    authorization: &crate::admin::permissions::AdminAuthorization,
     ids: &[Uuid],
 ) -> Result<BTreeSet<Uuid>, LexiconServiceError> {
-    if is_super_admin {
+    if !authorization.has("words.edit") {
+        return Ok(BTreeSet::new());
+    }
+    if authorization.is_super_admin || authorization.has("words.edit_others") {
         return Ok(ids.iter().copied().collect());
     }
     let owned = sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM lexicon.entries WHERE id = ANY($1) AND created_by_admin_id = $2",
     )
     .bind(ids)
-    .bind(actor_id)
+    .bind(authorization.admin_id)
     .fetch_all(&mut **tx)
     .await
     .map_err(database_error)?;
@@ -263,7 +264,7 @@ impl LexiconService {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         actor_id: Uuid,
-        is_super_admin: bool,
+        authorization: &crate::admin::permissions::AdminAuthorization,
         request_id: Uuid,
         kind: &str,
         keys: &[String],
@@ -284,7 +285,7 @@ impl LexiconService {
         // 组里可能有别人的词条：它们照常列进冲突响应供只读展示（避免撞值），
         // 但当前管理员既不需要、也不允许为它们写值，只需填满自己那部分。
         let current_ids = current.iter().copied().collect::<Vec<_>>();
-        let writable = writable_annotation_ids(tx, actor_id, is_super_admin, &current_ids).await?;
+        let writable = writable_annotation_ids(tx, authorization, &current_ids).await?;
         let fail = if submitted.keys().any(|id| !current.contains(id)) {
             Some(Reason::GroupChanged)
         } else if submitted.keys().any(|id| !writable.contains(id)) {
@@ -414,7 +415,7 @@ impl LexiconService {
     pub async fn update_annotation(
         &self,
         actor_id: Uuid,
-        is_super_admin: bool,
+        _is_super_admin: bool,
         request_id: Uuid,
         id: Uuid,
         mut input: UpdateEntryAnnotationInput,
@@ -432,6 +433,7 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
+        let authorization = lock_action(&mut tx, actor_id, "words.edit").await?;
         lock_annotation_commands(&mut tx).await?;
         let (kind, created_by_admin_id) = sqlx::query_as::<_, (String, Uuid)>(
             "SELECT kind, created_by_admin_id FROM lexicon.entries WHERE id = $1",
@@ -443,9 +445,9 @@ impl LexiconService {
         .ok_or(LexiconServiceError::WordNotFound)?;
         // 归属先于分组、修订与归档判定：无权改这条标注的管理员不该拿到它的
         // 同原型组、修订号或归档状态。
-        if !is_super_admin && created_by_admin_id != actor_id {
-            return Err(LexiconServiceError::EntryAnnotationForbidden);
-        }
+        authorization
+            .require_owned_action("words.edit", created_by_admin_id)
+            .map_err(|_| LexiconServiceError::EntryAnnotationForbidden)?;
         let keys = base_keys(&mut tx, id).await?;
         lock_keys(&mut tx, &keys).await?;
         let mut groups = self.annotation_groups_in(&mut tx, &kind, &keys).await?;
