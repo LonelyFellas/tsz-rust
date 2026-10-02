@@ -386,7 +386,7 @@ async fn admin_security_version_cannot_be_removed_after_password_change(pool: Pg
         .set_password(&id, "new-hash", false)
         .await
         .unwrap();
-    let error = tsz_rust::deployment_migrations::undo(&pool, 20260928010000, 20261001000000)
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260928010000, 20261001130000)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("cannot remove admin security_version"));

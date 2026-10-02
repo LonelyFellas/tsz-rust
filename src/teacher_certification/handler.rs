@@ -1,7 +1,7 @@
 use super::{model::*, service};
 use crate::api::{ApiJson, ApiPath, ApiQuery};
 use crate::{
-    admin::{AdminAuth, authorization::require_super_admin},
+    admin::{AdminAuth, permissions},
     auth::extract::AuthUser,
     error::AppError,
     state::AppState,
@@ -43,7 +43,8 @@ pub async fn list(
     auth: AdminAuth,
     ApiQuery(query): ApiQuery<ListQuery>,
 ) -> Result<Json<TeacherApplicationList>, AppError> {
-    require_super_admin(&state, &auth).await?;
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("teacherapply.access")?;
     let (limit, offset) = query.pagination()?;
     if query
         .status
@@ -52,9 +53,14 @@ pub async fn list(
     {
         return Err(service::invalid("认证状态无效"));
     }
-    let items = sqlx::query_as::<_, TeacherApplication>(
+    let mut items = sqlx::query_as::<_, TeacherApplication>(
         "SELECT * FROM teacher_applications WHERE ($1::text IS NULL OR status = $1) ORDER BY submitted_at DESC, id DESC LIMIT $2 OFFSET $3",
     ).bind(&query.status).bind(limit).bind(offset).fetch_all(&state.pool).await.map_err(AppError::internal)?;
+    if !authorization.has("teacherapply.read_sensitive") {
+        items
+            .iter_mut()
+            .for_each(TeacherApplication::redact_sensitive);
+    }
     let total = sqlx::query_scalar(
         "SELECT count(*) FROM teacher_applications WHERE ($1::text IS NULL OR status = $1)",
     )
@@ -87,9 +93,10 @@ pub async fn review(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<ReviewApplication>,
 ) -> Result<Json<TeacherApplication>, AppError> {
-    let admin = require_super_admin(&state, &auth).await?;
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("teacherapply.review")?;
     Ok(Json(
-        service::review(&state.pool, id, admin.id, input).await?,
+        service::review(&state.pool, id, auth.subject, input).await?,
     ))
 }
 
@@ -102,8 +109,9 @@ pub async fn revoke(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<RevokeCertification>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let admin = require_super_admin(&state, &auth).await?;
-    service::revoke(&state.pool, id, admin.id, &input.reason).await?;
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("teacherapply.revoke")?;
+    service::revoke(&state.pool, id, auth.subject, &input.reason).await?;
     Ok(Json(serde_json::json!({ "teacher_verified": false })))
 }
 
@@ -169,8 +177,14 @@ pub async fn admin_detail(
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<TeacherApplicationDetail>, AppError> {
-    require_super_admin(&state, &auth).await?;
-    detail(&state, id, None).await
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("teacherapply.access")?;
+    let Json(mut response) = detail(&state, id, None).await?;
+    if !authorization.has("teacherapply.read_sensitive") {
+        response.application.redact_sensitive();
+        response.files.clear();
+    }
+    Ok(Json(response))
 }
 
 #[utoipa::path(patch, path = "/api/v1/me/notifications/{id}/read", tag = "notifications",

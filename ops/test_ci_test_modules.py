@@ -27,6 +27,7 @@ EXPECTED_TARGETS = {
         "admin_login_code_handler",
         "admin_login_handler",
         "admin_logout_all_handler",
+        "admin_permissions_handler",
         "admin_preferences_handler",
         "admin_profile_handler",
         "admin_refresh_handler",
@@ -110,7 +111,7 @@ class CiTestModulesTests(unittest.TestCase):
         )
         flattened = [target for targets in actual.values() for target in targets]
         self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertEqual(len(flattened), 69)
+        self.assertEqual(len(flattened), 70)
 
     def test_ci02_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(

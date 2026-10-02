@@ -738,10 +738,24 @@ async fn security_migration_cannot_be_rolled_back_after_credentials_change(pool:
         .execute(&pool)
         .await
         .unwrap();
-    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923050000, 20261001000000)
+    let current_version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success IS TRUE")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260923050000, current_version)
         .await
         .unwrap_err();
-    assert!(format!("{error:#}").contains("cannot remove security_version"));
+    assert!(
+        format!("{error:#}").contains("cannot remove security_version"),
+        "{error:#}"
+    );
+    let saved_migration_version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success IS TRUE")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(saved_migration_version, current_version);
     let version: i64 = sqlx::query_scalar("SELECT security_version FROM users WHERE id=$1")
         .bind(u.id)
         .fetch_one(&pool)

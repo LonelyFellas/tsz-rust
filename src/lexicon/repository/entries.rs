@@ -165,6 +165,13 @@ impl LexiconRepository {
         &self,
         id: Uuid,
     ) -> Result<Option<EntryRecord>, LexiconRepositoryError> {
+        Self::entry_by_id_on(&self.pool, id).await
+    }
+
+    pub(crate) async fn entry_by_id_on<'e>(
+        executor: impl sqlx::Executor<'e, Database = Postgres>,
+        id: Uuid,
+    ) -> Result<Option<EntryRecord>, LexiconRepositoryError> {
         sqlx::query_as::<_, EntryRecord>(
             r#"
             SELECT entry.id,
@@ -199,7 +206,7 @@ impl LexiconRepository {
             "#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(executor)
         .await
         .map_err(LexiconRepositoryError::Database)
     }

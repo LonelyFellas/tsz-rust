@@ -205,25 +205,50 @@ pub(super) fn invariant_record() -> LexiconServiceError {
     ))
 }
 
-/// 草稿态写权限：**从未发布**的草稿只有创建者本人与超管能写。
-///
-/// 「草稿」只表示尚未对 C 端发布——它在 admin 内部对所有管理员照常可见（列表、详情），
-/// 但可见不等于可写。已发布词条（含带未发布修订的）不走这条限制，全员可编辑。
-///
-/// 判定顺序与 `delete_entry_in_transaction` 一致：归属先于其他业务校验，避免把
-/// 「这条处于什么状态」的信息泄露给无权处置它的管理员。
+/// 编辑权限及归属同时适用于草稿与已发布后的修订。
 pub(super) fn ensure_draft_writable(
     record: &EntryRecord,
-    actor_id: Uuid,
-    is_super_admin: bool,
+    authorization: &crate::admin::permissions::AdminAuthorization,
 ) -> Result<(), LexiconServiceError> {
-    if record.current_publication_id.is_none()
-        && !is_super_admin
-        && record.created_by_admin_id != actor_id
-    {
-        return Err(LexiconServiceError::EntryEditForbidden);
+    authorization.require("words.edit")?;
+    authorization
+        .require_owned_action("words.edit", record.created_by_admin_id)
+        .map_err(|_| LexiconServiceError::EntryEditForbidden)
+}
+
+pub(super) async fn lock_action(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor_id: Uuid,
+    action: &str,
+) -> Result<crate::admin::permissions::AdminAuthorization, LexiconServiceError> {
+    let authorization = crate::admin::permissions::lock(tx, actor_id).await?;
+    authorization.require(action)?;
+    Ok(authorization)
+}
+
+impl LexiconService {
+    pub(super) async fn authorize_any_action(
+        &self,
+        actor_id: Uuid,
+        actions: &[&str],
+    ) -> Result<(), LexiconServiceError> {
+        let mut tx = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        let authorization = crate::admin::permissions::lock(&mut tx, actor_id).await?;
+        if !actions.iter().any(|action| authorization.has(action)) {
+            return Err(crate::error::AppError::forbidden(
+                crate::error::ErrorCode::Forbidden,
+                "lexicon action permission required",
+            )
+            .into());
+        }
+        tx.commit().await.map_err(database_error)?;
+        Ok(())
     }
-    Ok(())
 }
 
 /// 单词词条只能挂单词词性、短语词条只能挂短语词性；不一致的每个 pos 节点各报一条，

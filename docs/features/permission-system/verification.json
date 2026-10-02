@@ -1,0 +1,119 @@
+{
+  "date": "2026-10-02",
+  "scope": "统一管理员权限系统：实现与本地验证；不含提交、推送、合并、部署或生产授权变更",
+  "sources": {
+    "backend_worktree": "/Users/darwish/Dev/tsz-core/.worktrees/backend/permission-system-design",
+    "backend_branch": "docs/permission-system-design",
+    "backend_base": "cc1723121a171020d154e0cdc13908fe34c74159",
+    "frontend_worktree": "/Users/darwish/Dev/tsz-core/.worktrees/frontend/permission-system",
+    "frontend_branch": "feat/unified-admin-permissions",
+    "frontend_base": "4bfb237e354cb3a5d0f71438c1f8bce9f2d170f1",
+    "version_note": "上述提交加本任务未提交差异，不是纯提交制品",
+    "openapi_sha256": "5e732f282c0add0816f2e941c7c4da8b87f7b8825cb1d804c2fab955488ce2b7",
+    "runtime_schema_matches_openapi": true,
+    "permission_keys": 29,
+    "pending_role_endpoints_not_claimed_implemented": true
+  },
+  "environment": {
+    "new_backend": "http://127.0.0.1:8391",
+    "legacy_backend": "http://127.0.0.1:8392",
+    "postgres": "本任务专用 tsz-permission-system-pg，127.0.0.1:55439；permission_test / permission_legacy_test",
+    "redis": "本任务专用 tsz-permission-system-redis，127.0.0.1:6391；新旧版本使用不同逻辑库",
+    "cargo_target": "/Users/darwish/.cargo-target/permission-system-validation；旧基线另用自己的 .target-legacy",
+    "api_proxy": "每个管理端验收服务显式指定 BACKEND_API_URL，未使用其他任务的 8383 服务",
+    "api_mock": false,
+    "tts_mock": false,
+    "otp_sender": "项目现有 Mock 发送器，固定测试码；登录、权限、数据库、会话与审计使用真实后端",
+    "home_dashboard": "保留项目原有占位统计，不以首页数字作为后端数据验收证据",
+    "production_access": false,
+    "local_service_cleanup": "已停止3022、3023两个临时管理端服务；用于旧版本测试的8392后端停止操作被工具拒绝，仍仅连接本任务独立旧库，未尝试其他停止方式。新后端8391与管理端3021保留。",
+    "startup_configuration": "已从正常启动清单移除会故意失败的旧版本回退验证项；permission-backend使用当前任务后端及正确迁移集，preview_start复用正常8391实例，readiness为ready。数据库账本及权限数据未回退。"
+  },
+  "checks": [
+    {"name": "backend cargo fmt --check", "result": "passed"},
+    {"name": "backend SQLX_OFFLINE=true cargo clippy --locked --all-targets --all-features -- -D warnings", "result": "passed"},
+    {"name": "backend cargo sqlx prepare -- --all-targets --all-features", "result": "passed", "database": "已确认的本任务隔离库", "cache_diff": "删除一个被本次替换的孤儿查询；两个查询改为依赖闭合的授权数组，2旧换2新；无其他缓存变化"},
+    {"name": "backend --lib --bins before review fixes", "result": "passed", "library_tests": 302, "binary_tests": 7},
+    {"name": "权限、profile、管理员治理、用户、教师、词性、词条、例句、音频、语音受影响集成测试", "result": "passed", "note": "包括原有测试基线适配后的重跑；没有把零匹配当作通过"},
+    {"name": "frontend pnpm typecheck", "result": "passed"},
+    {"name": "frontend pnpm lint", "result": "passed"},
+    {"name": "frontend pnpm test", "result": "passed", "files": 215, "tests_passed": 3150, "preexisting_skipped": 2},
+    {"name": "frontend pnpm --filter @tsz/admin build", "result": "passed"},
+    {"name": "frontend earlier pnpm build", "result": "passed", "note": "admin 与 web 均构建成功；最后微改命中检查另行记录"},
+    {"name": "最后旧后端升级提示微改", "result": "passed", "targeted_files": 20, "targeted_tests": 234, "note": "typecheck/lint/admin build重新通过；真实旧后端登录显示升级说明并保持业务/目录请求为0"},
+    {"name": "review fixes backend regressions", "result": "passed", "targets": {"admin_permissions": 11, "admin_profile": 12, "teacher": 20, "catalog": 11, "shared_sentences": 26, "user_detail": 21, "user_list": 5, "admin_library": 16, "audio_refs": 22, "audio_lifecycle": 7, "speech_fault": 10, "speech_service": 4, "lexicon_handler_permission": 5}, "note": "归属、最小授权、旧幂等回包、单连接池、教师原件等待中撤权及请求内查询复用均有专项回归；重复覆盖的shared_sentences只计一次"},
+    {"name": "review fixes backend build and native export", "result": "passed", "note": "隔离target执行fmt、all-targets/all-features clippy -D warnings、tsz-rust build与export_openapi均exit 0；本轮未新增SQL宏"},
+    {"name": "review fixes frontend contract tests", "result": "passed", "tests": 441, "note": "SharedSentence及SentencePublication必须有创建者UUID；新validator接受新响应，旧严格validator拒绝新增字段"},
+    {"name": "review fixes frontend behavior regressions", "result": "passed", "note": "迟到403、singleflight收尾、偏好返回覆盖新权限、账号切换、真实RootProviders/ConsoleLayout/WordCreate未保存输入保留、路由大小写/尾斜杠、侧栏共享判定及提交结果恢复"},
+    {"name": "两仓 git diff --check", "result": "passed"}
+  ],
+  "real_ui_and_database": [
+    "超级管理员及两个普通管理员通过实际 login-code/login/profile 流程登录；新普通管理员初始权限为空，直接词条请求被拒绝",
+    "从目录选 words.edit，批量开通给两人；确认页面展开 words.access；独立数据库核对4条授权、双方版本1及2条同批审计",
+    "两个标签批量关联两个权限；标签筛选及查看管理员名单正常；授权仍4条、双方版本仍1，不因标签变化自动改变权限",
+    "个人设置开通创建权限，取消基础访问时确认同时取消编辑；普通账号无权限直链 /words 不发词条业务查询",
+    "原页面重新获得权限后，窗口 focus 读取本人 profile，菜单与词条查询恢复，无需换账号",
+    "乙创建并保存本人 permissionbeta，数据库 creator=乙、revision=2；甲只有本人编辑时只能查看乙词条，直链向导无可编辑输入",
+    "给甲开通 edit_others 后，甲通过页面修改并保存乙词条；数据库 revision=3、creator仍乙、last_editor=甲，没有转移归属",
+    "取消甲 edit_others 后仍保留本人编辑；原会话刷新后旧页面重发保存乙词条返回403 entry_edit_forbidden，编辑输入0，已完成的revision3不回滚",
+    "新版文案使用全部权限、设置权限、查看调整、确认修改、同时开通/取消等日常说法；确认表显示人员及权限名称，技术 key 作为辅助",
+    "审查修复后重新构建8391后端：乙在3021例句库使用真实昵称显示的本人例句，修改中文并保存；数据库revision=2，created_by_admin_id仍为乙UUID",
+    "本人例句通过页面发布为版本1；填写必填原因后下架，列表变为已下架/恢复；再恢复后withdrawn_at=NULL、current_publication_id不变，草稿revision仍2、归属不变",
+    "本人通过发布历史选择回退，生成发布版本2；数据库lifecycle_revision=5，草稿revision仍2、归属仍乙UUID、发布者为乙；不是用UUID替换显示昵称规避问题"
+  ],
+  "regressions_fixed": [
+    "仅有例句访问不能取得只被词条引用的他人音频签名地址；签名交付前检查同一资源范围",
+    "不能把他人尚未引用、原本不可读的音频挂到自己的词条；词形、释义、发布与回滚使用一致校验，保留行锁和单词条占用规则",
+    "首次上传确认核对签发人；新临时 key 绑定管理员，拒绝抢先确认且不读取/复制/删除他人源对象；旧已确认 key 保留真实创建者幂等重放，无归属旧待确认 key 要求重新上传",
+    "管理员列表、改昵称及启禁用响应中的旧发布布尔值与 profile 一样由新授权完整能力包派生，不再读取旧列作为权限事实",
+    "提交超时、5xx、缺字段或409后废弃旧预览，回读当前状态再重新确认，不盲目重试或声称一定未保存"
+  ],
+  "review_fixes": {
+    "reported": 15,
+    "fixed": 15,
+    "batch_1": [
+      {"id": 1, "issue": "例句显示昵称被当作归属UUID", "result": "fixed", "evidence": "创建者UUID独立必填；草稿、发布、历史及旧单条/批量幂等回包恢复真实creator；真页面编辑及生命周期操作通过"},
+      {"id": 2, "issue": "保存事务内二次借连接", "result": "fixed", "evidence": "使用同事务读取必要字段；max_connections=1/acquire_timeout=1s下原PoolTimedOut复现，词形/释义保存修后成功"},
+      {"id": 6, "issue": "路由大小写及尾斜杠绕过页面检查", "result": "fixed", "evidence": "router和权限检查共享路由元数据及matchRoutes匹配语义；真实路由变体回归"},
+      {"id": 7, "issue": "新增例句缺少词条编辑依赖", "result": "fixed", "evidence": "目录补words.edit及递归words.access；最小预览/应用/创建本人成功、他人403，撤words.edit同时撤sentences.create"},
+      {"id": 8, "issue": "例句访问不能读取音色目录", "result": "fixed", "evidence": "目录允许词条或例句访问；语音生成仍独立检查speech.generate"},
+      {"id": 9, "issue": "查询参数导出为必填路径参数", "result": "fixed", "evidence": "三种Query DTO显式Query位置；九参数正确，八个可选参数required=false；原生重新导出并同步"}
+    ],
+    "batch_2": [
+      {"id": 3, "issue": "读取profile期间丢弃后续403", "result": "fixed", "evidence": "同会话刷新标记并在完整singleflight窗口排队重读；旧会话返回不覆盖新账号"},
+      {"id": 4, "issue": "偏好保存返回覆盖最新权限", "result": "fixed", "evidence": "仅合并最新同账号preferences；异步撤权及账号切换回归"},
+      {"id": 5, "issue": "无关权限变化重挂编辑器丢失未保存输入", "result": "fixed", "evidence": "根组件按账号身份重挂，撤权仅清受影响模块；真组件input DOM和值均保留"}
+    ],
+    "batch_3": [
+      {"id": 10, "issue": "同请求重复读取授权", "result": "fixed", "evidence": "请求extensions/OnceCell复用，普通请求SELECT由8到4；新请求重读，事务及敏感外部等待后的reload不复用旧快照"},
+      {"id": 11, "issue": "逐权限串行INSERT", "result": "fixed", "evidence": "每管理员UNNEST写入；100人×29权限INSERT由2900到100，2900条grant、100条审计、操作者、时间及no-op正确"},
+      {"id": 12, "issue": "审计列表与count重复筛选条件", "result": "fixed", "evidence": "固定FILTER与QueryBuilder复用；全部筛选及分页回归"},
+      {"id": 13, "issue": "提交恢复与冲突状态重复", "result": "fixed", "evidence": "conflict由recovery派生；未知结果/5xx/坏响应/409恢复路径保留"},
+      {"id": 14, "issue": "未知权限重复告警", "result": "fixed", "evidence": "删除外层重复generic warning，保留具名未知权限告警及有效权限过滤"},
+      {"id": 15, "issue": "侧栏重复实现权限算法", "result": "fixed", "evidence": "复用hasAdminPermission，保留超管专属及尚未实现菜单禁用规则"}
+    ],
+    "additional_regression": "请求内缓存曾使教师原件等待后撤权回归失败；交付前改用fresh reload，撤权/禁用/强制改密三种路径重新通过"
+  },
+  "migration_and_compatibility": {
+    "empty_database_up_down_up": "passed",
+    "read_only_person_migration_preview": "passed；不写授权，已初始化账号不被旧布尔值覆盖",
+    "legacy_frontend_new_backend": "审查前真实V3列表可读取；旧权限开关PATCH返回409且授权/版本不变。审查修复新增必填例句creator UUID后，旧严格validator拒绝新例句及历史响应，契约测试已证明该不兼容，不能沿用先前的部分兼容结论",
+    "paired_release": "当前响应契约不能简单前端先上线或后端先上线；按维护窗口配套切换，期间不宣称后台例句功能可用。旧后端仍可能放宽权限，禁止将其作为启用新控制后的直接回退方案",
+    "new_frontend_legacy_backend": "缺少权限版本字段时失败关闭，停留登录页且不发业务或目录请求；真实界面明确显示当前后台版本不支持权限设置、需升级后再登录",
+    "new_frontend_new_backend": "上述授权、标签、菜单/直链、本人及他人编辑、撤权流程已真实验证",
+    "legacy_binary_migrated_database": "实际启动退出1：已应用的20261001130000迁移不在旧二进制中，未提供后台服务",
+    "populated_permission_down": "实际退出1并拒绝删除；grant/tag/audit/词条revision/迁移账本前后完全一致",
+    "rollback_rule": "启用新控制后，不可直接回退至会放宽权限的旧后端；保留数据前向修复或使用已证明保留隔离的兼容版本"
+  },
+  "c_end": {
+    "implementation": "不新增管理员权限到C端；沿用身份、归属和业务关系",
+    "verified": ["新旧两后端实际C端登录与本人me返回200", "本人教师认证查询返回200", "C端token访问管理员profile返回401", "教师资格及本人资源相关后端回归", "web生产构建通过"],
+    "not_manually_verified": "完整C端页面操作与真实云渠道成功路径未另行手测，不把类型检查当作该手测完成"
+  },
+  "before_production": [
+    "未读取现网管理员真实名单，具体逐人差异仍须展示并由产品负责人批准；本次仅测试账号授权",
+    "真实短信、语音提供商及对象存储成功链路需要独立环境和凭据验证；权限拒绝、并发、归属及交付前复核已在隔离测试证明",
+    "提交、推送、合并、生产迁移、切换和部署都需要另行授权"
+  ],
+  "worktree_state": "原需求与设计文档保留，后端任务工作区复用；实现与验证改动均未提交。未重置、stash、清理其他任务或共享缓存。"
+}

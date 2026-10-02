@@ -31,9 +31,11 @@ pub struct AdminAccountAdminResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AdminAccountUserResponse {
     pub id: Uuid,
+    /// 完整手机号仅对 users.read_sensitive 可见；无权限或未绑定时省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub phone: Option<String>,
+    /// 完整邮箱仅对 users.read_sensitive 可见；无权限或未绑定时省略。
     #[schema(nullable = false)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
@@ -84,7 +86,7 @@ pub struct AdminUserIdPath {
 pub struct UserListQueryParams {
     /// 按用户持有的角色筛选
     pub role: Option<UserRole>,
-    /// 手机号、邮箱或昵称的字面子串匹配
+    /// 手机号、邮箱或昵称的字面子串匹配；无 users.read_sensitive 时仅匹配昵称。
     pub q: Option<String>,
     /// 注册时间下界（含，RFC 3339）
     pub registered_from: Option<DateTime<Utc>>,

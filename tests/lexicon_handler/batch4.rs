@@ -22,7 +22,7 @@ async fn batch4_published_summary_never_uses_draft_label(pool: PgPool) {
 #[sqlx::test]
 async fn batch4_revocation_wins_against_waiting_publisher(pool: PgPool) {
     let state = batch3_state(&pool).await;
-    let actor = seed_admin(&pool).await;
+    let actor = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let bearer = token(&state, actor);
     let word = batch3_word(&state, &bearer, "alpha").await;
     let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
@@ -34,11 +34,13 @@ async fn batch4_revocation_wins_against_waiting_publisher(pool: PgPool) {
         .await
         .unwrap();
     let mut revoke = pool.begin().await.unwrap();
-    sqlx::query("UPDATE admins SET can_publish_lexicon=false WHERE id=$1")
+    sqlx::query("UPDATE admins SET permission_version=permission_version+1 WHERE id=$1")
         .bind(actor)
         .execute(&mut *revoke)
         .await
         .unwrap();
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.publish'")
+        .bind(actor).execute(&mut *revoke).await.unwrap();
     let request_state = state.clone();
     let request = tokio::spawn(async move {
         call(
@@ -253,7 +255,7 @@ async fn public_list(state: &AppState, bearer: &str, entry: Option<&Value>) -> V
 #[sqlx::test]
 async fn batch4_sentence_publication_isolated_history_and_idempotency(pool: PgPool) {
     let state = batch3_state(&pool).await;
-    let actor = seed_admin(&pool).await;
+    let actor = seed_admin_with_role(&pool, AdminRole::Admin).await;
     let bearer = token(&state, actor);
     let word = batch3_word(&state, &bearer, "alpha").await;
     let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
@@ -329,11 +331,13 @@ async fn batch4_sentence_publication_isolated_history_and_idempotency(pool: PgPo
     .await;
     assert_eq!(history.as_array().unwrap().len(), 3);
     assert_eq!(history[0]["rollback_of_publication_id"], first);
-    sqlx::query("UPDATE admins SET role='admin', can_publish_lexicon=false WHERE id=$1")
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
         .bind(actor)
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.publish'")
+        .bind(actor).execute(&pool).await.unwrap();
     let (status, _) = call(
         &state,
         Method::POST,
@@ -721,4 +725,354 @@ async fn batch4_mixed_reverse_order_concurrency_has_one_winner(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(count, 2);
+}
+
+#[sqlx::test]
+async fn permission_mixed_batch_requires_only_present_resource_actions(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let actor = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    let bearer = token(&state, actor);
+    let word = batch3_word(&state, &bearer, "alpha").await;
+    let draft = sentence(&state, &bearer, &word).await;
+    let path = format!("{ROOT}/entries/publications/batch");
+    let mut mixed = batch3_input(&[&word]);
+    mixed["sentences"] = json!([item(&draft)]);
+    for missing in ["sentences.publish", "words.publish"] {
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key=$2")
+            .bind(actor)
+            .bind(missing)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, response) = call(
+            &state,
+            Method::POST,
+            &path,
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(mixed.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{missing}: {response}");
+        let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM lexicon.entry_publications), (SELECT count(*) FROM lexicon.shared_sentence_publications)")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(counts, (0, 0), "缺任何非空资源的发布动作都须整批无副作用");
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)")
+            .bind(actor).bind(missing).execute(&pool).await.unwrap();
+    }
+    let (status, result) = call(
+        &state,
+        Method::POST,
+        &path,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(mixed),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{result}");
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.publish'",
+    )
+    .bind(actor)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (_, current_sentence) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/sentences/{}", draft["id"].as_str().unwrap()),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let (status, result) = call(
+        &state,
+        Method::POST,
+        &path,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"items":[],"sentences":[item(&current_sentence)]})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "空词条集合不能要求words.publish：{result}"
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.publish'")
+        .bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.publish',$1)")
+        .bind(actor).execute(&pool).await.unwrap();
+    let next_word = batch3_word(&state, &bearer, "beta").await;
+    let (status, result) = call(
+        &state,
+        Method::POST,
+        &path,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(batch3_input(&[&next_word])),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "空例句集合不能要求sentences.publish：{result}"
+    );
+}
+
+fn permission_service(state: &AppState) -> tsz_rust::lexicon::service::LexiconService {
+    use tsz_rust::lexicon::{
+        detection_store::DetectionStore, impact_store::ImpactStore, repository::LexiconRepository,
+        service::LexiconService, surface_policy::SurfacePolicyStore,
+        surface_snapshot::SurfaceSnapshotStore,
+    };
+    LexiconService::new(
+        LexiconRepository::new(state.pool.clone()),
+        DetectionStore::new(state.redis.clone()),
+        ImpactStore::new(state.redis.clone()),
+        SurfaceSnapshotStore::new(
+            state.redis.clone(),
+            std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(600),
+        ),
+        SurfacePolicyStore::new(state.redis.clone()),
+        std::sync::Arc::from(&b"permission-test-key"[..]),
+    )
+}
+
+#[sqlx::test]
+async fn permission_edit_scope_applies_to_drafts_and_published_revisions_at_service_boundary(
+    pool: PgPool,
+) {
+    use tsz_rust::lexicon::{
+        dto::{DeleteDraftInput, EntryLifecycleInput, SaveMeaningsStepInputV3},
+        service::LexiconServiceError,
+    };
+    let state = batch3_state(&pool).await;
+    let owner = seed_admin(&pool).await;
+    let outsider = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    let bearer = token(&state, owner);
+    let service = permission_service(&state);
+    for published in [false, true] {
+        let mut word = batch3_word(&state, &bearer, if published { "beta" } else { "alpha" }).await;
+        if published {
+            let (status, response) = publish_ready_v3(&state, &bearer, &word).await;
+            assert_eq!(status, StatusCode::CREATED, "{response}");
+            word = response;
+        }
+        let id = Uuid::parse_str(word["word"]["id"].as_str().unwrap()).unwrap();
+        let input: SaveMeaningsStepInputV3 = serde_json::from_value(json!({"schema_version":3,"base_revision":word["word"]["revision"],"intent":"save","content":writable_v3_meanings(&word)})).unwrap();
+        let error = service
+            .save_meanings_v3(outsider, Uuid::now_v7(), id, input.clone(), true)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, LexiconServiceError::EntryEditForbidden),
+            "客户端超管bool不可扩权：{error:?}"
+        );
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.edit_others',$1)")
+            .bind(outsider).execute(&pool).await.unwrap();
+        let edited = service
+            .save_meanings_v3(outsider, Uuid::now_v7(), id, input, false)
+            .await
+            .unwrap();
+        let archived = service
+            .archive(
+                outsider,
+                Uuid::now_v7(),
+                id,
+                Uuid::now_v7(),
+                EntryLifecycleInput {
+                    base_revision: edited.word.revision,
+                    base_lifecycle_revision: edited.word.lifecycle_revision,
+                    confirmed_surface_match_token: None,
+                },
+                true,
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(archived, LexiconServiceError::EntryPublishForbidden),
+            "编辑他人不授予他人生命周期权限：{archived:?}"
+        );
+        let deletion = service
+            .delete_draft(
+                outsider,
+                Uuid::now_v7(),
+                id,
+                DeleteDraftInput {
+                    base_revision: edited.word.revision,
+                    base_lifecycle_revision: edited.word.lifecycle_revision,
+                },
+                true,
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(deletion, LexiconServiceError::EntryDeleteForbidden),
+            "范围权限/伪造bool不是超管"
+        );
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.edit_others'")
+            .bind(outsider).execute(&pool).await.unwrap();
+        let input: SaveMeaningsStepInputV3 = serde_json::from_value(json!({"schema_version":3,"base_revision":edited.word.revision,"intent":"save","content":writable_v3_meanings(&serde_json::to_value(&edited).unwrap())})).unwrap();
+        assert!(matches!(
+            service
+                .save_meanings_v3(outsider, Uuid::now_v7(), id, input, true)
+                .await,
+            Err(LexiconServiceError::EntryEditForbidden)
+        ));
+    }
+}
+
+#[sqlx::test]
+async fn permission_create_annotation_updates_require_edit_scope_without_super_admin(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let owner = seed_admin(&pool).await;
+    let editor = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    let existing = create_v3_with_complete_forms(&state, &pool, &token(&state, owner)).await;
+    let bearer = token(&state, editor);
+    let mut body = entry_annotations_create_body(
+        &state,
+        &bearer,
+        "harbour",
+        json!({"mode":"distinguish","uk":"harbour","us":"harbor","source_dialect":"uk"}),
+    )
+    .await;
+    let key = Uuid::now_v7();
+    let (status, required) = entry_annotations_submit(&state, &bearer, key, &mut body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{required}");
+    body["annotation"] = json!("new");
+    body["annotation_updates"] = entry_annotations_updates(&required, &["old"]);
+    let (status, denied) = entry_annotations_submit(&state, &bearer, key, &mut body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(denied["code"], "entry_annotation_forbidden");
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.edit_others',$1)")
+        .bind(editor).execute(&pool).await.unwrap();
+    let (status, created) = entry_annotations_submit(&state, &bearer, key, &mut body).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "有create、edit及编辑他人范围的普通管理员可提交嵌套标注：{created}"
+    );
+    let old_label: String =
+        sqlx::query_scalar("SELECT annotation FROM lexicon.entries WHERE id=$1")
+            .bind(Uuid::parse_str(existing["word"]["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(old_label, "old");
+    let role: String = sqlx::query_scalar("SELECT role FROM admins WHERE id=$1")
+        .bind(editor)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(role, "admin");
+}
+
+#[sqlx::test]
+async fn permission_shared_sentence_body_scope_and_host_scope_are_independent(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let owner = seed_admin(&pool).await;
+    let outsider = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    let bearer = token(&state, owner);
+    let other_bearer = token(&state, outsider);
+    let word = batch3_word(&state, &bearer, "alpha").await;
+    let word_id = word["word"]["id"].as_str().unwrap();
+    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    assert_eq!(status, StatusCode::CREATED);
+    for published in [false, true] {
+        let mut current = sentence(&state, &bearer, &word).await;
+        if published {
+            current = publish_sentence(&state, &bearer, &current).await;
+        }
+        let path = format!("{ROOT}/sentences/{}", current["id"].as_str().unwrap());
+        let body = json!({"base_revision":current["revision"],"content":current["content"]});
+        let (status, denied) = call(
+            &state,
+            Method::PUT,
+            &path,
+            &other_bearer,
+            None,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "已发布与草稿都须例句归属：{denied}"
+        );
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.edit_others',$1)")
+            .bind(outsider).execute(&pool).await.unwrap();
+        let (status, denied) = call(
+            &state,
+            Method::PUT,
+            &path,
+            &other_bearer,
+            None,
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "词条范围不能替代例句范围：{denied}"
+        );
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.edit_others'")
+            .bind(outsider).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'sentences.edit_others',$1)")
+            .bind(outsider).execute(&pool).await.unwrap();
+        let (status, edited) =
+            call(&state, Method::PUT, &path, &other_bearer, None, Some(body)).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "纯例句编辑无需编辑被引词条：{edited}"
+        );
+        let context_body = json!({"base_revision":edited["revision"],"content":edited["content"],"context_entry_id":word_id,"context_sense_id":word["word"]["meanings"]["pos"][0]["senses"][0]["id"]});
+        let (status, denied) = call(
+            &state,
+            Method::PUT,
+            &path,
+            &other_bearer,
+            None,
+            Some(context_body.clone()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "带宿主上下文另查词条归属：{denied}"
+        );
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.edit_others',$1)")
+            .bind(outsider).execute(&pool).await.unwrap();
+        let (status, edited) = call(
+            &state,
+            Method::PUT,
+            &path,
+            &other_bearer,
+            None,
+            Some(context_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "两对象分别获授权后可编辑：{edited}");
+        let (status, denied) = call(
+            &state,
+            Method::DELETE,
+            &path,
+            &other_bearer,
+            None,
+            Some(json!({"base_revision":edited["revision"]})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "两种编辑范围不构成永久删除超管身份：{denied}"
+        );
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key=ANY(ARRAY['words.edit_others','sentences.edit_others'])")
+            .bind(outsider).execute(&pool).await.unwrap();
+    }
 }

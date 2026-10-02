@@ -110,6 +110,10 @@ pub fn router(state: AppState) -> Router {
     // Axum 的 layer 后添加者先执行：Request ID 必须先写入 Extensions，
     // TraceLayer 的 make_span_with 才能读取并关联后续日志。
     let router = router
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            admin::authorization::enforce_business_access,
+        ))
         .layer(
             TraceLayer::new_for_http()
                 // 只记录 method/path/request_id；不要记录 headers，Cookie 中含 refresh token。

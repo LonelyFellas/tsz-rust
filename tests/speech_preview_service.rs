@@ -44,10 +44,31 @@ impl SpeechProvider for FakeProvider {
     }
 }
 
+async fn seed_admin(pool: &PgPool) -> Uuid {
+    let id = Uuid::now_v7();
+    tsz_rust::admin::AdminRepository::new(pool.clone())
+        .create(tsz_rust::admin::NewAdmin {
+            id,
+            phone: format!("speech-{}", id.simple()),
+            display_name: "Speech Admin".to_owned(),
+            password_hash: "hash".to_owned(),
+            role: tsz_rust::admin::AdminRole::Admin,
+            must_change_password: false,
+            created_by_admin_id: None,
+        })
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants (admin_id, permission_key, granted_by) SELECT $1, unnest(ARRAY['words.access', 'speech.generate']), $1")
+        .bind(id).execute(pool).await.unwrap();
+    id
+}
+
 fn redis_pool() -> deadpool_redis::Pool {
-    deadpool_redis::Config::from_url("redis://127.0.0.1:6379/0")
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .unwrap()
+    deadpool_redis::Config::from_url(
+        std::env::var("TEST_REDIS_URL").expect("isolated test Redis required"),
+    )
+    .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+    .unwrap()
 }
 
 fn request(text: &str) -> CreatePreviewRequest {
@@ -74,6 +95,7 @@ async fn insert_voice(pool: &PgPool) {
 
 #[sqlx::test]
 async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
+    let admin_id = seed_admin(&pool).await;
     insert_voice(&pool).await;
     let provider = Arc::new(FakeProvider {
         calls: AtomicUsize::new(0),
@@ -83,6 +105,7 @@ async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
         StoragePolicy::new(StoragePrivacy::Private, 1024, Duration::from_secs(60), None).unwrap(),
     );
     let service = PreviewService::new(
+        pool.clone(),
         PreviewRepository::new(pool),
         redis_pool(),
         Some(provider.clone()),
@@ -90,7 +113,7 @@ async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
     );
 
     let generated = service
-        .create_preview(request("cache-hit-test"))
+        .create_preview(admin_id, request("cache-hit-test"))
         .await
         .unwrap();
     assert!(matches!(
@@ -99,7 +122,7 @@ async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
     ));
     assert_eq!(generated.url_expires_in_seconds, 60);
     let hit = service
-        .create_preview(request("cache-hit-test"))
+        .create_preview(admin_id, request("cache-hit-test"))
         .await
         .unwrap();
     assert!(matches!(hit.cache_status, PreviewCacheStatus::Hit));
@@ -108,6 +131,7 @@ async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
 
 #[sqlx::test]
 async fn voice_listing_hides_provider_identity_and_disabled_rows(pool: PgPool) {
+    let admin_id = seed_admin(&pool).await;
     insert_voice(&pool).await;
     sqlx::query("UPDATE speech.voices SET provider_voice_id = 'en-US-AvaNeural' WHERE alias = 'en-us-jenny'")
         .execute(&pool).await.unwrap();
@@ -120,15 +144,69 @@ async fn voice_listing_hides_provider_identity_and_disabled_rows(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let service = PreviewService::new(PreviewRepository::new(pool), redis_pool(), None, None);
-    let response = service.list_voices().await.unwrap();
+    let service = PreviewService::new(
+        pool.clone(),
+        PreviewRepository::new(pool),
+        redis_pool(),
+        None,
+        None,
+    );
+    let response = service.list_voices(admin_id).await.unwrap();
     assert_eq!(response.items.len(), 1);
     assert_eq!(response.items[0].alias, "en-us-jenny");
     assert_eq!(response.items[0].capabilities.styles, vec!["chat"]);
 }
 
 #[sqlx::test]
+async fn voice_catalog_allows_sentences_only_but_generation_still_requires_grant(pool: PgPool) {
+    let admin_id = seed_admin(&pool).await;
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id = $1")
+        .bind(admin_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants (admin_id, permission_key, granted_by) VALUES ($1, 'sentences.access', $1)")
+        .bind(admin_id).execute(&pool).await.unwrap();
+    insert_voice(&pool).await;
+    let service = PreviewService::new(
+        pool.clone(),
+        PreviewRepository::new(pool.clone()),
+        redis_pool(),
+        None,
+        None,
+    );
+    let voices = service.list_voices(admin_id).await.unwrap();
+    assert_eq!(voices.items.len(), 1);
+    let denied = service
+        .create_preview(admin_id, request("sentences-only"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(denied, tsz_rust::speech::preview::PreviewServiceError::Authorization(ref error) if error.status_code() == axum::http::StatusCode::FORBIDDEN)
+    );
+    sqlx::query("INSERT INTO admin_permission_grants (admin_id, permission_key, granted_by) VALUES ($1, 'words.access', $1)")
+        .bind(admin_id).execute(&pool).await.unwrap();
+    let denied = service
+        .create_preview(admin_id, request("without-generation-grant"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(denied, tsz_rust::speech::preview::PreviewServiceError::Authorization(ref error) if error.status_code() == axum::http::StatusCode::FORBIDDEN)
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id = $1")
+        .bind(admin_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let denied = service.list_voices(admin_id).await.unwrap_err();
+    assert!(
+        matches!(denied, tsz_rust::speech::preview::PreviewServiceError::Authorization(ref error) if error.status_code() == axum::http::StatusCode::FORBIDDEN)
+    );
+}
+
+#[sqlx::test]
 async fn concurrent_same_fingerprint_has_one_provider_owner(pool: PgPool) {
+    let admin_id = seed_admin(&pool).await;
     insert_voice(&pool).await;
     let provider = Arc::new(FakeProvider {
         calls: AtomicUsize::new(0),
@@ -138,6 +216,7 @@ async fn concurrent_same_fingerprint_has_one_provider_owner(pool: PgPool) {
         StoragePolicy::new(StoragePrivacy::Private, 1024, Duration::from_secs(60), None).unwrap(),
     );
     let service = PreviewService::new(
+        pool.clone(),
         PreviewRepository::new(pool),
         redis_pool(),
         Some(provider.clone()),
@@ -146,8 +225,16 @@ async fn concurrent_same_fingerprint_has_one_provider_owner(pool: PgPool) {
     let first = service.clone();
     let second = service;
     let (left, right) = tokio::join!(
-        async move { first.create_preview(request("concurrent-test")).await },
-        async move { second.create_preview(request("concurrent-test")).await },
+        async move {
+            first
+                .create_preview(admin_id, request("concurrent-test"))
+                .await
+        },
+        async move {
+            second
+                .create_preview(admin_id, request("concurrent-test"))
+                .await
+        },
     );
     assert!(left.is_ok(), "first request should finish");
     assert!(right.is_ok(), "second request should hit winner");

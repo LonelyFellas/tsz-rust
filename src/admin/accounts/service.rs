@@ -11,6 +11,7 @@ use crate::{
                 UserListQuery, UserListResponse,
             },
         },
+        permissions::{self, AdminAuthorization},
     },
     api::{PaginatedResponse, PaginationMeta},
     platform::{Password, PasswordError, validate_password},
@@ -22,6 +23,8 @@ use crate::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdminAccountsServiceError {
+    #[error("admin authorization failed")]
+    Authorization(#[from] crate::error::AppError),
     #[error("user repository is none")]
     UserRepositoryNone,
 
@@ -322,7 +325,9 @@ impl AdminAccountsService {
     pub async fn user_list(
         &self,
         query: UserListQuery,
+        authorization: &AdminAuthorization,
     ) -> Result<UserListResponse, AdminAccountsServiceError> {
+        authorization.require("users.access")?;
         let user_repo = self.user_repo()?;
 
         let page = query.pagination.page.unwrap_or(1);
@@ -363,9 +368,20 @@ impl AdminAccountsService {
             offset,
         };
 
-        let (records, total) = user_repo.user_list(&filter).await.map_err(map_user_error)?;
+        let read_sensitive = authorization.has("users.read_sensitive");
+        let (records, total) = if read_sensitive {
+            user_repo.user_list(&filter).await.map_err(map_user_error)?
+        } else {
+            self.repository
+                .user_list_without_sensitive(&filter)
+                .await
+                .map_err(map_repository_error)?
+        };
 
-        let items = records.into_iter().map(user_response_from).collect();
+        let items = records
+            .into_iter()
+            .map(|record| user_response_from(record, read_sensitive))
+            .collect();
         let total_pages = if total == 0 {
             0
         } else {
@@ -387,7 +403,9 @@ impl AdminAccountsService {
     pub async fn user_detail(
         &self,
         user_id: &Uuid,
+        authorization: &AdminAuthorization,
     ) -> Result<AdminAccountUserResponse, AdminAccountsServiceError> {
+        authorization.require("users.access")?;
         let record = self
             .user_repo()?
             .admin_view_by_id(user_id)
@@ -395,42 +413,61 @@ impl AdminAccountsService {
             .map_err(map_user_error)?
             .ok_or(AdminAccountsServiceError::UserNotFound)?;
 
-        Ok(user_response_from(record))
+        Ok(user_response_from(
+            record,
+            authorization.has("users.read_sensitive"),
+        ))
     }
 
-    /// 启禁用 C 端用户（三期 `PATCH /users/{id}/status`，super）。
+    /// 启禁用 C 端用户，事务内复核操作者权限。
     pub async fn set_user_status(
         &self,
+        actor_id: Uuid,
         user_id: &Uuid,
         status: UserStatus,
     ) -> Result<AdminAccountUserResponse, AdminAccountsServiceError> {
-        self.update_user(user_id, Some(status), None).await
+        self.update_user(actor_id, "users.set_status", user_id, Some(status), None)
+            .await
     }
 
-    /// 改 C 端用户昵称（三期 `PATCH /users/{id}`，super）。
+    /// 改 C 端用户昵称，事务内复核 users.edit。
     /// 入参必须是已过 `DisplayName::parse` 的值——校验属于 handler 的活。
     pub async fn set_user_display_name(
         &self,
+        actor_id: Uuid,
         user_id: &Uuid,
         display_name: &str,
     ) -> Result<AdminAccountUserResponse, AdminAccountsServiceError> {
-        self.update_user(user_id, None, Some(display_name)).await
+        self.update_user(actor_id, "users.edit", user_id, None, Some(display_name))
+            .await
     }
 
     async fn update_user(
         &self,
+        actor_id: Uuid,
+        permission: &str,
         user_id: &Uuid,
         status: Option<UserStatus>,
         display_name: Option<&str>,
     ) -> Result<AdminAccountUserResponse, AdminAccountsServiceError> {
-        let record = self
-            .user_repo()?
-            .update_admin_view(user_id, status, display_name)
+        self.user_repo()?;
+        let mut tx =
+            self.repository.pool().begin().await.map_err(|error| {
+                map_repository_error(AdminAccountsRepositoryError::Database(error))
+            })?;
+        let authorization = permissions::lock(&mut tx, actor_id).await?;
+        authorization.require(permission)?;
+        let record = AdminAccountsRepository::update_user(&mut tx, user_id, status, display_name)
             .await
-            .map_err(map_user_error)?
+            .map_err(map_repository_error)?
             .ok_or(AdminAccountsServiceError::UserNotFound)?;
-
-        Ok(user_response_from(record))
+        tx.commit()
+            .await
+            .map_err(|error| map_repository_error(AdminAccountsRepositoryError::Database(error)))?;
+        Ok(user_response_from(
+            record,
+            authorization.has("users.read_sensitive"),
+        ))
     }
 
     fn user_repo(&self) -> Result<&UserRepository, AdminAccountsServiceError> {
@@ -441,11 +478,11 @@ impl AdminAccountsService {
 }
 
 /// 用户行 → wire 响应（`AdminUser`）。列表与单条读写共用一份映射，保证形状不漂移。
-fn user_response_from(record: UserListRecord) -> AdminAccountUserResponse {
+fn user_response_from(record: UserListRecord, read_sensitive: bool) -> AdminAccountUserResponse {
     AdminAccountUserResponse {
         id: record.id,
-        phone: record.phone,
-        email: record.email,
+        phone: record.phone.filter(|_| read_sensitive),
+        email: record.email.filter(|_| read_sensitive),
         display_name: record.display_name,
         avatar_url: record.avatar_url,
         roles: record.roles,

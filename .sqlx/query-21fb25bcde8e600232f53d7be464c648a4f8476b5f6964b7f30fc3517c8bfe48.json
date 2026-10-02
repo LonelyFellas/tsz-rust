@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            WITH updated AS (\n                UPDATE admins\n                SET status = $2, updated_at = NOW()\n                WHERE id = $1\n                RETURNING id, phone, display_name, role, status, can_publish_lexicon, created_by_admin_id,\n                          created_at, updated_at\n            )\n            SELECT\n                u.id AS \"id!\",\n                u.phone AS \"phone!\",\n                u.display_name AS \"display_name!\",\n                u.role as \"role!: AdminRole\",\n                u.status as \"status!: AdminStatus\",\n                (u.role = 'super_admin' OR u.can_publish_lexicon) AS \"can_publish_lexicon!\",\n                creator.id AS \"created_by_id?\",\n                creator.display_name AS \"created_by_display_name?\",\n                u.created_at AS \"created_at!\",\n                u.updated_at AS \"updated_at!\"\n            FROM updated u\n            LEFT JOIN admins creator\n                ON creator.id = u.created_by_admin_id\n            ",
+  "query": "\n            WITH updated AS (\n                UPDATE admins\n                SET status = $2, updated_at = NOW()\n                WHERE id = $1\n                RETURNING id, phone, display_name, role, status, created_by_admin_id,\n                          created_at, updated_at\n            )\n            SELECT\n                u.id AS \"id!\",\n                u.phone AS \"phone!\",\n                u.display_name AS \"display_name!\",\n                u.role as \"role!: AdminRole\",\n                u.status as \"status!: AdminStatus\",\n                (u.role = 'super_admin' OR (\n                    SELECT COUNT(*) FROM admin_permission_grants g\n                    WHERE g.admin_id = u.id AND g.permission_key = ANY($3::text[])\n                ) = cardinality($3::text[])) AS \"can_publish_lexicon!\",\n                creator.id AS \"created_by_id?\",\n                creator.display_name AS \"created_by_display_name?\",\n                u.created_at AS \"created_at!\",\n                u.updated_at AS \"updated_at!\"\n            FROM updated u\n            LEFT JOIN admins creator\n                ON creator.id = u.created_by_admin_id\n            ",
   "describe": {
     "columns": [
       {
@@ -112,7 +112,8 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Text"
+        "Text",
+        "TextArray"
       ]
     },
     "nullable": [
@@ -128,5 +129,5 @@
       false
     ]
   },
-  "hash": "b3f8c37f5702f8f00eb7420cd10a411d5efa5851ab233c2397bfea26619411e7"
+  "hash": "21fb25bcde8e600232f53d7be464c648a4f8476b5f6964b7f30fc3517c8bfe48"
 }

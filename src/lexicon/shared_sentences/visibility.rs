@@ -30,6 +30,8 @@ pub async fn set_visibility(
 ) -> Result<Json<SentenceVisibilityResponse>, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let authorization = crate::admin::permissions::lock(&mut tx, admin.id).await?;
+    authorization.require("words.edit")?;
     crate::lexicon::repository::LexiconRepository::lock_surface_contexts(&mut tx, &[entry_id])
         .await
         .map_err(|_| {
@@ -43,7 +45,7 @@ pub async fn set_visibility(
     .await
     .map_err(AppError::internal)?
     .ok_or_else(|| AppError::not_found("词条不存在"))?;
-    writable_entry(&mut tx, entry_id, &admin).await?;
+    writable_entry(&mut tx, entry_id, &authorization).await?;
     let revision: i64 = row.get("revision");
     if revision != input.base_revision {
         return Err(conflict());

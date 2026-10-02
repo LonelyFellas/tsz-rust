@@ -33,6 +33,10 @@ async fn seed_admin(pool: &PgPool, role: AdminRole) -> Uuid {
         })
         .await
         .expect("seed admin 应成功");
+    if role == AdminRole::Admin {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.access',$1),($1,'users.read_sensitive',$1)")
+            .bind(id).execute(pool).await.unwrap();
+    }
     id
 }
 
@@ -123,6 +127,239 @@ async fn stored_user(pool: &PgPool, id: Uuid) -> (String, String) {
 }
 
 // ————————————————————— GET /users/{id} —————————————————————
+
+#[sqlx::test]
+async fn delegated_user_actions_are_independent_and_redact_write_responses(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool, AdminRole::Admin).await;
+    let target = seed_user(&pool, "原昵称", &["student"]).await;
+    let bearer = token(&state, admin, AdminRole::Admin);
+    let uri = format!("/api/v1/admin/users/{target}");
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_sensitive'")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = request(&state, "GET", &uri, Some(&bearer), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert!(response.get("phone").is_none());
+    assert!(response.get("email").is_none());
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.edit',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = request(
+        &state,
+        "PATCH",
+        &uri,
+        Some(&bearer),
+        Some(json!({"display_name":"新昵称"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        serde_json::from_str::<Value>(&body)
+            .unwrap()
+            .get("phone")
+            .is_none()
+    );
+    let (status, _) = request(
+        &state,
+        "PATCH",
+        &format!("{uri}/status"),
+        Some(&bearer),
+        Some(json!({"status":"disabled"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        stored_user(&pool, target).await,
+        ("新昵称".into(), "active".into())
+    );
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.edit'",
+    )
+    .bind(admin)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.set_status',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = request(
+        &state,
+        "PATCH",
+        &format!("{uri}/status"),
+        Some(&bearer),
+        Some(json!({"status":"disabled"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        serde_json::from_str::<Value>(&body)
+            .unwrap()
+            .get("phone")
+            .is_none()
+    );
+    let (status, _) = request(
+        &state,
+        "PATCH",
+        &uri,
+        Some(&bearer),
+        Some(json!({"display_name":"不应修改"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        stored_user(&pool, target).await,
+        ("新昵称".into(), "disabled".into())
+    );
+    // 业务授权不等同于管理员治理授权。
+    let (status, _) = request(&state, "GET", "/api/v1/admin/admins", Some(&bearer), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn user_service_rechecks_revoked_permission_and_account_status(pool: PgPool) {
+    use tsz_rust::admin::accounts::{AdminAccountsRepository, AdminAccountsService};
+    use tsz_rust::user::{model::UserStatus, repository::UserRepository};
+    let admin = seed_admin(&pool, AdminRole::Admin).await;
+    let target = seed_user(&pool, "未改动", &["student"]).await;
+    let service = AdminAccountsService::new(
+        AdminAccountsRepository::new(pool.clone()),
+        Some(UserRepository::new(pool.clone())),
+    );
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.edit',$1),($1,'users.set_status',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    service
+        .set_user_display_name(admin, &target, "首次修改")
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM admins WHERE id=$1 FOR UPDATE")
+        .bind(admin)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.edit'",
+    )
+    .bind(admin)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let operation = tokio::spawn(async move {
+        service
+            .set_user_display_name(admin, &target, "撤权后不应修改")
+            .await
+    });
+    tx.commit().await.unwrap();
+    let error = operation.await.unwrap().unwrap_err();
+    assert_eq!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<tsz_rust::error::AppError>()
+            .unwrap()
+            .code(),
+        tsz_rust::error::ErrorCode::Forbidden
+    );
+    assert_eq!(stored_user(&pool, target).await.0, "首次修改");
+    sqlx::query("UPDATE admins SET status='disabled' WHERE id=$1")
+        .bind(admin)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let service = AdminAccountsService::new(
+        AdminAccountsRepository::new(pool.clone()),
+        Some(UserRepository::new(pool.clone())),
+    );
+    let error = service
+        .set_user_status(admin, &target, UserStatus::Disabled)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<tsz_rust::error::AppError>()
+            .unwrap()
+            .code(),
+        tsz_rust::error::ErrorCode::AccountDisabled
+    );
+    assert_eq!(stored_user(&pool, target).await.1, "active");
+}
+
+#[sqlx::test]
+async fn user_write_holds_authorization_lock_until_business_commit(pool: PgPool) {
+    use tsz_rust::admin::accounts::{AdminAccountsRepository, AdminAccountsService};
+    use tsz_rust::user::repository::UserRepository;
+    let actor = seed_admin(&pool, AdminRole::Admin).await;
+    let target = seed_user(&pool, "原昵称", &["student"]).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.edit',$1)")
+        .bind(actor).execute(&pool).await.unwrap();
+    let service = AdminAccountsService::new(
+        AdminAccountsRepository::new(pool.clone()),
+        Some(UserRepository::new(pool.clone())),
+    );
+    let mut object_lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+        .bind(target)
+        .execute(&mut *object_lock)
+        .await
+        .unwrap();
+    let write = tokio::spawn(async move {
+        service
+            .set_user_display_name(actor, &target, "写事务获胜")
+            .await
+    });
+    // 等待真实业务写阻塞，而非用固定 sleep 猜测调度。pg_stat_activity 仅用于测试同步。
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%WITH updated AS%')")
+                .fetch_one(&pool).await.unwrap();
+            if waiting { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let revoke_pool = pool.clone();
+    let mut revoke = tokio::spawn(async move {
+        let mut tx = revoke_pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM admins WHERE id=$1 FOR UPDATE")
+            .bind(actor)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.edit'",
+        )
+        .bind(actor)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut revoke)
+            .await
+            .is_err(),
+        "撤权不能在敏感写提交前穿过管理员共享锁"
+    );
+    object_lock.commit().await.unwrap();
+    write.await.unwrap().unwrap();
+    revoke.await.unwrap();
+    assert_eq!(stored_user(&pool, target).await.0, "写事务获胜");
+    let service = AdminAccountsService::new(
+        AdminAccountsRepository::new(pool.clone()),
+        Some(UserRepository::new(pool.clone())),
+    );
+    let error = service
+        .set_user_display_name(actor, &target, "不应修改")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<tsz_rust::error::AppError>()
+            .unwrap()
+            .code(),
+        tsz_rust::error::ErrorCode::Forbidden
+    );
+    assert_eq!(stored_user(&pool, target).await.0, "写事务获胜");
+}
 
 #[sqlx::test]
 async fn plain_admin_can_read_user_detail(pool: PgPool) {

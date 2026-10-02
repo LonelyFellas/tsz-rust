@@ -37,6 +37,7 @@ pub struct SentencePublication {
     pub publication_number: i64,
     pub source_revision: i64,
     pub snapshot: SharedSentenceContent,
+    pub created_by_admin_id: Uuid,
     pub published_at: DateTime<Utc>,
     pub published_by_admin_id: Uuid,
     pub rollback_of_publication_id: Option<Uuid>,
@@ -94,11 +95,11 @@ fn hash_bytes(value: &impl Serialize) -> Result<Vec<u8>, AppError> {
 pub(crate) async fn publisher(
     tx: &mut Transaction<'_, Postgres>,
     actor: Uuid,
+    action: &str,
 ) -> Result<bool, AppError> {
-    crate::admin::publication_permission::lock_publisher(tx, actor)
-        .await
-        .map_err(AppError::internal)?
-        .ok_or_else(|| AppError::forbidden(ErrorCode::Forbidden, "需要词库发布权限"))
+    let authorization = crate::admin::permissions::lock(tx, actor).await?;
+    authorization.require(action)?;
+    Ok(authorization.is_super_admin)
 }
 
 pub(crate) async fn owner(
@@ -140,17 +141,55 @@ pub(crate) async fn replay(
         .bind(scope).bind(actor).bind(key).execute(&mut **tx).await.map_err(AppError::internal)?;
     let row = sqlx::query("SELECT request_hash,response_body FROM platform.idempotency_records WHERE scope=$1 AND actor_id=$2 AND idempotency_key=$3 FOR UPDATE")
         .bind(scope).bind(actor).bind(key).fetch_optional(&mut **tx).await.map_err(AppError::internal)?;
-    row.map(|row| {
-        if row.get::<Vec<u8>, _>("request_hash").as_slice() != hash {
-            return Err(AppError::conflict(
-                ErrorCode::IdempotencyConflict,
-                None,
-                "幂等键已用于其他请求",
-            ));
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.get::<Vec<u8>, _>("request_hash").as_slice() != hash {
+        return Err(AppError::conflict(
+            ErrorCode::IdempotencyConflict,
+            None,
+            "幂等键已用于其他请求",
+        ));
+    }
+    let mut response = row.get::<serde_json::Value, _>("response_body");
+    backfill_cached_creators(tx, std::slice::from_mut(&mut response)).await?;
+    serde_json::from_value(response)
+        .map(Some)
+        .map_err(AppError::internal)
+}
+
+pub(crate) async fn backfill_cached_creators(
+    tx: &mut Transaction<'_, Postgres>,
+    responses: &mut [serde_json::Value],
+) -> Result<(), AppError> {
+    let ids = responses
+        .iter()
+        .filter(|response| response.get("created_by_admin_id").is_none())
+        .map(|response| serde_json::from_value::<Uuid>(response["id"].clone()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::internal)?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let owners = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT id,created_by_admin_id FROM lexicon.shared_sentences WHERE id=ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(AppError::internal)?
+    .into_iter()
+    .collect::<std::collections::HashMap<_, _>>();
+    for response in responses {
+        if response.get("created_by_admin_id").is_some() {
+            continue;
         }
-        serde_json::from_value(row.get("response_body")).map_err(AppError::internal)
-    })
-    .transpose()
+        let id =
+            serde_json::from_value::<Uuid>(response["id"].clone()).map_err(AppError::internal)?;
+        let owner = owners.get(&id).ok_or_else(missing)?;
+        response["created_by_admin_id"] = serde_json::json!(owner);
+    }
+    Ok(())
 }
 
 async fn remember(
@@ -391,7 +430,16 @@ async fn publish_command(
     let hash =
         hash_bytes(&serde_json::json!({"id":id,"input":input,"historical_id":historical_id}))?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    let super_admin = publisher(&mut tx, actor).await?;
+    let super_admin = publisher(
+        &mut tx,
+        actor,
+        if historical_id.is_some() {
+            "sentences.rollback"
+        } else {
+            "sentences.publish"
+        },
+    )
+    .await?;
     if let Some(response) = replay(&mut tx, scope, actor, key, &hash).await? {
         tx.commit().await.map_err(AppError::internal)?;
         return Ok(response);
@@ -517,7 +565,9 @@ pub async fn impact(
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<SentenceWithdrawalImpact>, AppError> {
-    require_active_admin(&state, &auth).await?;
+    crate::admin::permissions::load(&state, &auth)
+        .await?
+        .require("sentences.access")?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
@@ -549,7 +599,16 @@ async fn visibility_command(
     }
     let hash = hash_bytes(&serde_json::json!({"id":id,"input":input,"withdraw":withdraw}))?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    let super_admin = publisher(&mut tx, actor).await?;
+    let super_admin = publisher(
+        &mut tx,
+        actor,
+        if withdraw.is_some() {
+            "sentences.withdraw"
+        } else {
+            "sentences.restore"
+        },
+    )
+    .await?;
     if let Some(response) = replay(&mut tx, scope, actor, key, &hash).await? {
         tx.commit().await.map_err(AppError::internal)?;
         return Ok(response);

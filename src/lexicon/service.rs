@@ -77,6 +77,8 @@ const IMPACT_TTL: StdDuration = StdDuration::from_secs(10 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum LexiconServiceError {
+    #[error(transparent)]
+    Authorization(#[from] crate::error::AppError),
     #[error("invalid field {field}: {message}")]
     InvalidField {
         field: &'static str,
@@ -119,9 +121,9 @@ pub enum LexiconServiceError {
     EntryArchived,
     #[error("entry has publication history or inbound references and cannot be deleted")]
     EntryNotDeletable,
-    #[error("entry can only be deleted by its creator")]
+    #[error("entry can only be permanently deleted by a super admin")]
     EntryDeleteForbidden,
-    #[error("unpublished draft can only be edited by its creator")]
+    #[error("entry editing requires ownership or words.edit_others")]
     EntryEditForbidden,
     #[error("lexicon publication permission or entry ownership required")]
     EntryPublishForbidden,

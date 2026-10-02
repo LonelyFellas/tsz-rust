@@ -35,6 +35,10 @@ impl AudioAssetRepository {
         Self { pool }
     }
 
+    pub(super) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// `duration_ms` 留空：服务端暂不探测时长。
     pub async fn insert(&self, asset: NewAudioAsset<'_>) -> Result<DateTime<Utc>, sqlx::Error> {
         let row = sqlx::query(
@@ -71,10 +75,8 @@ impl AudioAssetRepository {
         }))
     }
 
-    /// 资产是否已经被某条词条引用（草稿或发布皆算）。
-    /// 一旦被引用，任何能读那条词条的管理员都该能试听它——否则多人协作时，
-    /// 非上传者在编辑器里看得见录音却点不开。
-    pub async fn is_referenced(&self, asset_id: Uuid) -> Result<bool, sqlx::Error> {
+    /// 资产是否有真实词条引用（草稿或发布皆算）；此表不表示例句引用。
+    pub async fn is_referenced_by_word(&self, asset_id: Uuid) -> Result<bool, sqlx::Error> {
         sqlx::query_scalar(
             r#"SELECT EXISTS(
                    SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1

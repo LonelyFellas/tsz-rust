@@ -82,6 +82,7 @@ pub(super) async fn published_on(
         content,
         entries,
         created_by: row.get("created_by"),
+        created_by_admin_id: row.get("created_by_admin_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -153,6 +154,7 @@ fn publication_from_row(row: sqlx::postgres::PgRow) -> Result<SentencePublicatio
         publication_number: row.get("publication_number"),
         source_revision: row.get("source_revision"),
         snapshot: serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?,
+        created_by_admin_id: row.get("created_by_admin_id"),
         published_at: row.get("published_at"),
         published_by_admin_id: row.get("published_by_admin_id"),
         rollback_of_publication_id: row.get("rollback_of_publication_id"),
@@ -180,7 +182,7 @@ pub async fn history(
             "发布序号必须为正数",
         ));
     }
-    let rows=sqlx::query("SELECT * FROM lexicon.shared_sentence_publications WHERE sentence_id=$1 AND ($2::bigint IS NULL OR publication_number<$2) ORDER BY publication_number DESC LIMIT 50")
+    let rows=sqlx::query("SELECT p.*,s.created_by_admin_id FROM lexicon.shared_sentence_publications p JOIN lexicon.shared_sentences s ON s.id=p.sentence_id WHERE p.sentence_id=$1 AND ($2::bigint IS NULL OR p.publication_number<$2) ORDER BY p.publication_number DESC LIMIT 50")
         .bind(id).bind(q.before_number).fetch_all(&state.pool).await.map_err(AppError::internal)?;
     Ok(Json(
         rows.into_iter()
@@ -197,7 +199,7 @@ pub async fn historical(
 ) -> Result<Json<SentencePublication>, AppError> {
     require_active_admin(&state, &auth).await?;
     let row = sqlx::query(
-        "SELECT * FROM lexicon.shared_sentence_publications WHERE sentence_id=$1 AND id=$2",
+        "SELECT p.*,s.created_by_admin_id FROM lexicon.shared_sentence_publications p JOIN lexicon.shared_sentences s ON s.id=p.sentence_id WHERE p.sentence_id=$1 AND p.id=$2",
     )
     .bind(id)
     .bind(publication_id)

@@ -1,10 +1,7 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 
 use crate::{
-    admin::{
-        AdminAuth,
-        authorization::{require_active_admin, require_super_admin},
-    },
+    admin::{AdminAuth, permissions},
     api::{ApiJson, ApiPath, ApiQuery, PaginatedResponse},
     catalog::{
         model::{
@@ -39,7 +36,20 @@ pub async fn catalog(
     State(state): State<AppState>,
     auth: AdminAuth,
 ) -> Result<impl IntoResponse, AppError> {
-    require_active_admin(&state, &auth).await?;
+    let authorization = permissions::load(&state, &auth).await?;
+    if ![
+        "words.access",
+        "sentences.access",
+        "lexicon_settings.access",
+    ]
+    .iter()
+    .any(|key| authorization.has(key))
+    {
+        return Err(AppError::forbidden(
+            ErrorCode::Forbidden,
+            "permission required",
+        ));
+    }
     let response = service(&state).catalog().await.map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
 }
@@ -54,7 +64,7 @@ pub async fn catalog(
         (status = 200, description = "基本词性管理列表", body = PaginatedResponse<PartOfSpeechConfig>),
         (status = 400, description = "查询参数非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "需要超级管理员"),
+        (status = 403, description = "需要词库配置权限"),
         (status = 500, description = "数据库查询失败")
     )
 )]
@@ -63,7 +73,9 @@ pub async fn list_parts(
     auth: AdminAuth,
     ApiQuery(query): ApiQuery<PartListQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_super_admin(&state, &auth).await?;
+    permissions::load(&state, &auth)
+        .await?
+        .require("lexicon_settings.access")?;
     let response = service(&state).list_parts(query).await.map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
 }
@@ -78,7 +90,7 @@ pub async fn list_parts(
         (status = 201, description = "基本词性创建成功", body = PartOfSpeechConfig),
         (status = 400, description = "字段值非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "需要超级管理员"),
+        (status = 403, description = "需要词库配置权限"),
         (status = 409, description = "编码、名称或缩写冲突"),
         (status = 422, description = "请求结构非法"),
         (status = 500, description = "数据库写入失败")
@@ -89,9 +101,11 @@ pub async fn create_part(
     auth: AdminAuth,
     ApiJson(request): ApiJson<CreatePartRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let admin = require_super_admin(&state, &auth).await?;
+    permissions::load(&state, &auth)
+        .await?
+        .require("lexicon_settings.edit")?;
     let response = service(&state)
-        .create_part(admin.id, request)
+        .create_part(auth.subject, request)
         .await
         .map_err(map_error)?;
     Ok((StatusCode::CREATED, Json(response)))
@@ -108,7 +122,7 @@ pub async fn create_part(
         (status = 200, description = "基本词性更新成功", body = PartOfSpeechConfig),
         (status = 400, description = "路径或字段值非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "需要超级管理员"),
+        (status = 403, description = "需要词库配置权限"),
         (status = 404, description = "基本词性不存在"),
         (status = 409, description = "唯一值或 revision 冲突"),
         (status = 422, description = "请求结构非法"),
@@ -121,9 +135,11 @@ pub async fn update_part(
     ApiPath(path): ApiPath<PartPath>,
     ApiJson(request): ApiJson<UpdatePartRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let admin = require_super_admin(&state, &auth).await?;
+    permissions::load(&state, &auth)
+        .await?
+        .require("lexicon_settings.edit")?;
     let response = service(&state)
-        .update_part(admin.id, path.id, request)
+        .update_part(auth.subject, path.id, request)
         .await
         .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
@@ -139,7 +155,7 @@ pub async fn update_part(
         (status = 204, description = "基本词性删除成功"),
         (status = 400, description = "路径或 base_revision 非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "需要超级管理员"),
+        (status = 403, description = "需要词库配置权限"),
         (status = 404, description = "基本词性不存在"),
         (status = 409, description = "revision 冲突、配置仍被引用，或仍挂有细分词性（part_of_speech_has_sub_parts）/ 词形变化（part_of_speech_has_form_types）"),
         (status = 500, description = "数据库写入失败")
@@ -151,12 +167,14 @@ pub async fn delete_part(
     ApiPath(path): ApiPath<PartPath>,
     ApiQuery(query): ApiQuery<DeleteRevisionQuery>,
 ) -> Result<StatusCode, AppError> {
-    require_super_admin(&state, &auth).await?;
+    permissions::load(&state, &auth)
+        .await?
+        .require("lexicon_settings.edit")?;
     if let Some(error) = invalid_delete_revision(query.base_revision) {
         return Err(error);
     }
     service(&state)
-        .delete_part(path.id, query.base_revision)
+        .delete_part(auth.subject, path.id, query.base_revision)
         .await
         .map_err(map_error)?;
     Ok(StatusCode::NO_CONTENT)
@@ -172,7 +190,7 @@ pub async fn delete_part(
         (status = 200, description = "细分词性列表", body = SubPartListResponse),
         (status = 400, description = "路径参数非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "需要超级管理员"),
+        (status = 403, description = "需要词库配置权限"),
         (status = 404, description = "基本词性不存在"),
         (status = 500, description = "数据库查询失败")
     )
@@ -182,7 +200,9 @@ pub async fn list_sub_parts(
     auth: AdminAuth,
     ApiPath(path): ApiPath<PartPath>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_super_admin(&state, &auth).await?;
+    permissions::load(&state, &auth)
+        .await?
+        .require("lexicon_settings.access")?;
     let response = service(&state)
         .list_sub_parts(path.id)
         .await
@@ -201,7 +221,7 @@ pub async fn list_sub_parts(
         (status = 201, description = "细分词性创建成功", body = SubPartOfSpeechConfig),
         (status = 400, description = "路径或字段值非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "需要超级管理员"),
+        (status = 403, description = "需要词库配置权限"),
         (status = 404, description = "基本词性不存在"),
         (status = 409, description = "编码或同父级名称冲突"),
         (status = 422, description = "请求结构非法"),
@@ -214,9 +234,11 @@ pub async fn create_sub_part(
     ApiPath(path): ApiPath<PartPath>,
     ApiJson(request): ApiJson<CreateSubPartRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let admin = require_super_admin(&state, &auth).await?;
+    permissions::load(&state, &auth)
+        .await?
+        .require("lexicon_settings.edit")?;
     let response = service(&state)
-        .create_sub_part(admin.id, path.id, request)
+        .create_sub_part(auth.subject, path.id, request)
         .await
         .map_err(map_error)?;
     Ok((StatusCode::CREATED, Json(response)))
@@ -233,7 +255,7 @@ pub async fn create_sub_part(
         (status = 200, description = "细分词性更新成功", body = SubPartOfSpeechConfig),
         (status = 400, description = "路径或字段值非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "需要超级管理员"),
+        (status = 403, description = "需要词库配置权限"),
         (status = 404, description = "细分词性不存在或父级不匹配"),
         (status = 409, description = "唯一值或 revision 冲突"),
         (status = 422, description = "请求结构非法"),
@@ -246,9 +268,11 @@ pub async fn update_sub_part(
     ApiPath(path): ApiPath<SubPartPath>,
     ApiJson(request): ApiJson<UpdateSubPartRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let admin = require_super_admin(&state, &auth).await?;
+    permissions::load(&state, &auth)
+        .await?
+        .require("lexicon_settings.edit")?;
     let response = service(&state)
-        .update_sub_part(admin.id, path.id, path.sub_id, request)
+        .update_sub_part(auth.subject, path.id, path.sub_id, request)
         .await
         .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
@@ -264,7 +288,7 @@ pub async fn update_sub_part(
         (status = 204, description = "细分词性删除成功"),
         (status = 400, description = "路径或 base_revision 非法"),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "需要超级管理员"),
+        (status = 403, description = "需要词库配置权限"),
         (status = 404, description = "细分词性不存在或父级不匹配"),
         (status = 409, description = "revision 冲突或配置仍被引用"),
         (status = 500, description = "数据库写入失败")
@@ -276,12 +300,14 @@ pub async fn delete_sub_part(
     ApiPath(path): ApiPath<SubPartPath>,
     ApiQuery(query): ApiQuery<DeleteRevisionQuery>,
 ) -> Result<StatusCode, AppError> {
-    require_super_admin(&state, &auth).await?;
+    permissions::load(&state, &auth)
+        .await?
+        .require("lexicon_settings.edit")?;
     if let Some(error) = invalid_delete_revision(query.base_revision) {
         return Err(error);
     }
     service(&state)
-        .delete_sub_part(path.id, path.sub_id, query.base_revision)
+        .delete_sub_part(auth.subject, path.id, path.sub_id, query.base_revision)
         .await
         .map_err(map_error)?;
     Ok(StatusCode::NO_CONTENT)
@@ -301,6 +327,7 @@ fn invalid_delete_revision(value: i64) -> Option<AppError> {
 
 fn map_error(error: CatalogServiceError) -> AppError {
     match error {
+        CatalogServiceError::Authorization(error) => error,
         CatalogServiceError::InvalidPart { field, message } => {
             AppError::validation(ErrorCode::InvalidPartOfSpeech, field, message)
         }

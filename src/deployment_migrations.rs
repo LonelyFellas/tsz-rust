@@ -122,7 +122,31 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261001000000;
+    const CURRENT_RELEASE_VERSION: i64 = 20261001130000;
+
+    #[sqlx::test]
+    async fn permission_history_prevents_destructive_rollback_after_revocation(pool: PgPool) {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO admins (id, phone, password_hash, display_name, permission_version) VALUES ($1, $2, 'hash', 'permission rollback', 2)")
+            .bind(id).bind(id.to_string()).execute(&pool).await.unwrap();
+        let error = undo(&pool, 20261001000000, CURRENT_RELEASE_VERSION)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("cannot remove permission schema"));
+        let current: i64 =
+            sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success IS TRUE")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(current, CURRENT_RELEASE_VERSION);
+        let version: i64 =
+            sqlx::query_scalar("SELECT permission_version FROM admins WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(version, 2);
+    }
 
     #[sqlx::test]
     async fn deployment_undo_preserves_payloads_supported_by_target_and_guards_new_regularity(

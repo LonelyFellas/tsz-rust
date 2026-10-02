@@ -11,7 +11,8 @@ use crate::{
             model::{AdminIdPath, AdminUserIdPath, UserListQueryParams},
             service::AdminAccountsServiceError,
         },
-        authorization::{require_active_admin, require_super_admin},
+        authorization::require_super_admin,
+        permissions,
     },
     api::{ApiJson, ApiPath, ApiQuery, ListQuery, PaginatedResponse, PaginationQuery},
     error::{AppError, ErrorCode},
@@ -210,10 +211,11 @@ pub async fn list_users(
         pagination,
     };
 
-    require_active_admin(&state, &auth).await?;
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("users.access")?;
 
     let response = user_service(&state)
-        .user_list(query)
+        .user_list(query, &authorization)
         .await
         .map_err(map_user_list_error)?;
     Ok((StatusCode::OK, Json(response)))
@@ -234,8 +236,8 @@ pub struct UpdateUserRequest {
 
 /// GET /api/v1/admin/users/{id}
 ///
-/// 单个 C 端用户的 admin 视图，形状与列表条目逐字段一致。全体管理员可读
-/// （与列表同一道闸），无需超管。
+/// 单个 C 端用户的 admin 视图，形状与列表条目逐字段一致；需要 users.access，
+/// 完整联系方式另需 users.read_sensitive。
 #[utoipa::path(
     get,
     path = "/api/v1/admin/users/{id}",
@@ -256,10 +258,11 @@ pub async fn get_user(
     auth: AdminAuth,
     ApiPath(path): ApiPath<AdminUserIdPath>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_active_admin(&state, &auth).await?;
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("users.access")?;
 
     let user = user_service(&state)
-        .user_detail(&path.id)
+        .user_detail(&path.id, &authorization)
         .await
         .map_err(map_user_error)?;
 
@@ -278,7 +281,7 @@ pub async fn get_user(
         (status = 200, description = "状态已更新，返回更新后的用户", body = AdminAccountUserResponse),
         (status = 400, description = "路径参数非法"),
         (status = 401, description = "缺少/无效/过期 token，或管理员不存在"),
-        (status = 403, description = "管理员账号已禁用、必须先改密，或不是超级管理员"),
+        (status = 403, description = "管理员账号已禁用、必须先改密，或缺少所需业务权限"),
         (status = 404, description = "用户不存在"),
         (status = 422, description = "请求体缺字段或 status 不在枚举内"),
         (status = 500, description = "数据库更新失败"),
@@ -290,10 +293,11 @@ pub async fn set_user_status(
     ApiPath(path): ApiPath<AdminUserIdPath>,
     ApiJson(req): ApiJson<UpdateUserStatusRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_super_admin(&state, &auth).await?;
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("users.set_status")?;
 
     let user = user_service(&state)
-        .set_user_status(&path.id, req.status)
+        .set_user_status(auth.subject, &path.id, req.status)
         .await
         .map_err(map_user_error)?;
 
@@ -302,7 +306,7 @@ pub async fn set_user_status(
 
 /// PATCH /api/v1/admin/users/{id}
 ///
-/// 超级管理员改 C 端用户昵称。**只有昵称可改**——手机/邮箱换绑、level、删号都是
+/// 有 users.edit 的管理员改 C 端用户昵称。**只有昵称可改**——手机/邮箱换绑、level、删号都是
 /// 记录在案的非目标（user-mgmt-D1/D3/D4），请求体里没有这些字段即结构上杜绝。
 #[utoipa::path(
     patch,
@@ -315,7 +319,7 @@ pub async fn set_user_status(
         (status = 200, description = "昵称已更新，返回更新后的用户", body = AdminAccountUserResponse),
         (status = 400, description = "路径参数或昵称非法"),
         (status = 401, description = "缺少/无效/过期 token，或管理员不存在"),
-        (status = 403, description = "管理员账号已禁用、必须先改密，或不是超级管理员"),
+        (status = 403, description = "管理员账号已禁用、必须先改密，或缺少所需业务权限"),
         (status = 404, description = "用户不存在"),
         (status = 422, description = "请求体缺 display_name 字段"),
         (status = 500, description = "数据库更新失败"),
@@ -327,12 +331,13 @@ pub async fn update_user(
     ApiPath(path): ApiPath<AdminUserIdPath>,
     ApiJson(req): ApiJson<UpdateUserRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_super_admin(&state, &auth).await?;
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("users.edit")?;
 
     let display_name = DisplayName::parse(&req.display_name).map_err(map_display_name_error)?;
 
     let user = user_service(&state)
-        .set_user_display_name(&path.id, display_name.as_str())
+        .set_user_display_name(auth.subject, &path.id, display_name.as_str())
         .await
         .map_err(map_user_error)?;
 
@@ -501,7 +506,10 @@ fn map_list_error(error: AdminAccountsServiceError) -> AppError {
 }
 
 fn map_user_list_error(error: AdminAccountsServiceError) -> AppError {
-    map_list_error(error)
+    match error {
+        AdminAccountsServiceError::Authorization(error) => error,
+        other => map_list_error(other),
+    }
 }
 
 /// C 端用户管理三条端点共用的装配点：这些端点都要读 users/user_roles。
@@ -514,6 +522,7 @@ fn user_service(state: &AppState) -> AdminAccountsService {
 
 fn map_user_error(error: AdminAccountsServiceError) -> AppError {
     match error {
+        AdminAccountsServiceError::Authorization(error) => error,
         AdminAccountsServiceError::UserNotFound => AppError::not_found("user not found"),
         other => AppError::internal(other),
     }

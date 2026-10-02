@@ -248,9 +248,180 @@ async fn seed_lexicon_usage(
 }
 
 #[sqlx::test]
-async fn catalog_read_allows_active_admin_but_management_requires_super_admin(pool: PgPool) {
+async fn delegated_catalog_permissions_cover_read_write_and_revocation(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool, AdminRole::Admin, false).await;
+    let bearer = token(&state, actor, AdminRole::Admin);
+    let payload = json!({"code":"permission_particle","name_zh":"权限小品词","name_en":"Permission Particle",
+        "abbreviation":"perm.","short_name_zh":"权限词","full_name_en":"permission particle","sort_order":100});
+    for uri in [
+        ROOT.to_owned(),
+        format!("{ROOT}/catalog"),
+        "/api/v1/admin/settings/form-types".to_owned(),
+    ] {
+        let (status, _, body, _) = call(&state, Method::GET, &uri, Some(&bearer), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "forbidden");
+    }
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'lexicon_settings.access',$1)")
+        .bind(actor).execute(&pool).await.unwrap();
+    for uri in [
+        ROOT.to_owned(),
+        format!("{ROOT}/catalog"),
+        "/api/v1/admin/settings/form-types".to_owned(),
+    ] {
+        assert_eq!(
+            call(&state, Method::GET, &uri, Some(&bearer), None).await.0,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        call(
+            &state,
+            Method::POST,
+            ROOT,
+            Some(&bearer),
+            Some(payload.clone())
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'lexicon_settings.edit',$1)")
+        .bind(actor).execute(&pool).await.unwrap();
+    let (status, _, created, _) =
+        call(&state, Method::POST, ROOT, Some(&bearer), Some(payload)).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let form_payload = json!({"part_of_speech_id":id,"code":"permission_form","name_zh":"权限词形","name_en":"Permission Form",
+        "short_name_zh":"权形","abbreviation":"pf.","full_name_en":"permission form","sort_order":99});
+    let (status, _, form, _) = call(
+        &state,
+        Method::POST,
+        "/api/v1/admin/settings/form-types",
+        Some(&bearer),
+        Some(form_payload),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{form}");
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='lexicon_settings.edit'")
+        .bind(actor).execute(&pool).await.unwrap();
+    let form_id = form["id"].as_str().unwrap();
+    for uri in [
+        format!("{ROOT}/{id}?base_revision=1"),
+        format!("/api/v1/admin/settings/form-types/{form_id}?base_revision=1"),
+    ] {
+        let (status, _, body, _) = call(&state, Method::DELETE, &uri, Some(&bearer), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "forbidden");
+    }
+    // 绕过 handler 直接调用服务也不能在撤权后写入，不能把缺权限误报成对象仍被引用。
+    let service = tsz_rust::catalog::service::CatalogService::new(
+        tsz_rust::catalog::repository::CatalogRepository::new(pool.clone()),
+    );
+    let error = service
+        .delete_part(actor, id.parse().unwrap(), 1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, tsz_rust::catalog::service::CatalogServiceError::Authorization(ref error) if error.code() == tsz_rust::error::ErrorCode::Forbidden)
+    );
+    assert_eq!(
+        call(&state, Method::GET, ROOT, Some(&bearer), None).await.0,
+        StatusCode::OK
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.form_types WHERE id=$1")
+        .bind(form_id.parse::<Uuid>().unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+async fn form_type_auxiliary_read_does_not_grant_settings_management(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool, AdminRole::Admin, false).await;
+    let bearer = token(&state, actor, AdminRole::Admin);
+    for (base, action) in [
+        ("words.access", "words.create"),
+        ("words.access", "words.edit"),
+        ("sentences.access", "sentences.create"),
+        ("sentences.access", "sentences.edit"),
+    ] {
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1")
+            .bind(actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,$2,$1)")
+            .bind(actor).bind(base).execute(&pool).await.unwrap();
+        assert_eq!(
+            call(
+                &state,
+                Method::GET,
+                &format!("{ROOT}/catalog"),
+                Some(&bearer),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &state,
+                Method::GET,
+                "/api/v1/admin/settings/form-types",
+                Some(&bearer),
+                None
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let mut dependencies = std::collections::BTreeSet::from([action.to_owned()]);
+        tsz_rust::admin::permissions::catalog::expand_grants(&mut dependencies);
+        let dependencies: Vec<_> = dependencies.into_iter().collect();
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest($2::text[]), $1 ON CONFLICT DO NOTHING")
+            .bind(actor).bind(&dependencies).execute(&pool).await.unwrap();
+        assert_eq!(
+            call(
+                &state,
+                Method::GET,
+                "/api/v1/admin/settings/form-types",
+                Some(&bearer),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&state, Method::GET, ROOT, Some(&bearer), None).await.0,
+            StatusCode::FORBIDDEN
+        );
+        let body = json!({"part_of_speech_id":Uuid::now_v7(),"code":"permission_form","name_zh":"权限词形","name_en":"Permission Form",
+            "short_name_zh":"权形","abbreviation":"pf.","full_name_en":"permission form","sort_order":99});
+        let (status, _, problem, _) = call(
+            &state,
+            Method::POST,
+            "/api/v1/admin/settings/form-types",
+            Some(&bearer),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(problem["code"], "forbidden");
+    }
+}
+
+#[sqlx::test]
+async fn catalog_read_allows_word_access_but_management_requires_settings_access(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin_id = seed_admin(&pool, AdminRole::Admin, false).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'words.access',$1)")
+        .bind(admin_id).execute(&pool).await.unwrap();
     let admin_token = token(&state, admin_id, AdminRole::Admin);
 
     let (status, _, body, _) = call(
@@ -1048,6 +1219,8 @@ async fn form_type_catalog_crud_permissions_revision_and_base_protection(pool: P
     let state = AppState::for_test(pool.clone());
     let root = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
     let admin = seed_admin(&pool, AdminRole::Admin, false).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'words.access',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
     let bearer = token(&state, root, AdminRole::SuperAdmin);
     let admin_token = token(&state, admin, AdminRole::Admin);
     let path = "/api/v1/admin/settings/form-types";

@@ -13,24 +13,7 @@ use crate::{
     state::AppState,
 };
 
-/// 侧栏菜单权限 key 全量目录（顺序即侧栏顺序）。Q10 取消 RBAC 后全员全功能，
-/// profile 恒返这份死数据，仅为保前端菜单渲染逻辑零改动。
-pub const MENU_PERMISSIONS: [&str; 12] = [
-    "users.access",
-    "classes.access",
-    "words.access",
-    "customdict.access",
-    "sentences.access",
-    "wordlists.access",
-    "customwordlist.access",
-    "tasks.access",
-    "reviews.access",
-    "teacherapply.access",
-    "comments.access",
-    "coins.access",
-];
-
-/// GET /profile 的响应：login 的 4 字段概要 + 菜单权限目录 + 个人偏好。
+/// GET /profile 的响应：当前身份、生效权限与个人偏好。
 #[derive(Serialize, ToSchema)]
 pub struct AdminProfileResponse {
     pub can_publish_lexicon: bool,
@@ -38,8 +21,9 @@ pub struct AdminProfileResponse {
     pub phone: String,
     pub display_name: String,
     pub role: AdminRole,
-    /// 菜单权限 key 全量目录（恒为数组，Q10 死数据；顺序即侧栏顺序）
-    pub permissions: Vec<&'static str>,
+    pub permissions: Vec<String>,
+    pub permission_version: i64,
+    pub catalog_version: String,
     /// 个人偏好；字段恒在，从未设置过的管理员返回默认值。
     pub preferences: AdminPreferences,
 }
@@ -85,38 +69,21 @@ pub async fn admin_profile(
     State(state): State<AppState>,
     admin: AdminAuth,
 ) -> Result<impl IntoResponse, AppError> {
-    let admin = AdminRepository::new(state.pool.clone())
-        .get_by_id(&admin.subject)
-        .await
-        .map_err(map_admin_error)?;
-
-    if !admin.is_active() {
-        return Err(AppError::forbidden(ErrorCode::AccountDisabled, "forbidden"));
-    }
-
-    // must_change 守卫（§7 守卫组）：目前 profile 是唯一守卫组端点，内联在此；
-    // change-password/logout-all 落地后若守卫组扩员，再抽成 middleware/组合提取器。
-    if admin.must_change_password {
-        return Err(AppError::forbidden(
-            ErrorCode::MustChangePassword,
-            "password change required",
-        ));
-    }
-
+    let authorization = crate::admin::permissions::load(&state, &admin).await?;
+    let admin = require_active_admin(&state, &admin).await?;
     Ok((
         StatusCode::OK,
         Json(AdminProfileResponse {
-            can_publish_lexicon: crate::admin::publication_permission::effective(
-                &state.pool,
-                admin.id,
-            )
-            .await
-            .map_err(AppError::internal)?,
+            can_publish_lexicon: crate::admin::permissions::legacy_publication_allowed(
+                &authorization,
+            ),
             id: admin.id,
             phone: admin.phone,
             display_name: admin.display_name,
             role: admin.role,
-            permissions: MENU_PERMISSIONS.to_vec(),
+            permissions: authorization.permissions.into_iter().collect(),
+            permission_version: authorization.permission_version,
+            catalog_version: crate::admin::permissions::catalog::catalog_version(),
             preferences: AdminPreferences {
                 dialect: admin.dialect_preference,
             },

@@ -269,7 +269,7 @@ pub async fn validate(
         return Err(v3_storage_unavailable());
     }
     let response = service(&state)
-        .validate_v3(path.id, input)
+        .validate_v3(auth.subject, path.id, input)
         .await
         .map_err(map_error)?;
     Ok((StatusCode::OK, Json(response)))
