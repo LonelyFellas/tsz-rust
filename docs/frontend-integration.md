@@ -27,6 +27,8 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 - Web 用户与管理端是不同身份域，分别使用 `/auth/*` 与 `/admin/auth/*`；不能混用 access token、refresh cookie 或登录状态。
 - 用户资料读取为 `GET /api/v1/auth/me`，不是旧对接清单中的 `/api/v1/me`。
+- 本人昵称保存为 `PATCH /api/v1/me`，仅接收 `display_name`，返回 `{ user: UserProfile }`；读取端点仍返回扁平 `UserProfile`。昵称按 Rust trim 后的 Unicode 码点计数（1–50），拒绝剩余 Cc/Cf 和 `< >`，不变更安全版本或会话。前端按 `invalid_display_name` 识别校验错误，并对齐 BOM/U+0085 的空白边界。
+- 昵称写入后资料装配或网络响应仍可能失败；相同昵称可安全重试，以重新读取确认当前值。无需数据库迁移；推荐先发布 additive 后端，再发布配套前端。后端回退后新保存接口恢复 404，但已写昵称仍可读取，前端必须提示未保存。
 - access token 通过 Bearer header 发送；刷新会话使用 HttpOnly cookie。cookie 的路径、刷新轮换和安全边界见[Token 设计](auth-token-design.md)、[会话刷新设计](session-refresh-design.md)，实际实现以两个身份域的 handler 为准。
 - 前端鉴权逻辑集中在 `@tsz/shared/auth`。授权失败与会话过期应按 HTTP 状态及稳定 `code` 区分，不匹配 `detail` 文案，不对所有 403 一律刷新。
 - 生产环境必须使用 HTTPS 与 Secure cookie。临时 HTTP 测试不能成为生产关闭 `COOKIE_SECURE` 的理由。

@@ -317,7 +317,10 @@ async fn build_login_response(
 /// login / me 共用的 user 档案装配点：查角色 + 拼 `UserProfile`（可失败、无 DB 副作用）。
 /// **唯一**构造点——将来 user 对象加字段（如 status/created_at，见契约 0.1 订正）只改这里，
 /// login 响应里的 user 与 me 的响应形状才不会漂移。
-async fn load_user_profile(state: &AppState, user: &User) -> Result<UserProfile, AppError> {
+pub(crate) async fn load_user_profile(
+    state: &AppState,
+    user: &User,
+) -> Result<UserProfile, AppError> {
     let roles = UserRepository::new(state.pool.clone())
         .get_roles_by_user_id(&user.id)
         .await
@@ -575,6 +578,9 @@ pub async fn confirm_account_deletion(
         .map_err(map_account_deletion_otp_error)?;
 
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    crate::avatar::repository::schedule_user_cleanup_in(&mut tx, user.subject)
+        .await
+        .map_err(AppError::internal)?;
     let deleted = service
         .delete_account_in(&mut tx, user.subject)
         .await
@@ -608,7 +614,7 @@ pub struct UserProfile {
     #[schema(example = "13800138000")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phone: Option<String>,
-    /// 头像未实现：现恒为空串 ""（不是 null、不省略，契约 0.1），实现后才是 URL
+    /// 无头像时为空字符串。
     #[schema(example = "")]
     pub avatar_url: String,
     pub roles: Vec<UserRole>,

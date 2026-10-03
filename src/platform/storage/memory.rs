@@ -106,6 +106,7 @@ impl ObjectStoreBackend for MemoryAdapter {
             self.fake_url("read", key, expires_in),
             BTreeMap::new(),
             expires_in,
+            SystemTime::now() + expires_in,
         ))
     }
 
@@ -130,6 +131,7 @@ impl ObjectStoreBackend for MemoryAdapter {
             self.fake_url("write", key, expires_in),
             headers,
             expires_in,
+            SystemTime::now() + expires_in,
         ))
     }
 

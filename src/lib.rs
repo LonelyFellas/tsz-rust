@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod api;
 pub mod auth;
+pub mod avatar;
 pub mod catalog;
 pub mod config;
 pub mod constant;
@@ -56,6 +57,7 @@ pub fn router(state: AppState) -> Router {
         //     user::USER_MOUNT,
         //     Router::new().route("/register", post(user::handler::register)),
         // )
+        .merge(avatar::router())
         .merge(teacher_certification::router())
         .nest(admin::ADMIN_MOUNT, admin::router(state.clone()))
         .nest(
@@ -78,6 +80,11 @@ pub fn router(state: AppState) -> Router {
                 .route("/password/change", post(auth::security::change_password))
                 .route("/login-otp", post(auth::handler::login_otp))
                 .route("/me", get(auth::handler::me)),
+        )
+        .route(
+            "/api/v1/me",
+            axum::routing::patch(user::handler::update_profile)
+                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024)),
         )
         .nest(
             "/api/v1/me/contact",
@@ -250,11 +257,13 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         otp_service,
         cookie_secure: config.cookie_secure,
         object_storage,
+        avatar_public_base_url: config.avatar_public_base_url,
         speech_provider,
         smart_lexicon_v3_flags: config.smart_lexicon_v3_flags,
     };
 
     if !config.deployment_smoke_only {
+        crate::avatar::cleanup::run_worker(state.clone());
         crate::teacher_certification::cleanup::run_worker(state.clone());
         crate::speech::preview::run_worker(state.pool.clone());
         crate::lexicon::audio_assets::run_worker(

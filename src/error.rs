@@ -111,6 +111,15 @@ pub enum ErrorCode {
     AudioUploadNotCompleted,
     InvalidAudioKey,
     AudioStorageNotConfigured,
+    UnsupportedAvatarContentType,
+    InvalidAvatarSize,
+    AvatarInvalidImage,
+    AvatarFileTooLarge,
+    InvalidAvatarKey,
+    AvatarUploadNotCompleted,
+    AvatarUploadRateLimited,
+    AvatarStorageNotConfigured,
+    AvatarStorageUnavailable,
     AudioAssetNotFound,
     ServiceUnavailable,
     InternalError,
@@ -124,7 +133,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 101] = [
+    pub const ALL: [Self; 110] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -223,6 +232,15 @@ impl ErrorCode {
         Self::AudioUploadNotCompleted,
         Self::InvalidAudioKey,
         Self::AudioStorageNotConfigured,
+        Self::UnsupportedAvatarContentType,
+        Self::InvalidAvatarSize,
+        Self::AvatarInvalidImage,
+        Self::AvatarFileTooLarge,
+        Self::InvalidAvatarKey,
+        Self::AvatarUploadNotCompleted,
+        Self::AvatarUploadRateLimited,
+        Self::AvatarStorageNotConfigured,
+        Self::AvatarStorageUnavailable,
         Self::AudioAssetNotFound,
         Self::ServiceUnavailable,
         Self::InternalError,
@@ -230,6 +248,51 @@ impl ErrorCode {
 
     pub const fn descriptor(self) -> ErrorDescriptor {
         let (slug, title, default_status) = match self {
+            Self::UnsupportedAvatarContentType => (
+                "unsupported_avatar_content_type",
+                "Unsupported avatar content type",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::InvalidAvatarSize => (
+                "invalid_avatar_size",
+                "Invalid avatar size",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::AvatarInvalidImage => (
+                "avatar_invalid_image",
+                "Invalid avatar image",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::AvatarFileTooLarge => (
+                "avatar_file_too_large",
+                "Avatar file too large",
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            Self::InvalidAvatarKey => (
+                "invalid_avatar_key",
+                "Invalid avatar key",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::AvatarUploadNotCompleted => (
+                "avatar_upload_not_completed",
+                "Avatar upload not completed",
+                StatusCode::CONFLICT,
+            ),
+            Self::AvatarUploadRateLimited => (
+                "avatar_upload_rate_limited",
+                "Avatar upload rate limited",
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+            Self::AvatarStorageNotConfigured => (
+                "avatar_storage_not_configured",
+                "Avatar storage not configured",
+                StatusCode::NOT_IMPLEMENTED,
+            ),
+            Self::AvatarStorageUnavailable => (
+                "avatar_storage_unavailable",
+                "Avatar storage unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
             Self::NotFound => ("not_found", "Resource not found", StatusCode::NOT_FOUND),
             Self::InvalidJson => ("invalid_json", "Invalid JSON", StatusCode::BAD_REQUEST),
             Self::InvalidRequestBody => (

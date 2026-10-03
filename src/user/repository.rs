@@ -135,6 +135,26 @@ impl UserRepository {
         Ok(user)
     }
 
+    pub async fn update_display_name(
+        &self,
+        user_id: Uuid,
+        security_version: i64,
+        display_name: &str,
+    ) -> Result<Option<User>, UserError> {
+        sqlx::query_as::<_, User>(
+            "UPDATE users SET display_name = $2, updated_at = NOW() \
+             WHERE id = $1 AND status = 'active' AND security_version = $3 \
+             RETURNING id, phone, email, password_hash, security_version, display_name, \
+             last_active_role, status, avatar_url, created_at, updated_at",
+        )
+        .bind(user_id)
+        .bind(display_name)
+        .bind(security_version)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(UserError::Db)
+    }
+
     /// 在同一事务内锁定用户、吊销其全部 refresh session，再删除用户。
     /// DELETE 的 FK cascade 会清理角色、profile 与 refresh token 行；显式 revoke
     /// 仍保留“先吊销、后删除”的安全顺序，避免未来 FK 策略变化破坏会话语义。

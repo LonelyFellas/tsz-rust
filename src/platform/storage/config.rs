@@ -171,6 +171,13 @@ impl ObjectStorageConfig {
         StorageRegistry::from_stores(stores)
     }
 
+    pub fn policy(&self, space: &str) -> Option<&StoragePolicy> {
+        self.bindings
+            .iter()
+            .find(|binding| binding.space.as_str() == space)
+            .map(|binding| &binding.policy)
+    }
+
     pub fn len(&self) -> usize {
         self.bindings.len()
     }

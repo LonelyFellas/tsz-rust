@@ -371,6 +371,7 @@ pub struct PresignedRequest {
     url: String,
     pub(crate) headers: BTreeMap<String, String>,
     expires_in: Duration,
+    expires_at: SystemTime,
 }
 
 impl PresignedRequest {
@@ -379,12 +380,14 @@ impl PresignedRequest {
         url: impl Into<String>,
         headers: BTreeMap<String, String>,
         expires_in: Duration,
+        expires_at: SystemTime,
     ) -> Self {
         Self {
             method: method.into(),
             url: url.into(),
             headers,
             expires_in,
+            expires_at,
         }
     }
 
@@ -404,6 +407,10 @@ impl PresignedRequest {
 
     pub fn expires_in(&self) -> Duration {
         self.expires_in
+    }
+
+    pub fn expires_at(&self) -> SystemTime {
+        self.expires_at
     }
 }
 
