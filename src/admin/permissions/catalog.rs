@@ -19,19 +19,31 @@ pub struct PermissionDefinition {
 
 macro_rules! permission {
     ($key:literal, $module:literal, $label:literal, $kind:literal, [$($requires:literal),*], $risk:literal) => {
+        permission!($key, $module, $label, $label, $kind, [$($requires),*], $risk)
+    };
+    ($key:literal, $module:literal, $label:literal, $description:literal, $kind:literal, [$($requires:literal),*], $risk:literal) => {
         PermissionDefinition {
-            key: $key, module_key: $module, label: $label, description: $label,
+            key: $key, module_key: $module, label: $label, description: $description,
             kind: $kind, requires: &[$($requires),*], risk_level: $risk,
         }
     };
 }
 
 pub const CATALOG: &[PermissionDefinition] = &[
-    permission!("words.access", "words", "查看后台词条", "page", [], "low"),
+    permission!(
+        "words.access",
+        "words",
+        "词条查看",
+        "查看后台词条",
+        "page",
+        [],
+        "low"
+    ),
     permission!(
         "words.detect",
         "words",
-        "检测词形并准备新词条",
+        "词形识别",
+        "识别词形，为新建词条做准备",
         "action",
         ["words.access"],
         "medium"
@@ -39,7 +51,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.validate",
         "words",
-        "校验词条与预览形态影响",
+        "词条校验",
+        "校验词条内容，预览形态变更的影响",
         "action",
         ["words.access"],
         "low"
@@ -47,7 +60,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.create",
         "words",
-        "创建本人词条",
+        "词条创建",
+        "创建归属于自己的词条",
         "action",
         ["words.access"],
         "medium"
@@ -55,7 +69,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.edit",
         "words",
-        "编辑本人词条及修订",
+        "词条编辑",
+        "编辑自己的词条及修订",
         "action",
         ["words.access"],
         "medium"
@@ -63,7 +78,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.edit_others",
         "words",
-        "编辑他人词条及已发布内容的修订，不包含发布或删除",
+        "他人词条编辑",
+        "扩展编辑范围至他人的词条及已发布内容的修订；不授予发布、归档或删除权限",
         "scope",
         ["words.edit"],
         "high"
@@ -71,7 +87,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.publish",
         "words",
-        "发布本人词条",
+        "词条发布",
+        "发布自己的词条",
         "action",
         ["words.access"],
         "high"
@@ -79,7 +96,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.archive",
         "words",
-        "归档本人词条",
+        "词条归档",
+        "归档自己的词条",
         "action",
         ["words.access"],
         "high"
@@ -87,7 +105,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.restore",
         "words",
-        "恢复本人词条",
+        "词条恢复",
+        "恢复自己的词条",
         "action",
         ["words.access"],
         "high"
@@ -95,7 +114,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.rollback",
         "words",
-        "回滚本人词条发布版本",
+        "词条版本回滚",
+        "回滚自己词条的发布版本",
         "action",
         ["words.access"],
         "high"
@@ -103,6 +123,7 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.access",
         "sentences",
+        "例句查看",
         "查看后台共享例句",
         "page",
         [],
@@ -111,7 +132,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.create",
         "sentences",
-        "创建本人共享例句",
+        "例句创建",
+        "创建归属于自己的共享例句",
         "action",
         ["sentences.access", "words.edit"],
         "medium"
@@ -119,7 +141,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.edit",
         "sentences",
-        "编辑本人共享例句",
+        "例句编辑",
+        "编辑自己的共享例句",
         "action",
         ["sentences.access", "words.access"],
         "medium"
@@ -127,7 +150,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.edit_others",
         "sentences",
-        "编辑他人共享例句，不包含发布或删除",
+        "他人例句编辑",
+        "扩展编辑范围至他人的例句；不授予发布、撤回或删除权限",
         "scope",
         ["sentences.edit"],
         "high"
@@ -135,7 +159,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.publish",
         "sentences",
-        "发布本人共享例句",
+        "例句发布",
+        "发布自己的共享例句",
         "action",
         ["sentences.access"],
         "high"
@@ -143,7 +168,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.withdraw",
         "sentences",
-        "撤回本人共享例句",
+        "例句撤回",
+        "撤回自己已发布的共享例句",
         "action",
         ["sentences.access"],
         "high"
@@ -151,7 +177,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.restore",
         "sentences",
-        "恢复本人共享例句",
+        "例句恢复",
+        "恢复自己的共享例句",
         "action",
         ["sentences.access"],
         "high"
@@ -159,7 +186,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.rollback",
         "sentences",
-        "回滚本人共享例句发布版本",
+        "例句版本回滚",
+        "回滚自己例句的发布版本",
         "action",
         ["sentences.access"],
         "high"
@@ -247,7 +275,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "speech.generate",
         "speech",
-        "生成语音预览，消耗语音服务资源",
+        "语音预览",
+        "生成语音预览，会消耗语音服务资源。",
         "action",
         ["words.access"],
         "medium"
@@ -361,6 +390,50 @@ pub fn invalid(message: &str) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_permission_labels_are_separate_from_scope_descriptions() {
+        let content: Vec<_> = CATALOG
+            .iter()
+            .filter(|permission| matches!(permission.module_key, "words" | "sentences"))
+            .collect();
+        assert_eq!(content.len(), 18);
+        for permission in content {
+            assert_ne!(
+                permission.label, permission.description,
+                "{}",
+                permission.key
+            );
+            assert!(!permission.label.contains("本人"));
+            assert!(!permission.label.contains("不包含"));
+        }
+        for (key, label, scope) in [
+            ("words.edit", "词条编辑", "自己的"),
+            (
+                "words.edit_others",
+                "他人词条编辑",
+                "不授予发布、归档或删除权限",
+            ),
+            ("sentences.edit", "例句编辑", "自己的"),
+            (
+                "sentences.edit_others",
+                "他人例句编辑",
+                "不授予发布、撤回或删除权限",
+            ),
+        ] {
+            let permission = definition(key).unwrap();
+            assert_eq!(permission.label, label);
+            assert!(permission.description.contains(scope));
+        }
+    }
+
+    #[test]
+    fn speech_permission_keeps_resource_notice_in_description() {
+        let permission = definition("speech.generate").unwrap();
+        assert_eq!(permission.label, "语音预览");
+        assert_eq!(permission.description, "生成语音预览，会消耗语音服务资源。");
+        assert_eq!(permission.requires, &["words.access"]);
+    }
 
     #[test]
     fn catalog_is_unique_closed_and_acyclic() {
