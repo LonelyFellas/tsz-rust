@@ -386,7 +386,12 @@ async fn admin_security_version_cannot_be_removed_after_password_change(pool: Pg
         .set_password(&id, "new-hash", false)
         .await
         .unwrap();
-    let error = tsz_rust::deployment_migrations::undo(&pool, 20260928010000, 20261001130000)
+    let current_version: i64 =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success IS TRUE")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20260928010000, current_version)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("cannot remove admin security_version"));

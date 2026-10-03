@@ -33,6 +33,9 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::avatar::handler::create_upload,
+        crate::avatar::handler::confirm,
+        crate::avatar::handler::read_public,
         crate::teacher_certification::handler::mine,
         crate::teacher_certification::handler::submit,
         crate::teacher_certification::handler::list,
@@ -61,6 +64,7 @@ use utoipa::{
         crate::lexicon::shared_sentences::reading::historical,
         crate::lexicon::shared_sentences::visibility::set_visibility,
 
+        crate::user::handler::update_profile,
         // auth 域
         crate::auth::handler::login,
         crate::auth::handler::login_otp,
@@ -158,6 +162,11 @@ use utoipa::{
     ),
     components(
         schemas(
+            crate::avatar::dto::AvatarUploadRequest,
+            crate::avatar::dto::AvatarConfirmRequest,
+            crate::avatar::dto::AvatarUpload,
+            crate::avatar::dto::AvatarUploadResponse,
+            crate::avatar::dto::AvatarConfirmResponse,
             crate::teacher_certification::model::TeacherApplication,
             crate::teacher_certification::model::TeacherCertification,
             crate::teacher_certification::model::TeacherApplicationDetail,
@@ -194,6 +203,8 @@ use utoipa::{
             crate::auth::security::PasswordChangeRequest,
             crate::auth::security::PasswordStatus,
             // user
+            crate::user::handler::UpdateProfileRequest,
+            crate::user::handler::UpdateProfileResponse,
             crate::user::model::UserRole,
             crate::user::model::AccountDeletionChannel,
             // otp

@@ -180,6 +180,17 @@ impl UserService {
         }
     }
 
+    pub async fn update_display_name(
+        &self,
+        user_id: Uuid,
+        security_version: i64,
+        display_name: crate::user::model::DisplayName,
+    ) -> Result<Option<User>, UserError> {
+        self.repository
+            .update_display_name(user_id, security_version, display_name.as_str())
+            .await
+    }
+
     pub async fn account_deletion_target(
         &self,
         user_id: Uuid,

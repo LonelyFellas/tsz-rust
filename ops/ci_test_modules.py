@@ -14,6 +14,7 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
         "account_deletion_handler",
         "account_security_handler",
         "auth_*",
+        "avatar_*",
         "otp_*",
         "refresh_tokens_schema",
         "register_session_transaction",

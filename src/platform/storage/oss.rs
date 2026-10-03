@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -333,6 +338,36 @@ fn convert_write_metadata(metadata: &Metadata, options: &BackendWriteOptions) ->
     converted
 }
 
+fn signed_expiration(uri: &str) -> Result<SystemTime, BackendErrorKind> {
+    let invalid = || BackendErrorKind::Unexpected;
+    let url = reqwest::Url::parse(uri).map_err(|_| invalid())?;
+    if let Some((_, value)) = url.query_pairs().find(|(name, _)| name == "Expires") {
+        let seconds = value.parse::<u64>().map_err(|_| invalid())?;
+        return UNIX_EPOCH
+            .checked_add(Duration::from_secs(seconds))
+            .ok_or_else(invalid);
+    }
+    let date = url
+        .query_pairs()
+        .find(|(name, _)| name == "x-oss-date")
+        .ok_or_else(invalid)?
+        .1
+        .into_owned();
+    let ttl = url
+        .query_pairs()
+        .find(|(name, _)| name == "x-oss-expires")
+        .ok_or_else(invalid)?
+        .1
+        .parse::<u64>()
+        .map_err(|_| invalid())?;
+    let date = chrono::NaiveDateTime::parse_from_str(&date, "%Y%m%dT%H%M%SZ")
+        .map_err(|_| invalid())?
+        .and_utc();
+    SystemTime::from(date)
+        .checked_add(Duration::from_secs(ttl))
+        .ok_or_else(invalid)
+}
+
 fn convert_presigned_request(
     request: opendal::raw::PresignedRequest,
     expires_in: Duration,
@@ -347,6 +382,7 @@ fn convert_presigned_request(
         request.uri().to_string(),
         headers,
         expires_in,
+        signed_expiration(&request.uri().to_string())?,
     ))
 }
 
@@ -480,11 +516,15 @@ impl ObjectStoreBackend for OssAdapter {
                     })
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let expires_at = signed_expiration(&parts.uri.to_string()).map_err(|kind| {
+            StorageError::backend(&self.space, StorageOperation::PresignWrite, kind)
+        })?;
         Ok(PresignedRequest::new(
             parts.method.as_str(),
             parts.uri.to_string(),
             headers,
             expires_in,
+            expires_at,
         ))
     }
 
@@ -499,6 +539,34 @@ impl ObjectStoreBackend for OssAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absolute_expiry_comes_from_actual_signed_parameters() {
+        let date = chrono::NaiveDateTime::parse_from_str("20261002T010000Z", "%Y%m%dT%H%M%SZ")
+            .unwrap()
+            .and_utc();
+        assert_eq!(
+            signed_expiration(
+                "https://example.test/file?x-oss-date=20261002T010000Z&x-oss-expires=60"
+            )
+            .unwrap(),
+            SystemTime::from(date) + Duration::from_secs(60)
+        );
+        assert_eq!(
+            signed_expiration("https://example.test/file?Expires=1770000000").unwrap(),
+            UNIX_EPOCH + Duration::from_secs(1770000000)
+        );
+        assert!(
+            signed_expiration("https://example.test/file?x-oss-date=invalid&x-oss-expires=60")
+                .is_err()
+        );
+        assert!(
+            signed_expiration(
+                "https://example.test/file?x-oss-date=20261002T010000Z&x-oss-expires=-1"
+            )
+            .is_err()
+        );
+    }
 
     fn space() -> StorageSpace {
         StorageSpace::parse("avatars").expect("固定空间合法")

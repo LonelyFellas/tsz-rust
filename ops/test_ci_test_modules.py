@@ -48,6 +48,9 @@ EXPECTED_TARGETS = {
         "auth_login_otp_handler",
         "auth_me",
         "auth_refresh_handler",
+        "avatar_handler",
+        "avatar_lifecycle",
+        "avatar_migrations",
         "otp_send_handler",
         "otp_service",
         "otp_store",
@@ -60,6 +63,7 @@ EXPECTED_TARGETS = {
         "teacher_profiles_schema",
         "teacher_certification_handler",
         "user_authenticate",
+        "user_profile_handler",
         "user_register_handler",
         "user_repository",
         "user_roles_schema",
@@ -111,7 +115,7 @@ class CiTestModulesTests(unittest.TestCase):
         )
         flattened = [target for targets in actual.values() for target in targets]
         self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertEqual(len(flattened), 70)
+        self.assertEqual(len(flattened), 74)
 
     def test_ci02_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(

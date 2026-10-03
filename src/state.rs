@@ -27,6 +27,7 @@ pub struct AppState {
     pub otp_service: Arc<OtpService>,
     pub cookie_secure: bool,
     pub object_storage: StorageRegistry,
+    pub avatar_public_base_url: Option<String>,
     pub speech_provider: Option<Arc<dyn SpeechProvider>>,
     pub smart_lexicon_v3_flags: SmartLexiconV3Flags,
 }
@@ -91,6 +92,7 @@ impl AppState {
             otp_service,
             cookie_secure: false,
             object_storage: StorageRegistry::empty(),
+            avatar_public_base_url: None,
             speech_provider: None,
             smart_lexicon_v3_flags: SmartLexiconV3Flags::all_disabled(),
         }
@@ -135,6 +137,7 @@ impl AppState {
             surface_policy_prefix: format!("test:{}:lexicon:surface-policy:", Uuid::now_v7()),
             otp_service,
             object_storage: StorageRegistry::empty(),
+            avatar_public_base_url: None,
             speech_provider: None,
             smart_lexicon_v3_flags: SmartLexiconV3Flags::all_disabled(),
         };

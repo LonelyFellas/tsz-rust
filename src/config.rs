@@ -135,6 +135,8 @@ pub struct Config {
     pub smart_lexicon_v3_flags: SmartLexiconV3Flags,
     #[serde(skip)]
     pub object_storage: ObjectStorageConfig,
+    #[serde(default)]
+    pub avatar_public_base_url: Option<String>,
     #[serde(skip)]
     pub azure_speech: Option<AzureSpeechConfig>,
 }
@@ -178,6 +180,45 @@ fn default_admin_refresh_ttl_days() -> u64 {
 }
 
 impl Config {
+    fn validate_avatar_config(&self) -> Result<(), envy::Error> {
+        let invalid = || {
+            envy::Error::Custom("avatars requires private storage, a 5242880 byte limit, TTL <=600s and a safe AVATAR_PUBLIC_BASE_URL".into())
+        };
+        let Some(policy) = self.object_storage.policy("avatars") else {
+            if self.avatar_public_base_url.is_some() {
+                return Err(invalid());
+            }
+            return Ok(());
+        };
+        if policy.privacy() != crate::platform::storage::StoragePrivacy::Private
+            || policy.max_object_size() != crate::avatar::MAX_BYTES
+            || policy.presign_ttl().as_secs() > 600
+        {
+            return Err(invalid());
+        }
+        let url = self.avatar_public_base_url.as_deref().ok_or_else(invalid)?;
+        let parsed = reqwest::Url::parse(url).map_err(|_| invalid())?;
+        let local = parsed.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !(parsed.scheme() == "https" || (parsed.scheme() == "http" && local))
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || parsed.cannot_be_a_base()
+            || parsed.path().trim_end_matches('/').is_empty()
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
     /// 从任意键值对解析配置——纯函数，不触碰进程环境，因此可单元测试。
     /// 生产的 [`load_config`] 与测试都走这条路径，保证被测逻辑即生产逻辑。
     pub fn from_pairs<I>(pairs: I) -> Result<Self, envy::Error>
@@ -192,6 +233,7 @@ impl Config {
         let mut cfg: Self = envy::from_iter(pairs)?;
         cfg.object_storage = object_storage;
         cfg.azure_speech = azure_speech;
+        cfg.validate_avatar_config()?;
         // 两把密钥相同 = per-realm 隔离塌一半,启动即失败(admin-design.md §13)
         if cfg.admin_jwt_secret == cfg.jwt_secret {
             return Err(envy::Error::Custom(
@@ -242,6 +284,67 @@ mod tests {
             flags.publish,
             flags.projection,
         ]
+    }
+
+    #[test]
+    fn avatar_configuration_is_all_or_nothing_and_rejects_unsafe_urls() {
+        let mut input = valid_baseline();
+        input.extend([
+            ("OBJECT_STORAGE_SPACES", "avatars"),
+            ("OBJECT_STORAGE_AVATARS_BACKEND", "oss"),
+            (
+                "OBJECT_STORAGE_AVATARS_OSS_ENDPOINT",
+                "https://oss-cn-hangzhou.aliyuncs.com",
+            ),
+            ("OBJECT_STORAGE_AVATARS_OSS_REGION", "cn-hangzhou"),
+            ("OBJECT_STORAGE_AVATARS_OSS_BUCKET", "avatar-test-bucket"),
+            ("OBJECT_STORAGE_AVATARS_OSS_ROOT", "/avatars"),
+            ("OBJECT_STORAGE_AVATARS_OSS_ACCESS_KEY_ID", "test-only-id"),
+            (
+                "OBJECT_STORAGE_AVATARS_OSS_ACCESS_KEY_SECRET",
+                "test-only-secret",
+            ),
+            ("OBJECT_STORAGE_AVATARS_PRIVACY", "private"),
+            ("OBJECT_STORAGE_AVATARS_MAX_OBJECT_SIZE_BYTES", "5242880"),
+            ("OBJECT_STORAGE_AVATARS_PRESIGN_TTL_SECONDS", "600"),
+            ("OBJECT_STORAGE_AVATARS_CACHE_CONTROL", "none"),
+        ]);
+        assert!(parse(&input).is_err());
+        for url in [
+            "https://api.example/api/v1/avatars",
+            "http://localhost:8396/api/v1/avatars",
+        ] {
+            let mut pairs = input.clone();
+            pairs.push(("AVATAR_PUBLIC_BASE_URL", url));
+            assert!(parse(&pairs).is_ok());
+        }
+        for url in [
+            "http://api.example/avatars",
+            "https://user:password@api.example/avatars",
+            "https://api.example/avatars?q=secret",
+            "https://api.example/avatars#fragment",
+            "file:///avatars",
+        ] {
+            let mut pairs = input.clone();
+            pairs.push(("AVATAR_PUBLIC_BASE_URL", url));
+            assert!(parse(&pairs).is_err());
+        }
+        input.push((
+            "AVATAR_PUBLIC_BASE_URL",
+            "https://api.example/api/v1/avatars",
+        ));
+        for (field, value) in [
+            ("OBJECT_STORAGE_AVATARS_PRIVACY", "public"),
+            ("OBJECT_STORAGE_AVATARS_PRESIGN_TTL_SECONDS", "601"),
+            ("OBJECT_STORAGE_AVATARS_MAX_OBJECT_SIZE_BYTES", "10485760"),
+        ] {
+            let mut pairs = input.clone();
+            pairs.iter_mut().find(|(key, _)| *key == field).unwrap().1 = value;
+            assert!(parse(&pairs).is_err());
+        }
+        let mut disabled = valid_baseline();
+        disabled.push(("AVATAR_PUBLIC_BASE_URL", "https://api.example/avatars"));
+        assert!(parse(&disabled).is_err());
     }
 
     #[test]
@@ -435,11 +538,15 @@ mod tests {
                 "test-key-secret",
             ),
             ("OBJECT_STORAGE_AVATARS_PRIVACY", "private"),
-            ("OBJECT_STORAGE_AVATARS_MAX_OBJECT_SIZE_BYTES", "1048576"),
+            ("OBJECT_STORAGE_AVATARS_MAX_OBJECT_SIZE_BYTES", "5242880"),
             ("OBJECT_STORAGE_AVATARS_PRESIGN_TTL_SECONDS", "300"),
             ("OBJECT_STORAGE_AVATARS_CACHE_CONTROL", "none"),
         ]);
 
+        input.push((
+            "AVATAR_PUBLIC_BASE_URL",
+            "https://api.example/api/v1/avatars",
+        ));
         let cfg = parse(&input).expect("完整对象存储配置应接入应用配置");
 
         assert_eq!(cfg.object_storage.len(), 1);

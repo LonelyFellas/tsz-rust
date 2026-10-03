@@ -188,3 +188,185 @@ async fn get_by_identifier_by_email_returns_the_matching_user(pool: PgPool) {
     assert_eq!(got.email.as_deref(), Some("bob@example.com"));
     assert_eq!(got.phone, None, "该用户无手机");
 }
+
+#[sqlx::test]
+async fn nickname_update_is_local_and_allows_duplicates_and_retries(pool: PgPool) {
+    let repo = UserRepository::new(pool.clone());
+    let id = repo
+        .create(new_user(
+            Some("13800138000"),
+            Some("alice@example.com"),
+            UserRole::Teacher,
+        ))
+        .await
+        .unwrap()
+        .id;
+    sqlx::query("UPDATE users SET avatar_url = 'avatar-before', security_version = 7, updated_at = created_at - INTERVAL '1 day' WHERE id = $1").bind(id).execute(&pool).await.unwrap();
+    let before = repo.get_by_id(&id).await.unwrap();
+    let roles = repo.get_roles_by_user_id(&id).await.unwrap();
+    let other = repo
+        .create(new_user(Some("13900139000"), None, UserRole::Student))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let saved = repo
+            .update_display_name(id, 7, &other.display_name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.display_name, other.display_name);
+        assert!(saved.updated_at > before.updated_at);
+        assert_eq!(saved.id, before.id);
+        assert_eq!(saved.phone, before.phone);
+        assert_eq!(saved.email, before.email);
+        assert_eq!(saved.avatar_url, before.avatar_url);
+        assert_eq!(saved.password_hash, before.password_hash);
+        assert_eq!(saved.security_version, before.security_version);
+        assert_eq!(saved.last_active_role, before.last_active_role);
+        assert_eq!(saved.status, before.status);
+        assert_eq!(saved.created_at, before.created_at);
+        assert_eq!(repo.get_roles_by_user_id(&id).await.unwrap(), roles);
+    }
+    assert!(
+        repo.update_display_name(id, 6, "stale")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        repo.update_display_name(id, 7, "disabled")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repo.update_display_name(Uuid::now_v7(), 0, "ghost")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+async fn wait_for_blocked_nickname_update(pool: &PgPool) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'UPDATE users SET display_name = $2%')").fetch_one(pool).await.unwrap();
+            if blocked { return; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("nickname UPDATE should wait on the user row lock");
+}
+
+#[sqlx::test]
+async fn nickname_waits_for_avatar_and_preserves_other_fields(pool: PgPool) {
+    let repo = UserRepository::new(pool.clone());
+    let id = repo
+        .create(new_user(Some("13800138000"), None, UserRole::Student))
+        .await
+        .unwrap()
+        .id;
+    let mut avatar = pool.begin().await.unwrap();
+    sqlx::query("UPDATE users SET avatar_url = 'concurrent-avatar' WHERE id = $1")
+        .bind(id)
+        .execute(&mut *avatar)
+        .await
+        .unwrap();
+    let task = tokio::spawn(async move {
+        repo.update_display_name(id, 0, "concurrent-name")
+            .await
+            .unwrap()
+    });
+    wait_for_blocked_nickname_update(&pool).await;
+    avatar.commit().await.unwrap();
+    let saved = task.await.unwrap().unwrap();
+    assert_eq!(saved.avatar_url, "concurrent-avatar");
+    assert_eq!(saved.display_name, "concurrent-name");
+    sqlx::query("UPDATE users SET avatar_url = 'later-avatar' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let saved = UserRepository::new(pool).get_by_id(&id).await.unwrap();
+    assert_eq!(saved.avatar_url, "later-avatar");
+    assert_eq!(saved.display_name, "concurrent-name");
+}
+
+#[sqlx::test]
+async fn nickname_and_admin_updates_follow_successful_write_order(pool: PgPool) {
+    let repo = UserRepository::new(pool.clone());
+    let id = repo
+        .create(new_user(Some("13800138000"), None, UserRole::Student))
+        .await
+        .unwrap()
+        .id;
+    let mut admin = pool.begin().await.unwrap();
+    sqlx::query("UPDATE users SET display_name = 'admin-name' WHERE id = $1")
+        .bind(id)
+        .execute(&mut *admin)
+        .await
+        .unwrap();
+    let task =
+        tokio::spawn(async move { repo.update_display_name(id, 0, "self-name").await.unwrap() });
+    wait_for_blocked_nickname_update(&pool).await;
+    admin.commit().await.unwrap();
+    assert_eq!(task.await.unwrap().unwrap().display_name, "self-name");
+    sqlx::query("UPDATE users SET display_name = 'admin-later' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        UserRepository::new(pool)
+            .get_by_id(&id)
+            .await
+            .unwrap()
+            .display_name,
+        "admin-later"
+    );
+}
+
+#[sqlx::test]
+async fn nickname_rechecks_predicate_after_concurrent_security_or_deletion(pool: PgPool) {
+    for mutation in [
+        "UPDATE users SET status = 'disabled' WHERE id = $1",
+        "UPDATE users SET security_version = security_version + 1 WHERE id = $1",
+        "DELETE FROM users WHERE id = $1",
+    ] {
+        let repo = UserRepository::new(pool.clone());
+        let id = repo
+            .create(new_user(Some("13800138000"), None, UserRole::Student))
+            .await
+            .unwrap()
+            .id;
+        let mut security = pool.begin().await.unwrap();
+        sqlx::query(mutation)
+            .bind(id)
+            .execute(&mut *security)
+            .await
+            .unwrap();
+        let task = tokio::spawn(async move {
+            repo.update_display_name(id, 0, "not-allowed")
+                .await
+                .unwrap()
+        });
+        wait_for_blocked_nickname_update(&pool).await;
+        security.commit().await.unwrap();
+        assert!(task.await.unwrap().is_none());
+        let name = sqlx::query_scalar::<_, String>("SELECT display_name FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+        assert!(name.is_none() || name.as_deref() == Some("Alice"));
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
