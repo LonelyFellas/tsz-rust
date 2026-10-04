@@ -249,11 +249,29 @@ pub enum PhonemeLocaleV3 {
     EnUs,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PronunciationSynthesisCandidateV3 {
+    #[schema(max_length = 200)]
+    pub ipa: String,
+    #[schema(max_length = 1600)]
+    pub ups: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(max_items = 30)]
+    pub ups_words: Option<Vec<UpsWordV3>>,
+}
+
 /// Independent Azure synthesis candidates; dictionary notation remains display-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PronunciationSynthesisV3 {
     pub alphabet: RichTextPhonemeAlphabet,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub uk: Option<PronunciationSynthesisCandidateV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub us: Option<PronunciationSynthesisCandidateV3>,
     /// Missing in legacy drafts means use the selected phoneme alphabet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_spelling: Option<bool>,
@@ -270,6 +288,41 @@ pub struct PronunciationSynthesisV3 {
     pub ipa: String,
     #[schema(max_length = 1600)]
     pub ups: String,
+}
+
+impl PronunciationSynthesisV3 {
+    pub(crate) fn for_locale(&self, locale: PhonemeLocaleV3, legacy_dialect: Dialect) -> Self {
+        let candidate = match locale {
+            PhonemeLocaleV3::EnGb => &self.uk,
+            PhonemeLocaleV3::EnUs => &self.us,
+        };
+        let mut selected = self.clone();
+        selected.uk = None;
+        selected.us = None;
+        let legacy_locale = match legacy_dialect {
+            Dialect::Uk => Some(PhonemeLocaleV3::EnGb),
+            Dialect::Us => Some(PhonemeLocaleV3::EnUs),
+            Dialect::Common => None,
+        };
+        selected.ipa_locale = self.ipa_locale.or(legacy_locale);
+        selected.ups_locale = self.ups_locale.or(legacy_locale);
+        if let Some(candidate) = candidate {
+            selected.ipa = candidate.ipa.clone();
+            selected.ups = candidate.ups.clone();
+            selected.ups_words = candidate.ups_words.clone();
+            selected.ipa_locale = Some(locale);
+            selected.ups_locale = Some(locale);
+        } else if self.uk.is_some() || self.us.is_some() {
+            if selected.ipa_locale != Some(locale) {
+                selected.ipa.clear();
+            }
+            if selected.ups_locale != Some(locale) {
+                selected.ups.clear();
+                selected.ups_words = None;
+            }
+        }
+        selected
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

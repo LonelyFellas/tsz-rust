@@ -116,6 +116,8 @@ fn first_annotation(
     pronunciations: &[WordPronunciationV3],
     start: usize,
     end: usize,
+    dialect: Dialect,
+    legacy_dialect: Dialect,
 ) -> Result<Option<RichTextAnnotationV3>, &'static str> {
     let synthesis = pronunciations
         .first()
@@ -123,6 +125,28 @@ fn first_annotation(
         .ok_or("关联词形的第一个发音未配置，请先完善该发音")?;
     if synthesis.use_spelling == Some(true) {
         return Ok(None);
+    }
+    use crate::lexicon::dto::PhonemeLocaleV3;
+    let dual = synthesis.uk.is_some() || synthesis.us.is_some();
+    // 通用正文的双口音音素由试听的目标 locale 决定，不能冻结成某一侧。
+    if dual && dialect == Dialect::Common {
+        return Ok(None);
+    }
+    let selected = match dialect {
+        Dialect::Uk => synthesis.for_locale(PhonemeLocaleV3::EnGb, legacy_dialect),
+        Dialect::Us => synthesis.for_locale(PhonemeLocaleV3::EnUs, legacy_dialect),
+        Dialect::Common => synthesis.clone(),
+    };
+    let synthesis = &selected;
+    let recorded_locale = match synthesis.alphabet {
+        RichTextPhonemeAlphabet::Ipa => synthesis.ipa_locale,
+        RichTextPhonemeAlphabet::Ups => synthesis.ups_locale,
+    };
+    if matches!(
+        (dialect, recorded_locale),
+        (Dialect::Uk, Some(PhonemeLocaleV3::EnUs)) | (Dialect::Us, Some(PhonemeLocaleV3::EnGb))
+    ) {
+        return Err("关联词形的第一个发音与当前口音不匹配，请先完善该发音");
     }
     let phoneme = match synthesis.alphabet {
         RichTextPhonemeAlphabet::Ipa => &synthesis.ipa,
@@ -203,8 +227,14 @@ pub(super) async fn validate_targets(
             link.target_variant_id = id;
             link.target_dialect = dialect;
             let segment = &link.source_segments[0];
-            if let Some(annotation) = first_annotation(&pronunciations, segment.start, segment.end)
-                .map_err(|message| invalid(variant.id, message))?
+            if let Some(annotation) = first_annotation(
+                &pronunciations,
+                segment.start,
+                segment.end,
+                variant.dialect,
+                dialect,
+            )
+            .map_err(|message| invalid(variant.id, message))?
             {
                 rich.annotations.push(annotation);
             }
@@ -246,22 +276,93 @@ mod tests {
     }
 
     #[test]
+    fn grammar_form_dual_accent_does_not_freeze_common_text_to_one_accent() {
+        let row: WordPronunciationV3 = serde_json::from_value(
+            json!({"id":Uuid::new_v4(), "dict_phonetic":"", "actual_pron":"",
+            "synthesis":{"alphabet":"ipa", "use_spelling":false, "ipa":"", "ups":"",
+                "uk":{"ipa":"fɑː", "ups":""}, "us":{"ipa":"fɑɹ", "ups":""}}}),
+        )
+        .unwrap();
+        assert!(
+            first_annotation(
+                std::slice::from_ref(&row),
+                0,
+                3,
+                Dialect::Common,
+                Dialect::Common
+            )
+            .unwrap()
+            .is_none()
+        );
+        for (dialect, phoneme) in [(Dialect::Uk, "fɑː"), (Dialect::Us, "fɑɹ")] {
+            let annotation =
+                first_annotation(std::slice::from_ref(&row), 0, 3, dialect, Dialect::Common)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                serde_json::to_value(annotation).unwrap()["phoneme"],
+                phoneme
+            );
+        }
+        let mut incomplete = row;
+        incomplete
+            .synthesis
+            .as_mut()
+            .unwrap()
+            .us
+            .as_mut()
+            .unwrap()
+            .ipa
+            .clear();
+        assert!(first_annotation(&[incomplete], 0, 3, Dialect::Us, Dialect::Common).is_err());
+    }
+
+    #[test]
+    fn grammar_form_does_not_borrow_unlabelled_legacy_uk_phonemes_for_us() {
+        let row: WordPronunciationV3 = serde_json::from_value(
+            json!({"id":Uuid::new_v4(), "dict_phonetic":"", "actual_pron":"",
+            "synthesis":{"alphabet":"ipa", "ipa":"fɑː", "ups":""}}),
+        )
+        .unwrap();
+        assert!(first_annotation(&[row], 0, 3, Dialect::Us, Dialect::Uk).is_err());
+    }
+
+    #[test]
     fn grammar_form_first_pronunciation_only() {
         let mut first = json!({"id": Uuid::new_v4(), "dict_phonetic": "", "actual_pron": "", "synthesis": {"alphabet": "ipa", "ipa": "dʒɒb", "ups": ""}});
         let mut second = first.clone();
         second["synthesis"]["ipa"] = json!("never-read");
         let parse = |value| serde_json::from_value::<WordPronunciationV3>(value).unwrap();
-        let annotation = first_annotation(&[parse(first.clone()), parse(second.clone())], 2, 5)
-            .unwrap()
-            .unwrap();
+        let annotation = first_annotation(
+            &[parse(first.clone()), parse(second.clone())],
+            2,
+            5,
+            Dialect::Common,
+            Dialect::Common,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             serde_json::to_value(annotation).unwrap(),
             json!({"type": "phoneme", "start": 2, "end": 5, "alphabet": "ipa", "phoneme": "dʒɒb"})
         );
         first.as_object_mut().unwrap().remove("synthesis");
-        assert!(first_annotation(&[parse(first), parse(second.clone())], 2, 5).is_err());
-        assert!(first_annotation(&[], 2, 5).is_err());
+        assert!(
+            first_annotation(
+                &[parse(first), parse(second.clone())],
+                2,
+                5,
+                Dialect::Common,
+                Dialect::Common
+            )
+            .is_err()
+        );
+        assert!(first_annotation(&[], 2, 5, Dialect::Common, Dialect::Common).is_err());
         second["synthesis"]["use_spelling"] = json!(true);
-        assert!(first_annotation(&[parse(second)], 2, 5).unwrap().is_none());
+        assert!(
+            first_annotation(&[parse(second)], 2, 5, Dialect::Common, Dialect::Common)
+                .unwrap()
+                .is_none()
+        );
     }
 }

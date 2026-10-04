@@ -5081,11 +5081,14 @@ fn canonicalize_v3_forms(content: &mut DraftFormsStepContentV3) -> Result<(), Le
 /// 两个框的文本常常不一样，错位搬过去比重标更糟。空合成候选归一为缺省。
 fn canonicalize_pronunciation_extensions(pronunciations: &mut [WordPronunciationV3]) {
     for pronunciation in pronunciations {
-        if pronunciation
-            .synthesis
-            .as_ref()
-            .is_some_and(|value| value.ipa.trim().is_empty() && value.ups.trim().is_empty())
-        {
+        if pronunciation.synthesis.as_ref().is_some_and(|value| {
+            value.ipa.trim().is_empty()
+                && value.ups.trim().is_empty()
+                && value.uk.is_none()
+                && value.us.is_none()
+                && value.use_spelling.is_none()
+                && value.ups_words.is_none()
+        }) {
             pronunciation.synthesis = None;
         }
         if let Some(rich) = &mut pronunciation.dict_phonetic_rich {
@@ -5377,6 +5380,27 @@ mod tests {
         CommonDialectV3, DialectRulesV3, WordCommonFormVariantV3, WordConcreteFormV3,
         WordFormGroupMemberV3, WordFormGroupV3, WordPosFormsV3, WordPronunciationV3,
     };
+
+    #[test]
+    fn synthesis_dual_candidates_survive_canonicalization() {
+        let raw = json!({"id":Uuid::new_v4(), "dict_phonetic":"fɑː", "actual_pron":"fɑː",
+            "synthesis":{"alphabet":"ipa", "use_spelling":true, "ipa":"", "ups":"",
+                "uk":{"ipa":"fɑː", "ups":""}, "us":{"ipa":"fɑɹ", "ups":""}}});
+        let mut rows: Vec<WordPronunciationV3> = vec![serde_json::from_value(raw.clone()).unwrap()];
+        canonicalize_pronunciation_extensions(&mut rows);
+        assert_eq!(
+            serde_json::to_value(&rows[0]).unwrap()["synthesis"],
+            raw["synthesis"]
+        );
+        rows[0].synthesis = Some(
+            serde_json::from_value(
+                json!({"alphabet":"ipa", "use_spelling":true, "ipa":"", "ups":""}),
+            )
+            .unwrap(),
+        );
+        canonicalize_pronunciation_extensions(&mut rows);
+        assert_eq!(rows[0].synthesis.as_ref().unwrap().use_spelling, Some(true));
+    }
 
     fn fixed_id(value: u128) -> Uuid {
         Uuid::from_u128(value)
