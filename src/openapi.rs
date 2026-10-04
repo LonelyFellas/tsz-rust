@@ -313,6 +313,7 @@ use utoipa::{
             crate::lexicon::dto::UsDialectV3,
             crate::lexicon::dto::WordPronunciationV3,
             crate::lexicon::dto::PronunciationSynthesisV3,
+            crate::lexicon::dto::PronunciationSynthesisCandidateV3,
             crate::lexicon::dto::WordCommonFormVariantV3,
             crate::lexicon::dto::WordUkFormVariantV3,
             crate::lexicon::dto::WordUsFormVariantV3,

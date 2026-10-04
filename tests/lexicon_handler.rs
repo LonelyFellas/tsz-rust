@@ -15670,8 +15670,18 @@ async fn v3_synthesis_survives_forms_meanings_publication_and_history(pool: PgPo
             .is_none()
     );
     let mut prior_hash: Option<Vec<u8>> = None;
-    for alphabet in ["ipa", "ups"] {
-        let synthesis = json!({"alphabet":alphabet,"ipa":"kæt","ups":"K AE T"});
+    for synthesis in [
+        json!({"alphabet":"ipa","ipa":"kæt","ups":"K AE T"}),
+        json!({"alphabet":"ups","ipa":"kæt","ups":"K AE T"}),
+        json!({"alphabet":"ipa","use_spelling":false,"ipa":"","ups":"",
+            "uk":{"ipa":"fɑː","ups":"F AA"},"us":{"ipa":"fɑɹ","ups":"F AA R"}}),
+        json!({"alphabet":"ipa","use_spelling":false,"ipa":"","ups":"",
+            "uk":{"ipa":"fɑː","ups":"F AA"},"us":{"ipa":"fɑɻ","ups":"F AA R"}}),
+        json!({"alphabet":"ups","use_spelling":false,"ipa":"","ups":"",
+            "uk":{"ipa":"fɑː","ups":"F AA"},"us":{"ipa":"fɑɻ","ups":"F AA R"}}),
+        json!({"alphabet":"ups","use_spelling":true,"ipa":"","ups":"",
+            "uk":{"ipa":"fɑː","ups":"F AA"},"us":{"ipa":"fɑɻ","ups":"F AA R"}}),
+    ] {
         let mut forms = word["word"]["forms"].clone();
         forms.pointer_mut(path).unwrap()["synthesis"] = synthesis.clone();
         let (_, saved) = save_v3_forms_after_impact(
