@@ -70,6 +70,27 @@ pub enum RoutePolicy {
 }
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
+    ("GET", "/wordlists", RoutePolicy::All(&["wordlists.access"])),
+    (
+        "GET",
+        "/wordlists/{id}/review-requests",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/{id}/review-requests/{request_id}/items",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "POST",
+        "/wordlists/{id}/review-requests/{request_id}/decision",
+        RoutePolicy::All(&["wordlists.review"]),
+    ),
+    (
+        "POST",
+        "/wordlists/{id}/withdraw",
+        RoutePolicy::All(&["wordlists.withdraw"]),
+    ),
     (
         "GET",
         "/coins/accounts",

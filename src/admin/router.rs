@@ -17,6 +17,23 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
+        .route("/wordlists", get(crate::wordlists::admin_handler::list))
+        .route(
+            "/wordlists/{id}/review-requests",
+            get(crate::wordlists::admin_handler::reviews),
+        )
+        .route(
+            "/wordlists/{id}/review-requests/{request_id}/items",
+            get(crate::wordlists::admin_handler::items),
+        )
+        .route(
+            "/wordlists/{id}/review-requests/{request_id}/decision",
+            post(crate::wordlists::admin_handler::decision),
+        )
+        .route(
+            "/wordlists/{id}/withdraw",
+            post(crate::wordlists::admin_handler::withdraw),
+        )
         .route(
             "/coins/accounts",
             get(crate::coins::admin_handler::accounts),

@@ -39,6 +39,8 @@ pub enum ErrorCode {
     InvalidDisplayName,
     InvalidOtpCode,
     InvalidInvitationCode,
+    WordListConflict,
+    WordListEntryUnavailable,
     InvalidCredentials,
     InvalidToken,
     InvalidRefreshToken,
@@ -148,7 +150,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 125] = [
+    pub const ALL: [Self; 127] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -177,6 +179,8 @@ impl ErrorCode {
         Self::InvalidDisplayName,
         Self::InvalidOtpCode,
         Self::InvalidInvitationCode,
+        Self::WordListConflict,
+        Self::WordListEntryUnavailable,
         Self::InvalidCredentials,
         Self::InvalidToken,
         Self::InvalidRefreshToken,
@@ -427,6 +431,16 @@ impl ErrorCode {
             Self::InvalidDisplayName => (
                 "invalid_display_name",
                 "Invalid display name",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::WordListConflict => (
+                "word_list_conflict",
+                "Word list conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::WordListEntryUnavailable => (
+                "word_list_entry_unavailable",
+                "Word list entry unavailable",
                 StatusCode::BAD_REQUEST,
             ),
             Self::InvalidInvitationCode => (

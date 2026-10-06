@@ -30,6 +30,30 @@ macro_rules! permission {
 }
 
 pub const CATALOG: &[PermissionDefinition] = &[
+    permission!(
+        "wordlists.access",
+        "wordlists",
+        "词表查看",
+        "page",
+        [],
+        "low"
+    ),
+    permission!(
+        "wordlists.review",
+        "wordlists",
+        "词表审核",
+        "action",
+        ["wordlists.access"],
+        "medium"
+    ),
+    permission!(
+        "wordlists.withdraw",
+        "wordlists",
+        "词表下架",
+        "action",
+        ["wordlists.access"],
+        "high"
+    ),
     permission!("coins.access", "coins", "天生币查询", "page", [], "medium"),
     permission!(
         "coins.credit",

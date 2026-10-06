@@ -30,6 +30,7 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
     ),
     "lexicon": (
         "dictionary_schema",
+        "wordlists_*",
         "lexicon_*",
         "sentence_*",
         "shared_sentences",

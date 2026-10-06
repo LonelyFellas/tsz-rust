@@ -20,6 +20,7 @@ pub mod speech;
 pub mod state;
 pub mod teacher_certification;
 pub mod user;
+pub mod wordlists;
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -85,6 +86,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/me/account-deletion/{id}/cancel",
             post(account_deletion::handler::cancel),
         )
+        .merge(wordlists::handler::router())
         .merge(avatar::router())
         .merge(teacher_certification::router())
         .nest(admin::ADMIN_MOUNT, admin::router(state.clone()))
