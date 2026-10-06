@@ -64,6 +64,7 @@ pub async fn submit(
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_user(&mut tx, auth.subject).await?;
+    crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     let allowed = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users u JOIN user_roles r ON r.user_id = u.id AND r.role = 'student' WHERE u.id = $1 AND u.status = 'active' AND u.security_version = $2)")
         .bind(auth.subject).bind(auth.security_version).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     if !allowed {
@@ -87,6 +88,7 @@ pub async fn submit(
         }
     }
     let id = Uuid::now_v7();
+    crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     let application = sqlx::query_as::<_, TeacherApplication>("INSERT INTO teacher_applications (id,user_id,real_name,contact,statement) VALUES ($1,$2,$3,$4,$5) RETURNING *")
         .bind(id).bind(auth.subject).bind(name).bind(contact).bind(statement).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     for (position, (file, _)) in files.into_iter().enumerate() {

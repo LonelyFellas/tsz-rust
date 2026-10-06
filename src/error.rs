@@ -49,6 +49,12 @@ pub enum ErrorCode {
     Forbidden,
     OtpRateLimited,
     OtpUnavailable,
+    AccountDeletionUpgradeRequired,
+    AccountDeletionConsentRequired,
+    AccountDeletionConsentOutdated,
+    AccountDeletionBalanceChanged,
+    AccountDeletionPending,
+    AccountDeletionExpired,
     AccountDeletionChannelUnavailable,
     InvalidAccountDeletionCode,
     PasswordHashUnavailable,
@@ -134,7 +140,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 111] = [
+    pub const ALL: [Self; 117] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -173,6 +179,12 @@ impl ErrorCode {
         Self::Forbidden,
         Self::OtpRateLimited,
         Self::OtpUnavailable,
+        Self::AccountDeletionUpgradeRequired,
+        Self::AccountDeletionConsentRequired,
+        Self::AccountDeletionConsentOutdated,
+        Self::AccountDeletionBalanceChanged,
+        Self::AccountDeletionPending,
+        Self::AccountDeletionExpired,
         Self::AccountDeletionChannelUnavailable,
         Self::InvalidAccountDeletionCode,
         Self::PasswordHashUnavailable,
@@ -444,6 +456,36 @@ impl ErrorCode {
                 "otp_unavailable",
                 "Verification service unavailable",
                 StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::AccountDeletionUpgradeRequired => (
+                "account_deletion_upgrade_required",
+                "Account deletion client upgrade required",
+                StatusCode::CONFLICT,
+            ),
+            Self::AccountDeletionConsentRequired => (
+                "account_deletion_consent_required",
+                "Account deletion consent required",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::AccountDeletionConsentOutdated => (
+                "account_deletion_consent_outdated",
+                "Account deletion consent outdated",
+                StatusCode::CONFLICT,
+            ),
+            Self::AccountDeletionBalanceChanged => (
+                "account_deletion_balance_changed",
+                "Account deletion balance changed",
+                StatusCode::CONFLICT,
+            ),
+            Self::AccountDeletionPending => (
+                "account_deletion_pending",
+                "Account deletion pending",
+                StatusCode::CONFLICT,
+            ),
+            Self::AccountDeletionExpired => (
+                "account_deletion_expired",
+                "Account deletion deadline passed",
+                StatusCode::CONFLICT,
             ),
             Self::AccountDeletionChannelUnavailable => (
                 "account_deletion_channel_unavailable",

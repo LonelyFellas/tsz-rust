@@ -117,3 +117,14 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 未提交材料 24 小时过期；每分钟回收无申请引用的过期、待删及注销账号材料。正在上传的材料保留记录，直到上传结束或过期，删除失败保留 `delete_pending` 供后续重试。真实证件只用于获授权的环境，本地验收使用明确标记的合成测试图片。
 
 先发布新增迁移和后端接口，再发布新前端；新前端不支持旧后端缺失的认证接口。旧前端原占位申请接口仍不可用，发布间隙不承诺申请入口可用；原登录／刷新协议未变。迁移 down 在已有认证申请、材料或通知时明确拒绝，防止删除存储追踪记录；此时回退应用但保留新增表，不能强制清空认证数据来回退。
+
+## 2026-10-06：B1b 注销申请与连续 72 小时等待
+
+- `GET /api/v1/me/account-deletion` 返回最新申请（无申请为 `null`）、当前十进制字符串余额、声明版本/正文和服务器时间。
+- `POST /api/v1/me/account-deletion` 使用本人渠道验证码、`expected_coin_balance`、主动的 `confirm_deletion`/`waive_balance`、`consent_version` 与 UUID `idempotency_key`，返回 202 及持久申请。相同意图重试返回原申请，不重新消费 OTP，不重置截止时间；不要自动 refresh 后重放验证码错误。
+- `POST /api/v1/me/account-deletion/{id}/cancel` 仅在服务端截止前撤销本人申请，恢复原余额。申请成功不清会话；登录不会自动撤销。待注销钱包拒绝所有收支，零余额也等待连续 72 小时。
+- 旧 `DELETE /api/v1/auth/account` 固定拒绝为 409 `account_deletion_upgrade_required`（无效会话为 401），不消费验证码、不删号、没有 204 成功分支。
+- 到期以数据库锁后 `clock_timestamp()` 判定；登录、refresh、旧 token 与敏感写入立即拒绝。持久 worker 每 30 秒扫描，忙碌/失败申请持久退避 60 秒；物理清理可稍晚，不能显示“所有数据已删除”。
+- 金额或声明内容在失败恢复查询中发生变化，也必须清除旧勾选并重新签署；不能只依赖特定错误码。新前端访问旧 API 的 404 显示不可用，绝不回退旧 DELETE。
+- 推荐先发布不回退旧删除路径的新前端，再发布 B1b 后端。过渡期新流程可能暂不可用；旧客户端在新后端也不能绕过等待。一旦保存任意申请/签署记录（含已撤销、零余额），不得回退到忽略等待期的旧后端，down 会拒绝删除证据。
+- B1a/B1b 尚未接入真实人工入账；B2 才增加业务权限、审计、人工入账/冲正与钱包页面。具体本地验收见前端任务目录 `docs/features/coins-system/b1b-acceptance.md`。

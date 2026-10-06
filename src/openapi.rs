@@ -33,6 +33,9 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::account_deletion::handler::get,
+        crate::account_deletion::handler::create,
+        crate::account_deletion::handler::cancel,
         crate::coins::handler::user_wallet,
         crate::coins::handler::user_entries,
         crate::coins::handler::admin_wallet,
@@ -1646,7 +1649,7 @@ mod tests {
             "#/components/schemas/ConfirmAccountDeletionRequest"
         );
         assert!(confirm["responses"]["401"]["content"]["application/problem+json"].is_object());
-        for status in ["400", "401", "409", "422", "500", "503"] {
+        for status in ["401", "409"] {
             assert!(
                 confirm["responses"][status]["content"]["application/problem+json"].is_object(),
                 "确认注销应声明 {status} Problem Details"
@@ -1658,7 +1661,17 @@ mod tests {
                 "申请注销码应声明 {status} Problem Details"
             );
         }
-        assert!(confirm["responses"]["204"]["headers"]["Set-Cookie"].is_object());
+        assert!(confirm["responses"]["204"].is_null());
+        let create = &value["paths"]["/api/v1/me/account-deletion"]["post"];
+        assert_eq!(
+            create["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AccountDeletionRequest"
+        );
+        assert!(create["responses"]["202"]["headers"]["Set-Cookie"].is_null());
+        assert!(
+            value["paths"]["/api/v1/me/account-deletion/{id}/cancel"]["post"]["responses"]["200"]
+                .is_object()
+        );
         assert!(request["security"].is_array() && confirm["security"].is_array());
     }
 

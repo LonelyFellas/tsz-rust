@@ -119,6 +119,7 @@ pub async fn upload(
             "invalid token",
         ));
     }
+    crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     let blocked = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM teacher_applications WHERE user_id = $1 AND status IN ('pending','approved')) OR EXISTS(SELECT 1 FROM teacher_profiles WHERE user_id = $1 AND verified) OR NOT EXISTS(SELECT 1 FROM user_roles WHERE user_id = $1 AND role = 'student')")
         .bind(auth.subject).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     if blocked {
@@ -146,8 +147,30 @@ pub async fn upload(
         .map_err(AppError::internal)?;
         return Err(unavailable());
     }
+    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    if let Err(error) = crate::avatar::repository::lock_user(&mut tx, &auth).await {
+        tx.rollback().await.map_err(AppError::internal)?;
+        sqlx::query("UPDATE teacher_certification_files SET state='delete_pending' WHERE id=$1")
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .map_err(AppError::internal)?;
+        return Err(error);
+    }
     let file = sqlx::query_as::<_, CertificationFile>("UPDATE teacher_certification_files SET state = 'ready' WHERE id = $1 AND user_id = $2 AND state = 'uploading' RETURNING *")
-        .bind(id).bind(auth.subject).fetch_optional(&state.pool).await.map_err(AppError::internal)?;
+        .bind(id).bind(auth.subject).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
+    if let Err(error) =
+        crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await
+    {
+        tx.rollback().await.map_err(AppError::internal)?;
+        sqlx::query("UPDATE teacher_certification_files SET state='delete_pending' WHERE id=$1")
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .map_err(AppError::internal)?;
+        return Err(error);
+    }
+    tx.commit().await.map_err(AppError::internal)?;
     match file {
         Some(file) => Ok((StatusCode::CREATED, Json(file))),
         None => {
@@ -218,12 +241,14 @@ pub async fn remove(
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<StatusCode, AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    crate::avatar::repository::lock_user(&mut tx, &auth).await?;
     let attached = sqlx::query_scalar::<_, bool>("SELECT expires_at IS NULL FROM teacher_certification_files WHERE id = $1 AND user_id = $2 FOR UPDATE")
         .bind(id).bind(auth.subject).fetch_optional(&mut *tx).await.map_err(AppError::internal)?
         .ok_or_else(|| AppError::not_found("材料不存在"))?;
     if attached {
         return Err(conflict());
     }
+    crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     sqlx::query("UPDATE teacher_certification_files SET state = 'delete_pending' WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)

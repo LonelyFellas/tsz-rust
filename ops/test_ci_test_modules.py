@@ -42,6 +42,8 @@ EXPECTED_TARGETS = {
     },
     "identity": {
         "account_deletion_handler",
+        "account_deletion_worker",
+        "account_deletion_gate",
         "account_security_handler",
         "auth_extract",
         "auth_login_handler",
@@ -118,7 +120,7 @@ class CiTestModulesTests(unittest.TestCase):
         )
         flattened = [target for targets in actual.values() for target in targets]
         self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertEqual(len(flattened), 77)
+        self.assertEqual(len(flattened), 79)
 
     def test_ci02_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(

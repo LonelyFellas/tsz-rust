@@ -44,7 +44,7 @@ impl FromRequestParts<AppState> for AuthUser {
             .parse(token)
             .map_err(|_| invalid_token())?;
         let version = sqlx::query_scalar::<_, i64>(
-            "SELECT security_version FROM users WHERE id = $1 AND status = 'active'",
+            "SELECT security_version FROM users WHERE id = $1 AND status = 'active' AND NOT EXISTS (SELECT 1 FROM account_deletion_requests d WHERE d.user_id=users.id AND d.status='pending' AND d.effective_at<=clock_timestamp())",
         )
         .bind(user.subject)
         .fetch_optional(&state.pool)

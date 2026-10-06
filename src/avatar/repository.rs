@@ -29,7 +29,7 @@ pub async fn lock_user(connection: &mut PgConnection, auth: &AuthUser) -> Result
     )
     .bind(auth.subject)
     .bind(auth.security_version)
-    .fetch_optional(connection)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(AppError::internal)?;
     if found.is_none() {
@@ -38,6 +38,7 @@ pub async fn lock_user(connection: &mut PgConnection, auth: &AuthUser) -> Result
             "invalid token",
         ));
     }
+    crate::account_deletion::ensure_not_effective_in(connection, auth.subject).await?;
     Ok(())
 }
 
@@ -208,6 +209,7 @@ pub async fn commit_avatar_in(
             "avatar upload not completed",
         ));
     }
+    crate::account_deletion::ensure_not_effective_in(connection, auth.subject).await?;
     sqlx::query("INSERT INTO avatar_cleanup_tasks (id,upload_id,object_key,kind,not_before,write_completed) SELECT $1,a.id,a.canonical_key,'canonical',now(),true FROM avatar_uploads a JOIN users u ON u.avatar_upload_id=a.id WHERE u.id=$2 AND a.canonical_key IS NOT NULL ON CONFLICT (object_key,kind) DO NOTHING")
         .bind(Uuid::now_v7()).bind(auth.subject).execute(&mut *connection).await.map_err(AppError::internal)?;
     sqlx::query("UPDATE avatar_uploads SET state='confirmed',canonical_key=$2,confirmed_at=now() WHERE id=$1")

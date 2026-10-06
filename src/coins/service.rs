@@ -39,9 +39,14 @@ async fn lock_account(
     };
     if sqlx::query_scalar::<_, bool>(query)
         .bind(owner.owner_id)
-        .fetch_optional(conn)
+        .fetch_optional(&mut *conn)
         .await?
         != Some(true)
+    {
+        return Err(CoinError::AccountUnavailable);
+    }
+    if owner.owner_type == OwnerType::User
+        && crate::account_deletion::is_effective_in(conn, owner.owner_id).await?
     {
         return Err(CoinError::AccountUnavailable);
     }

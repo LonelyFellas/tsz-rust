@@ -297,6 +297,7 @@ async fn build_login_response(
     if version != Some(user.security_version) {
         return Err(invalid_access_token());
     }
+    crate::account_deletion::ensure_not_effective_in(&mut tx, user.id).await?;
     let refresh = session_service(state)
         .issue_in(&mut tx, user.id)
         .await
@@ -540,59 +541,13 @@ pub async fn request_account_deletion_code(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// DELETE /api/v1/auth/account
-#[utoipa::path(
-    delete,
-    path = "/api/v1/auth/account",
-    tag = "auth",
-    security(("bearer_auth" = [])),
-    request_body = ConfirmAccountDeletionRequest,
-    responses(
-        (status = 204, description = "账号已注销，全部 refresh session 已吊销，并清除 refresh cookie",
-            headers(("Set-Cookie" = String, description = "清除 refresh_token cookie（Max-Age=0）"))),
-        (status = 400, description = "JSON 语法错误"),
-        (status = 401, description = "验证码错误、过期、已消费，或 access token 对应账号已不存在（不可区分验证码状态）"),
-        (status = 409, description = "当前账号没有所选渠道的联系方式"),
-        (status = 422, description = "请求体或渠道值不合法"),
-        (status = 500, description = "数据库内部错误"),
-        (status = 503, description = "验证码基础设施不可用"),
-    )
-)]
-pub async fn confirm_account_deletion(
-    State(state): State<AppState>,
-    user: AuthUser,
-    jar: CookieJar,
-    ApiJson(payload): ApiJson<ConfirmAccountDeletionRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    let service = UserService::new(UserRepository::new(state.pool.clone()));
-    let target = service
-        .account_deletion_target(user.subject, payload.channel)
-        .await
-        .map_err(map_account_deletion_target_error)?;
-
-    // Redis Lua 原子校验并删除 key：错误/过期/已用/并发输家统一为同一错误。
-    state
-        .otp_service
-        .verify(&target, Purpose::AccountDeletion, &payload.code)
-        .await
-        .map_err(map_account_deletion_otp_error)?;
-
-    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    crate::avatar::repository::schedule_user_cleanup_in(&mut tx, user.subject)
-        .await
-        .map_err(AppError::internal)?;
-    let deleted = service
-        .delete_account_in(&mut tx, user.subject)
-        .await
-        .map_err(AppError::internal)?;
-    if !deleted {
-        return Err(invalid_access_token());
-    }
-    tx.commit().await.map_err(AppError::internal)?;
-
-    Ok((
-        jar.remove(clean_refresh_token_cookie()),
-        StatusCode::NO_CONTENT,
+/// Legacy clients must upgrade; never consume OTP or delete an account here.
+#[utoipa::path(delete,path="/api/v1/auth/account",tag="auth",security(("bearer_auth"=[])),request_body=ConfirmAccountDeletionRequest,responses((status=409,description="请升级客户端并使用72小时注销申请接口"),(status=401,description="会话无效")))]
+pub async fn confirm_account_deletion(_user: AuthUser) -> Result<StatusCode, AppError> {
+    Err(AppError::conflict(
+        ErrorCode::AccountDeletionUpgradeRequired,
+        None,
+        "use the account deletion request flow",
     ))
 }
 
@@ -679,7 +634,7 @@ fn map_account_deletion_target_error(err: UserError) -> AppError {
     }
 }
 
-fn map_account_deletion_otp_error(err: OtpServiceError) -> AppError {
+pub(crate) fn map_account_deletion_otp_error(err: OtpServiceError) -> AppError {
     match err {
         OtpServiceError::InvalidCode => AppError::unauthorized(
             ErrorCode::InvalidAccountDeletionCode,

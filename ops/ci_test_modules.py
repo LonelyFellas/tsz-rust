@@ -12,6 +12,8 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
     "admin": ("admin_*",),
     "identity": (
         "account_deletion_handler",
+        "account_deletion_worker",
+        "account_deletion_gate",
         "account_security_handler",
         "auth_*",
         "avatar_*",

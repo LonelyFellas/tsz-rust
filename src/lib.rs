@@ -1,3 +1,4 @@
+pub mod account_deletion;
 pub mod admin;
 pub mod api;
 pub mod auth;
@@ -62,6 +63,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/me/coins/entries",
             get(coins::handler::user_entries),
+        )
+        .route(
+            "/api/v1/me/account-deletion",
+            get(account_deletion::handler::get).post(account_deletion::handler::create),
+        )
+        .route(
+            "/api/v1/me/account-deletion/{id}/cancel",
+            post(account_deletion::handler::cancel),
         )
         .merge(avatar::router())
         .merge(teacher_certification::router())
@@ -275,6 +284,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     };
 
     if !config.deployment_smoke_only {
+        crate::account_deletion::worker::run_worker(state.pool.clone());
         crate::avatar::cleanup::run_worker(state.clone());
         crate::teacher_certification::cleanup::run_worker(state.clone());
         crate::speech::preview::run_worker(state.pool.clone());
