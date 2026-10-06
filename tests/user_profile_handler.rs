@@ -53,6 +53,183 @@ async fn patch(state: &AppState, token: Option<&str>, body: String) -> (StatusCo
     )
 }
 
+async fn learning_request(
+    state: &AppState,
+    token: Option<&str>,
+    settings: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method(if settings.is_some() { "PUT" } else { "GET" })
+        .uri(if settings.is_some() {
+            "/api/v1/me/learning-settings"
+        } else {
+            "/api/v1/me"
+        })
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = token {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            request
+                .body(settings.map_or(Body::empty(), |body| Body::from(body.to_string())))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    (status, body)
+}
+
+#[sqlx::test]
+async fn learning_first_save_locks_level_but_variant_remains_editable(pool: PgPool) {
+    let id = create_user(&pool, UserRole::Student).await;
+    let state = AppState::for_test(pool.clone());
+    let token = state.token_manager.generate(id, "student").unwrap();
+    let (status, me) = learning_request(&state, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["onboarded"], false);
+    assert_eq!(me["learning_settings"], Value::Null);
+    assert_eq!(me["user"]["id"], id.to_string());
+    assert!(me["user"].get("password_hash").is_none());
+    let settings = json!({"cefr_level": "B1", "english_variant": "BrE"});
+    for _ in 0..2 {
+        let (status, body) = learning_request(&state, Some(&token), Some(settings.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({"learning_settings": settings, "onboarded": true})
+        );
+    }
+    let (status, body) = learning_request(
+        &state,
+        Some(&token),
+        Some(json!({"cefr_level": "B2", "english_variant": "AmE"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "cefr_level_locked");
+    assert_eq!(body["field"], "cefr_level");
+    let (_, me) = learning_request(&state, Some(&token), None).await;
+    assert_eq!(me["learning_settings"], settings);
+    let changed = json!({"cefr_level": "B1", "english_variant": "AmE"});
+    let (status, body) = learning_request(&state, Some(&token), Some(changed.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["learning_settings"], changed);
+    let (_, me) = learning_request(&state, Some(&token), None).await;
+    assert_eq!(me["onboarded"], true);
+    assert_eq!(me["learning_settings"], changed);
+}
+
+#[sqlx::test]
+async fn learning_empty_existing_profile_can_complete_onboarding(pool: PgPool) {
+    let id = create_user(&pool, UserRole::Student).await;
+    sqlx::query("INSERT INTO student_profiles (user_id) VALUES ($1)")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = AppState::for_test(pool);
+    let token = state.token_manager.generate(id, "student").unwrap();
+    let (_, me) = learning_request(&state, Some(&token), None).await;
+    assert_eq!(me["onboarded"], false);
+    let settings = json!({"cefr_level": "A2", "english_variant": "AmE"});
+    let (status, body) = learning_request(&state, Some(&token), Some(settings.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["learning_settings"], settings);
+}
+
+#[sqlx::test]
+async fn learning_concurrent_first_save_has_one_winning_level(pool: PgPool) {
+    let id = create_user(&pool, UserRole::Student).await;
+    let state = AppState::for_test(pool);
+    let token = state.token_manager.generate(id, "student").unwrap();
+    let (first, second) = tokio::join!(
+        learning_request(
+            &state,
+            Some(&token),
+            Some(json!({"cefr_level": "A1", "english_variant": "BrE"}))
+        ),
+        learning_request(
+            &state,
+            Some(&token),
+            Some(json!({"cefr_level": "C2", "english_variant": "AmE"}))
+        ),
+    );
+    let (winner, loser) = if first.0 == StatusCode::OK {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(winner.0, StatusCode::OK);
+    assert_eq!(loser.0, StatusCode::CONFLICT);
+    assert_eq!(loser.1["code"], "cefr_level_locked");
+    let (_, me) = learning_request(&state, Some(&token), None).await;
+    assert_eq!(me["learning_settings"], winner.1["learning_settings"]);
+}
+
+#[sqlx::test]
+async fn learning_requires_student_role_and_strict_settings(pool: PgPool) {
+    let id = create_user(&pool, UserRole::Teacher).await;
+    let state = AppState::for_test(pool.clone());
+    let token = state.token_manager.generate(id, "teacher").unwrap();
+    let settings = json!({"cefr_level": "C1", "english_variant": "AmE"});
+    for body in [None, Some(settings.clone())] {
+        let (status, _) = learning_request(&state, None, body).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (_, me) = learning_request(&state, Some(&token), None).await;
+    assert_eq!(me["onboarded"], true);
+    assert_eq!(me["learning_settings"], Value::Null);
+    let (status, _) = learning_request(&state, Some(&token), Some(settings.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM student_profiles WHERE user_id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("INSERT INTO user_roles (user_id, role) VALUES ($1, 'student')")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, me) = learning_request(&state, Some(&token), None).await;
+    assert_eq!(me["onboarded"], false);
+    assert_eq!(me["active_role"], "teacher");
+    for invalid in [
+        json!({}),
+        json!({"cefr_level": "B3", "english_variant": "BrE"}),
+        json!({"cefr_level": "A1", "english_variant": "common"}),
+        json!({"cefr_level": null, "english_variant": "BrE"}),
+        json!({"cefr_level": {"A1": null}, "english_variant": "BrE"}),
+        json!({"cefr_level": "A1", "english_variant": {"BrE": null}}),
+        json!({"cefr_level": "A1"}),
+        json!({"cefr_level": "A1", "english_variant": "BrE", "user_id": id}),
+    ] {
+        let (status, body) = learning_request(&state, Some(&token), Some(invalid.clone())).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{invalid}: {body}"
+        );
+        assert_eq!(body["code"], "invalid_request_body");
+    }
+    let (status, _) = learning_request(&state, Some(&token), Some(settings.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("UPDATE users SET security_version = security_version + 1 WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for body in [None, Some(settings)] {
+        let (status, _) = learning_request(&state, Some(&token), body).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+}
+
 #[sqlx::test]
 async fn saves_own_name_and_returns_safe_complete_profile(pool: PgPool) {
     let id = create_user(&pool, UserRole::Teacher).await;

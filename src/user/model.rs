@@ -47,7 +47,7 @@ impl UserRole {
     }
 }
 
-#[derive(sqlx::Type, Debug, Serialize, PartialEq, ToSchema)]
+#[derive(sqlx::Type, Debug, Serialize, Deserialize, PartialEq, Clone, Copy, ToSchema)]
 #[sqlx(type_name = "text")]
 pub enum CefrLevel {
     A1,
@@ -58,11 +58,30 @@ pub enum CefrLevel {
     C2,
 }
 
-#[derive(sqlx::Type, Debug, Serialize, PartialEq, ToSchema)]
+#[derive(sqlx::Type, Debug, Serialize, Deserialize, PartialEq, Clone, Copy, ToSchema)]
 #[sqlx(type_name = "text")]
 pub enum EnglishVariant {
     BrE,
     AmE,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, sqlx::FromRow, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LearningSettings {
+    #[serde(deserialize_with = "deserialize_string_enum")]
+    pub cefr_level: CefrLevel,
+    #[serde(deserialize_with = "deserialize_string_enum")]
+    pub english_variant: EnglishVariant,
+}
+
+// Unit enums otherwise accept externally tagged JSON objects as well as strings.
+fn deserialize_string_enum<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    T::deserialize(serde::de::IntoDeserializer::into_deserializer(value))
 }
 
 #[derive(Debug, thiserror::Error)]
