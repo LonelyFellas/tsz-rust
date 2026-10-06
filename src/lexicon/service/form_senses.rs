@@ -5,7 +5,7 @@ use crate::lexicon::dto::{
 };
 
 /// 词义始终限定在词形所属基本词性内；通用组可用全部词义，专用组只用绑定词义。
-pub(super) fn allowed_form_senses<'a>(
+pub(crate) fn allowed_form_senses<'a>(
     pos: &WordPosFormsV3,
     meanings: &'a DraftMeaningsStepContentV3,
     form_id: Uuid,

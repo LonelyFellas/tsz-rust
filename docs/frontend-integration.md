@@ -44,6 +44,12 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 前端用真实读取结果驱动登录、会话恢复与引导。已完成账号不能通过引导页、测评结果或查询参数重新定级；个人资料页只读难度、可修改英美偏好。无数据库迁移，先发布后端再切换前端读取 `/me`；旧 `/auth/me` 保留兼容，新前端不能先部署到没有 GET `/me` 的旧后端。配置持久化不代表尚未提供的学习内容下发接口已经接入。
 
+## 词表阅读（WL-03）
+
+公开及本人词表的 `/{id}/items` 保持默认标准响应，显式 `view=full` 才返回词形、词形对应义项、地区拼写、字典音标及配置展示名。`sort=author|label_asc|label_desc` 在分页前排序，仅改变阅读顺序，不写作者编排。新响应仅来自当前可用 V3 发布内容；公开响应不包含作者私密备注。
+
+旧 Web/Admin 的严格 runtime 可继续接受候选后端的默认标准/审核响应；不能向旧消费者无条件发送完整字段。发布顺序为后端 → Web，Admin 默认读取不变。新 Web 连接旧 API 时标准默认请求仍可读，完整/新增排序参数会被拒绝，页面明确提示失败并允许切回默认；不能前端先开放这些能力。本批无迁移，回退 Web 不改变数据，仍须保留已发布的 coins/注销 schema 与安全边界。需求和验收集中在前端 `docs/features/coins-system/wordlist-foundation-design.md` 与 `wordlists-tips-acceptance.md`。
+
 ## 词库 V3
 
 词条读写使用 `schema_version=3` 与原生 V3 结构；新代码不采用历史 V2 `base_form + slots` 模型或旧向导。发布、归档、恢复、回退、共享例句与节点引用约束见[词库模型](word-data-model.md)及 OpenAPI。

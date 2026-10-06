@@ -350,28 +350,73 @@ pub async fn read_entries(
     tx: &mut Tx<'_>,
     entry_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, WordlistEntry>, AppError> {
+    read_entries_view(tx, entry_ids, WordlistView::Standard).await
+}
+pub async fn read_entries_view(
+    tx: &mut Tx<'_>,
+    entry_ids: &[Uuid],
+    view: WordlistView,
+) -> Result<std::collections::HashMap<Uuid, WordlistEntry>, AppError> {
     lock_entries(tx, entry_ids, false).await?;
+    let form_labels = if view == WordlistView::Full {
+        let labels: Vec<(String, String)> =
+            sqlx::query_as("SELECT code, name_zh FROM catalog.form_types")
+                .fetch_all(&mut **tx)
+                .await
+                .map_err(AppError::internal)?;
+        let pos: Vec<(String, String)> =
+            sqlx::query_as("SELECT code, name_zh FROM catalog.parts_of_speech")
+                .fetch_all(&mut **tx)
+                .await
+                .map_err(AppError::internal)?;
+        let sub_pos: Vec<(String, String, String)> = sqlx::query_as("SELECT p.code,s.code,s.name_zh FROM catalog.sub_parts_of_speech s JOIN catalog.parts_of_speech p ON p.id=s.part_of_speech_id").fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+        Some(projection::ReadingLabels {
+            forms: labels.into_iter().collect(),
+            pos: pos.into_iter().collect(),
+            sub_pos: sub_pos
+                .into_iter()
+                .map(|(pos, code, label)| ((pos, code), label))
+                .collect(),
+        })
+    } else {
+        None
+    };
     let rows:Vec<(Uuid,Uuid,serde_json::Value)>=sqlx::query_as("SELECT e.id,p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=ANY($1) AND e.archived_at IS NULL AND p.content_schema_version=3").bind(entry_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     rows.into_iter()
-        .map(|(id, p, s)| Ok((id, projection::project(id, p, s)?)))
+        .map(|(id, p, s)| Ok((id, projection::project(id, p, s, form_labels.as_ref())?)))
         .collect()
 }
 pub async fn item_rows(
     tx: &mut Tx<'_>,
     id: Uuid,
-    query: &WordlistQuery,
+    query: &WordlistItemsQuery,
 ) -> Result<(Vec<ItemRow>, PaginationMeta), AppError> {
-    let (page, size, q) = pagination(query)?;
-    let filter = "i.wordlist_id=$1 AND ($2='' OR EXISTS(SELECT 1 FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=i.entry_id AND e.archived_at IS NULL AND p.content_schema_version=3 AND strpos(lower(p.snapshot#>>'{presentation,label}'),lower($2))>0))";
+    let (page, size, q) = pagination(&WordlistQuery {
+        q: query.q.clone(),
+        page: query.page,
+        page_size: query.page_size,
+    })?;
+    // Use only visible current publication labels for both matching and ordering.
+    let from = "wordlist_items i LEFT JOIN lexicon.entries e ON e.id=i.entry_id AND e.archived_at IS NULL LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3";
+    let filter = "i.wordlist_id=$1 AND ($2='' OR strpos(lower(p.snapshot#>>'{presentation,label}'),lower($2))>0)";
     let total = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT count(*) FROM wordlist_items i WHERE {filter}"
+        "SELECT count(*) FROM {from} WHERE {filter}"
     )))
     .bind(id)
     .bind(&q)
     .fetch_one(&mut **tx)
     .await
     .map_err(AppError::internal)?;
-    let rows=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT i.entry_id,i.position,i.private_note,i.note_revision FROM wordlist_items i WHERE {filter} ORDER BY i.position LIMIT $3 OFFSET $4"))).bind(id).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let order = match query.sort {
+        WordlistSort::Author => "i.position",
+        WordlistSort::LabelAsc => {
+            "lower(p.snapshot#>>'{presentation,label}') COLLATE \"C\" ASC NULLS LAST,i.position"
+        }
+        WordlistSort::LabelDesc => {
+            "lower(p.snapshot#>>'{presentation,label}') COLLATE \"C\" DESC NULLS LAST,i.position"
+        }
+    };
+    let rows=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT i.entry_id,i.position,i.private_note,i.note_revision FROM {from} WHERE {filter} ORDER BY {order} LIMIT $3 OFFSET $4"))).bind(id).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     Ok((rows, page_meta(page, size, total)))
 }
 pub async fn catalog(

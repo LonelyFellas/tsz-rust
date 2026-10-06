@@ -1,12 +1,20 @@
 //! Explicit allow-list projection: never serialize AdminWordV3 to a wordlist reader.
 use super::dto::*;
 use crate::{error::AppError, lexicon::dto::*};
+use std::collections::HashMap;
 use uuid::Uuid;
+
+pub struct ReadingLabels {
+    pub forms: HashMap<String, String>,
+    pub pos: HashMap<String, String>,
+    pub sub_pos: HashMap<(String, String), String>,
+}
 
 pub fn project(
     entry_id: Uuid,
     publication_id: Uuid,
     snapshot: serde_json::Value,
+    form_labels: Option<&ReadingLabels>,
 ) -> Result<WordlistEntry, AppError> {
     let word: AdminWordV3 = serde_json::from_value(snapshot).map_err(AppError::internal)?;
     if word.id != entry_id {
@@ -23,12 +31,62 @@ pub fn project(
             WordlistPos {
                 pos_id: form.pos_id,
                 pos: form.pos.clone(),
+                label: form_labels.and_then(|labels| labels.pos.get(&form.pos).cloned()),
+                forms: form_labels.map(|labels| {
+                    form.forms
+                        .iter()
+                        .map(|item| WordlistForm {
+                            id: item.id,
+                            form_type: item.form_type.as_str().to_owned(),
+                            label: labels
+                                .forms
+                                .get(item.form_type.as_str())
+                                .cloned()
+                                .unwrap_or_else(|| item.form_type.as_str().to_owned()),
+                            sense_ids: crate::lexicon::service::form_senses::allowed_form_senses(
+                                form,
+                                &word.meanings,
+                                item.id,
+                            )
+                            .map(|sense| sense.id)
+                            .collect(),
+                            variants: match &item.regional_variants {
+                                WordRegionalVariantsV3::Common { common } => vec![form_variant(
+                                    common.id,
+                                    Dialect::Common,
+                                    &common.spelling,
+                                    &common.pronunciations,
+                                )],
+                                WordRegionalVariantsV3::UkUs { uk, us } => vec![
+                                    form_variant(
+                                        uk.id,
+                                        Dialect::Uk,
+                                        &uk.spelling,
+                                        &uk.pronunciations,
+                                    ),
+                                    form_variant(
+                                        us.id,
+                                        Dialect::Us,
+                                        &us.spelling,
+                                        &us.pronunciations,
+                                    ),
+                                ],
+                            },
+                        })
+                        .collect()
+                }),
                 senses: meanings
                     .map(|m| {
                         m.senses
                             .iter()
                             .map(|sense| WordlistSense {
                                 id: sense.id,
+                                sub_pos_label: form_labels.and_then(|labels| {
+                                    labels
+                                        .sub_pos
+                                        .get(&(form.pos.clone(), sense.sub_pos.clone()))
+                                        .cloned()
+                                }),
                                 sub_pos: sense.sub_pos.clone(),
                                 level: sense.level.clone(),
                                 definitions: sense.definitions.iter().map(definition).collect(),
@@ -166,5 +224,26 @@ pub fn candidate(entry: WordlistEntry) -> WordlistCandidate {
         publication_id: entry.publication_id,
         label: entry.label,
         glosses,
+    }
+}
+
+fn form_variant(
+    id: Uuid,
+    dialect: Dialect,
+    spelling: &str,
+    pronunciations: &[WordPronunciationV3],
+) -> WordlistFormVariant {
+    WordlistFormVariant {
+        id,
+        dialect,
+        spelling: spelling.to_owned(),
+        pronunciations: pronunciations
+            .iter()
+            .map(|p| WordlistPronunciation {
+                id: p.id,
+                dict_phonetic: p.dict_phonetic.clone(),
+                dict_phonetic_rich: p.dict_phonetic_rich.clone(),
+            })
+            .collect(),
     }
 }
