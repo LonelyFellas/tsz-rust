@@ -122,7 +122,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261006010000;
+    const CURRENT_RELEASE_VERSION: i64 = 20261006020000;
 
     #[sqlx::test]
     async fn permission_history_prevents_destructive_rollback_after_revocation(pool: PgPool) {

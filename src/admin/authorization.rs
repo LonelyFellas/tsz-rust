@@ -70,6 +70,31 @@ pub enum RoutePolicy {
 }
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
+    (
+        "GET",
+        "/coins/accounts",
+        RoutePolicy::All(&["coins.access"]),
+    ),
+    (
+        "GET",
+        "/coins/accounts/{owner_type}/{owner_id}/entries",
+        RoutePolicy::All(&["coins.access"]),
+    ),
+    (
+        "GET",
+        "/coins/operations",
+        RoutePolicy::All(&["coins.access"]),
+    ),
+    (
+        "POST",
+        "/coins/manual-credits",
+        RoutePolicy::All(&["coins.credit"]),
+    ),
+    (
+        "POST",
+        "/coins/manual-credits/{operation_id}/reversal",
+        RoutePolicy::All(&["coins.reverse"]),
+    ),
     ("POST", "/auth/login", RoutePolicy::SessionFlow),
     ("POST", "/auth/login-code", RoutePolicy::SessionFlow),
     ("POST", "/auth/refresh", RoutePolicy::SessionFlow),

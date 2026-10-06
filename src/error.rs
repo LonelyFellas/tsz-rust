@@ -49,6 +49,13 @@ pub enum ErrorCode {
     Forbidden,
     OtpRateLimited,
     OtpUnavailable,
+    CoinInvalidAmount,
+    CoinAccountUnavailable,
+    CoinWalletUnavailable,
+    CoinInsufficientBalance,
+    CoinIdempotencyConflict,
+    CoinSourceConflict,
+    CoinReversalInvalid,
     AccountDeletionUpgradeRequired,
     AccountDeletionConsentRequired,
     AccountDeletionConsentOutdated,
@@ -140,7 +147,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 117] = [
+    pub const ALL: [Self; 124] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -179,6 +186,13 @@ impl ErrorCode {
         Self::Forbidden,
         Self::OtpRateLimited,
         Self::OtpUnavailable,
+        Self::CoinInvalidAmount,
+        Self::CoinAccountUnavailable,
+        Self::CoinWalletUnavailable,
+        Self::CoinInsufficientBalance,
+        Self::CoinIdempotencyConflict,
+        Self::CoinSourceConflict,
+        Self::CoinReversalInvalid,
         Self::AccountDeletionUpgradeRequired,
         Self::AccountDeletionConsentRequired,
         Self::AccountDeletionConsentOutdated,
@@ -456,6 +470,41 @@ impl ErrorCode {
                 "otp_unavailable",
                 "Verification service unavailable",
                 StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::CoinInvalidAmount => (
+                "coin_invalid_amount",
+                "Invalid coin amount",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::CoinAccountUnavailable => (
+                "coin_account_unavailable",
+                "Coin account unavailable",
+                StatusCode::CONFLICT,
+            ),
+            Self::CoinWalletUnavailable => (
+                "coin_wallet_unavailable",
+                "Coin wallet paused or closed",
+                StatusCode::CONFLICT,
+            ),
+            Self::CoinInsufficientBalance => (
+                "coin_insufficient_balance",
+                "Insufficient coin balance",
+                StatusCode::CONFLICT,
+            ),
+            Self::CoinIdempotencyConflict => (
+                "coin_idempotency_conflict",
+                "Coin request conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::CoinSourceConflict => (
+                "coin_source_conflict",
+                "Coin event already recorded",
+                StatusCode::CONFLICT,
+            ),
+            Self::CoinReversalInvalid => (
+                "coin_reversal_invalid",
+                "Invalid manual credit reversal",
+                StatusCode::CONFLICT,
             ),
             Self::AccountDeletionUpgradeRequired => (
                 "account_deletion_upgrade_required",

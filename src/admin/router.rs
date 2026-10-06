@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    routing::{get, patch},
+    routing::{get, patch, post},
 };
 
 use crate::{
@@ -17,6 +17,26 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
+        .route(
+            "/coins/accounts",
+            get(crate::coins::admin_handler::accounts),
+        )
+        .route(
+            "/coins/accounts/{owner_type}/{owner_id}/entries",
+            get(crate::coins::admin_handler::entries),
+        )
+        .route(
+            "/coins/manual-credits",
+            post(crate::coins::admin_handler::credit),
+        )
+        .route(
+            "/coins/manual-credits/{operation_id}/reversal",
+            post(crate::coins::admin_handler::reverse),
+        )
+        .route(
+            "/coins/operations",
+            get(crate::coins::admin_handler::operations),
+        )
         .route("/me/coins/wallet", get(crate::coins::handler::admin_wallet))
         .route(
             "/me/coins/entries",

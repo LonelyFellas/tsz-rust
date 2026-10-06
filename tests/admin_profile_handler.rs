@@ -34,9 +34,12 @@ use tsz_rust::admin::{AdminRepository, AdminRole, NewAdmin};
 use tsz_rust::auth::{Realm, TokenManager};
 use tsz_rust::state::AppState;
 
-const EXPECTED_PERMISSION_KEYS: [&str; 29] = [
+const EXPECTED_PERMISSION_KEYS: [&str; 32] = [
     "words.detect",
     "words.validate",
+    "coins.access",
+    "coins.credit",
+    "coins.reverse",
     "words.access",
     "words.create",
     "words.edit",
