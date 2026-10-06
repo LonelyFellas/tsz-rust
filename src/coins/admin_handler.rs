@@ -22,7 +22,7 @@ pub async fn accounts(
     ApiQuery(query): ApiQuery<CoinAccountsQuery>,
 ) -> Result<Json<CoinAccountPage>, AppError> {
     Ok(Json(
-        admin_service::accounts(&state.pool, auth.subject, query).await?,
+        admin_service::accounts(&state.pool, &auth, query).await?,
     ))
 }
 #[utoipa::path(get,path="/api/v1/admin/coins/accounts/{owner_type}/{owner_id}/entries",tag="coins",security(("bearer_auth"=[])),
@@ -59,7 +59,7 @@ pub async fn credit(
     ApiJson(input): ApiJson<ManualCreditRequest>,
 ) -> Result<Json<ManualCoinOperation>, AppError> {
     Ok(Json(
-        admin_service::credit(&state.pool, auth.subject, input).await?,
+        admin_service::credit(&state.pool, &auth, input).await?,
     ))
 }
 #[utoipa::path(post,path="/api/v1/admin/coins/manual-credits/{operation_id}/reversal",tag="coins",security(("bearer_auth"=[])),params(("operation_id"=Uuid,Path)),request_body=ManualReversalRequest,
@@ -71,7 +71,7 @@ pub async fn reverse(
     ApiJson(input): ApiJson<ManualReversalRequest>,
 ) -> Result<Json<ManualCoinOperation>, AppError> {
     Ok(Json(
-        admin_service::reverse(&state.pool, auth.subject, id, input).await?,
+        admin_service::reverse(&state.pool, &auth, id, input).await?,
     ))
 }
 #[utoipa::path(get,path="/api/v1/admin/coins/operations",tag="coins",security(("bearer_auth"=[])),params(CoinOperationsQuery),
@@ -82,6 +82,6 @@ pub async fn operations(
     ApiQuery(query): ApiQuery<CoinOperationsQuery>,
 ) -> Result<Json<ManualCoinOperationPage>, AppError> {
     Ok(Json(
-        admin_service::operations(&state.pool, auth.subject, query).await?,
+        admin_service::operations(&state.pool, &auth, query).await?,
     ))
 }

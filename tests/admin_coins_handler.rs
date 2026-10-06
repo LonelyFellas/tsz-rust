@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tower::ServiceExt;
 use tsz_rust::{
-    coins::{admin_dto::*, admin_service, model::*, service},
+    coins::{model::*, service},
     state::AppState,
 };
 use uuid::Uuid;
@@ -354,12 +354,14 @@ async fn permission_revocation_while_waiting_is_rechecked(pool: PgPool) {
         .execute(&mut *revoke)
         .await
         .unwrap();
-    let pool2 = pool.clone();
+    let state = AppState::for_test(pool.clone());
     let pending = tokio::spawn(async move {
-        admin_service::credit(
-            &pool2,
-            actor.owner_id,
-            serde_json::from_value::<ManualCreditRequest>(input(user, "revoked")).unwrap(),
+        request(
+            &state,
+            actor,
+            "POST",
+            "/coins/manual-credits",
+            input(user, "revoked"),
         )
         .await
     });
@@ -380,7 +382,7 @@ async fn permission_revocation_while_waiting_is_rechecked(pool: PgPool) {
         .await
         .unwrap();
     revoke.commit().await.unwrap();
-    assert!(pending.await.unwrap().is_err());
+    assert_eq!(pending.await.unwrap().0, StatusCode::FORBIDDEN);
     assert_eq!(balance(&pool, user).await, "0");
     reconciled(&pool).await;
 }
@@ -527,4 +529,114 @@ async fn distinct_operators_race_events_reversals_and_opposite_admin_targets(poo
         4
     );
     reconciled(&pool).await;
+}
+
+#[sqlx::test]
+async fn password_change_during_account_lock_wait_revokes_manual_writes(pool: PgPool) {
+    let mut outcomes = Vec::new();
+    for reversing in [false, true] {
+        let state = AppState::for_test(pool.clone());
+        let user = seed(&pool, OwnerType::User, Uuid::now_v7()).await;
+        let actor = admin(
+            &pool,
+            false,
+            &["coins.access", "coins.credit", "coins.reverse"],
+        )
+        .await;
+        let (path, body) = if reversing {
+            let original = request(
+                &state,
+                actor,
+                "POST",
+                "/coins/manual-credits",
+                input(user, "before-password-change"),
+            )
+            .await;
+            assert_eq!(original.0, StatusCode::OK);
+            (
+                format!(
+                    "/coins/manual-credits/{}/reversal",
+                    original.1["id"].as_str().unwrap()
+                ),
+                json!({"idempotency_key":Uuid::now_v7(),"reason":"correction"}),
+            )
+        } else {
+            (
+                "/coins/manual-credits".to_owned(),
+                input(user, "after-password-change"),
+            )
+        };
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+            .bind(user.owner_id)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let pending =
+            tokio::spawn(async move { request(&state, actor, "POST", &path, body).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {loop {
+            let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock')").fetch_one(&pool).await.unwrap();
+            if waiting {break;}tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }}).await.unwrap();
+        assert_eq!(
+            tsz_rust::admin::AdminRepository::new(pool.clone())
+                .set_password_if_unchanged(&actor.owner_id, "hash", "new-hash", false)
+                .await
+                .unwrap(),
+            1
+        );
+        blocker.commit().await.unwrap();
+        let result = pending.await.unwrap();
+        let operations: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM coin_operations WHERE actor_id=$1")
+                .bind(actor.owner_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let audits:i64=sqlx::query_scalar("SELECT count(*) FROM audit.admin_actions WHERE actor_admin_id=$1 AND resource_type='coin_operation'").bind(actor.owner_id).fetch_one(&pool).await.unwrap();
+        outcomes.push((result.0, balance(&pool, user).await, operations, audits));
+        reconciled(&pool).await;
+    }
+    assert_eq!(
+        outcomes,
+        vec![
+            (StatusCode::UNAUTHORIZED, "0".to_owned(), 0, 0),
+            (StatusCode::UNAUTHORIZED, "100".to_owned(), 1, 1)
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn password_change_during_admin_lock_wait_revokes_management_reads(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let user = seed(&pool, OwnerType::User, Uuid::now_v7()).await;
+    let actor = admin(&pool, false, &["coins.access"]).await;
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM admins WHERE id=$1 FOR UPDATE")
+        .bind(actor.owner_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let state2 = state.clone();
+    let accounts = tokio::spawn(async move {
+        request(
+            &state2,
+            actor,
+            "GET",
+            &format!("/coins/accounts?owner_type=user&search={}", user.owner_id),
+            Value::Null,
+        )
+        .await
+    });
+    let operations = tokio::spawn(async move {
+        request(&state, actor, "GET", "/coins/operations", Value::Null).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {loop {
+        let waiting:i64=sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'").fetch_one(&pool).await.unwrap();
+        if waiting>=2 {break;}tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }}).await.unwrap();
+    sqlx::query("UPDATE admins SET password_hash='new-hash',security_version=security_version+1 WHERE id=$1").bind(actor.owner_id).execute(&mut *blocker).await.unwrap();
+    blocker.commit().await.unwrap();
+    assert_eq!(accounts.await.unwrap().0, StatusCode::UNAUTHORIZED);
+    assert_eq!(operations.await.unwrap().0, StatusCode::UNAUTHORIZED);
 }

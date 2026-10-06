@@ -1,6 +1,6 @@
 use super::{admin_dto::*, model::*, service};
 use crate::{
-    admin::permissions,
+    admin::{AdminAuth, permissions},
     api::PaginationMeta,
     error::{AppError, ErrorCode},
 };
@@ -51,12 +51,31 @@ fn text(value: &str, max: usize) -> Result<(), AppError> {
     }
     Ok(())
 }
+async fn lock_authorization(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &AdminAuth,
+) -> Result<permissions::AdminAuthorization, AppError> {
+    let version: Option<i64> =
+        sqlx::query_scalar("SELECT security_version FROM admins WHERE id=$1 FOR SHARE")
+            .bind(auth.subject)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(AppError::internal)?;
+    if version != Some(auth.security_version) {
+        return Err(AppError::unauthorized(
+            ErrorCode::InvalidToken,
+            "invalid token",
+        ));
+    }
+    permissions::lock(tx, auth.subject).await
+}
 async fn authorize(
     tx: &mut Transaction<'_, Postgres>,
-    actor: Uuid,
+    auth: &AdminAuth,
     owner: Owner,
     key: &str,
 ) -> Result<(), AppError> {
+    let actor = auth.subject;
     service::lock_accounts_in(
         tx,
         &[
@@ -69,7 +88,7 @@ async fn authorize(
     )
     .await
     .map_err(coin_error)?;
-    let authorization = permissions::lock(tx, actor).await?;
+    let authorization = lock_authorization(tx, auth).await?;
     authorization.require(key)?;
     if owner.owner_type == OwnerType::Admin
         && (owner.owner_id == actor || !authorization.is_super_admin)
@@ -128,9 +147,10 @@ async fn audit_once(
 }
 pub async fn credit(
     pool: &PgPool,
-    actor: Uuid,
+    auth: &AdminAuth,
     input: ManualCreditRequest,
 ) -> Result<ManualCoinOperation, AppError> {
+    let actor = auth.subject;
     text(&input.event_id, 200)?;
     text(&input.reason, 1000)?;
     if let Some(evidence) = &input.evidence_ref {
@@ -149,7 +169,7 @@ pub async fn credit(
         owner_id: input.owner_id,
     };
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
-    authorize(&mut tx, actor, owner, "coins.credit").await?;
+    authorize(&mut tx, auth, owner, "coins.credit").await?;
     let context = Context {
         actor: Actor::Account(Owner {
             owner_type: OwnerType::Admin,
@@ -179,10 +199,11 @@ pub async fn credit(
 }
 pub async fn reverse(
     pool: &PgPool,
-    actor: Uuid,
+    auth: &AdminAuth,
     original_id: Uuid,
     input: ManualReversalRequest,
 ) -> Result<ManualCoinOperation, AppError> {
+    let actor = auth.subject;
     text(&input.reason, 1000)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     // Immutable original data determines every affected party before any account lock.
@@ -201,7 +222,7 @@ pub async fn reverse(
         owner_type: original.owner_type,
         owner_id: original.owner_id,
     };
-    authorize(&mut tx, actor, owner, "coins.reverse").await?;
+    authorize(&mut tx, auth, owner, "coins.reverse").await?;
     let amount =
         Amount::new(original.delta.parse().map_err(AppError::internal)?).map_err(coin_error)?;
     let context = Context {
@@ -253,7 +274,7 @@ fn meta(page: u32, page_size: u32, total: i64) -> PaginationMeta {
 }
 pub async fn accounts(
     pool: &PgPool,
-    actor: Uuid,
+    auth: &AdminAuth,
     query: CoinAccountsQuery,
 ) -> Result<CoinAccountPage, AppError> {
     let (page, size) = pagination(query.page, query.page_size)?;
@@ -264,7 +285,7 @@ pub async fn accounts(
         ));
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
-    permissions::lock(&mut tx, actor)
+    lock_authorization(&mut tx, auth)
         .await?
         .require("coins.access")?;
     let (table, email) = match query.owner_type {
@@ -290,7 +311,7 @@ pub async fn accounts(
 }
 pub async fn operations(
     pool: &PgPool,
-    actor: Uuid,
+    auth: &AdminAuth,
     query: CoinOperationsQuery,
 ) -> Result<ManualCoinOperationPage, AppError> {
     let (page, size) = pagination(query.page, query.page_size)?;
@@ -307,7 +328,7 @@ pub async fn operations(
         ));
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
-    permissions::lock(&mut tx, actor)
+    lock_authorization(&mut tx, auth)
         .await?
         .require("coins.access")?;
     let filter = " WHERE o.source_type IN ('manual_purchase','manual_reward','manual_reversal') AND ($1::text IS NULL OR w.owner_type=$1) AND ($2::uuid IS NULL OR w.owner_id=$2) AND ($3::uuid IS NULL OR o.actor_id=$3) AND ($4::text IS NULL OR o.source_type=$4) AND ($5::timestamptz IS NULL OR o.created_at>=$5) AND ($6::timestamptz IS NULL OR o.created_at<=$6)";
