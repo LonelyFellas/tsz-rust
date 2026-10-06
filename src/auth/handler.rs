@@ -143,6 +143,9 @@ pub async fn login_otp(
 pub struct RegisterRequest {
     #[schema(example = "13800138000")]
     phone: Option<String>,
+    /// 最终确认的邀请码；缺省不归因，注册后不可修改。
+    #[schema(max_length = 16)]
+    invite_code: Option<String>,
     #[schema(example = "student@example.com")]
     email: Option<String>,
     /// 15–128 个 Unicode 字符，区分大小写，支持符号与空格；拒绝弱密码和已知泄露密码。
@@ -203,6 +206,10 @@ pub async fn register(
     let psd = Password::parse_for_subjects(&payload.password, &[&identifier])
         .map_err(map_password_error)?;
 
+    let inviter =
+        crate::invitations::service::resolve_code(&state.pool, payload.invite_code.as_deref())
+            .await?;
+
     state
         .otp_service
         .verify(&identifier, Purpose::Register, &payload.code)
@@ -219,8 +226,12 @@ pub async fn register(
     })?;
     let service = UserService::new(UserRepository::new(state.pool.clone()));
 
-    // 5) 用户、初始角色和 refresh token 同事务提交。
+    // 5) 邀请人锁 → 新用户/角色 → 邀请关系/奖励 → refresh，同事务提交。
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let inviter_eligible = match inviter {
+        Some(id) => crate::invitations::service::lock_inviter_in(&mut tx, id).await?,
+        None => false,
+    };
     let user = service
         .register_verified_in(
             &mut tx,
@@ -231,6 +242,17 @@ pub async fn register(
         )
         .await
         .map_err(|error| map_register_error(error, field))?;
+
+    if let Some(inviter) = inviter {
+        crate::invitations::service::record_registration_in(
+            &mut tx,
+            inviter,
+            user.id,
+            inviter_eligible,
+            state.invitation_reward_amount,
+        )
+        .await?;
+    }
 
     let profile = UserProfile {
         id: user.id,

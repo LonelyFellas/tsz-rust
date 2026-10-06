@@ -33,6 +33,9 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::invitations::handler::overview,
+        crate::invitations::handler::create_code,
+        crate::invitations::handler::records,
         crate::account_deletion::handler::get,
         crate::account_deletion::handler::create,
         crate::account_deletion::handler::cancel,

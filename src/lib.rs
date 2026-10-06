@@ -9,6 +9,7 @@ pub mod config;
 pub mod constant;
 pub mod deployment_migrations;
 pub mod error;
+pub mod invitations;
 pub mod lexicon;
 pub mod openapi;
 pub mod otp;
@@ -59,6 +60,18 @@ pub fn router(state: AppState) -> Router {
         //     user::USER_MOUNT,
         //     Router::new().route("/register", post(user::handler::register)),
         // )
+        .route(
+            "/api/v1/me/invitations",
+            get(invitations::handler::overview),
+        )
+        .route(
+            "/api/v1/me/invitations/code",
+            post(invitations::handler::create_code),
+        )
+        .route(
+            "/api/v1/me/invitations/records",
+            get(invitations::handler::records),
+        )
         .route("/api/v1/me/coins/wallet", get(coins::handler::user_wallet))
         .route(
             "/api/v1/me/coins/entries",
@@ -266,6 +279,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         StdDuration::from_secs(config.otp_ttl_minutes * 60), // ttl
         config.otp_max_attempts.get(),                       // NonZeroU8 → u8，兑现了！
     ));
+    let invitation_reward_amount = config.active_invitation_reward_amount();
     let state = AppState {
         pool,
         token_manager,
@@ -277,6 +291,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         surface_policy_prefix: crate::lexicon::surface_policy::SURFACE_POLICY_PREFIX.to_owned(),
         otp_service,
         cookie_secure: config.cookie_secure,
+        invitation_reward_amount,
         object_storage,
         avatar_public_base_url: config.avatar_public_base_url,
         speech_provider,

@@ -26,6 +26,7 @@ pub struct AppState {
     pub(crate) surface_policy_prefix: String,
     pub otp_service: Arc<OtpService>,
     pub cookie_secure: bool,
+    pub invitation_reward_amount: Option<i64>,
     pub object_storage: StorageRegistry,
     pub avatar_public_base_url: Option<String>,
     pub speech_provider: Option<Arc<dyn SpeechProvider>>,
@@ -93,6 +94,7 @@ impl AppState {
             surface_policy_prefix: format!("test:{test_id}:lexicon:surface-policy:"),
             otp_service,
             cookie_secure: false,
+            invitation_reward_amount: None,
             object_storage: StorageRegistry::empty(),
             avatar_public_base_url: None,
             speech_provider: None,
@@ -124,6 +126,7 @@ impl AppState {
         let state = Self {
             pool,
             cookie_secure: false,
+            invitation_reward_amount: None,
             token_manager: Arc::new(TokenManager::new(
                 "test-secret",
                 Realm::Web,

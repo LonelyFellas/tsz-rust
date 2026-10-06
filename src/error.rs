@@ -38,6 +38,7 @@ pub enum ErrorCode {
     PasswordUnchanged,
     InvalidDisplayName,
     InvalidOtpCode,
+    InvalidInvitationCode,
     InvalidCredentials,
     InvalidToken,
     InvalidRefreshToken,
@@ -147,7 +148,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 124] = [
+    pub const ALL: [Self; 125] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -175,6 +176,7 @@ impl ErrorCode {
         Self::PasswordUnchanged,
         Self::InvalidDisplayName,
         Self::InvalidOtpCode,
+        Self::InvalidInvitationCode,
         Self::InvalidCredentials,
         Self::InvalidToken,
         Self::InvalidRefreshToken,
@@ -425,6 +427,11 @@ impl ErrorCode {
             Self::InvalidDisplayName => (
                 "invalid_display_name",
                 "Invalid display name",
+                StatusCode::BAD_REQUEST,
+            ),
+            Self::InvalidInvitationCode => (
+                "invalid_invitation_code",
+                "Invalid invitation code",
                 StatusCode::BAD_REQUEST,
             ),
             Self::InvalidOtpCode => (

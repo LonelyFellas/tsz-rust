@@ -59,6 +59,8 @@ EXPECTED_TARGETS = {
         "otp_store",
         "refresh_tokens_schema",
         "register_session_transaction",
+        "invitations_schema",
+        "invitations_handler",
         "session_repository",
         "session_reuse_detection",
         "session_service",
@@ -121,7 +123,7 @@ class CiTestModulesTests(unittest.TestCase):
         )
         flattened = [target for targets in actual.values() for target in targets]
         self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertEqual(len(flattened), 80)
+        self.assertEqual(len(flattened), 82)
 
     def test_ci02_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(

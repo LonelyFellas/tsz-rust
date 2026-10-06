@@ -20,6 +20,7 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
         "otp_*",
         "refresh_tokens_schema",
         "register_session_transaction",
+        "invitations_*",
         "session_*",
         "student_profiles_schema",
         "teacher_profiles_schema",

@@ -8,6 +8,12 @@ const DOWN: &str = include_str!("../migrations/20261006000000_coins.down.sql");
 #[sqlx::test]
 async fn empty_roundtrip_and_constraints(pool: PgPool) {
     let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261006030000_invitations.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     sqlx::raw_sql(DOWN).execute(&mut *tx).await.unwrap();
     sqlx::raw_sql(UP).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
