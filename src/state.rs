@@ -42,7 +42,9 @@ impl AppState {
     /// 内部用默认串建一个**惰性** redis pool。deadpool 惰性建连——只要测试不真正触达
     /// Redis 就不会发起连接，故这类测试无需本地跑 Redis，也不必在调用处构造 pool。
     pub fn for_test(pool: PgPool) -> Self {
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379/0")
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned());
+        let redis = deadpool_redis::Config::from_url(redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("测试 redis pool 应能创建（惰性，不立即连接）");
         Self::for_test_with_redis(pool, redis)
@@ -103,7 +105,9 @@ impl AppState {
     /// 再驱动 handler 走真实 `verify`。这里保留注入能力，以便测试任意验证码与异常分支，
     /// 不与 `OtpSender::Mock` 当前使用的固定码耦合。
     pub fn for_test_with_otp_store(pool: PgPool) -> (Self, OtpStore) {
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379/0")
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned());
+        let redis = deadpool_redis::Config::from_url(redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("测试 redis pool 应能创建（惰性）");
         let prefix = format!("test:{}:", Uuid::now_v7());

@@ -83,7 +83,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/me",
-            axum::routing::patch(user::handler::update_profile)
+            get(user::handler::me)
+                .patch(user::handler::update_profile)
+                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024)),
+        )
+        .route(
+            "/api/v1/me/learning-settings",
+            axum::routing::put(user::handler::update_learning_settings)
                 .layer(axum::extract::DefaultBodyLimit::max(2 * 1024)),
         )
         .nest(

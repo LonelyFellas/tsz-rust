@@ -64,7 +64,9 @@ use utoipa::{
         crate::lexicon::shared_sentences::reading::historical,
         crate::lexicon::shared_sentences::visibility::set_visibility,
 
+        crate::user::handler::me,
         crate::user::handler::update_profile,
+        crate::user::handler::update_learning_settings,
         // auth 域
         crate::auth::handler::login,
         crate::auth::handler::login_otp,
@@ -203,6 +205,11 @@ use utoipa::{
             crate::auth::security::PasswordChangeRequest,
             crate::auth::security::PasswordStatus,
             // user
+            crate::user::handler::MeResponse,
+            crate::user::handler::LearningSettingsResponse,
+            crate::user::model::LearningSettings,
+            crate::user::model::CefrLevel,
+            crate::user::model::EnglishVariant,
             crate::user::handler::UpdateProfileRequest,
             crate::user::handler::UpdateProfileResponse,
             crate::user::model::UserRole,

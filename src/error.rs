@@ -60,6 +60,7 @@ pub enum ErrorCode {
     SubPartOfSpeechConflict,
     AnnotationConflict,
     RevisionConflict,
+    CefrLevelLocked,
     ReferenceConflict,
     RelationPrebindingFanoutExceeded,
     StableNodeIdChanged,
@@ -133,7 +134,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 110] = [
+    pub const ALL: [Self; 111] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -183,6 +184,7 @@ impl ErrorCode {
         Self::SubPartOfSpeechConflict,
         Self::AnnotationConflict,
         Self::RevisionConflict,
+        Self::CefrLevelLocked,
         Self::ReferenceConflict,
         Self::RelationPrebindingFanoutExceeded,
         Self::StableNodeIdChanged,
@@ -496,6 +498,11 @@ impl ErrorCode {
             Self::RevisionConflict => (
                 "revision_conflict",
                 "Revision conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::CefrLevelLocked => (
+                "cefr_level_locked",
+                "CEFR level is locked",
                 StatusCode::CONFLICT,
             ),
             Self::ReferenceConflict => (

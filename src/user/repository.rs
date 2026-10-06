@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     platform::{EmailError, PhoneError, is_unique_violation},
-    user::model::{User, UserListFilter, UserListRecord, UserRole, UserStatus},
+    user::model::{LearningSettings, User, UserListFilter, UserListRecord, UserRole, UserStatus},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +24,18 @@ pub enum UserError {
     MissingSubject,
     #[error("duplicate subject")]
     DuplicateSubject,
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SaveLearningSettingsError {
+    #[error("invalid session")]
+    InvalidSession,
+    #[error("learning settings require a student profile")]
+    StudentRequired,
+    #[error("CEFR level cannot be changed")]
+    LevelLocked,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -133,6 +145,74 @@ impl UserRepository {
         .ok_or(UserError::NotFound)?;
 
         Ok(user)
+    }
+
+    pub async fn learning_settings(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<LearningSettings>, UserError> {
+        sqlx::query_as::<_, LearningSettings>(
+            "SELECT cefr_level, english_variant FROM student_profiles \
+             WHERE user_id = $1 AND cefr_level IS NOT NULL",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(UserError::Db)
+    }
+
+    pub async fn save_learning_settings(
+        &self,
+        user_id: Uuid,
+        security_version: i64,
+        settings: LearningSettings,
+    ) -> Result<LearningSettings, SaveLearningSettingsError> {
+        let mut tx = self.pool.begin().await?;
+        // Lock the user because a first-time learner may not have a profile row yet.
+        let user = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM users WHERE id = $1 AND security_version = $2 \
+             AND status = 'active' FOR UPDATE",
+        )
+        .bind(user_id)
+        .bind(security_version)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if user.is_none() {
+            return Err(SaveLearningSettingsError::InvalidSession);
+        }
+        let student = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM user_roles WHERE user_id = $1 AND role = 'student')",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !student {
+            return Err(SaveLearningSettingsError::StudentRequired);
+        }
+        let current = sqlx::query_as::<_, LearningSettings>(
+            "SELECT cefr_level, english_variant FROM student_profiles \
+             WHERE user_id = $1 AND cefr_level IS NOT NULL",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if current.is_some_and(|current| current.cefr_level != settings.cefr_level) {
+            return Err(SaveLearningSettingsError::LevelLocked);
+        }
+        let saved = sqlx::query_as::<_, LearningSettings>(
+            "INSERT INTO student_profiles (user_id, cefr_level, english_variant) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (user_id) DO UPDATE SET \
+             cefr_level = EXCLUDED.cefr_level, english_variant = EXCLUDED.english_variant \
+             RETURNING cefr_level, english_variant",
+        )
+        .bind(user_id)
+        .bind(settings.cefr_level)
+        .bind(settings.english_variant)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(saved)
     }
 
     pub async fn update_display_name(

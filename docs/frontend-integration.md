@@ -26,12 +26,20 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 ## 身份与错误处理
 
 - Web 用户与管理端是不同身份域，分别使用 `/auth/*` 与 `/admin/auth/*`；不能混用 access token、refresh cookie 或登录状态。
-- 用户资料读取为 `GET /api/v1/auth/me`，不是旧对接清单中的 `/api/v1/me`。
-- 本人昵称保存为 `PATCH /api/v1/me`，仅接收 `display_name`，返回 `{ user: UserProfile }`；读取端点仍返回扁平 `UserProfile`。昵称按 Rust trim 后的 Unicode 码点计数（1–50），拒绝剩余 Cc/Cf 和 `< >`，不变更安全版本或会话。前端按 `invalid_display_name` 识别校验错误，并对齐 BOM/U+0085 的空白边界。
+- `GET /api/v1/me` 返回用户档案包壳与真实学习配置；`GET /api/v1/auth/me` 保留扁平 `UserProfile`，兼容既有消费者。
+- 本人昵称保存为 `PATCH /api/v1/me`，仅接收 `display_name`，返回 `{ user: UserProfile }`。昵称按 Rust trim 后的 Unicode 码点计数（1–50），拒绝剩余 Cc/Cf 和 `< >`，不变更安全版本或会话。前端按 `invalid_display_name` 识别校验错误，并对齐 BOM/U+0085 的空白边界。
 - 昵称写入后资料装配或网络响应仍可能失败；相同昵称可安全重试，以重新读取确认当前值。无需数据库迁移；推荐先发布 additive 后端，再发布配套前端。后端回退后新保存接口恢复 404，但已写昵称仍可读取，前端必须提示未保存。
 - access token 通过 Bearer header 发送；刷新会话使用 HttpOnly cookie。cookie 的路径、刷新轮换和安全边界见[Token 设计](auth-token-design.md)、[会话刷新设计](session-refresh-design.md)，实际实现以两个身份域的 handler 为准。
 - 前端鉴权逻辑集中在 `@tsz/shared/auth`。授权失败与会话过期应按 HTTP 状态及稳定 `code` 区分，不匹配 `detail` 文案，不对所有 403 一律刷新。
 - 生产环境必须使用 HTTPS 与 Secure cookie。临时 HTTP 测试不能成为生产关闭 `COOKIE_SECURE` 的理由。
+
+## 个人学习配置
+
+`GET /api/v1/me` 返回 `{ user, active_role, learning_settings, onboarded }`。学生尚未明确选择时配置为 `null`、`onboarded=false`，包括没有学生资料行的已有账号；不回填默认级别。仅有教师身份的账号不要求个人学习引导。
+
+`PUT /api/v1/me/learning-settings` 成对提交 `cefr_level`（A1–C2）和 `english_variant`（BrE/AmE）。首次保存创建或更新学生资料并固定难度；后续只允许相同难度下切换英美偏好。同载荷可重试，修改难度返回 `409 cefr_level_locked` 且两项均不变；没有学生身份返回 403。
+
+前端用真实读取结果驱动登录、会话恢复与引导。已完成账号不能通过引导页、测评结果或查询参数重新定级；个人资料页只读难度、可修改英美偏好。无数据库迁移，先发布后端再切换前端读取 `/me`；旧 `/auth/me` 保留兼容，新前端不能先部署到没有 GET `/me` 的旧后端。配置持久化不代表尚未提供的学习内容下发接口已经接入。
 
 ## 词库 V3
 
