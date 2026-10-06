@@ -15,8 +15,8 @@ use tsz_rust::{
 
 async fn user(pool: &PgPool) -> Uuid {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, 'hash', '学生')")
-        .bind(id).bind(format!("{id}@example.test")).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO users (id, email, phone, password_hash, display_name) VALUES ($1, $2, $3, 'hash', '学生')")
+        .bind(id).bind(format!("{id}@example.test")).bind(format!("139{:08}", id.as_u128() % 100_000_000)).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO user_roles (user_id, role) VALUES ($1, 'student')")
         .bind(id)
         .execute(pool)

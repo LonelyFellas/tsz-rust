@@ -1,6 +1,6 @@
 use crate::{
     api::ApiJson,
-    auth::{AUTH_MOUNT, REFRESH_TOKEN_COOKIE, extract::AuthUser},
+    auth::{AUTH_MOUNT, REFRESH_TOKEN_COOKIE, extract::SessionUser},
     error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
     platform::{Email, Password, PasswordError, Phone, PhoneError},
@@ -524,7 +524,7 @@ pub struct ConfirmAccountDeletionRequest {
 )]
 pub async fn request_account_deletion_code(
     State(state): State<AppState>,
-    user: AuthUser,
+    SessionUser(user): SessionUser,
     ApiJson(payload): ApiJson<AccountDeletionCodeRequest>,
 ) -> Result<StatusCode, AppError> {
     let service = UserService::new(UserRepository::new(state.pool.clone()));
@@ -560,7 +560,7 @@ pub async fn request_account_deletion_code(
 )]
 pub async fn confirm_account_deletion(
     State(state): State<AppState>,
-    user: AuthUser,
+    SessionUser(user): SessionUser,
     jar: CookieJar,
     ApiJson(payload): ApiJson<ConfirmAccountDeletionRequest>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -634,7 +634,7 @@ pub struct UserProfile {
 )]
 pub async fn me(
     State(state): State<AppState>,
-    user: AuthUser,
+    SessionUser(user): SessionUser,
 ) -> Result<impl IntoResponse, AppError> {
     let user = UserRepository::new(state.pool.clone())
         .get_by_id(&user.subject)

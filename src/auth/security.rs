@@ -7,7 +7,10 @@ use uuid::Uuid;
 
 use crate::{
     api::ApiJson,
-    auth::{extract::AuthUser, handler::clean_refresh_token_cookie},
+    auth::{
+        extract::{AuthUser, SessionUser},
+        handler::clean_refresh_token_cookie,
+    },
     error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
     platform::{Password, PasswordError, hash_token},
@@ -98,11 +101,11 @@ pub struct PasswordStatus {
     security(("bearer_auth" = [])), request_body = ContactVerificationCodeRequest,
     responses((status = 204, description = "验证码已发送至本人已绑定渠道"),
         (status = 400, description = "目标或渠道无效"), (status = 401, description = "会话失效"),
-        (status = 403, description = "不可解绑最后一种联系方式"),
+        (status = 403, description = "phone_unbind_forbidden：手机号只允许换绑；不可解绑最后一种联系方式"),
         (status = 429, description = "发码频率超限"), (status = 503, description = "验证码服务不可用")))]
 pub async fn verification_code(
     State(state): State<AppState>,
-    auth: AuthUser,
+    SessionUser(auth): SessionUser,
     ApiJson(input): ApiJson<ContactVerificationCodeRequest>,
 ) -> Result<StatusCode, AppError> {
     let user = current_user(&state, &auth).await?;
@@ -125,7 +128,7 @@ pub async fn verification_code(
         (status = 429, description = "发码频率超限"), (status = 503, description = "验证码服务不可用")))]
 pub async fn bind_code(
     State(state): State<AppState>,
-    auth: AuthUser,
+    SessionUser(auth): SessionUser,
     ApiJson(input): ApiJson<ContactBindCodeRequest>,
 ) -> Result<StatusCode, AppError> {
     let user = current_user(&state, &auth).await?;
@@ -147,7 +150,7 @@ pub async fn bind_code(
         (status = 409, description = "联系方式已被其他账号占用"), (status = 503, description = "验证码服务不可用")))]
 pub async fn bind(
     State(state): State<AppState>,
-    auth: AuthUser,
+    SessionUser(auth): SessionUser,
     jar: CookieJar,
     ApiJson(input): ApiJson<ContactBindRequest>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -187,10 +190,10 @@ pub async fn bind(
     security(("bearer_auth" = [])), request_body = ContactUnbindRequest,
     responses((status = 204, description = "解绑成功，全部会话失效"),
         (status = 400, description = "渠道未绑定"), (status = 401, description = "会话或验证码失效"),
-        (status = 403, description = "不可解绑最后一种联系方式"), (status = 503, description = "验证码服务不可用")))]
+        (status = 403, description = "phone_unbind_forbidden：手机号只允许换绑；不可解绑最后一种联系方式"), (status = 503, description = "验证码服务不可用")))]
 pub async fn unbind(
     State(state): State<AppState>,
-    auth: AuthUser,
+    SessionUser(auth): SessionUser,
     jar: CookieJar,
     ApiJson(input): ApiJson<ContactUnbindRequest>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -303,7 +306,7 @@ pub async fn reset_password(
         (status = 503, description = "密码哈希服务不可用")))]
 pub async fn change_password(
     State(state): State<AppState>,
-    auth: AuthUser,
+    SessionUser(auth): SessionUser,
     jar: CookieJar,
     ApiJson(input): ApiJson<PasswordChangeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -398,6 +401,12 @@ fn validate_operation(
             "contact",
             "contact channel unavailable",
         )),
+        ContactOperation::Unbind if user.phone.as_deref() == Some(contact) => {
+            Err(AppError::forbidden(
+                ErrorCode::PhoneUnbindForbidden,
+                "phone cannot be unbound; replace it instead",
+            ))
+        }
         ContactOperation::Unbind if user.phone.is_none() || user.email.is_none() => Err(
             AppError::forbidden(ErrorCode::Forbidden, "cannot unbind last contact"),
         ),

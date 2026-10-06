@@ -60,7 +60,7 @@ fn unavailable() -> AppError {
 
 #[utoipa::path(post, path = "/api/v1/me/teacher-certification/files", tag = "teacher-certification",
     params(UploadQuery), request_body(content((inline(CertificationImage) = "image/jpeg"), (inline(CertificationImage) = "image/png"), (inline(CertificationImage) = "image/webp"))),
-    responses((status = 201, body = CertificationFile), (status = 401), (status = 409), (status = 413), (status = 422), (status = 503)), security(("bearer_auth" = [])))]
+    responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 201, body = CertificationFile), (status = 401), (status = 409), (status = 413), (status = 422), (status = 503)), security(("bearer_auth" = [])))]
 pub async fn upload(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -183,7 +183,7 @@ async fn read(state: &AppState, id: Uuid, owner: Option<Uuid>) -> Result<Respons
 }
 
 #[utoipa::path(get, path = "/api/v1/me/teacher-certification/files/{id}", tag = "teacher-certification",
-    params(("id" = Uuid, Path)), responses((status = 200, content((inline(CertificationImage) = "image/jpeg"), (inline(CertificationImage) = "image/png"), (inline(CertificationImage) = "image/webp"))), (status = 401), (status = 404)), security(("bearer_auth" = [])))]
+    params(("id" = Uuid, Path)), responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 200, content((inline(CertificationImage) = "image/jpeg"), (inline(CertificationImage) = "image/png"), (inline(CertificationImage) = "image/webp"))), (status = 401), (status = 404)), security(("bearer_auth" = [])))]
 pub async fn read_own(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -211,7 +211,7 @@ pub async fn read_admin(
 }
 
 #[utoipa::path(delete, path = "/api/v1/me/teacher-certification/files/{id}", tag = "teacher-certification",
-    params(("id" = Uuid, Path)), responses((status = 204), (status = 401), (status = 404), (status = 409)), security(("bearer_auth" = [])))]
+    params(("id" = Uuid, Path)), responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 204), (status = 401), (status = 404), (status = 409)), security(("bearer_auth" = [])))]
 pub async fn remove(
     State(state): State<AppState>,
     auth: AuthUser,

@@ -118,3 +118,42 @@ async fn short_header_does_not_panic(pool: PgPool) {
         "过短的头应 401 而非 panic"
     );
 }
+
+#[sqlx::test]
+async fn unbound_accounts_only_get_session_access_and_disabled_tokens_still_fail(pool: PgPool) {
+    use tsz_rust::auth::extract::SessionUser;
+    let state = AppState::for_test(pool);
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO users (id,email,password_hash,display_name) VALUES ($1,'unbound@example.com','hash','test')")
+        .bind(id).execute(&state.pool).await.unwrap();
+    let token = state.token_manager.generate(id, "student").unwrap();
+    let header = format!("Bearer {token}");
+    let mut parts = parts_with_auth(Some(&header));
+    assert_eq!(
+        SessionUser::from_request_parts(&mut parts, &state)
+            .await
+            .unwrap()
+            .0
+            .subject,
+        id
+    );
+    assert_eq!(status(&state, Some(&header)).await, StatusCode::FORBIDDEN);
+    sqlx::query("UPDATE users SET status='disabled' WHERE id=$1")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&state, Some(&header)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut parts = parts_with_auth(Some(&header));
+    assert_eq!(
+        SessionUser::from_request_parts(&mut parts, &state)
+            .await
+            .unwrap_err()
+            .into_response()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
