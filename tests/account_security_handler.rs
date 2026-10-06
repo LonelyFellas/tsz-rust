@@ -252,47 +252,49 @@ async fn only_contact_cannot_be_unbound_even_with_a_code(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn unbind_either_channel_and_concurrent_double_unbind_preserve_a_login(pool: PgPool) {
+async fn phone_cannot_be_unbound_but_email_can(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let u = user(&pool, Some("13800138000"), Some("old@example.com")).await;
     let token = access(&state, &u);
-    for (contact, channel) in [("13800138000", "phone"), ("old@example.com", "email")] {
-        assert_eq!(
-            post(
-                &state,
-                "/me/contact/verification-code",
-                Some(&token),
-                json!({"operation":"unbind","contact":contact,"verification_channel":channel})
-            )
-            .await
-            .0,
-            StatusCode::NO_CONTENT
-        );
-    }
-    let (a, b) = tokio::join!(
-        post(
-            &state,
-            "/me/contact/unbind",
-            Some(&token),
-            json!({"channel":"phone","verification_channel":"phone","verification_code":"000000"})
+    for (path, payload) in [
+        (
+            "/me/contact/verification-code",
+            json!({"operation":"unbind","contact":"13800138000","verification_channel":"email"}),
         ),
+        (
+            "/me/contact/unbind",
+            json!({"channel":"phone","verification_channel":"email","verification_code":"000000"}),
+        ),
+    ] {
+        let (status, body, _) = post(&state, path, Some(&token), payload).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "phone_unbind_forbidden");
+    }
+    assert_eq!(
         post(
             &state,
-            "/me/contact/unbind",
+            "/me/contact/verification-code",
             Some(&token),
-            json!({"channel":"email","verification_channel":"email","verification_code":"000000"})
+            json!({"operation":"unbind","contact":"old@example.com","verification_channel":"phone"})
         )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
     );
     assert_eq!(
-        [a.0, b.0]
-            .iter()
-            .filter(|s| **s == StatusCode::NO_CONTENT)
-            .count(),
-        1
+        post(
+            &state,
+            "/me/contact/unbind",
+            Some(&token),
+            json!({"channel":"email","verification_channel":"phone","verification_code":"000000"})
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
     );
-    assert!([a.0, b.0].contains(&StatusCode::UNAUTHORIZED));
     let saved = UserRepository::new(pool).get_by_id(&u.id).await.unwrap();
-    assert!(saved.phone.is_some() ^ saved.email.is_some());
+    assert_eq!(saved.phone.as_deref(), Some("13800138000"));
+    assert!(saved.email.is_none());
     assert_eq!(saved.security_version, 1);
 }
 
@@ -590,28 +592,9 @@ async fn released_phone_does_not_transfer_an_old_login_code_to_a_new_account(poo
         )
         .await
         .unwrap();
-    assert_eq!(
-        post(
-            &state,
-            "/me/contact/verification-code",
-            Some(&token),
-            json!({"operation":"unbind","contact":"13800138000","verification_channel":"email"})
-        )
-        .await
-        .0,
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        post(
-            &state,
-            "/me/contact/unbind",
-            Some(&token),
-            json!({"channel":"phone","verification_channel":"email","verification_code":"000000"})
-        )
-        .await
-        .0,
-        StatusCode::NO_CONTENT
-    );
+    binding_codes(&state, &token, "13900139000", "email").await;
+    assert_eq!(post(&state, "/me/contact/bind", Some(&token),
+        json!({"contact":"13900139000","code":"000000","verification_channel":"email","verification_code":"000000"})).await.0, StatusCode::NO_CONTENT);
     let new = user(&pool, Some("13800138000"), None).await;
     assert_ne!(new.id, old.id);
     let login = json!({"identifier":"13800138000","code":"123456"});
@@ -1124,4 +1107,83 @@ async fn reset_checks_both_contacts_after_otp_proof_without_consuming_rejected_c
         .await;
         assert_eq!(replay.0, StatusCode::UNAUTHORIZED);
     }
+}
+
+#[sqlx::test]
+async fn email_account_must_bind_phone_before_business_and_can_then_login_with_sms(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let u = user(&pool, None, Some("only@example.com")).await;
+    let token = access(&state, &u);
+    for path in ["/me", "/auth/me"] {
+        let (status, _, _) = call(&state, "GET", path, Some(&token), None, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    for (method, path, payload) in [
+        ("GET", "/me/teacher-certification", Value::Null),
+        ("GET", "/me/notifications", Value::Null),
+        ("PATCH", "/me", json!({"display_name":"测试同学"})),
+        (
+            "PUT",
+            "/me/learning-settings",
+            json!({"cefr_level":"B1","english_variant":"BrE"}),
+        ),
+        ("POST", "/me/avatar/upload-url", json!({})),
+    ] {
+        let (status, body, _) = call(&state, method, path, Some(&token), None, payload).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+        assert_eq!(body["code"], "phone_binding_required");
+    }
+    binding_codes(&state, &token, "13800138000", "email").await;
+    let (_, wrong, _) = post(&state, "/me/contact/bind", Some(&token), json!({"contact":"13800138000","code":"000000","verification_channel":"email","verification_code":"999999"})).await;
+    assert_eq!(wrong["code"], "invalid_otp_code");
+    assert!(
+        UserRepository::new(pool.clone())
+            .get_by_id(&u.id)
+            .await
+            .unwrap()
+            .phone
+            .is_none()
+    );
+    let (status, body, _) = post(&state, "/me/contact/bind", Some(&token), json!({"contact":"13800138000","code":"000000","verification_channel":"email","verification_code":"000000"})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        call(&state, "GET", "/me", Some(&token), None, Value::Null)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post(
+            &state,
+            "/otp/send",
+            None,
+            json!({"phone":"13800138000","purpose":"login"})
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+    let (status, login, _) = post(
+        &state,
+        "/auth/login-otp",
+        None,
+        json!({"identifier":"13800138000","code":"000000"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{login}");
+    assert_eq!(login["user"]["id"], u.id.to_string());
+    let new_token = login["access_token"].as_str().unwrap();
+    assert_eq!(
+        call(
+            &state,
+            "GET",
+            "/me/teacher-certification",
+            Some(new_token),
+            None,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
 }

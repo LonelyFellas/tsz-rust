@@ -27,7 +27,7 @@ async fn lock_user(tx: &mut Transaction<'_, Postgres>, auth: &AuthUser) -> Resul
 }
 
 #[utoipa::path(get,path="/api/v1/me/invitations",tag="invitations",security(("bearer_auth"=[])),
-    responses((status=200,description="本人邀请码及当前有效奖励配置；未启用时金额为空",body=InvitationOverview),
+    responses((status=403,description="需要先绑定手机号"),(status=200,description="本人邀请码及当前有效奖励配置；未启用时金额为空",body=InvitationOverview),
     (status=401,description="会话无效"),(status=500,description="查询失败")))]
 pub async fn overview(
     State(state): State<AppState>,
@@ -50,7 +50,7 @@ pub async fn overview(
 }
 
 #[utoipa::path(post,path="/api/v1/me/invitations/code",tag="invitations",security(("bearer_auth"=[])),
-    responses((status=200,description="幂等创建或返回本人固定邀请码",body=InvitationCode),
+    responses((status=403,description="需要先绑定手机号"),(status=200,description="幂等创建或返回本人固定邀请码",body=InvitationCode),
     (status=401,description="会话无效"),(status=500,description="创建失败")))]
 pub async fn create_code(
     State(state): State<AppState>,
@@ -85,7 +85,7 @@ pub async fn create_code(
 }
 
 #[utoipa::path(get,path="/api/v1/me/invitations/records",tag="invitations",security(("bearer_auth"=[])),params(InvitationRecordsQuery),
-    responses((status=200,description="本人邀请记录；不含联系方式或内部凭据",body=InvitationRecordPage),
+    responses((status=403,description="需要先绑定手机号"),(status=200,description="本人邀请记录；不含联系方式或内部凭据",body=InvitationRecordPage),
     (status=400,description="分页无效"),(status=401,description="会话无效"),(status=500,description="查询失败")))]
 pub async fn records(
     State(state): State<AppState>,

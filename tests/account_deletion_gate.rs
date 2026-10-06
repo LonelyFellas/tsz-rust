@@ -114,7 +114,11 @@ async fn pending_login_refresh_and_old_access_work_until_database_deadline(pool:
 #[sqlx::test]
 async fn refresh_profile_security_and_cancel_recheck_after_waiting_past_deadline(pool: PgPool) {
     for action in ["refresh", "profile", "security", "cancel", "login"] {
-        let (state, auth) = setup(&pool).await;
+        let (state, auth) = if action == "profile" {
+            account_deletion_support::setup_bound(&pool).await
+        } else {
+            setup(&pool).await
+        };
         password(&pool, &auth).await;
         let req = apply(&state, &auth, "0").await;
         let sessions = SessionService::new(

@@ -21,7 +21,7 @@ async fn empty_roundtrip_and_content_prevents_destructive_down(pool: PgPool) {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let (state, auth) = account_deletion_support::setup(&pool).await;
+    let (state, auth) = account_deletion_support::setup_bound(&pool).await;
     let id = wordlists_support::entry(&pool, "schema").await;
     let created = account_deletion_support::call(
         &state,

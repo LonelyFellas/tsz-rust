@@ -40,6 +40,16 @@ pub async fn setup(pool: &PgPool) -> (AppState, AuthUser) {
         },
     )
 }
+pub async fn setup_bound(pool: &PgPool) -> (AppState, AuthUser) {
+    let (state, auth) = setup(pool).await;
+    sqlx::query("UPDATE users SET phone=$2 WHERE id=$1")
+        .bind(auth.subject)
+        .bind(format!("199{:08}", auth.subject.as_u128() % 100_000_000))
+        .execute(pool)
+        .await
+        .unwrap();
+    (state, auth)
+}
 pub fn input(key: Uuid, balance: &str) -> Value {
     json!({"channel":"email","code":"000000","expected_coin_balance":balance,"waive_balance":balance!="0","confirm_deletion":true,"consent_version":service::CONSENT_VERSION,"idempotency_key":key})
 }

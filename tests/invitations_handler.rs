@@ -1,5 +1,5 @@
 mod account_deletion_support;
-use account_deletion_support::{apply, call, deadline, fund, setup};
+use account_deletion_support::{apply, call, deadline, fund, setup_bound};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -71,7 +71,7 @@ async fn records(state: &AppState, auth: &AuthUser) -> Value {
 }
 #[sqlx::test]
 async fn code_is_stable_rewards_are_atomic_and_records_are_private(pool: PgPool) {
-    let (mut state, auth) = setup(&pool).await;
+    let (mut state, auth) = setup_bound(&pool).await;
     state.invitation_reward_amount = Some(9_007_199_254_740_993);
     let overview = call(&state, &auth, "GET", "/api/v1/me/invitations", Value::Null)
         .await
@@ -92,7 +92,7 @@ async fn code_is_stable_rewards_are_atomic_and_records_are_private(pool: PgPool)
         registered["user"]["id"]
     );
     assert!(!list.to_string().contains("invitee@example.test"));
-    let (_, other) = setup(&pool).await;
+    let (_, other) = setup_bound(&pool).await;
     assert_eq!(records(&state, &other).await["pagination"]["total"], 0);
     assert_eq!(
         call(
@@ -130,7 +130,7 @@ async fn code_is_stable_rewards_are_atomic_and_records_are_private(pool: PgPool)
 }
 #[sqlx::test]
 async fn invalid_code_preserves_otp_and_disabled_rewards_never_backfill(pool: PgPool) {
-    let (mut state, auth) = setup(&pool).await;
+    let (mut state, auth) = setup_bound(&pool).await;
     let code = invite_code(&state, &auth).await;
     otp(&state, "disabled@example.test").await;
     let invalid = register(&state, "disabled@example.test", "FFFFFFFFFFFFFFFF").await;
@@ -156,7 +156,7 @@ async fn invalid_code_preserves_otp_and_disabled_rewards_never_backfill(pool: Pg
 }
 #[sqlx::test]
 async fn inactive_pending_expired_and_deleted_inviters_do_not_block_registration(pool: PgPool) {
-    let (mut state, auth) = setup(&pool).await;
+    let (mut state, auth) = setup_bound(&pool).await;
     state.invitation_reward_amount = Some(23);
     let code = invite_code(&state, &auth).await;
     let request = apply(&state, &auth, "0").await;
@@ -182,7 +182,7 @@ async fn inactive_pending_expired_and_deleted_inviters_do_not_block_registration
             .await
             .unwrap();
     assert_eq!(statuses, vec!["inviter_unavailable"; 3]);
-    let (_, other) = setup(&pool).await;
+    let (_, other) = setup_bound(&pool).await;
     let other_code = invite_code(&state, &other).await;
     sqlx::query("UPDATE users SET status='disabled' WHERE id=$1")
         .bind(other.subject)
@@ -206,8 +206,8 @@ async fn inactive_pending_expired_and_deleted_inviters_do_not_block_registration
 }
 #[sqlx::test]
 async fn concurrent_registration_cannot_credit_two_inviters(pool: PgPool) {
-    let (mut first, a) = setup(&pool).await;
-    let (mut second, b) = setup(&pool).await;
+    let (mut first, a) = setup_bound(&pool).await;
+    let (mut second, b) = setup_bound(&pool).await;
     first.invitation_reward_amount = Some(13);
     second.invitation_reward_amount = Some(13);
     let ca = invite_code(&first, &a).await;
@@ -236,7 +236,7 @@ async fn concurrent_registration_cannot_credit_two_inviters(pool: PgPool) {
 }
 #[sqlx::test]
 async fn technical_failures_roll_back_registration_and_reward(pool: PgPool) {
-    let (mut state, auth) = setup(&pool).await;
+    let (mut state, auth) = setup_bound(&pool).await;
     state.invitation_reward_amount = Some(29);
     let code = invite_code(&state, &auth).await;
     for table in ["coin_entries", "refresh_tokens"] {
@@ -276,7 +276,7 @@ async fn technical_failures_roll_back_registration_and_reward(pool: PgPool) {
 }
 #[sqlx::test]
 async fn waiting_registration_observes_inviter_state_after_lock(pool: PgPool) {
-    let (mut state, auth) = setup(&pool).await;
+    let (mut state, auth) = setup_bound(&pool).await;
     state.invitation_reward_amount = Some(31);
     let code = invite_code(&state, &auth).await;
     otp(&state, "waiting@example.test").await;
@@ -311,7 +311,7 @@ async fn waiting_registration_observes_inviter_state_after_lock(pool: PgPool) {
 
 #[sqlx::test]
 async fn code_creation_rechecks_deadline_after_unique_key_wait(pool: PgPool) {
-    let (state, auth) = setup(&pool).await;
+    let (state, auth) = setup_bound(&pool).await;
     let request = apply(&state, &auth, "0").await;
     let mut gate = pool.begin().await.unwrap();
     sqlx::query("INSERT INTO invitation_codes(user_id,code) VALUES($1,'0123456789ABCDEF')")

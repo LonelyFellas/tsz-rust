@@ -1,6 +1,6 @@
 mod account_deletion_support;
 mod wordlists_support;
-use account_deletion_support::{apply, call, deadline, fund, setup};
+use account_deletion_support::{apply, call, deadline, fund, setup_bound};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -47,8 +47,8 @@ async fn balance(pool: &PgPool, user: Uuid) -> i64 {
 }
 #[sqlx::test]
 async fn independent_events_atomic_transfer_replays_and_financial_retention(pool: PgPool) {
-    let (state, author) = setup(&pool).await;
-    let (_, payer) = setup(&pool).await;
+    let (state, author) = setup_bound(&pool).await;
+    let (_, payer) = setup_bound(&pool).await;
     let e = entry(&pool, "tips").await;
     let id = publish_list(&pool, &state, &author, e).await;
     fund(&pool, &payer, 100).await;
@@ -143,8 +143,8 @@ async fn independent_events_atomic_transfer_replays_and_financial_retention(pool
 }
 #[sqlx::test]
 async fn publication_updates_allow_tips_but_archive_restore_requires_new_review(pool: PgPool) {
-    let (state, author) = setup(&pool).await;
-    let (_, payer) = setup(&pool).await;
+    let (state, author) = setup_bound(&pool).await;
+    let (_, payer) = setup_bound(&pool).await;
     let e = entry(&pool, "version one").await;
     let id = publish_list(&pool, &state, &author, e).await;
     fund(&pool, &payer, 100).await;
@@ -210,8 +210,8 @@ async fn publication_updates_allow_tips_but_archive_restore_requires_new_review(
 }
 #[sqlx::test]
 async fn concurrent_lists_do_not_deadlock_and_fact_failure_rolls_back_wallets(pool: PgPool) {
-    let (state, author) = setup(&pool).await;
-    let (_, payer) = setup(&pool).await;
+    let (state, author) = setup_bound(&pool).await;
+    let (_, payer) = setup_bound(&pool).await;
     let e = entry(&pool, "parallel tips").await;
     let a = publish_list(&pool, &state, &author, e).await;
     let b = publish_list(&pool, &state, &author, e).await;
@@ -248,9 +248,9 @@ async fn concurrent_lists_do_not_deadlock_and_fact_failure_rolls_back_wallets(po
 
 #[sqlx::test]
 async fn withdraw_serializes_with_tip_and_receipts_remain_owner_scoped(pool: PgPool) {
-    let (state, author) = setup(&pool).await;
-    let (_, payer) = setup(&pool).await;
-    let (_, stranger) = setup(&pool).await;
+    let (state, author) = setup_bound(&pool).await;
+    let (_, payer) = setup_bound(&pool).await;
+    let (_, stranger) = setup_bound(&pool).await;
     let e = entry(&pool, "withdraw race").await;
     let id = publish_list(&pool, &state, &author, e).await;
     fund(&pool, &payer, 20).await;

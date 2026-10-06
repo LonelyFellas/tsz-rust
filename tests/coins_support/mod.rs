@@ -17,6 +17,14 @@ pub async fn seed(pool: &PgPool, owner_type: OwnerType, id: Uuid) -> Owner {
         .execute(pool)
         .await
         .unwrap();
+    if owner_type == OwnerType::User {
+        sqlx::query("UPDATE users SET phone=$2 WHERE id=$1")
+            .bind(id)
+            .bind(format!("198{:08}", id.as_u128() % 100_000_000))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
     Owner {
         owner_type,
         owner_id: id,

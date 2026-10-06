@@ -14,10 +14,10 @@ use uuid::Uuid;
 pub async fn setup(pool: &PgPool) -> (AppState, AuthUser, Arc<dyn ObjectStore>) {
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO users (id,email,password_hash,display_name) VALUES ($1,$2,'hash','Avatar')",
+        "INSERT INTO users (id,email,phone,password_hash,display_name) VALUES ($1,$2,$3,'hash','Avatar')",
     )
     .bind(id)
-    .bind(format!("{id}@example.test"))
+    .bind(format!("{id}@example.test")).bind(format!("139{:08}", id.as_u128() % 100_000_000))
     .execute(pool)
     .await
     .unwrap();

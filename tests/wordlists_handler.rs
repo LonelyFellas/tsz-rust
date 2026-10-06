@@ -1,6 +1,6 @@
 mod account_deletion_support;
 mod wordlists_support;
-use account_deletion_support::{apply, call, deadline, setup};
+use account_deletion_support::{apply, call, deadline, setup_bound};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -8,8 +8,8 @@ use wordlists_support::*;
 
 #[sqlx::test]
 async fn private_roundtrip_idempotency_revision_and_archive_boundary(pool: PgPool) {
-    let (state, auth) = setup(&pool).await;
-    let (_, other) = setup(&pool).await;
+    let (state, auth) = setup_bound(&pool).await;
+    let (_, other) = setup_bound(&pool).await;
     let a = entry(&pool, "apple").await;
     let b = entry(&pool, "banana").await;
     let input = create_body(&[a, b]);
@@ -116,7 +116,7 @@ async fn private_roundtrip_idempotency_revision_and_archive_boundary(pool: PgPoo
 
 #[sqlx::test]
 async fn deletion_deadline_and_cascade_preserve_financial_history(pool: PgPool) {
-    let (state, auth) = setup(&pool).await;
+    let (state, auth) = setup_bound(&pool).await;
     let a = entry(&pool, "expiry").await;
     let created = call(
         &state,
@@ -171,7 +171,7 @@ async fn deletion_deadline_and_cascade_preserve_financial_history(pool: PgPool) 
 
 #[sqlx::test]
 async fn removed_and_readded_entry_cannot_reuse_stale_note_version(pool: PgPool) {
-    let (state, auth) = setup(&pool).await;
+    let (state, auth) = setup_bound(&pool).await;
     let a = entry(&pool, "aba-a").await;
     let b = entry(&pool, "aba-b").await;
     let created = call(
@@ -205,7 +205,7 @@ async fn removed_and_readded_entry_cannot_reuse_stale_note_version(pool: PgPool)
 
 #[sqlx::test]
 async fn writer_waiting_on_list_rechecks_deletion_deadline(pool: PgPool) {
-    let (state, auth) = setup(&pool).await;
+    let (state, auth) = setup_bound(&pool).await;
     let a = entry(&pool, "wait").await;
     let created = call(
         &state,

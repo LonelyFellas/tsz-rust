@@ -219,7 +219,7 @@ pub async fn records(
     })
 }
 #[utoipa::path(post,path="/api/v1/wordlists/{id}/tips",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=CreateWordlistTip,
-responses((status=200,description="独立投币事件与双边转账原子提交",body=WordlistTip),(status=400,description="数量或词条不可用"),(status=401,description="会话无效"),(status=403,description="禁止自投"),(status=404,description="词表不可访问"),(status=409,description="余额、钱包、幂等或重审冲突")))]
+responses((status=200,description="独立投币事件与双边转账原子提交",body=WordlistTip),(status=400,description="数量或词条不可用"),(status=401,description="会话无效"),(status=403,description="需要先绑定手机号；禁止自投"),(status=404,description="词表不可访问"),(status=409,description="余额、钱包、幂等或重审冲突")))]
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -228,7 +228,7 @@ pub async fn create(
 ) -> Result<Json<WordlistTip>, AppError> {
     Ok(Json(transfer(&state.pool, &auth, id, input).await?))
 }
-#[utoipa::path(get,path="/api/v1/me/wordlist-tips",tag="wordlists",params(WordlistQuery),security(("bearer_auth"=[])),responses((status=200,description="本人投出与收到记录，不泄露私密词表新名称",body=WordlistTipPage),(status=400,description="查询无效"),(status=401,description="会话无效")))]
+#[utoipa::path(get,path="/api/v1/me/wordlist-tips",tag="wordlists",params(WordlistQuery),security(("bearer_auth"=[])),responses((status=403,description="需要先绑定手机号"),(status=200,description="本人投出与收到记录，不泄露私密词表新名称",body=WordlistTipPage),(status=400,description="查询无效"),(status=401,description="会话无效")))]
 pub async fn history(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -237,7 +237,7 @@ pub async fn history(
     Ok(Json(records(&state.pool, &auth, query).await?))
 }
 
-#[utoipa::path(get,path="/api/v1/me/wordlist-tips/{event_id}",tag="wordlists",params(("event_id"=Uuid,Path)),security(("bearer_auth"=[])),responses((status=200,description="核对本人已完成事件；不依赖词表仍公开或存在",body=WordlistTip),(status=401,description="会话无效"),(status=404,description="事件不存在或不属于本人")))]
+#[utoipa::path(get,path="/api/v1/me/wordlist-tips/{event_id}",tag="wordlists",params(("event_id"=Uuid,Path)),security(("bearer_auth"=[])),responses((status=403,description="需要先绑定手机号"),(status=200,description="核对本人已完成事件；不依赖词表仍公开或存在",body=WordlistTip),(status=401,description="会话无效"),(status=404,description="事件不存在或不属于本人")))]
 pub async fn receipt(
     State(state): State<AppState>,
     auth: AuthUser,

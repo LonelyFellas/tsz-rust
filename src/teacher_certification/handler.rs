@@ -10,7 +10,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use uuid::Uuid;
 
 #[utoipa::path(get, path = "/api/v1/me/teacher-certification", tag = "teacher-certification",
-    responses((status = 200, body = TeacherCertification), (status = 401)), security(("bearer_auth" = [])))]
+    responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 200, body = TeacherCertification), (status = 401)), security(("bearer_auth" = [])))]
 pub async fn mine(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -72,7 +72,7 @@ pub async fn list(
 }
 
 #[utoipa::path(post, path = "/api/v1/me/teacher-certification/applications", tag = "teacher-certification",
-    request_body = SubmitApplication, responses((status = 201, body = TeacherApplication), (status = 401), (status = 409), (status = 422)), security(("bearer_auth" = [])))]
+    request_body = SubmitApplication, responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 201, body = TeacherApplication), (status = 401), (status = 409), (status = 422)), security(("bearer_auth" = [])))]
 pub async fn submit(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -116,7 +116,7 @@ pub async fn revoke(
 }
 
 #[utoipa::path(get, path = "/api/v1/me/notifications", tag = "notifications",
-    params(ListQuery), responses((status = 200, body = NotificationList), (status = 401)), security(("bearer_auth" = [])))]
+    params(ListQuery), responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 200, body = NotificationList), (status = 401)), security(("bearer_auth" = [])))]
 pub async fn notifications(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -161,7 +161,7 @@ async fn detail(
 }
 
 #[utoipa::path(get, path = "/api/v1/me/teacher-certification/applications/{id}", tag = "teacher-certification",
-    params(("id" = Uuid, Path)), responses((status = 200, body = TeacherApplicationDetail), (status = 401), (status = 404)), security(("bearer_auth" = [])))]
+    params(("id" = Uuid, Path)), responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 200, body = TeacherApplicationDetail), (status = 401), (status = 404)), security(("bearer_auth" = [])))]
 pub async fn own_detail(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -188,7 +188,7 @@ pub async fn admin_detail(
 }
 
 #[utoipa::path(patch, path = "/api/v1/me/notifications/{id}/read", tag = "notifications",
-    params(("id" = Uuid, Path)), responses((status = 200, body = UserNotification), (status = 401), (status = 404)), security(("bearer_auth" = [])))]
+    params(("id" = Uuid, Path)), responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 200, body = UserNotification), (status = 401), (status = 404)), security(("bearer_auth" = [])))]
 pub async fn read_notification(
     State(state): State<AppState>,
     auth: AuthUser,

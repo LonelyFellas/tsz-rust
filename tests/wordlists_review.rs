@@ -1,6 +1,6 @@
 mod account_deletion_support;
 mod wordlists_support;
-use account_deletion_support::{call, setup};
+use account_deletion_support::{call, setup_bound};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -8,7 +8,7 @@ use uuid::Uuid;
 use wordlists_support::*;
 #[sqlx::test]
 async fn review_snapshot_notes_publication_and_disabled_author_withdraw(pool: PgPool) {
-    let (state, auth) = setup(&pool).await;
+    let (state, auth) = setup_bound(&pool).await;
     let a = entry(&pool, "review").await;
     let reviewer = admin(&pool).await;
     let created = call(
@@ -136,7 +136,7 @@ async fn review_snapshot_notes_publication_and_disabled_author_withdraw(pool: Pg
 }
 #[sqlx::test]
 async fn withdrawn_request_cannot_be_approved_and_audit_failure_rolls_back(pool: PgPool) {
-    let (state, auth) = setup(&pool).await;
+    let (state, auth) = setup_bound(&pool).await;
     let a = entry(&pool, "cancel").await;
     let reviewer = admin(&pool).await;
     let created = call(
@@ -212,7 +212,7 @@ async fn withdrawn_request_cannot_be_approved_and_audit_failure_rolls_back(pool:
 
 #[sqlx::test]
 async fn private_drafts_are_not_discovered_and_live_publications_never_leak_archives(pool: PgPool) {
-    let (state, auth) = setup(&pool).await;
+    let (state, auth) = setup_bound(&pool).await;
     let a = entry(&pool, "first publication").await;
     let reviewer = admin(&pool).await;
     let created = call(
@@ -296,7 +296,7 @@ async fn private_drafts_are_not_discovered_and_live_publications_never_leak_arch
 
 #[sqlx::test]
 async fn revoked_permission_is_rechecked_after_waiting_for_owner(pool: PgPool) {
-    let (state, auth) = setup(&pool).await;
+    let (state, auth) = setup_bound(&pool).await;
     let a = entry(&pool, "permission wait").await;
     let reviewer = admin(&pool).await;
     sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")

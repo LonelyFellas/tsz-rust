@@ -125,6 +125,79 @@ mod tests {
     const CURRENT_RELEASE_VERSION: i64 = 20261006050000;
 
     #[sqlx::test]
+    async fn coin_release_undo_matches_deployed_phone_schema_and_preserves_new_funds(pool: PgPool) {
+        use crate::coins::{model::*, service};
+        let user = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,password_hash,display_name) VALUES($1,$2,'hash','release rollback')")
+            .bind(user).bind(format!("{user}@example.test")).execute(&pool).await.unwrap();
+        let report = undo(&pool, 20261002000000, CURRENT_RELEASE_VERSION)
+            .await
+            .unwrap();
+        assert_eq!(report.current_version, 20261002000000);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users WHERE id=$1")
+                .bind(user)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT to_regclass('wordlists') IS NULL AND to_regclass('coin_wallets') IS NULL"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        );
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        service::credit_in(
+            &mut tx,
+            Owner {
+                owner_type: OwnerType::User,
+                owner_id: user,
+            },
+            Amount::new(1).unwrap(),
+            &Context {
+                actor: Actor::System,
+                idempotency_scope: "release-test".into(),
+                idempotency_key: Uuid::now_v7().to_string(),
+                source_type: "release-test".into(),
+                source_id: user.to_string(),
+                reason: "rollback guard".into(),
+                evidence_ref: None,
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            undo(&pool, 20261002000000, CURRENT_RELEASE_VERSION)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT max(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            CURRENT_RELEASE_VERSION
+        );
+        assert!(sqlx::query_scalar::<_,bool>("SELECT to_regclass('wordlists') IS NOT NULL AND to_regclass('wordlist_tips') IS NOT NULL").fetch_one(&pool).await.unwrap());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT balance FROM coin_wallets WHERE owner_type='user' AND owner_id=$1"
+            )
+            .bind(user)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
+    }
+
+    #[sqlx::test]
     async fn permission_history_prevents_destructive_rollback_after_revocation(pool: PgPool) {
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO admins (id, phone, password_hash, display_name, permission_version) VALUES ($1, $2, 'hash', 'permission rollback', 2)")

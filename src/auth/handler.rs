@@ -1,6 +1,6 @@
 use crate::{
     api::ApiJson,
-    auth::{AUTH_MOUNT, REFRESH_TOKEN_COOKIE, extract::AuthUser},
+    auth::{AUTH_MOUNT, REFRESH_TOKEN_COOKIE, extract::SessionUser},
     error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
     platform::{Email, Password, PasswordError, Phone, PhoneError},
@@ -547,7 +547,7 @@ pub struct ConfirmAccountDeletionRequest {
 )]
 pub async fn request_account_deletion_code(
     State(state): State<AppState>,
-    user: AuthUser,
+    SessionUser(user): SessionUser,
     ApiJson(payload): ApiJson<AccountDeletionCodeRequest>,
 ) -> Result<StatusCode, AppError> {
     let service = UserService::new(UserRepository::new(state.pool.clone()));
@@ -565,7 +565,7 @@ pub async fn request_account_deletion_code(
 
 /// Legacy clients must upgrade; never consume OTP or delete an account here.
 #[utoipa::path(delete,path="/api/v1/auth/account",tag="auth",security(("bearer_auth"=[])),request_body=ConfirmAccountDeletionRequest,responses((status=409,description="请升级客户端并使用72小时注销申请接口"),(status=401,description="会话无效")))]
-pub async fn confirm_account_deletion(_user: AuthUser) -> Result<StatusCode, AppError> {
+pub async fn confirm_account_deletion(_user: SessionUser) -> Result<StatusCode, AppError> {
     Err(AppError::conflict(
         ErrorCode::AccountDeletionUpgradeRequired,
         None,
@@ -611,7 +611,7 @@ pub struct UserProfile {
 )]
 pub async fn me(
     State(state): State<AppState>,
-    user: AuthUser,
+    SessionUser(user): SessionUser,
 ) -> Result<impl IntoResponse, AppError> {
     let user = UserRepository::new(state.pool.clone())
         .get_by_id(&user.subject)

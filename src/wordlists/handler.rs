@@ -47,7 +47,7 @@ pub async fn public_list(
 }
 
 #[utoipa::path(get,path="/api/v1/me/wordlists",tag="wordlists",params(WordlistQuery),security(("bearer_auth"=[])),
-responses((status=200,description="词表分页",body=WordlistPage),(status=400,description="参数无效"),(status=401,description="会话无效")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="词表分页",body=WordlistPage),(status=400,description="参数无效"),(status=401,description="会话无效")))]
 pub async fn my_list(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -66,7 +66,7 @@ pub async fn public_detail(
 }
 
 #[utoipa::path(get,path="/api/v1/me/wordlists/{id}",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),
-responses((status=200,description="词表元数据",body=Wordlist),(status=404,description="不存在或不可访问"),(status=401,description="会话无效")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="词表元数据",body=Wordlist),(status=404,description="不存在或不可访问"),(status=401,description="会话无效")))]
 pub async fn my_detail(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -108,7 +108,7 @@ pub async fn public_items(
 }
 
 #[utoipa::path(get,path="/api/v1/me/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistQuery),security(("bearer_auth"=[])),
-responses((status=200,description="当前发布内容；不可用条目不返回历史内容",body=MyWordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="当前发布内容；不可用条目不返回历史内容",body=MyWordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
 pub async fn my_items(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -143,7 +143,7 @@ pub async fn my_items(
 }
 
 #[utoipa::path(post,path="/api/v1/me/wordlists",tag="wordlists",security(("bearer_auth"=[])),request_body=CreateWordlist,
-responses((status=200,description="创建或重放",body=Wordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=409,description="请求键冲突")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="创建或重放",body=Wordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=409,description="请求键冲突")))]
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -152,7 +152,7 @@ pub async fn create(
     Ok(Json(service::create(&state.pool, &auth, input).await?))
 }
 #[utoipa::path(put,path="/api/v1/me/wordlists/{id}",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=UpdateWordlist,
-responses((status=200,description="原子保存内容和备注",body=Wordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=404,description="不可访问"),(status=409,description="版本或状态冲突")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="原子保存内容和备注",body=Wordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=404,description="不可访问"),(status=409,description="版本或状态冲突")))]
 pub async fn update(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -162,7 +162,7 @@ pub async fn update(
     Ok(Json(service::update(&state.pool, &auth, id, input).await?))
 }
 #[utoipa::path(get,path="/api/v1/me/wordlists/{id}/edit",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),
-responses((status=200,description="一致版本下的完整有序ID；词义和备注独立分页",body=WordlistEditSnapshot),(status=401,description="会话无效"),(status=404,description="不可访问")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="一致版本下的完整有序ID；词义和备注独立分页",body=WordlistEditSnapshot),(status=401,description="会话无效"),(status=404,description="不可访问")))]
 pub async fn edit(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -171,7 +171,7 @@ pub async fn edit(
     Ok(Json(service::edit_snapshot(&state.pool, id, &auth).await?))
 }
 #[utoipa::path(get,path="/api/v1/wordlists/catalog",tag="wordlists",params(WordlistQuery),security(("bearer_auth"=[])),
-responses((status=200,description="仅已发布且未归档的词条候选",body=WordlistCatalog),(status=400,description="参数无效"),(status=401,description="会话无效")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="仅已发布且未归档的词条候选",body=WordlistCatalog),(status=400,description="参数无效"),(status=401,description="会话无效")))]
 pub async fn catalog(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -181,7 +181,7 @@ pub async fn catalog(
 }
 
 #[utoipa::path(post,path="/api/v1/me/wordlists/{id}/review-requests",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=SubmitWordlist,
-responses((status=200,description="词表审核状态",body=WordlistReview),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=404,description="不可访问"),(status=409,description="版本或状态冲突")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="词表审核状态",body=WordlistReview),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=404,description="不可访问"),(status=409,description="版本或状态冲突")))]
 pub async fn submit(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -192,7 +192,7 @@ pub async fn submit(
 }
 
 #[utoipa::path(post,path="/api/v1/me/wordlists/{id}/withdraw",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=WithdrawWordlist,
-responses((status=200,description="词表审核状态",body=Wordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=404,description="不可访问"),(status=409,description="版本或状态冲突")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="词表审核状态",body=Wordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=404,description="不可访问"),(status=409,description="版本或状态冲突")))]
 pub async fn withdraw(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -203,7 +203,7 @@ pub async fn withdraw(
 }
 
 #[utoipa::path(get,path="/api/v1/me/wordlists/{id}/review-requests",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),
-responses((status=200,description="词表审核状态",body=WordlistReviews),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=404,description="不可访问"),(status=409,description="版本或状态冲突")))]
+responses((status=403,description="需要先绑定手机号"),(status=200,description="词表审核状态",body=WordlistReviews),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=404,description="不可访问"),(status=409,description="版本或状态冲突")))]
 pub async fn reviews(
     State(state): State<AppState>,
     auth: AuthUser,
