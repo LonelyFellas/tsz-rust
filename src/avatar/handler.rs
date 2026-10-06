@@ -9,7 +9,7 @@ use axum::{
 use uuid::Uuid;
 
 #[utoipa::path(post,path="/api/v1/me/avatar/upload-url",tag="avatar",request_body=AvatarUploadRequest,
-    responses((status=200,body=AvatarUploadResponse),(status=400),(status=401),(status=413),(status=422),(status=429),(status=500),(status=501),(status=503)),security(("bearer_auth"=[])))]
+    responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status=200,body=AvatarUploadResponse),(status=400),(status=401),(status=413),(status=422),(status=429),(status=500),(status=501),(status=503)),security(("bearer_auth"=[])))]
 pub async fn create_upload(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -21,7 +21,7 @@ pub async fn create_upload(
 }
 
 #[utoipa::path(post,path="/api/v1/me/avatar",tag="avatar",request_body=AvatarConfirmRequest,
-    responses((status=200,body=AvatarConfirmResponse),(status=400),(status=401),(status=409),(status=413),(status=422),(status=500),(status=501),(status=503)),security(("bearer_auth"=[])))]
+    responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status=200,body=AvatarConfirmResponse),(status=400),(status=401),(status=409),(status=413),(status=422),(status=500),(status=501),(status=503)),security(("bearer_auth"=[])))]
 pub async fn confirm(
     State(state): State<AppState>,
     auth: AuthUser,

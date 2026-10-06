@@ -5,7 +5,7 @@ use utoipa::ToSchema;
 use crate::{
     api::ApiJson,
     auth::{
-        extract::AuthUser,
+        extract::{AuthUser, SessionUser},
         handler::{UserProfile, load_user_profile},
     },
     error::{AppError, ErrorCode},
@@ -37,6 +37,7 @@ pub struct UpdateProfileResponse {
     request_body = UpdateProfileRequest,
     responses(
         (status = 200, description = "本人昵称已保存", body = UpdateProfileResponse),
+        (status = 403, description = "phone_binding_required：需先绑定手机号"),
         (status = 400, description = "昵称无效或 JSON 语法错误"),
         (status = 401, description = "Web 会话无效"),
         (status = 413, description = "请求体超过 2 KiB"),
@@ -93,7 +94,7 @@ pub struct LearningSettingsResponse {
 )]
 pub async fn me(
     State(state): State<AppState>,
-    auth: AuthUser,
+    SessionUser(auth): SessionUser,
 ) -> Result<Json<MeResponse>, AppError> {
     let repository = UserRepository::new(state.pool.clone());
     let user = repository
@@ -137,7 +138,7 @@ pub async fn me(
         (status = 200, description = "首次配置或修改英美偏好；难度首次保存后不可改，同载荷可重试", body = LearningSettingsResponse),
         (status = 400, description = "JSON 语法错误"),
         (status = 401, description = "Web 会话无效"),
-        (status = 403, description = "没有学生身份"),
+        (status = 403, description = "没有学生身份，或 phone_binding_required：需先绑定手机号"),
         (status = 409, description = "cefr_level_locked：已保存难度不可修改，两项均不变"),
         (status = 413, description = "请求体超过 2 KiB"),
         (status = 422, description = "缺字段、非法枚举或额外字段"),

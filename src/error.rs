@@ -47,6 +47,8 @@ pub enum ErrorCode {
     AccountLocked,
     MustChangePassword,
     Forbidden,
+    PhoneBindingRequired,
+    PhoneUnbindForbidden,
     OtpRateLimited,
     OtpUnavailable,
     AccountDeletionChannelUnavailable,
@@ -134,7 +136,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 111] = [
+    pub const ALL: [Self; 113] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -171,6 +173,8 @@ impl ErrorCode {
         Self::AccountLocked,
         Self::MustChangePassword,
         Self::Forbidden,
+        Self::PhoneBindingRequired,
+        Self::PhoneUnbindForbidden,
         Self::OtpRateLimited,
         Self::OtpUnavailable,
         Self::AccountDeletionChannelUnavailable,
@@ -432,6 +436,16 @@ impl ErrorCode {
             Self::MustChangePassword => (
                 "must_change_password",
                 "Password change required",
+                StatusCode::FORBIDDEN,
+            ),
+            Self::PhoneBindingRequired => (
+                "phone_binding_required",
+                "Phone binding required",
+                StatusCode::FORBIDDEN,
+            ),
+            Self::PhoneUnbindForbidden => (
+                "phone_unbind_forbidden",
+                "Phone cannot be unbound",
                 StatusCode::FORBIDDEN,
             ),
             Self::Forbidden => ("forbidden", "Forbidden", StatusCode::FORBIDDEN),

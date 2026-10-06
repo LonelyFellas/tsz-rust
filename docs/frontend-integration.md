@@ -26,6 +26,9 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 ## 身份与错误处理
 
 - Web 用户与管理端是不同身份域，分别使用 `/auth/*` 与 `/admin/auth/*`；不能混用 access token、refresh cookie 或登录状态。
+- Web 业务接口要求账号已绑定手机号，否则返回 `403 phone_binding_required`。无手机号账号仍可登录/注册、恢复和读取会话、绑定联系方式、修改密码、退出或注销；前端应在业务与新用户引导前补绑。
+- 手机号只能换绑，发码和最终解绑都会拒绝解绑手机号（`403 phone_unbind_forbidden`）；邮箱解绑仍受至少保留一种联系方式约束。绑定/换绑继续返回 204、撤销全部会话，随后可通过 `/auth/login-otp` 使用手机号验证码登录。
+- 配套需求与设计集中在前端仓库 `docs/features/require-phone-binding/`。发布顺序为先前端补绑入口，再后端业务限制；真实短信发送仍需接入供应商。
 - `GET /api/v1/me` 返回用户档案包壳与真实学习配置；`GET /api/v1/auth/me` 保留扁平 `UserProfile`，兼容既有消费者。
 - 本人昵称保存为 `PATCH /api/v1/me`，仅接收 `display_name`，返回 `{ user: UserProfile }`。昵称按 Rust trim 后的 Unicode 码点计数（1–50），拒绝剩余 Cc/Cf 和 `< >`，不变更安全版本或会话。前端按 `invalid_display_name` 识别校验错误，并对齐 BOM/U+0085 的空白边界。
 - 昵称写入后资料装配或网络响应仍可能失败；相同昵称可安全重试，以重新读取确认当前值。无需数据库迁移；推荐先发布 additive 后端，再发布配套前端。后端回退后新保存接口恢复 404，但已写昵称仍可读取，前端必须提示未保存。
