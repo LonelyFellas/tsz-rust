@@ -107,6 +107,11 @@ pub struct Config {
     /// 部署候选在 loopback 上验收时关闭所有后台 worker，避免隔离窗口内产生业务写入。
     #[serde(default)]
     pub deployment_smoke_only: bool,
+    /// 邀请奖励默认关闭；金额缺省时不发放。
+    #[serde(default)]
+    pub invitation_reward_enabled: bool,
+    #[serde(default)]
+    pub invitation_reward_amount: Option<i64>,
     pub database_url: String,
     pub jwt_secret: String,
     #[serde(default = "default_refresh_ttl_days")]
@@ -180,6 +185,11 @@ fn default_admin_refresh_ttl_days() -> u64 {
 }
 
 impl Config {
+    pub fn active_invitation_reward_amount(&self) -> Option<i64> {
+        self.invitation_reward_amount
+            .filter(|_| self.invitation_reward_enabled)
+    }
+
     fn validate_avatar_config(&self) -> Result<(), envy::Error> {
         let invalid = || {
             envy::Error::Custom("avatars requires private storage, a 5242880 byte limit, TTL <=600s and a safe AVATAR_PUBLIC_BASE_URL".into())
@@ -234,6 +244,14 @@ impl Config {
         cfg.object_storage = object_storage;
         cfg.azure_speech = azure_speech;
         cfg.validate_avatar_config()?;
+        if cfg
+            .invitation_reward_amount
+            .is_some_and(|amount| amount <= 0)
+        {
+            return Err(envy::Error::Custom(
+                "INVITATION_REWARD_AMOUNT must be a positive i64".into(),
+            ));
+        }
         // 两把密钥相同 = per-realm 隔离塌一半,启动即失败(admin-design.md §13)
         if cfg.admin_jwt_secret == cfg.jwt_secret {
             return Err(envy::Error::Custom(
@@ -345,6 +363,35 @@ mod tests {
         let mut disabled = valid_baseline();
         disabled.push(("AVATAR_PUBLIC_BASE_URL", "https://api.example/avatars"));
         assert!(parse(&disabled).is_err());
+    }
+
+    #[test]
+    fn invitation_reward_requires_explicit_positive_amount_and_enablement() {
+        let cfg = parse(&valid_baseline()).unwrap();
+        assert!(!cfg.invitation_reward_enabled);
+        assert_eq!(cfg.invitation_reward_amount, None);
+        assert_eq!(cfg.active_invitation_reward_amount(), None);
+        for invalid in ["0", "-1", "9223372036854775808", "1.5"] {
+            let mut input = valid_baseline();
+            input.push(("INVITATION_REWARD_AMOUNT", invalid));
+            assert!(parse(&input).is_err());
+        }
+        let mut input = valid_baseline();
+        input.push(("INVITATION_REWARD_ENABLED", "true"));
+        let cfg = parse(&input).unwrap();
+        assert!(cfg.invitation_reward_enabled);
+        assert_eq!(cfg.invitation_reward_amount, None);
+        assert_eq!(cfg.active_invitation_reward_amount(), None);
+        input.push(("INVITATION_REWARD_AMOUNT", "9223372036854775807"));
+        assert_eq!(
+            parse(&input).unwrap().active_invitation_reward_amount(),
+            Some(i64::MAX)
+        );
+        input.retain(|(key, _)| *key != "INVITATION_REWARD_ENABLED");
+        assert_eq!(
+            parse(&input).unwrap().active_invitation_reward_amount(),
+            None
+        );
     }
 
     #[test]

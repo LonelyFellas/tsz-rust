@@ -1,3 +1,4 @@
+mod account_deletion_support;
 mod avatar_support;
 use avatar_support::{picture, setup, upload};
 use tsz_rust::{
@@ -124,21 +125,19 @@ async fn account_deletion_handler_schedules_avatar_cleanup_before_delete(pool: P
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
-    let response = tsz_rust::router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/v1/auth/account")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({"channel":"email","code":"000000"}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let pending = tsz_rust::account_deletion::service::create(
+        &state,
+        &auth,
+        serde_json::from_value(account_deletion_support::input(Uuid::now_v7(), "0")).unwrap(),
+    )
+    .await
+    .unwrap();
+    account_deletion_support::deadline(&pool, pending.id, -1).await;
+    assert!(
+        tsz_rust::account_deletion::service::complete(&pool, auth.subject, pending.id)
+            .await
+            .unwrap()
+    );
     assert_eq!(
         read(&state, &format!("/api/v1/avatars/{id}"), None)
             .await

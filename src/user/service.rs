@@ -203,14 +203,6 @@ impl UserService {
         }
         .ok_or(UserError::MissingSubject)
     }
-
-    pub async fn delete_account_in(
-        &self,
-        connection: &mut sqlx::PgConnection,
-        user_id: Uuid,
-    ) -> Result<bool, UserError> {
-        UserRepository::delete_account_in(connection, user_id).await
-    }
 }
 
 pub(crate) async fn verify_login_password(password: &str, hash: &str) -> bool {

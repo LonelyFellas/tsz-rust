@@ -1,320 +1,326 @@
-//! C 端账号注销 handler 安全契约：本人联系方式、固定 purpose、OTP 单次消费、
-//! 并发防重放、事务级 cascade、全 session 失效与 refresh cookie 清理。
-
-use axum::{
-    body::Body,
-    http::{Request, StatusCode, header},
-};
-use chrono::{Duration, Utc};
-use http_body_util::BodyExt;
+mod account_deletion_support;
+use account_deletion_support::*;
+use axum::http::StatusCode;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tower::ServiceExt;
-use tsz_rust::session::{repository::RefreshTokenRepository, service::SessionService};
-use tsz_rust::{otp::model::Purpose, router, state::AppState};
+use tsz_rust::{
+    account_deletion::{dto::*, service},
+    coins::{model::*, repository},
+    otp::model::Purpose,
+};
 use uuid::Uuid;
-
-async fn seed_user(pool: &PgPool, phone: Option<&str>, email: Option<&str>) -> Uuid {
-    let id = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO users (id, phone, email, password_hash, display_name, last_active_role) \
-         VALUES ($1, $2, $3, 'hash', 'delete-me', 'student')",
+#[sqlx::test]
+async fn consent_exact_balance_and_legacy_client_cannot_bypass_wait(pool: PgPool) {
+    let (state, auth) = setup(&pool).await;
+    fund(&pool, &auth, 100).await;
+    code(&state, &auth).await;
+    let (status, body) = call(
+        &state,
+        &auth,
+        "DELETE",
+        "/api/v1/auth/account",
+        json!({"channel":"email","code":"000000"}),
     )
-    .bind(id)
-    .bind(phone)
-    .bind(email)
-    .execute(pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO user_roles (user_id, role) VALUES ($1, 'student')")
-        .bind(id)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO user_roles (user_id, role) VALUES ($1, 'teacher')")
-        .bind(id)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO student_profiles (user_id) VALUES ($1)")
-        .bind(id)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO teacher_profiles (user_id) VALUES ($1)")
-        .bind(id)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) \
-         VALUES ($1, $2, $3, $4)",
-    )
-    .bind(Uuid::now_v7())
-    .bind(id)
-    .bind(format!("hash-{id}"))
-    .bind(Utc::now() + Duration::days(30))
-    .execute(pool)
-    .await
-    .unwrap();
-    id
-}
-
-fn bearer(state: &AppState, user_id: Uuid) -> String {
-    format!(
-        "Bearer {}",
-        state.token_manager.generate(user_id, "student").unwrap()
-    )
-}
-
-async fn call(
-    state: &AppState,
-    method: &str,
-    path: &str,
-    token: &str,
-    body: Value,
-) -> axum::response::Response {
-    router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(path)
-                .header(header::AUTHORIZATION, token)
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::COOKIE, "refresh_token=secret-cookie")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "account_deletion_upgrade_required");
+    let key = Uuid::now_v7();
+    let mut payload = input(key, "100");
+    payload["waive_balance"] = json!(false);
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            payload
         )
         .await
-        .unwrap()
-}
-
-async fn problem(response: axum::response::Response) -> Value {
-    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
-}
-
-#[sqlx::test]
-async fn request_uses_current_users_contact_and_fixed_deletion_purpose(pool: PgPool) {
-    let user_id = seed_user(&pool, Some("13800138000"), Some("owner@example.com")).await;
-    let (state, store) = AppState::for_test_with_otp_store(pool);
-    let response = call(
+        .1["code"],
+        "account_deletion_consent_required"
+    );
+    let mut payload = input(key, "99");
+    payload["waive_balance"] = json!(true);
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            payload
+        )
+        .await
+        .1["code"],
+        "account_deletion_balance_changed"
+    );
+    let (status, body) = call(
         &state,
+        &auth,
         "POST",
-        "/api/v1/auth/account/deletion-code",
-        &bearer(&state, user_id),
-        json!({"channel":"email", "purpose":"login", "target":"attacker@example.com"}),
+        "/api/v1/me/account-deletion",
+        input(key, "100"),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert!(
-        store
-            .code_exists("owner@example.com", Purpose::AccountDeletion)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !store
-            .code_exists("attacker@example.com", Purpose::AccountDeletion)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !store
-            .code_exists("owner@example.com", Purpose::Login)
-            .await
-            .unwrap()
-    );
-}
-
-#[sqlx::test]
-async fn unavailable_channel_is_stable_problem_and_sends_nothing(pool: PgPool) {
-    let user_id = seed_user(&pool, Some("13800138001"), None).await;
-    let (state, store) = AppState::for_test_with_otp_store(pool);
-    let response = call(
-        &state,
-        "POST",
-        "/api/v1/auth/account/deletion-code",
-        &bearer(&state, user_id),
-        json!({"channel":"email"}),
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["confirmed_balance"], "100");
+    let wallet = repository::wallet(
+        &pool,
+        Owner {
+            owner_type: OwnerType::User,
+            owner_id: auth.subject,
+        },
     )
-    .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response.headers()[header::CONTENT_TYPE],
-        "application/problem+json"
-    );
-    assert_eq!(
-        problem(response).await["code"],
-        "account_deletion_channel_unavailable"
-    );
-    assert!(
-        !store
-            .code_exists("13800138001", Purpose::AccountDeletion)
-            .await
-            .unwrap()
-    );
-}
-
-#[sqlx::test]
-async fn wrong_code_is_undifferentiated_and_preserves_account(pool: PgPool) {
-    let user_id = seed_user(&pool, Some("13800138002"), None).await;
-    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
-    store
-        .save_code(
-            "13800138002",
-            Purpose::AccountDeletion,
-            "123456",
-            std::time::Duration::from_secs(300),
-        )
-        .await
-        .unwrap();
-    let response = call(
-        &state,
-        "DELETE",
-        "/api/v1/auth/account",
-        &bearer(&state, user_id),
-        json!({"channel":"phone", "code":"654321"}),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        response.headers()[header::CONTENT_TYPE],
-        "application/problem+json"
-    );
-    assert_eq!(
-        problem(response).await["code"],
-        "invalid_account_deletion_code"
-    );
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(user_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(exists);
-}
-
-#[sqlx::test]
-async fn success_cascades_and_clears_cookie_and_replay_fails(pool: PgPool) {
-    let user_id = seed_user(&pool, Some("13800138003"), None).await;
-    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
-    let issued_refresh = SessionService::new(
-        RefreshTokenRepository::new(pool.clone()),
-        Duration::days(30),
-    )
-    .issue(user_id)
     .await
     .unwrap();
-    store
-        .save_code(
-            "13800138003",
-            Purpose::AccountDeletion,
-            "123456",
-            std::time::Duration::from_secs(300),
-        )
-        .await
-        .unwrap();
-    let token = bearer(&state, user_id);
-    let response = call(
+    assert_eq!(wallet.status, WalletStatus::DeletionPending);
+    assert_eq!(wallet.balance, "100");
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT EXTRACT(EPOCH FROM effective_at-requested_at)::bigint FROM account_deletion_requests").fetch_one(&pool).await.unwrap(),259200);
+    let (_, saved) = call(
         &state,
-        "DELETE",
-        "/api/v1/auth/account",
-        &token,
-        json!({"channel":"phone", "code":"123456"}),
+        &auth,
+        "GET",
+        "/api/v1/me/account-deletion",
+        json!({}),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
-    assert!(cookie.starts_with("refresh_token="));
-    assert!(cookie.contains("Max-Age=0"));
-    assert!(cookie.contains("Path=/api/v1/auth"));
-
-    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT \
-          (SELECT COUNT(*) FROM users WHERE id = $1), \
-          (SELECT COUNT(*) FROM user_roles WHERE user_id = $1), \
-          (SELECT COUNT(*) FROM student_profiles WHERE user_id = $1), \
-          (SELECT COUNT(*) FROM teacher_profiles WHERE user_id = $1), \
-          (SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1)",
-    )
-    .bind(user_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    for (table, count) in [
-        ("users", counts.0),
-        ("user_roles", counts.1),
-        ("student_profiles", counts.2),
-        ("teacher_profiles", counts.3),
-        ("refresh_tokens", counts.4),
-    ] {
-        assert_eq!(count, 0, "{table} 应被删除/cascade 清理");
-    }
-
-    let replay = call(
-        &state,
-        "DELETE",
-        "/api/v1/auth/account",
-        &token,
-        json!({"channel":"phone", "code":"123456"}),
-    )
-    .await;
-    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
-
-    let me = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/auth/me")
-                .header(header::AUTHORIZATION, &token)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(me.status(), StatusCode::UNAUTHORIZED);
-
-    let refresh = router(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/v1/auth/refresh")
-                .header(
-                    header::COOKIE,
-                    format!("refresh_token={}", issued_refresh.plaintext),
-                )
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(refresh.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(saved["request"], body);
+    assert_eq!(
+        call(&state, &auth, "GET", "/api/v1/me", json!({})).await.0,
+        StatusCode::OK
+    );
 }
-
 #[sqlx::test]
-async fn concurrent_confirmation_has_exactly_one_winner(pool: PgPool) {
-    let user_id = seed_user(&pool, Some("13800138004"), None).await;
-    let (state, store) = AppState::for_test_with_otp_store(pool);
-    store
-        .save_code(
-            "13800138004",
-            Purpose::AccountDeletion,
-            "123456",
-            std::time::Duration::from_secs(300),
-        )
-        .await
-        .unwrap();
-    let token = bearer(&state, user_id);
-    let body = json!({"channel":"phone", "code":"123456"});
+async fn concurrent_retry_is_one_request_and_cancelled_key_never_reopens(pool: PgPool) {
+    let (state, auth) = setup(&pool).await;
+    code(&state, &auth).await;
+    let key = Uuid::now_v7();
     let (a, b) = tokio::join!(
         call(
             &state,
-            "DELETE",
-            "/api/v1/auth/account",
-            &token,
-            body.clone()
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            input(key, "0")
         ),
-        call(&state, "DELETE", "/api/v1/auth/account", &token, body),
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            input(key, "0")
+        )
     );
-    let mut statuses = [a.status(), b.status()];
-    statuses.sort();
-    assert_eq!(statuses, [StatusCode::NO_CONTENT, StatusCode::UNAUTHORIZED]);
+    assert_eq!(a.0, StatusCode::ACCEPTED, "{:?}", a.1);
+    assert_eq!(a, b);
+    let id = a.1["id"].as_str().unwrap();
+    let path = format!("/api/v1/me/account-deletion/{id}/cancel");
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            input(Uuid::now_v7(), "0")
+        )
+        .await
+        .1["code"],
+        "account_deletion_pending"
+    );
+    let mut different = input(key, "0");
+    different["waive_balance"] = json!(true);
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            different
+        )
+        .await
+        .1["code"],
+        "idempotency_conflict"
+    );
+    let cancelled = call(&state, &auth, "POST", &path, json!({})).await;
+    assert_eq!(cancelled.0, StatusCode::OK);
+    assert_eq!(cancelled.1["status"], "cancelled");
+    assert_eq!(
+        call(&state, &auth, "POST", &path, json!({})).await,
+        cancelled
+    );
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            input(key, "0")
+        )
+        .await
+        .1["status"],
+        "cancelled"
+    );
+    assert_eq!(
+        repository::wallet(
+            &pool,
+            Owner {
+                owner_type: OwnerType::User,
+                owner_id: auth.subject
+            }
+        )
+        .await
+        .unwrap()
+        .status,
+        WalletStatus::Open
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM coin_entries")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    // New intent needs a fresh OTP; an already consumed code cannot revive a request.
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            input(Uuid::now_v7(), "0")
+        )
+        .await
+        .1["code"],
+        "invalid_account_deletion_code"
+    );
+}
+#[sqlx::test]
+async fn bad_proof_missing_channel_and_foreign_cancel_have_no_effect(pool: PgPool) {
+    let (state, auth) = setup(&pool).await;
+    let (_, other) = setup(&pool).await;
+    let mut payload = input(Uuid::now_v7(), "0");
+    payload["channel"] = json!("phone");
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            payload
+        )
+        .await
+        .1["code"],
+        "account_deletion_channel_unavailable"
+    );
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/account-deletion",
+            input(Uuid::now_v7(), "0")
+        )
+        .await
+        .1["code"],
+        "invalid_account_deletion_code"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM coin_wallets")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let req = apply(&state, &auth, "0").await;
+    assert_eq!(
+        call(
+            &state,
+            &other,
+            "POST",
+            &format!("/api/v1/me/account-deletion/{}/cancel", req.id),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+#[sqlx::test]
+async fn cancel_preserves_balance_and_new_application_gets_new_deadline(pool: PgPool) {
+    let (state, auth) = setup(&pool).await;
+    fund(&pool, &auth, 9_007_199_254_740_993).await;
+    let request = apply(&state, &auth, "9007199254740993").await;
+    let cancelled = service::cancel(&state, &auth, request.id).await.unwrap();
+    assert_eq!(cancelled.status, DeletionStatus::Cancelled);
+    assert_eq!(
+        repository::wallet(
+            &pool,
+            Owner {
+                owner_type: OwnerType::User,
+                owner_id: auth.subject
+            }
+        )
+        .await
+        .unwrap()
+        .balance,
+        "9007199254740993"
+    );
+    // Restore a new proof through the isolated OTP store; request cooldown is unrelated to lifecycle.
+    let (proof_state, store) = tsz_rust::state::AppState::for_test_with_otp_store(pool.clone());
+    store
+        .save_code(
+            &format!("{}@example.test", auth.subject),
+            Purpose::AccountDeletion,
+            "000000",
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+    let new = service::create(
+        &proof_state,
+        &auth,
+        serde_json::from_value(input(Uuid::now_v7(), "9007199254740993")).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_ne!(new.id, request.id);
+    assert!(new.effective_at > request.effective_at);
+}
+
+#[sqlx::test]
+async fn deletion_code_remains_bound_to_current_contact_and_purpose(pool: PgPool) {
+    let (_, auth) = setup(&pool).await;
+    let (state, store) = tsz_rust::state::AppState::for_test_with_otp_store(pool.clone());
+    let missing = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/auth/account/deletion-code",
+        json!({"channel":"phone"}),
+    )
+    .await;
+    assert_eq!(missing.0, StatusCode::CONFLICT);
+    assert_eq!(missing.1["code"], "account_deletion_channel_unavailable");
+    let sent = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/auth/account/deletion-code",
+        json!({"channel":"email","purpose":"login","target":"attacker@example.test"}),
+    )
+    .await;
+    assert_eq!(sent.0, StatusCode::ACCEPTED);
+    let own = format!("{}@example.test", auth.subject);
+    assert!(
+        store
+            .code_exists(&own, Purpose::AccountDeletion)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .code_exists("attacker@example.test", Purpose::AccountDeletion)
+            .await
+            .unwrap()
+    );
+    assert!(!store.code_exists(&own, Purpose::Login).await.unwrap());
 }

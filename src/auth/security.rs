@@ -179,6 +179,7 @@ pub async fn bind(
     } else {
         (Some(contact.as_str()), user.email.as_deref())
     };
+    crate::account_deletion::ensure_not_effective_in(&mut tx, user.id).await?;
     sqlx::query("UPDATE users SET phone = $2, email = $3, security_version = security_version + 1, updated_at = NOW() WHERE id = $1")
         .bind(user.id).bind(phone).bind(email).execute(&mut *tx).await.map_err(contact_db_error)?;
     revoke_sessions(&mut tx, user.id).await?;
@@ -214,6 +215,7 @@ pub async fn unbind(
         ContactChannel::Phone => (None, user.email.as_deref()),
         ContactChannel::Email => (user.phone.as_deref(), None),
     };
+    crate::account_deletion::ensure_not_effective_in(&mut tx, user.id).await?;
     sqlx::query("UPDATE users SET phone = $2, email = $3, security_version = security_version + 1, updated_at = NOW() WHERE id = $1")
         .bind(user.id).bind(phone).bind(email).execute(&mut *tx).await.map_err(AppError::internal)?;
     revoke_sessions(&mut tx, user.id).await?;
@@ -359,8 +361,10 @@ async fn current_user(state: &AppState, auth: &AuthUser) -> Result<User, AppErro
 }
 
 async fn lock_user(connection: &mut PgConnection, id: Uuid) -> Result<User, AppError> {
-    sqlx::query_as::<_, User>("SELECT id, phone, email, password_hash, security_version, display_name, last_active_role, created_at, updated_at, status, avatar_url FROM users WHERE id = $1 FOR UPDATE")
-        .bind(id).fetch_optional(connection).await.map_err(AppError::internal)?.ok_or_else(invalid_session)
+    let user=sqlx::query_as::<_, User>("SELECT id, phone, email, password_hash, security_version, display_name, last_active_role, created_at, updated_at, status, avatar_url FROM users WHERE id = $1 FOR UPDATE")
+        .bind(id).fetch_optional(&mut *connection).await.map_err(AppError::internal)?.ok_or_else(invalid_session)?;
+    crate::account_deletion::ensure_not_effective_in(connection, id).await?;
+    Ok(user)
 }
 
 fn check_session(user: &User, auth: &AuthUser) -> Result<(), AppError> {
@@ -493,6 +497,7 @@ async fn update_password(
     id: Uuid,
     hash: &str,
 ) -> Result<(), AppError> {
+    crate::account_deletion::ensure_not_effective_in(connection, id).await?;
     sqlx::query("UPDATE users SET password_hash = $2, security_version = security_version + 1, updated_at = NOW() WHERE id = $1")
         .bind(id).bind(hash).execute(&mut *connection).await.map_err(AppError::internal)?;
     revoke_sessions(connection, id).await

@@ -157,3 +157,108 @@ async fn unbound_accounts_only_get_session_access_and_disabled_tokens_still_fail
         StatusCode::UNAUTHORIZED
     );
 }
+
+mod account_deletion_support;
+#[sqlx::test]
+async fn phone_gate_covers_new_business_without_blocking_public_reads_or_deletion(pool: PgPool) {
+    use account_deletion_support::{apply, call, deadline, setup};
+    use serde_json::{Value, json};
+    let (state, auth) = setup(&pool).await;
+    let id = Uuid::now_v7();
+    for path in [
+        "/api/v1/me/coins/wallet".to_owned(),
+        "/api/v1/me/coins/entries".to_owned(),
+        "/api/v1/me/invitations".to_owned(),
+        "/api/v1/me/invitations/records".to_owned(),
+        "/api/v1/me/wordlists".to_owned(),
+        "/api/v1/wordlists/catalog?q=word".to_owned(),
+        format!("/api/v1/me/wordlists/{id}"),
+        "/api/v1/me/wordlist-tips".to_owned(),
+        format!("/api/v1/me/wordlist-tips/{id}"),
+    ] {
+        let response = call(&state, &auth, "GET", &path, Value::Null).await;
+        assert_eq!(response.0, StatusCode::FORBIDDEN, "{path}: {}", response.1);
+        assert_eq!(response.1["code"], "phone_binding_required");
+    }
+    for (path, body) in [
+        (
+            "/api/v1/me/wordlists".to_owned(),
+            json!({"idempotency_key":id,"name":"private","items":[{"entry_id":id,"private_note":""}]}),
+        ),
+        (
+            format!("/api/v1/wordlists/{id}/tips"),
+            json!({"idempotency_key":id,"event_id":id,"amount":"1"}),
+        ),
+        ("/api/v1/me/invitations/code".to_owned(), Value::Null),
+    ] {
+        assert_eq!(
+            call(&state, &auth, "POST", &path, body).await.1["code"],
+            "phone_binding_required"
+        );
+    }
+    assert_eq!(
+        call(&state, &auth, "GET", "/api/v1/wordlists", Value::Null)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "GET",
+            &format!("/api/v1/wordlists/{id}"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let me = call(&state, &auth, "GET", "/api/v1/me", Value::Null).await;
+    assert_eq!(me.0, StatusCode::OK);
+    assert!(me.1.get("learning_settings").is_some());
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "GET",
+            "/api/v1/me/account-deletion",
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&state, &auth, "DELETE", "/api/v1/auth/account", Value::Null)
+            .await
+            .1["code"],
+        "account_deletion_upgrade_required"
+    );
+    let request = apply(&state, &auth, "0").await;
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            &format!("/api/v1/me/account-deletion/{}/cancel", request.id),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (state, auth) = setup(&pool).await;
+    let request = apply(&state, &auth, "0").await;
+    deadline(&pool, request.id, -1).await;
+    for path in [
+        "/api/v1/me",
+        "/api/v1/me/account-deletion",
+        "/api/v1/me/coins/wallet",
+    ] {
+        assert_eq!(
+            call(&state, &auth, "GET", path, Value::Null).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}

@@ -70,6 +70,52 @@ pub enum RoutePolicy {
 }
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
+    ("GET", "/wordlists", RoutePolicy::All(&["wordlists.access"])),
+    (
+        "GET",
+        "/wordlists/{id}/review-requests",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/{id}/review-requests/{request_id}/items",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "POST",
+        "/wordlists/{id}/review-requests/{request_id}/decision",
+        RoutePolicy::All(&["wordlists.review"]),
+    ),
+    (
+        "POST",
+        "/wordlists/{id}/withdraw",
+        RoutePolicy::All(&["wordlists.withdraw"]),
+    ),
+    (
+        "GET",
+        "/coins/accounts",
+        RoutePolicy::All(&["coins.access"]),
+    ),
+    (
+        "GET",
+        "/coins/accounts/{owner_type}/{owner_id}/entries",
+        RoutePolicy::All(&["coins.access"]),
+    ),
+    (
+        "GET",
+        "/coins/operations",
+        RoutePolicy::All(&["coins.access"]),
+    ),
+    (
+        "POST",
+        "/coins/manual-credits",
+        RoutePolicy::All(&["coins.credit"]),
+    ),
+    (
+        "POST",
+        "/coins/manual-credits/{operation_id}/reversal",
+        RoutePolicy::All(&["coins.reverse"]),
+    ),
     ("POST", "/auth/login", RoutePolicy::SessionFlow),
     ("POST", "/auth/login-code", RoutePolicy::SessionFlow),
     ("POST", "/auth/refresh", RoutePolicy::SessionFlow),
@@ -77,6 +123,8 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ("POST", "/auth/logout-all", RoutePolicy::SessionFlow),
     ("POST", "/auth/change-password", RoutePolicy::SessionFlow),
     ("GET", "/profile", RoutePolicy::ActiveSession),
+    ("GET", "/me/coins/wallet", RoutePolicy::ActiveSession),
+    ("GET", "/me/coins/entries", RoutePolicy::ActiveSession),
     ("PATCH", "/profile/preferences", RoutePolicy::ActiveSession),
     ("GET", "/admins", RoutePolicy::SuperAdmin),
     ("POST", "/admins", RoutePolicy::SuperAdmin),

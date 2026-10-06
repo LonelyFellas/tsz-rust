@@ -255,11 +255,11 @@ async fn nickname_update_is_local_and_allows_duplicates_and_retries(pool: PgPool
 async fn wait_for_blocked_nickname_update(pool: &PgPool) {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'UPDATE users SET display_name = $2%')").fetch_one(pool).await.unwrap();
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'SELECT id FROM users WHERE id=$1%' AND query LIKE '%security_version=$2 FOR UPDATE')").fetch_one(pool).await.unwrap();
             if blocked { return; }
             tokio::task::yield_now().await;
         }
-    }).await.expect("nickname UPDATE should wait on the user row lock");
+    }).await.expect("nickname write should wait on the user row lock");
 }
 
 #[sqlx::test]

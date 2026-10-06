@@ -177,7 +177,7 @@ impl UserRepository {
         .bind(security_version)
         .fetch_optional(&mut *tx)
         .await?;
-        if user.is_none() {
+        if user.is_none() || crate::account_deletion::is_effective_in(&mut tx, user_id).await? {
             return Err(SaveLearningSettingsError::InvalidSession);
         }
         let student = sqlx::query_scalar::<_, bool>(
@@ -221,7 +221,12 @@ impl UserRepository {
         security_version: i64,
         display_name: &str,
     ) -> Result<Option<User>, UserError> {
-        sqlx::query_as::<_, User>(
+        let mut tx = self.pool.begin().await?;
+        let found:Option<Uuid>=sqlx::query_scalar("SELECT id FROM users WHERE id=$1 AND status='active' AND security_version=$2 FOR UPDATE").bind(user_id).bind(security_version).fetch_optional(&mut *tx).await?;
+        if found.is_none() || crate::account_deletion::is_effective_in(&mut tx, user_id).await? {
+            return Ok(None);
+        }
+        let result = sqlx::query_as::<_, User>(
             "UPDATE users SET display_name = $2, updated_at = NOW() \
              WHERE id = $1 AND status = 'active' AND security_version = $3 \
              RETURNING id, phone, email, password_hash, security_version, display_name, \
@@ -230,9 +235,10 @@ impl UserRepository {
         .bind(user_id)
         .bind(display_name)
         .bind(security_version)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(UserError::Db)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(result)
     }
 
     /// 在同一事务内锁定用户、吊销其全部 refresh session，再删除用户。

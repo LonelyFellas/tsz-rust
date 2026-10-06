@@ -19,6 +19,7 @@ from ci_test_modules import (  # noqa: E402
 
 EXPECTED_TARGETS = {
     "admin": {
+        "admin_coins_handler",
         "admin_accounts_create_handler",
         "admin_accounts_list_handler",
         "admin_accounts_repository",
@@ -42,6 +43,8 @@ EXPECTED_TARGETS = {
     },
     "identity": {
         "account_deletion_handler",
+        "account_deletion_worker",
+        "account_deletion_gate",
         "account_security_handler",
         "auth_extract",
         "auth_login_handler",
@@ -56,6 +59,8 @@ EXPECTED_TARGETS = {
         "otp_store",
         "refresh_tokens_schema",
         "register_session_transaction",
+        "invitations_schema",
+        "invitations_handler",
         "session_repository",
         "session_reuse_detection",
         "session_service",
@@ -72,6 +77,10 @@ EXPECTED_TARGETS = {
     },
     "lexicon": {
         "dictionary_schema",
+        "wordlists_handler",
+        "wordlists_schema",
+        "wordlists_review",
+        "wordlists_tips",
         "lexicon_audio_asset_references",
         "lexicon_audio_assets_handler",
         "lexicon_audio_assets_schema",
@@ -87,6 +96,9 @@ EXPECTED_TARGETS = {
         "shared_sentences",
     },
     "platform": {
+        "coins_handler",
+        "coins_ledger",
+        "coins_schema",
         "catalog_handler",
         "catalog_schema",
         "health",
@@ -115,7 +127,7 @@ class CiTestModulesTests(unittest.TestCase):
         )
         flattened = [target for targets in actual.values() for target in targets]
         self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertEqual(len(flattened), 74)
+        self.assertEqual(len(flattened), 86)
 
     def test_ci02_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(

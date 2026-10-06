@@ -37,7 +37,14 @@ impl RefreshTokenRepository {
         .bind(old_hash)
         .fetch_optional(&mut *tx)
         .await?;
-        if owner.is_none() {
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+        let active: bool = sqlx::query_scalar("SELECT status='active' FROM users WHERE id=$1")
+            .bind(owner)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !active || crate::account_deletion::is_effective_in(&mut tx, owner).await? {
             return Ok(None);
         }
         let user_id = sqlx::query_scalar!(
