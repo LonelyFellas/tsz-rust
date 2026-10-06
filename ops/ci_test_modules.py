@@ -33,6 +33,7 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
     ),
     "platform": (
         "catalog_*",
+        "coins_*",
         "health",
         "object_storage*",
         "redis_readiness",

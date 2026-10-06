@@ -77,6 +77,8 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ("POST", "/auth/logout-all", RoutePolicy::SessionFlow),
     ("POST", "/auth/change-password", RoutePolicy::SessionFlow),
     ("GET", "/profile", RoutePolicy::ActiveSession),
+    ("GET", "/me/coins/wallet", RoutePolicy::ActiveSession),
+    ("GET", "/me/coins/entries", RoutePolicy::ActiveSession),
     ("PATCH", "/profile/preferences", RoutePolicy::ActiveSession),
     ("GET", "/admins", RoutePolicy::SuperAdmin),
     ("POST", "/admins", RoutePolicy::SuperAdmin),

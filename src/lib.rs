@@ -3,6 +3,7 @@ pub mod api;
 pub mod auth;
 pub mod avatar;
 pub mod catalog;
+pub mod coins;
 pub mod config;
 pub mod constant;
 pub mod deployment_migrations;
@@ -57,6 +58,11 @@ pub fn router(state: AppState) -> Router {
         //     user::USER_MOUNT,
         //     Router::new().route("/register", post(user::handler::register)),
         // )
+        .route("/api/v1/me/coins/wallet", get(coins::handler::user_wallet))
+        .route(
+            "/api/v1/me/coins/entries",
+            get(coins::handler::user_entries),
+        )
         .merge(avatar::router())
         .merge(teacher_certification::router())
         .nest(admin::ADMIN_MOUNT, admin::router(state.clone()))

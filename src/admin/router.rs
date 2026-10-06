@@ -17,6 +17,11 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
+        .route("/me/coins/wallet", get(crate::coins::handler::admin_wallet))
+        .route(
+            "/me/coins/entries",
+            get(crate::coins::handler::admin_entries),
+        )
         .route("/profile", get(admin::profile::handler::admin_profile))
         .route(
             "/profile/preferences",

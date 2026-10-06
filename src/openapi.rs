@@ -33,6 +33,10 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::coins::handler::user_wallet,
+        crate::coins::handler::user_entries,
+        crate::coins::handler::admin_wallet,
+        crate::coins::handler::admin_entries,
         crate::avatar::handler::create_upload,
         crate::avatar::handler::confirm,
         crate::avatar::handler::read_public,
