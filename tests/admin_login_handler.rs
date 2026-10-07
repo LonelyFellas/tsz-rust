@@ -474,3 +474,65 @@ async fn otp_backend_down_is_503_not_401(pool: PgPool) {
         "基础设施故障不是用户的错，不得累计失败"
     );
 }
+
+/// 真实登录入口签发三套独立 Cookie；后续登录不挤掉旧端，两轮刷新后均可访问。
+#[sqlx::test]
+async fn independent_browser_logins_keep_all_sessions_usable(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    create_admin(&pool, PHONE).await;
+    let mut devices = Vec::new();
+    for _ in 0..3 {
+        store
+            .save_code(PHONE, Purpose::AdminLogin, CODE, ttl())
+            .await
+            .unwrap();
+        let (status, cookie, body) = admin_login(&state, login_body(PHONE, PASSWORD, CODE)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let body: Value = serde_json::from_str(&body).unwrap();
+        devices.push((
+            cookie.unwrap().split(';').next().unwrap().to_owned(),
+            body["access_token"].as_str().unwrap().to_owned(),
+        ));
+    }
+    for _ in 0..2 {
+        for (cookie, bearer) in &mut devices {
+            let response = tsz_rust::router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/admin/profile")
+                        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response = tsz_rust::router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/admin/auth/refresh")
+                        .header(header::COOKIE, &*cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            *cookie = response
+                .headers()
+                .get(header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned();
+            let body: Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            *bearer = body["access_token"].as_str().unwrap().to_owned();
+        }
+    }
+}

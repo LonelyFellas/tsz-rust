@@ -269,19 +269,25 @@ impl AdminAccountsRepository {
     }
 
     /// 启禁用：更新 status 并回读治理视图（含创建者名），让调用方回显的一定是落库事实。
-    /// CTE 保证「改」与「读」在同一条语句里，中间没有别人插队改写的窗口。
+    /// 先更新并锁定账号；禁用同时递增安全版本、撤销全部 refresh，启用不恢复旧凭证。
     pub(crate) async fn set_status(
         &self,
         id: &Uuid,
         status: AdminStatus,
     ) -> Result<AdminAccountRecord, AdminAccountsRepositoryError> {
         let required_keys = legacy_publication_required_keys();
-        sqlx::query_as!(
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(AdminAccountsRepositoryError::Database)?;
+        let record = sqlx::query_as!(
             AdminAccountRecord,
             r#"
             WITH updated AS (
                 UPDATE admins
-                SET status = $2, updated_at = NOW()
+                SET status = $2, updated_at = NOW(),
+                    security_version = security_version + CASE WHEN $2 = 'disabled' THEN 1 ELSE 0 END
                 WHERE id = $1
                 RETURNING id, phone, display_name, role, status, created_by_admin_id,
                           created_at, updated_at
@@ -308,10 +314,18 @@ impl AdminAccountsRepository {
             status as AdminStatus,
             &required_keys,
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(AdminAccountsRepositoryError::Database)?
-        .ok_or(AdminAccountsRepositoryError::NotFound)
+        .ok_or(AdminAccountsRepositoryError::NotFound)?;
+        if status == AdminStatus::Disabled {
+            sqlx::query("UPDATE admin_refresh_tokens SET revoked_at = NOW() WHERE admin_id = $1 AND revoked_at IS NULL")
+                .bind(id).execute(&mut *tx).await.map_err(AdminAccountsRepositoryError::Database)?;
+        }
+        tx.commit()
+            .await
+            .map_err(AdminAccountsRepositoryError::Database)?;
+        Ok(record)
     }
 
     /// 超管重置普通管理员密码：写新哈希并**强制**置 `must_change_password`。

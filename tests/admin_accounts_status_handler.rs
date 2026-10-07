@@ -350,11 +350,11 @@ async fn disabled_admin_cannot_use_existing_access_token(pool: PgPool) {
             .oneshot(request)
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                 .unwrap();
-        assert_eq!(body["code"], "account_disabled");
+        assert_eq!(body["code"], "invalid_token");
     }
 }
 
@@ -571,4 +571,99 @@ async fn anonymous_request_is_unauthorized(pool: PgPool) {
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(stored_status(&pool, target).await, AdminStatus::Active);
+}
+
+#[sqlx::test]
+async fn disable_then_enable_does_not_restore_old_device_credentials(pool: PgPool) {
+    use chrono::Duration;
+    use tsz_rust::admin::{AdminRefreshTokenRepository, AdminSessionService};
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let target = seed_admin(&pool, AdminRole::Admin, false).await;
+    let actor_bearer = token(&state, actor, AdminRole::SuperAdmin);
+    let old_bearer = token(&state, target, AdminRole::Admin);
+    let svc = AdminSessionService::new(
+        AdminRefreshTokenRepository::new(pool.clone()),
+        Duration::days(7),
+    );
+    let first = svc.issue(&target, 0).await.unwrap();
+    let second = svc.issue(&target, 0).await.unwrap();
+    for status in ["disabled", "active"] {
+        let (code, body) = patch_status(
+            &state,
+            target,
+            Some(&actor_bearer),
+            json!({"status": status}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        for refresh in [&first.plaintext, &second.plaintext] {
+            let response = tsz_rust::router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/admin/auth/refresh")
+                        .header(header::COOKIE, format!("admin_refresh_token={refresh}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{status}: 已撤销refresh必须401触发前端清态"
+            );
+        }
+    }
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/profile")
+                .header(header::AUTHORIZATION, format!("Bearer {old_bearer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(svc.rotate(&first.plaintext).await.is_err());
+    assert!(svc.rotate(&second.plaintext).await.is_err());
+    assert!(svc.issue(&target, 0).await.is_err());
+    svc.issue(&target, 1).await.unwrap();
+}
+
+#[sqlx::test]
+async fn disable_failure_rolls_back_status_version_and_refresh_revocation(pool: PgPool) {
+    use chrono::Duration;
+    use tsz_rust::admin::{AdminRefreshTokenRepository, AdminSessionService};
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool, AdminRole::SuperAdmin, false).await;
+    let target = seed_admin(&pool, AdminRole::Admin, false).await;
+    let svc = AdminSessionService::new(
+        AdminRefreshTokenRepository::new(pool.clone()),
+        Duration::days(7),
+    );
+    let first = svc.issue(&target, 0).await.unwrap();
+    sqlx::raw_sql("CREATE FUNCTION reject_revocation() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'test revocation failure'; END; $$ LANGUAGE plpgsql; CREATE TRIGGER reject_revocation BEFORE UPDATE ON admin_refresh_tokens FOR EACH ROW EXECUTE FUNCTION reject_revocation();")
+        .execute(&pool).await.unwrap();
+    let (status, _) = patch_status(
+        &state,
+        target,
+        Some(&token(&state, actor, AdminRole::SuperAdmin)),
+        json!({"status":"disabled"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let account = AdminRepository::new(pool.clone())
+        .get_by_id(&target)
+        .await
+        .unwrap();
+    assert_eq!(account.status, AdminStatus::Active);
+    assert_eq!(account.security_version, 0);
+    sqlx::query("DROP TRIGGER reject_revocation ON admin_refresh_tokens")
+        .execute(&pool)
+        .await
+        .unwrap();
+    svc.rotate(&first.plaintext).await.unwrap();
 }

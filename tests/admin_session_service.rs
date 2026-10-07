@@ -1,11 +1,6 @@
 //! `AdminSessionService`（issue / rotate / logout / peek_admin_id）的行为测试（真库）。
 //!
-//! web 侧 `SessionService`（tests/session_service.rs）的平移，两处刻意偏离：
-//!   - **Q1 严格单登录**：`issue` 前先 `revoke_all_by_admin_id`——后台账号不允许
-//!     多处在线，重新登录即挤掉旧会话。
-//!   - **Q8 绝对死线**：`rotate` 的新枚**继承**被消费旧枚的 expires_at、不重算
-//!     now+ttl——轮换只换凭证不续命，到期 refresh 401 必重走 2FA。
-//!     （与 web 的滑动续期刻意相反。）
+//! 支持多端独立会话，同时保留 Q8 绝对刷新期限：轮换只换凭证，不延长有效期。
 //!
 //! 落库契约照旧：存哈希不存明文、每次明文都不同、rotate 原子换新。
 //! crypto 纯函数性质归 src/admin/session.rs 内联单测（若直接复用 web 私有函数的
@@ -98,92 +93,48 @@ async fn issue_persists_hashed_token_and_returns_plaintext(pool: PgPool) {
     );
 }
 
-/// **并发 issue（Q1 竞态）**：同一 admin 两个并发登录后，活跃会话数仍必须恒为 1。
-/// 钉的是 `revoke_all_and_insert` 的事务 + admins 行锁串行化——若退回「revoke_all 与
-/// insert 两条独立语句」，两个 revoke_all 会都跑在两个 insert 之前、各插一枚活跃，
-/// 本测试即翻红。多轮放大竞态命中概率。
+/// 同时登录的两端和后来的第三端均可独立轮换；本机退出不影响其他端。
 #[sqlx::test]
-async fn concurrent_issue_keeps_single_live_session(pool: PgPool) {
+async fn concurrent_logins_rotate_independently_and_logout_is_local(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
-
-    for round in 0..5 {
-        let a = service(pool.clone(), Duration::days(7));
-        let b = service(pool.clone(), Duration::days(7));
-        let (ra, rb) = tokio::join!(a.issue(&admin_id, 0), b.issue(&admin_id, 0));
-        ra.unwrap_or_else(|e| panic!("第 {round} 轮并发 issue A 应成功：{e:?}"));
-        rb.unwrap_or_else(|e| panic!("第 {round} 轮并发 issue B 应成功：{e:?}"));
-
-        let live = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM admin_refresh_tokens
-             WHERE admin_id = $1 AND rotated_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()",
-            admin_id
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            live,
-            Some(1),
-            "第 {round} 轮并发 issue 后活跃会话数必须恒为 1（Q1）"
-        );
-    }
-}
-
-/// **严格单登录（Q1）**：重新 issue 会吊销该 admin 既有的全部会话——旧枚立即失效、
-/// 不能再 rotate；任意时刻活跃行数恒为 1；别的 admin 不受波及。
-#[sqlx::test]
-async fn issue_revokes_all_prior_sessions_of_that_admin(pool: PgPool) {
-    let admin_id = seed_admin(&pool).await;
-    let bystander = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
-
-    let first = svc.issue(&admin_id, 0).await.expect("首次登录应成功");
-    let other = svc.issue(&bystander, 0).await.expect("路人登录应成功");
-
-    let second = svc.issue(&admin_id, 0).await.expect("重新登录应成功");
-    assert_ne!(first.plaintext, second.plaintext, "两次 issue 明文应不同");
-
-    // 旧会话被挤掉：行已吊销、rotate 被拒
-    let repo = AdminRefreshTokenRepository::new(pool.clone());
-    let old_row = repo
-        .find_by_hash(&expected_hash(&first.plaintext))
-        .await
-        .unwrap()
-        .expect("旧枚行应还在（吊销不是删除）");
-    assert!(
-        old_row.revoked_at.is_some(),
-        "重新登录必须吊销旧会话（严格单登录）"
-    );
-    let err = svc
-        .rotate(&first.plaintext)
-        .await
-        .map(drop)
-        .expect_err("被挤掉的旧枚不该还能 rotate");
-    assert!(matches!(err, AdminSessionError::InvalidRefreshToken));
-
-    // 新会话可用；该 admin 活跃行恒 1
+    let (first, second) = tokio::join!(svc.issue(&admin_id, 0), svc.issue(&admin_id, 0));
+    let mut first = first.unwrap();
+    let mut second = second.unwrap();
+    let third = svc.issue(&admin_id, 0).await.unwrap();
+    for _ in 0..3 {
+        first = svc.rotate(&first.plaintext).await.unwrap().refresh;
+        second = svc.rotate(&second.plaintext).await.unwrap().refresh;
+    }
+    svc.logout(&first.plaintext).await.unwrap();
+    assert!(matches!(
+        svc.rotate(&first.plaintext).await,
+        Err(AdminSessionError::InvalidRefreshToken)
+    ));
     svc.rotate(&second.plaintext)
         .await
-        .expect("新会话应可正常轮换");
-    let live = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM admin_refresh_tokens
-         WHERE admin_id = $1 AND rotated_at IS NULL AND revoked_at IS NULL AND expires_at > NOW()",
-        admin_id
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(live, Some(1), "严格单登录下活跃会话数恒为 1");
-
-    // 别的 admin 毫发无伤
-    let other_row = repo
-        .find_by_hash(&expected_hash(&other.plaintext))
+        .expect("其他端应可继续续期");
+    svc.rotate(&third.plaintext)
         .await
-        .unwrap()
+        .expect("第三端应可继续续期");
+}
+
+/// 签发前读取的身份失效后，迟到登录不得创建新会话。
+#[sqlx::test]
+async fn issue_rejects_stale_version_and_disabled_admin(pool: PgPool) {
+    let admin_id = seed_admin(&pool).await;
+    let svc = service(pool.clone(), Duration::days(7));
+    svc.logout_all(&admin_id, 0).await.unwrap();
+    assert!(svc.issue(&admin_id, 0).await.is_err());
+    svc.issue(&admin_id, 1).await.unwrap();
+    sqlx::query("UPDATE admins SET status = 'disabled' WHERE id = $1")
+        .bind(admin_id)
+        .execute(&pool)
+        .await
         .unwrap();
     assert!(
-        other_row.revoked_at.is_none(),
-        "单登录清场只限本 admin，不得波及他人"
+        svc.issue(&admin_id, 1).await.is_err(),
+        "版本仍匹配但禁用也不能签发"
     );
 }
 
@@ -402,4 +353,97 @@ async fn peek_admin_id_unknown_returns_none(pool: PgPool) {
         .await
         .expect("peek 不应报错");
     assert!(got.is_none());
+}
+
+/// 以真实锁等待建立交错：安全变更先排队，旧登录/刷新后排队。
+/// 放锁后安全变更必须覆盖既有会话，并阻止已读取旧身份的迟到签发。
+#[sqlx::test]
+async fn security_changes_serialize_with_waiting_login_and_refresh(pool: PgPool) {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+    use tsz_rust::state::AppState;
+
+    async fn wait_for_lock_count(pool: &PgPool, count: i64) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")
+                    .fetch_one(pool).await.unwrap();
+                if waiting >= count { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("操作应实际进入账号行锁等待");
+    }
+
+    for action in ["logout_all", "password", "disable"] {
+        for refresh in [false, true] {
+            let admin = seed_admin(&pool).await;
+            let svc = service(pool.clone(), Duration::days(7));
+            let old = svc.issue(&admin, 0).await.unwrap();
+            let state = AppState::for_test(pool.clone());
+            let actor = seed_admin(&pool).await;
+            sqlx::query("UPDATE admins SET role = 'super_admin', must_change_password = false WHERE id = $1")
+                .bind(actor).execute(&pool).await.unwrap();
+            let bearer = state
+                .admin_token_manager
+                .generate(actor, "super_admin")
+                .unwrap();
+            let mut blocker = pool.begin().await.unwrap();
+            sqlx::query("SELECT id FROM admins WHERE id = $1 FOR UPDATE")
+                .bind(admin)
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let change_pool = pool.clone();
+            let change = tokio::spawn(async move {
+                match action {
+                    "logout_all" => service(change_pool, Duration::days(7))
+                        .logout_all(&admin, 0)
+                        .await
+                        .unwrap(),
+                    "password" => AdminRepository::new(change_pool)
+                        .set_password(&admin, "new-hash", false)
+                        .await
+                        .unwrap(),
+                    "disable" => {
+                        let response = tsz_rust::router(state)
+                            .oneshot(
+                                Request::builder()
+                                    .method("PATCH")
+                                    .uri(format!("/api/v1/admin/admins/{admin}/status"))
+                                    .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                                    .header(header::CONTENT_TYPE, "application/json")
+                                    .body(Body::from(r#"{"status":"disabled"}"#))
+                                    .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(response.status(), StatusCode::OK);
+                    }
+                    _ => unreachable!(),
+                }
+            });
+            wait_for_lock_count(&pool, 1).await;
+            let pending_pool = pool.clone();
+            let old_plaintext = old.plaintext.clone();
+            let pending = tokio::spawn(async move {
+                let svc = service(pending_pool, Duration::days(7));
+                if refresh {
+                    svc.rotate(&old_plaintext).await.is_err()
+                } else {
+                    svc.issue(&admin, 0).await.is_err()
+                }
+            });
+            wait_for_lock_count(&pool, 2).await;
+            blocker.commit().await.unwrap();
+            change.await.unwrap();
+            assert!(
+                pending.await.unwrap(),
+                "{action}, refresh={refresh}: 迟到的旧凭证必须被拒绝"
+            );
+            assert!(svc.rotate(&old.plaintext).await.is_err());
+        }
+    }
 }

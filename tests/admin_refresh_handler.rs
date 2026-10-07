@@ -214,3 +214,31 @@ async fn locked_admin_is_423_and_token_not_consumed(pool: PgPool) {
         "锁定期间不该消费旧枚：解锁后同一枚应仍能轮换"
     );
 }
+
+/// peek 必须保留已轮换但未撤销的凭证，才能执行窗口外重放的全设备吊销。
+#[sqlx::test]
+async fn rotated_cookie_replay_still_revokes_other_devices(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let id = seed_admin(&pool).await;
+    let old = issue_refresh(&pool, state.admin_refresh_ttl, id).await;
+    let svc = AdminSessionService::new(
+        AdminRefreshTokenRepository::new(pool.clone()),
+        state.admin_refresh_ttl,
+    );
+    let current = svc.rotate(&old.plaintext).await.unwrap();
+    let other = issue_refresh(&pool, state.admin_refresh_ttl, id).await;
+    sqlx::query("UPDATE admin_refresh_tokens SET rotated_at = NOW() - INTERVAL '30 seconds' WHERE admin_id = $1 AND rotated_at IS NOT NULL")
+        .bind(id).execute(&pool).await.unwrap();
+    assert_eq!(
+        refresh(&state, Some(&old.plaintext)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        refresh(&state, Some(&current.refresh.plaintext)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        refresh(&state, Some(&other.plaintext)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}

@@ -294,7 +294,7 @@ async fn admin_token_revoked_and_rotated_default_null(pool: PgPool) {
 
 #[sqlx::test]
 async fn admin_can_hold_multiple_tokens_at_schema_level(pool: PgPool) {
-    // 「严格单登录」(Q1)是 service 层语义(issue 前 revoke_all),schema 刻意不拦——
+    // 多端独立登录由现有表直接支持，schema 允许同账号多个活跃会话——
     // 宽限窗口/重放验尸都需要历史行共存。此测试钉住这条边界,防止有人给表加错约束。
     let aid = insert_admin(&pool, "13800000001").await;
     insert_admin_token(&pool, aid, "hash-a")
