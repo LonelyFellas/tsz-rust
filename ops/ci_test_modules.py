@@ -31,6 +31,8 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
     "lexicon": (
         "dictionary_schema",
         "wordlists_*",
+        "learning_tasks_*",
+        "learning_runs_*",
         "lexicon_*",
         "sentence_*",
         "shared_sentences",

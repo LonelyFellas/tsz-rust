@@ -10,6 +10,7 @@ pub mod constant;
 pub mod deployment_migrations;
 pub mod error;
 pub mod invitations;
+pub mod learning_tasks;
 pub mod lexicon;
 pub mod openapi;
 pub mod otp;
@@ -87,6 +88,7 @@ pub fn router(state: AppState) -> Router {
             post(account_deletion::handler::cancel),
         )
         .merge(wordlists::handler::router())
+        .merge(learning_tasks::handler::router())
         .merge(avatar::router())
         .merge(teacher_certification::router())
         .nest(admin::ADMIN_MOUNT, admin::router(state.clone()))

@@ -50,6 +50,14 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 旧 Web/Admin 的严格 runtime 可继续接受候选后端的默认标准/审核响应；不能向旧消费者无条件发送完整字段。发布顺序为后端 → Web，Admin 默认读取不变。新 Web 连接旧 API 时标准默认请求仍可读，完整/新增排序参数会被拒绝，页面明确提示失败并允许切回默认；不能前端先开放这些能力。本批无迁移，回退 Web 不改变数据，仍须保留已发布的 coins/注销 schema 与安全边界。需求和验收集中在前端 `docs/features/coins-system/wordlist-foundation-design.md` 与 `wordlists-tips-acceptance.md`。
 
+## 学生学习任务（LT-01～LT-04）
+
+`/me/learning-tasks` 与 `/me/learning-runs` 提供学生自建每日/长期任务、出题预览、固定轮次、首次有效作答和历史。题型为中文释义拼写英文，必须具备学生资格、已绑定手机号和真实学习设置。题目与判定由服务端固定；全部有效作答即完成，正确率独立统计，不发放 coins。
+
+每日北京时间 04:00 换日，整个任务 ends_at 可缩短当前轮次；长期轮次完成后通过 after_run_id 明确再开。创建、开始及首答请求须保留幂等键，未知结果不能换键重答。普通发布/词表重命名或追加不改本轮答案；来源撤回、固定成员移除或归档代际变化使未完成轮失效，历史内容按当前权限裁剪。
+
+发布顺序为后端 → Web，Admin 无功能变更。已有接口响应保持不变；旧 API 对学习路由返回 404，新 Web 明确提示尚未就绪。迁移 `20261007010000` 新增六张学习表，有学习事实时 down 拒绝执行；旧二进制的严格 SQLx 校验也会拒绝新 schema。回退时保留数据和当前后端，或另制兼容回退构建，不能直接删表换旧二进制。配套需求与隔离验收证据集中在前端 `docs/features/coins-system/learning-task-foundation-design.md` 第 10 节。
+
 ## 词库 V3
 
 词条读写使用 `schema_version=3` 与原生 V3 结构；新代码不采用历史 V2 `base_form + slots` 模型或旧向导。发布、归档、恢复、回退、共享例句与节点引用约束见[词库模型](word-data-model.md)及 OpenAPI。
