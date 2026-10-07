@@ -111,7 +111,7 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 `PermissionTag.color` 在目录、标签列表、创建结果和成员变更结果中返回，已有标签由迁移赋予 `default`。创建及 PATCH 请求可省略 `color`，保留旧管理端的写入行为；新值只接受预设色或不透明 `#RRGGBB`，HEX 按大写存储。修改颜色使用现有 `expected_version` 冲突控制，不改变标签成员或管理员授权。
 
-配套管理端先同步本仓 OpenAPI，再按后端 → Admin 顺序发布。旧管理端可以读取新增字段并继续发送无颜色的请求；新管理端若先连接旧后端，携带 `color` 的写入会因严格请求 DTO 被拒绝。旧后端二进制能忽略已新增的颜色列；回退自定义色约束会将现有 HEX 颜色改为 `default`，不应当作无损回退。
+配套管理端先同步本仓 OpenAPI，再按后端 → Admin 顺序发布。旧管理端可以读取新增字段并继续发送无颜色的请求；新管理端若先连接旧后端，携带 `color` 的写入会因严格请求 DTO 被拒绝。已运行的旧后端查询可忽略新增列，但旧二进制重启时 SQLx migrator 会因缺少已应用的迁移版本而拒绝启动，不可直接回退旧制品。回退自定义色约束会将现有 HEX 颜色改为 `default`，也不是无损回退。
 
 ## 2026-09-28：第五批教师认证与身份
 
