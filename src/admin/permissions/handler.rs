@@ -100,8 +100,14 @@ pub async fn create_tag(
     Ok((
         StatusCode::CREATED,
         Json(
-            service::create_tag(&state.pool, auth.subject, request_id.as_uuid(), &input.name)
-                .await?,
+            service::create_tag(
+                &state.pool,
+                auth.subject,
+                request_id.as_uuid(),
+                &input.name,
+                input.color.as_deref(),
+            )
+            .await?,
         ),
     ))
 }
@@ -122,6 +128,7 @@ pub async fn rename_tag(
         path.tag_id,
         input.expected_version,
         Some(&input.name),
+        input.color.as_deref(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -142,6 +149,7 @@ pub async fn delete_tag(
         request_id.as_uuid(),
         path.tag_id,
         query.expected_version,
+        None,
         None,
     )
     .await?;
@@ -214,7 +222,7 @@ pub async fn audits(
 ) -> Result<Json<PermissionAudits>, AppError> {
     require_super_admin(&state, &auth).await?;
     let (page, page_size) = pagination(query.page, query.page_size)?;
-    const FILTER: &str = " WHERE action IN ('admin.permissions.change', 'admin.permission_tags.create', 'admin.permission_tags.rename', 'admin.permission_tags.delete', 'admin.permission_tags.items') AND ($1::uuid IS NULL OR resource_id = $1 OR actor_admin_id = $1) AND ($2::text IS NULL OR metadata->'grant' ? $2 OR metadata->'revoke' ? $2 OR metadata->'before' ? $2 OR metadata->'after' ? $2 OR metadata->'before'->'permissions' ? $2) AND ($3::timestamptz IS NULL OR occurred_at >= $3) AND ($4::timestamptz IS NULL OR occurred_at <= $4)";
+    const FILTER: &str = " WHERE action IN ('admin.permissions.change', 'admin.permission_tags.create', 'admin.permission_tags.rename', 'admin.permission_tags.update', 'admin.permission_tags.delete', 'admin.permission_tags.items') AND ($1::uuid IS NULL OR resource_id = $1 OR actor_admin_id = $1) AND ($2::text IS NULL OR metadata->'grant' ? $2 OR metadata->'revoke' ? $2 OR metadata->'before' ? $2 OR metadata->'after' ? $2 OR metadata->'before'->'permissions' ? $2) AND ($3::timestamptz IS NULL OR occurred_at >= $3) AND ($4::timestamptz IS NULL OR occurred_at <= $4)";
     let mut count_sql =
         sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT count(*) FROM audit.admin_actions");
     count_sql.push(FILTER);

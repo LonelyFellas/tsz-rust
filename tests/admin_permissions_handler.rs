@@ -706,6 +706,74 @@ async fn no_op_does_not_increment_and_concurrent_super_admins_do_not_lose_update
 }
 
 #[sqlx::test]
+async fn tag_color_is_saved_validated_and_preserved_by_membership_changes(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed(&pool, AdminRole::SuperAdmin).await;
+    let bearer = token(&state, actor, AdminRole::SuperAdmin);
+    let (status, tag) = request(
+        &state,
+        &bearer,
+        "POST",
+        "/permission-tags",
+        Some(json!({"name": "内容编辑", "color": "blue"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{tag}");
+    assert_eq!(tag["color"], "blue");
+    let path = format!("/permission-tags/{}", tag["id"].as_str().unwrap());
+    let (status, _) = request(
+        &state,
+        &bearer,
+        "PATCH",
+        &path,
+        Some(json!({"name": "内容编辑", "color": "#a1B2c3", "expected_version": 0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, list) = request(&state, &bearer, "GET", "/permission-tags", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list[0]["color"], "#A1B2C3");
+    assert_eq!(list[0]["version"], 1);
+    let (status, changed) = request(
+        &state,
+        &bearer,
+        "POST",
+        "/permission-tag-changes",
+        Some(json!({"catalog_version": catalog::catalog_version(), "targets": [{"tag_id": tag["id"], "expected_version": 1, "add": ["words.access"], "remove": []}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(changed[0]["color"], "#A1B2C3");
+    for invalid in ["pink", "#12345", "#GGGGGG"] {
+        assert_eq!(
+            request(
+                &state,
+                &bearer,
+                "PATCH",
+                &path,
+                Some(json!({"name": "内容编辑", "color": invalid, "expected_version": 2})),
+            )
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let (_, list) = request(&state, &bearer, "GET", "/permission-tags", None).await;
+    assert_eq!(list[0]["color"], "#A1B2C3");
+    assert_eq!(list[0]["version"], 2);
+    let (status, created) = request(
+        &state,
+        &bearer,
+        "POST",
+        "/permission-tags",
+        Some(json!({"name": "新标签", "color": "#fF00aa"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["color"], "#FF00AA");
+}
+
+#[sqlx::test]
 async fn tag_changes_are_many_to_many_atomic_and_never_change_grants(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let super_id = seed(&pool, AdminRole::SuperAdmin).await;
