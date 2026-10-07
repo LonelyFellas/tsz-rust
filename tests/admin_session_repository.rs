@@ -14,7 +14,7 @@
 //!
 //! ⚠️ 边界划分同 web：repository 只搬 SQL——不做哈希（token_hash 原样存，测试用
 //! 普通字符串当"假哈希"）、不判过期语义（过期行照样插/查，过期只在 consume 的
-//! WHERE 里挡）。「严格单登录」（Q1 的 issue 前 revoke_all）是 service 编排，
+//! WHERE 里挡）。多端独立会话由 service 签发，
 //! repo 的 insert 不执法——本文件专门一条钉住这个边界。
 //!
 //! 契约（等 src/admin/session.rs 实现，admin/mod.rs 需 re-export）：
@@ -129,8 +129,7 @@ async fn expired_row_is_still_insertable_and_readable(pool: PgPool) {
     );
 }
 
-/// 同一 admin 多枚并存：repo 的 insert **不执法单登录**——严格单登录（Q1 的
-/// issue 前 revoke_all）是 service 编排的活，谁也别在 repo 层重复执法。
+/// 同一 admin 多枚并存：schema 与 repository 支持独立设备会话。
 #[sqlx::test]
 async fn insert_allows_multiple_live_tokens_per_admin(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;

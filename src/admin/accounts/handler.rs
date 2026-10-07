@@ -389,7 +389,7 @@ pub struct ResetAdminPasswordResponse {
 
 /// PATCH /api/v1/admin/admins/{admin_id}/status
 ///
-/// 超级管理员启用/禁用普通管理员；禁用状态由受保护接口逐次核验。
+/// 超级管理员启用/禁用普通管理员；禁用时原子撤销全部旧 access/refresh，重新启用不会恢复旧登录。
 #[utoipa::path(
     patch,
     path = "/api/v1/admin/admins/{admin_id}/status",

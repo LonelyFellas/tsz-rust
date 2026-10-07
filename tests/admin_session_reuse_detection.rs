@@ -1,12 +1,6 @@
 //! admin refresh token **重放检测**的规格测试（真库，`#[sqlx::test]`）。
 //!
-//! web 侧 tests/session_reuse_detection.rs 的平移（契约同 RFC 9700 §4.14.2 +
-//! 20s 宽限窗口不铸币不连坐），叠加 admin 的严格单登录（Q1）后场景有两处变形：
-//!   - 「多设备连坐」不存在——单登录下受害者最多只有一条活链，重放连坐 =
-//!     炸掉链上现存的那枚新 token。
-//!   - 「被挤掉的旧会话重放」成为高频合法场景：重新登录后老 tab 拿着已吊销的
-//!     旧枚再刷，**不是**泄露证据（revoked_at 非空、rotated_at 为空），绝不许
-//!     把刚登录的新会话连坐掉——否则单登录 + 误伤 = 谁也登不进来。
+//! 多设备独立会话下保留账号级重放吊销，20s 宽限窗口不铸币、不连坐。
 //!
 //! 五件事缺一不可（同 web）：
 //!   1. 窗口外重放确实触发 revoke_all（功能本身）
@@ -101,9 +95,9 @@ async fn count_live(pool: &PgPool, admin_id: Uuid) -> i64 {
 // ————————————————————— 1. 重放触发全量吊销 —————————————————————
 
 /// 核心场景：攻击者偷到 A，管理员先用 A 换成了 A'，攻击者（窗口外）再拿 A 来换
-/// → A' 必须作废（单登录下这就是受害者的全部会话）。
+/// → A' 必须作废（同时吊销该管理员的其他设备会话）。
 #[sqlx::test]
-async fn replaying_rotated_token_revokes_the_live_session(pool: PgPool) {
+async fn replaying_rotated_token_revokes_all_device_sessions(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
@@ -113,6 +107,8 @@ async fn replaying_rotated_token_revokes_the_live_session(pool: PgPool) {
         .await
         .expect("首次 rotate 应成功")
         .refresh;
+
+    let second_device = svc.issue(&admin_id, 0).await.unwrap();
 
     // 把 A 的轮换时间回拨出宽限窗口——窗口内的重放按丢包重试宽待（见第 5 节）
     backdate_rotated_at(&pool, &a.plaintext, GRACE_SECS + 5).await;
@@ -128,6 +124,10 @@ async fn replaying_rotated_token_revokes_the_live_session(pool: PgPool) {
         "重放对外仍应是 InvalidRefreshToken（别告诉攻击者被识破），实际 {err:?}"
     );
 
+    assert!(
+        svc.rotate(&second_device.plaintext).await.is_err(),
+        "窗口外重放仍按账号撤销其他设备"
+    );
     assert!(
         is_revoked(&pool, &a_prime.plaintext).await,
         "重放被检测后，链上的 A' 必须作废（否则攻击者手握 A' 可续到死线）"
@@ -204,7 +204,7 @@ async fn expired_token_is_not_treated_as_reuse(pool: PgPool) {
     let repo = AdminRefreshTokenRepository::new(pool.clone());
     let svc = service(pool.clone(), Duration::days(7));
 
-    // 先建活跃会话，再直插过期行——顺序反过来会被严格单登录的 issue 清场吊销掉
+    // 同一账号的有效会话与过期会话并存
     let live = svc.issue(&admin_id, 0).await.unwrap();
     let expired = "known-plaintext-expired-never-used";
     repo.insert(NewAdminRefreshToken {
@@ -227,25 +227,24 @@ async fn expired_token_is_not_treated_as_reuse(pool: PgPool) {
         .expect("活跃会话应不受影响");
 }
 
-/// **单登录高频场景**：重新登录挤掉旧会话（revoked_at 非空、rotated_at 为空）后，
-/// 老 tab 拿旧枚再刷——那是自己人不是攻击，绝不许连坐刚登录的新会话。
-/// （误判的后果在单登录下被放大：挤掉→重放→连坐新会话 = 永远登不进来。）
+/// 已主动退出的旧凭证不是重放泄露证据，不得影响其他设备。
 #[sqlx::test]
-async fn displaced_session_replay_is_not_treated_as_reuse(pool: PgPool) {
+async fn logged_out_session_replay_is_not_treated_as_reuse(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     let svc = service(pool.clone(), Duration::days(7));
 
     let old_login = svc.issue(&admin_id, 0).await.unwrap();
-    let new_login = svc.issue(&admin_id, 0).await.unwrap(); // 单登录：old_login 在此被吊销
+    let new_login = svc.issue(&admin_id, 0).await.unwrap();
+    svc.logout(&old_login.plaintext).await.unwrap();
 
     svc.rotate(&old_login.plaintext)
         .await
         .map(drop)
-        .expect_err("被挤掉的旧枚应被拒");
+        .expect_err("已退出的旧枚应被拒");
 
     assert!(
         !is_revoked(&pool, &new_login.plaintext).await,
-        "被挤掉的旧枚重放 ≠ 泄露，不得连坐刚登录的新会话"
+        "已退出的旧枚重放 ≠ 泄露，不得连坐刚登录的新会话"
     );
     svc.rotate(&new_login.plaintext)
         .await
@@ -329,6 +328,8 @@ async fn in_grace_replay_is_401_without_revocation(pool: PgPool) {
         .expect("首次 rotate 应成功")
         .refresh;
 
+    let other_device = svc.issue(&admin_id, 0).await.unwrap();
+
     // 紧接着重放（rotated_at 距今 << 宽限窗口）
     let err = svc
         .rotate(&a.plaintext)
@@ -344,6 +345,9 @@ async fn in_grace_replay_is_401_without_revocation(pool: PgPool) {
     svc.rotate(&a_prime.plaintext)
         .await
         .expect("A' 应仍可正常轮换");
+    svc.rotate(&other_device.plaintext)
+        .await
+        .expect("宽限期重放不影响其他设备");
 }
 
 /// 窗口内重放不得凭空造会话：重放前后活跃行数必须不变（宽限绝不铸币）。

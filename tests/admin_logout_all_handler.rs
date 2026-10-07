@@ -1,7 +1,7 @@
 //! `POST /api/v1/admin/auth/logout-all` 的契约（设计 §7 逃生组 + §11）。
 //!
 //! 这条端点一期就在契约里，但从未落地。两条硬契约：
-//!   - 吊销**该管理员的全部**会话，幂等（没有活跃会话也 204）；
+//!   - 吊销**该管理员的全部** access / refresh，旧 Bearer 重试返回 401；
 //!   - 属逃生组：`must_change_password` 的管理员必须能调通——否则被强制改密者
 //!     除了改密之外无路可走。
 
@@ -53,7 +53,7 @@ fn session_service(pool: &PgPool) -> AdminSessionService {
     )
 }
 
-/// 直接插行造多枚活跃会话——`issue` 是严格单登录（会先清场），造不出并存的两枚。
+/// 直接插行造多枚活跃会话。
 async fn insert_active_session(pool: &PgPool, admin_id: Uuid) {
     sqlx::query(
         r#"
@@ -180,7 +180,7 @@ async fn admin_pending_password_change_can_still_logout_all(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn logout_all_is_idempotent_without_sessions(pool: PgPool) {
+async fn logout_all_invalidates_bearer_even_without_refresh_sessions(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin = seed_admin(&pool, false).await;
     let bearer = token(&state, admin);
@@ -189,7 +189,7 @@ async fn logout_all_is_idempotent_without_sessions(pool: PgPool) {
     let (second, _) = logout_all(&state, Some(&bearer), None).await;
 
     assert_eq!(first, StatusCode::NO_CONTENT);
-    assert_eq!(second, StatusCode::NO_CONTENT);
+    assert_eq!(second, StatusCode::UNAUTHORIZED);
 }
 
 #[sqlx::test]
@@ -223,4 +223,80 @@ async fn web_realm_token_cannot_logout_admin_sessions(pool: PgPool) {
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(active_session_count(&pool, admin).await, 1);
+}
+
+async fn profile_status(state: &AppState, bearer: &str) -> StatusCode {
+    tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/profile")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+#[sqlx::test]
+async fn logout_all_invalidates_old_credentials_and_stale_retry_preserves_new_login(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool, false).await;
+    let bystander = seed_admin(&pool, false).await;
+    let svc = session_service(&pool);
+    let first = svc.issue(&admin, 0).await.unwrap();
+    let second = svc.issue(&admin, 0).await.unwrap();
+    let unaffected = svc.issue(&bystander, 0).await.unwrap();
+    let old_access = token(&state, admin);
+    assert_eq!(
+        logout_all(&state, Some(&old_access), None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        profile_status(&state, &old_access).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(svc.rotate(&first.plaintext).await.is_err());
+    assert!(svc.rotate(&second.plaintext).await.is_err());
+    svc.rotate(&unaffected.plaintext).await.unwrap();
+    assert_eq!(
+        profile_status(&state, &token(&state, bystander)).await,
+        StatusCode::OK
+    );
+    let new_refresh = svc.issue(&admin, 1).await.unwrap();
+    let new_access = state
+        .admin_token_manager
+        .generate_with_version(admin, AdminRole::Admin.as_str(), 1)
+        .unwrap();
+    assert_eq!(
+        logout_all(&state, Some(&old_access), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    // 模拟已通过 extractor、随后迟到的请求，同样须由事务的版本比较拒绝。
+    assert!(svc.logout_all(&admin, 0).await.is_err());
+    assert_eq!(profile_status(&state, &new_access).await, StatusCode::OK);
+    svc.rotate(&new_refresh.plaintext).await.unwrap();
+}
+
+#[sqlx::test]
+async fn logout_all_failure_rolls_back_version_and_keeps_credentials(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool, false).await;
+    let svc = session_service(&pool);
+    let first = svc.issue(&admin, 0).await.unwrap();
+    let second = svc.issue(&admin, 0).await.unwrap();
+    sqlx::raw_sql("CREATE FUNCTION reject_revocation() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'test revocation failure'; END; $$ LANGUAGE plpgsql; CREATE TRIGGER reject_revocation BEFORE UPDATE ON admin_refresh_tokens FOR EACH ROW EXECUTE FUNCTION reject_revocation();")
+        .execute(&pool).await.unwrap();
+    let bearer = token(&state, admin);
+    let (status, cookies) = logout_all(&state, Some(&bearer), None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(cookies.is_empty());
+    assert_eq!(profile_status(&state, &bearer).await, StatusCode::OK);
+    sqlx::query("DROP TRIGGER reject_revocation ON admin_refresh_tokens")
+        .execute(&pool)
+        .await
+        .unwrap();
+    svc.rotate(&first.plaintext).await.unwrap();
+    svc.rotate(&second.plaintext).await.unwrap();
 }
