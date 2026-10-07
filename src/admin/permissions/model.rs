@@ -80,6 +80,8 @@ pub struct ChangeResponse {
 pub struct PermissionTag {
     pub id: Uuid,
     pub name: String,
+    #[schema(pattern = "^(default|blue|cyan|green|gold|orange|red|purple|#[0-9A-Fa-f]{6})$")]
+    pub color: String,
     pub version: i64,
     pub permissions: Vec<String>,
 }
@@ -88,12 +90,16 @@ pub struct PermissionTag {
 #[serde(deny_unknown_fields)]
 pub struct CreateTagRequest {
     pub name: String,
+    #[schema(pattern = "^(default|blue|cyan|green|gold|orange|red|purple|#[0-9A-Fa-f]{6})$")]
+    pub color: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateTagRequest {
     pub name: String,
+    #[schema(pattern = "^(default|blue|cyan|green|gold|orange|red|purple|#[0-9A-Fa-f]{6})$")]
+    pub color: Option<String>,
     pub expected_version: i64,
 }
 

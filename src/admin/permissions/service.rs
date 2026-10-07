@@ -279,14 +279,15 @@ pub async fn audit(
 }
 
 pub async fn tags(pool: &PgPool) -> Result<Vec<PermissionTag>, AppError> {
-    let rows = sqlx::query_as::<_, (Uuid, String, i64, Vec<String>)>(
-        "SELECT t.id, t.name, t.version, COALESCE(array_agg(i.permission_key ORDER BY i.permission_key) FILTER (WHERE i.permission_key IS NOT NULL), ARRAY[]::text[]) FROM permission_tags t LEFT JOIN permission_tag_items i ON i.tag_id = t.id GROUP BY t.id ORDER BY lower(t.name), t.id",
+    let rows = sqlx::query_as::<_, (Uuid, String, String, i64, Vec<String>)>(
+        "SELECT t.id, t.name, t.color, t.version, COALESCE(array_agg(i.permission_key ORDER BY i.permission_key) FILTER (WHERE i.permission_key IS NOT NULL), ARRAY[]::text[]) FROM permission_tags t LEFT JOIN permission_tag_items i ON i.tag_id = t.id GROUP BY t.id ORDER BY lower(t.name), t.id",
     ).fetch_all(pool).await.map_err(AppError::internal)?;
     Ok(rows
         .into_iter()
-        .map(|(id, name, version, permissions)| PermissionTag {
+        .map(|(id, name, color, version, permissions)| PermissionTag {
             id,
             name,
+            color,
             version,
             permissions,
         })
@@ -299,6 +300,21 @@ fn tag_name(name: &str) -> Result<String, AppError> {
         return Err(catalog::invalid("tag name must contain 1 to 50 characters"));
     }
     Ok(name.to_owned())
+}
+
+fn tag_color(color: &str) -> Result<String, AppError> {
+    match color {
+        "default" | "blue" | "cyan" | "green" | "gold" | "orange" | "red" | "purple" => {
+            Ok(color.to_owned())
+        }
+        _ if color.len() == 7
+            && color.as_bytes()[0] == b'#'
+            && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit) =>
+        {
+            Ok(color.to_ascii_uppercase())
+        }
+        _ => Err(catalog::invalid("invalid tag color")),
+    }
 }
 
 fn map_tag_error(error: sqlx::Error) -> AppError {
@@ -329,14 +345,17 @@ pub async fn create_tag(
     actor: Uuid,
     request_id: Uuid,
     name: &str,
+    color: Option<&str>,
 ) -> Result<PermissionTag, AppError> {
     let name = tag_name(name)?;
+    let color = tag_color(color.unwrap_or("default"))?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_tag_actor(&mut tx, actor).await?;
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO permission_tags (id, name) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO permission_tags (id, name, color) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(&name)
+        .bind(&color)
         .execute(&mut *tx)
         .await
         .map_err(map_tag_error)?;
@@ -347,13 +366,14 @@ pub async fn create_tag(
         "admin.permission_tags.create",
         "permission_tag",
         id,
-        serde_json::json!({"after": name, "version": 0}),
+        serde_json::json!({"after": name, "color": color, "version": 0}),
     )
     .await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(PermissionTag {
         id,
         name,
+        color,
         version: 0,
         permissions: vec![],
     })
@@ -366,12 +386,14 @@ pub async fn update_tag(
     id: Uuid,
     expected: i64,
     name: Option<&str>,
+    color: Option<&str>,
 ) -> Result<(), AppError> {
     let name = name.map(tag_name).transpose()?;
+    let color = color.map(tag_color).transpose()?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_tag_actor(&mut tx, actor).await?;
-    let (before, version) = sqlx::query_as::<_, (String, i64)>(
-        "SELECT name, version FROM permission_tags WHERE id = $1 FOR UPDATE",
+    let (before_name, before_color, version) = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT name, color, version FROM permission_tags WHERE id = $1 FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -381,7 +403,9 @@ pub async fn update_tag(
     if expected != version {
         return Err(conflict("tag changed"));
     }
-    if name.as_ref().is_some_and(|name| name == &before) {
+    if name.as_ref().is_some_and(|name| name == &before_name)
+        && color.as_deref().unwrap_or(&before_color) == before_color
+    {
         return Ok(());
     }
     let items: Vec<String> = sqlx::query_scalar(
@@ -392,9 +416,13 @@ pub async fn update_tag(
     .await
     .map_err(AppError::internal)?;
     let action = if let Some(name) = &name {
-        sqlx::query("UPDATE permission_tags SET name = $2, version = version + 1, updated_at = now() WHERE id = $1")
-            .bind(id).bind(name).execute(&mut *tx).await.map_err(map_tag_error)?;
-        "admin.permission_tags.rename"
+        sqlx::query("UPDATE permission_tags SET name = $2, color = $3, version = version + 1, updated_at = now() WHERE id = $1")
+            .bind(id).bind(name).bind(color.as_deref().unwrap_or(&before_color)).execute(&mut *tx).await.map_err(map_tag_error)?;
+        if color.as_ref().is_some_and(|color| color != &before_color) {
+            "admin.permission_tags.update"
+        } else {
+            "admin.permission_tags.rename"
+        }
     } else {
         sqlx::query("DELETE FROM permission_tags WHERE id = $1")
             .bind(id)
@@ -403,7 +431,7 @@ pub async fn update_tag(
             .map_err(AppError::internal)?;
         "admin.permission_tags.delete"
     };
-    audit(&mut tx, actor, request_id, action, "permission_tag", id, serde_json::json!({"before": {"name": before, "permissions": items, "version": version}, "after": name, "version": version + 1})).await?;
+    audit(&mut tx, actor, request_id, action, "permission_tag", id, serde_json::json!({"before": {"name": before_name, "color": before_color, "permissions": items, "version": version}, "after": name, "color_after": name.as_ref().map(|_| color.as_deref().unwrap_or(&before_color)), "version": version + 1})).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(())
 }
@@ -419,8 +447,8 @@ pub async fn change_tags(
     validate_targets(&ids)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_tag_actor(&mut tx, actor).await?;
-    let rows = sqlx::query_as::<_, (Uuid, String, i64)>(
-        "SELECT id, name, version FROM permission_tags WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+    let rows = sqlx::query_as::<_, (Uuid, String, String, i64)>(
+        "SELECT id, name, color, version FROM permission_tags WHERE id = ANY($1) ORDER BY id FOR UPDATE",
     )
     .bind(&ids)
     .fetch_all(&mut *tx)
@@ -432,7 +460,7 @@ pub async fn change_tags(
             .iter()
             .find(|row| row.0 == target.tag_id)
             .ok_or_else(|| AppError::not_found("tag not found"))?;
-        if target.expected_version != row.2 {
+        if target.expected_version != row.3 {
             return Err(conflict("tag changed"));
         }
         let (add, remove) = selections(&target.add, &target.remove)?;
@@ -444,10 +472,17 @@ pub async fn change_tags(
         for key in remove {
             after.remove(&key);
         }
-        changes.push((target.tag_id, row.1.clone(), row.2, before, after));
+        changes.push((
+            target.tag_id,
+            row.1.clone(),
+            row.2.clone(),
+            row.3,
+            before,
+            after,
+        ));
     }
     let mut result = Vec::new();
-    for (id, name, mut version, before, after) in changes {
+    for (id, name, color, mut version, before, after) in changes {
         if before != after {
             let remove: Vec<_> = before.difference(&after).cloned().collect();
             sqlx::query(
@@ -482,6 +517,7 @@ pub async fn change_tags(
         result.push(PermissionTag {
             id,
             name,
+            color,
             version,
             permissions: after.into_iter().collect(),
         });
