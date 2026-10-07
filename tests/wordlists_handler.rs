@@ -251,3 +251,117 @@ async fn writer_waiting_on_list_rechecks_deletion_deadline(pool: PgPool) {
         "私密备注"
     );
 }
+
+#[sqlx::test]
+async fn full_reading_is_opt_in_and_sorting_precedes_pagination_without_editing(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let (_, other) = setup_bound(&pool).await;
+    let z = full_entry(&pool, "zebra").await;
+    let a = entry(&pool, "apple").await;
+    let same = entry(&pool, "APPLE").await;
+    let created = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/wordlists",
+        create_body(&[z, a, same]),
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::OK, "{}", created.1);
+    let id = created.1["id"].as_str().unwrap();
+    let path = format!("/api/v1/me/wordlists/{id}");
+    let standard = call(&state, &auth, "GET", &format!("{path}/items"), Value::Null).await;
+    let pos = &standard.1["items"][0]["entry"]["pos"][0];
+    assert!(pos.get("forms").is_none());
+    assert!(pos.get("label").is_none());
+    assert!(pos["senses"][0].get("sub_pos_label").is_none());
+    let full_path = format!("{path}/items?view=full");
+    assert_eq!(
+        call(&state, &other, "GET", &full_path, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let full = call(&state, &auth, "GET", &full_path, Value::Null).await;
+    assert_eq!(full.0, StatusCode::OK, "{}", full.1);
+    let pos = &full.1["items"][0]["entry"]["pos"][0];
+    assert_eq!(pos["label"], "名词");
+    assert_eq!(pos["senses"][0]["sub_pos_label"], "可数名词");
+    let forms = &pos["forms"];
+    assert_eq!(forms.as_array().unwrap().len(), 3);
+    assert_eq!(
+        forms[0]["variants"][0]["pronunciations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(forms[0]["variants"][1]["dialect"], "us");
+    assert_eq!(forms[1]["form_type"], "base");
+    assert_eq!(
+        forms[0]["sense_ids"],
+        json!([pos["senses"][0]["id"], pos["senses"][1]["id"]])
+    );
+    assert_eq!(forms[2]["sense_ids"], json!([pos["senses"][1]["id"]]));
+    assert!(!full.1.to_string().contains("PRIVATE ACTUAL"));
+    assert!(!full.1.to_string().contains("ADMIN PRIVATE"));
+    sqlx::query("UPDATE catalog.form_types SET name_zh='原形新标签' WHERE code='base'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let renamed = call(&state, &auth, "GET", &full_path, Value::Null).await;
+    assert_eq!(
+        renamed.1["items"][0]["entry"]["pos"][0]["forms"][0]["label"],
+        "原形新标签"
+    );
+    for (page, expected) in [(1, a), (2, same), (3, z)] {
+        let sorted = call(
+            &state,
+            &auth,
+            "GET",
+            &format!("{path}/items?sort=label_asc&page_size=1&page={page}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(sorted.0, StatusCode::OK, "{}", sorted.1);
+        assert_eq!(sorted.1["items"][0]["entry_id"], json!(expected));
+        assert_eq!(sorted.1["revision"], 1);
+    }
+    let filtered = call(
+        &state,
+        &auth,
+        "GET",
+        &format!("{path}/items?sort=label_desc&q=app&page_size=1&page=2"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(filtered.1["items"][0]["entry_id"], json!(same));
+    let edit = call(&state, &auth, "GET", &format!("{path}/edit"), Value::Null).await;
+    assert_eq!(edit.1["entry_ids"], json!([z, a, same]));
+    assert_eq!(edit.1["wordlist"]["revision"], 1);
+    sqlx::query("UPDATE lexicon.entries SET archived_at=clock_timestamp() WHERE id=$1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let archived = call(
+        &state,
+        &auth,
+        "GET",
+        &format!("{path}/items?view=full&sort=label_asc"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(archived.1["items"][2]["entry_id"], json!(a));
+    assert!(archived.1["items"][2]["entry"].is_null());
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "GET",
+            &format!("{path}/items?sort=unknown"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}

@@ -54,7 +54,7 @@ mod annotations;
 mod dictionary_suggestions;
 mod editing;
 mod entry;
-mod form_senses;
+pub(crate) mod form_senses;
 pub(crate) mod grammar_form_links;
 mod helpers;
 mod inbound_references;

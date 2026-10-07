@@ -201,6 +201,8 @@ use utoipa::{
     ),
     components(
         schemas(
+            crate::wordlists::dto::WordlistView,
+            crate::wordlists::dto::WordlistSort,
             crate::avatar::dto::AvatarUploadRequest,
             crate::avatar::dto::AvatarConfirmRequest,
             crate::avatar::dto::AvatarUpload,
@@ -1703,6 +1705,40 @@ mod tests {
                 .is_object()
         );
         assert!(request["security"].is_array() && confirm["security"].is_array());
+    }
+
+    #[test]
+    fn wordlist_reading_query_enums_are_registered_and_optional() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        for path in [
+            "/api/v1/wordlists/{id}/items",
+            "/api/v1/me/wordlists/{id}/items",
+        ] {
+            let params = doc["paths"][path]["get"]["parameters"].as_array().unwrap();
+            for (name, schema, values) in [
+                (
+                    "view",
+                    "WordlistView",
+                    serde_json::json!(["standard", "full"]),
+                ),
+                (
+                    "sort",
+                    "WordlistSort",
+                    serde_json::json!(["author", "label_asc", "label_desc"]),
+                ),
+            ] {
+                let param = params.iter().find(|p| p["name"] == name).unwrap();
+                assert_eq!(param["required"], false);
+                assert_eq!(
+                    param["schema"]["$ref"],
+                    format!("#/components/schemas/{schema}")
+                );
+                assert_eq!(
+                    doc["components"]["schemas"][schema]["enum"], values,
+                    "{path}: unresolved or incorrect {schema}"
+                );
+            }
+        }
     }
 
     #[test]

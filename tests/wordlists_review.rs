@@ -261,7 +261,7 @@ async fn private_drafts_are_not_discovered_and_live_publications_never_leak_arch
         &state,
         &auth,
         "GET",
-        &format!("/api/v1/wordlists/{id}/items"),
+        &format!("/api/v1/wordlists/{id}/items?view=full"),
         Value::Null,
     )
     .await;
@@ -275,8 +275,8 @@ async fn private_drafts_are_not_discovered_and_live_publications_never_leak_arch
         .await
         .unwrap();
     for route in [
-        format!("/api/v1/wordlists/{id}/items"),
-        format!("{path}/items"),
+        format!("/api/v1/wordlists/{id}/items?view=full"),
+        format!("{path}/items?view=full"),
     ] {
         let data = call(&state, &auth, "GET", &route, Value::Null).await;
         assert_eq!(data.0, StatusCode::OK);
@@ -292,6 +292,29 @@ async fn private_drafts_are_not_discovered_and_live_publications_never_leak_arch
     )
     .await;
     assert!(audit.1["items"][0]["entry"].is_null());
+    sqlx::query("UPDATE lexicon.entries SET archived_at=NULL WHERE id=$1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let restored = call(
+        &state,
+        &auth,
+        "GET",
+        &format!("/api/v1/wordlists/{id}/items?view=full"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(restored.0, StatusCode::OK);
+    assert_eq!(
+        restored.1["items"][0]["entry"]["label"],
+        "updated publication"
+    );
+    assert!(!restored.1.to_string().contains("private_note"));
+    assert_eq!(
+        restored.1["items"][0]["entry"]["pos"][0]["forms"],
+        json!([])
+    );
 }
 
 #[sqlx::test]

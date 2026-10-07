@@ -61,3 +61,49 @@ pub async fn admin_call(
     let data = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&data).unwrap_or(Value::Null))
 }
+
+/// A published read fixture with multiple bases, dialects and dedicated sense bindings.
+pub async fn full_entry(pool: &PgPool, label: &str) -> Uuid {
+    let id = entry(pool, label).await;
+    let mut snapshot: Value = sqlx::query_scalar("SELECT p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(pool).await.unwrap();
+    let rich = |text: &str| json!({"version":1,"text":text,"spans":[],"liaisons":[]});
+    let pronunciation = |text: &str| json!({"id":Uuid::now_v7(),"dict_phonetic":text,"dict_phonetic_rich":rich(text),"actual_pron":"PRIVATE ACTUAL","style":"normal"});
+    let regional = |dialect: &str, spelling: &str, sounds: Vec<Value>| json!({"id":Uuid::now_v7(),"dialect":dialect,"spelling":spelling,"origin":"manual","pronunciations":sounds});
+    let base = Uuid::now_v7();
+    let alternate = Uuid::now_v7();
+    let plural = Uuid::now_v7();
+    let general = Uuid::now_v7();
+    let dedicated = Uuid::now_v7();
+    snapshot["forms"]["pos"][0]["forms"] = json!([
+        {"id":base,"form_type":"base","regional_variants":{"mode":"uk_us","uk":regional("uk",label,vec![pronunciation("/riːd/"),pronunciation("/red/")]),"us":regional("us",label,vec![pronunciation("ɹiːd")])}},
+        {"id":alternate,"form_type":"base","regional_variants":{"mode":"uk_us","uk":regional("uk","alternate-base",vec![pronunciation("ɔːlt")]),"us":regional("us","alternate-base",vec![pronunciation("ɔlt")])}},
+        {"id":plural,"form_type":"plural","regional_variants":{"mode":"common","common":regional("common","dedicated-plural",vec![pronunciation("plʊərəl")])}}
+    ]);
+    let group = |id: Uuid, scope: &str, forms: &[Uuid]| json!({"id":id,"scope":scope,"is_regular":true,"dialect_rules":{"spelling_mode":"unified","phonetic_mode":if scope == "general" { "distinguish" } else { "unified" }},"members":forms.iter().map(|form|json!({"id":Uuid::now_v7(),"form_id":form})).collect::<Vec<_>>()});
+    snapshot["forms"]["pos"][0]["form_groups"] = json!([
+        group(general, "general", &[base, alternate]),
+        group(dedicated, "dedicated", &[plural])
+    ]);
+    snapshot["meanings"]["pos"][0]["senses"][0]["sub_pos"] = json!("N-COUNT");
+    let mut second = snapshot["meanings"]["pos"][0]["senses"][0].clone();
+    second["id"] = json!(Uuid::now_v7());
+    second["form_group_ids"] = json!([dedicated]);
+    second["definitions"][0]["id"] = json!(Uuid::now_v7());
+    second["definitions"][0]["content_id"] = json!(Uuid::now_v7());
+    second["definitions"][0]["content"] = rich("专用词义");
+    snapshot["meanings"]["pos"][0]["senses"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    let _: tsz_rust::lexicon::dto::AdminWordV3 = serde_json::from_value(snapshot.clone()).unwrap();
+    let publisher = admin(pool).await;
+    let publication = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entry_publications(id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id) VALUES($1,$2,2,2,3,$3,$4,$5)").bind(publication).bind(id).bind(snapshot).bind(publication.as_bytes().to_vec()).bind(publisher).execute(pool).await.unwrap();
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=$2 WHERE id=$1")
+        .bind(id)
+        .bind(publication)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}

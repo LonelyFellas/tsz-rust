@@ -47,6 +47,37 @@ pub struct WordlistQuery {
     #[param(minimum = 1, maximum = 100, default = 50)]
     pub page_size: Option<u32>,
 }
+#[derive(Debug, Clone, Copy, Default, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WordlistView {
+    #[default]
+    Standard,
+    Full,
+}
+#[derive(Debug, Clone, Copy, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WordlistSort {
+    #[default]
+    Author,
+    LabelAsc,
+    LabelDesc,
+}
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in=Query)]
+pub struct WordlistItemsQuery {
+    #[param(max_length = 100)]
+    pub q: Option<String>,
+    #[param(minimum = 1, default = 1)]
+    pub page: Option<u32>,
+    #[param(minimum = 1, maximum = 100, default = 50)]
+    pub page_size: Option<u32>,
+    /// Full explicitly opts into form data; omitted preserves the standard wire shape.
+    #[serde(default)]
+    pub view: WordlistView,
+    #[serde(default)]
+    pub sort: WordlistSort,
+}
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWordlistItem {
@@ -116,6 +147,9 @@ pub struct WordlistDefinition {
 #[serde(deny_unknown_fields)]
 pub struct WordlistSense {
     pub id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub sub_pos_label: Option<String>,
     pub sub_pos: String,
     pub level: String,
     pub definitions: Vec<WordlistDefinition>,
@@ -130,9 +164,42 @@ pub struct WordlistGrammar {
 #[serde(deny_unknown_fields)]
 pub struct WordlistPos {
     pub pos_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub label: Option<String>,
     pub pos: String,
     pub senses: Vec<WordlistSense>,
     pub grammar_structures: Vec<WordlistGrammar>,
+    /// Present only when the reader explicitly requests view=full.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub forms: Option<Vec<WordlistForm>>,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistPronunciation {
+    pub id: Uuid,
+    pub dict_phonetic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub dict_phonetic_rich: Option<RichTextV3>,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistFormVariant {
+    pub id: Uuid,
+    pub dialect: Dialect,
+    pub spelling: String,
+    pub pronunciations: Vec<WordlistPronunciation>,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistForm {
+    pub id: Uuid,
+    pub form_type: String,
+    pub label: String,
+    pub sense_ids: Vec<Uuid>,
+    pub variants: Vec<WordlistFormVariant>,
 }
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

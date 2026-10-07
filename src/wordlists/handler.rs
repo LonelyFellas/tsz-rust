@@ -75,19 +75,20 @@ pub async fn my_detail(
     Ok(Json(service::read(&state.pool, id, Some(&auth)).await?))
 }
 
-#[utoipa::path(get,path="/api/v1/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistQuery),
+#[utoipa::path(get,path="/api/v1/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery),
 responses((status=200,description="当前发布内容；不可用条目不返回历史内容",body=WordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
 pub async fn public_items(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<Uuid>,
-    ApiQuery(query): ApiQuery<WordlistQuery>,
+    ApiQuery(query): ApiQuery<WordlistItemsQuery>,
 ) -> Result<Json<WordlistItems>, AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let list = service::read_lock(&mut tx, id, None).await?;
     let (rows, pagination) = service::item_rows(&mut tx, id, &query).await?;
-    let mut entries = service::read_entries(
+    let mut entries = service::read_entries_view(
         &mut tx,
         &rows.iter().map(|r| r.entry_id).collect::<Vec<_>>(),
+        query.view,
     )
     .await?;
     let items = rows
@@ -107,20 +108,21 @@ pub async fn public_items(
     }))
 }
 
-#[utoipa::path(get,path="/api/v1/me/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistQuery),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/me/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery),security(("bearer_auth"=[])),
 responses((status=403,description="需要先绑定手机号"),(status=200,description="当前发布内容；不可用条目不返回历史内容",body=MyWordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
 pub async fn my_items(
     State(state): State<AppState>,
     auth: AuthUser,
     ApiPath(id): ApiPath<Uuid>,
-    ApiQuery(query): ApiQuery<WordlistQuery>,
+    ApiQuery(query): ApiQuery<WordlistItemsQuery>,
 ) -> Result<Json<MyWordlistItems>, AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let list = service::read_lock(&mut tx, id, Some(&auth)).await?;
     let (rows, pagination) = service::item_rows(&mut tx, id, &query).await?;
-    let mut entries = service::read_entries(
+    let mut entries = service::read_entries_view(
         &mut tx,
         &rows.iter().map(|r| r.entry_id).collect::<Vec<_>>(),
+        query.view,
     )
     .await?;
     let items = rows
