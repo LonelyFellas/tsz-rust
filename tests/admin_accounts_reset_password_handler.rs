@@ -127,13 +127,32 @@ async fn reset_revokes_every_session_of_the_target(pool: PgPool) {
     let actor = seed_admin(&pool, AdminRole::SuperAdmin, "hashed-pw", false).await;
     let target = seed_admin(&pool, AdminRole::Admin, "old-hash", false).await;
     let bystander = seed_admin(&pool, AdminRole::Admin, "old-hash", false).await;
-    issue_session(&pool, target).await;
+    let sessions = AdminSessionService::new(
+        AdminRefreshTokenRepository::new(pool.clone()),
+        Duration::days(7),
+    );
+    let first = sessions.issue(&target, 0).await.unwrap();
+    let second = sessions.issue(&target, 0).await.unwrap();
+    let old_access = token(&state, target, AdminRole::Admin);
     issue_session(&pool, bystander).await;
     let bearer = token(&state, actor, AdminRole::SuperAdmin);
 
     let (status, body) = reset(&state, target, Some(&bearer)).await;
 
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(sessions.rotate(&first.plaintext).await.is_err());
+    assert!(sessions.rotate(&second.plaintext).await.is_err());
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/profile")
+                .header(header::AUTHORIZATION, format!("Bearer {old_access}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         active_session_count(&pool, target).await,
         0,
@@ -258,6 +277,7 @@ async fn own_password_change_revokes_access_refresh_and_preserves_raw_password(p
         Duration::days(7),
     );
     let old_refresh = session.issue(&id, 0).await.unwrap();
+    let second_refresh = session.issue(&id, 0).await.unwrap();
     let response = tsz_rust::router(state.clone())
         .oneshot(
             Request::builder()
@@ -288,6 +308,7 @@ async fn own_password_change_revokes_access_refresh_and_preserves_raw_password(p
     );
     assert_eq!(active_session_count(&pool, id).await, 0);
     assert!(session.rotate(&old_refresh.plaintext).await.is_err());
+    assert!(session.rotate(&second_refresh.plaintext).await.is_err());
     let after = AdminRepository::new(pool.clone())
         .get_by_id(&id)
         .await

@@ -144,7 +144,7 @@ pub struct AdminRefreshResponse {
     responses(
         (status = 200, description = "轮换成功，返回新 access token；新 refresh token 经 Set-Cookie 下发", body = AdminRefreshResponse,
             headers(("Set-Cookie" = String, description = "轮换出的新 admin_refresh_token cookie"))),
-        (status = 401, description = "refresh token 缺失、无效、已过期或重放"),
+        (status = 401, description = "refresh token 缺失、无效、已撤销、已过期或重放"),
         (status = 403, description = "账号被禁用"),
         (status = 423, description = "账号被临时锁定"),
     )
@@ -240,7 +240,7 @@ pub struct AdminLoginResponse {
     tag = "admin",
     request_body = AdminLoginRequest,
     responses(
-        (status = 200, description = "登录成功，返回管理员档案与令牌", body = AdminLoginResponse,
+        (status = 200, description = "登录成功，返回管理员档案与令牌；保留其他设备会话", body = AdminLoginResponse,
             headers(("Set-Cookie" = String,
                 description = "admin_refresh_token cookie（HttpOnly; SameSite=Lax; Path=/api/v1/admin/auth; Max-Age=refresh TTL 秒）"))),
         (status = 400, description = "手机号格式非法"),
@@ -306,14 +306,14 @@ pub async fn admin_logout(
 /// 除了改密之外，唯一的出口就是把自己全部登出（设计 §7）。
 ///
 /// 目标按 access token 的 subject 判定，不读 refresh cookie：调用者可能压根没带
-/// 有效 cookie。幂等——本来就没有活跃会话时同样 204。
+/// 有效 cookie。成功后旧 access token 也失效；用旧 Bearer 重试返回 401。
 #[utoipa::path(
     post,
     path = "/api/v1/admin/auth/logout-all",
     tag = "admin",
     security(("bearer_auth" = [])),
     responses(
-        (status = 204, description = "该管理员的全部会话已吊销（幂等）；附清除 admin_refresh_token 的 Set-Cookie",
+        (status = 204, description = "该管理员的全部 access/refresh 会话已吊销；旧 Bearer 重试返回 401；附清除 admin_refresh_token 的 Set-Cookie",
             headers(("Set-Cookie" = String, description = "清除 admin_refresh_token 的 cookie（Max-Age=0）"))),
         (status = 401, description = "缺少/无效/过期 token"),
         (status = 500, description = "数据库更新失败"),
@@ -325,7 +325,7 @@ pub async fn admin_logout_all(
     auth: AdminAuth,
 ) -> Result<impl IntoResponse, AppError> {
     admin_session_svc(&state)
-        .logout_all(&auth.subject)
+        .logout_all(&auth.subject, auth.security_version)
         .await
         .map_err(map_admin_session_error)?;
 
@@ -463,7 +463,7 @@ fn admin_session_svc(state: &AppState) -> AdminSessionService {
     )
 }
 
-/// 签发一枚新 admin refresh（落库，Q1 会先清场旧会话）并挂上 cookie。
+/// 签发一枚新 admin refresh（落库，保留其他设备会话）并挂上 cookie。
 /// refresh 轮换**不**走这里——新枚由 `rotate` 原子产出，handler 只管装 cookie。
 async fn issue_admin_refresh_cookie(
     state: &AppState,

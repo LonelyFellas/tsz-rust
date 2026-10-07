@@ -32,7 +32,7 @@
 | 2 | 第二把 JWT 密钥 `ADMIN_JWT_SECRET`(必填),`TokenManager::new(secret, Realm::Admin, ttl)` 第二实例 | 双防线 = per-realm secret + aud 校验;`Realm::Admin` 枚举早已就位 |
 | 3 | 两级 `super_admin`/`admin`,列/枚举/wire 统一命名 **`role`**(单一身份,非 web 的多角色;RBAC 已取消无撞车) | super 是治理顶点:仅 seed 可造、不可被启禁用/重置;与 JWT claim 名天然一致 |
 | 4 | refresh cookie:`admin_refresh_token`,`Path=/api/v1/admin`,SameSite=**Strict** | 名字+Path 与 web cookie 双向隔离;后台无跨站跳转需求,比 web 的 Lax 更严 |
-| 5 | 会话策略:**严格单登录**——issue 前 `revoke_all`(Q1 已定) | go 侧语义;后台账号不该多处同时在线 |
+| 5 | 会话策略:**多端独立登录**(2026-10-07 替代 Q1) | 新登录保留其他会话；保留 Q8 绝对刷新期限 |
 | 6 | 轮换/重放语义**复刻 tsz-rust web 侧**(CAS 原子轮换 + 20s 宽限不铸币 + 窗口外连坐),不照搬 go 的「宽限内铸新币」 | 同一套已验证的模式;前端 refresh 已 single-flight,不需要铸币宽限 |
 | 7 | 账号锁定:连续失败 5 次锁 15 分钟,锁定态 **423**(区别于 401),成功清零、自动解锁(hardening-D8) | 挡分布式低频撞库;423 的轻微枚举 oracle 已知且接受(admin 账号极少) |
 | 8 | must_change_password = DB 列 + **逐请求查库的守卫**(非 token claim),白名单仅 change-password/logout/logout-all(hardening-D6) | 重置后即时生效,零 TTL 滞后 |
@@ -50,7 +50,7 @@ go 迁移注释原文:admins 是「与 users 完全独立的后台身份库」�
 
 - 爆炸半径隔离:C 端任何漏洞(如 OTP 逻辑)不可能变成后台提权入口;
 - 生命周期不同:web 用户自助注册、多角色可切换;admin 由超管 provision、单一 role、强制改密;
-- 会话策略不同:web 多设备,admin 严格单登录。
+- 两端均支持多设备；admin 保留独立的绝对刷新期限与账号全端撤销。
 
 `role` 语义(account-D1/D2;Q10 后无权限委派,两级即全部):
 
@@ -119,7 +119,7 @@ CREATE UNIQUE INDEX admin_refresh_tokens_hash ON admin_refresh_tokens (token_has
 - `AdminRefreshTokenRepository`(具体 struct,方法集 = web 版:`insert/find_by_hash/consume_and_insert/revoke_by_hash/revoke_all_by_admin_id`),SQL 打 `admin_refresh_tokens`。**不抽 trait 泛化**:`query!` 宏要静态 SQL,表名进不了参数;5 个方法的复制是最地道的解。
 - `AdminSessionService`:同 web `SessionService`(哈希私有、`peek_admin_id`、宽限窗口 20s 硬编码镜像测试常量)。
 - **与 go 的刻意偏离**:go 宽限窗口(60s)内的诚实重放会**铸一枚新 token**(N 个 tab 竞速留 N 枚活 token);我们沿 web 侧语义——窗口内只回 401 不铸币、不连坐。代价:丢响应后重试会要求重登。admin 前端已做 single-flight 去重 + StrictMode 单飞,常规竞速根本到不了后端,此代价可接受。宽限秒数也随 web 用 20s(go 60s)。(Q2 已定)
-- **严格单登录**(Q1 已定):`issue` 前先 `revoke_all_by_admin_id`——go 语义「Issue 先 RevokeAll 再发新」。web 侧多设备,admin 侧后台账号异地同时在线本身就是异常。
+- **多端独立登录**(2026-10-07 替代 Q1)：签发持有账号行锁，核对 active 与认证时的 security_version 后插入，不吊销其他会话。普通退出只撤销当前 refresh；全部退出同事务递增 security_version 并撤销全部 refresh，旧 Bearer 重试返回 401。禁用同样原子撤销，重新启用不恢复旧登录；改密/重置继续全端失效。
 - cookie:名 `admin_refresh_token`,`HttpOnly; SameSite=Strict; Path=/api/v1/admin`(= `ADMIN_MOUNT` 常量,下发与清除同源,沿用 web 侧「挂载前缀单一事实来源」惯例),`Max-Age` = admin refresh TTL,`Secure` 共用 `cookie_secure` 配置。helper 平行复刻:`admin_session_service(state)` / `issue_admin_refresh_cookie(...)` / `admin_refresh_cookie(token, state)`。
 - refresh 编排照搬 web 侧「轮换压轴」次序:peek → 查 admin → status 检查(disabled ⇒ 与无效 token 不可区分的 401)→ 签 access → **rotate 压轴** → 组装。服务端瞬时故障不烧客户端凭证。
 - **绝对会话上限 7 天(Q8,与 web 滑动语义刻意相反)**:`issue`(仅 login 调)时 `expires_at = now + 7d`;`rotate` 的新枚 **继承被消费旧枚的 expires_at,不重算**——轮换只换凭证不续命,`expires_at` 事实上成为「本次登录的绝对死线」。到期后 refresh 走既有过期分支 401 ⇒ 前端跳登录,重走 2FA。实现落点:admin 版 `consume_and_insert` **不收 expires_at 参数**,CTE 单条 SQL 里 `UPDATE ... RETURNING admin_id, expires_at` 再把该 expires_at 直接喂给 INSERT(继承在 DB 层原子完成,service 无法传错)。连带两点:①响应的 `refresh_token_expires_at` 在整个会话期恒定不变(前端可据此做「即将到期」提示);②refresh 下发的新 cookie `Max-Age` 应设为**剩余寿命**(`expires_at - now`)而非满血 7 天,否则 cookie 活得比 token 久(无害但不洁——过期 cookie 只会换来 401)。
@@ -144,7 +144,7 @@ phone 归一化(trim)→ get_by_phone;NotFound ⇒ InvalidCredentials(不可区�
               反而成了密码爆破的确认 oracle**(拿垃圾码试密码,看报错就知道密码对没对)
        Store 错(Redis 挂)⇒ 503 fail-close
   → ⑤ clear_failed_logins(有残留才写)
-  → ⑥ 签 access + issue refresh(单登录:先 revoke_all)——cookie 压轴,可失败步骤全在前
+  → ⑥ 签 access + issue refresh(账号行锁下校验 active/安全版本，保留其他会话)——cookie 压轴,可失败步骤全在前
   → 200,body 含 must_change_password(登录本身不拦,由守卫拦其余端点)
 ```
 
@@ -194,7 +194,7 @@ repository 层两个原子方法(hardening-D8,单条 UPDATE 无 read-modify-writ
 | `PATCH /admins/{id}/status` | ✓,返回更新后 Admin | 403 "cannot change a super admin's status" |
 | `POST /admins/{id}/reset-password` | ✓,返回一次性临时密码 | 403 "cannot reset a super admin"(含 super 重置自己) |
 
-**reset 副作用链的顺序有讲究**(hardening-D5):先 `revoke_all`(踢目标全部会话)再 `set_password(hash, must_change=true)`。两步不共事务:revoke 成功而 set 失败 = 目标被登出但旧密码仍可登录,自愈;**反序**则可能出现「会话没踢、临时密码没人知道」的死锁窗口。
+**reset 安全事务**：密码更新、security_version 递增与全部 refresh 撤销同事务提交，失败整体回滚；所有旧 access / refresh 失效。
 
 **provision**:phone 必填(5–20)、display_name 必填(1–50,trim,拒 `<>`/控制符/Cf——约束与 web `DisplayName::parse` 高度重合,实现时评估直接复用);**无 email(Q9)**;判重**不先查**、直接 insert 靠唯一索引 + 23505 映射 409(user 域同哲学);置 must_change=true(列默认即 true,显式写更稳);201 返 `{admin, temporary_password}`。
 
@@ -364,7 +364,7 @@ config 新增:
 
 ## 18. 决策记录(Q1–Q6 已定,2026-07-19)
 
-- **Q1 单登录:定案「严格单登录」**——admin issue 前 `revoke_all_by_admin_id`(go 语义,后台账号不允许多处在线)。
+- **Q1 历史决策（2026-07-19）：「严格单登录」**——曾在 issue 前撤销其他 refresh。**2026-10-07 已由 Admin 多端登录需求替代**：同账号多端独立登录，保留 Q8 绝对刷新期限；全端退出、改密、禁用通过安全版本与 refresh 撤销使旧凭证失效。
 - **Q2 宽限语义:定案「沿 web 侧」**——20s 内 401 不铸币不连坐,窗口外 revoke_all 连坐(§15 偏离 1 成立)。
 - **Q3 AppError 扩展:定案「全局加」**——`Locked(String)` → 423 + 带 `code` 的 403/400 变体(通用能力,web 侧将来也用得上)。
 - **Q4 profile 过渡期 permissions:定案「返回死数据」**——一、二期恒返全量目录 key(前端菜单全开,= go backfill 零行为变化语义);三期接真 RBAC 表。
