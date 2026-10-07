@@ -1158,8 +1158,18 @@ fn validate_variant(
             let mut candidates = vec![("synthesis", synthesis, complete && !dual, dialect)];
             if dual {
                 candidates.extend([
-                    ("synthesis.uk", &uk, complete, Dialect::Uk),
-                    ("synthesis.us", &us, complete, Dialect::Us),
+                    (
+                        "synthesis.uk",
+                        &uk,
+                        complete && matches!(dialect, Dialect::Common | Dialect::Uk),
+                        Dialect::Uk,
+                    ),
+                    (
+                        "synthesis.us",
+                        &us,
+                        complete && matches!(dialect, Dialect::Common | Dialect::Us),
+                        Dialect::Us,
+                    ),
                 ]);
             }
             for (prefix, synthesis, complete, dialect) in candidates {
@@ -2708,6 +2718,37 @@ mod tests {
         );
         raw.pointer_mut(path).unwrap()["us"]["unexpected"] = json!(true);
         assert!(decode_v3_forms_request::<SaveFormsStepInputV3>(raw).is_err());
+    }
+
+    #[test]
+    fn synthesis_regional_variants_require_only_their_own_accent() {
+        let mut raw = valid_request();
+        raw["content"]["pos"][0]["forms"][0]["regional_variants"] = uk_us_regional_variants(
+            "019d2a80-0000-7000-8000-000000000003",
+            "019d2a80-0000-7000-8000-000000000004",
+            "019d2a80-0000-7000-8000-000000000007",
+            "019d2a80-0000-7000-8000-000000000008",
+        );
+        raw["content"]["pos"][0]["form_groups"][0]["dialect_rules"] =
+            json!({"spelling_mode":"distinguish", "phonetic_mode":"distinguish"});
+        let regional = &mut raw["content"]["pos"][0]["forms"][0]["regional_variants"];
+        regional["uk"]["pronunciations"][0]["synthesis"] = json!({
+            "alphabet":"ipa", "use_spelling":false, "ipa":"", "ups":"",
+            "uk":{"ipa":"kʌlə", "ups":"K AH L AH"}
+        });
+        regional["us"]["pronunciations"][0]["synthesis"] = json!({
+            "alphabet":"ipa", "use_spelling":false, "ipa":"", "ups":"",
+            "us":{"ipa":"kʌlɚ", "ups":"K AH L ER"}
+        });
+        let issues = validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete);
+        assert!(issues.is_empty(), "{issues:?}");
+        raw["content"]["pos"][0]["forms"][0]["regional_variants"]["us"]["pronunciations"][0]["synthesis"]
+            ["us"]["ipa"] = json!("");
+        assert!(
+            validate_forms(&decode_valid(raw).content, StepSaveIntent::Complete)
+                .iter()
+                .any(|issue| issue.field == "synthesis.us.ipa")
+        );
     }
 
     #[test]
