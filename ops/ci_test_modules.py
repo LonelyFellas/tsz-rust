@@ -33,6 +33,7 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
         "wordlists_*",
         "learning_tasks_*",
         "learning_runs_*",
+        "learning_rewards_*",
         "lexicon_*",
         "sentence_*",
         "shared_sentences",

@@ -13,6 +13,7 @@ use axum::{
 use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/v1/me/coins/learning-rewards", get(reward_day))
         .route("/api/v1/me/learning-tasks/preview", post(preview))
         .route("/api/v1/me/learning-tasks", get(list).post(create))
         .route("/api/v1/me/learning-tasks/{id}", get(detail).patch(rename))
@@ -27,6 +28,14 @@ pub fn router() -> Router<AppState> {
             get(get_questions),
         )
         .route("/api/v1/me/learning-runs/{id}/answers", post(answer))
+}
+#[utoipa::path(get,path="/api/v1/me/coins/learning-rewards",tag="learning_tasks",security(("bearer_auth"=[])),params(LearningRewardQuery),responses((status=200,description="本人业务日奖励",body=LearningRewardDay),(status=400,description="日期无效"),(status=401,description="会话失效"),(status=403,description="需要已绑定手机的学生资格"),(status=409,description="需要学习设置")))]
+pub async fn reward_day(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ApiQuery(query): ApiQuery<LearningRewardQuery>,
+) -> Result<Json<LearningRewardDay>, AppError> {
+    Ok(Json(super::rewards::day(&state.pool, &auth, query).await?))
 }
 #[utoipa::path(post,path="/api/v1/me/learning-tasks/preview",tag="learning_tasks",security(("bearer_auth"=[])),request_body=PreviewLearningTask,responses((status=200,description="本人学习事实",body=LearningPreview),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="需要已绑定手机的学生资格"),(status=404,description="资源不存在"),(status=409,description="版本、请求键、轮次或来源冲突"),(status=422,description="JSON不符合契约")))]
 pub async fn preview(

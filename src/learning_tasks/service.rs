@@ -535,12 +535,14 @@ pub async fn answer(
     .await
     .map_err(AppError::internal)?;
     if answered == i64::from(row.target_count) {
-        sqlx::query("INSERT INTO learning_completions(id,run_id,task_id,user_id,task_type,business_day,task_revision,target_count,answered_count,correct_count,completed_at,generation_version,grading_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)").bind(Uuid::now_v7()).bind(id).bind(task_id).bind(auth.subject).bind(row.task_type).bind(row.business_day).bind(row.task_revision).bind(row.target_count).bind(answered as i32).bind(correct_count as i32).bind(at).bind(&row.generation_version).bind(&row.grading_version).execute(&mut *tx).await.map_err(AppError::internal)?;
+        let completion_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO learning_completions(id,run_id,task_id,user_id,task_type,business_day,task_revision,target_count,answered_count,correct_count,completed_at,generation_version,grading_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)").bind(completion_id).bind(id).bind(task_id).bind(auth.subject).bind(row.task_type).bind(row.business_day).bind(row.task_revision).bind(row.target_count).bind(answered as i32).bind(correct_count as i32).bind(at).bind(&row.generation_version).bind(&row.grading_version).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("UPDATE learning_runs SET state='completed' WHERE id=$1")
             .bind(id)
             .execute(&mut *tx)
             .await
             .map_err(AppError::internal)?;
+        super::rewards::settle_completion_in(&mut tx, completion_id).await?;
     }
     // Source owners can cross their deletion deadline while locks are held.
     let final_access = sources_for_questions(&mut tx, auth, &lists, &qs).await?;

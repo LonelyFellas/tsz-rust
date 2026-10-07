@@ -2,6 +2,12 @@ use sqlx::PgPool;
 #[sqlx::test]
 async fn empty_down_up_roundtrip(pool: PgPool) {
     sqlx::raw_sql(include_str!(
+        "../migrations/20261007020000_learning_rewards.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20261007010000_learning_tasks.down.sql"
     ))
     .execute(&pool)
@@ -13,7 +19,7 @@ async fn empty_down_up_roundtrip(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let tables:i64=sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'learning_%'").fetch_one(&pool).await.unwrap();
+    let tables:i64=sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('learning_tasks','learning_runs','learning_questions','learning_answers','learning_completions','learning_run_start_requests')").fetch_one(&pool).await.unwrap();
     assert_eq!(tables, 6);
 }
 
