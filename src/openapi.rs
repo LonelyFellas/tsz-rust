@@ -33,6 +33,18 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::learning_tasks::handler::preview,
+        crate::learning_tasks::handler::create,
+        crate::learning_tasks::handler::list,
+        crate::learning_tasks::handler::detail,
+        crate::learning_tasks::handler::rename,
+        crate::learning_tasks::handler::archive,
+        crate::learning_tasks::handler::start,
+        crate::learning_tasks::handler::history,
+        crate::learning_tasks::handler::get_run,
+        crate::learning_tasks::handler::get_questions,
+        crate::learning_tasks::handler::answer,
+
         crate::wordlists::tips::receipt,
         crate::wordlists::tips::create,
         crate::wordlists::tips::history,
@@ -201,6 +213,7 @@ use utoipa::{
     ),
     components(
         schemas(
+            crate::learning_tasks::dto::LearningTaskState,
             crate::wordlists::dto::WordlistView,
             crate::wordlists::dto::WordlistSort,
             crate::avatar::dto::AvatarUploadRequest,

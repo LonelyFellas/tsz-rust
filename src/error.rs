@@ -39,6 +39,11 @@ pub enum ErrorCode {
     InvalidDisplayName,
     InvalidOtpCode,
     InvalidInvitationCode,
+    LearningTaskConflict,
+    LearningRunUnavailable,
+    LearningSettingsRequired,
+    LearningInsufficientQuestions,
+    LearningAlreadyAnswered,
     WordListConflict,
     WordListEntryUnavailable,
     InvalidCredentials,
@@ -152,7 +157,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 129] = [
+    pub const ALL: [Self; 134] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -181,6 +186,11 @@ impl ErrorCode {
         Self::InvalidDisplayName,
         Self::InvalidOtpCode,
         Self::InvalidInvitationCode,
+        Self::LearningTaskConflict,
+        Self::LearningRunUnavailable,
+        Self::LearningSettingsRequired,
+        Self::LearningInsufficientQuestions,
+        Self::LearningAlreadyAnswered,
         Self::WordListConflict,
         Self::WordListEntryUnavailable,
         Self::InvalidCredentials,
@@ -436,6 +446,31 @@ impl ErrorCode {
                 "invalid_display_name",
                 "Invalid display name",
                 StatusCode::BAD_REQUEST,
+            ),
+            Self::LearningTaskConflict => (
+                "learning_task_conflict",
+                "learning_task_conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::LearningRunUnavailable => (
+                "learning_run_unavailable",
+                "learning_run_unavailable",
+                StatusCode::CONFLICT,
+            ),
+            Self::LearningSettingsRequired => (
+                "learning_settings_required",
+                "learning_settings_required",
+                StatusCode::CONFLICT,
+            ),
+            Self::LearningInsufficientQuestions => (
+                "learning_insufficient_questions",
+                "learning_insufficient_questions",
+                StatusCode::CONFLICT,
+            ),
+            Self::LearningAlreadyAnswered => (
+                "learning_already_answered",
+                "learning_already_answered",
+                StatusCode::CONFLICT,
             ),
             Self::WordListConflict => (
                 "word_list_conflict",

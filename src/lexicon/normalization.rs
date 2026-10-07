@@ -74,7 +74,14 @@ pub fn normalize_headword(value: &str) -> Result<NormalizedHeadword, HeadwordNor
         return Err(HeadwordNormalizationError::TooLong);
     }
 
-    let key = display
+    let key = normalize_text_key(&display);
+
+    Ok(NormalizedHeadword { display, key })
+}
+
+/// Same spelling normalization for definition text; no headword input length limit.
+pub(crate) fn normalize_text_key(value: &str) -> String {
+    collapse_whitespace(value.nfkc())
         .chars()
         .map(|character| match character {
             '\u{2018}' | '\u{2019}' | '\u{02bc}' => '\'',
@@ -82,9 +89,7 @@ pub fn normalize_headword(value: &str) -> Result<NormalizedHeadword, HeadwordNor
             other => other,
         })
         .flat_map(char::to_lowercase)
-        .collect();
-
-    Ok(NormalizedHeadword { display, key })
+        .collect()
 }
 
 pub fn sha256_json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {

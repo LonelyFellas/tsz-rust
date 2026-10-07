@@ -122,7 +122,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261006050000;
+    const CURRENT_RELEASE_VERSION: i64 = 20261007010000;
 
     #[sqlx::test]
     async fn coin_release_undo_matches_deployed_phone_schema_and_preserves_new_funds(pool: PgPool) {
