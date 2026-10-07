@@ -8,7 +8,7 @@ use crate::{
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use uuid::Uuid;
 pub type Tx<'a> = Transaction<'a, Postgres>;
 pub fn conflict(message: &str) -> AppError {
@@ -151,6 +151,8 @@ pub struct QuestionRow {
     pub id: Uuid,
     pub position: i32,
     pub source_wordlist_id: Uuid,
+    pub source_membership_id: Uuid,
+    pub source_public_generation: Option<i64>,
     pub entry_id: Uuid,
     pub entry_archive_generation: i64,
     pub prompt_snapshot: serde_json::Value,
@@ -180,9 +182,9 @@ pub async fn answers(tx: &mut Tx<'_>, id: Uuid) -> Result<HashMap<Uuid, AnswerRo
     Ok(rows.into_iter().map(|r| (r.question_id, r)).collect())
 }
 pub struct SourceAccess {
-    pub lists: HashMap<Uuid, i64>,
+    pub lists: HashMap<Uuid, (i64, Option<i64>)>,
     pub entries: HashMap<Uuid, (Uuid, i64, serde_json::Value)>,
-    pub members: HashSet<(Uuid, Uuid)>,
+    pub members: HashMap<(Uuid, Uuid), Uuid>,
     pub ordered: Vec<(Uuid, Uuid)>,
 }
 pub async fn sources(
@@ -207,12 +209,15 @@ async fn source_access(
     ids: &[Uuid],
     fixed_entries: Option<&[Uuid]>,
 ) -> Result<SourceAccess, AppError> {
-    let rows:Vec<(Uuid,Uuid,String,i64)>=sqlx::query_as("SELECT id,owner_user_id,state,revision FROM wordlists WHERE id=ANY($1) ORDER BY id FOR SHARE").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let rows:Vec<(Uuid,Uuid,String,i64,i64)>=sqlx::query_as("SELECT id,owner_user_id,state,revision,learning_public_generation FROM wordlists WHERE id=ANY($1) ORDER BY id FOR SHARE").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     let mut lists = HashMap::new();
-    for (id, owner, state, revision) in rows {
+    for (id, owner, state, revision, generation) in rows {
         let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users u WHERE id=$1 AND status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp()))").bind(owner).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
         if active && (owner == auth.subject || state == "published") {
-            lists.insert(id, revision);
+            lists.insert(
+                id,
+                (revision, (owner != auth.subject).then_some(generation)),
+            );
         }
     }
     let visible_ids: Vec<_> = ids
@@ -220,8 +225,8 @@ async fn source_access(
         .copied()
         .filter(|id| lists.contains_key(id))
         .collect();
-    let members:Vec<(Uuid,Uuid)>=sqlx::query_as("SELECT wordlist_id,entry_id FROM wordlist_items WHERE wordlist_id=ANY($1) AND ($2::uuid[] IS NULL OR entry_id=ANY($2)) ORDER BY array_position($1,wordlist_id),position").bind(visible_ids).bind(fixed_entries).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
-    let mut entry_ids: Vec<_> = members.iter().map(|(_, e)| *e).collect();
+    let members:Vec<(Uuid,Uuid,Uuid)>=sqlx::query_as("SELECT wordlist_id,entry_id,learning_membership_id FROM wordlist_items WHERE wordlist_id=ANY($1) AND ($2::uuid[] IS NULL OR entry_id=ANY($2)) ORDER BY array_position($1,wordlist_id),position").bind(visible_ids).bind(fixed_entries).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let mut entry_ids: Vec<_> = members.iter().map(|(_, e, _)| *e).collect();
     entry_ids.sort();
     entry_ids.dedup();
     if entry_ids.len() > 1000 {
@@ -229,20 +234,27 @@ async fn source_access(
     }
     crate::wordlists::service::lock_entries(tx, &entry_ids, false).await?;
     let entries:Vec<(Uuid,Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT e.id,p.id,e.wordlist_archive_generation,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=ANY($1) AND e.archived_at IS NULL AND p.content_schema_version=3").bind(entry_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    // Entry locks may have waited across an owner's deletion deadline. Project only
+    // after rechecking all owners with the database clock; these account locks are held.
+    let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    lists.retain(|id, _| visible.contains(id));
     Ok(SourceAccess {
         lists,
         entries: entries
             .into_iter()
             .map(|(e, p, g, s)| (e, (p, g, s)))
             .collect(),
-        members: members.iter().copied().collect(),
-        ordered: members,
+        members: members.iter().map(|(l, e, m)| ((*l, *e), *m)).collect(),
+        ordered: members.into_iter().map(|(l, e, _)| (l, e)).collect(),
     })
 }
 impl SourceAccess {
     pub fn available(&self, q: &QuestionRow) -> bool {
-        self.lists.contains_key(&q.source_wordlist_id)
-            && self.members.contains(&(q.source_wordlist_id, q.entry_id))
+        self.lists
+            .get(&q.source_wordlist_id)
+            .is_some_and(|(_, generation)| *generation == q.source_public_generation)
+            && self.members.get(&(q.source_wordlist_id, q.entry_id))
+                == Some(&q.source_membership_id)
             && self
                 .entries
                 .get(&q.entry_id)
@@ -252,15 +264,18 @@ impl SourceAccess {
         self.ordered
             .iter()
             .filter_map(|(list, entry)| {
-                self.lists
-                    .get(list)
-                    .zip(self.entries.get(entry))
-                    .map(|(revision, (p, g, s))| (list, entry, revision, p, g, s))
+                self.lists.get(list).zip(self.entries.get(entry)).map(
+                    |((revision, generation), (p, g, s))| {
+                        (list, entry, revision, generation, p, g, s)
+                    },
+                )
             })
-            .map(|(l, e, r, p, g, s)| {
+            .map(|(l, e, r, generation, p, g, s)| {
                 Ok(LearningSource {
                     wordlist_id: *l,
                     revision: *r,
+                    membership_id: self.members[&(*l, *e)],
+                    public_generation: *generation,
                     entry_id: *e,
                     publication_id: *p,
                     archive_generation: *g,

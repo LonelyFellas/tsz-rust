@@ -219,6 +219,8 @@ async fn candidate_projection_obeys_cefr_context_and_form_relationships(pool: Pg
     let source = |snapshot: Value| LearningSource {
         wordlist_id: list,
         revision: 1,
+        membership_id: Uuid::now_v7(),
+        public_generation: None,
         entry_id: entry,
         archive_generation: generation,
         publication_id: publication,

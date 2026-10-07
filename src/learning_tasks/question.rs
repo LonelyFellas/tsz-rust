@@ -24,6 +24,8 @@ pub struct AnswerSnapshot {
 pub struct Candidate {
     pub source_wordlist_id: Uuid,
     pub source_revision: i64,
+    pub source_membership_id: Uuid,
+    pub source_public_generation: Option<i64>,
     pub entry_id: Uuid,
     pub entry_archive_generation: i64,
     pub publication_id: Uuid,
@@ -38,6 +40,8 @@ pub struct Candidate {
 pub struct LearningSource {
     pub wordlist_id: Uuid,
     pub revision: i64,
+    pub membership_id: Uuid,
+    pub public_generation: Option<i64>,
     pub entry_id: Uuid,
     pub archive_generation: i64,
     pub publication_id: Uuid,
@@ -187,6 +191,8 @@ pub fn build_candidates(
                 pool.candidates.push(Candidate {
                     source_wordlist_id: source.wordlist_id,
                     source_revision: source.revision,
+                    source_membership_id: source.membership_id,
+                    source_public_generation: source.public_generation,
                     entry_id: source.entry_id,
                     entry_archive_generation: source.archive_generation,
                     publication_id: source.publication_id,

@@ -1,3 +1,18 @@
+-- Stable access episodes: renames, notes and unrelated additions do not change them.
+ALTER TABLE wordlists ADD COLUMN learning_public_generation bigint NOT NULL DEFAULT 0 CHECK(learning_public_generation>=0);
+ALTER TABLE wordlist_items ADD COLUMN learning_membership_id uuid NOT NULL DEFAULT gen_random_uuid();
+CREATE FUNCTION advance_learning_public_generation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF OLD.state='published' AND NEW.state<>'published' THEN
+  NEW.learning_public_generation := OLD.learning_public_generation + 1;
+ ELSE
+  NEW.learning_public_generation := OLD.learning_public_generation;
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER learning_public_generation BEFORE UPDATE ON wordlists
+ FOR EACH ROW EXECUTE FUNCTION advance_learning_public_generation();
+
 CREATE TABLE learning_tasks (
  id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
  name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100),
@@ -34,6 +49,7 @@ CREATE INDEX learning_run_history ON learning_runs(task_id,started_at DESC,id DE
 CREATE TABLE learning_questions (
  id uuid PRIMARY KEY, run_id uuid NOT NULL REFERENCES learning_runs(id) ON DELETE CASCADE,
  position integer NOT NULL CHECK(position>=0), source_wordlist_id uuid NOT NULL, source_revision bigint NOT NULL,
+ source_membership_id uuid NOT NULL, source_public_generation bigint,
  entry_id uuid NOT NULL, entry_archive_generation bigint NOT NULL, publication_id uuid NOT NULL,
  pos_id uuid NOT NULL, sense_id uuid NOT NULL, definition_id uuid NOT NULL, form_ids uuid[] NOT NULL,
  unit_key text NOT NULL, prompt_snapshot jsonb NOT NULL, answer_snapshot jsonb NOT NULL, fingerprint bytea NOT NULL,

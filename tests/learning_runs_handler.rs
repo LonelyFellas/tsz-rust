@@ -364,3 +364,165 @@ async fn unrelated_large_append_preserves_run_and_large_pages_do_not_overflow(po
         assert_eq!(r.1["items"], serde_json::json!([]));
     }
 }
+
+#[sqlx::test]
+async fn restored_membership_and_public_access_do_not_revive_old_runs(pool: PgPool) {
+    let (state, owner, list) = setup(&pool).await;
+    let task = create(&state, &owner, list, "longterm").await;
+    let old = start(&state, &owner, &task).await;
+    let entry: uuid::Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(list)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let other = wordlists_support::entry(&pool, "unrelated").await;
+    let edit = |revision, ids: Vec<uuid::Uuid>| serde_json::json!({"expected_revision":revision,"content":{"name":"source","entry_ids":ids},"note_updates":[]});
+    let path = format!("/api/v1/me/wordlists/{list}");
+    assert_eq!(
+        call(&state, &owner, "PUT", &path, edit(1, vec![other]))
+            .await
+            .0,
+        200
+    );
+    let run_path = format!("/api/v1/me/learning-runs/{}", old["id"].as_str().unwrap());
+    assert_eq!(
+        call(&state, &owner, "GET", &run_path, Value::Null).await.1["state"],
+        "invalidated"
+    );
+    assert_eq!(
+        call(&state, &owner, "PUT", &path, edit(2, vec![entry, other]))
+            .await
+            .0,
+        200
+    );
+    let restored = call(&state, &owner, "GET", &run_path, Value::Null).await.1;
+    assert_eq!(
+        restored["state"], "invalidated",
+        "removed/reinserted member revived old run"
+    );
+    let (_, borrower, _) = setup(&pool).await;
+    sqlx::query("UPDATE wordlists SET state='published' WHERE id=$1")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let task = create(&state, &borrower, list, "longterm").await;
+    let old = start(&state, &borrower, &task).await;
+    let own_task = create(&state, &owner, list, "longterm").await;
+    let own = start(&state, &owner, &own_task).await;
+    assert_eq!(
+        call(
+            &state,
+            &owner,
+            "POST",
+            &format!("{path}/withdraw"),
+            serde_json::json!({"expected_revision":3})
+        )
+        .await
+        .0,
+        200
+    );
+    let review = call(
+        &state,
+        &owner,
+        "POST",
+        &format!("{path}/review-requests"),
+        serde_json::json!({"expected_revision":4,"idempotency_key":uuid::Uuid::now_v7()}),
+    )
+    .await;
+    assert_eq!(review.0, 200, "{}", review.1);
+    let admin = wordlists_support::admin(&pool).await;
+    let approved = wordlists_support::admin_call(
+        &state,
+        admin,
+        "POST",
+        &format!(
+            "/api/v1/admin/wordlists/{list}/review-requests/{}/decision",
+            review.1["id"].as_str().unwrap()
+        ),
+        serde_json::json!({"expected_revision":5,"approve":true,"reason":null}),
+    )
+    .await;
+    assert_eq!(approved.0, 200, "{}", approved.1);
+    let run_path = format!("/api/v1/me/learning-runs/{}", old["id"].as_str().unwrap());
+    assert_eq!(
+        call(&state, &borrower, "GET", &run_path, Value::Null)
+            .await
+            .1["state"],
+        "invalidated"
+    );
+    let own_path = format!("/api/v1/me/learning-runs/{}", own["id"].as_str().unwrap());
+    assert_eq!(
+        call(&state, &owner, "GET", &own_path, Value::Null).await.1["state"],
+        "active"
+    );
+}
+
+#[sqlx::test]
+async fn source_owner_expiring_while_read_waits_hides_questions_and_receipts(pool: PgPool) {
+    let (state, owner, list) = setup(&pool).await;
+    let (_, learner, _) = setup(&pool).await;
+    sqlx::query("UPDATE wordlists SET state='published' WHERE id=$1")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let task = create(&state, &learner, list, "longterm").await;
+    let run = start(&state, &learner, &task).await;
+    let qs = questions(&state, &learner, &run).await;
+    let first = answer_body(&qs["items"][0], "apple");
+    assert_eq!(
+        call(&state, &learner, "POST", &answer_path(&run), first.clone())
+            .await
+            .0,
+        200
+    );
+    let request = account_deletion_support::apply(&state, &owner, "0").await;
+    let entry: uuid::Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(list)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for receipt in [false, true] {
+        account_deletion_support::deadline(&pool, request.id, 1500).await;
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM lexicon.entries WHERE id=$1 FOR UPDATE")
+            .bind(entry)
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        let s = state.clone();
+        let auth = tsz_rust::auth::extract::AuthUser {
+            subject: learner.subject,
+            role: "student".into(),
+            security_version: learner.security_version,
+        };
+        let p = if receipt {
+            answer_path(&run)
+        } else {
+            format!(
+                "/api/v1/me/learning-runs/{}/questions",
+                run["id"].as_str().unwrap()
+            )
+        };
+        let body = if receipt { first.clone() } else { Value::Null };
+        let read = tokio::spawn(async move {
+            call(&s, &auth, if receipt { "POST" } else { "GET" }, &p, body).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2),async{loop{let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT id,current_publication_id%')").fetch_one(&pool).await.unwrap();if waiting{break;}tokio::time::sleep(std::time::Duration::from_millis(10)).await;}}).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+        blocker.commit().await.unwrap();
+        let result = read.await.unwrap();
+        assert_eq!(result.0, 200, "{}", result.1);
+        let q = if receipt {
+            &result.1["question"]
+        } else {
+            &result.1["items"][0]
+        };
+        assert_eq!(q["content_available"], false, "{q}");
+        assert!(q["prompt"].is_null());
+        assert!(q["feedback"].is_null());
+    }
+}
