@@ -44,6 +44,7 @@ use utoipa::{
         crate::learning_tasks::handler::get_run,
         crate::learning_tasks::handler::get_questions,
         crate::learning_tasks::handler::answer,
+        crate::learning_tasks::handler::reward_day,
 
         crate::wordlists::tips::receipt,
         crate::wordlists::tips::create,

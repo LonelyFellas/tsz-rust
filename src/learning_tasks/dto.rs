@@ -4,6 +4,44 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum LearningRewardStatus {
+    InProgress,
+    ThresholdNotMet,
+    Awarded,
+    RewardDisabled,
+    WalletUnavailable,
+}
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct LearningRewardQuery {
+    pub business_day: Option<NaiveDate>,
+}
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+#[serde(deny_unknown_fields)]
+pub struct LearningRewardDay {
+    pub business_day: NaiveDate,
+    pub server_time: DateTime<Utc>,
+    #[schema(required = true)]
+    pub rule_version: Option<String>,
+    #[schema(required = true)]
+    pub minimum_units: Option<i32>,
+    #[schema(required = true, pattern = "^[1-9][0-9]{0,18}$")]
+    pub daily_amount: Option<String>,
+    #[schema(minimum = 0, maximum = 200)]
+    pub qualifying_units: i32,
+    pub status: LearningRewardStatus,
+    #[schema(pattern = "^(0|[1-9][0-9]{0,18})$")]
+    pub awarded_amount: String,
+    #[schema(required = true)]
+    pub operation_id: Option<Uuid>,
+    #[schema(required = true)]
+    pub settled_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
