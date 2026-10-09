@@ -3,9 +3,13 @@ use tsz_rust::deployment_migrations;
 use tsz_rust::platform;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    tsz_rust::safe_log::init();
+    tsz_rust::safe_log::exit_on_error("main", run().await)
+}
+
+async fn run() -> anyhow::Result<()> {
     // 初始化追踪器
-    tracing_subscriber::fmt::init();
 
     let mut arguments = std::env::args().skip(1);
     if let Some(command) = arguments.next() {

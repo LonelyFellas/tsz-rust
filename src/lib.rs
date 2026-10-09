@@ -15,7 +15,9 @@ pub mod lexicon;
 pub mod openapi;
 pub mod otp;
 pub mod platform;
+pub mod reliability;
 pub mod request_id;
+pub mod safe_log;
 pub mod session;
 pub mod speech;
 pub mod state;
@@ -39,11 +41,7 @@ use config::Config;
 use deadpool_redis::Pool as RedisPool;
 use serde_json::json;
 use sqlx::PgPool;
-use tower_http::{
-    LatencyUnit,
-    trace::{DefaultOnFailure, DefaultOnResponse, TraceLayer},
-};
-use tracing::Level;
+use tower_http::trace::TraceLayer;
 
 use crate::{
     auth::{Realm, TokenManager},
@@ -159,6 +157,7 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             admin::authorization::enforce_business_access,
         ))
+        .layer(middleware::from_fn(reliability::boundary))
         .layer(
             TraceLayer::new_for_http()
                 // 只记录 method/path/request_id；不要记录 headers，Cookie 中含 refresh token。
@@ -171,17 +170,14 @@ pub fn router(state: AppState) -> Router {
                     tracing::info_span!(
                         "http.request",
                         request_id = %request_id,
-                        method = %req.method(),
-                        path = %req.uri().path(),
+                        method = match req.method().as_str() { "GET" => "GET", "POST" => "POST", "PUT" => "PUT", "PATCH" => "PATCH", "DELETE" => "DELETE", "HEAD" => "HEAD", "OPTIONS" => "OPTIONS", _ => "OTHER" },
+                        route = req.extensions().get::<axum::extract::MatchedPath>().map(|path| path.as_str()).unwrap_or("unmatched"),
                     )
                 })
-                // 默认是 DEBUG，生产 INFO 级别下看不见，必须提到 INFO。
-                .on_response(
-                    DefaultOnResponse::new()
-                        .level(Level::INFO)
-                        .latency_unit(LatencyUnit::Millis),
-                )
-                .on_failure(DefaultOnFailure::new().level(Level::ERROR)),
+                .on_response(|response: &axum::http::Response<_>, latency: StdDuration, _span: &tracing::Span| {
+                    tracing::info!(event = "http_response", status = response.status().as_u16(), elapsed_ms = latency.as_millis() as u64);
+                })
+                .on_failure(()),
         )
         .layer(middleware::from_fn(request_id_middleware));
 
@@ -200,7 +196,10 @@ async fn readiness(
 ) -> impl IntoResponse {
     // 1) 探 DB
     if let Err(e) = sqlx::query("SELECT 1").execute(&pool).await {
-        tracing::error!("database connection failed: {}", e);
+        tracing::error!(
+            event = "readiness_database_failed",
+            error_kind = crate::safe_log::error_kind(&e)
+        );
         return unavailable("database connection failed");
     }
 
@@ -211,12 +210,18 @@ async fn readiness(
                 .query_async::<()>(&mut conn)
                 .await
             {
-                tracing::error!("redis connection failed: {}", e);
+                tracing::error!(
+                    event = "readiness_redis_failed",
+                    error_kind = crate::safe_log::error_kind(&e)
+                );
                 return unavailable("redis connection failed");
             }
         }
         Err(e) => {
-            tracing::error!("redis connection failed: {}", e);
+            tracing::error!(
+                event = "readiness_redis_failed",
+                error_kind = crate::safe_log::error_kind(&e)
+            );
             return unavailable("redis connection failed");
         }
     }
@@ -243,6 +248,10 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         .ensure_catalog_voices()
         .await?;
     tracing::info!("database migrations applied");
+
+    // Migrations use the maintenance pool; application connections have bounded SQL.
+    pool.close().await;
+    let pool = platform::db::connect_runtime(&config.database_url).await?;
 
     // 预热 dummy_hash 的 OnceLock：它是 not-found 登录分支做时序平衡用的 Argon2id 哈希，
     // 首次调用会同步算 ~250ms。放在 bind 之前、于启动线程上一次性付清，

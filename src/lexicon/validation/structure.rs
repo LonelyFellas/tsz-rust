@@ -214,7 +214,6 @@ pub(crate) fn validate_node_identities(
             tracing::warn!(
                 %entry_id,
                 node_id = %node.id,
-                proposed_node_role = %node.node_role,
                 "草稿复用了缺少父子绑定的历史节点"
             );
             identity_issue(
@@ -232,10 +231,8 @@ pub(crate) fn validate_node_identities(
                 %entry_id,
                 node_id = %node.id,
                 stored_parent_node_id = ?stored.parent_node_id,
-                stored_node_role = %stored.node_role,
                 stored_stable_slot = stored.stable_slot,
                 proposed_parent_node_id = ?node.parent_node_id,
-                proposed_node_role = %node.node_role,
                 proposed_stable_slot = node.stable_slot,
                 "草稿把已有节点 ID 挪到了别的父节点或槽位"
             );
@@ -263,7 +260,6 @@ pub(crate) fn validate_node_identities(
             // `GET /entries/{id}` 的 `retired_stable_slots` 拿回来，而不是从报错里读。
             tracing::warn!(
                 %entry_id,
-                node_role = %node.node_role,
                 parent_node_id = ?node.parent_node_id,
                 existing_node_id = %existing_id,
                 proposed_node_id = %node.id,

@@ -32,14 +32,14 @@ pub fn run_worker(pool: PgPool, storage: Option<Arc<dyn ObjectStore>>) {
         // 没配 audio 空间的环境根本不会产生资产，跑这个 worker 只是白占一个任务。
         return;
     };
-    tokio::spawn(async move {
+    crate::safe_log::spawn_worker("lexicon/audio_assets/cleanup", async move {
         loop {
             match reclaim_once(&pool, &storage).await {
                 Ok(0) => {}
                 Ok(deleted) => tracing::info!(deleted, "audio assets reclaimed"),
                 Err(error) => tracing::error!(
-                    error = %error,
-                    error_kind = "audio_asset_cleanup",
+                    error_kind = crate::safe_log::error_kind(&error),
+                    operation = "audio_asset_cleanup",
                     "audio asset cleanup failed"
                 ),
             }
@@ -109,7 +109,7 @@ pub async fn reclaim_once(
             // 库里的键不合法说明写入侧出过 bug，删不了也报不出去；留着行以便排查。
             tracing::error!(
                 asset_id = %id,
-                error_kind = "audio_asset_key",
+                operation = "audio_asset_key",
                 "stored audio asset key is not a valid object key; skipping reclamation"
             );
             tx.rollback().await?;
@@ -139,15 +139,14 @@ pub async fn reclaim_once(
         }
         let deleted_object = match tokio::time::timeout(DELETE_TIMEOUT, storage.delete(&key)).await
         {
-            Ok(result) => result.map_err(|error| error.to_string()),
-            Err(_) => Err(format!("delete timed out after {DELETE_TIMEOUT:?}")),
+            Ok(result) => result.map_err(|error| crate::safe_log::error_kind(&error)),
+            Err(_) => Err("storage_timeout"),
         };
         if let Err(error) = deleted_object {
             tracing::warn!(
                 asset_id = %id,
-                object_key = %key,
-                error = %error,
-                error_kind = "storage_delete",
+                error_kind = error,
+                operation = "storage_delete",
                 "audio asset object delete failed; row kept for the next round"
             );
             tx.rollback().await?;

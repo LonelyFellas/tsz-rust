@@ -5,7 +5,12 @@ use tsz_rust::speech::{
 };
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    tsz_rust::safe_log::init();
+    tsz_rust::safe_log::exit_on_error("sync_speech_voices", run().await)
+}
+
+async fn run() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     let config = AzureSpeechConfig::from_pairs(std::env::vars())?
         .context("Azure Speech must be configured")?;

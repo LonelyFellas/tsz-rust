@@ -2,7 +2,12 @@ use anyhow::Context;
 use tsz_rust::lexicon::v3_initial_headword_backfill;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    tsz_rust::safe_log::init();
+    tsz_rust::safe_log::exit_on_error("lexicon_v3_initial_headwords", run().await)
+}
+
+async fn run() -> anyhow::Result<()> {
     let command = std::env::args()
         .nth(1)
         .context("usage: lexicon_v3_initial_headwords <dry-run|apply>")?;

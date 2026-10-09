@@ -981,7 +981,7 @@ async fn remove_verified_surface_confirmation(
             .await
     {
         tracing::warn!(
-            %error,
+            error_kind = crate::safe_log::error_kind(&error),
             snapshot_id = %confirmation.snapshot_id,
             "completed V3 publication command but failed to remove surface confirmation"
         );

@@ -728,7 +728,7 @@ impl LexiconService {
             && let Err(error) = self.surface_snapshots.remove_verified(&confirmation).await
         {
             tracing::warn!(
-                ?error,
+                error_kind = crate::safe_log::error_kind(&error),
                 "failed to remove consumed restore visibility snapshot"
             );
         }

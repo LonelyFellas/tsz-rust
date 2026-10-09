@@ -11,6 +11,12 @@ class CiWorkflowTests(unittest.TestCase):
             encoding="utf-8"
         )
 
+    def test_backup_restore_safety_checks_run_in_quality(self) -> None:
+        self.assertIn(
+            "python3 -m unittest discover -s ops -p 'test_backup_restore_drill.py'",
+            self._job("quality"),
+        )
+
     def test_ci07_integration_matrix_is_parallel_and_complete(self) -> None:
         integration = self._job("integration")
 

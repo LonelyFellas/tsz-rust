@@ -44,6 +44,7 @@ MODULE_RULES: dict[str, tuple[str, ...]] = {
         "health",
         "object_storage*",
         "redis_readiness",
+        "reliability",
         "speech_*",
     ),
 }

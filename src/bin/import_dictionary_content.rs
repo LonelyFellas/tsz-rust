@@ -242,7 +242,7 @@ async fn copy_contents(connection: &mut PgConnection, path: &Path) -> anyhow::Re
                 chunk.clear();
             }
             if rows.is_multiple_of(100_000) {
-                println!("{}: {rows} rows streamed", path.display());
+                println!("{rows} rows streamed");
             }
         }
         if !chunk.is_empty() {
@@ -265,8 +265,12 @@ async fn copy_contents(connection: &mut PgConnection, path: &Path) -> anyhow::Re
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+async fn main() -> std::process::ExitCode {
+    tsz_rust::safe_log::init();
+    tsz_rust::safe_log::exit_on_error("import_dictionary_content", run().await)
+}
+
+async fn run() -> anyhow::Result<()> {
     dotenvy::from_filename(".env").ok();
     let args = parse_args_from(env::args_os().skip(1))?;
     ensure!(args.contents.is_file(), "contents file not found");
