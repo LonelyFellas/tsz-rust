@@ -64,6 +64,14 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 能力不仅取决于端点是否存在，还取决于权限、配置、当前实体状态与响应中的 `capabilities`。不得从旧文档中某次“已上线”或“本地候选”的描述推断当前环境状态。
 
+### 富文本斜体
+
+核心与 V3 富文本注解增加 `{ "type": "italic", "start": 0, "end": 3 }`，范围使用 Unicode 码点，与既有标注一样校验非空、越界、跨段和总量，并合并相邻或重叠斜体。通过既有 JSONB 和发布快照持久化，无数据库迁移；斜体与加粗不改变合成正文、音素、停顿或 SSML。
+
+配套前端同步 OpenAPI、严格 runtime schema、wire 类型和编辑器；需求与兼容性记录在前端 `docs/features/grammar-editor-formatting/`。新版本可读取旧数据；旧前端的严格注解 union 和旧后端枚举都拒绝斜体。应在暂停相关编辑写入的窗口升级读写两端并刷新旧页面，确认所有消费者可读新格式后再恢复斜体写入。存在斜体数据后，不能直接回退不支持该注解的前端或后端，也不能通过丢弃注解来回退。
+
+语法词形候选沿用成分目标搜索能力，运行环境须开启 `SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY`（默认关闭），并满足既有 read、edit、projection、sentence_associations 开关；缺少时返回 503。该运行开关与斜体存储互相独立。
+
 ### 每条发音的英美合成候选
 
 `synthesis.uk`、`synthesis.us` 分别保存英美 IPA、UPS 与可选逐词边界；`alphabet`、`use_spelling` 仍是一组共用来源选择。词形的地区或音标通用规则不限制这两套候选。

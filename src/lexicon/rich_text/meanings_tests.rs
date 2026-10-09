@@ -5,7 +5,9 @@ use uuid::Uuid;
 fn text() -> Value {
     json!({"version": 2, "text": "test", "annotations": [
         {"type": "emphasis", "start": 2, "end": 4, "level": "strong"},
-        {"type": "emphasis", "start": 0, "end": 2, "level": "strong"}
+        {"type": "emphasis", "start": 0, "end": 2, "level": "strong"},
+        {"type": "italic", "start": 0, "end": 2},
+        {"type": "italic", "start": 2, "end": 4}
     ]})
 }
 
@@ -92,7 +94,8 @@ fn complete_meanings_are_normalized_in_place_without_losing_extensions() {
     ];
     for path in paths {
         expected.pointer_mut(path).unwrap()["annotations"] = json!([
-            {"type": "emphasis", "start": 0, "end": 4, "level": "strong"}
+            {"type": "emphasis", "start": 0, "end": 4, "level": "strong"},
+            {"type": "italic", "start": 0, "end": 4}
         ]);
     }
     assert!(canonicalize_meanings(&mut content));

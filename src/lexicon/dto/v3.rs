@@ -660,6 +660,10 @@ pub enum RichTextAnnotationV3 {
         at: usize,
         duration_ms: u32,
     },
+    Italic {
+        start: usize,
+        end: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
