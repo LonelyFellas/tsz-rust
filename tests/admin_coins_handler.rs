@@ -241,6 +241,26 @@ async fn reversal_is_full_once_private_and_permission_checked(pool: PgPool) {
         request(&state, actor, "POST", &path, body.clone()).await.0,
         StatusCode::FORBIDDEN
     );
+    sqlx::raw_sql("CREATE FUNCTION fail_reversal_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='coins.reverse' THEN RAISE EXCEPTION 'synthetic failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_reversal_audit BEFORE INSERT ON audit.admin_actions FOR EACH ROW EXECUTE FUNCTION fail_reversal_audit();").execute(&pool).await.unwrap();
+    assert_eq!(
+        request(&state, root, "POST", &path, body.clone()).await.0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(balance(&pool, user).await, "100");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM coin_operations WHERE reverses_operation_id IS NOT NULL"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    reconciled(&pool).await;
+    sqlx::query("DROP TRIGGER fail_reversal_audit ON audit.admin_actions")
+        .execute(&pool)
+        .await
+        .unwrap();
     let (a, b) = tokio::join!(
         request(&state, root, "POST", &path, body.clone()),
         request(&state, root, "POST", &path, body.clone())

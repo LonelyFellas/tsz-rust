@@ -2,7 +2,12 @@ use anyhow::{Context, ensure};
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
+    tsz_rust::safe_log::init();
+    tsz_rust::safe_log::exit_on_error("permission_migration_preview", run().await)
+}
+
+async fn run() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     ensure!(
         args.next().as_deref() == Some("--database-url"),

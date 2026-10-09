@@ -23,7 +23,7 @@ pub fn run_worker(state: AppState) {
     if super::files::store(&state).is_err() {
         return;
     }
-    tokio::spawn(async move {
+    crate::safe_log::spawn_worker("teacher_certification/cleanup", async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;

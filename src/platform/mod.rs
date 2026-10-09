@@ -1,4 +1,4 @@
-mod db;
+pub mod db;
 mod model;
 mod redis;
 pub mod storage;

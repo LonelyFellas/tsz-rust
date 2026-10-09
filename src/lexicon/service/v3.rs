@@ -1629,7 +1629,7 @@ impl LexiconService {
         if let Some(confirmation) = &verified_surface
             && let Err(error) = self.surface_snapshots.remove_verified(confirmation).await
         {
-            tracing::warn!(%error, snapshot_id = %confirmation.snapshot_id, "created V3 entry but failed to remove surface confirmation");
+            tracing::warn!(error_kind = crate::safe_log::error_kind(&error), snapshot_id = %confirmation.snapshot_id, "created V3 entry but failed to remove surface confirmation");
         }
         Ok(envelope)
     }
@@ -2094,7 +2094,7 @@ impl LexiconService {
                 .or(confirmation.verified_impact.as_ref())
         }) && let Err(error) = self.surface_snapshots.remove_verified(confirmation).await
         {
-            tracing::warn!(%error, snapshot_id = %confirmation.snapshot_id, "saved V3 forms but failed to remove surface confirmation");
+            tracing::warn!(error_kind = crate::safe_log::error_kind(&error), snapshot_id = %confirmation.snapshot_id, "saved V3 forms but failed to remove surface confirmation");
         }
         let word = self.get_v3(entry_id).await?;
         Ok(AdminWordV3Envelope { word })

@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 
 use super::{
-    error::StorageError,
+    error::{BackendErrorKind, StorageError, StorageOperation},
     model::{ObjectKey, ObjectMetadata, PresignedRequest, PutOptions, StoragePolicy, StorageSpace},
 };
 
@@ -104,6 +104,22 @@ impl StorageService {
         }
     }
 
+    async fn bounded<T>(
+        &self,
+        operation: StorageOperation,
+        future: impl std::future::Future<Output = Result<T, StorageError>>,
+    ) -> Result<T, StorageError> {
+        tokio::time::timeout(Duration::from_secs(30), future)
+            .await
+            .unwrap_or_else(|_| {
+                Err(StorageError::backend(
+                    &self.space,
+                    operation,
+                    BackendErrorKind::TemporarilyUnavailable,
+                ))
+            })
+    }
+
     fn ensure_size(&self, actual: u64) -> Result<(), StorageError> {
         let max = self.policy.max_object_size();
         if actual > max {
@@ -150,33 +166,45 @@ impl ObjectStore for StorageService {
         body: Vec<u8>,
         options: PutOptions,
     ) -> Result<ObjectMetadata, StorageError> {
-        let content_length = u64::try_from(body.len()).unwrap_or(u64::MAX);
-        self.ensure_size(content_length)?;
-        let metadata = self
-            .backend
-            .put(key, body, &self.write_options(content_length, &options))
-            .await?;
-        self.ensure_size(metadata.content_length)?;
-        Ok(metadata)
+        self.bounded(StorageOperation::Put, async {
+            let content_length = u64::try_from(body.len()).unwrap_or(u64::MAX);
+            self.ensure_size(content_length)?;
+            let metadata = self
+                .backend
+                .put(key, body, &self.write_options(content_length, &options))
+                .await?;
+            self.ensure_size(metadata.content_length)?;
+            Ok(metadata)
+        })
+        .await
     }
 
     async fn read(&self, key: &ObjectKey) -> Result<Vec<u8>, StorageError> {
-        let result = self.backend.read(key, self.bounded_read_limit()).await?;
-        self.ensure_size(u64::try_from(result.body.len()).unwrap_or(u64::MAX))?;
-        self.ensure_size(result.metadata.content_length)?;
-        Ok(result.body)
+        self.bounded(StorageOperation::Read, async {
+            let result = self.backend.read(key, self.bounded_read_limit()).await?;
+            self.ensure_size(u64::try_from(result.body.len()).unwrap_or(u64::MAX))?;
+            self.ensure_size(result.metadata.content_length)?;
+            Ok(result.body)
+        })
+        .await
     }
 
     async fn stat(&self, key: &ObjectKey) -> Result<ObjectMetadata, StorageError> {
-        let metadata = self.backend.stat(key).await?;
-        self.ensure_size(metadata.content_length)?;
-        Ok(metadata)
+        self.bounded(StorageOperation::Stat, async {
+            let metadata = self.backend.stat(key).await?;
+            self.ensure_size(metadata.content_length)?;
+            Ok(metadata)
+        })
+        .await
     }
 
     async fn presign_read(&self, key: &ObjectKey) -> Result<PresignedRequest, StorageError> {
-        self.backend
-            .presign_read(key, self.policy.presign_ttl())
-            .await
+        self.bounded(StorageOperation::PresignRead, async {
+            self.backend
+                .presign_read(key, self.policy.presign_ttl())
+                .await
+        })
+        .await
     }
 
     async fn presign_write(
@@ -185,14 +213,17 @@ impl ObjectStore for StorageService {
         content_length: u64,
         options: PutOptions,
     ) -> Result<PresignedRequest, StorageError> {
-        self.ensure_size(content_length)?;
-        self.backend
-            .presign_write(
-                key,
-                self.policy.presign_ttl(),
-                &self.write_options(content_length, &options),
-            )
-            .await
+        self.bounded(StorageOperation::PresignWrite, async {
+            self.ensure_size(content_length)?;
+            self.backend
+                .presign_write(
+                    key,
+                    self.policy.presign_ttl(),
+                    &self.write_options(content_length, &options),
+                )
+                .await
+        })
+        .await
     }
 
     async fn copy(
@@ -200,31 +231,37 @@ impl ObjectStore for StorageService {
         source: &ObjectKey,
         destination: &ObjectKey,
     ) -> Result<ObjectMetadata, StorageError> {
-        let source = self.backend.read(source, self.bounded_read_limit()).await?;
-        let content_length = u64::try_from(source.body.len()).unwrap_or(u64::MAX);
-        self.ensure_size(content_length)?;
-        self.ensure_size(source.metadata.content_length)?;
-        let destination_metadata = self
-            .backend
-            .put(
-                destination,
-                source.body,
-                &BackendWriteOptions {
-                    content_type: source.metadata.content_type,
-                    cache_control: self
-                        .policy
-                        .cache_control()
-                        .map(|cache_control| cache_control.as_str().to_owned()),
-                    content_length,
-                },
-            )
-            .await?;
-        self.ensure_size(destination_metadata.content_length)?;
-        Ok(destination_metadata)
+        self.bounded(StorageOperation::Copy, async {
+            let source = self.backend.read(source, self.bounded_read_limit()).await?;
+            let content_length = u64::try_from(source.body.len()).unwrap_or(u64::MAX);
+            self.ensure_size(content_length)?;
+            self.ensure_size(source.metadata.content_length)?;
+            let destination_metadata = self
+                .backend
+                .put(
+                    destination,
+                    source.body,
+                    &BackendWriteOptions {
+                        content_type: source.metadata.content_type,
+                        cache_control: self
+                            .policy
+                            .cache_control()
+                            .map(|cache_control| cache_control.as_str().to_owned()),
+                        content_length,
+                    },
+                )
+                .await?;
+            self.ensure_size(destination_metadata.content_length)?;
+            Ok(destination_metadata)
+        })
+        .await
     }
 
     async fn delete(&self, key: &ObjectKey) -> Result<(), StorageError> {
-        self.backend.delete(key).await
+        self.bounded(StorageOperation::Delete, async {
+            self.backend.delete(key).await
+        })
+        .await
     }
 }
 
@@ -241,6 +278,7 @@ mod tests {
     struct ReplacedObjectBackend {
         space: StorageSpace,
         body: Vec<u8>,
+        stall: bool,
         read_limits: Mutex<Vec<u64>>,
         put_count: AtomicUsize,
         put_content_types: Mutex<Vec<Option<String>>>,
@@ -251,6 +289,7 @@ mod tests {
             Self {
                 space,
                 body,
+                stall: false,
                 read_limits: Mutex::new(Vec::new()),
                 put_count: AtomicUsize::new(0),
                 put_content_types: Mutex::new(Vec::new()),
@@ -266,6 +305,9 @@ mod tests {
             _body: Vec<u8>,
             options: &BackendWriteOptions,
         ) -> Result<ObjectMetadata, StorageError> {
+            if self.stall {
+                return std::future::pending().await;
+            }
             self.put_count.fetch_add(1, Ordering::SeqCst);
             self.put_content_types
                 .lock()
@@ -285,6 +327,9 @@ mod tests {
             _key: &ObjectKey,
             limit: u64,
         ) -> Result<BackendReadResult, StorageError> {
+            if self.stall {
+                return std::future::pending().await;
+            }
             self.read_limits.lock().expect("测试锁未中毒").push(limit);
             let limit = usize::try_from(limit).unwrap_or(usize::MAX);
             let body = self.body[..self.body.len().min(limit)].to_vec();
@@ -335,6 +380,9 @@ mod tests {
         }
 
         async fn delete(&self, _key: &ObjectKey) -> Result<(), StorageError> {
+            if self.stall {
+                return std::future::pending().await;
+            }
             Ok(())
         }
     }
@@ -348,6 +396,30 @@ mod tests {
         )
         .expect("固定策略合法");
         StorageService::new(backend.space.clone(), policy, backend)
+    }
+
+    #[tokio::test]
+    async fn reliability_stalled_storage_read_write_and_delete_finish_with_safe_errors() {
+        let mut backend =
+            ReplacedObjectBackend::new(StorageSpace::parse("attachments").unwrap(), vec![]);
+        backend.stall = true;
+        let service = test_service(Arc::new(backend));
+        let key = ObjectKey::parse("sensitive-object-key").unwrap();
+        let (read, put, delete) = tokio::join!(
+            service.read(&key),
+            service.put(&key, vec![1], PutOptions::default()),
+            service.delete(&key)
+        );
+        for error in [read.unwrap_err(), put.unwrap_err(), delete.unwrap_err()] {
+            assert!(matches!(
+                error,
+                StorageError::Backend {
+                    kind: BackendErrorKind::TemporarilyUnavailable,
+                    ..
+                }
+            ));
+            assert!(!error.to_string().contains("sensitive-object-key"));
+        }
     }
 
     #[tokio::test]

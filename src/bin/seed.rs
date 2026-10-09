@@ -2,9 +2,12 @@ use anyhow::Context;
 use tsz_rust::admin::{AdminRepository, AdminService, SeedOutcome};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+async fn main() -> std::process::ExitCode {
+    tsz_rust::safe_log::init();
+    tsz_rust::safe_log::exit_on_error("seed", run().await)
+}
 
+async fn run() -> anyhow::Result<()> {
     let db_url = std::env::var("DATABASE_URL").context("DATABASE_URL is required")?;
     let phone = std::env::var("SEED_ADMIN_PHONE").context("SEED_ADMIN_PHONE is required")?;
     let password =

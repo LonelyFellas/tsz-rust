@@ -312,7 +312,10 @@ impl PreviewService {
 
 async fn compensate_delete(storage: &Arc<dyn ObjectStore>, key: &ObjectKey) {
     if storage.delete(key).await.is_err() {
-        tracing::warn!(object_key = %key, error_kind = "storage_delete", "speech preview compensation failed");
+        tracing::warn!(
+            error_kind = "storage_delete",
+            "speech preview compensation failed"
+        );
     }
 }
 

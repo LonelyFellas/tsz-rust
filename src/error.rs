@@ -1169,13 +1169,25 @@ impl AppError {
 
     /// 内部原因仅写服务端日志，对外固定为 internal_error。
     pub fn internal<E: Into<anyhow::Error>>(source: E) -> Self {
-        let mut error = Self::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::InternalError,
-            "internal error",
-            None,
+        let source = source.into();
+        let timeout = matches!(
+            crate::safe_log::error_kind(source.as_ref()),
+            "database_pool_timeout" | "database_statement_timeout" | "database_lock_timeout"
         );
-        error.source = Some(source.into());
+        let mut error = if timeout {
+            Self::unavailable(
+                ErrorCode::ServiceUnavailable,
+                "database temporarily unavailable; outcome may be unknown",
+            )
+        } else {
+            Self::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "internal error",
+                None,
+            )
+        };
+        error.source = Some(source);
         error
     }
 
@@ -1204,7 +1216,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         if let Some(source) = &self.source {
             tracing::error!(
-                error = %source,
+                error_kind = crate::safe_log::error_kind(source.as_ref()),
                 status = %self.status,
                 code = ?self.response.code,
                 "request failed"

@@ -1,5 +1,7 @@
-use sqlx::PgPool;
+use sqlx::postgres::PgConnectOptions;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::{ConnectOptions, PgPool};
+use std::str::FromStr;
 use std::time::Duration;
 
 /// 从连接串建连接池。参数（连接数/超时）先给保守默认值。
@@ -7,7 +9,7 @@ pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(5))
-        .connect(database_url)
+        .connect_with(PgConnectOptions::from_str(database_url)?.disable_statement_logging())
         .await?;
     Ok(pool)
 }
@@ -26,4 +28,16 @@ pub fn is_foreign_key_violation(e: &sqlx::Error, constraint: &str) -> bool {
         return db.code().as_deref() == Some("23503") && db.constraint() == Some(constraint);
     }
     false
+}
+
+/// Startup options remain DEFAULT inside transactions that restore lock_timeout.
+pub async fn connect_runtime(database_url: &str) -> anyhow::Result<PgPool> {
+    let options = PgConnectOptions::from_str(database_url)?
+        .disable_statement_logging()
+        .options([("statement_timeout", "10s"), ("lock_timeout", "3s")]);
+    Ok(PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?)
 }

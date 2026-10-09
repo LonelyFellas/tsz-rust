@@ -149,8 +149,8 @@ fn map_error(error: AudioAssetServiceError) -> AppError {
         // 只能靠这条日志定位，响应体里不会有任何线索。
         AudioAssetServiceError::Storage(error) => {
             tracing::error!(
-                error = %error,
-                error_kind = "audio_storage",
+                error_kind = crate::safe_log::error_kind(&error),
+                operation = "audio_storage",
                 "audio asset storage operation failed"
             );
             AppError::unavailable(ErrorCode::ServiceUnavailable, "audio storage unavailable")

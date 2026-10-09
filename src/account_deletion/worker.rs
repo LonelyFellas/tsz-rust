@@ -15,7 +15,7 @@ pub async fn sweep(pool: &PgPool) -> Result<u64, AppError> {
             }
             Ok(false) => {}
             Err(error) => {
-                tracing::error!(request_id=%id,error=%error,"account deletion completion failed; will retry")
+                tracing::error!(request_id=%id,error_kind = crate::safe_log::error_kind(&error),"account deletion completion failed; will retry")
             }
         }
         // Persist backoff so repeatedly busy/broken requests yield to later accounts,
@@ -26,13 +26,16 @@ pub async fn sweep(pool: &PgPool) -> Result<u64, AppError> {
     Ok(completed)
 }
 pub fn run_worker(pool: PgPool) {
-    tokio::spawn(async move {
+    crate::safe_log::spawn_worker("account_deletion/worker", async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             if let Err(error) = sweep(&pool).await {
-                tracing::error!(error=%error,"account deletion sweep failed");
+                tracing::error!(
+                    error_kind = crate::safe_log::error_kind(&error),
+                    "account deletion sweep failed"
+                );
             }
         }
     });

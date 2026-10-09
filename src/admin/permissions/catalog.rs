@@ -375,10 +375,7 @@ pub fn effective_keys(stored: impl IntoIterator<Item = String>) -> BTreeSet<Stri
             if definition(key).is_some() {
                 true
             } else {
-                tracing::warn!(
-                    permission_key = key,
-                    "unknown administrator permission ignored"
-                );
+                tracing::warn!("unknown administrator permission ignored");
                 false
             }
         })

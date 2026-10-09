@@ -403,7 +403,6 @@ fn parse_pending_key(value: &str) -> Option<(ObjectKey, Option<Uuid>)> {
 async fn compensate_delete(storage: &Arc<dyn ObjectStore>, key: &ObjectKey) {
     if storage.delete(key).await.is_err() {
         tracing::warn!(
-            object_key = %key,
             error_kind = "storage_delete",
             "audio asset compensation failed"
         );
