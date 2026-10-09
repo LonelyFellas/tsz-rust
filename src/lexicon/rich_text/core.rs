@@ -464,6 +464,7 @@ fn annotation_type_rank(annotation: &RichTextAnnotation) -> u8 {
         RichTextAnnotation::Liaison { .. } => 2,
         RichTextAnnotation::Emphasis { .. } => 3,
         RichTextAnnotation::Phoneme { .. } => 4,
+        RichTextAnnotation::Italic { .. } => 5,
     }
 }
 
@@ -474,6 +475,7 @@ fn annotation_json(annotation: &RichTextAnnotation) -> String {
 pub(super) fn range_bounds(annotation: &RichTextAnnotation) -> Option<(usize, usize)> {
     match annotation {
         RichTextAnnotation::Emphasis { start, end, .. }
+        | RichTextAnnotation::Italic { start, end }
         | RichTextAnnotation::Phoneme { start, end, .. }
         | RichTextAnnotation::Liaison { start, end, .. }
         | RichTextAnnotation::Highlight { start, end, .. } => Some((*start, *end)),
@@ -484,6 +486,7 @@ pub(super) fn range_bounds(annotation: &RichTextAnnotation) -> Option<(usize, us
 pub(super) fn set_range_end(annotation: &mut RichTextAnnotation, next_end: usize) {
     match annotation {
         RichTextAnnotation::Emphasis { end, .. }
+        | RichTextAnnotation::Italic { end, .. }
         | RichTextAnnotation::Phoneme { end, .. }
         | RichTextAnnotation::Liaison { end, .. }
         | RichTextAnnotation::Highlight { end, .. } => *end = next_end,
@@ -493,6 +496,7 @@ pub(super) fn set_range_end(annotation: &mut RichTextAnnotation, next_end: usize
 
 pub(super) fn same_merge_attributes(left: &RichTextAnnotation, right: &RichTextAnnotation) -> bool {
     match (left, right) {
+        (RichTextAnnotation::Italic { .. }, RichTextAnnotation::Italic { .. }) => true,
         (
             RichTextAnnotation::Emphasis { level: left, .. },
             RichTextAnnotation::Emphasis { level: right, .. },

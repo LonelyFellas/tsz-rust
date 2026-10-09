@@ -2,6 +2,38 @@ use super::*;
 use crate::lexicon::dto::{RichTextEmphasisLevel, RichTextHighlightColor, RichTextPhonemeAlphabet};
 
 #[test]
+fn italic_merges_independently_of_speech_marks_and_uses_codepoints() {
+    let mut value: RichText = serde_json::from_value(serde_json::json!({
+        "version": 2, "text": "😀 jobs", "annotations": [
+            {"type":"italic","start":2,"end":4},
+            {"type":"italic","start":4,"end":6},
+            {"type":"emphasis","start":2,"end":6,"level":"core"},
+            {"type":"phoneme","start":2,"end":6,"alphabet":"ipa","phoneme":"dʒɒbz"}
+        ]
+    }))
+    .unwrap();
+    canonicalize(&mut value).unwrap();
+    let expected = serde_json::to_value(&value).unwrap();
+    assert_eq!(
+        expected["annotations"],
+        serde_json::json!([
+            {"type":"emphasis","start":2,"end":6,"level":"core"},
+            {"type":"phoneme","start":2,"end":6,"alphabet":"ipa","phoneme":"dʒɒbz"},
+            {"type":"italic","start":2,"end":6}
+        ])
+    );
+    canonicalize(&mut value).unwrap();
+    assert_eq!(serde_json::to_value(value).unwrap(), expected);
+    for (start, end) in [(2, 2), (0, 9), (0, 6)] {
+        let invalid: RichText = serde_json::from_value(serde_json::json!({
+            "version":2,"text":"a\njobs","annotations":[{"type":"italic","start":start,"end":end}]
+        }))
+        .unwrap();
+        assert!(!is_valid(&invalid));
+    }
+}
+
+#[test]
 fn canonicalizes_ranges_and_last_pause_deterministically() {
     let mut value = RichText::V2(RichTextV2 {
         version: 2,

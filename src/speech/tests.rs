@@ -93,6 +93,15 @@ fn teaching_marks_do_not_split_words_or_change_spoken_text() {
             RichTextEmphasisLevel::Strong,
         ] {
             for annotations in [
+                vec![RichTextAnnotation::Italic { start: 1, end }],
+                vec![
+                    RichTextAnnotation::Italic { start: 1, end },
+                    RichTextAnnotation::Emphasis {
+                        start: 0,
+                        end: 3,
+                        level,
+                    },
+                ],
                 vec![RichTextAnnotation::Emphasis {
                     start: 0,
                     end,
@@ -156,6 +165,7 @@ fn teaching_marks_preserve_explicit_phonemes_and_pauses() {
         };
         let expected = build_ssml(&request(content.clone())).unwrap();
         content.annotations.extend([
+            RichTextAnnotation::Italic { start: 1, end: 7 },
             RichTextAnnotation::Emphasis {
                 start: 0,
                 end: 4,

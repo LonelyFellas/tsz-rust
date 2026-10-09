@@ -1923,6 +1923,7 @@ async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
         "version": 2,
         "text": "countable noun",
         "annotations": [
+            {"type": "italic", "start": 1, "end": 12},
             {"type": "emphasis", "start": 10, "end": 14, "level": "grammar"},
             // 起点锚点是 "le"、终点锚点是 "n"：两端宽度不同，退化成单字母就会被这条测出来。
             {"type": "liaison", "start": 7, "end": 11, "start_len": 2, "end_len": 1},
@@ -1948,6 +1949,7 @@ async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
     // 缺省宽度不上 wire：end_len 是 1，所以不出现。
     let canonical = json!([
         {"type": "emphasis", "start": 0, "end": 9, "level": "function"},
+        {"type": "italic", "start": 1, "end": 12},
         {"type": "liaison", "start": 7, "end": 11, "start_len": 2},
         {"type": "emphasis", "start": 10, "end": 14, "level": "grammar"}
     ]);
