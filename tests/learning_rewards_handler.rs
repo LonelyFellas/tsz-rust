@@ -339,8 +339,17 @@ async fn duplicate_short_task_query_budget(pool: PgPool) {
         .await
         .unwrap();
     println!("10,000 duplicate completed units: {}", plan.join("\n"));
+    // Fixture writes are outside the query-only performance budget.
+    sqlx::query("SET LOCAL statement_timeout = DEFAULT")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     // Fixture identities, not production semantic mutation: exercise bounded distinct output.
     sqlx::raw_sql("UPDATE learning_questions q SET unit_key='fixture-unit-'||(x.n%20)::text FROM reward_load x WHERE q.id=x.question_id").execute(&mut *tx).await.unwrap();
+    sqlx::query("SET LOCAL statement_timeout = '1000ms'")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i32>(query)
             .bind(auth.subject)
