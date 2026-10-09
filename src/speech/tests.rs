@@ -83,6 +83,31 @@ fn ssml_is_escaped_nested_and_deterministic() {
 }
 
 #[test]
+fn sentence_visual_formats_preserve_ssml_and_pause() {
+    let mut content = plain("😀 jobs today");
+    content.annotations.push(RichTextAnnotation::Pause {
+        at: 6,
+        duration_ms: 750,
+    });
+    let baseline = request(content.clone());
+    content.annotations.extend([
+        RichTextAnnotation::Bold { start: 2, end: 6 },
+        RichTextAnnotation::Italic { start: 3, end: 5 },
+        RichTextAnnotation::Underline { start: 2, end: 6 },
+    ]);
+    let formatted = request(content);
+    assert_eq!(
+        build_ssml(&baseline).unwrap(),
+        build_ssml(&formatted).unwrap()
+    );
+    assert!(
+        build_ssml(&formatted)
+            .unwrap()
+            .contains("jobs<break time=\"750ms\"/>")
+    );
+}
+
+#[test]
 fn teaching_marks_do_not_split_words_or_change_spoken_text() {
     for text in ["jobs", "job something; someone jobs", "😀 jobs<&"] {
         let end = text.chars().count();

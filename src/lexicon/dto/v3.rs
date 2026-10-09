@@ -664,6 +664,14 @@ pub enum RichTextAnnotationV3 {
         start: usize,
         end: usize,
     },
+    Bold {
+        start: usize,
+        end: usize,
+    },
+    Underline {
+        start: usize,
+        end: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
