@@ -92,6 +92,9 @@ jobs:
       - name: Test deployment manifest tooling
         run: python3 -m unittest ops/test_deployment_manifest.py
 
+      - name: Test isolated backup restore drill safety
+        run: python3 -m unittest discover -s ops -p 'test_backup_restore_drill.py'
+
       - name: Test CI module partitioning
         run: python3 -m unittest ops/test_ci_test_modules.py
 
