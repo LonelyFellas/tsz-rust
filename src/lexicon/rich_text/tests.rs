@@ -2,6 +2,43 @@ use super::*;
 use crate::lexicon::dto::{RichTextEmphasisLevel, RichTextHighlightColor, RichTextPhonemeAlphabet};
 
 #[test]
+fn sentence_formats_roundtrip_both_dtos_and_merge_independently() {
+    for kind in ["bold", "underline"] {
+        let json = serde_json::json!({
+            "version": 2, "text": "😀 jobs", "annotations": [
+                {"type":kind,"start":2,"end":4},
+                {"type":kind,"start":4,"end":6},
+                {"type":"italic","start":3,"end":5}
+            ]
+        });
+        let native: RichTextV3 = serde_json::from_value(json.clone()).unwrap();
+        assert!(is_valid_native(&native));
+        let mut value: RichText = serde_json::from_value(json).unwrap();
+        canonicalize(&mut value).unwrap();
+        let saved = serde_json::to_value(&value).unwrap();
+        assert_eq!(
+            saved["annotations"],
+            serde_json::json!([
+                {"type":kind,"start":2,"end":6},
+                {"type":"italic","start":3,"end":5}
+            ])
+        );
+        let native: RichTextV3 = serde_json::from_value(saved.clone()).unwrap();
+        assert!(is_valid_native(&native));
+        assert_eq!(serde_json::to_value(native).unwrap(), saved);
+        canonicalize(&mut value).unwrap();
+        assert_eq!(serde_json::to_value(value).unwrap(), saved);
+        for (start, end) in [(2, 2), (0, 9), (0, 6)] {
+            let invalid: RichText = serde_json::from_value(serde_json::json!({
+                "version":2,"text":"a\njobs","annotations":[{"type":kind,"start":start,"end":end}]
+            }))
+            .unwrap();
+            assert!(!is_valid(&invalid));
+        }
+    }
+}
+
+#[test]
 fn italic_merges_independently_of_speech_marks_and_uses_codepoints() {
     let mut value: RichText = serde_json::from_value(serde_json::json!({
         "version": 2, "text": "😀 jobs", "annotations": [

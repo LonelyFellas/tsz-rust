@@ -2188,22 +2188,24 @@ mod tests {
         assert!(
             schemas["RichTextAnnotationV3"]["oneOf"]
                 .as_array()
-                .is_some_and(|branches| branches.len() == 6
+                .is_some_and(|branches| branches.len() == 8
                     && branches
                         .iter()
                         .all(|branch| branch["additionalProperties"] == false))
         );
-        let italic = schemas["RichTextAnnotationV3"]["oneOf"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|branch| branch["properties"]["type"]["enum"][0] == "italic")
-            .unwrap();
-        assert_eq!(
-            italic["required"],
-            serde_json::json!(["start", "end", "type"])
-        );
-        assert_eq!(italic["properties"].as_object().unwrap().len(), 3);
+        for kind in ["italic", "bold", "underline"] {
+            let format = schemas["RichTextAnnotationV3"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|branch| branch["properties"]["type"]["enum"][0] == kind)
+                .unwrap();
+            assert_eq!(
+                format["required"],
+                serde_json::json!(["start", "end", "type"])
+            );
+            assert_eq!(format["properties"].as_object().unwrap().len(), 3);
+        }
 
         // 音色 / 语速：挂在语法结构变体与英文文本变体上，两处都是可选字段，
         // 未配置时不出现在响应里（`skip_serializing_if`）。

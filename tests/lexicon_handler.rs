@@ -1907,6 +1907,75 @@ async fn v3_grammar_form_links_save_first_pronunciation_and_clear(pool: PgPool) 
 }
 
 #[sqlx::test]
+async fn sentence_formats_persist_in_definitions_and_shared_sentences(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let forms_saved = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let entry_id = forms_saved["word"]["id"].as_str().unwrap();
+    let mut meanings =
+        complete_v3_meanings_fixture(forms_saved["word"]["forms"]["pos"][0]["pos_id"].clone());
+    let rich = json!({"version":2,"text":"a harbour today","annotations":[
+        {"type":"pause","at":1,"duration_ms":500},
+        {"type":"bold","start":2,"end":9},
+        {"type":"underline","start":2,"end":9},
+        {"type":"italic","start":3,"end":7},
+        {"type":"liaison","start":8,"end":11}
+    ]});
+    let sense = &mut meanings["pos"][0]["senses"][0];
+    let sense_id = sense["id"].clone();
+    let grammar_id = sense["definitions"][0]["grammar_structure_id"].clone();
+    sense["definitions"].as_array_mut().unwrap().push(json!({
+        "definition_mode":"en_sentence","id":Uuid::now_v7(),"level":"A1","grammar_structure_id":grammar_id,
+        "content":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":rich}}
+    }));
+    let (status, saved) = call(&state, Method::PUT, &format!("{ROOT}/entries/{entry_id}/steps/meanings"), &bearer, None,
+        Some(json!({"schema_version":3,"base_revision":forms_saved["word"]["revision"],"intent":"complete","content":meanings}))).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let canonical = saved["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["value"].clone();
+    assert_eq!(canonical["annotations"].as_array().unwrap().len(), 5);
+    let (status, reread) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reread}");
+    assert_eq!(
+        reread["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["value"],
+        canonical
+    );
+    let form = &forms_saved["word"]["forms"]["pos"][0]["forms"][0];
+    let link = json!({"id":Uuid::now_v7(),"source_dialect":"common","source_segments":[{"start":2,"end":9,"surface":"harbour"}],"target":{"state":"linked","target_entry_id":entry_id,"target_pos_id":forms_saved["word"]["forms"]["pos"][0]["pos_id"],"target_base_form_id":form["id"],"target_form_id":form["id"],"target_variant_id":form["regional_variants"]["uk"]["id"],"target_sense_id":sense_id}});
+    let translation_id = Uuid::now_v7();
+    let (status, sentence) = call(&state, Method::POST, &format!("{ROOT}/sentences"), &bearer, Some(Uuid::now_v7()), Some(json!({
+        "source_entry_id":entry_id,"source_sense_id":sense_id,
+        "content":{"sentence":{"id":Uuid::now_v7(),"level":"A1","en_text":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":canonical}},"zh_text_id":translation_id,"zh_text":rich_text("今天的港口"),"zh_translations":[{"id":translation_id,"band":"word_for_word","language":"zh","content":rich_text("今天的港口")}],"links":[]},"annotations":[link]}
+    }))).await;
+    assert_eq!(status, StatusCode::OK, "{sentence}");
+    let sentence_id = sentence["id"].as_str().unwrap();
+    let (status, reread) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/sentences/{sentence_id}?view=draft"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reread}");
+    assert_eq!(
+        reread["content"]["sentence"]["en_text"]["common"]["value"],
+        canonical
+    );
+}
+
+#[sqlx::test]
 async fn v3_grammar_annotations_keep_levels_and_liaison_anchors(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
