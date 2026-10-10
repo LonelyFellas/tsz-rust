@@ -1,4 +1,4 @@
 interface:
   display_name: "Build tsz-rust"
-  short_description: "按 spec 实现后端改动并向验收命令收敛"
-  default_prompt: "Use $build to implement the confirmed tsz-rust spec and converge on its acceptance command."
+  short_description: "按明确任务或已有设计实现后端改动，复用验证并核对验收结果"
+  default_prompt: "Use $build to implement the clear tsz-rust task or existing design, reuse valid checks, and verify the agreed acceptance criteria."
