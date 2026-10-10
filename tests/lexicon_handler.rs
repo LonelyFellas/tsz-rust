@@ -134,12 +134,37 @@ async fn call_with_spelling_markup(
     body: Option<Value>,
     markup: bool,
 ) -> (StatusCode, Value) {
+    call_with_capabilities(
+        state,
+        method,
+        uri,
+        bearer,
+        idempotency_key,
+        body,
+        (markup, true),
+    )
+    .await
+}
+
+async fn call_with_capabilities(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    bearer: &str,
+    idempotency_key: Option<Uuid>,
+    body: Option<Value>,
+    capabilities: (bool, bool),
+) -> (StatusCode, Value) {
+    let (markup, formatting) = capabilities;
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
         .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
     if markup {
         builder = builder.header("X-TSZ-Spelling-Markup", "v1");
+    }
+    if formatting {
+        builder = builder.header("X-TSZ-Sentence-Formatting", "v1");
     }
     if let Some(idempotency_key) = idempotency_key {
         builder = builder.header("Idempotency-Key", idempotency_key.to_string());
@@ -186,7 +211,7 @@ async fn call_with_spelling_markup(
     {
         assert_eq!(
             vary.as_ref().and_then(|value| value.to_str().ok()),
-            Some("x-tsz-spelling-markup")
+            Some("x-tsz-spelling-markup, x-tsz-sentence-formatting")
         );
     }
     (status, body)
@@ -17501,3 +17526,6 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
     .await;
     assert_eq!(draft["word"]["forms"], newer["word"]["forms"]);
 }
+
+#[path = "lexicon_handler/sentence_formatting.rs"]
+mod sentence_formatting;

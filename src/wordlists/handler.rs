@@ -1,4 +1,5 @@
 use super::{dto::*, review, service};
+use crate::lexicon::sentence_formatting::response as formatting_response;
 use crate::{
     api::{ApiJson, ApiPath, ApiQuery},
     auth::extract::AuthUser,
@@ -6,6 +7,10 @@ use crate::{
     state::AppState,
 };
 use axum::{Json, Router, extract::State, routing::get};
+use axum::{
+    http::{HeaderMap, StatusCode},
+    response::Response,
+};
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -75,13 +80,14 @@ pub async fn my_detail(
     Ok(Json(service::read(&state.pool, id, Some(&auth)).await?))
 }
 
-#[utoipa::path(get,path="/api/v1/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery),
+#[utoipa::path(get,path="/api/v1/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),
 responses((status=200,description="当前发布内容；不可用条目不返回历史内容",body=WordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
 pub async fn public_items(
     State(state): State<AppState>,
+    headers: HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(query): ApiQuery<WordlistItemsQuery>,
-) -> Result<Json<WordlistItems>, AppError> {
+) -> Result<Response, AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let list = service::read_lock(&mut tx, id, None).await?;
     let (rows, pagination) = service::item_rows(&mut tx, id, &query).await?;
@@ -101,21 +107,26 @@ pub async fn public_items(
         .collect();
     service::eligible_owner(&mut tx, list.owner_user_id).await?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(Json(WordlistItems {
-        items,
-        revision: list.revision,
-        pagination,
-    }))
+    formatting_response(
+        &headers,
+        StatusCode::OK,
+        WordlistItems {
+            items,
+            revision: list.revision,
+            pagination,
+        },
+    )
 }
 
-#[utoipa::path(get,path="/api/v1/me/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/me/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),security(("bearer_auth"=[])),
 responses((status=403,description="需要先绑定手机号"),(status=200,description="当前发布内容；不可用条目不返回历史内容",body=MyWordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
 pub async fn my_items(
     State(state): State<AppState>,
+    headers: HeaderMap,
     auth: AuthUser,
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(query): ApiQuery<WordlistItemsQuery>,
-) -> Result<Json<MyWordlistItems>, AppError> {
+) -> Result<Response, AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let list = service::read_lock(&mut tx, id, Some(&auth)).await?;
     let (rows, pagination) = service::item_rows(&mut tx, id, &query).await?;
@@ -137,11 +148,15 @@ pub async fn my_items(
         .collect();
     service::eligible_owner(&mut tx, list.owner_user_id).await?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(Json(MyWordlistItems {
-        items,
-        revision: list.revision,
-        pagination,
-    }))
+    formatting_response(
+        &headers,
+        StatusCode::OK,
+        MyWordlistItems {
+            items,
+            revision: list.revision,
+            pagination,
+        },
+    )
 }
 
 #[utoipa::path(post,path="/api/v1/me/wordlists",tag="wordlists",security(("bearer_auth"=[])),request_body=CreateWordlist,

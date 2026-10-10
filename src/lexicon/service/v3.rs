@@ -1909,6 +1909,37 @@ impl LexiconService {
         let pos_ownership_unchanged = current_form_pos_ids == next_form_pos_ids;
         let mut meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings).map_err(serialization_error)?;
+        if !self.sentence_formatting_supported {
+            if crate::lexicon::sentence_formatting::contains_new_formats(
+                &serde_json::to_value(&current_forms).map_err(serialization_error)?,
+            ) {
+                return Err(crate::lexicon::sentence_formatting::word_write_error(
+                    entry_id,
+                    PersistedWordStep::Forms,
+                )
+                .into());
+            }
+            let next_pos = input
+                .content
+                .pos
+                .iter()
+                .map(|pos| pos.pos_id)
+                .collect::<HashSet<_>>();
+            for pos in &meanings.pos {
+                if !next_pos.contains(&pos.pos_id)
+                    && crate::lexicon::sentence_formatting::contains_new_formats(
+                        &serde_json::to_value(pos).map_err(serialization_error)?,
+                    )
+                {
+                    return Err(crate::lexicon::sentence_formatting::word_write_error(
+                        entry_id,
+                        PersistedWordStep::Forms,
+                    )
+                    .into());
+                }
+            }
+        }
+
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
         let forms_was_complete = record.completed_steps.iter().any(|step| step == "forms");
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
@@ -2232,6 +2263,18 @@ impl LexiconService {
             return Err(LexiconServiceError::RevisionConflict {
                 current_revision: record.revision,
             });
+        }
+        if !self.sentence_formatting_supported
+            && (crate::lexicon::sentence_formatting::contains_new_formats(&record.meanings)
+                || crate::lexicon::sentence_formatting::contains_new_formats(
+                    &serde_json::to_value(&content).map_err(serialization_error)?,
+                ))
+        {
+            return Err(crate::lexicon::sentence_formatting::word_write_error(
+                entry_id,
+                PersistedWordStep::Meanings,
+            )
+            .into());
         }
         if intent == StepSaveIntent::Complete
             && !record.completed_steps.iter().any(|step| step == "forms")

@@ -167,13 +167,14 @@ pub struct SentenceHistoryQuery {
     pub before_number: Option<i64>,
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceHistoryQuery),responses((status=200,body=Vec<SentencePublication>)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceHistoryQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=Vec<SentencePublication>)))]
 pub async fn history(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(q): ApiQuery<SentenceHistoryQuery>,
-) -> Result<Json<Vec<SentencePublication>>, AppError> {
+) -> Result<Response, AppError> {
     require_active_admin(&state, &auth).await?;
     if q.before_number.is_some_and(|n| n <= 0) {
         return Err(AppError::validation(
@@ -184,19 +185,22 @@ pub async fn history(
     }
     let rows=sqlx::query("SELECT p.*,s.created_by_admin_id FROM lexicon.shared_sentence_publications p JOIN lexicon.shared_sentences s ON s.id=p.sentence_id WHERE p.sentence_id=$1 AND ($2::bigint IS NULL OR p.publication_number<$2) ORDER BY p.publication_number DESC LIMIT 50")
         .bind(id).bind(q.before_number).fetch_all(&state.pool).await.map_err(AppError::internal)?;
-    Ok(Json(
+    formatting_response(
+        &headers,
+        StatusCode::OK,
         rows.into_iter()
             .map(publication_from_row)
-            .collect::<Result<_, _>>()?,
-    ))
+            .collect::<Result<Vec<_>, _>>()?,
+    )
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path)),responses((status=200,body=SentencePublication),(status=404,description="发布记录不存在")))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SentencePublication),(status=404,description="发布记录不存在")))]
 pub async fn historical(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiPath((id, publication_id)): ApiPath<(Uuid, Uuid)>,
-) -> Result<Json<SentencePublication>, AppError> {
+) -> Result<Response, AppError> {
     require_active_admin(&state, &auth).await?;
     let row = sqlx::query(
         "SELECT p.*,s.created_by_admin_id FROM lexicon.shared_sentence_publications p JOIN lexicon.shared_sentences s ON s.id=p.sentence_id WHERE p.sentence_id=$1 AND p.id=$2",
@@ -207,5 +211,5 @@ pub async fn historical(
     .await
     .map_err(AppError::internal)?
     .ok_or_else(missing)?;
-    Ok(Json(publication_from_row(row)?))
+    formatting_response(&headers, StatusCode::OK, publication_from_row(row)?)
 }

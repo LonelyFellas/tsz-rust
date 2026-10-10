@@ -38,7 +38,7 @@ pub async fn search_component_targets(
     path = "/api/v1/admin/lexicon/entries/{id}",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     responses(
         (status = 200, description = "版本化 canonical 词条草稿", body = AdminWordDraftV3Envelope),
         (status = 400, description = "词条 ID 非法"),
@@ -68,7 +68,7 @@ pub async fn get(
         state.smart_lexicon_v3_flags,
     );
     project_spelling_markup(&headers, &mut response.word.forms);
-    Ok(spelling_markup_response(StatusCode::OK, response))
+    spelling_markup_response(&headers, StatusCode::OK, response)
 }
 
 #[utoipa::path(
@@ -109,7 +109,7 @@ pub async fn inbound_references(
     path = "/api/v1/admin/lexicon/entries/{id}/publications",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     responses(
         (status = 200, description = "不可变 publication 历史，按各 snapshot 自身 schema_version 判别", body = AdminWordPublicationListResponse),
         (status = 400, description = "词条 ID 非法"),
@@ -138,7 +138,7 @@ pub async fn list_publications(
         );
         project_spelling_markup(&headers, &mut publication.word.forms);
     }
-    Ok(spelling_markup_response(StatusCode::OK, response))
+    spelling_markup_response(&headers, StatusCode::OK, response)
 }
 
 #[utoipa::path(
@@ -146,7 +146,7 @@ pub async fn list_publications(
     path = "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(PublicationPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(PublicationPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     responses(
         (status = 200, description = "按 snapshot 自身 schema_version 判别的不可变 publication", body = AdminWordPublicationEnvelope),
         (status = 400, description = "词条或 publication ID 非法"),
@@ -177,7 +177,7 @@ pub async fn get_publication(
         state.smart_lexicon_v3_flags,
     );
     project_spelling_markup(&headers, &mut response.publication.word.forms);
-    Ok(spelling_markup_response(StatusCode::OK, response))
+    spelling_markup_response(&headers, StatusCode::OK, response)
 }
 
 #[utoipa::path(

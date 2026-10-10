@@ -365,3 +365,6 @@ async fn full_reading_is_opt_in_and_sorting_precedes_pagination_without_editing(
         StatusCode::BAD_REQUEST
     );
 }
+
+#[path = "wordlists_handler/sentence_formatting.rs"]
+mod sentence_formatting;

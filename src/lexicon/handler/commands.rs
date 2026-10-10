@@ -40,7 +40,7 @@ pub async fn detect(
     path = "/api/v1/admin/lexicon/entries",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "创建命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(("Idempotency-Key" = Uuid, Header, description = "创建命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = CreateAdminWordV3Input,
     responses(
         (status = 201, description = "词条草稿创建成功", body = AdminWordV3Envelope),
@@ -79,7 +79,7 @@ pub async fn create(
         .await
         .map_err(map_error)?;
     project_spelling_markup(&headers, &mut response.word.forms);
-    Ok(spelling_markup_response(StatusCode::CREATED, response))
+    spelling_markup_response(&headers, StatusCode::CREATED, response)
 }
 
 // --- editor ---
@@ -136,7 +136,7 @@ pub async fn preview_forms_impact(
     path = "/api/v1/admin/lexicon/entries/{id}/steps/forms",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = SaveFormsStepInputV3,
     responses(
         (status = 200, description = "保存或完成词形与发音步骤", body = AdminWordV3Envelope),
@@ -170,6 +170,7 @@ pub async fn save_forms(
         return Err(v3_storage_unavailable());
     }
     let mut response = service(&state)
+        .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(&headers))
         .save_forms_v3(
             admin.id,
             request_id.as_uuid(),
@@ -185,7 +186,7 @@ pub async fn save_forms(
         state.smart_lexicon_v3_flags,
     );
     project_spelling_markup(&headers, &mut response.word.forms);
-    Ok(spelling_markup_response(StatusCode::OK, response))
+    spelling_markup_response(&headers, StatusCode::OK, response)
 }
 
 #[utoipa::path(
@@ -193,7 +194,7 @@ pub async fn save_forms(
     path = "/api/v1/admin/lexicon/entries/{id}/steps/meanings",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = SaveMeaningsStepInputV3,
     responses(
         (status = 200, description = "保存或完成词义与例句步骤", body = AdminWordV3Envelope),
@@ -226,6 +227,7 @@ pub async fn save_meanings(
         return Err(v3_storage_unavailable());
     }
     let mut response = service(&state)
+        .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(&headers))
         .save_meanings_v3(
             admin.id,
             request_id.as_uuid(),
@@ -240,7 +242,7 @@ pub async fn save_meanings(
         state.smart_lexicon_v3_flags,
     );
     project_spelling_markup(&headers, &mut response.word.forms);
-    Ok(spelling_markup_response(StatusCode::OK, response))
+    spelling_markup_response(&headers, StatusCode::OK, response)
 }
 
 #[utoipa::path(
@@ -286,7 +288,7 @@ pub async fn validate(
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
     params(EntryPath,
-        ("Idempotency-Key" = Uuid, Header, description = "发布命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+        ("Idempotency-Key" = Uuid, Header, description = "发布命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = PublishAdminWordV3Input,
     responses(
         (status = 201, description = "发布不可变词条版本", body = AdminWordV3Envelope),
@@ -335,7 +337,7 @@ pub async fn publish(
         state.smart_lexicon_v3_flags,
     );
     project_spelling_markup(&headers, &mut response.word.forms);
-    Ok(spelling_markup_response(StatusCode::CREATED, response))
+    spelling_markup_response(&headers, StatusCode::CREATED, response)
 }
 
 #[utoipa::path(
@@ -344,7 +346,7 @@ pub async fn publish(
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
     params(PublicationPath,
-        ("Idempotency-Key" = Uuid, Header, description = "历史 publication activation 命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+        ("Idempotency-Key" = Uuid, Header, description = "历史 publication activation 命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = RollbackPublicationV3Input,
     responses(
         (status = 201, description = "历史内容已通过当前校验并发布为新版本，草稿保留", body = AdminWordV3Envelope),
@@ -397,7 +399,7 @@ pub async fn rollback_publication(
         state.smart_lexicon_v3_flags,
     );
     project_spelling_markup(&headers, &mut response.word.forms);
-    Ok(spelling_markup_response(StatusCode::CREATED, response))
+    spelling_markup_response(&headers, StatusCode::CREATED, response)
 }
 
 #[utoipa::path(
@@ -437,7 +439,7 @@ pub async fn update_annotation(
 #[utoipa::path(
     post, path = "/api/v1/admin/lexicon/entries/publications/batch", tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "原子批次发布幂等键"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(("Idempotency-Key" = Uuid, Header, description = "原子批次发布幂等键"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = crate::lexicon::dto::BatchPublicationInputV3,
     responses(
         (status = 201, description = "所选词条全部发布", body = crate::lexicon::dto::BatchPublicationResponseV3),
@@ -473,5 +475,5 @@ pub async fn publish_batch(
         apply_capability_flags(&mut word.capabilities, state.smart_lexicon_v3_flags);
         project_spelling_markup(&headers, &mut word.forms);
     }
-    Ok(spelling_markup_response(StatusCode::CREATED, response))
+    spelling_markup_response(&headers, StatusCode::CREATED, response)
 }
