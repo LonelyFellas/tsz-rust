@@ -8,6 +8,7 @@ pub mod model;
 pub(crate) mod node_identity;
 pub mod normalization;
 pub(crate) mod provenance;
+pub mod published;
 pub mod repository;
 pub mod rich_text;
 pub mod router;

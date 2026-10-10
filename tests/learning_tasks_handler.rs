@@ -216,15 +216,21 @@ async fn candidate_projection_obeys_cefr_context_and_form_relationships(pool: Pg
     };
     let (_, _, list) = setup(&pool).await;
     let (entry,publication,generation,snapshot):(Uuid,Uuid,i64,Value)=sqlx::query_as("SELECT e.id,p.id,e.wordlist_archive_generation,p.snapshot FROM wordlist_items i JOIN lexicon.entries e ON e.id=i.entry_id JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE i.wordlist_id=$1").bind(list).fetch_one(&pool).await.unwrap();
-    let source = |snapshot: Value| LearningSource {
-        wordlist_id: list,
-        revision: 1,
-        membership_id: Uuid::now_v7(),
-        public_generation: None,
-        entry_id: entry,
-        archive_generation: generation,
-        publication_id: publication,
-        word: serde_json::from_value(snapshot).unwrap(),
+    let source = |snapshot: Value| {
+        let word: tsz_rust::lexicon::dto::AdminWordV3 = serde_json::from_value(snapshot).unwrap();
+        LearningSource {
+            wordlist_id: list,
+            revision: 1,
+            membership_id: Uuid::now_v7(),
+            public_generation: None,
+            entry_id: entry,
+            archive_generation: generation,
+            publication_id: publication,
+            content: tsz_rust::lexicon::published::PublishedContentV3 {
+                forms: word.forms,
+                meanings: word.meanings,
+            },
+        }
     };
     let context = LearningContext {
         cefr_level: "A1".into(),

@@ -116,11 +116,10 @@ pub async fn lock_entries(
     ids: &[Uuid],
     require_all: bool,
 ) -> Result<(), AppError> {
-    let rows:Vec<(Uuid,Option<Uuid>,Option<chrono::DateTime<chrono::Utc>>)>=sqlx::query_as("SELECT id,current_publication_id,archived_at FROM lexicon.entries WHERE id=ANY($1) ORDER BY id FOR SHARE")
-        .bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let locked = crate::lexicon::published::lock_entries_in(tx, ids).await?;
     if require_all {
         let supported:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=ANY($1) AND e.archived_at IS NULL AND p.content_schema_version=3").bind(ids).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
-        if rows.len() != ids.len() || supported as usize != ids.len() {
+        if locked != ids.len() || supported as usize != ids.len() {
             return Err(invalid("包含未发布、归档或不支持的词条"));
         }
     }

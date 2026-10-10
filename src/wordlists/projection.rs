@@ -43,7 +43,7 @@ pub fn project(
                                 .get(item.form_type.as_str())
                                 .cloned()
                                 .unwrap_or_else(|| item.form_type.as_str().to_owned()),
-                            sense_ids: crate::lexicon::service::form_senses::allowed_form_senses(
+                            sense_ids: crate::lexicon::published::allowed_form_senses(
                                 form,
                                 &word.meanings,
                                 item.id,
