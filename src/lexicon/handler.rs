@@ -41,6 +41,9 @@ use crate::{
 pub(crate) mod commands;
 pub(crate) mod lifecycle;
 pub(crate) mod query;
+mod spelling_markup;
+
+use spelling_markup::{project_spelling_markup, spelling_markup_response};
 
 pub use commands::{
     create, detect, preview_forms_impact, publish, rollback_publication, save_forms, save_meanings,

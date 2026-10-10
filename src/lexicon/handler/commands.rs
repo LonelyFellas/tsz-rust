@@ -40,7 +40,7 @@ pub async fn detect(
     path = "/api/v1/admin/lexicon/entries",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "创建命令幂等键（UUID）")),
+    params(("Idempotency-Key" = Uuid, Header, description = "创建命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = CreateAdminWordV3Input,
     responses(
         (status = 201, description = "词条草稿创建成功", body = AdminWordV3Envelope),
@@ -67,7 +67,7 @@ pub async fn create(
     if !state.smart_lexicon_v3_flags.create || !state.smart_lexicon_v3_flags.projection {
         return Err(v3_storage_unavailable());
     }
-    let response = service(&state)
+    let mut response = service(&state)
         .create_v3(
             admin.id,
             admin.is_super_admin(),
@@ -78,7 +78,8 @@ pub async fn create(
         )
         .await
         .map_err(map_error)?;
-    Ok((StatusCode::CREATED, Json(response)))
+    project_spelling_markup(&headers, &mut response.word.forms);
+    Ok(spelling_markup_response(StatusCode::CREATED, response))
 }
 
 // --- editor ---
@@ -135,7 +136,7 @@ pub async fn preview_forms_impact(
     path = "/api/v1/admin/lexicon/entries/{id}/steps/forms",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = SaveFormsStepInputV3,
     responses(
         (status = 200, description = "保存或完成词形与发音步骤", body = AdminWordV3Envelope),
@@ -152,6 +153,7 @@ pub async fn preview_forms_impact(
 pub async fn save_forms(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
     ApiPath(path): ApiPath<EntryPath>,
     ApiJson(input): ApiJson<Value>,
@@ -182,7 +184,8 @@ pub async fn save_forms(
         &mut response.word.capabilities,
         state.smart_lexicon_v3_flags,
     );
-    Ok((StatusCode::OK, Json(response)))
+    project_spelling_markup(&headers, &mut response.word.forms);
+    Ok(spelling_markup_response(StatusCode::OK, response))
 }
 
 #[utoipa::path(
@@ -190,7 +193,7 @@ pub async fn save_forms(
     path = "/api/v1/admin/lexicon/entries/{id}/steps/meanings",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = SaveMeaningsStepInputV3,
     responses(
         (status = 200, description = "保存或完成词义与例句步骤", body = AdminWordV3Envelope),
@@ -206,6 +209,7 @@ pub async fn save_forms(
 pub async fn save_meanings(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     Extension(request_id): Extension<RequestId>,
     ApiPath(path): ApiPath<EntryPath>,
     ApiJson(input): ApiJson<Value>,
@@ -235,7 +239,8 @@ pub async fn save_meanings(
         &mut response.word.capabilities,
         state.smart_lexicon_v3_flags,
     );
-    Ok((StatusCode::OK, Json(response)))
+    project_spelling_markup(&headers, &mut response.word.forms);
+    Ok(spelling_markup_response(StatusCode::OK, response))
 }
 
 #[utoipa::path(
@@ -280,10 +285,8 @@ pub async fn validate(
     path = "/api/v1/admin/lexicon/entries/{id}/publications",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(
-        EntryPath,
-        ("Idempotency-Key" = Uuid, Header, description = "发布命令幂等键（UUID）")
-    ),
+    params(EntryPath,
+        ("Idempotency-Key" = Uuid, Header, description = "发布命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = PublishAdminWordV3Input,
     responses(
         (status = 201, description = "发布不可变词条版本", body = AdminWordV3Envelope),
@@ -331,7 +334,8 @@ pub async fn publish(
         &mut response.word.capabilities,
         state.smart_lexicon_v3_flags,
     );
-    Ok((StatusCode::CREATED, Json(response)))
+    project_spelling_markup(&headers, &mut response.word.forms);
+    Ok(spelling_markup_response(StatusCode::CREATED, response))
 }
 
 #[utoipa::path(
@@ -339,10 +343,8 @@ pub async fn publish(
     path = "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/rollback",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(
-        PublicationPath,
-        ("Idempotency-Key" = Uuid, Header, description = "历史 publication activation 命令幂等键（UUID）")
-    ),
+    params(PublicationPath,
+        ("Idempotency-Key" = Uuid, Header, description = "历史 publication activation 命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = RollbackPublicationV3Input,
     responses(
         (status = 201, description = "历史内容已通过当前校验并发布为新版本，草稿保留", body = AdminWordV3Envelope),
@@ -394,7 +396,8 @@ pub async fn rollback_publication(
         &mut response.word.capabilities,
         state.smart_lexicon_v3_flags,
     );
-    Ok((StatusCode::CREATED, Json(response)))
+    project_spelling_markup(&headers, &mut response.word.forms);
+    Ok(spelling_markup_response(StatusCode::CREATED, response))
 }
 
 #[utoipa::path(
@@ -434,7 +437,7 @@ pub async fn update_annotation(
 #[utoipa::path(
     post, path = "/api/v1/admin/lexicon/entries/publications/batch", tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "原子批次发布幂等键")),
+    params(("Idempotency-Key" = Uuid, Header, description = "原子批次发布幂等键"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = crate::lexicon::dto::BatchPublicationInputV3,
     responses(
         (status = 201, description = "所选词条全部发布", body = crate::lexicon::dto::BatchPublicationResponseV3),
@@ -468,6 +471,7 @@ pub async fn publish_batch(
         .map_err(map_error)?;
     for word in &mut response.words {
         apply_capability_flags(&mut word.capabilities, state.smart_lexicon_v3_flags);
+        project_spelling_markup(&headers, &mut word.forms);
     }
-    Ok((StatusCode::CREATED, Json(response)))
+    Ok(spelling_markup_response(StatusCode::CREATED, response))
 }

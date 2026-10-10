@@ -26,6 +26,8 @@ use tsz_rust::{
 mod batch4;
 #[path = "lexicon_handler/batch5.rs"]
 mod batch5;
+#[path = "lexicon_handler/spelling_markup.rs"]
+mod spelling_markup;
 
 const ROOT: &str = "/api/v1/admin/lexicon";
 fn test_redis_url() -> String {
@@ -111,6 +113,7 @@ fn token(state: &AppState, admin_id: Uuid) -> String {
         .expect("测试 token 应能签发")
 }
 
+// 默认调用模拟当前 api-client；旧页面不发送能力头。
 async fn call(
     state: &AppState,
     method: Method,
@@ -119,10 +122,25 @@ async fn call(
     idempotency_key: Option<Uuid>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    call_with_spelling_markup(state, method, uri, bearer, idempotency_key, body, true).await
+}
+
+async fn call_with_spelling_markup(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    bearer: &str,
+    idempotency_key: Option<Uuid>,
+    body: Option<Value>,
+    markup: bool,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
         .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    if markup {
+        builder = builder.header("X-TSZ-Spelling-Markup", "v1");
+    }
     if let Some(idempotency_key) = idempotency_key {
         builder = builder.header("Idempotency-Key", idempotency_key.to_string());
     }
@@ -137,6 +155,7 @@ async fn call(
         .await
         .unwrap();
     let status = response.status();
+    let vary = response.headers().get(header::VARY).cloned();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let body = if bytes.is_empty() {
         Value::Null
@@ -148,6 +167,28 @@ async fn call(
             )
         })
     };
+    if body
+        .get("word")
+        .is_some_and(|word| word.get("forms").is_some())
+        || body
+            .get("words")
+            .and_then(Value::as_array)
+            .is_some_and(|words| words.iter().any(|word| word.get("forms").is_some()))
+        || body.pointer("/publication/word/forms").is_some()
+        || body
+            .get("publications")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.pointer("/word/forms").is_some())
+            })
+    {
+        assert_eq!(
+            vary.as_ref().and_then(|value| value.to_str().ok()),
+            Some("x-tsz-spelling-markup")
+        );
+    }
     (status, body)
 }
 
@@ -17248,6 +17289,25 @@ async fn v3_spelling_rich_roundtrips_and_preserves_legacy_writes(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK, "{loaded}");
     assert_eq!(loaded["word"]["forms"], expected);
+    let (status, legacy_view) = call_with_spelling_markup(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{legacy_view}");
+    let mut expected_legacy = expected.clone();
+    for side in ["uk", "us"] {
+        expected_legacy.pointer_mut(path).unwrap()[side]
+            .as_object_mut()
+            .unwrap()
+            .remove("spelling_rich");
+    }
+    assert_eq!(legacy_view["word"]["forms"], expected_legacy);
     let mut legacy = expected.clone();
     for side in ["uk", "us"] {
         legacy.pointer_mut(path).unwrap()[side]
@@ -17262,6 +17322,22 @@ async fn v3_spelling_rich_roundtrips_and_preserves_legacy_writes(pool: PgPool) {
         saved["word"]["revision"].as_i64().unwrap(),
         "complete",
         legacy,
+    )
+    .await;
+    assert_eq!(preserved["word"]["forms"], expected);
+    let (status, legacy_saved) = call_with_spelling_markup(
+        &state, Method::PUT, &format!("{ROOT}/entries/{id}/steps/forms"), &bearer, None,
+        Some(json!({"schema_version":3,"base_revision":preserved["word"]["revision"],"intent":"complete","content":expected_legacy})), false,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{legacy_saved}");
+    assert_eq!(legacy_saved["word"]["forms"], expected_legacy);
+    let (_, preserved) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
     )
     .await;
     assert_eq!(preserved["word"]["forms"], expected);

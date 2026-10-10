@@ -38,7 +38,7 @@ pub async fn search_component_targets(
     path = "/api/v1/admin/lexicon/entries/{id}",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     responses(
         (status = 200, description = "版本化 canonical 词条草稿", body = AdminWordDraftV3Envelope),
         (status = 400, description = "词条 ID 非法"),
@@ -52,6 +52,7 @@ pub async fn search_component_targets(
 pub async fn get(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiPath(path): ApiPath<EntryPath>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
@@ -66,7 +67,8 @@ pub async fn get(
         &mut response.word.capabilities,
         state.smart_lexicon_v3_flags,
     );
-    Ok((StatusCode::OK, Json(response)))
+    project_spelling_markup(&headers, &mut response.word.forms);
+    Ok(spelling_markup_response(StatusCode::OK, response))
 }
 
 #[utoipa::path(
@@ -107,7 +109,7 @@ pub async fn inbound_references(
     path = "/api/v1/admin/lexicon/entries/{id}/publications",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath),
+    params(EntryPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     responses(
         (status = 200, description = "不可变 publication 历史，按各 snapshot 自身 schema_version 判别", body = AdminWordPublicationListResponse),
         (status = 400, description = "词条 ID 非法"),
@@ -121,8 +123,9 @@ pub async fn inbound_references(
 pub async fn list_publications(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiPath(path): ApiPath<EntryPath>,
-) -> Result<(StatusCode, Json<AdminWordPublicationListResponse>), AppError> {
+) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
     let mut response = service(&state)
         .publication_history(path.id)
@@ -133,8 +136,9 @@ pub async fn list_publications(
             &mut publication.word.capabilities,
             state.smart_lexicon_v3_flags,
         );
+        project_spelling_markup(&headers, &mut publication.word.forms);
     }
-    Ok((StatusCode::OK, Json(response)))
+    Ok(spelling_markup_response(StatusCode::OK, response))
 }
 
 #[utoipa::path(
@@ -142,7 +146,7 @@ pub async fn list_publications(
     path = "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(PublicationPath),
+    params(PublicationPath, ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     responses(
         (status = 200, description = "按 snapshot 自身 schema_version 判别的不可变 publication", body = AdminWordPublicationEnvelope),
         (status = 400, description = "词条或 publication ID 非法"),
@@ -157,8 +161,9 @@ pub async fn list_publications(
 pub async fn get_publication(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiPath(path): ApiPath<PublicationPath>,
-) -> Result<(StatusCode, Json<AdminWordPublicationEnvelope>), AppError> {
+) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
     let mut response = service(&state)
         .publication(path.id, path.publication_id)
@@ -171,7 +176,8 @@ pub async fn get_publication(
         &mut response.publication.word.capabilities,
         state.smart_lexicon_v3_flags,
     );
-    Ok((StatusCode::OK, Json(response)))
+    project_spelling_markup(&headers, &mut response.publication.word.forms);
+    Ok(spelling_markup_response(StatusCode::OK, response))
 }
 
 #[utoipa::path(
