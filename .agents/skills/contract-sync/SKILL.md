@@ -5,6 +5,8 @@ description: 对齐 tsz 与 tsz-rust 的 OpenAPI、wire 类型、端点快照和
 
 # TSZ 前后端契约同步
 
+通用授权与任务记录遵循 [AGENTS.md](../../../AGENTS.md)。契约核对、生成与兼容证据记入主任务，各阶段复用；不为两仓分别重做设计、确认或最终门。
+
 目标是让后端实现、生成契约和实际前端消费者一致。只要求核对时保持只读；要求同步/修复时完成本地改动与验证，不自动提交或部署。
 
 ## 1. 固定本次输入
@@ -23,6 +25,7 @@ SQLX_OFFLINE=true cargo run --locked --all-features --bin export_openapi
 ```
 
 该二进制生成 `docs/openapi.json`，不启动服务。SQLx 离线编译依赖当前 `.sqlx`；缓存缺失时定位 SQL/schema 变化，按已确认隔离数据库准备缓存，不能随手连接共享库或改用裸 `cargo run`。
+build/bugfix 已完成同输入导出且实现、配置、依赖未变时复用该产物与证据，不再重复导出；同步也只在输入或生成物需要变化时执行。
 
 在选定的前端根目录运行；`tsz_backend_root` 必须是上一步核实的绝对路径：
 
@@ -44,7 +47,7 @@ env -u SYNC_OPENAPI_RUNTIME_ONLY OPENAPI_SOURCE="$tsz_backend_root/docs/openapi.
 V3 runtime validator 会拒绝未声明字段。新增响应字段也可能让旧前端报错；同时检查新前端访问旧 API 的缺字段/新枚举行为。
 兼容性必须基于实际 schema 与消费者，不能默认「新增字段安全」或「一律前端先发」。
 
-迭代运行受影响契约文件及 Rust handler/序列化测试；完成同步至少运行 `pnpm --filter @tsz/api-client test` 和受影响类型检查。
+迭代运行受影响契约文件及 Rust handler/序列化测试；完成同步须有当前输入的 `pnpm --filter @tsz/api-client test` 和受影响类型检查通过证据，可复用同状态已完成结果，紧接 ship 时由原生 hooks 承接其覆盖项。
 数据库集成测试先核实依赖隔离。最终全量质量门复用项目 test/ship 的安排，不在这里再叠一轮。
 需要证明浏览器连到真实后端时，读取选定前端 checkout 的 `.agents/skills/test/references/real-backend-acceptance.md`。
 
