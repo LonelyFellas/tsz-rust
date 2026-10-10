@@ -1,7 +1,6 @@
 use axum::{
-    Json,
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use serde::Serialize;
 
@@ -25,8 +24,17 @@ pub(super) fn project_spelling_markup(headers: &HeaderMap, forms: &mut DraftForm
     }
 }
 
-pub(super) fn spelling_markup_response<T: Serialize>(status: StatusCode, body: T) -> Response {
-    (status, [(header::VARY, HEADER)], Json(body)).into_response()
+pub(super) fn spelling_markup_response<T: Serialize>(
+    headers: &HeaderMap,
+    status: StatusCode,
+    body: T,
+) -> Result<Response, crate::error::AppError> {
+    let mut response = crate::lexicon::sentence_formatting::response(headers, status, body)?;
+    response.headers_mut().insert(
+        header::VARY,
+        axum::http::HeaderValue::from_static("x-tsz-spelling-markup, x-tsz-sentence-formatting"),
+    );
+    Ok(response)
 }
 
 #[cfg(test)]

@@ -481,7 +481,7 @@ async fn publish_command(
     Ok(response)
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header)),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
 pub async fn publish(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -489,15 +489,17 @@ pub async fn publish(
     headers: HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<SentencePublicationInput>,
-) -> Result<Json<SharedSentence>, AppError> {
+) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
-    Ok(Json(
+    formatting_response(
+        &headers,
+        StatusCode::OK,
         publish_command(&state, admin.id, request.as_uuid(), id, key, input, None).await?,
-    ))
+    )
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}/rollback",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("Idempotency-Key"=Uuid,Header)),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}/rollback",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
 pub async fn rollback(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -505,10 +507,12 @@ pub async fn rollback(
     headers: HeaderMap,
     ApiPath((id, publication)): ApiPath<(Uuid, Uuid)>,
     ApiJson(input): ApiJson<SentencePublicationInput>,
-) -> Result<Json<SharedSentence>, AppError> {
+) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
-    Ok(Json(
+    formatting_response(
+        &headers,
+        StatusCode::OK,
         publish_command(
             &state,
             admin.id,
@@ -519,7 +523,7 @@ pub async fn rollback(
             Some(publication),
         )
         .await?,
-    ))
+    )
 }
 
 async fn impact_on(
@@ -648,7 +652,7 @@ async fn visibility_command(
     Ok(response)
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/withdraw",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header)),request_body=WithdrawSentenceInput,responses((status=200,body=SharedSentence),(status=403,description="无下架权"),(status=409,description="版本或影响确认过期")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/withdraw",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=WithdrawSentenceInput,responses((status=200,body=SharedSentence),(status=403,description="无下架权"),(status=409,description="版本或影响确认过期")))]
 pub async fn withdraw(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -656,10 +660,12 @@ pub async fn withdraw(
     headers: HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<WithdrawSentenceInput>,
-) -> Result<Json<SharedSentence>, AppError> {
+) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
-    Ok(Json(
+    formatting_response(
+        &headers,
+        StatusCode::OK,
         visibility_command(
             &state,
             admin.id,
@@ -673,10 +679,10 @@ pub async fn withdraw(
             Some((input.reason, input.impact_fingerprint)),
         )
         .await?,
-    ))
+    )
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/restore",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header)),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无恢复权"),(status=409,description="版本或引用冲突")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/restore",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无恢复权"),(status=409,description="版本或引用冲突")))]
 pub async fn restore(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -684,10 +690,12 @@ pub async fn restore(
     headers: HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<SentencePublicationInput>,
-) -> Result<Json<SharedSentence>, AppError> {
+) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
-    Ok(Json(
+    formatting_response(
+        &headers,
+        StatusCode::OK,
         visibility_command(&state, admin.id, request.as_uuid(), id, key, input, None).await?,
-    ))
+    )
 }

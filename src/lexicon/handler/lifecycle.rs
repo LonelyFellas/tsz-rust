@@ -70,7 +70,7 @@ pub async fn delete_draft(
     path = "/api/v1/admin/lexicon/entries/{id}/archive",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = EntryLifecycleInput,
     responses(
         (status = 200, description = "词条已归档且 publication 历史保持不变", body = AdminWordV3Envelope),
@@ -106,7 +106,7 @@ pub async fn archive(
         .await
         .map_err(map_error)?;
     project_spelling_markup(&headers, &mut response.word.forms);
-    Ok(spelling_markup_response(StatusCode::OK, response))
+    spelling_markup_response(&headers, StatusCode::OK, response)
 }
 
 #[utoipa::path(
@@ -114,7 +114,7 @@ pub async fn archive(
     path = "/api/v1/admin/lexicon/entries/{id}/restore",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = EntryLifecycleInput,
     responses(
         (status = 200, description = "词条已恢复且 publication 历史保持不变", body = AdminWordV3Envelope),
@@ -152,7 +152,7 @@ pub async fn restore(
         .await
         .map_err(map_error)?;
     project_spelling_markup(&headers, &mut response.word.forms);
-    Ok(spelling_markup_response(StatusCode::OK, response))
+    spelling_markup_response(&headers, StatusCode::OK, response)
 }
 
 #[utoipa::path(
@@ -207,7 +207,7 @@ pub async fn delete_batch(
     path = "/api/v1/admin/lexicon/entries/archive-batch",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "批量归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(("Idempotency-Key" = Uuid, Header, description = "批量归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = EntryLifecycleBatchInput,
     responses(
         (status = 200, description = "原子批量归档结果", body = EntryLifecycleBatchResponse),
@@ -248,7 +248,7 @@ pub async fn archive_batch(
     for word in &mut response.words {
         project_spelling_markup(&headers, &mut word.forms);
     }
-    Ok(spelling_markup_response(StatusCode::OK, response))
+    spelling_markup_response(&headers, StatusCode::OK, response)
 }
 
 #[utoipa::path(
@@ -256,7 +256,7 @@ pub async fn archive_batch(
     path = "/api/v1/admin/lexicon/entries/restore-batch",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "批量恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
+    params(("Idempotency-Key" = Uuid, Header, description = "批量恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
     request_body = EntryLifecycleBatchInput,
     responses(
         (status = 200, description = "原子批量恢复结果", body = EntryLifecycleBatchResponse),
@@ -299,5 +299,5 @@ pub async fn restore_batch(
     for word in &mut response.words {
         project_spelling_markup(&headers, &mut word.forms);
     }
-    Ok(spelling_markup_response(StatusCode::OK, response))
+    spelling_markup_response(&headers, StatusCode::OK, response)
 }

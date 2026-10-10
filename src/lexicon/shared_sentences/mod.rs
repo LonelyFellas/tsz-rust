@@ -3,7 +3,13 @@ pub(crate) mod publication;
 pub(crate) mod reading;
 pub(crate) mod visibility;
 
-use axum::{Json, extract::State, http::StatusCode};
+use crate::lexicon::sentence_formatting::{self, response as formatting_response};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::Response,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -580,12 +586,13 @@ async fn bump(conn: &mut PgConnection, id: Uuid) -> Result<(), AppError> {
     Ok(())
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),params(SentenceListQuery),responses((status=200,body=SharedSentenceList),(status=400,description="查询参数无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条")))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),params(SentenceListQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentenceList),(status=400,description="查询参数无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条")))]
 pub async fn list(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiQuery(q): ApiQuery<SentenceListQuery>,
-) -> Result<Json<SharedSentenceList>, AppError> {
+) -> Result<Response, AppError> {
     crate::admin::permissions::load(&state, &auth)
         .await?
         .require("sentences.access")?;
@@ -605,7 +612,11 @@ pub async fn list(
         ));
     }
     if q.view == SentenceView::Published {
-        return Ok(Json(reading::published_list(&state.pool, &q).await?));
+        return formatting_response(
+            &headers,
+            StatusCode::OK,
+            reading::published_list(&state.pool, &q).await?,
+        );
     }
     let mut snapshot = state.pool.begin().await.map_err(AppError::internal)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -688,16 +699,21 @@ pub async fn list(
             Err(e) => return Err(e),
         }
     }
-    Ok(Json(SharedSentenceList { items, total }))
+    formatting_response(
+        &headers,
+        StatusCode::OK,
+        SharedSentenceList { items, total },
+    )
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceReadQuery),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceReadQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
 pub async fn get(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(q): ApiQuery<SentenceReadQuery>,
-) -> Result<Json<SharedSentence>, AppError> {
+) -> Result<Response, AppError> {
     crate::admin::permissions::load(&state, &auth)
         .await?
         .require("sentences.access")?;
@@ -706,18 +722,23 @@ pub async fn get(
         .execute(&mut *snapshot)
         .await
         .map_err(AppError::internal)?;
-    Ok(Json(match q.view {
-        SentenceView::Draft => read_on(&mut snapshot, id).await?,
-        SentenceView::Published => reading::published_on(&mut snapshot, id).await?,
-    }))
+    formatting_response(
+        &headers,
+        StatusCode::OK,
+        match q.view {
+            SentenceView::Draft => read_on(&mut snapshot, id).await?,
+            SentenceView::Published => reading::published_on(&mut snapshot, id).await?,
+        },
+    )
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),request_body=CreateSharedSentence,responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),request_body=CreateSharedSentence,params(("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
 pub async fn create(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiJson(input): ApiJson<CreateSharedSentence>,
-) -> Result<Json<SharedSentence>, AppError> {
+) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     validate(&input.content)?;
     let id = input.content.sentence.id;
@@ -769,16 +790,17 @@ pub async fn create(
         annotations(&mut tx, id, &input.content).await?;
     }
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(Json(read(&state.pool, id).await?))
+    formatting_response(&headers, StatusCode::OK, read(&state.pool, id).await?)
 }
 
-#[utoipa::path(put,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),request_body=UpdateSharedSentence,responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
+#[utoipa::path(put,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=UpdateSharedSentence,responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
 pub async fn update(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<UpdateSharedSentence>,
-) -> Result<Json<SharedSentence>, AppError> {
+) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     validate(&input.content)?;
     if input.context_entry_id.is_some() != input.context_sense_id.is_some() {
@@ -809,6 +831,16 @@ pub async fn update(
     )
     .await?;
     lock(&mut tx, id, input.base_revision).await?;
+    if !sentence_formatting::supported(&headers) {
+        let current = read_on(&mut tx, id).await?;
+        if sentence_formatting::contains_new_formats(
+            &serde_json::to_value(current.content).map_err(AppError::internal)?,
+        ) || sentence_formatting::contains_new_formats(
+            &serde_json::to_value(&input.content).map_err(AppError::internal)?,
+        ) {
+            return Err(invalid(sentence_formatting::UPGRADE_MESSAGE));
+        }
+    }
     sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
         .bind(id)
         .execute(&mut *tx)
@@ -823,7 +855,7 @@ pub async fn update(
         .map_err(AppError::internal)?;
     bump(&mut tx, id).await?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(Json(read(&state.pool, id).await?))
+    formatting_response(&headers, StatusCode::OK, read(&state.pool, id).await?)
 }
 
 #[utoipa::path(delete,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),request_body=SentenceRevision,responses((status=204,description="删除或移除收录成功"),(status=400,description="输入无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本冲突"),(status=422,description="请求结构无效")))]

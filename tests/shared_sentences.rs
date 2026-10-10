@@ -222,7 +222,8 @@ async fn call_with_key(
         .method(method)
         .uri(path)
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header("Idempotency-Key", idempotency_key.to_string());
+        .header("Idempotency-Key", idempotency_key.to_string())
+        .header("X-TSZ-Sentence-Formatting", "v1");
     let body = if let Some(body) = body {
         req = req.header(header::CONTENT_TYPE, "application/json");
         Body::from(body.to_string())

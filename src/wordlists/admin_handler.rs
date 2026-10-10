@@ -1,4 +1,5 @@
 use super::{dto::*, review};
+use crate::lexicon::sentence_formatting::response as formatting_response;
 use crate::{
     admin::AdminAuth,
     api::{ApiJson, ApiPath, ApiQuery},
@@ -6,6 +7,10 @@ use crate::{
     state::AppState,
 };
 use axum::{Json, extract::State};
+use axum::{
+    http::{HeaderMap, StatusCode},
+    response::Response,
+};
 use uuid::Uuid;
 
 #[utoipa::path(get,path="/api/v1/admin/wordlists",tag="wordlists",params(AdminWordlistQuery),security(("bearer_auth"=[])),
@@ -28,17 +33,20 @@ pub async fn reviews(
     Ok(Json(review::admin_reviews(&state.pool, &auth, id).await?))
 }
 
-#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/review-requests/{request_id}/items",tag="wordlists",params(("id"=Uuid,Path),("request_id"=Uuid,Path),WordlistQuery),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/review-requests/{request_id}/items",tag="wordlists",params(("id"=Uuid,Path),("request_id"=Uuid,Path),WordlistQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),security(("bearer_auth"=[])),
 responses((status=200,description="词表管理",body=WordlistItems),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
 pub async fn items(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiPath((id, request_id)): ApiPath<(Uuid, Uuid)>,
     ApiQuery(query): ApiQuery<WordlistQuery>,
-) -> Result<Json<WordlistItems>, AppError> {
-    Ok(Json(
+) -> Result<Response, AppError> {
+    formatting_response(
+        &headers,
+        StatusCode::OK,
         review::admin_items(&state.pool, &auth, id, request_id, query).await?,
-    ))
+    )
 }
 
 #[utoipa::path(post,path="/api/v1/admin/wordlists/{id}/review-requests/{request_id}/decision",tag="wordlists",params(("id"=Uuid,Path),("request_id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=WordlistDecision,

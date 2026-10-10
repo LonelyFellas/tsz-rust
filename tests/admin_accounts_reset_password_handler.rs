@@ -380,16 +380,16 @@ async fn refresh_waits_for_password_change_and_cannot_escape_revocation(pool: Pg
         .unwrap();
     let rotate = tokio::spawn(async move { session.rotate(&old.plaintext).await });
     // 使用第二连接的实际锁等待证据，避免以睡眠推断轮换到达锁点。
-    let mut observed_wait = false;
-    for _ in 0..100 {
-        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE OF a%')").fetch_one(&pool).await.unwrap();
-        if waiting {
-            observed_wait = true;
-            break;
+    let observed_wait = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE OF a%')").fetch_one(&pool).await.unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        tokio::task::yield_now().await;
-    }
-    assert!(observed_wait, "轮换必须实际进入管理员行锁等待");
+    }).await;
+    assert!(observed_wait.is_ok(), "轮换必须实际进入管理员行锁等待");
     sqlx::query("UPDATE admin_refresh_tokens SET revoked_at = NOW() WHERE admin_id = $1")
         .bind(id)
         .execute(&mut *tx)
