@@ -70,7 +70,7 @@ pub async fn delete_draft(
     path = "/api/v1/admin/lexicon/entries/{id}/archive",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "归档命令幂等键（UUID）")),
+    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = EntryLifecycleInput,
     responses(
         (status = 200, description = "词条已归档且 publication 历史保持不变", body = AdminWordV3Envelope),
@@ -93,7 +93,7 @@ pub async fn archive(
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
     require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
-    let response = service(&state)
+    let mut response = service(&state)
         .archive(
             admin.id,
             request_id.as_uuid(),
@@ -105,7 +105,8 @@ pub async fn archive(
         )
         .await
         .map_err(map_error)?;
-    Ok((StatusCode::OK, Json(response)))
+    project_spelling_markup(&headers, &mut response.word.forms);
+    Ok(spelling_markup_response(StatusCode::OK, response))
 }
 
 #[utoipa::path(
@@ -113,7 +114,7 @@ pub async fn archive(
     path = "/api/v1/admin/lexicon/entries/{id}/restore",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "恢复命令幂等键（UUID）")),
+    params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = EntryLifecycleInput,
     responses(
         (status = 200, description = "词条已恢复且 publication 历史保持不变", body = AdminWordV3Envelope),
@@ -138,7 +139,7 @@ pub async fn restore(
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
     require_lifecycle_v3_capabilities(&state, &[path.id]).await?;
-    let response = service(&state)
+    let mut response = service(&state)
         .restore(
             admin.id,
             request_id.as_uuid(),
@@ -150,7 +151,8 @@ pub async fn restore(
         )
         .await
         .map_err(map_error)?;
-    Ok((StatusCode::OK, Json(response)))
+    project_spelling_markup(&headers, &mut response.word.forms);
+    Ok(spelling_markup_response(StatusCode::OK, response))
 }
 
 #[utoipa::path(
@@ -205,7 +207,7 @@ pub async fn delete_batch(
     path = "/api/v1/admin/lexicon/entries/archive-batch",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "批量归档命令幂等键（UUID）")),
+    params(("Idempotency-Key" = Uuid, Header, description = "批量归档命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = EntryLifecycleBatchInput,
     responses(
         (status = 200, description = "原子批量归档结果", body = EntryLifecycleBatchResponse),
@@ -232,7 +234,7 @@ pub async fn archive_batch(
         .map(|entry| entry.id)
         .collect::<Vec<_>>();
     require_lifecycle_v3_capabilities(&state, &entry_ids).await?;
-    let response = service(&state)
+    let mut response = service(&state)
         .archive_batch(
             admin.id,
             request_id.as_uuid(),
@@ -243,7 +245,10 @@ pub async fn archive_batch(
         )
         .await
         .map_err(map_error)?;
-    Ok((StatusCode::OK, Json(response)))
+    for word in &mut response.words {
+        project_spelling_markup(&headers, &mut word.forms);
+    }
+    Ok(spelling_markup_response(StatusCode::OK, response))
 }
 
 #[utoipa::path(
@@ -251,7 +256,7 @@ pub async fn archive_batch(
     path = "/api/v1/admin/lexicon/entries/restore-batch",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(("Idempotency-Key" = Uuid, Header, description = "批量恢复命令幂等键（UUID）")),
+    params(("Idempotency-Key" = Uuid, Header, description = "批量恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1")),
     request_body = EntryLifecycleBatchInput,
     responses(
         (status = 200, description = "原子批量恢复结果", body = EntryLifecycleBatchResponse),
@@ -280,7 +285,7 @@ pub async fn restore_batch(
         .map(|entry| entry.id)
         .collect::<Vec<_>>();
     require_lifecycle_v3_capabilities(&state, &entry_ids).await?;
-    let response = service(&state)
+    let mut response = service(&state)
         .restore_batch(
             admin.id,
             request_id.as_uuid(),
@@ -291,5 +296,8 @@ pub async fn restore_batch(
         )
         .await
         .map_err(map_error)?;
-    Ok((StatusCode::OK, Json(response)))
+    for word in &mut response.words {
+        project_spelling_markup(&headers, &mut word.forms);
+    }
+    Ok(spelling_markup_response(StatusCode::OK, response))
 }
