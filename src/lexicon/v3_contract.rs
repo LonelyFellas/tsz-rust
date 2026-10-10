@@ -12,7 +12,7 @@ use crate::{
         Dialect, DialectModeV3, DialectRulesV3, DialectVariantRichTextSlotV3,
         DraftFormsStepContentV3, DraftMeaningsStepContentV3, DraftNodeLocation,
         DraftValidationIssue, EnglishTextV3, FormGroupScopeV3, PersistedWordStep, RichText,
-        RichTextV3, RichTextVariantV3, SentenceTranslationBandV3, StepSaveIntent,
+        RichTextV2V3, RichTextV3, RichTextVariantV3, SentenceTranslationBandV3, StepSaveIntent,
         TranslationLanguageV3, V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode,
         VoiceProfileV3, WordConcreteFormV3, WordDefinitionV3, WordFormTypeV2, WordFormTypeV3,
         WordRegionalVariantsV3, WordSentenceTranslationV3,
@@ -425,7 +425,22 @@ fn regional_variants_match_rules(variants: &WordRegionalVariantsV3, rules: Diale
             DialectModeV3::Unified,
             DialectModeV3::Distinguish,
             WordRegionalVariantsV3::UkUs { uk, us },
-        ) => uk.spelling == us.spelling && uk.is_regular == us.is_regular,
+        ) => {
+            let canonical = |rich: Option<&RichTextV2V3>| {
+                let mut rich = rich.cloned().unwrap_or(RichTextV2V3 {
+                    version: 2,
+                    text: uk.spelling.clone(),
+                    annotations: Vec::new(),
+                });
+                crate::lexicon::rich_text::canonicalize_spelling(&mut rich)
+                    .then_some(rich.annotations)
+            };
+            uk.spelling == us.spelling
+                && uk.is_regular == us.is_regular
+                && canonical(uk.spelling_rich.as_ref())
+                    .zip(canonical(us.spelling_rich.as_ref()))
+                    .is_some_and(|(left, right)| left == right)
+        }
         (
             DialectModeV3::Distinguish,
             DialectModeV3::Distinguish,
@@ -1004,6 +1019,7 @@ fn validate_form_content(
             common.id,
             Dialect::Common,
             &common.spelling,
+            common.spelling_rich.as_ref(),
             &common.pronunciations,
             complete,
             node_roles,
@@ -1016,6 +1032,7 @@ fn validate_form_content(
                 uk.id,
                 Dialect::Uk,
                 &uk.spelling,
+                uk.spelling_rich.as_ref(),
                 &uk.pronunciations,
                 complete,
                 node_roles,
@@ -1027,6 +1044,7 @@ fn validate_form_content(
                 us.id,
                 Dialect::Us,
                 &us.spelling,
+                us.spelling_rich.as_ref(),
                 &us.pronunciations,
                 complete,
                 node_roles,
@@ -1043,6 +1061,7 @@ fn validate_variant(
     variant_id: Uuid,
     dialect: Dialect,
     spelling: &str,
+    spelling_rich: Option<&RichTextV2V3>,
     pronunciations: &[crate::lexicon::dto::WordPronunciationV3],
     complete: bool,
     node_roles: &mut HashMap<Uuid, &'static str>,
@@ -1079,6 +1098,18 @@ fn validate_variant(
             "spelling",
             variant_id,
             "variant spelling exceeds the shared 200-codepoint limit",
+            variant_location.clone(),
+        ));
+    }
+    if let Some(rich) = spelling_rich
+        && (rich.text != spelling
+            || !crate::lexicon::rich_text::canonicalize_spelling(&mut rich.clone()))
+    {
+        issues.push(issue(
+            V3ValidationIssueCode::SpellingRichTextInvalid,
+            "spelling_rich",
+            variant_id,
+            "spelling rich text must match the normalized spelling and contain only valid italic or liaison annotations",
             variant_location.clone(),
         ));
     }
@@ -1661,6 +1692,76 @@ mod tests {
     // C1 selection from the approved matrix:
     // V3-U01/02/03/04/06/06a/06b/06c/07/07b/08/10b/11a/11b/11c.
     // Database migration and successful V3 persistence remain C2 and are not simulated here.
+    #[test]
+    fn spelling_rich_contract_preserves_valid_decorations_and_rejects_invalid_values() {
+        let path = "/content/pos/0/forms/0/regional_variants/common";
+        let rich = json!({"version":2,"text":"colour","annotations":[
+            {"type":"italic","start":0,"end":3},
+            {"type":"liaison","start":1,"end":5,"start_len":2}
+        ]});
+        let mut raw = valid_request();
+        raw.pointer_mut(path).unwrap()["spelling_rich"] = rich.clone();
+        let input = decode_valid(raw.clone());
+        assert!(validate_forms(&input.content, StepSaveIntent::Save).is_empty());
+        assert_eq!(
+            serde_json::to_value(&input).unwrap().pointer(path).unwrap()["spelling_rich"],
+            rich
+        );
+        for invalid in [
+            json!(null),
+            json!({"version":1,"text":"colour","spans":[],"liaisons":[]}),
+        ] {
+            raw.pointer_mut(path).unwrap()["spelling_rich"] = invalid;
+            assert!(decode_v3_forms_request::<SaveFormsStepInputV3>(raw.clone()).is_err());
+        }
+        for invalid in [
+            json!({"version":2,"text":"color","annotations":[]}),
+            json!({"version":2,"text":"colour","annotations":[{"type":"italic","start":0,"end":7}]}),
+            json!({"version":2,"text":"colour","annotations":[{"type":"liaison","start":0,"end":2,"start_len":3}]}),
+            json!({"version":2,"text":"colour","annotations":[{"type":"pause","at":0,"duration_ms":500}]}),
+            json!({"version":2,"text":"colour","annotations":[{"type":"emphasis","start":0,"end":3,"level":"core"}]}),
+        ] {
+            raw.pointer_mut(path).unwrap()["spelling_rich"] = invalid;
+            let input = decode_valid(raw.clone());
+            let issues = validate_forms(&input.content, StepSaveIntent::Save);
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.code == "spelling_rich_text_invalid"
+                        && issue.field == "spelling_rich"
+                        && issue.node_id.to_string() == "019d2a80-0000-7000-8000-000000000003")
+            );
+        }
+    }
+
+    #[test]
+    fn unified_spelling_compares_canonical_annotations_and_rejects_actual_differences() {
+        let raw = valid_request();
+        let original = raw["content"]["pos"][0]["forms"][0]["regional_variants"]["common"].clone();
+        let mut uk = original.clone();
+        uk["dialect"] = json!("uk");
+        uk["spelling_rich"] = json!({"version":2,"text":"colour","annotations":[
+            {"type":"italic","start":2,"end":4},{"type":"italic","start":0,"end":2}
+        ]});
+        let mut us = original;
+        us["dialect"] = json!("us");
+        us["spelling_rich"] = json!({"version":2,"text":"colour","annotations":[{"type":"italic","start":0,"end":4}]});
+        let mut variants: WordRegionalVariantsV3 =
+            serde_json::from_value(json!({"mode":"uk_us","uk":uk,"us":us})).unwrap();
+        assert!(regional_variants_match_rules(
+            &variants,
+            DialectRulesV3::UNIFIED_DISTINGUISH
+        ));
+        let WordRegionalVariantsV3::UkUs { us, .. } = &mut variants else {
+            unreachable!()
+        };
+        us.spelling_rich.as_mut().unwrap().annotations.clear();
+        assert!(!regional_variants_match_rules(
+            &variants,
+            DialectRulesV3::UNIFIED_DISTINGUISH
+        ));
+    }
+
     fn valid_request() -> Value {
         json!({
             "schema_version": 3,
@@ -2627,6 +2728,7 @@ mod tests {
                 Uuid::new_v4(),
                 dialect,
                 "cat",
+                None,
                 std::slice::from_ref(&pronunciation),
                 true,
                 &mut HashMap::new(),

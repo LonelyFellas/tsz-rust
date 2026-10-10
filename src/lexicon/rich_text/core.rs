@@ -18,6 +18,28 @@ pub fn is_valid_native(value: &RichTextV3) -> bool {
     canonicalize_native(&mut value.clone())
 }
 
+/// Spelling decorations are display-only; speech and grammar annotations are not accepted.
+pub fn canonicalize_spelling(value: &mut crate::lexicon::dto::RichTextV2V3) -> bool {
+    use crate::lexicon::dto::RichTextAnnotationV3;
+    if value.annotations.iter().any(|annotation| {
+        !matches!(
+            annotation,
+            RichTextAnnotationV3::Italic { .. } | RichTextAnnotationV3::Liaison { .. }
+        )
+    }) {
+        return false;
+    }
+    let mut native = RichTextV3::V2(value.clone());
+    if !canonicalize_native(&mut native) {
+        return false;
+    }
+    let RichTextV3::V2(canonical) = native else {
+        return false;
+    };
+    *value = canonical;
+    true
+}
+
 /// Validates and canonicalizes every rich-text value in the meanings payload.
 ///
 /// Invalid values are left untouched so the regular draft validator can attach

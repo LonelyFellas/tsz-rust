@@ -369,6 +369,15 @@ where
     PronunciationStyle::deserialize(deserializer).map(Some)
 }
 
+fn deserialize_optional_spelling_rich<'de, D>(
+    deserializer: D,
+) -> Result<Option<RichTextV2V3>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    RichTextV2V3::deserialize(deserializer).map(Some)
+}
+
 fn deserialize_optional_regularity<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
 where
     D: Deserializer<'de>,
@@ -383,6 +392,14 @@ pub struct WordCommonFormVariantV3 {
     pub dialect: CommonDialectV3,
     #[schema(max_length = 200)]
     pub spelling: String,
+    /// 展示标注；正文与规范化后的 spelling 一致，缺键兼容旧记录。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_spelling_rich",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub spelling_rich: Option<RichTextV2V3>,
     /// 该拼写是否规则变化；缺省兼容历史组级值。
     #[serde(
         default,
@@ -406,6 +423,14 @@ pub struct WordUkFormVariantV3 {
     pub dialect: UkDialectV3,
     #[schema(max_length = 200)]
     pub spelling: String,
+    /// 展示标注；正文与规范化后的 spelling 一致，缺键兼容旧记录。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_spelling_rich",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub spelling_rich: Option<RichTextV2V3>,
     /// 该拼写是否规则变化；缺省兼容历史组级值。
     #[serde(
         default,
@@ -429,6 +454,14 @@ pub struct WordUsFormVariantV3 {
     pub dialect: UsDialectV3,
     #[schema(max_length = 200)]
     pub spelling: String,
+    /// 展示标注；正文与规范化后的 spelling 一致，缺键兼容旧记录。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_spelling_rich",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub spelling_rich: Option<RichTextV2V3>,
     /// 该拼写是否规则变化；缺省兼容历史组级值。
     #[serde(
         default,
@@ -1823,6 +1856,7 @@ pub enum V3ValidationIssueCode {
     EmptyFormGroup,
     BaseFormRequiredInGroup,
     VariantSpellingRequired,
+    SpellingRichTextInvalid,
     PronunciationRequired,
     DuplicatePronunciation,
     ContentLimitExceeded,
@@ -1907,6 +1941,7 @@ impl V3ValidationIssueCode {
             Self::EmptyFormGroup => "empty_form_group",
             Self::BaseFormRequiredInGroup => "base_form_required_in_group",
             Self::VariantSpellingRequired => "variant_spelling_required",
+            Self::SpellingRichTextInvalid => "spelling_rich_text_invalid",
             Self::PronunciationRequired => "pronunciation_required",
             Self::DuplicatePronunciation => "duplicate_pronunciation",
             Self::ContentLimitExceeded => "content_limit_exceeded",
@@ -1991,6 +2026,7 @@ impl V3ValidationIssueCode {
             "empty_form_group" => Self::EmptyFormGroup,
             "base_form_required_in_group" => Self::BaseFormRequiredInGroup,
             "variant_spelling_required" => Self::VariantSpellingRequired,
+            "spelling_rich_text_invalid" => Self::SpellingRichTextInvalid,
             "pronunciation_required" => Self::PronunciationRequired,
             "duplicate_pronunciation" => Self::DuplicatePronunciation,
             "content_limit_exceeded" => Self::ContentLimitExceeded,

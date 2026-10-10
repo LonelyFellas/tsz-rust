@@ -72,6 +72,16 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 语法词形候选沿用成分目标搜索能力，运行环境须开启 `SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY`（默认关闭），并满足既有 read、edit、projection、sentence_associations 开关；缺少时返回 503。该运行开关与斜体存储互相独立。
 
+### 词形拼写展示标注
+
+common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`，仅接收 RichText V2 的斜体和连读。正文必须等于规范化后的 `spelling`；纯文本继续用于搜索、引用和语音合成，公共词单投影不扩字段，无数据库迁移。
+
+旧调用省略字段时，稳定变体和最终拼写未变则保留已有标注，拼写变化则移除旧标注；显式同正文空 `annotations` 才表示清除。统一拼写的英美两侧需要等价标注，比较规范化后的内容及默认连读端宽。
+
+先发布支持可选字段读取并保留的前端，保持新增拼写标注写入关闭；再部署支持字段的后端，刷新旧管理端页面后开放编辑。旧严格前端会拒绝带新字段的记录，旧后端会拒绝新字段写入。首笔 rich 数据保存后只能回退到仍支持该字段的兼容版本，不能通过删标注实现无损回退。
+
+配套需求、设计及验证记录集中在前端 `docs/features/spelling-pronunciation-markup/`；最终交付时明确浏览器验收与配套版本的实际状态。
+
 ### 每条发音的英美合成候选
 
 `synthesis.uk`、`synthesis.us` 分别保存英美 IPA、UPS 与可选逐词边界；`alphabet`、`use_spelling` 仍是一组共用来源选择。词形的地区或音标通用规则不限制这两套候选。
