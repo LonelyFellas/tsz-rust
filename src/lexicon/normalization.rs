@@ -1,8 +1,8 @@
 use std::sync::LazyLock;
 
+use crate::platform::text::{display_v1, key_v1};
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use unicode_normalization::UnicodeNormalization;
 
 pub const HEADWORD_NORMALIZATION_VERSION: i16 = 1;
 pub const MAX_HEADWORD_CODEPOINTS: usize = 200;
@@ -10,7 +10,7 @@ pub const MAX_HEADWORD_CODEPOINTS: usize = 200;
 // 录入词条允许的字符：拉丁字母（含预组合变音符）、组合变音符、数字、半角空格与常见连接符。
 // 归一化不一定能把变音符合成掉（`q` + U+0301 没有预组合字符），只看 Script=Latin 会漏，
 // 故并入 `\p{Mark}`。空白只写半角空格而不是 `\s`：全角空格、不换行空格已被
-// `collapse_whitespace` 折叠成它，控制字符更早就被拒了，能走到这里的空白只有这一种。
+// `display_v1` 折叠成它，控制字符更早就被拒了，能走到这里的空白只有这一种。
 // 逗号是为 `day in, day out` 这类短语开的——内置词典里有 663 条这样的正经词条。
 // 规则与 admin 前端 `headwordValidation.ts` 对齐——任一侧放宽，脏词条就会从另一侧漏进来。
 static ALLOWED_HEADWORD_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -66,7 +66,7 @@ pub fn normalize_headword(value: &str) -> Result<NormalizedHeadword, HeadwordNor
         return Err(HeadwordNormalizationError::ControlCharacter);
     }
 
-    let display = collapse_whitespace(value.nfkc());
+    let display = display_v1(value);
     if display.is_empty() {
         return Err(HeadwordNormalizationError::Empty);
     }
@@ -81,38 +81,12 @@ pub fn normalize_headword(value: &str) -> Result<NormalizedHeadword, HeadwordNor
 
 /// Same spelling normalization for definition text; no headword input length limit.
 pub(crate) fn normalize_text_key(value: &str) -> String {
-    collapse_whitespace(value.nfkc())
-        .chars()
-        .map(|character| match character {
-            '\u{2018}' | '\u{2019}' | '\u{02bc}' => '\'',
-            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
-            other => other,
-        })
-        .flat_map(char::to_lowercase)
-        .collect()
+    key_v1(value)
 }
 
 pub fn sha256_json<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
     let bytes = serde_json::to_vec(value)?;
     Ok(Sha256::digest(bytes).to_vec())
-}
-
-fn collapse_whitespace(characters: impl Iterator<Item = char>) -> String {
-    let mut output = String::new();
-    let mut pending_space = false;
-
-    for character in characters {
-        if character.is_whitespace() {
-            pending_space = !output.is_empty();
-            continue;
-        }
-        if pending_space {
-            output.push(' ');
-            pending_space = false;
-        }
-        output.push(character);
-    }
-    output
 }
 
 #[cfg(test)]

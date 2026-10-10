@@ -3,10 +3,10 @@ use super::dto::{LearningContext, LearningExclusions, LearningPrompt};
 use crate::{
     error::{AppError, ErrorCode},
     lexicon::{
-        dto::*,
-        normalization::{HEADWORD_NORMALIZATION_VERSION, normalize_headword},
-        service::form_senses::allowed_form_senses,
+        dto::{WordDefinitionV3, WordRegionalVariantsV3},
+        published::{PublishedContentV3, allowed_form_senses},
     },
+    platform::text::{display_v1, key_v1},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 pub const GENERATION_VERSION: &str = "zh_base_v1";
 pub const GRADING_VERSION: &str = "spelling_exact_v1";
+pub const ANSWER_NORMALIZATION_VERSION: i16 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnswerSnapshot {
     pub answers: Vec<String>,
@@ -45,7 +46,7 @@ pub struct LearningSource {
     pub entry_id: Uuid,
     pub archive_generation: i64,
     pub publication_id: Uuid,
-    pub word: AdminWordV3,
+    pub content: PublishedContentV3,
 }
 pub struct CandidatePool {
     pub candidates: Vec<Candidate>,
@@ -91,7 +92,7 @@ fn select_definition<'a>(
 }
 fn leaks(prompt: &str, key: &str) -> bool {
     // Latin word boundaries allow “cat” in “category” but reject “猫 cat / cat 猫”.
-    let text = crate::lexicon::normalization::normalize_text_key(prompt);
+    let text = key_v1(prompt);
     static WORD_CHAR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"^[\p{Script=Latin}\p{Mark}\p{Number}]$").expect("Latin word boundary")
     });
@@ -114,14 +115,9 @@ pub fn build_candidates(
     };
     let mut seen = HashSet::new();
     for source in sources {
-        if source.word.id != source.entry_id {
-            return Err(AppError::internal(std::io::Error::other(
-                "publication entry mismatch",
-            )));
-        }
-        for pos in &source.word.forms.pos {
+        for pos in &source.content.forms.pos {
             let Some(meanings) = source
-                .word
+                .content
                 .meanings
                 .pos
                 .iter()
@@ -152,12 +148,12 @@ pub fn build_candidates(
                 let mut answer = AnswerSnapshot {
                     answers: vec![],
                     keys: vec![],
-                    normalization_version: HEADWORD_NORMALIZATION_VERSION,
+                    normalization_version: ANSWER_NORMALIZATION_VERSION,
                 };
                 let mut form_ids = vec![];
                 for form in &pos.forms {
                     if form.form_type.as_str() != "base"
-                        || !allowed_form_senses(pos, &source.word.meanings, form.id)
+                        || !allowed_form_senses(pos, &source.content.meanings, form.id)
                             .any(|s| s.id == sense.id)
                     {
                         continue;
@@ -172,11 +168,11 @@ pub fn build_candidates(
                             }
                         }
                     };
-                    if let Ok(n) = normalize_headword(spelling) {
+                    if let Some((display, key)) = normalize_answer_v1(spelling) {
                         form_ids.push(form.id);
-                        if !answer.keys.contains(&n.key) {
-                            answer.answers.push(n.display);
-                            answer.keys.push(n.key);
+                        if !answer.keys.contains(&key) {
+                            answer.answers.push(display);
+                            answer.keys.push(key);
                         }
                     }
                 }
@@ -212,14 +208,29 @@ pub fn build_candidates(
     }
     Ok(pool)
 }
-pub fn grade_spelling(snapshot: &AnswerSnapshot, answer: &str) -> Result<(String, bool), AppError> {
-    if snapshot.normalization_version != HEADWORD_NORMALIZATION_VERSION {
-        return Err(AppError::conflict(
-            ErrorCode::LearningRunUnavailable,
-            None,
-            "判定版本不支持",
-        ));
+fn normalize_answer_v1(value: &str) -> Option<(String, String)> {
+    if value.chars().any(char::is_control) {
+        return None;
     }
+    let display = display_v1(value);
+    if display.is_empty() || display.chars().count() > 200 {
+        return None;
+    }
+    let key = key_v1(&display);
+    Some((display, key))
+}
+
+pub fn grade_spelling(snapshot: &AnswerSnapshot, answer: &str) -> Result<(String, bool), AppError> {
+    let normalize = match snapshot.normalization_version {
+        1 => normalize_answer_v1,
+        _ => {
+            return Err(AppError::conflict(
+                ErrorCode::LearningRunUnavailable,
+                None,
+                "判定版本不支持",
+            ));
+        }
+    };
     // Bound raw input as well as normalized text to avoid unbounded whitespace submissions.
     if answer.chars().count() > 400 {
         return Err(AppError::bad_request(
@@ -227,14 +238,14 @@ pub fn grade_spelling(snapshot: &AnswerSnapshot, answer: &str) -> Result<(String
             "答案过长",
         ));
     }
-    let n = normalize_headword(answer).map_err(|_| {
+    let (_, key) = normalize(answer).ok_or_else(|| {
         AppError::bad_request(
             ErrorCode::InvalidRequestBody,
             "答案不能为空、包含控制字符或超过 200 字",
         )
     })?;
-    let correct = snapshot.keys.contains(&n.key);
-    Ok((n.key, correct))
+    let correct = snapshot.keys.contains(&key);
+    Ok((key, correct))
 }
 pub fn business_window(at: DateTime<Utc>) -> (NaiveDate, DateTime<Utc>, DateTime<Utc>) {
     // Shanghai has fixed UTC+08:00 for all supported learning dates; 04:00 is 20:00 UTC.
@@ -260,6 +271,34 @@ mod tests {
         assert!(!grade_spelling(&snapshot, "完全错误").unwrap().1);
         assert!(grade_spelling(&snapshot, "  ").is_err());
         assert!(grade_spelling(&snapshot, "a\nb").is_err());
+        for (answer, expected_key) in [
+            ("  It’s\u{3000}Well—Known  ", "it's well-known"),
+            ("cafe\u{301}", "café"),
+            ("ＣＥＮＴＥＲ", "center"),
+        ] {
+            let historical = AnswerSnapshot {
+                answers: vec![expected_key.into()],
+                keys: vec![expected_key.into()],
+                normalization_version: 1,
+            };
+            assert_eq!(
+                grade_spelling(&historical, answer).unwrap(),
+                (expected_key.to_owned(), true)
+            );
+        }
+        assert!(grade_spelling(&snapshot, &"a".repeat(200)).is_ok());
+        assert!(grade_spelling(&snapshot, &"a".repeat(201)).is_err());
+        assert!(grade_spelling(&snapshot, &format!("{}a", " ".repeat(399))).is_ok());
+        assert!(grade_spelling(&snapshot, &format!("{}a", " ".repeat(400))).is_err());
+        assert!(grade_spelling(&snapshot, &"ﬃ".repeat(67)).is_err());
+        let unsupported = AnswerSnapshot {
+            normalization_version: 2,
+            ..snapshot
+        };
+        assert_eq!(
+            grade_spelling(&unsupported, "don't").unwrap_err().code(),
+            ErrorCode::LearningRunUnavailable
+        );
         assert!(leaks("猫 cat", "cat"));
         assert!(leaks("cat×示例", "cat"));
         assert!(leaks(&format!("{} ＣＡＴ", "中".repeat(201)), "cat"));

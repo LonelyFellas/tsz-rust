@@ -20,9 +20,6 @@ async fn source_update_archive_and_deleted_source_receipt(pool: PgPool) {
     let qs = questions(&state, &auth, &run).await;
     let path = answer_path(&run);
     let first = answer_body(&qs["items"][0], "apple");
-    let a = call(&state, &auth, "POST", &path, first.clone()).await;
-    assert_eq!(a.0, 200, "{}", a.1);
-    assert_eq!(a.1["is_correct"], true);
     sqlx::query("UPDATE wordlists SET name='rename',revision=revision+1 WHERE id=$1")
         .bind(list)
         .execute(&pool)
@@ -35,7 +32,21 @@ async fn source_update_archive_and_deleted_source_receipt(pool: PgPool) {
             .await
             .unwrap();
     let admin = wordlists_support::admin(&pool).await;
-    wordlists_support::publish(&pool, entry, admin, "new-answer", 3).await;
+    let mut snapshot: Value = sqlx::query_scalar("SELECT p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1")
+        .bind(entry).fetch_one(&pool).await.unwrap();
+    snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["spelling"] =
+        serde_json::json!("new-answer");
+    snapshot["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
+        serde_json::json!("重发后的释义");
+    let publication = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.entry_publications(id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id) VALUES($1,$2,3,3,3,$3,$4,$5)")
+        .bind(publication).bind(entry).bind(snapshot).bind(publication.as_bytes().to_vec()).bind(admin).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=$2 WHERE id=$1")
+        .bind(entry)
+        .bind(publication)
+        .execute(&pool)
+        .await
+        .unwrap();
     let restored = call(
         &state,
         &auth,
@@ -45,6 +56,36 @@ async fn source_update_archive_and_deleted_source_receipt(pool: PgPool) {
     )
     .await;
     assert_eq!(restored.1["state"], "active");
+    let restored_questions = questions(&state, &auth, &run).await;
+    assert_eq!(restored_questions["items"], qs["items"]);
+    let a = call(&state, &auth, "POST", &path, first.clone()).await;
+    assert_eq!(a.0, 200, "{}", a.1);
+    assert_eq!(a.1["is_correct"], true);
+    assert_eq!(
+        a.1["question"]["feedback"]["accepted_answers"],
+        serde_json::json!(["apple", "alternate-base"])
+    );
+    let fresh_task = create(&state, &auth, list, "longterm").await;
+    let fresh_run = start(&state, &auth, &fresh_task).await;
+    let fresh_questions = questions(&state, &auth, &fresh_run).await;
+    assert_eq!(
+        fresh_questions["items"][0]["prompt"]["definition"],
+        "重发后的释义"
+    );
+    let fresh_answer = call(
+        &state,
+        &auth,
+        "POST",
+        &answer_path(&fresh_run),
+        answer_body(&fresh_questions["items"][0], "new-answer"),
+    )
+    .await;
+    assert_eq!(fresh_answer.0, 200, "{}", fresh_answer.1);
+    assert_eq!(fresh_answer.1["is_correct"], true);
+    assert_eq!(
+        fresh_answer.1["question"]["feedback"]["accepted_answers"],
+        serde_json::json!(["new-answer", "alternate-base"])
+    );
     sqlx::query("UPDATE lexicon.entries SET archived_at=clock_timestamp() WHERE id=$1")
         .bind(entry)
         .execute(&pool)
@@ -386,10 +427,8 @@ async fn restored_membership_and_public_access_do_not_revive_old_runs(pool: PgPo
         200
     );
     let run_path = format!("/api/v1/me/learning-runs/{}", old["id"].as_str().unwrap());
-    assert_eq!(
-        call(&state, &owner, "GET", &run_path, Value::Null).await.1["state"],
-        "invalidated"
-    );
+    // No run read between removal and reinsertion: the membership identity must
+    // invalidate the old run even when nobody observed its temporary absence.
     assert_eq!(
         call(&state, &owner, "PUT", &path, edit(2, vec![entry, other]))
             .await

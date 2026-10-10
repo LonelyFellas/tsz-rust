@@ -5,6 +5,7 @@ use super::{
 use crate::{
     auth::extract::AuthUser,
     error::{AppError, ErrorCode},
+    lexicon::published::{self, CurrentPublication},
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -183,7 +184,7 @@ pub async fn answers(tx: &mut Tx<'_>, id: Uuid) -> Result<HashMap<Uuid, AnswerRo
 }
 pub struct SourceAccess {
     pub lists: HashMap<Uuid, (i64, Option<i64>)>,
-    pub entries: HashMap<Uuid, (Uuid, i64, serde_json::Value)>,
+    pub(crate) entries: HashMap<Uuid, CurrentPublication>,
     pub members: HashMap<(Uuid, Uuid), Uuid>,
     pub ordered: Vec<(Uuid, Uuid)>,
 }
@@ -232,18 +233,14 @@ async fn source_access(
     if entry_ids.len() > 1000 {
         return Err(invalid("来源超过 1000 个词条，请拆分任务"));
     }
-    crate::wordlists::service::lock_entries(tx, &entry_ids, false).await?;
-    let entries:Vec<(Uuid,Uuid,i64,serde_json::Value)>=sqlx::query_as("SELECT e.id,p.id,e.wordlist_archive_generation,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=ANY($1) AND e.archived_at IS NULL AND p.content_schema_version=3").bind(entry_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let entries = published::read_current_in(tx, &entry_ids).await?;
     // Entry locks may have waited across an owner's deletion deadline. Project only
     // after rechecking all owners with the database clock; these account locks are held.
     let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     lists.retain(|id, _| visible.contains(id));
     Ok(SourceAccess {
         lists,
-        entries: entries
-            .into_iter()
-            .map(|(e, p, g, s)| (e, (p, g, s)))
-            .collect(),
+        entries,
         members: members.iter().map(|(l, e, m)| ((*l, *e), *m)).collect(),
         ordered: members.into_iter().map(|(l, e, _)| (l, e)).collect(),
     })
@@ -258,28 +255,28 @@ impl SourceAccess {
             && self
                 .entries
                 .get(&q.entry_id)
-                .is_some_and(|(_, g, _)| *g == q.entry_archive_generation)
+                .is_some_and(|p| p.archive_generation == q.entry_archive_generation)
     }
     pub fn learning_sources(&self) -> Result<Vec<LearningSource>, AppError> {
         self.ordered
             .iter()
             .filter_map(|(list, entry)| {
                 self.lists.get(list).zip(self.entries.get(entry)).map(
-                    |((revision, generation), (p, g, s))| {
-                        (list, entry, revision, generation, p, g, s)
+                    |((revision, generation), publication)| {
+                        (list, entry, revision, generation, publication)
                     },
                 )
             })
-            .map(|(l, e, r, generation, p, g, s)| {
+            .map(|(l, e, r, generation, publication)| {
                 Ok(LearningSource {
                     wordlist_id: *l,
                     revision: *r,
                     membership_id: self.members[&(*l, *e)],
                     public_generation: *generation,
                     entry_id: *e,
-                    publication_id: *p,
-                    archive_generation: *g,
-                    word: serde_json::from_value(s.clone()).map_err(AppError::internal)?,
+                    publication_id: publication.publication_id,
+                    archive_generation: publication.archive_generation,
+                    content: publication.content_v3()?,
                 })
             })
             .collect()
