@@ -334,6 +334,7 @@ mod tests {
             form_type: "base".to_owned(),
             regional_variants: WordRegionalVariantsV3::Common {
                 common: WordCommonFormVariantV3 {
+                    spelling_rich: None,
                     is_regular: None,
                     id: variant_id,
                     dialect: CommonDialectV3::Common,
@@ -358,6 +359,7 @@ mod tests {
             form_type: "base".to_owned(),
             regional_variants: WordRegionalVariantsV3::UkUs {
                 uk: WordUkFormVariantV3 {
+                    spelling_rich: None,
                     is_regular: None,
                     id: uk_variant_id,
                     dialect: UkDialectV3::Uk,
@@ -367,6 +369,7 @@ mod tests {
                     component_usages: Vec::new().into(),
                 },
                 us: WordUsFormVariantV3 {
+                    spelling_rich: None,
                     is_regular: None,
                     id: us_variant_id,
                     dialect: UsDialectV3::Us,

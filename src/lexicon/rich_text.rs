@@ -28,7 +28,9 @@ pub struct RichTextIssue {
 
 mod core;
 
-pub use core::{canonicalize, canonicalize_meanings, is_valid, is_valid_native};
+pub use core::{
+    canonicalize, canonicalize_meanings, canonicalize_spelling, is_valid, is_valid_native,
+};
 
 #[cfg(test)]
 mod meanings_tests;

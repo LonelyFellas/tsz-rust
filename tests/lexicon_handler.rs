@@ -17192,3 +17192,236 @@ async fn first_forms_save_locks_the_initial_annotation_group_before_leaving_it(p
     );
     assert!(created["word"]["annotation"].is_null());
 }
+
+#[sqlx::test]
+async fn v3_spelling_rich_roundtrips_and_preserves_legacy_writes(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let ready = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let id = ready["word"]["id"].as_str().unwrap();
+    let path = "/pos/0/forms/0/regional_variants";
+    let mut forms = ready["word"]["forms"].clone();
+    for side in ["uk", "us"] {
+        let variant = &mut forms.pointer_mut(path).unwrap()[side];
+        let spelling = variant["spelling"].as_str().unwrap().to_owned();
+        variant["spelling_rich"] = json!({"version":2,"text":spelling,"annotations":[
+            {"type":"italic","start":0,"end":2},
+            {"type":"liaison","start":1,"end":spelling.chars().count(),"start_len":2}
+        ]});
+    }
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        ready["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    assert_eq!(saved["word"]["meanings"], ready["word"]["meanings"]);
+    assert_eq!(
+        saved["word"]["completed_steps"],
+        ready["word"]["completed_steps"]
+    );
+    let expected = saved["word"]["forms"].clone();
+    for side in ["uk", "us"] {
+        assert_eq!(
+            expected.pointer(path).unwrap()[side]["id"],
+            ready["word"]["forms"].pointer(path).unwrap()[side]["id"]
+        );
+        assert_eq!(
+            expected.pointer(path).unwrap()[side]["spelling"],
+            ready["word"]["forms"].pointer(path).unwrap()[side]["spelling"]
+        );
+    }
+    let (status, loaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{loaded}");
+    assert_eq!(loaded["word"]["forms"], expected);
+    let mut legacy = expected.clone();
+    for side in ["uk", "us"] {
+        legacy.pointer_mut(path).unwrap()[side]
+            .as_object_mut()
+            .unwrap()
+            .remove("spelling_rich");
+    }
+    let (_, preserved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        saved["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        legacy,
+    )
+    .await;
+    assert_eq!(preserved["word"]["forms"], expected);
+    let mut changed = expected.clone();
+    changed.pointer_mut(path).unwrap()["uk"]
+        .as_object_mut()
+        .unwrap()
+        .remove("spelling_rich");
+    changed.pointer_mut(path).unwrap()["uk"]["spelling"] = json!("harbouring");
+    let (_, changed) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        preserved["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        changed,
+    )
+    .await;
+    assert!(
+        changed["word"]["forms"].pointer(path).unwrap()["uk"]
+            .get("spelling_rich")
+            .is_none()
+    );
+    assert_eq!(
+        changed["word"]["forms"].pointer(path).unwrap()["us"]["spelling_rich"],
+        expected.pointer(path).unwrap()["us"]["spelling_rich"]
+    );
+    let mut cleared = changed["word"]["forms"].clone();
+    cleared.pointer_mut(path).unwrap()["us"]["spelling_rich"]["annotations"] = json!([]);
+    let (_, cleared) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        changed["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        cleared,
+    )
+    .await;
+    assert_eq!(
+        cleared["word"]["forms"].pointer(path).unwrap()["us"]["spelling_rich"]["annotations"],
+        json!([])
+    );
+    let mut invalid = cleared["word"]["forms"].clone();
+    invalid.pointer_mut(path).unwrap()["us"]["spelling_rich"]["text"] = json!("wrong text");
+    let (status, problem) = call(&state,Method::PUT,&format!("{ROOT}/entries/{id}/steps/forms"),&bearer,None,
+        Some(json!({"schema_version":3,"base_revision":cleared["word"]["revision"],"intent":"complete","content":invalid}))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{problem}");
+    assert!(
+        problem.to_string().contains("spelling_rich_text_invalid"),
+        "{problem}"
+    );
+    let (_, after) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(after["word"]["revision"], cleared["word"]["revision"]);
+    assert_eq!(after["word"]["forms"], cleared["word"]["forms"]);
+}
+
+#[sqlx::test]
+async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let ready = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let id = Uuid::parse_str(ready["word"]["id"].as_str().unwrap()).unwrap();
+    let path = "/pos/0/forms/0/regional_variants/uk";
+    let mut forms = ready["word"]["forms"].clone();
+    let variant = forms.pointer_mut(path).unwrap();
+    variant["spelling_rich"] = json!({"version":2,"text":variant["spelling"],"annotations":[{"type":"italic","start":0,"end":2},{"type":"liaison","start":1,"end":4}]});
+    let pronunciation = &mut variant["pronunciations"][0];
+    pronunciation["actual_pron_rich"] = json!({"version":2,"text":pronunciation["actual_pron"],"annotations":[{"type":"liaison","start":0,"end":2}]});
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &id.to_string(),
+        ready["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let original = current_publication_id(&pool, id).await;
+    let snapshot = current_publication_snapshot(&pool, id).await;
+    let expected = snapshot["forms"].pointer(path).unwrap().clone();
+    assert_eq!(
+        expected,
+        saved["word"]["forms"].pointer(path).unwrap().clone()
+    );
+    let mut empty = published["word"]["forms"].clone();
+    let variant = empty.pointer_mut(path).unwrap();
+    variant["spelling_rich"]["annotations"] = json!([]);
+    variant["pronunciations"][0]["actual_pron_rich"]["annotations"] = json!([]);
+    let (_, changed) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        &id.to_string(),
+        published["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        empty,
+    )
+    .await;
+    let (status, newer) = publish_ready_v3(&state, &bearer, &changed).await;
+    assert_eq!(status, StatusCode::CREATED, "{newer}");
+    let (status, history) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}/publications/{original}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    assert_eq!(
+        history["publication"]["word"]["forms"]
+            .pointer(path)
+            .unwrap(),
+        &expected
+    );
+    let (status, rolled) = rollback_v3_history(
+        &state,
+        &bearer,
+        id,
+        original,
+        newer["word"]["revision"].as_i64().unwrap(),
+        newer["word"]["lifecycle_revision"].as_i64().unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{rolled}");
+    assert_ne!(current_publication_id(&pool, id).await, original);
+    assert_eq!(
+        current_publication_snapshot(&pool, id).await["forms"]
+            .pointer(path)
+            .unwrap(),
+        &expected
+    );
+    let stored: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=$1")
+            .bind(original)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, snapshot);
+    let (_, draft) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(draft["word"]["forms"], newer["word"]["forms"]);
+}
