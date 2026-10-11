@@ -17625,3 +17625,95 @@ async fn v3_independent_association_permission_preserves_text_and_owner_scope(po
         saved["word"]["revision"].as_i64().unwrap() + 1
     );
 }
+
+#[sqlx::test]
+async fn independent_edit_permissions_ignore_persisted_response_only_fields(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    let bearer = token(&state, owner);
+    let source = self_linked_definition_draft(&state, &pool, &bearer).await;
+    let (target, _) =
+        create_published_v3_phrase(&state, &pool, &bearer, "review target", json!([])).await;
+    let writable = |word: &Value| {
+        let mut content = writable_v3_meanings(word);
+        let sense = &mut content["pos"][0]["senses"][0];
+        for relation in sense["relations"].as_array_mut().unwrap() {
+            for field in ["target_headword", "target_gloss", "target_status"] {
+                relation.as_object_mut().unwrap().remove(field);
+            }
+        }
+        for link in sense["definitions"][1]["content"]["common"]["text_links"]
+            .as_array_mut()
+            .unwrap()
+        {
+            link.as_object_mut().unwrap().remove("target_headword");
+            link.as_object_mut().unwrap().remove("target_gloss");
+        }
+        content
+    };
+    let mut content = writable(&source);
+    content["pos"][0]["senses"][0]["relations"] = json!([{"id":Uuid::now_v7(),"relation":"synonym","score":"80.00","target_word_id":target["word"]["id"],"target_sense_id":target["word"]["meanings"]["pos"][0]["senses"][0]["id"]}]);
+    let saved = save_v3_meanings(&state, &bearer, &source, content).await;
+    let id = saved["word"]["id"].as_str().unwrap();
+    let stored: Value = sqlx::query_scalar(
+        "SELECT meanings FROM lexicon.entry_editor_projection WHERE entry_id=$1",
+    )
+    .bind(Uuid::parse_str(id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(stored["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["text_links"][0]["target_headword"].is_string());
+    assert!(stored["pos"][0]["senses"][0]["relations"][0]["target_headword"].is_string());
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.associate'").bind(owner).execute(&pool).await.unwrap();
+    let mut edit = writable(&saved);
+    edit["pos"][0]["senses"][0]["level"] = json!("B2");
+    let (status, edited) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        id,
+        saved["word"]["revision"].as_i64().unwrap(),
+        edit,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.edit'",
+    )
+    .bind(owner)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.associate',$1)").bind(owner).execute(&pool).await.unwrap();
+    let mut association = writable(&edited);
+    association["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["text_links"] =
+        json!([]);
+    let (status, changed) = save_v3_meanings_raw(
+        &state,
+        &bearer,
+        id,
+        edited["word"]["revision"].as_i64().unwrap(),
+        association,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    let (_, reread) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        reread["word"]["meanings"]["pos"][0]["senses"][0]["relations"],
+        edited["word"]["meanings"]["pos"][0]["senses"][0]["relations"]
+    );
+    assert_eq!(
+        reread["word"]["meanings"]["pos"][0]["senses"][0]["level"],
+        "B2"
+    );
+    assert!(reread["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["text_links"].as_array().is_none_or(Vec::is_empty));
+}

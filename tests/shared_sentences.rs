@@ -2447,3 +2447,61 @@ async fn independent_sentence_association_permission_rejects_mixed_writes(pool: 
     );
     assert_eq!(persisted["revision"], 2);
 }
+
+#[sqlx::test]
+async fn content_editor_can_save_both_dialects_when_annotations_only_reorder(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let owner = admin_with_role(&pool, AdminRole::Admin).await;
+    let source = entry(&pool, owner, "wonderful").await;
+    let mut input = content(source);
+    let uk = input["sentence"]["en_text"]["common"].clone();
+    let mut us = uk.clone();
+    us["id"] = json!(Uuid::now_v7());
+    input["sentence"]["en_text"] = json!({"mode":"distinguish","source_dialect":"uk","uk":{"state":"ready","variant":uk},"us":{"state":"ready","variant":us}});
+    let mut uk_annotation = input["annotations"][0].clone();
+    uk_annotation["source_dialect"] = json!("uk");
+    let mut us_annotation = uk_annotation.clone();
+    us_annotation["id"] = json!(Uuid::now_v7());
+    us_annotation["source_dialect"] = json!("us");
+    input["annotations"] = json!([uk_annotation, us_annotation]);
+    let (status, created) = call(
+        &state,
+        owner,
+        Method::POST,
+        ROOT,
+        Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":input})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.associate'").bind(owner).execute(&pool).await.unwrap();
+    let path = format!("{ROOT}/{}", created["id"].as_str().unwrap());
+    let mut changed = created["content"].clone();
+    changed["annotations"].as_array_mut().unwrap().reverse();
+    changed["sentence"]["en_text"]["uk"]["variant"]["value"]["text"] = json!("A wonderful flower!");
+    let (status, updated) = call(
+        &state,
+        owner,
+        Method::PUT,
+        &path,
+        Some(json!({"base_revision":1,"content":changed})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let (_, persisted) = call(
+        &state,
+        owner,
+        Method::GET,
+        &format!("{path}?view=draft"),
+        None,
+    )
+    .await;
+    assert_eq!(persisted["revision"], 2);
+    assert_eq!(
+        persisted["content"]["sentence"]["en_text"]["uk"]["variant"]["value"]["text"],
+        "A wonderful flower!"
+    );
+    assert_eq!(
+        persisted["content"]["annotations"],
+        created["content"]["annotations"]
+    );
+}
