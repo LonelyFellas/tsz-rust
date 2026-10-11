@@ -110,8 +110,17 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.edit",
         "words",
-        "词条编辑",
-        "编辑自己的词条及修订",
+        "词条文本与音频编辑",
+        "编辑自己的词条文本、音频及其他内容；单词和短语关联需另行授权",
+        "action",
+        ["words.access"],
+        "medium"
+    ),
+    permission!(
+        "words.associate",
+        "words",
+        "词条单词与短语关联",
+        "编辑自己词条正文中的单词、短语及词形关联；不授予文本和音频编辑权限",
         "action",
         ["words.access"],
         "medium"
@@ -119,10 +128,10 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.edit_others",
         "words",
-        "他人词条编辑",
-        "扩展编辑范围至他人的词条及已发布内容的修订；不授予发布、归档或删除权限",
+        "可编辑他人的词条",
+        "将已获授权的内容编辑和关联操作扩展至他人的词条；不授予操作权限",
         "scope",
-        ["words.edit"],
+        ["words.access"],
         "high"
     ),
     permission!(
@@ -182,8 +191,17 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.edit",
         "sentences",
-        "例句编辑",
-        "编辑自己的共享例句",
+        "例句文本与音频编辑",
+        "编辑自己的例句文本、音频及其他内容；单词和短语关联需另行授权",
+        "action",
+        ["sentences.access", "words.access"],
+        "medium"
+    ),
+    permission!(
+        "sentences.associate",
+        "sentences",
+        "例句单词与短语关联",
+        "编辑自己例句正文中的单词、短语及词形关联；不授予文本和音频编辑权限",
         "action",
         ["sentences.access", "words.access"],
         "medium"
@@ -191,10 +209,10 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.edit_others",
         "sentences",
-        "他人例句编辑",
-        "扩展编辑范围至他人的例句；不授予发布、撤回或删除权限",
+        "可编辑他人的例句",
+        "将已获授权的内容编辑和关联操作扩展至他人的例句；不授予操作权限",
         "scope",
-        ["sentences.edit"],
+        ["sentences.access"],
         "high"
     ),
     permission!(
@@ -218,8 +236,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.restore",
         "sentences",
-        "例句恢复",
-        "恢复自己的共享例句",
+        "恢复例句展示",
+        "恢复自己已下架的共享例句展示",
         "action",
         ["sentences.access"],
         "high"
@@ -227,8 +245,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.rollback",
         "sentences",
-        "例句版本回滚",
-        "回滚自己例句的发布版本",
+        "恢复到历史版本",
+        "将自己的共享例句恢复到历史发布版本",
         "action",
         ["sentences.access"],
         "high"
@@ -435,7 +453,7 @@ mod tests {
             .iter()
             .filter(|permission| matches!(permission.module_key, "words" | "sentences"))
             .collect();
-        assert_eq!(content.len(), 18);
+        assert_eq!(content.len(), 20);
         for permission in content {
             assert_ne!(
                 permission.label, permission.description,
@@ -446,17 +464,13 @@ mod tests {
             assert!(!permission.label.contains("不包含"));
         }
         for (key, label, scope) in [
-            ("words.edit", "词条编辑", "自己的"),
-            (
-                "words.edit_others",
-                "他人词条编辑",
-                "不授予发布、归档或删除权限",
-            ),
-            ("sentences.edit", "例句编辑", "自己的"),
+            ("words.edit", "词条文本与音频编辑", "自己的"),
+            ("words.edit_others", "可编辑他人的词条", "不授予操作权限"),
+            ("sentences.edit", "例句文本与音频编辑", "自己的"),
             (
                 "sentences.edit_others",
-                "他人例句编辑",
-                "不授予发布、撤回或删除权限",
+                "可编辑他人的例句",
+                "不授予操作权限",
             ),
         ] {
             let permission = definition(key).unwrap();
@@ -579,11 +593,15 @@ mod tests {
         .unwrap();
         let before = expanded.after.into_iter().collect();
         let revoked = preview_change(actor, 2, &before, &[], &["words.access".to_owned()]).unwrap();
+        assert_eq!(revoked.dependency_revocations, vec!["sentences.edit"]);
         assert_eq!(
-            revoked.dependency_revocations,
-            vec!["sentences.edit", "sentences.edit_others"]
+            revoked.after,
+            vec![
+                "sentences.access",
+                "sentences.edit_others",
+                "sentences.publish"
+            ]
         );
-        assert_eq!(revoked.after, vec!["sentences.access", "sentences.publish"]);
         assert!(
             validate_closed(&BTreeSet::from([
                 "sentences.access".to_owned(),
@@ -594,16 +612,12 @@ mod tests {
     }
 
     #[test]
-    fn scope_requires_edit_and_does_not_imply_publish() {
+    fn scope_requires_access_and_does_not_imply_actions() {
         let mut keys = BTreeSet::from(["words.edit_others".to_owned()]);
         expand_grants(&mut keys);
         assert_eq!(
             keys,
-            BTreeSet::from([
-                "words.access".to_owned(),
-                "words.edit".to_owned(),
-                "words.edit_others".to_owned()
-            ])
+            BTreeSet::from(["words.access".to_owned(), "words.edit_others".to_owned()])
         );
         assert!(effective_keys(["words.edit_others".to_owned(), "unknown".to_owned()]).is_empty());
     }

@@ -56,7 +56,7 @@ async fn seed_admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
         .await
         .expect("seed admin 应成功");
     if ordinary {
-        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest(ARRAY['words.access','words.create','words.edit','words.publish','words.archive','words.restore','words.rollback','words.detect','words.validate','sentences.access','sentences.create','sentences.edit','sentences.publish','sentences.withdraw','sentences.restore','sentences.rollback','speech.generate']), $1")
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest(ARRAY['words.access','words.create','words.edit','words.associate','words.publish','words.archive','words.restore','words.rollback','words.detect','words.validate','sentences.access','sentences.create','sentences.edit','sentences.associate','sentences.publish','sentences.withdraw','sentences.restore','sentences.rollback','speech.generate']), $1")
             .bind(id).execute(pool).await.unwrap();
     }
     id
@@ -17529,3 +17529,99 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
 
 #[path = "lexicon_handler/sentence_formatting.rs"]
 mod sentence_formatting;
+
+#[sqlx::test]
+async fn v3_independent_association_permission_preserves_text_and_owner_scope(pool: PgPool) {
+    let state = AppState::for_test(pool.clone())
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let owner = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    let bearer = token(&state, owner);
+    let initial = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let mut forms = initial["word"]["forms"].clone();
+    forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["synthesis"] =
+        json!({"alphabet":"ipa","ipa":"hɑːbə","ups":"","ipa_locale":"en-GB"});
+    let (_, initial) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        initial["word"]["id"].as_str().unwrap(),
+        initial["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms,
+    )
+    .await;
+    let id = initial["word"]["id"].as_str().unwrap();
+    let mut meanings =
+        complete_v3_meanings_fixture(initial["word"]["forms"]["pos"][0]["pos_id"].clone());
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"] =
+        json!({"version":2,"text":"a harbour","annotations":[]});
+    let saved = save_v3_meanings(&state, &bearer, &initial, meanings).await;
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.edit'",
+    )
+    .bind(owner)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.associate',$1) ON CONFLICT DO NOTHING").bind(owner).execute(&pool).await.unwrap();
+    let mut linked = writable_v3_meanings(&saved);
+    let form = &saved["word"]["forms"]["pos"][0]["forms"][0];
+    linked["pos"][0]["grammar_structures"][0]["variants"][0]["form_links"] = json!([{
+        "id":Uuid::now_v7(),"source_segments":[{"start":2,"end":9,"surface":"harbour"}],
+        "target_word_id":id,"target_pos_id":saved["word"]["forms"]["pos"][0]["pos_id"],
+        "target_form_id":form["id"],"target_variant_id":form["regional_variants"]["uk"]["id"],"target_dialect":"uk"
+    }]);
+    let path = format!("{ROOT}/entries/{id}/steps/meanings");
+    let request = |content: Value| json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"save","content":content});
+    let mut forged = linked.clone();
+    forged["pos"][0]["grammar_structures"][0]["variants"][0]["content"]["text"] =
+        json!("a changed harbour");
+    let (status, result) = call(
+        &state,
+        Method::PUT,
+        &path,
+        &bearer,
+        None,
+        Some(request(forged)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
+    let outsider = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.associate',$1) ON CONFLICT DO NOTHING").bind(outsider).execute(&pool).await.unwrap();
+    let other_bearer = token(&state, outsider);
+    let (status, result) = call(
+        &state,
+        Method::PUT,
+        &path,
+        &other_bearer,
+        None,
+        Some(request(linked.clone())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
+    let (status, result) = call(
+        &state,
+        Method::PUT,
+        &path,
+        &bearer,
+        None,
+        Some(request(linked)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (_, persisted) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let variant = &persisted["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0];
+    assert_eq!(variant["content"]["text"], "a harbour");
+    assert_eq!(variant["form_links"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        persisted["word"]["revision"].as_i64().unwrap(),
+        saved["word"]["revision"].as_i64().unwrap() + 1
+    );
+}

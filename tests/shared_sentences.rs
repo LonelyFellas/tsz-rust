@@ -137,7 +137,7 @@ async fn admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
         .await
         .unwrap();
     if ordinary {
-        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest(ARRAY['words.access','words.create','words.edit','words.publish','words.archive','words.restore','words.rollback','sentences.access','sentences.create','sentences.edit','sentences.publish','sentences.withdraw','sentences.restore','sentences.rollback']), $1")
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest(ARRAY['words.access','words.create','words.edit','words.associate','words.publish','words.archive','words.restore','words.rollback','sentences.access','sentences.create','sentences.edit','sentences.associate','sentences.publish','sentences.withdraw','sentences.restore','sentences.rollback']), $1")
             .bind(id).execute(pool).await.unwrap();
     }
     id
@@ -2375,4 +2375,75 @@ async fn forms_impact_flags_only_changes_that_break_sentence_targets(pool: PgPoo
         impact.get("blocked_references").is_none(),
         "无关改动不该列出被破坏的引用：{impact}"
     );
+}
+
+#[sqlx::test]
+async fn independent_sentence_association_permission_rejects_mixed_writes(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let owner = admin_with_role(&pool, AdminRole::Admin).await;
+    let source = entry(&pool, owner, "wonderful").await;
+    let (status, created) = call(&state, owner, Method::POST, ROOT, Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":content(source)}))).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let path = format!("{ROOT}/{id}");
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.edit'",
+    )
+    .bind(owner)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'sentences.associate',$1) ON CONFLICT DO NOTHING").bind(owner).execute(&pool).await.unwrap();
+    let mut linked = created["content"].clone();
+    linked["annotations"].as_array_mut().unwrap().pop();
+    let mut forged = linked.clone();
+    forged["sentence"]["level"] = json!("C2");
+    let (status, error) = call(
+        &state,
+        owner,
+        Method::PUT,
+        &path,
+        Some(json!({"base_revision":1,"content":forged})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+    let (_, unchanged) = call(
+        &state,
+        owner,
+        Method::GET,
+        &format!("{path}?view=draft"),
+        None,
+    )
+    .await;
+    assert_eq!(unchanged["content"], created["content"]);
+    assert_eq!(unchanged["revision"], 1);
+    let (status, updated) = call(
+        &state,
+        owner,
+        Method::PUT,
+        &path,
+        Some(json!({"base_revision":1,"content":linked})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let (_, persisted) = call(
+        &state,
+        owner,
+        Method::GET,
+        &format!("{path}?view=draft"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        persisted["content"]["annotations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        persisted["content"]["sentence"],
+        created["content"]["sentence"]
+    );
+    assert_eq!(persisted["revision"], 2);
 }

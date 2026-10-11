@@ -534,14 +534,11 @@ mod tests {
         let id = Uuid::nil();
         let first =
             preview_change(id, 0, &BTreeSet::new(), &["words.edit_others".into()], &[]).unwrap();
-        assert_eq!(
-            first.grant,
-            ["words.access", "words.edit", "words.edit_others"]
-        );
-        assert_eq!(first.dependency_grants, ["words.access", "words.edit"]);
+        assert_eq!(first.grant, ["words.access", "words.edit_others"]);
+        assert_eq!(first.dependency_grants, ["words.access"]);
         let before = first.after.into_iter().collect();
-        let next = preview_change(id, 1, &before, &[], &["words.edit".into()]).unwrap();
-        assert_eq!(next.after, ["words.access"]);
+        let next = preview_change(id, 1, &before, &[], &["words.access".into()]).unwrap();
+        assert!(next.after.is_empty());
         assert_eq!(next.dependency_revocations, ["words.edit_others"]);
         assert!(
             preview_change(

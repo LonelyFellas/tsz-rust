@@ -235,8 +235,10 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
             "lexicon_settings.access",
             "words.create",
             "words.edit",
+            "words.associate",
             "sentences.create",
             "sentences.edit",
+            "sentences.associate",
         ]),
     ),
     (
@@ -357,7 +359,7 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "PUT",
         "/lexicon/entries/{id}/steps/meanings",
-        RoutePolicy::All(&["words.edit"]),
+        RoutePolicy::Any(&["words.edit", "words.associate"]),
     ),
     (
         "PATCH",
@@ -448,7 +450,7 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "PUT",
         "/lexicon/sentences/{id}",
-        RoutePolicy::All(&["sentences.edit"]),
+        RoutePolicy::Any(&["sentences.edit", "sentences.associate"]),
     ),
     ("DELETE", "/lexicon/sentences/{id}", RoutePolicy::SuperAdmin),
     (
