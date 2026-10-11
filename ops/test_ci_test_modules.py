@@ -241,6 +241,25 @@ class CiTestModulesTests(unittest.TestCase):
                 "--all-features",
                 "--test",
                 "lexicon_target",
+                "--",
+                "--show-output",
+            ],
+            check=True,
+        )
+
+    def test_build_mode_compiles_the_same_complete_target_set_without_running(self) -> None:
+        runner = mock.Mock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(
+                ["build", "lexicon"],
+                discovered_targets=self._one_target_per_module(),
+                rules=self._synthetic_rules(),
+                runner=runner,
+            )
+        runner.assert_called_once_with(
+            [
+                "cargo", "test", "--locked", "--all-features",
+                "--test", "lexicon_target", "--no-run",
             ],
             check=True,
         )

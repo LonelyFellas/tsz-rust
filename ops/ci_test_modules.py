@@ -129,6 +129,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("list", help="print the complete module inventory")
+    build_parser = subparsers.add_parser("build", help="compile one integration module")
+    build_parser.add_argument("module")
     run_parser = subparsers.add_parser("run", help="run one integration module")
     run_parser.add_argument("module")
     return parser
@@ -155,6 +157,7 @@ def main(
         return 0
 
     command = cargo_command(args.module, grouped)
+    command.extend(["--no-run"] if args.action == "build" else ["--", "--show-output"])
     print(f"{args.module}: {', '.join(grouped[args.module])}", flush=True)
     runner(command, check=True)
     return 0
