@@ -491,7 +491,7 @@ async fn single_and_batch_changes_expand_dependencies_preserve_existing_and_audi
     let batch = preview(&state, &bearer, &ids, &["words.edit_others"], &[]).await;
     assert_eq!(
         batch["targets"][0]["dependency_grants"],
-        json!(["words.access", "words.edit"])
+        json!(["words.access"])
     );
     let (status, result) = request(
         &state,
@@ -504,12 +504,7 @@ async fn single_and_batch_changes_expand_dependencies_preserve_existing_and_audi
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!(
         result["targets"][0]["permissions"],
-        json!([
-            "users.access",
-            "words.access",
-            "words.edit",
-            "words.edit_others"
-        ])
+        json!(["users.access", "words.access", "words.edit_others"])
     );
     assert_eq!(result["targets"][0]["permission_version"], 2);
     assert_eq!(result["targets"][1]["permission_version"], 1);
@@ -524,7 +519,19 @@ async fn single_and_batch_changes_expand_dependencies_preserve_existing_and_audi
     assert_eq!(status, StatusCode::OK, "{audits}");
     assert_eq!(audits["total"], 2);
     assert_eq!(audits["items"][0]["request_id"], result["request_id"]);
-    let revoke = preview(&state, &bearer, &ids, &[], &["words.edit"]).await;
+    let (status, recipients) = request(
+        &state,
+        &bearer,
+        "GET",
+        "/permissions/words.access/admins?page=1&page_size=1",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recipients}");
+    assert_eq!(recipients["total"], 2);
+    assert_eq!(recipients["items"].as_array().unwrap().len(), 1);
+    assert_eq!(recipients["super_admins_are_implicit"], true);
+    let revoke = preview(&state, &bearer, &ids, &[], &["words.access"]).await;
     assert_eq!(
         revoke["targets"][0]["dependency_revocations"],
         json!(["words.edit_others"])
@@ -538,22 +545,7 @@ async fn single_and_batch_changes_expand_dependencies_preserve_existing_and_audi
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{result}");
-    assert_eq!(
-        result["targets"][0]["permissions"],
-        json!(["users.access", "words.access"])
-    );
-    let (status, recipients) = request(
-        &state,
-        &bearer,
-        "GET",
-        "/permissions/words.access/admins?page=1&page_size=1",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{recipients}");
-    assert_eq!(recipients["total"], 2);
-    assert_eq!(recipients["items"].as_array().unwrap().len(), 1);
-    assert_eq!(recipients["super_admins_are_implicit"], true);
+    assert_eq!(result["targets"][0]["permissions"], json!(["users.access"]));
 }
 
 #[sqlx::test]

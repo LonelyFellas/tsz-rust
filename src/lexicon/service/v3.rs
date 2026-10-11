@@ -1995,11 +1995,19 @@ impl LexiconService {
         } else {
             None
         };
+        let previous_meanings = serde_json::to_value(&meanings).map_err(serialization_error)?;
         reconcile_v3_meanings_after_forms(&mut meanings, &input.content);
         super::form_senses::apply_sense_bindings(
             &input.content,
             &mut meanings,
             &input.sense_bindings,
+        )?;
+        crate::admin::permissions::content::require_changes(
+            &authorization,
+            "words",
+            record.created_by_admin_id,
+            &previous_meanings,
+            &serde_json::to_value(&meanings).map_err(serialization_error)?,
         )?;
         super::inbound_references::ensure_self_text_link_references(
             entry_id,
@@ -2217,12 +2225,17 @@ impl LexiconService {
             .begin()
             .await
             .map_err(database_error)?;
-        let authorization = lock_action(&mut transaction, actor_id, "words.edit").await?;
+        let authorization = crate::admin::permissions::lock(&mut transaction, actor_id).await?;
         let record = LexiconRepository::entry_by_id_on(&mut *transaction, entry_id)
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        ensure_draft_writable(&record, &authorization)?;
+        authorization
+            .require_any_owned_action(
+                &["words.edit", "words.associate"],
+                record.created_by_admin_id,
+            )
+            .map_err(|_| LexiconServiceError::EntryEditForbidden)?;
         ensure_native_v3_entry_in(&mut transaction, &record).await?;
         if record.revision != base_revision {
             return Err(LexiconServiceError::RevisionConflict {
@@ -2236,6 +2249,18 @@ impl LexiconService {
         preserve_missing_sense_component_usages(&mut content, &compatibility_meanings);
         super::text_links::preserve_missing(&mut content, &compatibility_meanings)?;
         super::grammar_form_links::preserve_missing(&mut content, &compatibility_meanings)?;
+        crate::admin::permissions::content::require_changes(
+            &authorization,
+            "words",
+            record.created_by_admin_id,
+            &serde_json::to_value(&compatibility_meanings).map_err(serialization_error)?,
+            &serde_json::to_value(&content).map_err(serialization_error)?,
+        )?;
+        if intent == StepSaveIntent::Complete
+            && !record.completed_steps.iter().any(|step| step == "meanings")
+        {
+            authorization.require_owned_action("words.edit", record.created_by_admin_id)?;
+        }
         let mut issues = crate::lexicon::v3_contract::validate_meanings(&content, intent);
         if intent == StepSaveIntent::Complete {
             issues.extend(
@@ -2257,7 +2282,12 @@ impl LexiconService {
             .await
             .map_err(repository_error)?
             .ok_or(LexiconServiceError::WordNotFound)?;
-        ensure_draft_writable(&record, &authorization)?;
+        authorization
+            .require_any_owned_action(
+                &["words.edit", "words.associate"],
+                record.created_by_admin_id,
+            )
+            .map_err(|_| LexiconServiceError::EntryEditForbidden)?;
         ensure_v3_record_active(&record)?;
         if record.revision != base_revision {
             return Err(LexiconServiceError::RevisionConflict {

@@ -377,7 +377,10 @@ async fn writable_entry(
     .await
     .map_err(AppError::internal)?
     .ok_or_else(|| AppError::not_found("词条不存在"))?;
-    authorization.require_owned_action("words.edit", row.get("created_by_admin_id"))?;
+    authorization.require_any_owned_action(
+        &["words.edit", "words.associate"],
+        row.get("created_by_admin_id"),
+    )?;
     if row.get::<Option<DateTime<Utc>>, _>("archived_at").is_some() {
         return Err(AppError::conflict(
             ErrorCode::EntryArchived,
@@ -563,7 +566,10 @@ async fn writable_sentence(
             ));
         }
     } else {
-        authorization.require_owned_action("sentences.edit", row.get("created_by_admin_id"))?;
+        authorization.require_any_owned_action(
+            &["sentences.edit", "sentences.associate"],
+            row.get("created_by_admin_id"),
+        )?;
     }
     if deleting && published {
         return Err(AppError::conflict(
@@ -811,7 +817,6 @@ pub async fn update(
     }
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let authorization = crate::admin::permissions::lock(&mut tx, admin.id).await?;
-    authorization.require("sentences.edit")?;
     lock_targets(
         &mut tx,
         Some(&input.content),
@@ -831,6 +836,14 @@ pub async fn update(
     )
     .await?;
     lock(&mut tx, id, input.base_revision).await?;
+    let current = read_on(&mut tx, id).await?;
+    crate::admin::permissions::content::require_changes(
+        &authorization,
+        "sentences",
+        current.created_by_admin_id,
+        &serde_json::to_value(&current.content).map_err(AppError::internal)?,
+        &serde_json::to_value(&input.content).map_err(AppError::internal)?,
+    )?;
     if !sentence_formatting::supported(&headers) {
         let current = read_on(&mut tx, id).await?;
         if sentence_formatting::contains_new_formats(

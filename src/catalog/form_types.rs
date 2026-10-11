@@ -243,8 +243,10 @@ pub async fn list(
         "lexicon_settings.access",
         "words.create",
         "words.edit",
+        "words.associate",
         "sentences.create",
         "sentences.edit",
+        "sentences.associate",
     ]
     .iter()
     .any(|key| authorization.has(key))

@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod content;
 pub mod handler;
 pub mod migration;
 pub mod model;
@@ -40,11 +41,25 @@ impl AdminAuthorization {
         }
     }
 
+    pub fn require_any_owned_action(&self, keys: &[&str], owner: Uuid) -> Result<(), AppError> {
+        if keys
+            .iter()
+            .any(|key| self.require_owned_action(key, owner).is_ok())
+        {
+            Ok(())
+        } else {
+            Err(AppError::forbidden(
+                ErrorCode::Forbidden,
+                "content editing permission required",
+            ))
+        }
+    }
+
     pub fn require_owned_action(&self, key: &str, owner: Uuid) -> Result<(), AppError> {
         self.require(key)?;
         let others = match key {
-            "words.edit" => Some("words.edit_others"),
-            "sentences.edit" => Some("sentences.edit_others"),
+            "words.edit" | "words.associate" => Some("words.edit_others"),
+            "sentences.edit" | "sentences.associate" => Some("sentences.edit_others"),
             _ => None,
         };
         if self.is_super_admin

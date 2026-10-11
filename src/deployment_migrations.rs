@@ -122,7 +122,73 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261007031000;
+    const CURRENT_RELEASE_VERSION: i64 = 20261011010000;
+
+    #[sqlx::test]
+    async fn split_edit_migration_preserves_grants_and_blocks_unsafe_downgrade(pool: PgPool) {
+        let owner = Uuid::now_v7();
+        let tag = Uuid::now_v7();
+        sqlx::query("INSERT INTO admins(id, phone, password_hash, display_name) VALUES($1,$2,'hash','split permissions')")
+            .bind(owner).bind(owner.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1,unnest(ARRAY['words.access','words.edit','sentences.access','sentences.edit','words.edit_others']),$1")
+            .bind(owner).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO permission_tags(id,name) VALUES($1,'editors')")
+            .bind(tag)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO permission_tag_items(tag_id,permission_key) VALUES($1,'words.edit')",
+        )
+        .bind(tag)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261011010000_split_content_edit_permissions.up.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let keys: Vec<String> = sqlx::query_scalar("SELECT permission_key FROM admin_permission_grants WHERE admin_id=$1 ORDER BY permission_key").bind(owner).fetch_all(&pool).await.unwrap();
+        assert!(
+            keys.contains(&"words.associate".into())
+                && keys.contains(&"sentences.associate".into())
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT permission_version FROM admins WHERE id=$1")
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM permission_tag_items WHERE tag_id=$1 AND permission_key='words.associate'").bind(tag).fetch_one(&pool).await.unwrap(),1);
+        // Safe rollback removes only the new keys, and reapplying restores the old editor capability.
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261011010000_split_content_edit_permissions.down.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM admin_permission_grants WHERE admin_id=$1 AND permission_key LIKE '%.associate'").bind(owner).fetch_one(&pool).await.unwrap(),0);
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261011010000_split_content_edit_permissions.up.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.associate'").bind(owner).execute(&pool).await.unwrap();
+        assert!(
+            sqlx::raw_sql(include_str!(
+                "../migrations/20261011010000_split_content_edit_permissions.down.sql"
+            ))
+            .execute(&pool)
+            .await
+            .is_err()
+        );
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.associate'").bind(owner).fetch_one(&pool).await.unwrap(),1);
+    }
 
     #[sqlx::test]
     async fn coin_release_undo_matches_deployed_phone_schema_and_preserves_new_funds(pool: PgPool) {
