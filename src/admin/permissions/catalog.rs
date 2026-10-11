@@ -155,8 +155,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.restore",
         "words",
-        "词条恢复",
-        "恢复自己的词条",
+        "从垃圾桶恢复",
+        "将已删入垃圾桶的词条恢复到智能词库中，重返可编辑状态",
         "action",
         ["words.access"],
         "high"
@@ -164,8 +164,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.rollback",
         "words",
-        "词条版本回滚",
-        "回滚自己词条的发布版本",
+        "恢复到历史版本",
+        "将可编辑词条恢复到它的某个历史版本",
         "action",
         ["words.access"],
         "high"
