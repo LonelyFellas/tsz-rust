@@ -1188,3 +1188,93 @@ async fn revoking_legacy_teacher_only_account_keeps_student_membership(pool: PgP
         .unwrap();
     assert_eq!(count, 1);
 }
+
+#[sqlx::test]
+async fn user_identity_permission_only_exposes_submitted_identity_documents_of_target_user(
+    pool: PgPool,
+) {
+    let owner = user(&pool).await;
+    let other = user(&pool).await;
+    let viewer = admin(&pool, AdminRole::Admin).await;
+    grant(&pool, viewer, &["users.access", "users.read_identity"]).await;
+    let state = with_storage(AppState::for_test(pool.clone()));
+    let owner_token = state.token_manager.generate(owner, "student").unwrap();
+    let bearer = state.admin_token_manager.generate(viewer, "admin").unwrap();
+    let (_, file) = upload(&state, &owner_token, "image/png", PNG).await;
+    let file_id: Uuid = file["id"].as_str().unwrap().parse().unwrap();
+    let base = format!("/api/v1/admin/users/{owner}/identity-documents");
+    assert_eq!(
+        get(
+            state.clone(),
+            &format!("{base}/{file_id}"),
+            Some(bearer.clone())
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let application = Uuid::now_v7();
+    sqlx::query("INSERT INTO teacher_applications(id,user_id,real_name,contact,statement) VALUES($1,$2,'合成教师','fixture@example.test','测试')").bind(application).bind(owner).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO teacher_application_files(application_id,file_id,position) VALUES($1,$2,0)",
+    )
+    .bind(application)
+    .bind(file_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, files) = get(state.clone(), &base, Some(bearer.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(files[0]["id"], file_id.to_string());
+    assert!(files[0].get("object_key").is_none());
+    assert_eq!(
+        get(
+            state.clone(),
+            &format!("{base}/{file_id}"),
+            Some(bearer.clone())
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(
+            state.clone(),
+            &format!("/api/v1/admin/users/{other}/identity-documents/{file_id}"),
+            Some(bearer.clone())
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(
+            state.clone(),
+            &format!("/api/v1/admin/teacher-certification/files/{file_id}"),
+            Some(bearer.clone())
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    sqlx::query("UPDATE teacher_certification_files SET kind='education' WHERE id=$1")
+        .bind(file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        get(
+            state.clone(),
+            &format!("{base}/{file_id}"),
+            Some(bearer.clone())
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_identity'").bind(viewer).execute(&pool).await.unwrap();
+    assert_eq!(
+        get(state, &base, Some(bearer)).await.0,
+        StatusCode::FORBIDDEN
+    );
+}

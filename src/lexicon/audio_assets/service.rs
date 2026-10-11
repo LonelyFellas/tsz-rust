@@ -94,6 +94,9 @@ impl AudioAssetService {
     ) -> Result<AdminAuthorization, AudioAssetServiceError> {
         let mut tx = self.repository.pool().begin().await?;
         let authorization = crate::admin::permissions::lock(&mut tx, admin_id).await?;
+        if writing {
+            authorization.require("speech.upload_audio")?;
+        }
         let keys = if writing {
             &[
                 "words.create",

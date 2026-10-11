@@ -254,15 +254,52 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "users.access",
         "users",
-        "查看用户管理列表和资料",
+        "查看全部用户名单",
+        "查看平台内所有用户的昵称和注册时间",
         "page",
         [],
         "medium"
     ),
     permission!(
+        "users.read_basic",
+        "users",
+        "查看用户基本信息",
+        "查看用户 ID、头像、昵称、角色、认证和账号状态",
+        "action",
+        ["users.access"],
+        "high"
+    ),
+    permission!(
+        "users.read_coin_balance",
+        "users",
+        "查看用户天生币余额",
+        "查看用户当前天生币余额",
+        "action",
+        ["users.access"],
+        "high"
+    ),
+    permission!(
+        "users.read_coin_entries",
+        "users",
+        "查看用户天生币账单",
+        "查看用户天生币收支账单；逐笔余额另需余额权限",
+        "action",
+        ["users.access"],
+        "high"
+    ),
+    permission!(
+        "users.read_identity",
+        "users",
+        "查看用户身份证件",
+        "查看用户最近一次教师认证申请中的身份证正反面",
+        "action",
+        ["users.access"],
+        "high"
+    ),
+    permission!(
         "users.read_sensitive",
         "users",
-        "查看用户完整手机号和邮箱",
+        "查看用户电话和邮箱",
         "action",
         ["users.access"],
         "high"
@@ -278,9 +315,10 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "users.set_status",
         "users",
-        "变更用户状态",
+        "封禁用户",
+        "封禁或解除封禁用户账号",
         "action",
-        ["users.access"],
+        ["users.read_basic"],
         "high"
     ),
     permission!(
@@ -330,6 +368,15 @@ pub const CATALOG: &[PermissionDefinition] = &[
         "action",
         ["lexicon_settings.access"],
         "high"
+    ),
+    permission!(
+        "speech.upload_audio",
+        "words",
+        "选择发音 – 上传音频",
+        "能够在智能词库选择发音时，直接上传音频给文本配音。",
+        "action",
+        [],
+        "medium"
     ),
     permission!(
         "speech.generate",

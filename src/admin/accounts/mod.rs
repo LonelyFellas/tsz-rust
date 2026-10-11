@@ -16,3 +16,5 @@ pub use model::{
 pub use repository::{AdminAccountsRepository, AdminAccountsRepositoryError};
 pub use router::router;
 pub use service::AdminAccountsService;
+
+pub(crate) mod user_resources;

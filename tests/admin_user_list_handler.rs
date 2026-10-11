@@ -29,7 +29,7 @@ async fn seed_admin(pool: &PgPool) -> Uuid {
         })
         .await
         .expect("seed admin 应成功");
-    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.access',$1),($1,'users.read_sensitive',$1)")
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.access',$1),($1,'users.read_basic',$1),($1,'users.read_sensitive',$1)")
         .bind(id).execute(pool).await.unwrap();
     id
 }
@@ -291,5 +291,97 @@ async fn user_list_omits_absent_phone_and_email_instead_of_returning_null(pool: 
     assert!(
         !email_user.contains_key("phone"),
         "纯邮箱用户不应返回 phone:null"
+    );
+}
+
+#[sqlx::test]
+async fn list_only_permission_does_not_disclose_basic_profile_or_filter_roles(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool).await;
+    let user = seed_user(&pool, "名单用户", &["teacher"]).await;
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key <> 'users.access'")
+        .bind(admin).execute(&pool).await.unwrap();
+    let bearer = admin_token(&state, admin);
+    for path in [
+        "/api/v1/admin/users".to_string(),
+        format!("/api/v1/admin/users/{user}"),
+    ] {
+        let (status, body) = get(&state, &path, &bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let response: Value = serde_json::from_str(&body).unwrap();
+        let item = response.get("items").map_or(&response, |items| &items[0]);
+        assert_eq!(item["display_name"], "名单用户");
+        assert!(item["created_at"].is_string());
+        for key in [
+            "avatar_url",
+            "roles",
+            "teacher_verified",
+            "status",
+            "updated_at",
+            "phone",
+            "email",
+        ] {
+            assert!(item.get(key).is_none(), "leaked {key}: {item}");
+        }
+    }
+    assert_eq!(
+        get(&state, "/api/v1/admin/users?role=teacher", &bearer)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    for path in ["coin-wallet", "coin-entries", "identity-documents"] {
+        assert_eq!(
+            get(
+                &state,
+                &format!("/api/v1/admin/users/{user}/{path}"),
+                &bearer
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.read_coin_entries',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = get(
+        &state,
+        &format!("/api/v1/admin/users/{user}/coin-entries"),
+        &bearer,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        get(
+            &state,
+            &format!("/api/v1/admin/users/{user}/coin-wallet"),
+            &bearer
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.read_coin_balance',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = get(
+        &state,
+        &format!("/api/v1/admin/users/{user}/coin-wallet"),
+        &bearer,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["balance"],
+        "0"
+    );
+    assert_eq!(
+        get(
+            &state,
+            &format!("/api/v1/admin/users/{}/coin-wallet", Uuid::now_v7()),
+            &bearer
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
     );
 }

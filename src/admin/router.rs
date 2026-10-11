@@ -64,6 +64,22 @@ pub fn router(_state: AppState) -> Router<AppState> {
             "/profile/preferences",
             patch(admin::profile::handler::update_admin_preferences),
         )
+        .route(
+            "/users/{id}/coin-wallet",
+            get(admin::accounts::user_resources::wallet),
+        )
+        .route(
+            "/users/{id}/coin-entries",
+            get(admin::accounts::user_resources::entries),
+        )
+        .route(
+            "/users/{id}/identity-documents",
+            get(admin::accounts::user_resources::identity_documents),
+        )
+        .route(
+            "/users/{id}/identity-documents/{file_id}",
+            get(admin::accounts::user_resources::identity_file),
+        )
         .route("/users", get(admin::accounts::handler::list_users))
         .route(
             "/users/{id}",

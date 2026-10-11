@@ -176,6 +176,26 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     ("POST", "/permission-tag-changes", RoutePolicy::SuperAdmin),
     ("GET", "/permission-audits", RoutePolicy::SuperAdmin),
+    (
+        "GET",
+        "/users/{id}/coin-wallet",
+        RoutePolicy::All(&["users.read_coin_balance"]),
+    ),
+    (
+        "GET",
+        "/users/{id}/coin-entries",
+        RoutePolicy::All(&["users.read_coin_entries"]),
+    ),
+    (
+        "GET",
+        "/users/{id}/identity-documents",
+        RoutePolicy::All(&["users.read_identity"]),
+    ),
+    (
+        "GET",
+        "/users/{id}/identity-documents/{file_id}",
+        RoutePolicy::All(&["users.read_identity"]),
+    ),
     ("GET", "/users", RoutePolicy::All(&["users.access"])),
     ("GET", "/users/{id}", RoutePolicy::All(&["users.access"])),
     ("PATCH", "/users/{id}", RoutePolicy::All(&["users.edit"])),
@@ -486,22 +506,12 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "POST",
         "/lexicon/audio-assets/upload-url",
-        RoutePolicy::Any(&[
-            "words.create",
-            "words.edit",
-            "sentences.create",
-            "sentences.edit",
-        ]),
+        RoutePolicy::All(&["speech.upload_audio"]),
     ),
     (
         "POST",
         "/lexicon/audio-assets",
-        RoutePolicy::Any(&[
-            "words.create",
-            "words.edit",
-            "sentences.create",
-            "sentences.edit",
-        ]),
+        RoutePolicy::All(&["speech.upload_audio"]),
     ),
     (
         "GET",

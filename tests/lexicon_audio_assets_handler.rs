@@ -548,6 +548,20 @@ async fn audio_write_anyof_and_read_anyof_preserve_private_creator_boundary(pool
             "sentences.access"
         };
         let owner = ordinary_with_audio_permissions(&pool, &[access, action]).await;
+        let (status, _, _) = call(
+            &state,
+            Method::POST,
+            UPLOAD_URL,
+            Some(&token(&state, owner)),
+            Some(json!({"content_type":"audio/mpeg","size":8})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "content action alone cannot upload"
+        );
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.upload_audio',$1)").bind(owner).execute(&pool).await.unwrap();
         let bearer = token(&state, owner);
         let asset = upload_asset(&state, &store, &bearer, vec![9; 8]).await;
         let path = format!(
@@ -620,9 +634,10 @@ impl RevokingAudioStore {
             .execute(&mut *tx)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND NOT($2::boolean AND permission_key='sentences.access')")
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND NOT($2::boolean AND permission_key='sentences.access') AND (NOT $3::boolean OR permission_key='speech.upload_audio')")
             .bind(self.admin_id)
             .bind(phase == AudioRevokePhase::WordReadSignature)
+            .bind(matches!(phase, AudioRevokePhase::Stat | AudioRevokePhase::Copy | AudioRevokePhase::WriteSignature))
             .execute(&mut *tx)
             .await
             .unwrap();
@@ -739,8 +754,15 @@ async fn audio_detached_promotion_rechecks_before_copy_and_delivery_without_undo
     let mut state = AppState::for_test(pool.clone());
     let inner = configure_audio(&mut state);
     for phase in [AudioRevokePhase::Stat, AudioRevokePhase::Copy] {
-        let admin_id =
-            ordinary_with_audio_permissions(&pool, &["sentences.access", "sentences.create"]).await;
+        let admin_id = ordinary_with_audio_permissions(
+            &pool,
+            &[
+                "sentences.access",
+                "sentences.create",
+                "speech.upload_audio",
+            ],
+        )
+        .await;
         let pending_key =
             ObjectKey::parse(format!("uploads/{admin_id}/{}.mp3", Uuid::now_v7())).unwrap();
         inner
@@ -816,8 +838,16 @@ async fn audio_detached_promotion_rechecks_before_copy_and_delivery_without_undo
 async fn audio_first_confirm_cannot_claim_another_admins_pending_upload(pool: PgPool) {
     let mut state = AppState::for_test(pool.clone());
     let inner = configure_audio(&mut state);
-    let uploader = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
-    let intruder = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
+    let uploader = ordinary_with_audio_permissions(
+        &pool,
+        &["words.access", "words.create", "speech.upload_audio"],
+    )
+    .await;
+    let intruder = ordinary_with_audio_permissions(
+        &pool,
+        &["words.access", "words.create", "speech.upload_audio"],
+    )
+    .await;
     let uploader_token = token(&state, uploader);
     let intruder_token = token(&state, intruder);
     let store = Arc::new(RevokingAudioStore {
@@ -946,8 +976,16 @@ async fn audio_first_confirm_rejects_ownerless_legacy_pending_but_replays_confir
 ) {
     let mut state = AppState::for_test(pool.clone());
     let inner = configure_audio(&mut state);
-    let uploader = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
-    let intruder = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
+    let uploader = ordinary_with_audio_permissions(
+        &pool,
+        &["words.access", "words.create", "speech.upload_audio"],
+    )
+    .await;
+    let intruder = ordinary_with_audio_permissions(
+        &pool,
+        &["words.access", "words.create", "speech.upload_audio"],
+    )
+    .await;
     let uploader_token = token(&state, uploader);
     let store = Arc::new(RevokingAudioStore {
         inner: inner.clone(),
@@ -1052,7 +1090,11 @@ async fn audio_first_confirm_rejects_ownerless_legacy_pending_but_replays_confir
 async fn audio_first_confirm_and_replay_require_current_permissions(pool: PgPool) {
     let mut state = AppState::for_test(pool.clone());
     let inner = configure_audio(&mut state);
-    let uploader = ordinary_with_audio_permissions(&pool, &["words.access", "words.create"]).await;
+    let uploader = ordinary_with_audio_permissions(
+        &pool,
+        &["words.access", "words.create", "speech.upload_audio"],
+    )
+    .await;
     let uploader_token = token(&state, uploader);
     let store = Arc::new(RevokingAudioStore {
         inner: inner.clone(),
@@ -1086,7 +1128,7 @@ async fn audio_first_confirm_and_replay_require_current_permissions(pool: PgPool
         .unwrap();
     let input = json!({"key":pending.as_str(),"locale":"en-GB","gender":"female","original_name":"revoked.mp3"});
     sqlx::query(
-        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.create'",
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='speech.upload_audio'",
     )
     .bind(uploader)
     .execute(&pool)
@@ -1114,7 +1156,7 @@ async fn audio_first_confirm_and_replay_require_current_permissions(pool: PgPool
         .await
         .unwrap();
     assert_eq!(assets, 0);
-    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.create',$1)")
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.upload_audio',$1)")
         .bind(uploader).execute(&pool).await.unwrap();
     let (status, confirmed, _) = call(
         &state,
@@ -1126,7 +1168,7 @@ async fn audio_first_confirm_and_replay_require_current_permissions(pool: PgPool
     .await;
     assert_eq!(status, StatusCode::CREATED, "{confirmed}");
     sqlx::query(
-        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.create'",
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='speech.upload_audio'",
     )
     .bind(uploader)
     .execute(&pool)
@@ -1222,8 +1264,15 @@ async fn audio_signatures_recheck_before_delivery(pool: PgPool) {
         AudioRevokePhase::WriteSignature,
         AudioRevokePhase::ReadSignature,
     ] {
-        let admin_id =
-            ordinary_with_audio_permissions(&pool, &["sentences.access", "sentences.create"]).await;
+        let admin_id = ordinary_with_audio_permissions(
+            &pool,
+            &[
+                "sentences.access",
+                "sentences.create",
+                "speech.upload_audio",
+            ],
+        )
+        .await;
         let asset = upload_asset(&state, &inner, &token(&state, admin_id), vec![7; 8]).await;
         let store = Arc::new(RevokingAudioStore {
             inner: inner.clone(),
