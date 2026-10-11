@@ -14,6 +14,8 @@ description: 将 tsz-rust 当前 GitHub main 的成功 CI 制品部署到 tshb-t
 本技能及其引用的操作手册是唯一部署流程；前端部署、提交或合并授权不能代替后端部署授权。
 本会话已明确授权的同一后端部署可以继续，不因跨步骤或等待重新请求相同许可。
 
+通过 Codex CLI 恢复协调会话时，必须显式指定后端项目目录（例如 `codex -C <tsz-rust-root> exec resume <session-id>`），恢复后先核对 cwd 和项目自定义 agent 的加载状态，再唤醒 `backend_deploy_runner`。从前端或其他目录恢复可能得到 `unknown agent_type`；先修正项目上下文，不用普通代理替代。CLI 恢复的 sandbox/approval 设置也须核对并沿用本会话已获授权的执行环境，不能假设自动继承。
+
 实际执行前必须完整读取 [操作手册](references/runbook.md)，包括失败后的回退和锁清理。
 仅做讨论/评估时按需读取，不执行手册中的变更命令。
 

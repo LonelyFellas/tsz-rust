@@ -1,28 +1,27 @@
 //! Only application-owned events reach the service log. Never format error chains.
 use std::error::Error;
-use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub fn init() {
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
-                    (metadata.target() == "tsz_rust"
-                        || metadata.target().starts_with("tsz_rust::")
-                        || matches!(
-                            metadata.target(),
-                            "seed"
-                                | "import_dictionary"
-                                | "import_dictionary_content"
-                                | "sync_speech_voices"
-                                | "lexicon_v3_initial_headwords"
-                                | "permission_migration_preview"
-                                | "export_openapi"
-                        ))
-                        && *metadata.level() <= tracing::Level::INFO
-                })),
-        )
+        // A global metadata filter cannot leave per-layer state behind when the
+        // log bridge probes a disabled dependency event without emitting it.
+        .with(tracing_subscriber::filter::filter_fn(|metadata| {
+            (metadata.target() == "tsz_rust"
+                || metadata.target().starts_with("tsz_rust::")
+                || matches!(
+                    metadata.target(),
+                    "seed"
+                        | "import_dictionary"
+                        | "import_dictionary_content"
+                        | "sync_speech_voices"
+                        | "lexicon_v3_initial_headwords"
+                        | "permission_migration_preview"
+                        | "export_openapi"
+                ))
+                && *metadata.level() <= tracing::Level::INFO
+        }))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
     std::panic::set_hook(Box::new(|panic| {
         // Payloads and backtraces can contain credentials. Locations are compiled code.
@@ -107,6 +106,18 @@ mod tests {
         init();
         match mode.as_str() {
             "panic" => panic!("{SECRET}"),
+            "startup" => {
+                for _ in 0..2 {
+                    use tracing::callsite::Callsite;
+                    // LogTracer::enabled uses Dispatch::enabled directly rather
+                    // than tracing's callsite-interest shortcut.
+                    let probe = tracing::callsite! {name: "dependency enabled probe", kind: tracing::metadata::Kind::EVENT, target: "sqlx::postgres::notice", level: tracing::Level::WARN, fields:};
+                    assert!(!tracing::dispatcher::get_default(
+                        |dispatch| dispatch.enabled(probe.metadata())
+                    ));
+                    tracing::info!(target: "tsz_rust", "database migrations applied");
+                }
+            }
             "http" => {
                 use tower::ServiceExt;
                 let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -147,7 +158,7 @@ mod tests {
 
     #[test]
     fn reliability_captures_real_stderr_without_error_or_panic_payloads() {
-        for mode in ["panic", "error", "worker", "http"] {
+        for mode in ["panic", "error", "worker", "http", "startup"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -170,11 +181,20 @@ mod tests {
                     "http_response"
                 } else if mode == "worker" {
                     "worker_stopped"
+                } else if mode == "startup" {
+                    "database migrations applied"
                 } else {
                     "command_failed"
                 }),
                 "{stderr}"
             );
+            if mode == "startup" {
+                assert_eq!(
+                    stderr.matches("database migrations applied").count(),
+                    2,
+                    "{stderr}"
+                );
+            }
             assert_eq!(output.status.success(), mode != "panic");
         }
     }
