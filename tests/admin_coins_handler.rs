@@ -660,3 +660,75 @@ async fn password_change_during_admin_lock_wait_revokes_management_reads(pool: P
     assert_eq!(accounts.await.unwrap().0, StatusCode::UNAUTHORIZED);
     assert_eq!(operations.await.unwrap().0, StatusCode::UNAUTHORIZED);
 }
+
+#[sqlx::test]
+async fn user_ledger_permission_is_independent_of_balance_and_coin_management(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let user = seed(&pool, OwnerType::User, Uuid::now_v7()).await;
+    let actor = admin(&pool, false, &["users.access", "users.read_coin_entries"]).await;
+    let root = admin(&pool, true, &[]).await;
+    assert_eq!(
+        request(
+            &state,
+            root,
+            "POST",
+            "/coins/manual-credits",
+            input(user, "task88")
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let path = format!("/users/{}/coin-entries", user.owner_id);
+    let (status, ledger) = request(&state, actor, "GET", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{ledger}");
+    assert_eq!(ledger["items"][0]["delta"], "100");
+    assert!(ledger["items"][0].get("balance_after").is_none());
+    assert!(ledger["items"][0].get("reason").is_none());
+    assert_eq!(
+        request(
+            &state,
+            actor,
+            "GET",
+            &format!("/users/{}/coin-wallet", user.owner_id),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(
+            &state,
+            actor,
+            "GET",
+            &format!("/coins/accounts/user/{}/entries", user.owner_id),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'users.read_coin_balance',$1)").bind(actor.owner_id).execute(&pool).await.unwrap();
+    assert_eq!(
+        request(&state, actor, "GET", &path, Value::Null).await.1["items"][0]["balance_after"],
+        "100"
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_coin_entries'").bind(actor.owner_id).execute(&pool).await.unwrap();
+    assert_eq!(
+        request(&state, actor, "GET", &path, Value::Null).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(
+            &state,
+            actor,
+            "GET",
+            &format!("/users/{}/coin-wallet", user.owner_id),
+            Value::Null
+        )
+        .await
+        .1["balance"],
+        "100"
+    );
+}

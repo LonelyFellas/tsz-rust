@@ -328,6 +328,9 @@ impl AdminAccountsService {
         authorization: &AdminAuthorization,
     ) -> Result<UserListResponse, AdminAccountsServiceError> {
         authorization.require("users.access")?;
+        if query.filters.role.is_some() {
+            authorization.require("users.read_basic")?;
+        }
         let user_repo = self.user_repo()?;
 
         let page = query.pagination.page.unwrap_or(1);
@@ -380,7 +383,7 @@ impl AdminAccountsService {
 
         let items = records
             .into_iter()
-            .map(|record| user_response_from(record, read_sensitive))
+            .map(|record| user_response_from(record, authorization))
             .collect();
         let total_pages = if total == 0 {
             0
@@ -413,10 +416,7 @@ impl AdminAccountsService {
             .map_err(map_user_error)?
             .ok_or(AdminAccountsServiceError::UserNotFound)?;
 
-        Ok(user_response_from(
-            record,
-            authorization.has("users.read_sensitive"),
-        ))
+        Ok(user_response_from(record, authorization))
     }
 
     /// 启禁用 C 端用户，事务内复核操作者权限。
@@ -464,10 +464,7 @@ impl AdminAccountsService {
         tx.commit()
             .await
             .map_err(|error| map_repository_error(AdminAccountsRepositoryError::Database(error)))?;
-        Ok(user_response_from(
-            record,
-            authorization.has("users.read_sensitive"),
-        ))
+        Ok(user_response_from(record, &authorization))
     }
 
     fn user_repo(&self) -> Result<&UserRepository, AdminAccountsServiceError> {
@@ -478,18 +475,23 @@ impl AdminAccountsService {
 }
 
 /// 用户行 → wire 响应（`AdminUser`）。列表与单条读写共用一份映射，保证形状不漂移。
-fn user_response_from(record: UserListRecord, read_sensitive: bool) -> AdminAccountUserResponse {
+fn user_response_from(
+    record: UserListRecord,
+    authorization: &AdminAuthorization,
+) -> AdminAccountUserResponse {
+    let read_sensitive = authorization.has("users.read_sensitive");
+    let read_basic = authorization.has("users.read_basic");
     AdminAccountUserResponse {
         id: record.id,
         phone: record.phone.filter(|_| read_sensitive),
         email: record.email.filter(|_| read_sensitive),
         display_name: record.display_name,
-        avatar_url: record.avatar_url,
-        roles: record.roles,
-        teacher_verified: record.teacher_verified,
-        status: record.status,
+        avatar_url: read_basic.then_some(record.avatar_url),
+        roles: read_basic.then_some(record.roles),
+        teacher_verified: read_basic.then_some(record.teacher_verified),
+        status: read_basic.then_some(record.status),
         created_at: record.created_at,
-        updated_at: record.updated_at,
+        updated_at: read_basic.then_some(record.updated_at),
     }
 }
 

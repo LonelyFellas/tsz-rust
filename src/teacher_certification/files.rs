@@ -186,7 +186,11 @@ pub async fn upload(
     }
 }
 
-async fn read(state: &AppState, id: Uuid, owner: Option<Uuid>) -> Result<Response, AppError> {
+pub(crate) async fn read(
+    state: &AppState,
+    id: Uuid,
+    owner: Option<Uuid>,
+) -> Result<Response, AppError> {
     let record = sqlx::query_as::<_, (String, String)>("SELECT object_key, content_type FROM teacher_certification_files f WHERE id = $1 AND state = 'ready' AND (expires_at IS NULL OR expires_at > now()) AND (($2::uuid IS NOT NULL AND user_id = $2) OR ($2::uuid IS NULL AND EXISTS(SELECT 1 FROM teacher_application_files a WHERE a.file_id = f.id)))")
         .bind(id).bind(owner).fetch_optional(&state.pool).await.map_err(AppError::internal)?
         .ok_or_else(|| AppError::not_found("材料不存在"))?;

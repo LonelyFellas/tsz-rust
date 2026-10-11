@@ -34,7 +34,7 @@ use tsz_rust::admin::{AdminRepository, AdminRole, NewAdmin};
 use tsz_rust::auth::{Realm, TokenManager};
 use tsz_rust::state::AppState;
 
-const EXPECTED_PERMISSION_KEYS: [&str; 37] = [
+const EXPECTED_PERMISSION_KEYS: [&str; 42] = [
     "words.detect",
     "words.validate",
     "wordlists.access",
@@ -62,6 +62,10 @@ const EXPECTED_PERMISSION_KEYS: [&str; 37] = [
     "sentences.restore",
     "sentences.rollback",
     "users.access",
+    "users.read_basic",
+    "users.read_coin_balance",
+    "users.read_coin_entries",
+    "users.read_identity",
     "users.edit",
     "users.set_status",
     "users.read_sensitive",
@@ -72,6 +76,7 @@ const EXPECTED_PERMISSION_KEYS: [&str; 37] = [
     "lexicon_settings.access",
     "lexicon_settings.edit",
     "speech.generate",
+    "speech.upload_audio",
 ];
 
 /// 造一个 active 管理员，返回 id。

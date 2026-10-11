@@ -968,6 +968,7 @@ async fn migration_preview_is_read_only_and_never_replays_legacy_flags_over_new_
         [
             "sentences.access",
             "users.access",
+            "users.read_basic",
             "users.read_sensitive",
             "words.access"
         ]
@@ -1053,4 +1054,113 @@ async fn audit_failure_rolls_back_authorization(pool: PgPool) {
     .await;
     assert_eq!(snapshot["permissions"], json!([]));
     assert_eq!(snapshot["permission_version"], 0);
+}
+
+#[sqlx::test]
+async fn user_permission_migration_preserves_effective_grants_and_guards_rollback(pool: PgPool) {
+    let full = seed(&pool, AdminRole::Admin).await;
+    let list = seed(&pool, AdminRole::Admin).await;
+    let orphan = seed(&pool, AdminRole::Admin).await;
+    for (id, keys) in [
+        (
+            full,
+            vec![
+                "users.access",
+                "coins.access",
+                "teacherapply.access",
+                "teacherapply.read_sensitive",
+            ],
+        ),
+        (list, vec!["users.access"]),
+        (orphan, vec!["coins.access", "teacherapply.read_sensitive"]),
+    ] {
+        for key in keys {
+            sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)")
+                .bind(id).bind(key).execute(&pool).await.unwrap();
+        }
+    }
+    let up = include_str!("../migrations/20261011020000_split_user_permissions.up.sql");
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    for (id, expected) in [(full, 4_i64), (list, 1), (orphan, 0)] {
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM admin_permission_grants WHERE admin_id=$1 AND permission_key IN ('users.read_basic','users.read_coin_balance','users.read_coin_entries','users.read_identity')")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, expected);
+    }
+    let version: i64 = sqlx::query_scalar("SELECT permission_version FROM admins WHERE id=$1")
+        .bind(full)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT permission_version FROM admins WHERE id=$1")
+            .bind(full)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        version
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_basic'").bind(list).execute(&pool).await.unwrap();
+    let down = include_str!("../migrations/20261011020000_split_user_permissions.down.sql");
+    assert!(sqlx::raw_sql(down).execute(&pool).await.is_err());
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM admin_permission_grants WHERE permission_key='users.read_basic'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[sqlx::test]
+async fn audio_upload_migration_preserves_effective_writers_without_expanding_read_access(
+    pool: PgPool,
+) {
+    let editor = seed(&pool, AdminRole::Admin).await;
+    let sentence = seed(&pool, AdminRole::Admin).await;
+    let orphan = seed(&pool, AdminRole::Admin).await;
+    let sentence_editor = seed(&pool, AdminRole::Admin).await;
+    for (id, keys) in [
+        (editor, vec!["words.access", "words.edit"]),
+        (sentence, vec!["sentences.access", "sentences.create"]),
+        (orphan, vec!["words.edit"]),
+        (
+            sentence_editor,
+            vec!["sentences.access", "sentences.edit", "words.access"],
+        ),
+    ] {
+        for key in keys {
+            sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)").bind(id).bind(key).execute(&pool).await.unwrap();
+        }
+    }
+    let up = include_str!("../migrations/20261011030000_audio_upload_permission.up.sql");
+    let down = include_str!("../migrations/20261011030000_audio_upload_permission.down.sql");
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    for (id, expected) in [
+        (editor, true),
+        (sentence, false),
+        (orphan, false),
+        (sentence_editor, true),
+    ] {
+        assert_eq!(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='speech.upload_audio')").bind(id).fetch_one(&pool).await.unwrap(),expected);
+    }
+    assert!(!sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.access')").bind(sentence).fetch_one(&pool).await.unwrap());
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT permission_version FROM admins WHERE id=$1")
+            .bind(editor)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='speech.upload_audio'").bind(editor).execute(&pool).await.unwrap();
+    assert!(sqlx::raw_sql(down).execute(&pool).await.is_err());
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM admin_permission_grants WHERE permission_key='speech.upload_audio'").fetch_one(&pool).await.unwrap(),0);
 }

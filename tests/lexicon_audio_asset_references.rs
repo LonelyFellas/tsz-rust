@@ -1746,7 +1746,12 @@ async fn permission_audio_sentence_access_does_not_read_word_only_references(poo
     );
     let creator_sentence_only = seed_permission_admin(
         &pool,
-        &["sentences.access", "sentences.edit", "words.access"],
+        &[
+            "sentences.access",
+            "sentences.edit",
+            "words.access",
+            "speech.upload_audio",
+        ],
     )
     .await;
     let creator_token = bearer(&state, creator_sentence_only);
@@ -1837,6 +1842,7 @@ async fn assert_private_audio_binding(pool: PgPool, forms: bool) {
             "words.create",
             "words.edit",
             "words.publish",
+            "speech.upload_audio",
         ],
     )
     .await;

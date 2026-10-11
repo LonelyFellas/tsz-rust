@@ -34,7 +34,7 @@ async fn seed_admin(pool: &PgPool, role: AdminRole) -> Uuid {
         .await
         .expect("seed admin 应成功");
     if role == AdminRole::Admin {
-        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.access',$1),($1,'users.read_sensitive',$1)")
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.access',$1),($1,'users.read_basic',$1),($1,'users.read_sensitive',$1)")
             .bind(id).execute(pool).await.unwrap();
     }
     id

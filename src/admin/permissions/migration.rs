@@ -46,10 +46,12 @@ pub async fn preview(pool: &PgPool) -> Result<MigrationPreview, AppError> {
             "words.access".into(),
             "sentences.access".into(),
             "users.access".into(),
+            "users.read_basic".into(),
             "users.read_sensitive".into(),
         ]);
         if publication {
             proposed.extend(LEGACY_PUBLICATION_KEYS.iter().map(|key| key.to_string()));
+            proposed.insert("speech.upload_audio".into());
             catalog::expand_grants(&mut proposed);
         }
         let migration_candidate = version == 0 && current.is_empty();

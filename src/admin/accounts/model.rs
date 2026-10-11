@@ -40,12 +40,27 @@ pub struct AdminAccountUserResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     pub display_name: String,
-    pub avatar_url: String,
-    pub roles: Vec<UserRole>,
-    pub teacher_verified: bool,
-    pub status: UserStatus,
+    /// 仅对 users.read_basic 可见。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub avatar_url: Option<String>,
+    /// 仅对 users.read_basic 可见。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub roles: Option<Vec<UserRole>>,
+    /// 仅对 users.read_basic 可见。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub teacher_verified: Option<bool>,
+    /// 仅对 users.read_basic 可见。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub status: Option<UserStatus>,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    /// 仅对 users.read_basic 可见。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
