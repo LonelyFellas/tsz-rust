@@ -1123,10 +1123,15 @@ async fn audio_upload_migration_preserves_effective_writers_without_expanding_re
     let editor = seed(&pool, AdminRole::Admin).await;
     let sentence = seed(&pool, AdminRole::Admin).await;
     let orphan = seed(&pool, AdminRole::Admin).await;
+    let sentence_editor = seed(&pool, AdminRole::Admin).await;
     for (id, keys) in [
         (editor, vec!["words.access", "words.edit"]),
         (sentence, vec!["sentences.access", "sentences.create"]),
         (orphan, vec!["words.edit"]),
+        (
+            sentence_editor,
+            vec!["sentences.access", "sentences.edit", "words.access"],
+        ),
     ] {
         for key in keys {
             sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)").bind(id).bind(key).execute(&pool).await.unwrap();
@@ -1135,7 +1140,12 @@ async fn audio_upload_migration_preserves_effective_writers_without_expanding_re
     let up = include_str!("../migrations/20261011030000_audio_upload_permission.up.sql");
     let down = include_str!("../migrations/20261011030000_audio_upload_permission.down.sql");
     sqlx::raw_sql(up).execute(&pool).await.unwrap();
-    for (id, expected) in [(editor, true), (sentence, true), (orphan, false)] {
+    for (id, expected) in [
+        (editor, true),
+        (sentence, false),
+        (orphan, false),
+        (sentence_editor, true),
+    ] {
         assert_eq!(sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='speech.upload_audio')").bind(id).fetch_one(&pool).await.unwrap(),expected);
     }
     assert!(!sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.access')").bind(sentence).fetch_one(&pool).await.unwrap());
