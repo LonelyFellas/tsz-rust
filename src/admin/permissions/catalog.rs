@@ -500,7 +500,7 @@ mod tests {
             .iter()
             .filter(|permission| matches!(permission.module_key, "words" | "sentences"))
             .collect();
-        assert_eq!(content.len(), 20);
+        assert_eq!(content.len(), 21);
         for permission in content {
             assert_ne!(
                 permission.label, permission.description,
