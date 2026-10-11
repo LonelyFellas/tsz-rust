@@ -310,6 +310,12 @@ jobs:
           python3 ops/ci_metrics.py run --name cargo-fetch --
           python3 ops/ci_cargo_fetch.py
 
+      - name: Compile ${{ matrix.module }} integration tests
+        run: >-
+          python3 ops/ci_metrics.py run
+          --name integration-compile-${{ matrix.module }} --
+          python3 ops/ci_test_modules.py build ${{ matrix.module }}
+
       - name: Run ${{ matrix.module }} integration tests
         run: >-
           python3 ops/ci_metrics.py run

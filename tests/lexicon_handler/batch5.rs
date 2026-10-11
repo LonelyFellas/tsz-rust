@@ -49,10 +49,42 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
     let state = batch3_state(&pool).await;
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
-    let mut words = Vec::new();
-    for index in 0..50 {
-        words.push(batch3_word(&state, &bearer, &format!("sample{index}")).await);
-    }
+    let fixture_started = Instant::now();
+    let surfaces = (0..50)
+        .map(|index| format!("sample{index}"))
+        .collect::<Vec<_>>();
+    let prototype = create_legacy_v3_empty_skeleton(&state, &bearer, &surfaces[0]).await;
+    let mut ids = vec![prototype];
+    ids.extend(
+        fixtures::seed_empty_v3_entries(&pool, prototype, &surfaces[0], &surfaces[1..]).await,
+    );
+    record_test_phase("maximum-batch", "empty-fixture", fixture_started);
+    let content_started = Instant::now();
+    let mut words = stream::iter(ids.iter().zip(&surfaces))
+        .map(|(id, surface)| {
+            let state = &state;
+            let bearer = &bearer;
+            async move {
+                let (_, forms) = save_v3_forms_after_impact(
+                    state,
+                    bearer,
+                    &id.to_string(),
+                    1,
+                    "complete",
+                    v3_forms_fixture_for(surface),
+                )
+                .await;
+                let meanings = complete_v3_meanings_fixture(
+                    forms["word"]["forms"]["pos"][0]["pos_id"].clone(),
+                );
+                save_v3_meanings(state, bearer, &forms, meanings).await
+            }
+        })
+        .buffered(4)
+        .collect::<Vec<_>>()
+        .await;
+    record_test_phase("maximum-batch", "content-fixture", content_started);
+    let relations_started = Instant::now();
     // 一个显式选择的环：每条依赖下一条，批次达到 API 的 50 条上限。
     for index in 0..words.len() {
         let target = &words[(index + 1) % words.len()];
@@ -64,6 +96,7 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
         }]);
         words[index] = save_v3_meanings(&state, &bearer, &words[index], meanings).await;
     }
+    record_test_phase("maximum-batch", "relation-fixture", relations_started);
     let start = Instant::now();
     let (status, published) = call(
         &state,
@@ -76,6 +109,7 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     assert_eq!(published["words"].as_array().unwrap().len(), 50);
+    record_test_phase("maximum-batch", "publish-assertions", start);
     eprintln!(
         "batch5 measurement: entries=50 cyclic_relations=50 batch_ms={:.2}",
         start.elapsed().as_secs_f64() * 1000.0
@@ -85,8 +119,20 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(count, 50);
+    let reference_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.entry_publication_sense_refs reference
+         JOIN lexicon.entries source ON source.id=reference.entry_id
+            AND source.current_publication_id=reference.publication_id
+         JOIN lexicon.entries target ON target.id=reference.target_entry_id
+            AND target.current_publication_id=reference.target_publication_id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reference_count, 50, "整个循环的发布引用必须持久化");
     let mut list_times = Vec::new();
     let mut reference_times = Vec::new();
+    let reads_started = Instant::now();
     for iteration in 0..20 {
         let start = Instant::now();
         let (status, list) = call(
@@ -112,6 +158,7 @@ async fn batch5_list_references_and_maximum_batch_measurement(pool: PgPool) {
         assert!(total >= 1, "{refs}");
         reference_times.push(start.elapsed().as_secs_f64() * 1000.0);
     }
+    record_test_phase("maximum-batch", "list-reference-assertions", reads_started);
     for (name, mut samples) in [("list", list_times), ("references", reference_times)] {
         samples.sort_by(f64::total_cmp);
         eprintln!(

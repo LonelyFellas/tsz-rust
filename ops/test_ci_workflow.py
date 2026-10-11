@@ -101,6 +101,11 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("--name lib-bins", unit_doc)
         self.assertIn("--name doc-tests", unit_doc)
         self.assertIn("--name integration-${{ matrix.module }}", integration)
+        self.assertIn("--name integration-compile-${{ matrix.module }}", integration)
+        self.assertLess(
+            integration.index("ci_test_modules.py build"),
+            integration.index("ci_test_modules.py run"),
+        )
         self.assertIn("--name release-build", release)
         for job in (quality, unit_doc, integration, release):
             self.assertIn("--name cargo-fetch", job)

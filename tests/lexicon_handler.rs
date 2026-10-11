@@ -6,6 +6,7 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode, header},
 };
+use futures_util::{StreamExt, stream};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -26,10 +27,19 @@ use tsz_rust::{
 mod batch4;
 #[path = "lexicon_handler/batch5.rs"]
 mod batch5;
+#[path = "lexicon_handler/fixtures.rs"]
+mod fixtures;
 #[path = "lexicon_handler/spelling_markup.rs"]
 mod spelling_markup;
 
 const ROOT: &str = "/api/v1/admin/lexicon";
+
+fn record_test_phase(test: &str, phase: &str, started: std::time::Instant) {
+    eprintln!(
+        "{}",
+        json!({"ci_test": test, "phase": phase, "elapsed_ms": started.elapsed().as_millis()})
+    );
+}
 fn test_redis_url() -> String {
     std::env::var("TEST_REDIS_URL")
         .or_else(|_| std::env::var("REDIS_URL"))
@@ -6796,11 +6806,39 @@ async fn create_published_v3_phrase(
     surface: &str,
     uk_component_usages: Value,
 ) -> (Value, Uuid) {
+    let meanings_saved = create_ready_v3_phrase(state, bearer, surface, uk_component_usages).await;
+    let entry_id = meanings_saved["word"]["id"].as_str().unwrap();
+    let (status, published) = publish_ready_v3(state, bearer, &meanings_saved).await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let publication_id: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
+            .bind(Uuid::parse_str(entry_id).unwrap())
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    (published, publication_id)
+}
+
+async fn create_ready_v3_phrase(
+    state: &AppState,
+    bearer: &str,
+    surface: &str,
+    uk_component_usages: Value,
+) -> Value {
     let (entry_id, mut forms) = create_v3_phrase_draft(state, bearer, surface).await;
     forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] =
         uk_component_usages;
+    complete_v3_phrase_draft(state, bearer, &entry_id, forms).await
+}
+
+async fn complete_v3_phrase_draft(
+    state: &AppState,
+    bearer: &str,
+    entry_id: &str,
+    forms: Value,
+) -> Value {
     let (_, forms_saved) =
-        save_v3_forms_after_impact(state, bearer, &entry_id, 1, "complete", forms).await;
+        save_v3_forms_after_impact(state, bearer, entry_id, 1, "complete", forms).await;
     let (status, meanings_saved) = call(
         state,
         Method::PUT,
@@ -6817,15 +6855,7 @@ async fn create_published_v3_phrase(
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{meanings_saved}");
-    let (status, published) = publish_ready_v3(state, bearer, &meanings_saved).await;
-    assert_eq!(status, StatusCode::CREATED, "{published}");
-    let publication_id: Uuid =
-        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
-            .bind(Uuid::parse_str(&entry_id).unwrap())
-            .fetch_one(pool)
-            .await
-            .unwrap();
-    (published, publication_id)
+    meanings_saved
 }
 
 #[sqlx::test]
@@ -15033,31 +15063,76 @@ fn phrase_meanings_fixture(pos_id: Value) -> Value {
 async fn component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_late_entry(
     pool: PgPool,
 ) {
+    let fixture_started = std::time::Instant::now();
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
     let admin_id = seed_admin(&pool).await;
     let bearer = token(&state, admin_id);
     let mut expected = HashSet::new();
-    let mut last_id = String::new();
     // 251 足以穿过旧版 200 词条总量窗口，同时避免把正常 CI 时间消耗在重复建稿发布上。
     // 开发阶段另以 1001 个真实发布词条 / 8008 候选完整跑过同一路径。
-    for index in 0..251_u32 {
-        let suffix = [index / 676, index / 26 % 26, index % 26]
-            .map(|n| char::from(b'a' + n as u8))
-            .iter()
-            .collect::<String>();
-        let (published, _) = create_published_v3_phrase(
+    // 测试池最多 5 条连接；4 个独立 fixture 并行，给请求内部查询留出余量。
+    let surfaces = (0..251_u32)
+        .map(|index| {
+            let suffix = [index / 676, index / 26 % 26, index % 26]
+                .map(|n| char::from(b'a' + n as u8))
+                .iter()
+                .collect::<String>();
+            format!("pagination harbour {suffix}")
+        })
+        .collect::<Vec<_>>();
+    let (prototype, _) = create_v3_phrase_draft(&state, &bearer, &surfaces[0]).await;
+    let prototype = Uuid::parse_str(&prototype).unwrap();
+    let mut ids = vec![prototype];
+    ids.extend(
+        fixtures::seed_empty_v3_entries(&pool, prototype, &surfaces[0], &surfaces[1..]).await,
+    );
+    record_test_phase("component-pagination", "empty-fixture", fixture_started);
+    let content_started = std::time::Instant::now();
+    let words = stream::iter(ids.iter().zip(&surfaces))
+        .map(|(id, surface)| {
+            let state = &state;
+            let bearer = &bearer;
+            async move {
+                complete_v3_phrase_draft(
+                    state,
+                    bearer,
+                    &id.to_string(),
+                    phrase_forms_fixture(surface),
+                )
+                .await
+            }
+        })
+        .buffered(4)
+        .collect::<Vec<_>>()
+        .await;
+    let last_id = words.last().unwrap()["word"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for word in &words {
+        expected.insert(word["word"]["id"].as_str().unwrap().to_owned());
+    }
+    record_test_phase("component-pagination", "content-fixture", content_started);
+    let publish_started = std::time::Instant::now();
+    // 保留单条发布样本，其他独立词条用现有的 50 条批量发布能力准备。
+    let (status, first) = publish_ready_v3(&state, &bearer, &words[0]).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    for batch in words[1..].chunks(50) {
+        let (status, published) = call(
             &state,
-            &pool,
+            Method::POST,
+            &format!("{ROOT}/entries/publications/batch"),
             &bearer,
-            &format!("pagination harbour {suffix}"),
-            json!([]),
+            Some(Uuid::now_v7()),
+            Some(batch3_input(&batch.iter().collect::<Vec<_>>())),
         )
         .await;
-        last_id = published["word"]["id"].as_str().unwrap().to_owned();
-        expected.insert(last_id.clone());
+        assert_eq!(status, StatusCode::CREATED, "{published}");
+        assert_eq!(published["words"].as_array().unwrap().len(), batch.len());
     }
+    record_test_phase("component-pagination", "publish-fixture", publish_started);
     let mut cursor = None;
     let mut visited = HashSet::new();
     let mut candidate_keys = HashSet::new();
@@ -15101,6 +15176,11 @@ async fn component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_
     );
     assert!(last_next.is_none(), "必须遍历到末页");
     assert_eq!(visited, expected, "旧200词条窗口之外也必须可达");
+    assert_eq!(
+        candidate_keys.len(),
+        2008,
+        "保持 251 个词条的完整英美候选形状"
+    );
     assert_eq!(candidate_keys.len() as u64, total.unwrap());
     let input =
         json!({"schema_version":3,"q":"pagination harbour","page_size":1,"entry_id":last_id});
@@ -15134,6 +15214,7 @@ async fn component_target_search_pages_past_the_old_200_entry_cap_and_targets_a_
     assert!(empty["matches"].as_array().unwrap().is_empty());
     assert_eq!(empty["truncated"], false);
     assert!(empty.get("next_cursor").is_none());
+    record_test_phase("component-pagination", "search-assertions", started);
 }
 
 #[sqlx::test]
