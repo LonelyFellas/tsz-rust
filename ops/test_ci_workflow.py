@@ -21,9 +21,9 @@ class CiWorkflowTests(unittest.TestCase):
         integration = self._job("integration")
 
         self.assertIn("fail-fast: false", integration)
-        self.assertIn("module: [lexicon, admin, identity, platform]", integration)
+        self.assertIn("module: [lexicon-pagination, lexicon-handler, lexicon-other, admin, identity, platform]", integration)
         self.assertIn(
-            "python3 ops/ci_test_modules.py run ${{ matrix.module }}", integration
+            "python3 ops/ci_test_shards.py run ${{ matrix.module }}", integration
         )
 
     def test_ci08_only_test_jobs_start_database_services(self) -> None:
@@ -51,11 +51,18 @@ class CiWorkflowTests(unittest.TestCase):
         summary = self._job("ci-summary")
 
         self.assertIn("name: Format, lint and test", summary)
-        self.assertIn("needs: [quality, unit-doc, integration]", summary)
+        self.assertIn("needs: [quality, unit-doc, integration, lexicon-summary]", summary)
         self.assertIn("if: ${{ always() }}", summary)
         self.assertIn("needs.quality.result", summary)
         self.assertIn("needs['unit-doc'].result", summary)
         self.assertIn("needs.integration.result", summary)
+        inventory = self._job("lexicon-summary")
+        self.assertIn("name: Integration (lexicon)", inventory)
+        self.assertIn("needs: [integration]", inventory)
+        self.assertIn("ci_test_shards.py verify integration-inventories", inventory)
+        self.assertIn("pattern: integration-inventory-*", inventory)
+        self.assertIn("needs['lexicon-summary'].result", summary)
+        self.assertIn("if-no-files-found: error", self._job("integration"))
 
     def test_ci10_release_artifact_is_exact_main_and_auditable(self) -> None:
         release = self._job("release-artifact")
@@ -103,8 +110,8 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("--name integration-${{ matrix.module }}", integration)
         self.assertIn("--name integration-compile-${{ matrix.module }}", integration)
         self.assertLess(
-            integration.index("ci_test_modules.py build"),
-            integration.index("ci_test_modules.py run"),
+            integration.index("ci_test_shards.py build"),
+            integration.index("ci_test_shards.py run"),
         )
         self.assertIn("--name release-build", release)
         for job in (quality, unit_doc, integration, release):
@@ -136,6 +143,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("cargo fmt --all -- --check", quality)
         self.assertIn("python3 -m unittest ops/test_deployment_manifest.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_test_modules.py", quality)
+        self.assertIn("python3 -m unittest ops/test_ci_test_shards.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_workflow.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_fingerprint.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_metrics.py", quality)
