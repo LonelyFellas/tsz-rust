@@ -89,6 +89,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check CI template helper formatting
+        run: rustfmt --edition 2024 --check ops/ci_identity_template.rs
+
       - name: Test deployment manifest tooling
         run: python3 -m unittest ops/test_deployment_manifest.py
 

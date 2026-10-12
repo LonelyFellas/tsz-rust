@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CI-only SQLx lifecycle timing using a disposable, version-locked source copy."""
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 import hashlib
 import json
 import os
@@ -11,7 +11,9 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import tomllib
+import uuid
 
 from ci_test_modules import classify_targets, discover_targets
 
@@ -96,7 +98,31 @@ def instrument_core(source):
     return source
 
 
-def instrument_postgres(source):
+def template_cases(root):
+    cases = json.loads((root / "ops/ci_template_cases.json").read_text())
+    targets = {"auth_me", "session_repository", "session_service", "session_reuse_detection", "user_repository", "user_service"}
+    if not cases or len(cases) != len(set(cases)) or any(not re.fullmatch(r"[a-zA-Z_][a-zA-Z_0-9]*::[a-zA-Z_][a-zA-Z_0-9]*", c) or c.partition("::")[0] not in targets for c in cases):
+        raise ValueError("invalid or duplicate business template whitelist")
+    return cases
+
+
+def instrument_postgres(source, cases=(), fingerprint=""):
+    if cases:
+        helper = fingerprint.replace("sqlx::migrate::", "sqlx_core::migrate::")
+        helper += '\nconst CI_TEMPLATE_CASES: &[&str] = &[\n' + ",\n".join(json.dumps(c) for c in cases) + '\n];\n'
+        source = replace_once(source, "static MASTER_POOL:", helper + "\nstatic MASTER_POOL:")
+        source = replace_once(source, '    let create_command = format!("create database {db_name:?}");', '''    let create_command = if CI_TEMPLATE_CASES.contains(&args.test_path) {
+        let template = std::env::var("SQLX_CI_TEMPLATE").expect("missing job-owned template");
+        let suffix = template.strip_prefix("_tsz_ci_tpl_").expect("invalid template prefix");
+        assert!(suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()));
+        let expected = std::env::var("SQLX_CI_TEMPLATE_FINGERPRINT").expect("missing template fingerprint");
+        assert_eq!(migration_fingerprint(args.migrator.expect("whitelisted test needs migrations")), expected,
+            "template belongs to different migrations");
+        eprintln!("SQLX_CI_TEMPLATE_USE {{\\"test\\":{:?},\\"template\\":{:?}}}", args.test_path, template);
+        format!("create database {db_name:?} template {template:?} strategy WAL_LOG")
+    } else {
+        format!("create database {db_name:?}")
+    };''')
     return replace_once(source, '''    conn.execute(AssertSqlSafe(create_command)).await?;''', '''    {
         let _ci = sqlx_core::testing::CiPhaseTimer::new(args.test_path, "db_create");
         conn.execute(AssertSqlSafe(create_command)).await?;
@@ -180,14 +206,16 @@ def prepare(root, state):
             upstream = package.extractfile(prefix + relative).read()
             package.extractall(state, filter="data")
         copy = state / f"{name}-0.9.0"
-        patched = instrument_core(upstream.decode()) if name == "sqlx-core" else instrument_postgres(upstream.decode())
+        helper_source = (root / "ops/ci_identity_template.rs").read_text()
+        fingerprint = helper_source.split("// BEGIN MIGRATION FINGERPRINT\n")[1].split("// END MIGRATION FINGERPRINT")[0]
+        patched = instrument_core(upstream.decode()) if name == "sqlx-core" else instrument_postgres(upstream.decode(), template_cases(root), fingerprint)
         (copy / relative).write_text(patched)
         evidence[name] = {"version": "0.9.0", "upstream_sha256": hashlib.sha256(upstream).hexdigest(), "timed_sha256": hashlib.sha256(patched.encode()).hexdigest()}
         patches.append(f'{name} = {{ path = {json.dumps(str(copy))} }}')
     manifest = snapshot / "Cargo.toml"
     if "[patch.crates-io]" in manifest.read_text():
         raise ValueError("existing crate patches require explicit profiling review")
-    manifest.write_text(manifest.read_text() + "\n[patch.crates-io]\n" + "\n".join(patches) + "\n")
+    manifest.write_text(manifest.read_text() + '\n[[bin]]\nname = "ci-identity-template"\npath = "ops/ci_identity_template.rs"\n\n[patch.crates-io]\n' + "\n".join(patches) + "\n")
     # Preserve every pinned transitive version; only the two reviewed path sources change.
     (snapshot / "Cargo.lock").write_text(profile_lock((root / "Cargo.lock").read_text()))
     subprocess.run(["cargo", "metadata", "--locked", "--offline", "--all-features", "--format-version=1"], cwd=snapshot, check=True, stdout=subprocess.DEVNULL)
@@ -195,6 +223,16 @@ def prepare(root, state):
     evidence["unit_cases"] = instrument_units(snapshot)
     (state / "source-evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
     return snapshot
+
+
+def audit_template_uses(report, cases, template):
+    executed = {f"{row['target']}::{row['name']}": row["status"] for row in report["executed"]}
+    uses = report.get("template_uses", [])
+    if any(executed.get(case) != "ok" for case in cases):
+        raise ValueError("template whitelist contains an absent, renamed or failed case")
+    if Counter(row["test"] for row in uses) != Counter(cases) or any(row["template"] != template for row in uses):
+        raise ValueError("missing, duplicate or non-whitelisted template use")
+    return {"cloned_cases": len(uses), "fresh_sqlx_cases": len({row["test"] for row in report["timings"] if row["phase"] == "db_create"}) - len(uses)}
 
 
 def summarize(report, unit_cases=()):
@@ -240,6 +278,7 @@ def main():
     parser.add_argument("--report", type=Path)
     parser.add_argument("--state", type=Path, default=Path(os.environ.get("RUNNER_TEMP", str(ROOT / "target"))) / "identity-phase-profile")
     args = parser.parse_args()
+    args.state = args.state.resolve()
     if args.shard != "identity":
         command = [sys.executable, str(ROOT / "ops/ci_test_shards.py"), args.action, args.shard]
         if args.report:
@@ -253,12 +292,41 @@ def main():
         if not args.report:
             parser.error("identity run requires --report")
         command += ["--report", str(args.report.resolve())]
-    subprocess.run(command, cwd=snapshot, env=env, check=True)
+    helper = args.state / "template-executable.json"
+    template_report = args.state / "template-checks.json"
+    template = "_tsz_ci_tpl_" + uuid.uuid4().hex
+    if args.action == "build":
+        build = subprocess.run(["cargo", "build", "--locked", "--all-features", "--bin", "ci-identity-template", "--message-format=json"], cwd=snapshot, env=env, text=True, stdout=subprocess.PIPE)
+        items = [json.loads(line) for line in build.stdout.splitlines()]
+        for item in items:
+            if item.get("reason") == "compiler-message":
+                print(item["message"]["rendered"], file=sys.stderr, end="")
+        build.check_returncode()
+        paths = [item["executable"] for item in items if item.get("reason") == "compiler-artifact" and item.get("executable") and item["target"]["name"] == "ci-identity-template"]
+        if len(paths) != 1:
+            raise ValueError("template helper executable inventory differs")
+        helper.write_text(json.dumps(paths[0]))
+        subprocess.run(command, cwd=snapshot, env=env, check=True)
+        return
+    executable = json.loads(helper.read_text())
+    if template_report.exists():
+        raise ValueError("template report already exists; use a fresh run state")
+    try:
+        subprocess.run([executable, "prepare", template, str(template_report)], cwd=snapshot, env=env, check=True)
+        checks = json.loads(template_report.read_text())
+        env.update(SQLX_CI_TEMPLATE=template, SQLX_CI_TEMPLATE_FINGERPRINT=checks["migration_fingerprint"])
+        subprocess.run(command, cwd=snapshot, env=env, check=True)
+    finally:
+        if template_report.exists():
+            cleanup_started = time.monotonic()
+            subprocess.run([executable, "cleanup", template, str(template_report)], cwd=snapshot, env=env, check=True)
+            checks["cleanup_ms"] = round((time.monotonic() - cleanup_started) * 1000, 3)
     if args.action == "run":
         report = json.loads(args.report.read_text())
         evidence = json.loads((args.state / "source-evidence.json").read_text())
         summary = summarize(report, evidence["unit_cases"])
         summary["source_evidence"] = evidence
+        summary["template_pilot"] = {**checks, **audit_template_uses(report, template_cases(ROOT), template)}
         output = args.report.parent / "identity-phases.json"
         output.write_text(json.dumps(summary, indent=2) + "\n")
         print(json.dumps({"profiled_sqlx_cases": summary["profiled_sqlx_cases"], "cumulative_phase_ms": summary["cumulative_phase_ms"]}), flush=True)

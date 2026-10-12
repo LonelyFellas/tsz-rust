@@ -3,9 +3,10 @@ import json
 from pathlib import Path
 import sys
 import unittest
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ci_identity_profile import PACKAGES, instrument_core, instrument_postgres, profile_lock, replace_once, summarize, validate_profile_lock
+from ci_identity_profile import PACKAGES, audit_template_uses, instrument_core, instrument_postgres, profile_lock, replace_once, summarize, template_cases, validate_profile_lock
 
 
 class IdentityProfileTests(unittest.TestCase):
@@ -62,6 +63,29 @@ class IdentityProfileTests(unittest.TestCase):
         report = self.fixture()
         report["timings"] = [row for row in report["timings"] if row["phase"] != "migration"]
         self.assertEqual(summarize(report, [{"target": "pure", "name": "unit"}])["profiled_sqlx_cases"], 1)
+
+    def test_template_route_audit_rejects_missing_duplicate_wrong_template_and_unlisted_use(self):
+        report = self.fixture()
+        cases = ["identity_test::case"]
+        report["template_uses"] = [{"test": cases[0], "template": "owned-template"}]
+        self.assertEqual(audit_template_uses(report, cases, "owned-template"), {"cloned_cases": 1, "fresh_sqlx_cases": 0})
+        for mutation in [lambda r: r.update(template_uses=[]), lambda r: r["template_uses"].append(r["template_uses"][0]), lambda r: r["template_uses"][0].update(template="stale"), lambda r: r["template_uses"][0].update(test="pure::unit"), lambda r: r["executed"].pop(0)]:
+            changed = copy.deepcopy(report)
+            mutation(changed)
+            with self.assertRaises(ValueError):
+                audit_template_uses(changed, cases, "owned-template")
+
+    def test_whitelist_cannot_silently_expand_to_migration_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "ops").mkdir()
+            path = root / "ops/ci_template_cases.json"
+            for cases in [[], ["avatar_migrations::up_down"], ["user_repository::case"] * 2, ["user_repository::case\"; SQL"]]:
+                path.write_text(json.dumps(cases))
+                with self.assertRaises(ValueError):
+                    template_cases(root)
+            path.write_text(json.dumps(["user_repository::case"]))
+            self.assertEqual(template_cases(root), ["user_repository::case"])
 
 
 if __name__ == "__main__":
