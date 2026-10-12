@@ -65,6 +65,8 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", self._job("integration"))
         self.assertIn("if: matrix.module == 'identity'", self._job("integration"))
         self.assertIn("name: identity-phase-measurements", self._job("integration"))
+        self.assertIn("if: matrix.module == 'lexicon-handler'", self._job("integration"))
+        self.assertIn("name: lexicon-handler-phase-measurements", self._job("integration"))
 
     def test_ci10_release_artifact_is_exact_main_and_auditable(self) -> None:
         release = self._job("release-artifact")
