@@ -282,8 +282,12 @@ impl AdminSessionService {
         &self,
         plaintext: &str,
         request_id: Option<Uuid>,
+        current_only: bool,
     ) -> Result<RotatedAdminRefresh, AdminSessionError> {
         let Some(request_id) = request_id else {
+            if current_only {
+                return Err(AdminSessionError::InvalidRefreshToken);
+            }
             return self.rotate(plaintext).await;
         };
         match self
@@ -303,6 +307,9 @@ impl AdminSessionService {
                 },
             }),
             crate::session::recovery::Recovery::Invalid => {
+                Err(AdminSessionError::InvalidRefreshToken)
+            }
+            crate::session::recovery::Recovery::Replay if current_only => {
                 Err(AdminSessionError::InvalidRefreshToken)
             }
             crate::session::recovery::Recovery::Replay => self.rotate(plaintext).await,

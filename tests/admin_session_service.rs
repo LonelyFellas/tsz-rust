@@ -378,7 +378,7 @@ async fn security_changes_serialize_with_waiting_login_and_refresh(pool: PgPool)
     }
 
     for action in ["logout_all", "password", "disable"] {
-        for operation in ["login", "refresh", "recover"] {
+        for operation in ["login", "refresh", "recover", "legacy-recover"] {
             let admin = seed_admin(&pool).await;
             let svc = service(pool.clone(), Duration::days(7));
             let old = svc.issue(&admin, 0).await.unwrap();
@@ -431,10 +431,11 @@ async fn security_changes_serialize_with_waiting_login_and_refresh(pool: PgPool)
             let pending = tokio::spawn(async move {
                 let svc = service(pending_pool, Duration::days(7));
                 match operation {
-                    "recover" => svc
+                    "recover" | "legacy-recover" => svc
                         .rotate_with_request(
                             &old_plaintext,
                             Some(Uuid::parse_str("b36adf77-2cb3-4c10-a766-fb2c3a512e19").unwrap()),
+                            operation == "legacy-recover",
                         )
                         .await
                         .is_err(),

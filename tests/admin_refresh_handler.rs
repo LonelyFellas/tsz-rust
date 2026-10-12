@@ -67,9 +67,21 @@ async fn refresh_with_request(
     cookie: Option<&str>,
     request_id: Option<Uuid>,
 ) -> (StatusCode, Option<String>, String) {
+    refresh_with_mode(state, cookie, request_id, false).await
+}
+
+async fn refresh_with_mode(
+    state: &AppState,
+    cookie: Option<&str>,
+    request_id: Option<Uuid>,
+    current_only: bool,
+) -> (StatusCode, Option<String>, String) {
     let mut builder = Request::builder()
         .method("POST")
         .uri("/api/v1/admin/auth/refresh");
+    if current_only {
+        builder = builder.header("x-refresh-current-only", "v1");
+    }
     if let Some(token) = cookie {
         builder = builder.header(
             header::COOKIE,
@@ -219,6 +231,7 @@ async fn recovery_capability_probe_is_non_mutating(pool: PgPool) {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(response.headers()["x-refresh-recovery"], "v1");
+    assert_eq!(response.headers()["x-refresh-current-only"], "v1");
     assert!(!response.headers().contains_key(header::SET_COOKIE));
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM admin_refresh_tokens")
         .fetch_one(&pool)
@@ -382,5 +395,38 @@ async fn rotated_cookie_replay_still_revokes_other_devices(pool: PgPool) {
     assert_eq!(
         refresh(&state, Some(&other.plaintext)).await.0,
         StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+async fn legacy_tab_recovery_rejects_consumed_cookie_without_revoking_current_sessions(
+    pool: PgPool,
+) {
+    let state = AppState::for_test(pool.clone());
+    let id = seed_admin(&pool).await;
+    let old = issue_refresh(&pool, state.admin_refresh_ttl, id).await;
+    let svc = AdminSessionService::new(
+        AdminRefreshTokenRepository::new(pool.clone()),
+        state.admin_refresh_ttl,
+    );
+    let current = svc.rotate(&old.plaintext).await.unwrap();
+    sqlx::query("UPDATE admin_refresh_tokens SET rotated_at=rotated_at-interval '1 hour' WHERE admin_id=$1 AND rotated_at IS NOT NULL")
+        .bind(id).execute(&pool).await.unwrap();
+    let key = Uuid::parse_str("283e8512-4e3c-4c59-a02b-2f383a97e9ae").unwrap();
+    let rejected = refresh_with_mode(&state, Some(&old.plaintext), Some(key), true).await;
+    assert_eq!(rejected.0, StatusCode::UNAUTHORIZED);
+    assert!(rejected.1.is_none());
+    let live: i64 = sqlx::query_scalar("SELECT count(*) FROM admin_refresh_tokens WHERE admin_id=$1 AND revoked_at IS NULL AND rotated_at IS NULL")
+        .bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(live, 1, "旧标记恢复不能连坐撤销当前会话");
+    let restored =
+        refresh_with_mode(&state, Some(&current.refresh.plaintext), Some(key), true).await;
+    assert_eq!(restored.0, StatusCode::OK, "有效 Cookie 应可直接恢复");
+    assert_eq!(
+        refresh_with_mode(&state, Some(&current.refresh.plaintext), Some(key), true)
+            .await
+            .1,
+        restored.1,
+        "恢复响应丢失仍须同键续接"
     );
 }

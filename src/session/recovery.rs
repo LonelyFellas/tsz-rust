@@ -27,6 +27,18 @@ pub fn request_id(headers: &HeaderMap) -> Result<Option<Uuid>, AppError> {
     Ok(Some(id))
 }
 
+/// 旧页面没有原刷新键，不能把不同键的旧 Cookie 当成恶意重放而连坐撤销。
+pub fn current_only(headers: &HeaderMap, request_id: Option<Uuid>) -> Result<bool, AppError> {
+    match headers.get("x-refresh-current-only") {
+        None => Ok(false),
+        Some(value) if value == "v1" && request_id.is_some() => Ok(true),
+        Some(_) => Err(AppError::bad_request(
+            ErrorCode::ValidationFailed,
+            "invalid current-only refresh request",
+        )),
+    }
+}
+
 pub enum Recovery {
     Ready {
         owner: Uuid,
@@ -141,4 +153,21 @@ fn derive(plaintext: &str, request_id: Uuid, realm: &str) -> String {
     mac.update(realm.as_bytes());
     mac.update(request_id.as_bytes());
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_only_requires_the_supported_mode_and_a_valid_request_key() {
+        let mut headers = HeaderMap::new();
+        let key = Uuid::parse_str("283e8512-4e3c-4c59-a02b-2f383a97e9ae").unwrap();
+        assert!(!current_only(&headers, None).unwrap());
+        headers.insert("x-refresh-current-only", "v1".parse().unwrap());
+        assert!(current_only(&headers, None).is_err());
+        assert!(current_only(&headers, Some(key)).unwrap());
+        headers.insert("x-refresh-current-only", "unknown".parse().unwrap());
+        assert!(current_only(&headers, Some(key)).is_err());
+    }
 }

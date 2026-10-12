@@ -48,7 +48,21 @@ async fn post_with_request(
     body: Option<Value>,
     request_id: Option<uuid::Uuid>,
 ) -> (StatusCode, Option<String>, Value) {
+    post_with_mode(pool, uri, refresh, body, request_id, false).await
+}
+
+async fn post_with_mode(
+    pool: PgPool,
+    uri: &str,
+    refresh: Option<&str>,
+    body: Option<Value>,
+    request_id: Option<uuid::Uuid>,
+    current_only: bool,
+) -> (StatusCode, Option<String>, Value) {
     let mut builder = Request::builder().method("POST").uri(uri);
+    if current_only {
+        builder = builder.header("x-refresh-current-only", "v1");
+    }
     if let Some(request_id) = request_id {
         builder = builder.header("x-refresh-request-id", request_id.to_string());
     }
@@ -576,5 +590,59 @@ async fn logout_only_kills_this_session(pool: PgPool) {
         s2,
         StatusCode::OK,
         "设备一登出不该影响设备二的会话——logout 是单会话操作"
+    );
+}
+
+#[sqlx::test]
+async fn legacy_tab_recovery_preserves_other_sessions_and_restores_current_web_cookie(
+    pool: PgPool,
+) {
+    let user = register_user(&pool, "13800138000").await;
+    let svc = tsz_rust::session::service::SessionService::new(
+        tsz_rust::session::repository::RefreshTokenRepository::new(pool.clone()),
+        chrono::Duration::days(30),
+    );
+    let old = svc.issue(user).await.unwrap();
+    let current = svc.rotate(&old.plaintext).await.unwrap();
+    sqlx::query("UPDATE refresh_tokens SET rotated_at=rotated_at-interval '1 hour' WHERE user_id=$1 AND rotated_at IS NOT NULL")
+        .bind(user).execute(&pool).await.unwrap();
+    let key = uuid::Uuid::parse_str("283e8512-4e3c-4c59-a02b-2f383a97e9ae").unwrap();
+    let uri = "/api/v1/auth/refresh";
+    let rejected = post_with_mode(
+        pool.clone(),
+        uri,
+        Some(&old.plaintext),
+        None,
+        Some(key),
+        true,
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::UNAUTHORIZED);
+    assert!(rejected.1.is_none());
+    let live: i64 = sqlx::query_scalar("SELECT count(*) FROM refresh_tokens WHERE user_id=$1 AND revoked_at IS NULL AND rotated_at IS NULL")
+        .bind(user).fetch_one(&pool).await.unwrap();
+    assert_eq!(live, 1, "未知旧轮换不得撤销当前会话");
+    let restored = post_with_mode(
+        pool.clone(),
+        uri,
+        Some(&current.refresh.plaintext),
+        None,
+        Some(key),
+        true,
+    )
+    .await;
+    assert_eq!(restored.0, StatusCode::OK);
+    assert_eq!(
+        post_with_mode(
+            pool,
+            uri,
+            Some(&current.refresh.plaintext),
+            None,
+            Some(key),
+            true
+        )
+        .await
+        .1,
+        restored.1
     );
 }
