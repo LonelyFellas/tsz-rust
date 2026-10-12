@@ -6,7 +6,7 @@ import unittest
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ci_identity_profile import BATCH_COUNTS, BATCH_FIXTURES, BATCH_TEST, PACKAGES, audit_template_uses, instrument_core, instrument_maximum_batch, instrument_postgres, profile_lock, replace_once, summarize, summarize_maximum_batch, template_cases, validate_profile_lock
+from ci_identity_profile import BATCH_COUNTS, BATCH_FIXTURES, BATCH_HTTP_REQUESTS, BATCH_TEST, PACKAGES, audit_router_pilot, audit_template_uses, instrument_core, instrument_maximum_batch, instrument_postgres, profile_lock, replace_once, summarize, summarize_maximum_batch, template_cases, validate_profile_lock
 
 
 class IdentityProfileTests(unittest.TestCase):
@@ -115,6 +115,16 @@ class IdentityProfileTests(unittest.TestCase):
             path.write_text(source.replace("save_v3_forms_after_impact(", "changed_helper("))
             with self.assertRaises(ValueError):
                 instrument_maximum_batch(root)
+
+    def test_router_pilot_requires_one_builder_and_every_original_request(self):
+        report = self.batch_fixture()
+        report["router_pilots"] = [{"test": BATCH_TEST, "router_builds": 1, "requests": dict(BATCH_HTTP_REQUESTS), "unique_request_ids": 243}]
+        self.assertEqual(audit_router_pilot(report)["requests"], BATCH_HTTP_REQUESTS)
+        for mutation in [lambda r: r.update(router_pilots=[]), lambda r: r["router_pilots"].append(r["router_pilots"][0]), lambda r: r["router_pilots"][0].update(router_builds=2), lambda r: r["router_pilots"][0].update(router_builds=True), lambda r: r["router_pilots"][0].update(unique_request_ids=242), lambda r: r["router_pilots"][0]["requests"].update(list=19), lambda r: r["router_pilots"][0]["requests"].update(other=1), lambda r: r["executed"][0].update(status="ignored")]:
+            changed = copy.deepcopy(report)
+            mutation(changed)
+            with self.assertRaises(ValueError):
+                audit_router_pilot(changed)
 
 
 if __name__ == "__main__":

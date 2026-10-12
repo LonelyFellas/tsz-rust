@@ -1,6 +1,7 @@
 //! 智能词库从检测、建稿、分步保存到不可变发布的主链路契约测试。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use axum::{
     body::Body,
@@ -33,6 +34,79 @@ mod fixtures;
 mod spelling_markup;
 
 const ROOT: &str = "/api/v1/admin/lexicon";
+
+#[derive(Clone, Default)]
+struct TestRouterStats {
+    router_builds: usize,
+    requests: BTreeMap<&'static str, usize>,
+    request_ids: HashSet<String>,
+}
+
+struct TestRouterScope {
+    state_address: usize,
+    router: axum::Router,
+    stats: Arc<Mutex<TestRouterStats>>,
+}
+
+tokio::task_local! {
+    static TEST_ROUTER: TestRouterScope;
+}
+
+// Only callers explicitly entering this scope reuse a router. The immutable
+// state borrow spans the future; another state, even using the same pool, falls
+// back to building its own router. No router survives the scope or test.
+async fn with_test_router<F: std::future::Future>(
+    state: &AppState,
+    future: F,
+) -> (F::Output, TestRouterStats) {
+    let stats = Arc::new(Mutex::new(TestRouterStats {
+        router_builds: 1,
+        ..Default::default()
+    }));
+    let scope = TestRouterScope {
+        state_address: std::ptr::from_ref(state) as usize,
+        router: tsz_rust::router(state.clone()),
+        stats: stats.clone(),
+    };
+    let result = TEST_ROUTER.scope(scope, future).await;
+    let stats = stats.lock().unwrap().clone();
+    (result, stats)
+}
+
+fn test_request_kind(method: &Method, uri: &str) -> &'static str {
+    let path = uri.split('?').next().unwrap();
+    match (method.as_str(), path.strip_prefix(ROOT).unwrap_or(path)) {
+        ("POST", "/detections") => "detection",
+        ("POST", "/entries") => "create",
+        ("GET", "/entries") => "list",
+        ("POST", "/entries/publications/batch") => "publish-batch",
+        ("POST", path) if path.ends_with("/steps/forms/impact") => "forms-impact",
+        ("PUT", path) if path.ends_with("/steps/forms") => "forms-save",
+        ("PUT", path) if path.ends_with("/steps/meanings") => "meanings-save",
+        ("GET", path) if path.ends_with("/inbound-references") => "references",
+        _ => "other",
+    }
+}
+
+fn test_router(state: &AppState, kind: &'static str) -> axum::Router {
+    TEST_ROUTER
+        .try_with(|scope| {
+            let same_state = scope.state_address == std::ptr::from_ref(state) as usize;
+            {
+                let mut stats = scope.stats.lock().unwrap();
+                *stats.requests.entry(kind).or_default() += 1;
+                if !same_state {
+                    stats.router_builds += 1;
+                }
+            }
+            if same_state {
+                scope.router.clone()
+            } else {
+                tsz_rust::router(state.clone())
+            }
+        })
+        .unwrap_or_else(|_| tsz_rust::router(state.clone()))
+}
 
 fn record_test_phase(test: &str, phase: &str, started: std::time::Instant) {
     eprintln!(
@@ -166,6 +240,7 @@ async fn call_with_capabilities(
     capabilities: (bool, bool),
 ) -> (StatusCode, Value) {
     let (markup, formatting) = capabilities;
+    let request_kind = test_request_kind(&method, uri);
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
@@ -185,11 +260,22 @@ async fn call_with_capabilities(
     } else {
         Body::empty()
     };
-    let response = tsz_rust::router(state.clone())
+    let response = test_router(state, request_kind)
         .oneshot(builder.body(body).unwrap())
         .await
         .unwrap();
     let status = response.status();
+    let _ = TEST_ROUTER.try_with(|scope| {
+        let request_id = response.headers()["x-request-id"].to_str().unwrap();
+        assert!(
+            scope
+                .stats
+                .lock()
+                .unwrap()
+                .request_ids
+                .insert(request_id.to_owned())
+        );
+    });
     let vary = response.headers().get(header::VARY).cloned();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let body = if bytes.is_empty() {

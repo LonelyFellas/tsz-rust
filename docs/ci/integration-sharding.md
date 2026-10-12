@@ -150,3 +150,25 @@ missing, invalid or extra sample fails the job. Request sums in the concurrent
 content fixture are cumulative, not wall time; never add them to their parent
 spans or attribute a whole-shard delay to one overlapping test without evidence.
 Reports contain only names/counts/times/hashes, not SQL or fixture data.
+
+
+## Maximum-batch Router reuse pilot
+
+Only the original maximum-batch case enters an explicit task-local Router
+scope. It creates the complete application Router once, including Swagger under
+all-features, then clones it for every real HTTP request. The immutable state
+borrow lasts for the scope; a different AppState builds its own Router. Nested
+scopes restore their parent and the Router is dropped before SQLx cleanup.
+No Router or authorization result is cached across tests. Every request still
+creates fresh middleware extensions and a unique request ID.
+
+The original 243 HTTP calls are audited by kind: 1 detection, 1 creation,
+50 forms-impact, 50 forms-save, 100 meanings-save, 1 batch publication,
+20 list reads and 20 reference reads. All original data/assertions and the
+four-concurrent content fixture remain in place. CI requires one construction,
+this exact request inventory, 243 unique request IDs and the existing 190
+request timing samples. Separate integration cases verify different-state
+fallback/nested scope isolation, Swagger presence and live account revocation.
+All original integration results must remain; the two new isolation cases are
+additional coverage, with no new ignored cases. Compare maximum-batch fixture
+walls and whole shard time with successful main run 38247710389.
