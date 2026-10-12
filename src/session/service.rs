@@ -40,8 +40,12 @@ impl SessionService {
         &self,
         plaintext: &str,
         request_id: Option<Uuid>,
+        current_only: bool,
     ) -> Result<RotatedRefresh, SessionError> {
         let Some(request_id) = request_id else {
+            if current_only {
+                return Err(SessionError::InvalidRefreshToken);
+            }
             return self.rotate(plaintext).await;
         };
         match self
@@ -61,6 +65,9 @@ impl SessionService {
                 },
             }),
             super::recovery::Recovery::Invalid => Err(SessionError::InvalidRefreshToken),
+            super::recovery::Recovery::Replay if current_only => {
+                Err(SessionError::InvalidRefreshToken)
+            }
             super::recovery::Recovery::Replay => self.rotate(plaintext).await,
         }
     }

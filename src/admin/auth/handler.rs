@@ -146,6 +146,7 @@ pub struct AdminRefreshResponse {
         ("admin_refresh_token" = String, Cookie,
             description = "登录时经 Set-Cookie 下发的 admin refresh token，浏览器自动携带（HttpOnly；Path=/api/v1/admin/auth，仅认证端点可见）"),
         ("X-Refresh-Request-Id" = Option<Uuid>, Header, description = "随机 UUID v4；同一次刷新重试保留原键，可续接丢失的轮换响应"),
+        ("X-Refresh-Current-Only" = Option<String>, Header, description = "v1：旧标签页恢复仅接受当前有效 Cookie 或同键后继；拒绝未知旧轮换，不撤销其他会话。必须同时提供请求键"),
     ),
     responses(
         (status = 200, description = "轮换成功，返回新 access token；新 refresh token 经 Set-Cookie 下发", body = AdminRefreshResponse,
@@ -162,6 +163,7 @@ pub async fn admin_refresh(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let request_id = crate::session::recovery::request_id(&headers)?;
+    let current_only = crate::session::recovery::current_only(&headers, request_id)?;
     // 1） 拿refresh plaintext
     let refresh_plaintext = jar
         .get(ADMIN_REFRESH_TOKEN_COOKIE)
@@ -196,7 +198,7 @@ pub async fn admin_refresh(
 
     // 7） 用旧refresh token 换新refresh token
     let rotated_refresh = admin_session_svc(&state)
-        .rotate_with_request(&refresh_plaintext, request_id)
+        .rotate_with_request(&refresh_plaintext, request_id, current_only)
         .await
         .map_err(map_admin_session_error)?;
 
@@ -218,10 +220,16 @@ pub async fn admin_refresh(
 }
 
 #[utoipa::path(head, path = "/api/v1/admin/auth/refresh", tag = "admin", responses(
-    (status = 204, description = "支持同键刷新恢复，不消费会话", headers(("X-Refresh-Recovery" = String, description = "v1")))
+    (status = 204, description = "支持同键刷新恢复和安全恢复旧标签页，不消费会话", headers(("X-Refresh-Recovery" = String, description = "v1"), ("X-Refresh-Current-Only" = String, description = "v1")))
 ))]
 pub async fn admin_refresh_recovery() -> impl IntoResponse {
-    (StatusCode::NO_CONTENT, [("x-refresh-recovery", "v1")])
+    (
+        StatusCode::NO_CONTENT,
+        [
+            ("x-refresh-recovery", "v1"),
+            ("x-refresh-current-only", "v1"),
+        ],
+    )
 }
 
 #[derive(Deserialize, ToSchema)]
