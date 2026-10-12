@@ -101,6 +101,9 @@ jobs:
       - name: Test integration shard execution audit
         run: python3 -m unittest ops/test_ci_test_shards.py
 
+      - name: Test identity lifecycle timing safety
+        run: python3 -m unittest ops/test_ci_identity_profile.py
+
       - name: Test CI workflow structure
         run: python3 -m unittest ops/test_ci_workflow.py
 
@@ -317,13 +320,13 @@ jobs:
         run: >-
           python3 ops/ci_metrics.py run
           --name integration-compile-${{ matrix.module }} --
-          python3 ops/ci_test_shards.py build ${{ matrix.module }}
+          python3 ops/ci_identity_profile.py build ${{ matrix.module }}
 
       - name: Run ${{ matrix.module }} integration tests
         run: >-
           python3 ops/ci_metrics.py run
           --name integration-${{ matrix.module }} --
-          python3 ops/ci_test_shards.py run ${{ matrix.module }}
+          python3 ops/ci_identity_profile.py run ${{ matrix.module }}
           --report target/ci-shards/${{ matrix.module }}-report.json
 
       - name: Upload executed test inventory
@@ -331,6 +334,15 @@ jobs:
         with:
           name: integration-inventory-${{ matrix.module }}
           path: target/ci-shards/${{ matrix.module }}-report.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload identity phase measurements
+        if: matrix.module == 'identity'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: identity-phase-measurements
+          path: target/ci-shards/identity-phases.json
           if-no-files-found: error
           retention-days: 7
 

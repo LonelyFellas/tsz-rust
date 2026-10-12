@@ -103,7 +103,7 @@ def run(shard, grouped, directory, report):
     executables = json.loads((directory / f"{shard}-executables.json").read_text())
     if set(executables) != set(targets_for(shard, grouped)):
         raise ClassificationError("stale executable inventory")
-    inventory, executed = {}, []
+    inventory, executed, timings = {}, [], []
     for target, executable in sorted(executables.items()):
         names = list_cases(executable)
         ignored = list_cases(executable, ignored=True)
@@ -116,7 +116,10 @@ def run(shard, grouped, directory, report):
         with subprocess.Popen([executable, *filters_for(shard), "--show-output"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
             for line in process.stdout:
                 print(line, end="", flush=True)
-                match = RESULT.fullmatch(ANSI.sub("", line).strip())
+                cleaned = ANSI.sub("", line).strip()
+                if cleaned.startswith("SQLX_CI_PHASE "):
+                    timings.append(json.loads(cleaned.removeprefix("SQLX_CI_PHASE ")))
+                match = RESULT.fullmatch(cleaned)
                 if match:
                     results.append({"target": target, "name": match[1], "status": match[2]})
             if process.wait() != 0:
@@ -124,7 +127,7 @@ def run(shard, grouped, directory, report):
         validate_results(target, selected, [name for name in ignored if name in selected], results)
         executed.extend(results)
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps({"sha": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "shard": shard, "inventory": inventory, "executed": executed}, indent=2) + "\n")
+    report.write_text(json.dumps({"sha": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "shard": shard, "inventory": inventory, "executed": executed, **({"timings": timings} if timings else {})}, indent=2) + "\n")
 
 
 def verify_manifests(manifests, grouped, sha):

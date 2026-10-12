@@ -61,3 +61,32 @@ and confirm the same 92 targets, case identities and existing ignored set. Also
 report runner-minute cost; one hosted-runner comparison is evidence, not an SLA.
 Results and candidate SHA are recorded in the PR after CI completes, avoiding a
 new measurement run caused only by committing the report.
+
+## Identity lifecycle measurements
+
+Only the identity CI job uses a disposable profiling workspace. The SQLx 0.9.0
+crate archives are verified against the original Cargo.lock SHA-256 checksums,
+then extracted into private copies. Anchors in their test-only lifecycle code
+must match exactly. Instrumentation adds clocks/logging around the original
+operations without changing connection limits, transactions, timeout or cleanup.
+The temporary lockfile changes only the two reviewed path sources, preserves
+all transitive package versions, and is validated by `cargo metadata --locked`.
+Neither the repository manifest/lockfile nor the shared Cargo registry is edited.
+
+Every enabled identity case must have timing. SQLx cases record `db_setup`
+(master connection/registration/old-name cleanup plus CREATE DATABASE), nested
+`db_create`, automatic `migration`, `pool_connect`, pure test `body`, `pool_close`,
+and database `cleanup`. `total` and `test_callback` are parent spans. Explicit
+migration operations performed by a test itself remain part of its body; absent
+automatic migrations are not fabricated. Non-database test bodies receive only
+a timer statement in the disposable copy. Removing those statements reproduces
+the original source bytes; assertions and fixtures are preserved.
+
+The existing executed-case audit is unchanged. Missing/duplicate/invalid timing
+fails identity profiling. Reports contain case names and durations only, never
+SQL, database URLs, credentials or fixture data. Full measurements accompany the
+identity execution inventory; `identity-phase-measurements` also contains totals,
+slow-case details and source hashes. Phase totals are cumulative across cases,
+including concurrent cases, and must not be interpreted as job wall time.
+`db_create` is already inside `db_setup`; `body` and connection lifecycle are
+already inside `test_callback`, so parent/child spans must not be added together.
