@@ -36,6 +36,34 @@ pub struct SessionService {
 }
 
 impl SessionService {
+    pub async fn rotate_with_request(
+        &self,
+        plaintext: &str,
+        request_id: Option<Uuid>,
+    ) -> Result<RotatedRefresh, SessionError> {
+        let Some(request_id) = request_id else {
+            return self.rotate(plaintext).await;
+        };
+        match self
+            .repository
+            .rotate_recoverable(plaintext, request_id, self.refresh_ttl)
+            .await?
+        {
+            super::recovery::Recovery::Ready {
+                owner,
+                plaintext,
+                expires_at,
+            } => Ok(RotatedRefresh {
+                user_id: owner,
+                refresh: IssuedRefresh {
+                    plaintext,
+                    expires_at,
+                },
+            }),
+            super::recovery::Recovery::Invalid => Err(SessionError::InvalidRefreshToken),
+            super::recovery::Recovery::Replay => self.rotate(plaintext).await,
+        }
+    }
     pub fn new(repository: RefreshTokenRepository, refresh_ttl: Duration) -> Self {
         Self {
             repository,

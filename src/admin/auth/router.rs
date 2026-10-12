@@ -6,7 +6,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", post(handler::admin_login))
         .route("/change-password", post(handler::change_password))
-        .route("/refresh", post(handler::admin_refresh))
+        .route(
+            "/refresh",
+            post(handler::admin_refresh).head(handler::admin_refresh_recovery),
+        )
         .route("/login-code", post(handler::admin_login_code))
         .route("/logout", post(handler::admin_logout))
         .route("/logout-all", post(handler::admin_logout_all))

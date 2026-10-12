@@ -94,7 +94,10 @@ pub fn router(state: AppState) -> Router {
             auth::AUTH_MOUNT,
             Router::new()
                 .route("/login", post(auth::handler::login))
-                .route("/refresh", post(auth::handler::refresh_token))
+                .route(
+                    "/refresh",
+                    post(auth::handler::refresh_token).head(auth::handler::refresh_recovery),
+                )
                 .route("/logout", post(auth::handler::logout))
                 .route(
                     "/account/deletion-code",

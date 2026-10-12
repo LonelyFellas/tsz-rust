@@ -55,6 +55,21 @@ pub struct AdminRefreshTokenRepository {
 }
 
 impl AdminRefreshTokenRepository {
+    pub async fn rotate_recoverable(
+        &self,
+        plaintext: &str,
+        request_id: Uuid,
+        ttl: Duration,
+    ) -> Result<crate::session::recovery::Recovery, AdminRefreshTokenError> {
+        Ok(crate::session::recovery::rotate(
+            &self.pool,
+            crate::session::recovery::Realm::Admin,
+            plaintext,
+            request_id,
+            ttl,
+        )
+        .await?)
+    }
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -263,6 +278,36 @@ pub struct AdminSessionService {
 }
 
 impl AdminSessionService {
+    pub async fn rotate_with_request(
+        &self,
+        plaintext: &str,
+        request_id: Option<Uuid>,
+    ) -> Result<RotatedAdminRefresh, AdminSessionError> {
+        let Some(request_id) = request_id else {
+            return self.rotate(plaintext).await;
+        };
+        match self
+            .repository
+            .rotate_recoverable(plaintext, request_id, self.refresh_ttl)
+            .await?
+        {
+            crate::session::recovery::Recovery::Ready {
+                owner,
+                plaintext,
+                expires_at,
+            } => Ok(RotatedAdminRefresh {
+                admin_id: owner,
+                refresh: IssuedAdminRefresh {
+                    plaintext,
+                    expires_at,
+                },
+            }),
+            crate::session::recovery::Recovery::Invalid => {
+                Err(AdminSessionError::InvalidRefreshToken)
+            }
+            crate::session::recovery::Recovery::Replay => self.rotate(plaintext).await,
+        }
+    }
     pub fn new(repository: AdminRefreshTokenRepository, refresh_ttl: Duration) -> Self {
         Self {
             repository,

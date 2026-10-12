@@ -184,6 +184,7 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ("POST", "/auth/login", RoutePolicy::SessionFlow),
     ("POST", "/auth/login-code", RoutePolicy::SessionFlow),
     ("POST", "/auth/refresh", RoutePolicy::SessionFlow),
+    ("HEAD", "/auth/refresh", RoutePolicy::SessionFlow),
     ("POST", "/auth/logout", RoutePolicy::SessionFlow),
     ("POST", "/auth/logout-all", RoutePolicy::SessionFlow),
     ("POST", "/auth/change-password", RoutePolicy::SessionFlow),
@@ -586,11 +587,19 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
 ];
 
 pub fn route_policy(method: &str, path: &str) -> Option<RoutePolicy> {
-    let method = if method == "HEAD" { "GET" } else { method };
     let path = path.strip_prefix("/api/v1/admin")?;
     ROUTE_POLICIES
         .iter()
         .find(|(verb, route, _)| *verb == method && *route == path)
+        .or_else(|| {
+            (method == "HEAD")
+                .then(|| {
+                    ROUTE_POLICIES
+                        .iter()
+                        .find(|(verb, route, _)| *verb == "GET" && *route == path)
+                })
+                .flatten()
+        })
         .map(|(_, _, policy)| *policy)
 }
 
@@ -739,7 +748,8 @@ mod tests {
         for (path, item) in spec["paths"].as_object().unwrap() {
             if path.starts_with("/api/v1/admin/") {
                 for method in item.as_object().unwrap().keys() {
-                    if ["get", "post", "put", "patch", "delete"].contains(&method.as_str()) {
+                    if ["get", "head", "post", "put", "patch", "delete"].contains(&method.as_str())
+                    {
                         assert!(
                             route_policy(&method.to_uppercase(), path).is_some(),
                             "missing policy: {method} {path}"
