@@ -98,6 +98,9 @@ jobs:
       - name: Test CI module partitioning
         run: python3 -m unittest ops/test_ci_test_modules.py
 
+      - name: Test integration shard execution audit
+        run: python3 -m unittest ops/test_ci_test_shards.py
+
       - name: Test CI workflow structure
         run: python3 -m unittest ops/test_ci_workflow.py
 
@@ -227,7 +230,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [lexicon, admin, identity, platform]
+        module: [lexicon-pagination, lexicon-handler, lexicon-other, admin, identity, platform]
 
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/tsz_rust
@@ -281,7 +284,7 @@ jobs:
         id: ci-fingerprint
         run: >-
           python3 ops/ci_fingerprint.py
-          --profile test-${{ matrix.module }} --features all --sqlx-offline true
+          --profile test-${{ startsWith(matrix.module, 'lexicon-') && 'lexicon' || matrix.module }} --features all --sqlx-offline true
           --github-output "$GITHUB_OUTPUT"
 
       - name: Restore Cargo cache
@@ -314,18 +317,55 @@ jobs:
         run: >-
           python3 ops/ci_metrics.py run
           --name integration-compile-${{ matrix.module }} --
-          python3 ops/ci_test_modules.py build ${{ matrix.module }}
+          python3 ops/ci_test_shards.py build ${{ matrix.module }}
 
       - name: Run ${{ matrix.module }} integration tests
         run: >-
           python3 ops/ci_metrics.py run
           --name integration-${{ matrix.module }} --
-          python3 ops/ci_test_modules.py run ${{ matrix.module }}
+          python3 ops/ci_test_shards.py run ${{ matrix.module }}
+          --report target/ci-shards/${{ matrix.module }}-report.json
+
+      - name: Upload executed test inventory
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integration-inventory-${{ matrix.module }}
+          path: target/ci-shards/${{ matrix.module }}-report.json
+          if-no-files-found: error
+          retention-days: 7
+
+  lexicon-summary:
+    # Preserve the existing required branch-protection check; every shard and
+    # the executed-case audit must pass before this check can become green.
+    name: Integration (lexicon)
+    if: ${{ always() }}
+    needs: [integration]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require all integration shards to pass
+        env:
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+        run: test "$INTEGRATION_RESULT" = "success"
+
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download executed test inventories
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: integration-inventory-*
+          path: integration-inventories
+
+      - name: Require every discovered integration case exactly once
+        run: python3 ops/ci_test_shards.py verify integration-inventories
 
   ci-summary:
     name: Format, lint and test
     if: ${{ always() }}
-    needs: [quality, unit-doc, integration]
+    needs: [quality, unit-doc, integration, lexicon-summary]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
 
@@ -335,10 +375,12 @@ jobs:
           QUALITY_RESULT: ${{ needs.quality.result }}
           UNIT_DOC_RESULT: ${{ needs['unit-doc'].result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
+          INVENTORY_RESULT: ${{ needs['lexicon-summary'].result }}
         run: |
           test "$QUALITY_RESULT" = "success"
           test "$UNIT_DOC_RESULT" = "success"
           test "$INTEGRATION_RESULT" = "success"
+          test "$INVENTORY_RESULT" = "success"
 
   release-artifact:
     name: Build release artifact
