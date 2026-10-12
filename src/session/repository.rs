@@ -17,6 +17,21 @@ pub struct RefreshTokenRepository {
 }
 
 impl RefreshTokenRepository {
+    pub async fn rotate_recoverable(
+        &self,
+        plaintext: &str,
+        request_id: Uuid,
+        ttl: chrono::Duration,
+    ) -> Result<super::recovery::Recovery, RefreshTokenError> {
+        Ok(super::recovery::rotate(
+            &self.pool,
+            super::recovery::Realm::Web,
+            plaintext,
+            request_id,
+            ttl,
+        )
+        .await?)
+    }
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }

@@ -38,7 +38,20 @@ async fn post(
     refresh: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Option<String>, Value) {
+    post_with_request(pool, uri, refresh, body, None).await
+}
+
+async fn post_with_request(
+    pool: PgPool,
+    uri: &str,
+    refresh: Option<&str>,
+    body: Option<Value>,
+    request_id: Option<uuid::Uuid>,
+) -> (StatusCode, Option<String>, Value) {
     let mut builder = Request::builder().method("POST").uri(uri);
+    if let Some(request_id) = request_id {
+        builder = builder.header("x-refresh-request-id", request_id.to_string());
+    }
     if let Some(token) = refresh {
         builder = builder.header(header::COOKIE, format!("refresh_token={token}"));
     }
@@ -66,6 +79,46 @@ async fn post(
         set_cookie,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
+}
+
+#[sqlx::test]
+async fn lost_response_recovers_same_web_cookie_without_extending_expiry(pool: PgPool) {
+    let user = register_user(&pool, "13800138000").await;
+    let old = tsz_rust::session::service::SessionService::new(
+        tsz_rust::session::repository::RefreshTokenRepository::new(pool.clone()),
+        chrono::Duration::days(30),
+    )
+    .issue(user)
+    .await
+    .unwrap();
+    let key = uuid::Uuid::parse_str("b36adf77-2cb3-4c10-a766-fb2c3a512e19").unwrap();
+    let uri = "/api/v1/auth/refresh";
+    let first = post_with_request(pool.clone(), uri, Some(&old.plaintext), None, Some(key)).await;
+    assert_eq!(first.0, StatusCode::OK);
+    sqlx::query("UPDATE refresh_tokens SET rotated_at=rotated_at-interval '1 hour' WHERE user_id=$1 AND rotated_at IS NOT NULL")
+        .bind(user).execute(&pool).await.unwrap();
+    let (left, right) = tokio::join!(
+        post_with_request(pool.clone(), uri, Some(&old.plaintext), None, Some(key)),
+        post_with_request(pool.clone(), uri, Some(&old.plaintext), None, Some(key))
+    );
+    for recovered in [left, right] {
+        assert_eq!(recovered.0, StatusCode::OK);
+        assert_eq!(first.1, recovered.1);
+        assert_eq!(
+            first.2["refresh_token_expires_at"],
+            recovered.2["refresh_token_expires_at"]
+        );
+    }
+    let current = cookie_value(first.1.as_deref().unwrap());
+    let body_recovery = post_with_request(pool.clone(), uri, Some(current), None, Some(key)).await;
+    assert_eq!(body_recovery.0, StatusCode::OK);
+    assert_eq!(first.1, body_recovery.1);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM refresh_tokens WHERE user_id=$1")
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
 }
 
 /// 从 `Set-Cookie` 头里取出 refresh token 明文（`refresh_token=<值>; ...`）。

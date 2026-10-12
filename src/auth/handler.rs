@@ -422,17 +422,21 @@ pub struct RefreshResponse {
     params(
         ("refresh_token" = String, Cookie,
             description = "登录时经 Set-Cookie 下发的 refresh token，浏览器自动携带（HttpOnly，手动调用需自带 Cookie 头）"),
+        ("X-Refresh-Request-Id" = Option<Uuid>, Header, description = "随机 UUID v4；同一次刷新重试保留原键，可续接丢失的轮换响应"),
     ),
     responses(
         (status = 200, description = "轮换成功，返回新 access token；新 refresh token 经 Set-Cookie 下发", body = RefreshResponse,
             headers(("Set-Cookie" = String, description = "轮换出的新 refresh_token cookie"))),
         (status = 401, description = "refresh token 缺失、无效、已过期或用户被禁用"),
+        (status = 400, description = "刷新请求键无效"),
     )
 )]
 pub async fn refresh_token(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
+    let request_id = crate::session::recovery::request_id(&headers)?;
     // 1） 拿refresh plaintext
     let refresh_plaintext = jar
         .get(REFRESH_TOKEN_COOKIE)
@@ -465,7 +469,7 @@ pub async fn refresh_token(
 
     // 6） 用旧refresh token 换新refresh token
     let rotated_refresh = session_service(&state)
-        .rotate(&refresh_plaintext)
+        .rotate_with_request(&refresh_plaintext, request_id)
         .await
         .map_err(map_session_error)?;
 
@@ -475,11 +479,19 @@ pub async fn refresh_token(
     // 8) 返回响应
     Ok((
         jar,
+        [("x-refresh-recovery", "v1")],
         Json(RefreshResponse {
             token,
             refresh_token_expires_at: rotated_refresh.refresh.expires_at.timestamp(),
         }),
     ))
+}
+
+#[utoipa::path(head, path = "/api/v1/auth/refresh", tag = "auth", responses(
+    (status = 204, description = "支持同键刷新恢复，不消费会话", headers(("X-Refresh-Recovery" = String, description = "v1")))
+))]
+pub async fn refresh_recovery() -> impl IntoResponse {
+    (StatusCode::NO_CONTENT, [("x-refresh-recovery", "v1")])
 }
 
 /// POST /api/v1/auth/logout

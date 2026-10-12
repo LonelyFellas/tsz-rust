@@ -378,7 +378,7 @@ async fn security_changes_serialize_with_waiting_login_and_refresh(pool: PgPool)
     }
 
     for action in ["logout_all", "password", "disable"] {
-        for refresh in [false, true] {
+        for operation in ["login", "refresh", "recover"] {
             let admin = seed_admin(&pool).await;
             let svc = service(pool.clone(), Duration::days(7));
             let old = svc.issue(&admin, 0).await.unwrap();
@@ -430,10 +430,16 @@ async fn security_changes_serialize_with_waiting_login_and_refresh(pool: PgPool)
             let old_plaintext = old.plaintext.clone();
             let pending = tokio::spawn(async move {
                 let svc = service(pending_pool, Duration::days(7));
-                if refresh {
-                    svc.rotate(&old_plaintext).await.is_err()
-                } else {
-                    svc.issue(&admin, 0).await.is_err()
+                match operation {
+                    "recover" => svc
+                        .rotate_with_request(
+                            &old_plaintext,
+                            Some(Uuid::parse_str("b36adf77-2cb3-4c10-a766-fb2c3a512e19").unwrap()),
+                        )
+                        .await
+                        .is_err(),
+                    "refresh" => svc.rotate(&old_plaintext).await.is_err(),
+                    _ => svc.issue(&admin, 0).await.is_err(),
                 }
             });
             wait_for_lock_count(&pool, 2).await;
@@ -441,7 +447,7 @@ async fn security_changes_serialize_with_waiting_login_and_refresh(pool: PgPool)
             change.await.unwrap();
             assert!(
                 pending.await.unwrap(),
-                "{action}, refresh={refresh}: 迟到的旧凭证必须被拒绝"
+                "{action}, operation={operation}: 迟到的旧凭证必须被拒绝"
             );
             assert!(svc.rotate(&old.plaintext).await.is_err());
         }

@@ -141,6 +141,7 @@ use utoipa::{
         crate::auth::handler::login,
         crate::auth::handler::login_otp,
         crate::auth::handler::refresh_token,
+        crate::auth::handler::refresh_recovery,
         crate::auth::handler::logout,
         crate::auth::handler::me,
         crate::auth::handler::register,
@@ -158,6 +159,7 @@ use utoipa::{
         // admin 域
         crate::admin::auth::handler::admin_login,
         crate::admin::auth::handler::admin_refresh,
+        crate::admin::auth::handler::admin_refresh_recovery,
         crate::admin::auth::handler::admin_login_code,
         crate::admin::auth::handler::admin_logout,
         crate::admin::auth::handler::admin_logout_all,

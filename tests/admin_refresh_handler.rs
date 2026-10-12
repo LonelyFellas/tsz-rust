@@ -59,6 +59,14 @@ async fn issue_refresh(pool: &PgPool, ttl: Duration, admin_id: Uuid) -> IssuedAd
 /// POST /api/v1/admin/auth/refresh；`cookie` 为 None 时不带 Cookie 头。
 /// 返回 (状态码, Set-Cookie, body 文本)。
 async fn refresh(state: &AppState, cookie: Option<&str>) -> (StatusCode, Option<String>, String) {
+    refresh_with_request(state, cookie, None).await
+}
+
+async fn refresh_with_request(
+    state: &AppState,
+    cookie: Option<&str>,
+    request_id: Option<Uuid>,
+) -> (StatusCode, Option<String>, String) {
     let mut builder = Request::builder()
         .method("POST")
         .uri("/api/v1/admin/auth/refresh");
@@ -67,6 +75,9 @@ async fn refresh(state: &AppState, cookie: Option<&str>) -> (StatusCode, Option<
             header::COOKIE,
             format!("{ADMIN_REFRESH_TOKEN_COOKIE}={token}"),
         );
+    }
+    if let Some(request_id) = request_id {
+        builder = builder.header("x-refresh-request-id", request_id.to_string());
     }
     let resp = tsz_rust::router(state.clone())
         .oneshot(builder.body(Body::empty()).unwrap())
@@ -83,6 +94,137 @@ async fn refresh(state: &AppState, cookie: Option<&str>) -> (StatusCode, Option<
         set_cookie,
         String::from_utf8(bytes.to_vec()).unwrap(),
     )
+}
+
+#[sqlx::test]
+async fn lost_refresh_response_can_be_recovered_without_another_rotation(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let id = seed_admin(&pool).await;
+    let issued = issue_refresh(&pool, state.admin_refresh_ttl, id).await;
+    let request_id = Uuid::parse_str("283e8512-4e3c-4c59-a02b-2f383a97e9ae").unwrap();
+    let first = refresh_with_request(&state, Some(&issued.plaintext), Some(request_id)).await;
+    assert_eq!(first.0, StatusCode::OK);
+    sqlx::query("UPDATE admin_refresh_tokens SET rotated_at = rotated_at - interval '1 hour' WHERE admin_id = $1 AND rotated_at IS NOT NULL")
+        .bind(id).execute(&pool).await.unwrap();
+    let recovered = refresh_with_request(&state, Some(&issued.plaintext), Some(request_id)).await;
+    assert_eq!(
+        recovered.0,
+        StatusCode::OK,
+        "联网后同一次刷新应恢复：{}",
+        recovered.2
+    );
+    assert_eq!(first.1, recovered.1, "重试应下发同一枚 cookie");
+    let new_token = recovered
+        .1
+        .as_ref()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("admin_refresh_token=")
+        .unwrap();
+    let body_recovery = refresh_with_request(&state, Some(new_token), Some(request_id)).await;
+    assert_eq!(body_recovery.0, StatusCode::OK);
+    assert_eq!(
+        recovered.1, body_recovery.1,
+        "Cookie 已送达而 JSON 丢失时不能再次轮换"
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM admin_refresh_tokens WHERE admin_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[sqlx::test]
+async fn recovery_cannot_resurrect_revoked_expired_or_consumed_successors(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let key = Uuid::parse_str("b36adf77-2cb3-4c10-a766-fb2c3a512e19").unwrap();
+    for failure in ["revoked", "expired", "consumed"] {
+        let id = seed_admin(&pool).await;
+        let old = issue_refresh(&pool, state.admin_refresh_ttl, id).await;
+        let first = refresh_with_request(&state, Some(&old.plaintext), Some(key)).await;
+        assert_eq!(first.0, StatusCode::OK);
+        let statement = match failure {
+            "revoked" => {
+                "UPDATE admin_refresh_tokens SET revoked_at=clock_timestamp() WHERE admin_id=$1 AND rotated_at IS NULL"
+            }
+            "expired" => {
+                "UPDATE admin_refresh_tokens SET expires_at=clock_timestamp()-interval '1 second' WHERE admin_id=$1 AND rotated_at IS NULL"
+            }
+            _ => {
+                "UPDATE admin_refresh_tokens SET rotated_at=clock_timestamp() WHERE admin_id=$1 AND rotated_at IS NULL"
+            }
+        };
+        sqlx::query(statement)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let recovered = refresh_with_request(&state, Some(&old.plaintext), Some(key)).await;
+        assert_eq!(
+            recovered.0,
+            StatusCode::UNAUTHORIZED,
+            "{failure} 后继不能复活"
+        );
+        assert!(recovered.1.is_none());
+    }
+}
+
+#[sqlx::test]
+async fn different_request_key_keeps_replay_detection(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let id = seed_admin(&pool).await;
+    let old = issue_refresh(&pool, state.admin_refresh_ttl, id).await;
+    let key = Uuid::parse_str("b36adf77-2cb3-4c10-a766-fb2c3a512e19").unwrap();
+    let other = Uuid::parse_str("283e8512-4e3c-4c59-a02b-2f383a97e9ae").unwrap();
+    assert_eq!(
+        refresh_with_request(&state, Some(&old.plaintext), Some(key))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    sqlx::query("UPDATE admin_refresh_tokens SET rotated_at=rotated_at-interval '1 hour' WHERE admin_id=$1 AND rotated_at IS NOT NULL")
+        .bind(id).execute(&pool).await.unwrap();
+    assert_eq!(
+        refresh_with_request(&state, Some(&old.plaintext), Some(other))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM admin_refresh_tokens WHERE admin_id=$1 AND revoked_at IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live, 0);
+}
+
+#[sqlx::test]
+async fn recovery_capability_probe_is_non_mutating(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let response = tsz_rust::router(state)
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/api/v1/admin/auth/refresh")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.headers()["x-refresh-recovery"], "v1");
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM admin_refresh_tokens")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 // ============================== ④ 成功路径 ==============================

@@ -1,4 +1,9 @@
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 use axum_extra::extract::{
     CookieJar,
     cookie::{Cookie, SameSite},
@@ -140,6 +145,7 @@ pub struct AdminRefreshResponse {
     params(
         ("admin_refresh_token" = String, Cookie,
             description = "登录时经 Set-Cookie 下发的 admin refresh token，浏览器自动携带（HttpOnly；Path=/api/v1/admin/auth，仅认证端点可见）"),
+        ("X-Refresh-Request-Id" = Option<Uuid>, Header, description = "随机 UUID v4；同一次刷新重试保留原键，可续接丢失的轮换响应"),
     ),
     responses(
         (status = 200, description = "轮换成功，返回新 access token；新 refresh token 经 Set-Cookie 下发", body = AdminRefreshResponse,
@@ -147,12 +153,15 @@ pub struct AdminRefreshResponse {
         (status = 401, description = "refresh token 缺失、无效、已撤销、已过期或重放"),
         (status = 403, description = "账号被禁用"),
         (status = 423, description = "账号被临时锁定"),
+        (status = 400, description = "刷新请求键无效"),
     )
 )]
 pub async fn admin_refresh(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
+    let request_id = crate::session::recovery::request_id(&headers)?;
     // 1） 拿refresh plaintext
     let refresh_plaintext = jar
         .get(ADMIN_REFRESH_TOKEN_COOKIE)
@@ -187,7 +196,7 @@ pub async fn admin_refresh(
 
     // 7） 用旧refresh token 换新refresh token
     let rotated_refresh = admin_session_svc(&state)
-        .rotate(&refresh_plaintext)
+        .rotate_with_request(&refresh_plaintext, request_id)
         .await
         .map_err(map_admin_session_error)?;
 
@@ -200,11 +209,19 @@ pub async fn admin_refresh(
     // 9) 返回响应
     Ok((
         jar,
+        [("x-refresh-recovery", "v1")],
         Json(AdminRefreshResponse {
             token,
             refresh_token_expires_at: rotated_refresh.refresh.expires_at.timestamp(),
         }),
     ))
+}
+
+#[utoipa::path(head, path = "/api/v1/admin/auth/refresh", tag = "admin", responses(
+    (status = 204, description = "支持同键刷新恢复，不消费会话", headers(("X-Refresh-Recovery" = String, description = "v1")))
+))]
+pub async fn admin_refresh_recovery() -> impl IntoResponse {
+    (StatusCode::NO_CONTENT, [("x-refresh-recovery", "v1")])
 }
 
 #[derive(Deserialize, ToSchema)]
