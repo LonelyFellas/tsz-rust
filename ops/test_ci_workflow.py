@@ -23,7 +23,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("fail-fast: false", integration)
         self.assertIn("module: [lexicon-pagination, lexicon-handler, lexicon-other, admin, identity, platform]", integration)
         self.assertIn(
-            "python3 ops/ci_test_shards.py run ${{ matrix.module }}", integration
+            "python3 ops/ci_identity_profile.py run ${{ matrix.module }}", integration
         )
 
     def test_ci08_only_test_jobs_start_database_services(self) -> None:
@@ -63,6 +63,8 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("pattern: integration-inventory-*", inventory)
         self.assertIn("needs['lexicon-summary'].result", summary)
         self.assertIn("if-no-files-found: error", self._job("integration"))
+        self.assertIn("if: matrix.module == 'identity'", self._job("integration"))
+        self.assertIn("name: identity-phase-measurements", self._job("integration"))
 
     def test_ci10_release_artifact_is_exact_main_and_auditable(self) -> None:
         release = self._job("release-artifact")
@@ -110,8 +112,8 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("--name integration-${{ matrix.module }}", integration)
         self.assertIn("--name integration-compile-${{ matrix.module }}", integration)
         self.assertLess(
-            integration.index("ci_test_shards.py build"),
-            integration.index("ci_test_shards.py run"),
+            integration.index("ci_identity_profile.py build"),
+            integration.index("ci_identity_profile.py run"),
         )
         self.assertIn("--name release-build", release)
         for job in (quality, unit_doc, integration, release):
@@ -144,6 +146,7 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("python3 -m unittest ops/test_deployment_manifest.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_test_modules.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_test_shards.py", quality)
+        self.assertIn("python3 -m unittest ops/test_ci_identity_profile.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_workflow.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_fingerprint.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_metrics.py", quality)
