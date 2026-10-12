@@ -86,7 +86,7 @@ pub async fn begin<'a>(
 ) -> Result<Tx<'a>, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     let mut accounts: Vec<Uuid> =
-        sqlx::query_scalar("SELECT DISTINCT owner_user_id FROM wordlists WHERE id=ANY($1)")
+        sqlx::query_scalar("SELECT DISTINCT owner_user_id FROM wordlists WHERE id=ANY($1) AND owner_user_id IS NOT NULL")
             .bind(lists)
             .fetch_all(&mut *tx)
             .await
@@ -210,14 +210,17 @@ async fn source_access(
     ids: &[Uuid],
     fixed_entries: Option<&[Uuid]>,
 ) -> Result<SourceAccess, AppError> {
-    let rows:Vec<(Uuid,Uuid,String,i64,i64)>=sqlx::query_as("SELECT id,owner_user_id,state,revision,learning_public_generation FROM wordlists WHERE id=ANY($1) ORDER BY id FOR SHARE").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let rows:Vec<(Uuid,Option<Uuid>,String,i64,i64)>=sqlx::query_as("SELECT id,owner_user_id,state,revision,learning_public_generation FROM wordlists WHERE id=ANY($1) AND deleted_at IS NULL ORDER BY id FOR SHARE").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     let mut lists = HashMap::new();
     for (id, owner, state, revision, generation) in rows {
         let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users u WHERE id=$1 AND status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp()))").bind(owner).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
-        if active && (owner == auth.subject || state == "published") {
+        if (owner.is_none() || active) && (owner == Some(auth.subject) || state == "published") {
             lists.insert(
                 id,
-                (revision, (owner != auth.subject).then_some(generation)),
+                (
+                    revision,
+                    (owner != Some(auth.subject)).then_some(generation),
+                ),
             );
         }
     }
@@ -236,7 +239,7 @@ async fn source_access(
     let entries = published::read_current_in(tx, &entry_ids).await?;
     // Entry locks may have waited across an owner's deletion deadline. Project only
     // after rechecking all owners with the database clock; these account locks are held.
-    let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w LEFT JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND w.deleted_at IS NULL AND (w.owner_admin_id IS NOT NULL OR (u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())))").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     lists.retain(|id, _| visible.contains(id));
     Ok(SourceAccess {
         lists,

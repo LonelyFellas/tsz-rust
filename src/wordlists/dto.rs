@@ -21,7 +21,8 @@ pub enum WordlistState {
 #[serde(deny_unknown_fields)]
 pub struct Wordlist {
     pub id: Uuid,
-    pub owner_user_id: Uuid,
+    #[schema(required = true)]
+    pub owner_user_id: Option<Uuid>,
     pub owner_name: String,
     pub name: String,
     pub state: WordlistState,
@@ -243,7 +244,7 @@ pub struct MyWordlistItems {
     pub revision: i64,
     pub pagination: PaginationMeta,
 }
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
 #[serde(deny_unknown_fields)]
 pub struct WordlistCandidate {
     pub entry_id: Uuid,
@@ -314,4 +315,98 @@ pub struct AdminWordlistQuery {
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub state: Option<WordlistState>,
+}
+
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+#[serde(deny_unknown_fields)]
+pub struct AdminWordlist {
+    #[sqlx(flatten)]
+    pub wordlist: Wordlist,
+    pub review_state: String,
+    pub recommended: bool,
+    /// Total coins, represented as a decimal string without precision loss.
+    pub tip_amount: String,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminWordlistPage {
+    pub items: Vec<AdminWordlist>,
+    pub pagination: PaginationMeta,
+}
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in=Query)]
+pub struct WordlistManagementQuery {
+    pub q: Option<String>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub public: Option<bool>,
+    pub recommended: Option<bool>,
+    pub created_from: Option<DateTime<Utc>>,
+    /// Exclusive upper bound.
+    pub created_before: Option<DateTime<Utc>>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminWordlistItemInput {
+    pub entry_id: Uuid,
+    #[schema(max_length = 1000)]
+    pub admin_note: String,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateAdminWordlist {
+    pub idempotency_key: Uuid,
+    #[schema(min_length = 1, max_length = 100)]
+    pub name: String,
+    #[schema(min_items = 1, max_items = 10000)]
+    pub items: Vec<AdminWordlistItemInput>,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAdminWordlist {
+    pub expected_revision: i64,
+    pub name: String,
+    pub items: Vec<AdminWordlistItemInput>,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminWordlistEdit {
+    pub detail: AdminWordlist,
+    pub items: Vec<AdminWordlistEditItem>,
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistVisibility {
+    pub expected_revision: i64,
+    pub public: bool,
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistRecommendation {
+    pub expected_revision: i64,
+    pub recommended: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminWordlistEditItem {
+    pub entry_id: Uuid,
+    pub admin_note: String,
+    #[schema(required = true)]
+    pub candidate: Option<WordlistCandidate>,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in=Query)]
+pub struct WordlistSuggestionQuery {
+    #[param(max_length = 200)]
+    pub q: String,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistSuggestions {
+    #[schema(max_items = 3)]
+    pub items: Vec<WordlistCandidate>,
 }

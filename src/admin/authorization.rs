@@ -70,6 +70,71 @@ pub enum RoutePolicy {
 }
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
+    (
+        "GET",
+        "/lexicon/entries/related-suggestions",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/lexicon/entries/{id}/relation-senses",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/suggestions",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/management",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/catalog",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/{id}",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/{id}/edit",
+        RoutePolicy::All(&["wordlists.edit"]),
+    ),
+    (
+        "GET",
+        "/wordlists/{id}/items",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "POST",
+        "/wordlists",
+        RoutePolicy::All(&["wordlists.create"]),
+    ),
+    (
+        "PUT",
+        "/wordlists/{id}",
+        RoutePolicy::All(&["wordlists.edit"]),
+    ),
+    (
+        "POST",
+        "/wordlists/{id}/visibility",
+        RoutePolicy::All(&["wordlists.visibility"]),
+    ),
+    (
+        "POST",
+        "/wordlists/{id}/recommendation",
+        RoutePolicy::All(&["wordlists.recommend"]),
+    ),
+    (
+        "POST",
+        "/wordlists/{id}/delete",
+        RoutePolicy::All(&["wordlists.delete"]),
+    ),
     ("GET", "/wordlists", RoutePolicy::All(&["wordlists.access"])),
     (
         "GET",

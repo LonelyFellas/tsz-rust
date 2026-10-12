@@ -27,6 +27,23 @@ pub async fn submit(
     id: Uuid,
     input: SubmitWordlist,
 ) -> Result<WordlistReview, AppError> {
+    submit_mode(pool, auth, id, input, false).await
+}
+pub async fn publish(
+    pool: &PgPool,
+    auth: &AuthUser,
+    id: Uuid,
+    input: SubmitWordlist,
+) -> Result<WordlistReview, AppError> {
+    submit_mode(pool, auth, id, input, true).await
+}
+async fn submit_mode(
+    pool: &PgPool,
+    auth: &AuthUser,
+    id: Uuid,
+    input: SubmitWordlist,
+    automatic: bool,
+) -> Result<WordlistReview, AppError> {
     let hash = service::hash(&input)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     service::lock_user(&mut tx, auth).await?;
@@ -52,9 +69,21 @@ pub async fn submit(
         }
         let ids = service::ids(&mut tx, id).await?;
         service::lock_entries(&mut tx, &ids, true).await?;
+        sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         let request = Uuid::now_v7();
-        sqlx::query("UPDATE wordlists SET state='pending',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("UPDATE wordlists SET state='pending',review_state='pending',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("INSERT INTO wordlist_review_requests(id,wordlist_id,submitted_revision,name,entry_ids,submit_key,request_hash) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(request).bind(id).bind(list.revision+1).bind(list.name).bind(ids).bind(input.idempotency_key).bind(hash).execute(&mut *tx).await.map_err(AppError::internal)?;
+        if automatic {
+            super::management::approve_entries(&mut tx, id).await?;
+            sqlx::query(
+                "UPDATE wordlists SET state='published',review_state='approved' WHERE id=$1",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+            sqlx::query("UPDATE wordlist_review_requests SET state='approved',decided_at=clock_timestamp() WHERE id=$1").bind(request).execute(&mut *tx).await.map_err(AppError::internal)?;
+        }
         request
     };
     let result = review(&mut tx, id, request).await?;
@@ -80,47 +109,29 @@ pub async fn withdraw(
         return Err(service::conflict());
     }
     sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
-    sqlx::query("UPDATE wordlists SET state='draft',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("UPDATE wordlists SET state='draft',review_state=CASE WHEN review_state='pending' THEN 'none' ELSE review_state END,revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     let result = service::meta(&mut tx, id).await?;
     crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(result)
 }
-pub async fn lock_admin(
-    tx: &mut Tx<'_>,
-    auth: &AdminAuth,
-    permission: &str,
-) -> Result<(), AppError> {
-    let version: Option<i64> =
-        sqlx::query_scalar("SELECT security_version FROM admins WHERE id=$1 FOR SHARE")
-            .bind(auth.subject)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(AppError::internal)?;
-    if version != Some(auth.security_version) {
-        return Err(AppError::unauthorized(
-            ErrorCode::InvalidToken,
-            "invalid token",
-        ));
-    }
-    permissions::lock(tx, auth.subject)
-        .await?
-        .require(permission)
-}
+pub use crate::admin::permissions::lock_session as lock_admin;
 // Owner::Ord is user then admin; lock the user before any admin/permission/list lock.
-async fn admin_list_lock(
+pub async fn admin_list_lock(
     tx: &mut Tx<'_>,
     auth: &AdminAuth,
     id: Uuid,
     permission: &str,
     write: bool,
 ) -> Result<Wordlist, AppError> {
-    let owner: Uuid = sqlx::query_scalar("SELECT owner_user_id FROM wordlists WHERE id=$1")
-        .bind(id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(AppError::internal)?
-        .ok_or_else(|| AppError::not_found("wordlist not found"))?;
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "SELECT owner_user_id FROM wordlists WHERE id=$1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::internal)?
+    .ok_or_else(|| AppError::not_found("wordlist not found"))?;
     sqlx::query("SELECT id FROM users WHERE id=$1 FOR SHARE")
         .bind(owner)
         .fetch_optional(&mut **tx)
@@ -154,11 +165,7 @@ pub async fn decision(
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     let list = admin_list_lock(&mut tx, auth, id, "wordlists.review", true).await?;
     let pending = review(&mut tx, id, request).await?;
-    if list.state != WordlistState::Pending
-        || list.revision != input.expected_revision
-        || pending.state != "pending"
-        || pending.submitted_revision != list.revision
-    {
+    if pending.state != "pending" || pending.submitted_revision != input.expected_revision {
         return Err(service::conflict());
     }
     if input.approve {
@@ -167,7 +174,7 @@ pub async fn decision(
         service::lock_entries(&mut tx, &ids, true).await?;
         sqlx::query("UPDATE wordlist_items i SET approved_lifecycle_revision=e.lifecycle_revision,approved_archive_generation=e.wordlist_archive_generation FROM lexicon.entries e WHERE i.wordlist_id=$1 AND e.id=i.entry_id").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     }
-    sqlx::query("UPDATE wordlists SET state=$2,revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(if input.approve{"published"}else{"rejected"}).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("UPDATE wordlists SET state=$2,review_state=CASE WHEN $2='published' THEN 'approved' ELSE 'rejected' END,revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(if input.approve{"published"}else{"rejected"}).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("UPDATE wordlist_review_requests SET state=$2,reviewer_id=$3,reason=$4,decided_at=clock_timestamp() WHERE id=$1").bind(request).bind(if input.approve{"approved"}else{"rejected"}).bind(auth.subject).bind(explanation).execute(&mut *tx).await.map_err(AppError::internal)?;
     permissions::service::audit(&mut tx,auth.subject,Uuid::now_v7(),if input.approve{"wordlist.approve"}else{"wordlist.reject"},"wordlist",id,serde_json::json!({"review_request_id":request,"submitted_revision":pending.submitted_revision})).await?;
     let result = service::meta(&mut tx, id).await?;
@@ -303,12 +310,12 @@ pub async fn admin_list(
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_admin(&mut tx, auth, "wordlists.access").await?;
     let total =
-        sqlx::query_scalar("SELECT count(*) FROM wordlists WHERE state<>'draft' AND strpos(lower(name),lower($1))>0 AND ($2::text IS NULL OR state=$2)")
+        sqlx::query_scalar("SELECT count(*) FROM wordlists WHERE owner_user_id IS NOT NULL AND deleted_at IS NULL AND state<>'draft' AND strpos(lower(name),lower($1))>0 AND ($2::text IS NULL OR state=$2)")
             .bind(&q).bind(&query.state)
             .fetch_one(&mut *tx)
             .await
             .map_err(AppError::internal)?;
-    let items=sqlx::query_as("SELECT w.id,w.owner_user_id,u.display_name AS owner_name,w.name,w.state,w.revision,(SELECT count(*) FROM wordlist_items i WHERE i.wordlist_id=w.id) AS item_count,w.created_at,w.updated_at FROM wordlists w JOIN users u ON u.id=w.owner_user_id WHERE w.state<>'draft' AND strpos(lower(w.name),lower($1))>0 AND ($2::text IS NULL OR w.state=$2) ORDER BY (w.state='pending') DESC,w.updated_at DESC,w.id DESC LIMIT $3 OFFSET $4").bind(q).bind(&query.state).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    let items=sqlx::query_as("SELECT w.id,w.owner_user_id,u.display_name AS owner_name,w.name,w.state,w.revision,(SELECT count(*) FROM wordlist_items i WHERE i.wordlist_id=w.id) AS item_count,w.created_at,w.updated_at FROM wordlists w JOIN users u ON u.id=w.owner_user_id WHERE w.deleted_at IS NULL AND w.state<>'draft' AND strpos(lower(w.name),lower($1))>0 AND ($2::text IS NULL OR w.state=$2) ORDER BY (w.state='pending') DESC,w.updated_at DESC,w.id DESC LIMIT $3 OFFSET $4").bind(q).bind(&query.state).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistPage {
         items,

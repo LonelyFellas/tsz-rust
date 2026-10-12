@@ -1,0 +1,93 @@
+{
+  "id": "01a12e9c-cf66-7031-9c6e-35bcc3c4d35e",
+  "kind": "word",
+  "forms": {
+    "pos": [
+      {
+        "pos": "noun",
+        "forms": [],
+        "pos_id": "01a12e9c-cf67-7d03-b7cb-03f14612cb8c",
+        "form_groups": []
+      }
+    ]
+  },
+  "status": "published",
+  "language": "en",
+  "meanings": {
+    "pos": [
+      {
+        "pos_id": "01a12e9c-cf67-7d03-b7cb-03f14612cb8c",
+        "senses": [
+          {
+            "id": "01a12e9c-cf67-7d03-b7cb-0421ace6d0bd",
+            "level": "C2",
+            "sub_pos": "countable",
+            "relations": [],
+            "sentences": [],
+            "definitions": [
+              {
+                "id": "01a12e9c-cf67-7d03-b7cb-043fd151fc43",
+                "level": "A1",
+                "content": {
+                  "text": "测试中文",
+                  "spans": [],
+                  "version": 1,
+                  "liaisons": []
+                },
+                "content_id": "01a12e9c-cf67-7d03-b7cb-0443d67f1a73",
+                "definition_mode": "zh_definition",
+                "grammar_structure_id": "01a12e9c-cf67-7d03-b7cb-040c0f22644d"
+              }
+            ],
+            "depends_on_context": false
+          }
+        ],
+        "grammar_structures": [
+          {
+            "id": "01a12e9c-cf67-7d03-b7cb-040c0f22644d",
+            "variants": [
+              {
+                "id": "01a12e9c-cf67-7d03-b7cb-0411bb454ecd",
+                "content": {
+                  "text": "a + noun",
+                  "spans": [],
+                  "version": 1,
+                  "liaisons": []
+                },
+                "dialect": "common"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "sense_groups": []
+  },
+  "revision": 1,
+  "annotation": "ADMIN PRIVATE",
+  "created_at": "2026-10-06T00:00:00Z",
+  "created_by": "01a12e9c-cf64-76b0-8a6e-174c3311b8c6",
+  "updated_at": "2026-10-06T00:00:00Z",
+  "capabilities": {
+    "publication": {
+      "mode": "native"
+    },
+    "pronunciation_normalization_version": "nfkc_trim_lower_v1"
+  },
+  "presentation": {
+    "label": "apple",
+    "matched_surfaces": [
+      "apple"
+    ],
+    "strategy_version": "test"
+  },
+  "schema_version": 3,
+  "completed_steps": [
+    "forms",
+    "meanings"
+  ],
+  "lifecycle_revision": 1,
+  "max_reachable_step": "preview",
+  "published_revision": 1,
+  "has_unpublished_changes": false
+}

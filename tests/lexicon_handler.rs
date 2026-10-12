@@ -17798,3 +17798,6 @@ async fn independent_edit_permissions_ignore_persisted_response_only_fields(pool
     );
     assert!(reread["word"]["meanings"]["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["text_links"].as_array().is_none_or(Vec::is_empty));
 }
+
+#[path = "lexicon_handler/related_suggestions.rs"]
+mod related_suggestions;

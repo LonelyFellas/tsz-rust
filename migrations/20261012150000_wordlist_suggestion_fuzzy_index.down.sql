@@ -1,0 +1,1 @@
+DROP INDEX lexicon.lexicon_surface_sources_suggestion_fuzzy_idx;

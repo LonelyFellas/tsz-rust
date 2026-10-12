@@ -17,7 +17,48 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
-        .route("/wordlists", get(crate::wordlists::admin_handler::list))
+        .route(
+            "/wordlists/suggestions",
+            get(crate::wordlists::admin_handler::suggestions),
+        )
+        .route(
+            "/wordlists/management",
+            get(crate::wordlists::admin_handler::management_list),
+        )
+        .route(
+            "/wordlists/catalog",
+            get(crate::wordlists::admin_handler::catalog),
+        )
+        .route(
+            "/wordlists/{id}",
+            get(crate::wordlists::admin_handler::detail)
+                .put(crate::wordlists::admin_handler::update),
+        )
+        .route(
+            "/wordlists/{id}/edit",
+            get(crate::wordlists::admin_handler::edit),
+        )
+        .route(
+            "/wordlists/{id}/items",
+            get(crate::wordlists::admin_handler::current_items),
+        )
+        .route(
+            "/wordlists/{id}/visibility",
+            post(crate::wordlists::admin_handler::visibility),
+        )
+        .route(
+            "/wordlists/{id}/recommendation",
+            post(crate::wordlists::admin_handler::recommend),
+        )
+        .route(
+            "/wordlists/{id}/delete",
+            post(crate::wordlists::admin_handler::delete),
+        )
+        .route(
+            "/wordlists",
+            get(crate::wordlists::admin_handler::list)
+                .post(crate::wordlists::admin_handler::create),
+        )
         .route(
             "/wordlists/{id}/review-requests",
             get(crate::wordlists::admin_handler::reviews),

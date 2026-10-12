@@ -25,4 +25,6 @@ pub(crate) mod v3_projection;
 pub mod validation;
 mod visibility;
 
+pub(crate) mod entry_search;
+pub mod related_suggestions;
 pub mod shared_sentences;

@@ -87,7 +87,7 @@ pub async fn transfer(
     let amount = Amount::new(value).map_err(coin_error)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     let author: Uuid =
-        sqlx::query_scalar("SELECT owner_user_id FROM wordlists WHERE id=$1 AND state='published'")
+        sqlx::query_scalar("SELECT owner_user_id FROM wordlists WHERE id=$1 AND state='published' AND deleted_at IS NULL AND owner_user_id IS NOT NULL")
             .bind(id)
             .fetch_optional(&mut *tx)
             .await
@@ -210,7 +210,7 @@ pub async fn records(
     .await
     .map_err(AppError::internal)?;
     // A payer must not learn a renamed private wordlist after its author withdraws it.
-    let items=sqlx::query_as("SELECT t.event_id,t.wordlist_id,t.payer_user_id,t.author_user_id,t.amount::text AS amount,t.operation_id,t.created_at,CASE WHEN w.owner_user_id=$1 OR (w.state='published' AND author.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=author.id AND d.status='pending' AND d.effective_at<=clock_timestamp())) THEN w.name ELSE NULL END AS wordlist_name,COALESCE(w.owner_user_id=$1 OR (w.state='published' AND author.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=author.id AND d.status='pending' AND d.effective_at<=clock_timestamp())),false) AS wordlist_accessible,counterparty.display_name AS counterparty_name FROM wordlist_tips t LEFT JOIN wordlists w ON w.id=t.wordlist_id LEFT JOIN users author ON author.id=t.author_user_id LEFT JOIN users counterparty ON counterparty.id=CASE WHEN t.payer_user_id=$1 THEN t.author_user_id ELSE t.payer_user_id END WHERE t.payer_user_id=$1 OR t.author_user_id=$1 ORDER BY t.created_at DESC,t.event_id DESC LIMIT $2 OFFSET $3").bind(auth.subject).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    let items=sqlx::query_as("SELECT t.event_id,t.wordlist_id,t.payer_user_id,t.author_user_id,t.amount::text AS amount,t.operation_id,t.created_at,CASE WHEN w.owner_user_id=$1 OR (w.state='published' AND author.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=author.id AND d.status='pending' AND d.effective_at<=clock_timestamp())) THEN w.name ELSE NULL END AS wordlist_name,COALESCE(w.owner_user_id=$1 OR (w.state='published' AND author.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=author.id AND d.status='pending' AND d.effective_at<=clock_timestamp())),false) AS wordlist_accessible,counterparty.display_name AS counterparty_name FROM wordlist_tips t LEFT JOIN wordlists w ON w.id=t.wordlist_id AND w.deleted_at IS NULL LEFT JOIN users author ON author.id=t.author_user_id LEFT JOIN users counterparty ON counterparty.id=CASE WHEN t.payer_user_id=$1 THEN t.author_user_id ELSE t.payer_user_id END WHERE t.payer_user_id=$1 OR t.author_user_id=$1 ORDER BY t.created_at DESC,t.event_id DESC LIMIT $2 OFFSET $3").bind(auth.subject).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistTipPage {

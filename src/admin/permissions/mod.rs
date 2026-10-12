@@ -170,3 +170,23 @@ pub fn legacy_publication_allowed(authorization: &AdminAuthorization) -> bool {
         .iter()
         .all(|key| authorization.has(key))
 }
+
+pub async fn lock_session(
+    tx: &mut Transaction<'_, Postgres>,
+    auth: &AdminAuth,
+    permission: &str,
+) -> Result<(), AppError> {
+    let version: Option<i64> =
+        sqlx::query_scalar("SELECT security_version FROM admins WHERE id=$1 FOR SHARE")
+            .bind(auth.subject)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(AppError::internal)?;
+    if version != Some(auth.security_version) {
+        return Err(AppError::unauthorized(
+            ErrorCode::InvalidToken,
+            "invalid token",
+        ));
+    }
+    lock(tx, auth.subject).await?.require(permission)
+}

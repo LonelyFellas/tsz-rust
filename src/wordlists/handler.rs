@@ -25,7 +25,13 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v1/me/wordlist-tips", get(super::tips::history))
         .route("/api/v1/wordlists", get(public_list))
+        .route("/api/v1/wordlists/recommended", get(recommended))
+        .route(
+            "/api/v1/me/wordlists/{id}/publish",
+            axum::routing::post(publish),
+        )
         .route("/api/v1/wordlists/catalog", get(catalog))
+        .route("/api/v1/wordlists/suggestions", get(suggestions))
         .route("/api/v1/wordlists/{id}", get(public_detail))
         .route("/api/v1/wordlists/{id}/items", get(public_items))
         .route("/api/v1/me/wordlists", get(my_list).post(create))
@@ -227,4 +233,34 @@ pub async fn reviews(
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<WordlistReviews>, AppError> {
     Ok(Json(review::reviews(&state.pool, &auth, id).await?))
+}
+
+#[utoipa::path(get,path="/api/v1/wordlists/recommended",tag="wordlists",params(WordlistQuery),responses((status=200,description="系统推荐公开词表",body=WordlistPage),(status=400,description="查询无效")))]
+pub async fn recommended(
+    State(state): State<AppState>,
+    ApiQuery(query): ApiQuery<WordlistQuery>,
+) -> Result<Json<WordlistPage>, AppError> {
+    Ok(Json(
+        super::management::recommended(&state.pool, query).await?,
+    ))
+}
+#[utoipa::path(post,path="/api/v1/me/wordlists/{id}/publish",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=SubmitWordlist,responses((status=200,description="纯智能词表自动通过公开申请",body=WordlistReview),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
+pub async fn publish(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiJson(input): ApiJson<SubmitWordlist>,
+) -> Result<Json<WordlistReview>, AppError> {
+    Ok(Json(review::publish(&state.pool, &auth, id, input).await?))
+}
+
+#[utoipa::path(get,path="/api/v1/wordlists/suggestions",tag="wordlists",params(WordlistSuggestionQuery),security(("bearer_auth"=[])),responses((status=200,description="最多三个词条候选，无总数和分页",body=WordlistSuggestions),(status=400,description="查询无效"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号")))]
+pub async fn suggestions(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ApiQuery(query): ApiQuery<WordlistSuggestionQuery>,
+) -> Result<Json<WordlistSuggestions>, AppError> {
+    Ok(Json(
+        super::suggestions::for_user(&state.pool, &auth, query).await?,
+    ))
 }

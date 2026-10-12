@@ -81,7 +81,7 @@ pub(crate) fn idempotency_key_error(message: &'static str) -> AppError {
     AppError::validation(ErrorCode::InvalidRequestBody, "idempotency_key", message)
 }
 
-fn v3_storage_unavailable() -> AppError {
+pub(super) fn v3_storage_unavailable() -> AppError {
     AppError::unavailable(
         ErrorCode::SmartLexiconV3StorageUnavailable,
         "Smart Lexicon V3 storage or projection capability is disabled",
