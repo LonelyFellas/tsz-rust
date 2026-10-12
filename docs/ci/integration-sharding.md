@@ -90,3 +90,40 @@ slow-case details and source hashes. Phase totals are cumulative across cases,
 including concurrent cases, and must not be interpreted as job wall time.
 `db_create` is already inside `db_setup`; `body` and connection lifecycle are
 already inside `test_callback`, so parent/child spans must not be added together.
+
+## Identity template pilot
+
+The identity job creates a unique, job-owned template from an empty database and
+applies every current migration. The template is sealed with
+`ALLOW_CONNECTIONS false` after closing its last connection; nothing is cached
+between runs. Only the 65 exact business case paths in
+`ops/ci_template_cases.json` clone it. All other SQLx cases, including migration
+specialists, retain their original fresh-database path. New cases default to
+fresh; absent/renamed whitelist entries fail the execution audit.
+
+The disposable PostgreSQL testing copy changes only CREATE DATABASE for these
+cases, using PostgreSQL 16's default WAL_LOG strategy. Each case retains its own
+SQLx name, registry entry, fixture loading, pool limits and cleanup. SQLx's
+original migrator still runs, including locking, version/checksum and dirty-ledger
+checks. A compiled migration fingerprint must match the template's fingerprint.
+Production sources, migration files, test bodies/assertions/fixture sizes and
+the checked-in Cargo manifest/lockfile are unchanged.
+
+Before executing any case, `ci_identity_template.rs` compares clone state with a
+second database fully migrated from empty: catalog definitions, initial table
+rows, migration ledger, sequence definitions/values, extensions, owners,
+privileges and database settings. Only explicitly listed migration clock fields
+and the cluster transaction ID watermark are normalized; seed IDs and all other
+data remain part of the comparison. Committed DDL/data/sequence changes in A,
+deletion of A while B is connected, and a new clone after mutation must leave B
+and the template baseline unchanged. Separate corrupted-ledger probes must be
+rejected for dirty state and checksum mismatch. Cleanup drops only successfully
+created, invocation-owned databases, without terminating unrelated sessions.
+
+Every whitelist case must produce exactly one clone-use marker and pass; no
+other case may produce one. Full-shard discovery/execution auditing remains in
+place. Measurements include one-time bootstrap/verification overhead and actual
+clone/fresh counts, as well as the original phase timings. Compare both execution
+and compile/whole-job time against successful run 38225091081; do not treat
+cumulative concurrent phase savings as wall-time savings. This limited pilot
+does not promise to shorten the independent lexicon shard's critical path.

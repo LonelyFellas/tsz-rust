@@ -103,7 +103,7 @@ def run(shard, grouped, directory, report):
     executables = json.loads((directory / f"{shard}-executables.json").read_text())
     if set(executables) != set(targets_for(shard, grouped)):
         raise ClassificationError("stale executable inventory")
-    inventory, executed, timings = {}, [], []
+    inventory, executed, timings, template_uses = {}, [], [], []
     for target, executable in sorted(executables.items()):
         names = list_cases(executable)
         ignored = list_cases(executable, ignored=True)
@@ -119,6 +119,8 @@ def run(shard, grouped, directory, report):
                 cleaned = ANSI.sub("", line).strip()
                 if cleaned.startswith("SQLX_CI_PHASE "):
                     timings.append(json.loads(cleaned.removeprefix("SQLX_CI_PHASE ")))
+                if cleaned.startswith("SQLX_CI_TEMPLATE_USE "):
+                    template_uses.append(json.loads(cleaned.removeprefix("SQLX_CI_TEMPLATE_USE ")))
                 match = RESULT.fullmatch(cleaned)
                 if match:
                     results.append({"target": target, "name": match[1], "status": match[2]})
@@ -127,7 +129,7 @@ def run(shard, grouped, directory, report):
         validate_results(target, selected, [name for name in ignored if name in selected], results)
         executed.extend(results)
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps({"sha": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "shard": shard, "inventory": inventory, "executed": executed, **({"timings": timings} if timings else {})}, indent=2) + "\n")
+    report.write_text(json.dumps({"sha": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "shard": shard, "inventory": inventory, "executed": executed, **({"timings": timings} if timings else {}), **({"template_uses": template_uses} if template_uses else {})}, indent=2) + "\n")
 
 
 def verify_manifests(manifests, grouped, sha):
