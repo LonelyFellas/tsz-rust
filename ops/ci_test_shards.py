@@ -105,6 +105,7 @@ def run(shard, grouped, directory, report):
         raise ClassificationError("stale executable inventory")
     inventory, executed, timings, template_uses = {}, [], [], []
     batch_timings, batch_fixture_phases = [], []
+    router_pilots = []
     for target, executable in sorted(executables.items()):
         names = list_cases(executable)
         ignored = list_cases(executable, ignored=True)
@@ -124,6 +125,8 @@ def run(shard, grouped, directory, report):
                     template_uses.append(json.loads(cleaned.removeprefix("SQLX_CI_TEMPLATE_USE ")))
                 if cleaned.startswith("SQLX_CI_BATCH_PHASE "):
                     batch_timings.append(json.loads(cleaned.removeprefix("SQLX_CI_BATCH_PHASE ")))
+                if cleaned.startswith("SQLX_CI_ROUTER_PILOT "):
+                    router_pilots.append(json.loads(cleaned.removeprefix("SQLX_CI_ROUTER_PILOT ")))
                 if cleaned.startswith('{"ci_test":'):
                     row = json.loads(cleaned)
                     if row["ci_test"] == "maximum-batch":
@@ -136,7 +139,7 @@ def run(shard, grouped, directory, report):
         validate_results(target, selected, [name for name in ignored if name in selected], results)
         executed.extend(results)
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps({"sha": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "shard": shard, "inventory": inventory, "executed": executed, **({"timings": timings} if timings else {}), **({"template_uses": template_uses} if template_uses else {}), **({"batch_timings": batch_timings} if batch_timings else {}), **({"batch_fixture_phases": batch_fixture_phases} if batch_fixture_phases else {})}, indent=2) + "\n")
+    report.write_text(json.dumps({"sha": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(), "shard": shard, "inventory": inventory, "executed": executed, **({"timings": timings} if timings else {}), **({"template_uses": template_uses} if template_uses else {}), **({"batch_timings": batch_timings} if batch_timings else {}), **({"batch_fixture_phases": batch_fixture_phases} if batch_fixture_phases else {}), **({"router_pilots": router_pilots} if router_pilots else {})}, indent=2) + "\n")
 
 
 def verify_manifests(manifests, grouped, sha):
