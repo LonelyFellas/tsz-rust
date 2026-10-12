@@ -349,6 +349,15 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Upload lexicon handler phase measurements
+        if: matrix.module == 'lexicon-handler'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lexicon-handler-phase-measurements
+          path: target/ci-shards/lexicon-handler-phases.json
+          if-no-files-found: error
+          retention-days: 7
+
   lexicon-summary:
     # Preserve the existing required branch-protection check; every shard and
     # the executed-case audit must pass before this check can become green.

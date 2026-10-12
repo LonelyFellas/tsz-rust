@@ -6,7 +6,7 @@ import unittest
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).parent))
-from ci_identity_profile import PACKAGES, audit_template_uses, instrument_core, instrument_postgres, profile_lock, replace_once, summarize, template_cases, validate_profile_lock
+from ci_identity_profile import BATCH_COUNTS, BATCH_FIXTURES, BATCH_TEST, PACKAGES, audit_template_uses, instrument_core, instrument_maximum_batch, instrument_postgres, profile_lock, replace_once, summarize, summarize_maximum_batch, template_cases, validate_profile_lock
 
 
 class IdentityProfileTests(unittest.TestCase):
@@ -86,6 +86,35 @@ class IdentityProfileTests(unittest.TestCase):
                     template_cases(root)
             path.write_text(json.dumps(["user_repository::case"]))
             self.assertEqual(template_cases(root), ["user_repository::case"])
+
+    def batch_fixture(self):
+        return {"executed": [{"target": "lexicon_handler", "name": BATCH_TEST.partition("::")[2], "status": "ok"}], "timings": [{"test": BATCH_TEST, "phase": "body", "elapsed_us": 100000}], "batch_fixture_phases": [{"ci_test": "maximum-batch", "phase": phase, "elapsed_ms": 10} for phase in BATCH_FIXTURES], "batch_timings": [{"test": BATCH_TEST, "phase": phase, "elapsed_us": 100, "complete": True} for phase, count in BATCH_COUNTS.items() for _ in range(count)]}
+
+    def test_nested_batch_paths_and_concurrent_samples_are_audited(self):
+        summary = summarize_maximum_batch(self.batch_fixture())
+        self.assertEqual(summary["request_samples"]["forms-impact-save"]["count"], 50)
+        self.assertEqual(summary["request_samples"]["list-read"]["count"], 20)
+        self.assertEqual(summary["fixture_wall_ms"]["content-fixture"], 10)
+
+    def test_missing_extra_invalid_and_unfinished_batch_measurements_fail(self):
+        for mutation in [lambda r: r["batch_timings"].pop(), lambda r: r["batch_timings"].append(r["batch_timings"][0]), lambda r: r["batch_timings"][0].update(test="wrong::case"), lambda r: r["batch_timings"][0].update(complete=False), lambda r: r["batch_timings"][0].update(elapsed_us=-1), lambda r: r["batch_timings"][0].update(elapsed_us=1000000), lambda r: r["batch_fixture_phases"].pop(), lambda r: r["batch_fixture_phases"].append(r["batch_fixture_phases"][0]), lambda r: r["timings"][0].update(elapsed_us=1), lambda r: r["executed"][0].update(status="ignored")]:
+            report = self.batch_fixture()
+            mutation(report)
+            with self.assertRaises(ValueError):
+                summarize_maximum_batch(report)
+
+    def test_batch_timer_edits_preserve_original_bytes_and_reject_anchor_drift(self):
+        source = (Path(__file__).parents[1] / "tests/lexicon_handler/batch5.rs").read_text()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "tests/lexicon_handler/batch5.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(source)
+            evidence = instrument_maximum_batch(root)
+            self.assertTrue(evidence["reversible_timer_edits"])
+            path.write_text(source.replace("save_v3_forms_after_impact(", "changed_helper("))
+            with self.assertRaises(ValueError):
+                instrument_maximum_batch(root)
 
 
 if __name__ == "__main__":

@@ -4,10 +4,12 @@ import argparse
 from collections import Counter, defaultdict
 import hashlib
 import json
+import math
 import os
 import re
 from pathlib import Path
 import shutil
+import statistics
 import subprocess
 import sys
 import tarfile
@@ -175,7 +177,82 @@ def instrument_units(snapshot):
     return units
 
 
-def prepare(root, state):
+BATCH_TEST = "lexicon_handler::batch5::batch5_list_references_and_maximum_batch_measurement"
+BATCH_COUNTS = {"forms-impact-save": 50, "initial-meanings-save": 50, "relation-save": 50, "list-read": 20, "references-read": 20}
+BATCH_FIXTURES = {"empty-fixture", "content-fixture", "relation-fixture", "publish-assertions", "list-reference-assertions"}
+
+
+def instrument_maximum_batch(snapshot):
+    path = snapshot / "tests/lexicon_handler/batch5.rs"
+    original = path.read_text()
+    source = original
+    edits = []
+
+    def edit(old, new):
+        nonlocal source
+        source = replace_once(source, old, new)
+        edits.append((old, new))
+
+    def timer(name, phase):
+        return f'let {name} = CiBatchTimer::new("{BATCH_TEST}", "{phase}");'
+
+    edit('''                let (_, forms) = save_v3_forms_after_impact(''', '                ' + timer("_ci_forms", "forms-impact-save") + '\n                let (_, forms) = save_v3_forms_after_impact(')
+    edit('''                let meanings = complete_v3_meanings_fixture(''', '''                drop(_ci_forms);
+                let meanings = complete_v3_meanings_fixture(''')
+    edit('''                save_v3_meanings(state, bearer, &forms, meanings).await''', '                ' + timer("_ci_meanings", "initial-meanings-save") + '''
+                let saved = save_v3_meanings(state, bearer, &forms, meanings).await;
+                drop(_ci_meanings);
+                saved''')
+    edit('''        words[index] = save_v3_meanings(&state, &bearer, &words[index], meanings).await;''', '        ' + timer("_ci_relation", "relation-save") + '''
+        words[index] = save_v3_meanings(&state, &bearer, &words[index], meanings).await;
+        drop(_ci_relation);''')
+    edit('''        let (status, list) = call(''', '        ' + timer("_ci_list", "list-read") + '\n        let (status, list) = call(')
+    edit('''        assert_eq!(status, StatusCode::OK, "{list}");''', '''        drop(_ci_list);
+        assert_eq!(status, StatusCode::OK, "{list}");''')
+    edit('''        let refs = inbound_references_of(&state, &bearer, word["id"].as_str().unwrap()).await;''', '        ' + timer("_ci_refs", "references-read") + '''
+        let refs = inbound_references_of(&state, &bearer, word["id"].as_str().unwrap()).await;
+        drop(_ci_refs);''')
+    helper = TIMER.replace("CiPhaseTimer", "CiBatchTimer").replace("SQLX_CI_PHASE ", "SQLX_CI_BATCH_PHASE ")
+    source += helper
+    # Reversing only the timer edits must reproduce every original byte: no
+    # assertion, loop bound, concurrency, request, fixture or await is removed.
+    restored = source.removesuffix(helper)
+    for old, new in reversed(edits):
+        restored = replace_once(restored, new, old)
+    if restored != original:
+        raise ValueError("batch instrumentation changed test behavior")
+    path.write_text(source)
+    return {"original_sha256": hashlib.sha256(original.encode()).hexdigest(), "timed_sha256": hashlib.sha256(source.encode()).hexdigest(), "reversible_timer_edits": True}
+
+
+def summarize_maximum_batch(report):
+    if not any(f"{r['target']}::{r['name']}" == BATCH_TEST and r["status"] == "ok" for r in report["executed"]):
+        raise ValueError("maximum batch case was not executed successfully")
+    samples = defaultdict(list)
+    for row in report.get("batch_timings", []):
+        if row["test"] != BATCH_TEST or row["phase"] not in BATCH_COUNTS or row["complete"] is not True or type(row["elapsed_us"]) is not int or row["elapsed_us"] < 0:
+            raise ValueError("invalid maximum batch timing")
+        samples[row["phase"]].append(row["elapsed_us"])
+    if {p: len(v) for p, v in samples.items()} != BATCH_COUNTS:
+        raise ValueError("missing, duplicate or unexpected maximum batch samples")
+    fixtures = report.get("batch_fixture_phases", [])
+    if Counter(r["phase"] for r in fixtures) != Counter(BATCH_FIXTURES) or any(r["ci_test"] != "maximum-batch" or type(r["elapsed_ms"]) is not int or r["elapsed_ms"] < 0 for r in fixtures):
+        raise ValueError("invalid maximum batch fixture phases")
+    walls = {r["phase"]: r["elapsed_ms"] for r in fixtures}
+    body = next(t["elapsed_us"] for t in report["timings"] if t["test"] == BATCH_TEST and t["phase"] == "body")
+    if sum(walls.values()) * 1000 > body:
+        raise ValueError("batch fixture walls exceed test body")
+    if sum(samples["forms-impact-save"] + samples["initial-meanings-save"]) > 4 * (walls["content-fixture"] + 1) * 1000 or sum(samples["relation-save"]) > (walls["relation-fixture"] + 1) * 1000 or sum(samples["list-read"] + samples["references-read"]) > (walls["list-reference-assertions"] + 1) * 1000:
+        raise ValueError("batch request timings exceed their parent spans")
+    phases = {t["phase"]: round(t["elapsed_us"] / 1000, 3) for t in report["timings"] if t["test"] == BATCH_TEST}
+    requests = {}
+    for phase, values in samples.items():
+        values.sort()
+        requests[phase] = {"count": len(values), "sum_ms": round(sum(values) / 1000, 3), "p50_ms": round(statistics.median(values) / 1000, 3), "p95_ms": round(values[math.ceil(len(values) * .95) - 1] / 1000, 3), "max_ms": round(max(values) / 1000, 3)}
+    return {"test": BATCH_TEST, "lifecycle_ms": phases, "fixture_wall_ms": walls, "request_samples": requests, "content_concurrency": 4}
+
+
+def prepare(root, state, shard="identity"):
     snapshot = state / "workspace"
     if snapshot.exists():
         raise ValueError("profiling workspace already exists; use a fresh state directory")
@@ -206,21 +283,26 @@ def prepare(root, state):
             upstream = package.extractfile(prefix + relative).read()
             package.extractall(state, filter="data")
         copy = state / f"{name}-0.9.0"
-        helper_source = (root / "ops/ci_identity_template.rs").read_text()
-        fingerprint = helper_source.split("// BEGIN MIGRATION FINGERPRINT\n")[1].split("// END MIGRATION FINGERPRINT")[0]
-        patched = instrument_core(upstream.decode()) if name == "sqlx-core" else instrument_postgres(upstream.decode(), template_cases(root), fingerprint)
+        fingerprint = ""
+        if shard == "identity":
+            helper_source = (root / "ops/ci_identity_template.rs").read_text()
+            fingerprint = helper_source.split("// BEGIN MIGRATION FINGERPRINT\n")[1].split("// END MIGRATION FINGERPRINT")[0]
+        patched = instrument_core(upstream.decode()) if name == "sqlx-core" else instrument_postgres(upstream.decode(), template_cases(root) if shard == "identity" else (), fingerprint)
         (copy / relative).write_text(patched)
         evidence[name] = {"version": "0.9.0", "upstream_sha256": hashlib.sha256(upstream).hexdigest(), "timed_sha256": hashlib.sha256(patched.encode()).hexdigest()}
         patches.append(f'{name} = {{ path = {json.dumps(str(copy))} }}')
     manifest = snapshot / "Cargo.toml"
     if "[patch.crates-io]" in manifest.read_text():
         raise ValueError("existing crate patches require explicit profiling review")
-    manifest.write_text(manifest.read_text() + '\n[[bin]]\nname = "ci-identity-template"\npath = "ops/ci_identity_template.rs"\n\n[patch.crates-io]\n' + "\n".join(patches) + "\n")
+    helper_bin = '\n[[bin]]\nname = "ci-identity-template"\npath = "ops/ci_identity_template.rs"\n' if shard == "identity" else ""
+    manifest.write_text(manifest.read_text() + helper_bin + '\n[patch.crates-io]\n' + "\n".join(patches) + "\n")
     # Preserve every pinned transitive version; only the two reviewed path sources change.
     (snapshot / "Cargo.lock").write_text(profile_lock((root / "Cargo.lock").read_text()))
     subprocess.run(["cargo", "metadata", "--locked", "--offline", "--all-features", "--format-version=1"], cwd=snapshot, check=True, stdout=subprocess.DEVNULL)
     validate_profile_lock(original, locked_packages(snapshot / "Cargo.lock"))
-    evidence["unit_cases"] = instrument_units(snapshot)
+    evidence["unit_cases"] = instrument_units(snapshot) if shard == "identity" else []
+    if shard == "lexicon-handler":
+        evidence["maximum_batch"] = instrument_maximum_batch(snapshot)
     (state / "source-evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
     return snapshot
 
@@ -242,7 +324,7 @@ def summarize(report, unit_cases=()):
     for row in report.get("timings", []):
         target, sep, name = row["test"].partition("::")
         if not sep or (target, name) not in results or row["phase"] not in allowed:
-            raise ValueError("timing does not belong to an executed identity case")
+            raise ValueError("timing does not belong to an executed case")
         if not row["complete"] or type(row["elapsed_us"]) is not int or row["elapsed_us"] < 0:
             raise ValueError("incomplete or invalid timing")
         case = cases[(target, name)]
@@ -253,7 +335,7 @@ def summarize(report, unit_cases=()):
         raise ValueError("SQLx timing instrumentation produced no events")
     units = {(row["target"], row["name"]) for row in unit_cases}
     if set(cases) != set(results) or not units <= set(results):
-        raise ValueError("an executed identity case lacks timing or unit inventory differs")
+        raise ValueError("an executed case lacks timing or unit inventory differs")
     for key, phases in cases.items():
         if key in units:
             if set(phases) != {"body"}:
@@ -276,22 +358,34 @@ def main():
     parser.add_argument("action", choices=["build", "run"])
     parser.add_argument("shard")
     parser.add_argument("--report", type=Path)
-    parser.add_argument("--state", type=Path, default=Path(os.environ.get("RUNNER_TEMP", str(ROOT / "target"))) / "identity-phase-profile")
+    parser.add_argument("--state", type=Path)
     args = parser.parse_args()
-    args.state = args.state.resolve()
-    if args.shard != "identity":
+    args.state = (args.state or Path(os.environ.get("RUNNER_TEMP", str(ROOT / "target"))) / f"{args.shard}-phase-profile").resolve()
+    if args.shard not in ("identity", "lexicon-handler"):
         command = [sys.executable, str(ROOT / "ops/ci_test_shards.py"), args.action, args.shard]
         if args.report:
             command += ["--report", str(args.report)]
         subprocess.run(command, check=True)
         return
-    snapshot = prepare(ROOT, args.state) if args.action == "build" else args.state / "workspace"
+    snapshot = prepare(ROOT, args.state, args.shard) if args.action == "build" else args.state / "workspace"
     env = {**os.environ, "CARGO_TARGET_DIR": str(args.state / "target"), "GITHUB_SHA": os.environ.get("GITHUB_SHA") or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()}
-    command = [sys.executable, str(snapshot / "ops/ci_test_shards.py"), args.action, "identity"]
+    command = [sys.executable, str(snapshot / "ops/ci_test_shards.py"), args.action, args.shard]
     if args.action == "run":
         if not args.report:
-            parser.error("identity run requires --report")
+            parser.error("profiled run requires --report")
         command += ["--report", str(args.report.resolve())]
+    if args.shard == "lexicon-handler":
+        subprocess.run(command, cwd=snapshot, env=env, check=True)
+        if args.action == "run":
+            report = json.loads(args.report.read_text())
+            summary = summarize(report)
+            summary["source_evidence"] = json.loads((args.state / "source-evidence.json").read_text())
+            summary["maximum_batch"] = summarize_maximum_batch(report)
+            if report.get("template_uses") or any("migration" not in {t["phase"] for t in report["timings"] if t["test"] == f"{r['target']}::{r['name']}"} for r in report["executed"]):
+                raise ValueError("lexicon profiling changed the fresh migration path")
+            (args.report.parent / "lexicon-handler-phases.json").write_text(json.dumps(summary, indent=2) + "\n")
+            print(json.dumps({"profiled_sqlx_cases": summary["profiled_sqlx_cases"], "cumulative_phase_ms": summary["cumulative_phase_ms"], "maximum_batch": summary["maximum_batch"]}), flush=True)
+        return
     helper = args.state / "template-executable.json"
     template_report = args.state / "template-checks.json"
     template = "_tsz_ci_tpl_" + uuid.uuid4().hex

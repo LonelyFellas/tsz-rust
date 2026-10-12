@@ -127,3 +127,26 @@ clone/fresh counts, as well as the original phase timings. Compare both executio
 and compile/whole-job time against successful run 38225091081; do not treat
 cumulative concurrent phase savings as wall-time savings. This limited pilot
 does not promise to shorten the independent lexicon shard's critical path.
+
+## Lexicon handler lifecycle and maximum-batch measurements
+
+The lexicon-handler shard reuses the same verified SQLx 0.9.0 private-copy
+lifecycle timers, without the identity template/helper or cloning route. Every
+enabled case must retain fresh database creation, automatic migration, body,
+connection lifecycle and cleanup timing. The pagination shard retains its
+original path; all existing execution/ignored-case audits remain in place.
+
+Only the disposable copy of the existing 50-entry cyclic maximum-batch test
+receives request timers: 50 forms impact/save pairs, 50 initial meanings saves,
+50 serial relation saves, 20 list reads and 20 reference reads. Reversing timer
+edits must reproduce the original test source bytes. The original five fixture
+wall spans are also collected. Assertions, API calls, await order, `.buffered(4)`,
+50 entries/50 relations and all 20+20 read samples remain unchanged.
+
+`lexicon-handler-phase-measurements` stores the complete lifecycle summary,
+slowest cases, maximum-batch lifecycle/fixture walls, per-request distributions,
+counts and source evidence; raw events accompany the execution inventory. A
+missing, invalid or extra sample fails the job. Request sums in the concurrent
+content fixture are cumulative, not wall time; never add them to their parent
+spans or attribute a whole-shard delay to one overlapping test without evidence.
+Reports contain only names/counts/times/hashes, not SQL or fixture data.
