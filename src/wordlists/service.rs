@@ -12,8 +12,8 @@ use uuid::Uuid;
 pub type Tx<'a> = Transaction<'a, Postgres>;
 // SQL interpolation below is limited to these fixed fragments and a boolean lock mode.
 // All request values are bind parameters.
-pub const VISIBLE_OWNER: &str = "u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())";
-const META: &str = "SELECT w.id,w.owner_user_id,u.display_name AS owner_name,w.name,w.state,w.revision,(SELECT count(*) FROM wordlist_items i WHERE i.wordlist_id=w.id) AS item_count,w.created_at,w.updated_at FROM wordlists w JOIN users u ON u.id=w.owner_user_id";
+pub const VISIBLE_OWNER: &str = "(w.owner_admin_id IS NOT NULL OR (u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())))";
+pub const META: &str = "SELECT w.id,w.owner_user_id,COALESCE(u.display_name,a.display_name) AS owner_name,w.name,w.state,w.revision,(SELECT count(*) FROM wordlist_items i WHERE i.wordlist_id=w.id) AS item_count,w.created_at,w.updated_at FROM wordlists w LEFT JOIN users u ON u.id=w.owner_user_id LEFT JOIN admins a ON a.id=w.owner_admin_id";
 fn invalid(message: &str) -> AppError {
     AppError::bad_request(ErrorCode::ValidationFailed, message)
 }
@@ -57,7 +57,10 @@ pub async fn lock_user(tx: &mut Tx<'_>, auth: &AuthUser) -> Result<(), AppError>
     }
     crate::account_deletion::ensure_not_effective_in(tx, auth.subject).await
 }
-pub async fn eligible_owner(tx: &mut Tx<'_>, owner: Uuid) -> Result<(), AppError> {
+pub async fn eligible_owner(tx: &mut Tx<'_>, owner: Option<Uuid>) -> Result<(), AppError> {
+    let Some(owner) = owner else {
+        return Ok(());
+    };
     let valid: Option<bool> =
         sqlx::query_scalar("SELECT status='active' FROM users WHERE id=$1 FOR SHARE")
             .bind(owner)
@@ -80,9 +83,9 @@ pub async fn lock_list(
     write: bool,
 ) -> Result<Wordlist, AppError> {
     let sql = if write {
-        "SELECT id FROM wordlists WHERE id=$1 AND ($2::uuid IS NULL OR owner_user_id=$2) FOR UPDATE"
+        "SELECT id FROM wordlists WHERE id=$1 AND deleted_at IS NULL AND ($2::uuid IS NULL OR owner_user_id=$2) FOR UPDATE"
     } else {
-        "SELECT id FROM wordlists WHERE id=$1 AND ($2::uuid IS NULL OR owner_user_id=$2) FOR SHARE"
+        "SELECT id FROM wordlists WHERE id=$1 AND deleted_at IS NULL AND ($2::uuid IS NULL OR owner_user_id=$2) FOR SHARE"
     };
     sqlx::query_scalar::<_, Uuid>(sql)
         .bind(id)
@@ -94,11 +97,14 @@ pub async fn lock_list(
     meta(tx, id).await
 }
 pub async fn meta(tx: &mut Tx<'_>, id: Uuid) -> Result<Wordlist, AppError> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!("{META} WHERE w.id=$1")))
-        .bind(id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(AppError::internal)
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{META} WHERE w.id=$1 AND w.deleted_at IS NULL"
+    )))
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::internal)?
+    .ok_or_else(|| AppError::not_found("wordlist not found"))
 }
 pub fn validate_content(name: &str, ids: &[Uuid]) -> Result<(), AppError> {
     if name.trim().is_empty()
@@ -237,6 +243,7 @@ pub async fn update(
             ));
         }
         lock_entries(&mut tx, &c.entry_ids, true).await?;
+        sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("DELETE FROM wordlist_items WHERE wordlist_id=$1 AND NOT(entry_id=ANY($2))")
             .bind(id)
             .bind(&c.entry_ids)
@@ -244,7 +251,7 @@ pub async fn update(
             .await
             .map_err(AppError::internal)?;
         sqlx::query("INSERT INTO wordlist_items(wordlist_id,entry_id,position) SELECT $1,x.id,(x.n-1)::integer FROM unnest($2::uuid[]) WITH ORDINALITY AS x(id,n) ON CONFLICT(wordlist_id,entry_id) DO UPDATE SET position=excluded.position").bind(id).bind(&c.entry_ids).execute(&mut *tx).await.map_err(AppError::internal)?;
-        sqlx::query("UPDATE wordlists SET name=$2,state='draft',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(c.name.trim()).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("UPDATE wordlists SET name=$2,state='draft',review_state='none',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(c.name.trim()).execute(&mut *tx).await.map_err(AppError::internal)?;
     }
     for note in input.note_updates {
         let result=sqlx::query("UPDATE wordlist_items SET private_note=$3,note_revision=note_revision+1 WHERE wordlist_id=$1 AND entry_id=$2 AND note_revision=$4").bind(id).bind(note.entry_id).bind(note.private_note).bind(note.expected_note_revision).execute(&mut *tx).await.map_err(AppError::internal)?;
@@ -268,10 +275,10 @@ pub async fn list(
         lock_user(&mut tx, auth).await?;
     }
     let filter = format!(
-        "($1::uuid IS NOT NULL AND w.owner_user_id=$1 OR $1::uuid IS NULL AND w.state='published' AND {VISIBLE_OWNER}) AND strpos(lower(w.name),lower($2))>0"
+        "w.deleted_at IS NULL AND ($1::uuid IS NOT NULL AND w.owner_user_id=$1 OR $1::uuid IS NULL AND w.state='published' AND {VISIBLE_OWNER}) AND strpos(lower(w.name),lower($2))>0"
     );
     let total = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT count(*) FROM wordlists w JOIN users u ON u.id=w.owner_user_id WHERE {filter}"
+        "SELECT count(*) FROM wordlists w LEFT JOIN users u ON u.id=w.owner_user_id LEFT JOIN admins a ON a.id=w.owner_admin_id WHERE {filter}"
     )))
     .bind(owner.map(|a| a.subject))
     .bind(&q)
@@ -303,12 +310,14 @@ pub async fn read_lock(
         lock_user(tx, auth).await?;
         return lock_list(tx, id, Some(auth.subject), false).await;
     }
-    let owner: Uuid = sqlx::query_scalar("SELECT owner_user_id FROM wordlists WHERE id=$1")
-        .bind(id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(AppError::internal)?
-        .ok_or_else(|| AppError::not_found("wordlist not found"))?;
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "SELECT owner_user_id FROM wordlists WHERE id=$1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::internal)?
+    .ok_or_else(|| AppError::not_found("wordlist not found"))?;
     eligible_owner(tx, owner).await?;
     let list = lock_list(tx, id, None, false).await?;
     if list.state != WordlistState::Published {
@@ -426,17 +435,26 @@ pub async fn catalog(
     let (page, size, q) = pagination(&query)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_user(&mut tx, auth).await?;
-    let filter = "e.archived_at IS NULL AND p.content_schema_version=3 AND strpos(lower(p.snapshot#>>'{presentation,label}'),lower($1))>0";
-    let total=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE {filter}"))).bind(&q).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
-    let entry_ids:Vec<Uuid>=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT e.id FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE {filter} ORDER BY (lower(p.snapshot#>>'{{presentation,label}}')=lower($1)) DESC,p.snapshot#>>'{{presentation,label}}',e.id LIMIT $2 OFFSET $3"))).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
-    let mut entries = read_entries(&mut tx, &entry_ids).await?;
+    let result = catalog_in(&mut tx, page, size, q).await?;
+    crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
+    tx.commit().await.map_err(AppError::internal)?;
+    Ok(result)
+}
+pub async fn catalog_in(
+    tx: &mut Tx<'_>,
+    page: u32,
+    size: u32,
+    q: String,
+) -> Result<WordlistCatalog, AppError> {
+    let filter = "e.archived_at IS NULL AND p.content_schema_version=3 AND (strpos(lower(p.snapshot#>>'{presentation,label}'),lower($1))>0 OR (char_length($1)>=3 AND similarity(lower(p.snapshot#>>'{presentation,label}'),lower($1))>=0.3))";
+    let total=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE {filter}"))).bind(&q).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
+    let entry_ids:Vec<Uuid>=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT e.id FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE {filter} ORDER BY (lower(p.snapshot#>>'{{presentation,label}}')=lower($1)) DESC,(strpos(lower(p.snapshot#>>'{{presentation,label}}'),lower($1))=1) DESC,similarity(lower(p.snapshot#>>'{{presentation,label}}'),lower($1)) DESC,p.snapshot#>>'{{presentation,label}}',e.id LIMIT $2 OFFSET $3"))).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let mut entries = read_entries(tx, &entry_ids).await?;
     let items = entry_ids
         .iter()
         .filter_map(|id| entries.remove(id))
         .map(projection::candidate)
         .collect();
-    crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
-    tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistCatalog {
         items,
         pagination: page_meta(page, size, total),

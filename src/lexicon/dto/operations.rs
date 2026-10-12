@@ -809,3 +809,40 @@ pub struct AdminWordStats {
     pub today: i64,
     pub month: i64,
 }
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in=Query)]
+pub struct RelatedSuggestionQuery {
+    #[param(max_length = 200)]
+    pub q: String,
+    pub exclude_entry_id: Option<Uuid>,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelatedEntrySuggestion {
+    pub entry_id: Uuid,
+    pub publication_id: Uuid,
+    pub label: String,
+    pub glosses: Vec<String>,
+    pub sense_count: i64,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelatedEntrySuggestions {
+    #[schema(max_items = 3)]
+    pub items: Vec<RelatedEntrySuggestion>,
+}
+#[derive(Debug, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in=Query)]
+pub struct RelatedSenseQuery {
+    pub publication_id: Option<Uuid>,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelatedEntrySenses {
+    pub entry_id: Uuid,
+    pub publication_id: Uuid,
+    pub senses: Vec<super::RelatedWordSenseV3>,
+}

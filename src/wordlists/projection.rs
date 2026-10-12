@@ -213,10 +213,14 @@ pub fn candidate(entry: WordlistEntry) -> WordlistCandidate {
         .pos
         .iter()
         .flat_map(|p| &p.senses)
-        .flat_map(|s| &s.definitions)
-        .filter(|d| d.definition_mode.starts_with("zh_"))
-        .flat_map(|d| &d.texts)
-        .map(|t| t.content.text().to_owned())
+        .filter_map(|s| {
+            s.definitions
+                .iter()
+                .filter(|d| d.definition_mode.starts_with("zh_"))
+                .flat_map(|d| &d.texts)
+                .map(|t| t.content.text().to_owned())
+                .find(|text| !text.trim().is_empty())
+        })
         .take(2)
         .collect();
     WordlistCandidate {

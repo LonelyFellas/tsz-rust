@@ -76,6 +76,14 @@ pub fn router() -> Router<AppState> {
         .route("/entries/stats", get(handler::stats))
         .route("/entries/related-search", get(handler::related_search))
         .route(
+            "/entries/related-suggestions",
+            get(super::related_suggestions::suggest),
+        )
+        .route(
+            "/entries/{id}/relation-senses",
+            get(super::related_suggestions::senses),
+        )
+        .route(
             "/entries/{id}",
             get(handler::get).delete(handler::delete_draft),
         )
