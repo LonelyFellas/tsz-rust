@@ -2505,3 +2505,65 @@ async fn content_editor_can_save_both_dialects_when_annotations_only_reorder(poo
         created["content"]["annotations"]
     );
 }
+
+#[sqlx::test]
+async fn sentence_permission_migration_preserves_grants_and_tags(pool: PgPool) {
+    let actor = admin_with_role(&pool, AdminRole::Admin).await;
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.publish'").bind(actor).execute(&pool).await.unwrap();
+    let tag = Uuid::now_v7();
+    sqlx::query("INSERT INTO permission_tags(id,name) VALUES($1,'task124')")
+        .bind(tag)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO permission_tag_items(tag_id,permission_key) VALUES($1,'sentences.restore')",
+    )
+    .bind(tag)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let up = include_str!("../migrations/20261013100000_sentence_permissions.up.sql");
+    let down = include_str!("../migrations/20261013100000_sentence_permissions.down.sql");
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT permission_key FROM admin_permission_grants WHERE admin_id=$1")
+            .bind(actor)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(keys.contains(&"sentences.publish".into()));
+    assert!(!keys.contains(&"sentences.restore".into()));
+    let tag_keys: Vec<String> =
+        sqlx::query_scalar("SELECT permission_key FROM permission_tag_items WHERE tag_id=$1")
+            .bind(tag)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tag_keys, vec!["sentences.publish"]);
+    let version: i64 = sqlx::query_scalar("SELECT permission_version FROM admins WHERE id=$1")
+        .bind(actor)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(version, 1);
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'sentences.read_published',$1)").bind(actor).execute(&pool).await.unwrap();
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT permission_key FROM admin_permission_grants WHERE admin_id=$1")
+            .bind(actor)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(keys.contains(&"sentences.restore".into()));
+    assert!(keys.contains(&"sentences.publish".into()));
+    assert!(!keys.contains(&"sentences.read_published".into()));
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    let tag_keys: Vec<String> =
+        sqlx::query_scalar("SELECT permission_key FROM permission_tag_items WHERE tag_id=$1")
+            .bind(tag)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tag_keys, vec!["sentences.publish"]);
+}

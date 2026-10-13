@@ -592,6 +592,7 @@ async fn bump(conn: &mut PgConnection, id: Uuid) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 公开视图允许 sentences.read_published 或 sentences.access；draft 视图仅允许 sentences.access。
 #[utoipa::path(get,path="/api/v1/admin/lexicon/sentences",tag="admin-lexicon",security(("bearer_auth"=[])),params(SentenceListQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentenceList),(status=400,description="查询参数无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条")))]
 pub async fn list(
     State(state): State<AppState>,
@@ -599,9 +600,10 @@ pub async fn list(
     headers: HeaderMap,
     ApiQuery(q): ApiQuery<SentenceListQuery>,
 ) -> Result<Response, AppError> {
-    crate::admin::permissions::load(&state, &auth)
-        .await?
-        .require("sentences.access")?;
+    let authorization = crate::admin::permissions::load(&state, &auth).await?;
+    if q.view != SentenceView::Published || !authorization.has("sentences.read_published") {
+        authorization.require("sentences.access")?;
+    }
     let page = q.page.unwrap_or(1);
     let size = q.page_size.unwrap_or(10);
     if (q.sense_id.is_some() && q.entry_id.is_none())
@@ -712,6 +714,7 @@ pub async fn list(
     )
 }
 
+/// 公开只读权限只返回当前公开快照；撤回内容和草稿不可访问。
 #[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceReadQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SharedSentence),(status=400,description="内容或目标无效"),(status=401,description="未登录"),(status=403,description="管理员不可用或无权编辑目标词条"),(status=404,description="例句或词条不存在"),(status=409,description="版本或幂等冲突"),(status=422,description="请求结构无效")))]
 pub async fn get(
     State(state): State<AppState>,
@@ -720,9 +723,10 @@ pub async fn get(
     ApiPath(id): ApiPath<Uuid>,
     ApiQuery(q): ApiQuery<SentenceReadQuery>,
 ) -> Result<Response, AppError> {
-    crate::admin::permissions::load(&state, &auth)
-        .await?
-        .require("sentences.access")?;
+    let authorization = crate::admin::permissions::load(&state, &auth).await?;
+    if q.view != SentenceView::Published || !authorization.has("sentences.read_published") {
+        authorization.require("sentences.access")?;
+    }
     let mut snapshot = state.pool.begin().await.map_err(AppError::internal)?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *snapshot)

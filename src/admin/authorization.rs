@@ -504,12 +504,12 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "GET",
         "/lexicon/sentences",
-        RoutePolicy::All(&["sentences.access"]),
+        RoutePolicy::Any(&["sentences.access", "sentences.read_published"]),
     ),
     (
         "GET",
         "/lexicon/sentences/{id}",
-        RoutePolicy::All(&["sentences.access"]),
+        RoutePolicy::Any(&["sentences.access", "sentences.read_published"]),
     ),
     (
         "GET",
@@ -560,7 +560,7 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "POST",
         "/lexicon/sentences/{id}/restore",
-        RoutePolicy::All(&["sentences.restore"]),
+        RoutePolicy::All(&["sentences.publish"]),
     ),
     (
         "GET",

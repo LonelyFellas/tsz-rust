@@ -64,7 +64,7 @@ const EXPECTED_PERMISSION_KEYS: [&str; 51] = [
     "sentences.edit_others",
     "sentences.publish",
     "sentences.withdraw",
-    "sentences.restore",
+    "sentences.read_published",
     "sentences.rollback",
     "users.access",
     "users.read_basic",

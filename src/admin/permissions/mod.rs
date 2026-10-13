@@ -172,7 +172,6 @@ pub const LEGACY_PUBLICATION_KEYS: &[&str] = &[
     "words.rollback",
     "sentences.publish",
     "sentences.withdraw",
-    "sentences.restore",
     "sentences.rollback",
 ];
 
