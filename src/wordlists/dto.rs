@@ -85,6 +85,10 @@ pub struct CreateWordlistItem {
     pub entry_id: Uuid,
     #[schema(max_length = 1000)]
     pub private_note: String,
+    /// Author's annotation, visible to anyone who can read the wordlist.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schema(max_length = 1000)]
+    pub author_note: String,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -106,11 +110,22 @@ pub struct WordlistNoteUpdate {
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct WordlistAuthorNote {
+    pub entry_id: Uuid,
+    #[schema(max_length = 1000)]
+    pub author_note: String,
+}
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WordlistContentUpdate {
     #[schema(min_length = 1, max_length = 100)]
     pub name: String,
     #[schema(min_items = 1, max_items = 10000)]
     pub entry_ids: Vec<Uuid>,
+    /// Complete annotation list when present; omitted legacy writes preserve retained annotations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(max_items = 10000)]
+    pub author_notes: Option<Vec<WordlistAuthorNote>>,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -216,6 +231,10 @@ pub struct WordlistEntry {
 pub struct WordlistItem {
     pub entry_id: Uuid,
     pub position: i32,
+    /// Returned only for clients requesting X-TSZ-Wordlist-Annotations: v1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 1000)]
+    pub author_note: Option<String>,
     /// Null means unavailable; no historical label or definition is returned.
     #[schema(required = true)]
     pub entry: Option<WordlistEntry>,
@@ -225,6 +244,9 @@ pub struct WordlistItem {
 pub struct MyWordlistItem {
     pub entry_id: Uuid,
     pub position: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, max_length = 1000)]
+    pub author_note: Option<String>,
     #[schema(required = true)]
     pub entry: Option<WordlistEntry>,
     pub private_note: String,

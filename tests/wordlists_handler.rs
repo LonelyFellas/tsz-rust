@@ -368,3 +368,6 @@ async fn full_reading_is_opt_in_and_sorting_precedes_pagination_without_editing(
 
 #[path = "wordlists_handler/sentence_formatting.rs"]
 mod sentence_formatting;
+
+#[path = "wordlists_handler/author_notes.rs"]
+mod author_notes;
