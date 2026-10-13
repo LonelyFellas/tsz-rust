@@ -122,7 +122,40 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261013100000;
+    const CURRENT_RELEASE_VERSION: i64 = 20261013160000;
+
+    #[sqlx::test]
+    async fn deployment_undo_preserves_author_annotations_and_ledger(pool: PgPool) {
+        let admin = Uuid::now_v7();
+        let list = Uuid::now_v7();
+        let request = Uuid::now_v7();
+        let entry = Uuid::now_v7();
+        sqlx::query("INSERT INTO admins(id,phone,password_hash,display_name) VALUES($1,$2,'hash','annotation rollback')")
+            .bind(admin).bind(admin.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO wordlists(id,owner_admin_id,name,create_key,create_hash) VALUES($1,$2,'historical list',$3,'hash')")
+            .bind(list).bind(admin).bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO wordlist_review_requests(id,wordlist_id,submitted_revision,name,entry_ids,state,submit_key,request_hash,author_notes) VALUES($1,$2,1,'historical review',ARRAY[$3]::uuid[],'rejected',$4,'hash',$5)")
+            .bind(request).bind(list).bind(entry).bind(Uuid::now_v7())
+            .bind(serde_json::json!({(entry.to_string()): "must preserve public annotation"}))
+            .execute(&pool).await.unwrap();
+        let error = undo(&pool, 20261013100000, CURRENT_RELEASE_VERSION)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("wordlist author annotations must be preserved"));
+        let current: i64 =
+            sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(current, CURRENT_RELEASE_VERSION);
+        let notes: serde_json::Value =
+            sqlx::query_scalar("SELECT author_notes FROM wordlist_review_requests WHERE id=$1")
+                .bind(request)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(notes[entry.to_string()], "must preserve public annotation");
+    }
 
     #[sqlx::test]
     async fn split_edit_migration_preserves_grants_and_blocks_unsafe_downgrade(pool: PgPool) {
