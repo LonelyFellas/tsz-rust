@@ -89,7 +89,7 @@ async fn delegated_teacher_access_review_revoke_do_not_imply_sensitive_materials
         "POST",
         "/api/v1/me/teacher-certification/applications",
         &owner_token,
-        payload,
+        payload.clone(),
     )
     .await;
     let application = submitted["id"].as_str().unwrap();
@@ -106,7 +106,7 @@ async fn delegated_teacher_access_review_revoke_do_not_imply_sensitive_materials
             &body["items"][0]
         };
         for field in ["real_name", "contact", "statement"] {
-            assert_eq!(app[field], "", "{body}");
+            assert_eq!(app[field], submitted[field], "{body}");
         }
         assert_eq!(app["review_reason"], Value::Null);
         if path == detail_path {
@@ -128,7 +128,7 @@ async fn delegated_teacher_access_review_revoke_do_not_imply_sensitive_materials
     .await;
     assert_eq!(status, StatusCode::OK, "{reviewed}");
     assert_eq!(reviewed["status"], "approved");
-    assert_eq!(reviewed["contact"], "");
+    assert_eq!(reviewed["contact"], "teacher@example.test");
     let revoke_path = format!("/api/v1/admin/users/{owner}/teacher-certification");
     assert_eq!(
         send(
@@ -142,12 +142,45 @@ async fn delegated_teacher_access_review_revoke_do_not_imply_sensitive_materials
         .0,
         StatusCode::FORBIDDEN
     );
-    grant(&pool, reviewer, &["teacherapply.read_sensitive"]).await;
+    grant(&pool, reviewer, &["teacherapply.read_certificates"]).await;
     let (status, detail) = get(state.clone(), &detail_path, Some(bearer.clone())).await;
     assert_eq!(status, StatusCode::OK, "{detail}");
     assert_eq!(detail["application"]["contact"], "teacher@example.test");
-    assert_eq!(detail["files"].as_array().unwrap().len(), 4);
-    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key IN ('teacherapply.review','teacherapply.read_sensitive')")
+    assert_eq!(detail["files"].as_array().unwrap().len(), 2);
+    assert!(
+        detail["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| { ["education", "language"].contains(&file["kind"].as_str().unwrap()) })
+    );
+    assert_eq!(
+        get(state.clone(), &file_path, Some(bearer.clone())).await.0,
+        StatusCode::FORBIDDEN
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='teacherapply.read_certificates'")
+        .bind(reviewer).execute(&pool).await.unwrap();
+    grant(&pool, reviewer, &["teacherapply.read_identity"]).await;
+    let (_, detail) = get(state.clone(), &detail_path, Some(bearer.clone())).await;
+    assert_eq!(detail["files"].as_array().unwrap().len(), 2);
+    assert!(
+        detail["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| { ["id_front", "id_back"].contains(&file["kind"].as_str().unwrap()) })
+    );
+    let certificate_path = format!(
+        "/api/v1/admin/teacher-certification/files/{}",
+        payload["education_files"][0].as_str().unwrap()
+    );
+    assert_eq!(
+        get(state.clone(), &certificate_path, Some(bearer.clone()))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key IN ('teacherapply.review','teacherapply.read_identity')")
         .bind(reviewer).execute(&pool).await.unwrap();
     grant(&pool, reviewer, &["teacherapply.revoke"]).await;
     assert_eq!(
@@ -578,7 +611,7 @@ async fn admin_material_read_requires_submission_and_rechecks_revocation_after_s
     grant(
         &pool,
         reviewer,
-        &["teacherapply.access", "teacherapply.read_sensitive"],
+        &["teacherapply.access", "teacherapply.read_identity"],
     )
     .await;
     let mut state = with_storage(AppState::for_test(pool.clone()));
@@ -639,7 +672,7 @@ async fn admin_material_read_requires_submission_and_rechecks_revocation_after_s
         StorageRegistry::from_stores([paused.clone() as std::sync::Arc<dyn ObjectStore>]).unwrap();
     for (mutation, expected) in [
         (
-            "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='teacherapply.read_sensitive'",
+            "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='teacherapply.read_identity'",
             "forbidden",
         ),
         (
@@ -656,7 +689,7 @@ async fn admin_material_read_requires_submission_and_rechecks_revocation_after_s
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'teacherapply.read_sensitive',$1) ON CONFLICT DO NOTHING")
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'teacherapply.read_identity',$1) ON CONFLICT DO NOTHING")
             .bind(reviewer).execute(&pool).await.unwrap();
         let request_state = state.clone();
         let request_path = path.clone();
@@ -1277,4 +1310,93 @@ async fn user_identity_permission_only_exposes_submitted_identity_documents_of_t
         get(state, &base, Some(bearer)).await.0,
         StatusCode::FORBIDDEN
     );
+}
+
+#[sqlx::test]
+async fn certificate_and_identity_permissions_enforce_stored_kind_for_bytes(pool: PgPool) {
+    let owner = user(&pool).await;
+    let reviewer = admin(&pool, AdminRole::Admin).await;
+    grant(
+        &pool,
+        reviewer,
+        &["teacherapply.access", "teacherapply.read_certificates"],
+    )
+    .await;
+    let state = with_storage(AppState::for_test(pool.clone()));
+    let owner_token = state.token_manager.generate(owner, "student").unwrap();
+    let bearer = state
+        .admin_token_manager
+        .generate(reviewer, "admin")
+        .unwrap();
+    let application = Uuid::now_v7();
+    let mut files = Vec::new();
+    for kind in &["id_front", "id_back", "education", "language"] {
+        let response = tsz_rust::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/me/teacher-certification/files?kind={kind}"
+                    ))
+                    .header(header::AUTHORIZATION, format!("Bearer {owner_token}"))
+                    .header(header::CONTENT_TYPE, "image/png")
+                    .body(Body::from(PNG))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let file: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let id: Uuid = file["id"].as_str().unwrap().parse().unwrap();
+        files.push((id, *kind));
+    }
+    sqlx::query("INSERT INTO teacher_applications(id,user_id,real_name,contact,statement) VALUES ($1,$2,'教师','teacher@example.test','任教')")
+        .bind(application).bind(owner).execute(&pool).await.unwrap();
+    for (position, (id, _)) in files.iter().enumerate() {
+        sqlx::query("INSERT INTO teacher_application_files(application_id,file_id,position) VALUES($1,$2,$3)")
+            .bind(application).bind(id).bind(position as i16).execute(&pool).await.unwrap();
+    }
+    for permission in [
+        "teacherapply.read_certificates",
+        "teacherapply.read_identity",
+        "teacherapply.read_sensitive",
+        "users.read_identity",
+    ] {
+        sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key <> 'teacherapply.access'")
+            .bind(reviewer).execute(&pool).await.unwrap();
+        grant(&pool, reviewer, &[permission]).await;
+        for (id, kind) in &files {
+            let expected = match (*kind, permission) {
+                ("id_front" | "id_back", "teacherapply.read_identity")
+                | ("education" | "language", "teacherapply.read_certificates") => StatusCode::OK,
+                _ => StatusCode::FORBIDDEN,
+            };
+            let response = tsz_rust::router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/admin/teacher-certification/files/{id}"))
+                        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{permission}: {kind}");
+            if expected == StatusCode::OK {
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                assert_eq!(
+                    response
+                        .into_body()
+                        .collect()
+                        .await
+                        .unwrap()
+                        .to_bytes()
+                        .as_ref(),
+                    PNG
+                );
+            }
+        }
+    }
 }

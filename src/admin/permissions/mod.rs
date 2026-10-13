@@ -30,6 +30,17 @@ impl AdminAuthorization {
             && (self.is_super_admin || self.permissions.contains(key))
     }
 
+    pub fn require_super_admin(&self) -> Result<(), AppError> {
+        if self.is_super_admin {
+            Ok(())
+        } else {
+            Err(AppError::forbidden(
+                ErrorCode::Forbidden,
+                "super admin required",
+            ))
+        }
+    }
+
     pub fn require(&self, key: &str) -> Result<(), AppError> {
         if self.has(key) {
             Ok(())

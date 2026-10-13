@@ -34,7 +34,7 @@ use tsz_rust::admin::{AdminRepository, AdminRole, NewAdmin};
 use tsz_rust::auth::{Realm, TokenManager};
 use tsz_rust::state::AppState;
 
-const EXPECTED_PERMISSION_KEYS: [&str; 47] = [
+const EXPECTED_PERMISSION_KEYS: [&str; 51] = [
     "words.detect",
     "words.validate",
     "wordlists.access",
@@ -77,9 +77,13 @@ const EXPECTED_PERMISSION_KEYS: [&str; 47] = [
     "teacherapply.access",
     "teacherapply.review",
     "teacherapply.revoke",
-    "teacherapply.read_sensitive",
+    "teacherapply.read_certificates",
+    "teacherapply.read_identity",
     "lexicon_settings.access",
-    "lexicon_settings.edit",
+    "lexicon_settings.edit_basic",
+    "lexicon_settings.edit_sub",
+    "lexicon_settings.edit_forms",
+    "lexicon_settings.delete",
     "speech.generate",
     "speech.upload_audio",
 ];

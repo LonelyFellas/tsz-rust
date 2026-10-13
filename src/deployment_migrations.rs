@@ -122,7 +122,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261012160000;
+    const CURRENT_RELEASE_VERSION: i64 = 20261013010000;
 
     #[sqlx::test]
     async fn split_edit_migration_preserves_grants_and_blocks_unsafe_downgrade(pool: PgPool) {

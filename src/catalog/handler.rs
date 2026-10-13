@@ -103,7 +103,7 @@ pub async fn create_part(
 ) -> Result<impl IntoResponse, AppError> {
     permissions::load(&state, &auth)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.edit_basic")?;
     let response = service(&state)
         .create_part(auth.subject, request)
         .await
@@ -137,7 +137,7 @@ pub async fn update_part(
 ) -> Result<impl IntoResponse, AppError> {
     permissions::load(&state, &auth)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.edit_basic")?;
     let response = service(&state)
         .update_part(auth.subject, path.id, request)
         .await
@@ -169,7 +169,7 @@ pub async fn delete_part(
 ) -> Result<StatusCode, AppError> {
     permissions::load(&state, &auth)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require_super_admin()?;
     if let Some(error) = invalid_delete_revision(query.base_revision) {
         return Err(error);
     }
@@ -236,7 +236,7 @@ pub async fn create_sub_part(
 ) -> Result<impl IntoResponse, AppError> {
     permissions::load(&state, &auth)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.edit_sub")?;
     let response = service(&state)
         .create_sub_part(auth.subject, path.id, request)
         .await
@@ -270,7 +270,7 @@ pub async fn update_sub_part(
 ) -> Result<impl IntoResponse, AppError> {
     permissions::load(&state, &auth)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.edit_sub")?;
     let response = service(&state)
         .update_sub_part(auth.subject, path.id, path.sub_id, request)
         .await
@@ -302,7 +302,7 @@ pub async fn delete_sub_part(
 ) -> Result<StatusCode, AppError> {
     permissions::load(&state, &auth)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.delete")?;
     if let Some(error) = invalid_delete_revision(query.base_revision) {
         return Err(error);
     }

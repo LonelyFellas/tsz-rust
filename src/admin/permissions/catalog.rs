@@ -364,7 +364,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "teacherapply.access",
         "teacherapply",
-        "查看教师认证申请",
+        "查看教师资格申请列表",
+        "查看平台所有申请教师认证的名单，包括姓名、联系方式、认证说明、申请时间及审核和撤销结果",
         "page",
         [],
         "medium"
@@ -372,7 +373,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "teacherapply.review",
         "teacherapply",
-        "审核教师认证申请",
+        "审核教师资格",
+        "有权审核教师资格，通过或驳回教师资格申请",
         "action",
         ["teacherapply.access"],
         "high"
@@ -380,15 +382,26 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "teacherapply.revoke",
         "teacherapply",
-        "撤销教师认证资格",
+        "撤销教师资格",
+        "有权撤销已通过认证的教师资格",
         "action",
         ["teacherapply.access"],
         "high"
     ),
     permission!(
-        "teacherapply.read_sensitive",
+        "teacherapply.read_certificates",
         "teacherapply",
-        "查看教师认证原件",
+        "查看教师资格证书",
+        "有权查看教师认证过程中上传的学历和语言资格证书",
+        "action",
+        ["teacherapply.access"],
+        "high"
+    ),
+    permission!(
+        "teacherapply.read_identity",
+        "teacherapply",
+        "查看个人身份证",
+        "有权查看教师认证过程中提供的个人身份证正反面",
         "action",
         ["teacherapply.access"],
         "high"
@@ -396,15 +409,44 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "lexicon_settings.access",
         "lexicon_settings",
-        "查看词性和形态配置",
+        "查看全部词性配置",
+        "可以查看平台已经配置好的全部词性，包括基本词性、细分词性和词形变化",
         "page",
         [],
         "low"
     ),
     permission!(
-        "lexicon_settings.edit",
+        "lexicon_settings.edit_basic",
         "lexicon_settings",
-        "编辑词性和形态配置",
+        "编辑基本词性配置",
+        "可以新增和编辑平台的基本词性配置",
+        "action",
+        ["lexicon_settings.access"],
+        "high"
+    ),
+    permission!(
+        "lexicon_settings.edit_sub",
+        "lexicon_settings",
+        "编辑细分词性配置",
+        "可以新增和编辑平台的细分词性配置",
+        "action",
+        ["lexicon_settings.access"],
+        "high"
+    ),
+    permission!(
+        "lexicon_settings.edit_forms",
+        "lexicon_settings",
+        "编辑词形变化配置",
+        "可以新增和编辑平台的词形变化配置",
+        "action",
+        ["lexicon_settings.access"],
+        "high"
+    ),
+    permission!(
+        "lexicon_settings.delete",
+        "lexicon_settings",
+        "删除词性或词形",
+        "可以删除平台已经配置好的细分词性和词形变化；基本词性仅超级管理员可删除",
         "action",
         ["lexicon_settings.access"],
         "high"

@@ -30,7 +30,7 @@ impl CatalogService {
             .map_err(database_error)?;
         crate::admin::permissions::lock(&mut tx, actor_id)
             .await?
-            .require("lexicon_settings.edit")?;
+            .require("lexicon_settings.edit_basic")?;
         CatalogRepository::insert_part(&mut tx, &value)
             .await
             .map_err(map_repository_error)?;
@@ -69,7 +69,7 @@ impl CatalogService {
             .map_err(database_error)?;
         crate::admin::permissions::lock(&mut tx, actor_id)
             .await?
-            .require("lexicon_settings.edit")?;
+            .require("lexicon_settings.edit_basic")?;
         let updated =
             CatalogRepository::update_part(&mut tx, id, request.base_revision, actor_id, &changes)
                 .await
@@ -103,7 +103,7 @@ impl CatalogService {
             .map_err(database_error)?;
         crate::admin::permissions::lock(&mut tx, actor_id)
             .await?
-            .require("lexicon_settings.edit")?;
+            .require_super_admin()?;
         let Some((current_revision, code)) = CatalogRepository::part_revision(&mut tx, id, true)
             .await
             .map_err(map_repository_error)?
@@ -179,7 +179,7 @@ impl CatalogService {
             .map_err(database_error)?;
         crate::admin::permissions::lock(&mut tx, actor_id)
             .await?
-            .require("lexicon_settings.edit")?;
+            .require("lexicon_settings.edit_sub")?;
         // 父词性必须存在；挂在哪个词性下不再设限，任意基本词性都能扩展细分词性。
         if CatalogRepository::part_revision(&mut tx, part_id, false)
             .await
@@ -228,7 +228,7 @@ impl CatalogService {
             .map_err(database_error)?;
         crate::admin::permissions::lock(&mut tx, actor_id)
             .await?
-            .require("lexicon_settings.edit")?;
+            .require("lexicon_settings.edit_sub")?;
         // 编码是词条引用的口径，改了就等于换了一个细分词性：已被词义引用时不放行。
         if let Some(code) = &changes.code {
             let Some((current_revision, current_code)) =
@@ -304,7 +304,7 @@ impl CatalogService {
             .map_err(database_error)?;
         crate::admin::permissions::lock(&mut tx, actor_id)
             .await?
-            .require("lexicon_settings.edit")?;
+            .require("lexicon_settings.delete")?;
         let Some((current_revision, code)) =
             CatalogRepository::sub_part_revision(&mut tx, part_id, sub_id, true)
                 .await
