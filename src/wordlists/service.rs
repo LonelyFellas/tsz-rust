@@ -151,7 +151,7 @@ pub async fn create(
     if input
         .items
         .iter()
-        .any(|i| i.private_note.chars().count() > 1000)
+        .any(|i| i.private_note.chars().count() > 1000 || i.author_note.chars().count() > 1000)
     {
         return Err(invalid("备注不能超过 1000 字"));
     }
@@ -193,7 +193,8 @@ pub async fn create(
             .iter()
             .map(|i| i.private_note.as_str())
             .collect();
-        sqlx::query("INSERT INTO wordlist_items(wordlist_id,entry_id,position,private_note) SELECT $1,x.id,(x.n-1)::integer,x.note FROM unnest($2::uuid[],$3::text[]) WITH ORDINALITY AS x(id,note,n)").bind(id).bind(&entry_ids).bind(notes).execute(&mut *tx).await.map_err(AppError::internal)?;
+        let author_notes: Vec<_> = input.items.iter().map(|i| i.author_note.as_str()).collect();
+        sqlx::query("INSERT INTO wordlist_items(wordlist_id,entry_id,position,private_note,author_note) SELECT $1,x.id,(x.n-1)::integer,x.note,x.author_note FROM unnest($2::uuid[],$3::text[],$4::text[]) WITH ORDINALITY AS x(id,note,author_note,n)").bind(id).bind(&entry_ids).bind(notes).bind(author_notes).execute(&mut *tx).await.map_err(AppError::internal)?;
         id
     };
     let result = meta(&mut tx, id).await?;
@@ -224,6 +225,14 @@ pub async fn update(
     }
     if let Some(c) = &input.content {
         validate_content(&c.name, &c.entry_ids)?;
+        if let Some(notes) = &c.author_notes
+            && (notes.len() != c.entry_ids.len()
+                || notes.iter().zip(&c.entry_ids).any(|(note, id)| {
+                    note.entry_id != *id || note.author_note.chars().count() > 1000
+                }))
+        {
+            return Err(invalid("作者注释须与词条顺序一致，且每条不超过 1000 字"));
+        }
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_user(&mut tx, auth).await?;
@@ -251,6 +260,11 @@ pub async fn update(
             .await
             .map_err(AppError::internal)?;
         sqlx::query("INSERT INTO wordlist_items(wordlist_id,entry_id,position) SELECT $1,x.id,(x.n-1)::integer FROM unnest($2::uuid[]) WITH ORDINALITY AS x(id,n) ON CONFLICT(wordlist_id,entry_id) DO UPDATE SET position=excluded.position").bind(id).bind(&c.entry_ids).execute(&mut *tx).await.map_err(AppError::internal)?;
+        if let Some(notes) = &c.author_notes {
+            let text: Vec<_> = notes.iter().map(|note| note.author_note.as_str()).collect();
+            sqlx::query("UPDATE wordlist_items i SET author_note=x.note FROM unnest($2::uuid[],$3::text[]) AS x(id,note) WHERE i.wordlist_id=$1 AND i.entry_id=x.id")
+                .bind(id).bind(&c.entry_ids).bind(text).execute(&mut *tx).await.map_err(AppError::internal)?;
+        }
         sqlx::query("UPDATE wordlists SET name=$2,state='draft',review_state='none',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(c.name.trim()).execute(&mut *tx).await.map_err(AppError::internal)?;
     }
     for note in input.note_updates {
@@ -351,6 +365,7 @@ pub async fn edit_snapshot(
 pub struct ItemRow {
     pub entry_id: Uuid,
     pub position: i32,
+    pub author_note: String,
     pub private_note: String,
     pub note_revision: i64,
 }
@@ -424,7 +439,7 @@ pub async fn item_rows(
             "lower(p.snapshot#>>'{presentation,label}') COLLATE \"C\" DESC NULLS LAST,i.position"
         }
     };
-    let rows=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT i.entry_id,i.position,i.private_note,i.note_revision FROM {from} WHERE {filter} ORDER BY {order} LIMIT $3 OFFSET $4"))).bind(id).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let rows=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT i.entry_id,i.position,i.author_note,i.private_note,i.note_revision FROM {from} WHERE {filter} ORDER BY {order} LIMIT $3 OFFSET $4"))).bind(id).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     Ok((rows, page_meta(page, size, total)))
 }
 pub async fn catalog(

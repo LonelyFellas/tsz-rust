@@ -72,7 +72,7 @@ async fn submit_mode(
         sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         let request = Uuid::now_v7();
         sqlx::query("UPDATE wordlists SET state='pending',review_state='pending',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
-        sqlx::query("INSERT INTO wordlist_review_requests(id,wordlist_id,submitted_revision,name,entry_ids,submit_key,request_hash) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(request).bind(id).bind(list.revision+1).bind(list.name).bind(ids).bind(input.idempotency_key).bind(hash).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO wordlist_review_requests(id,wordlist_id,submitted_revision,name,entry_ids,submit_key,request_hash,author_notes) VALUES($1,$2,$3,$4,$5,$6,$7,(SELECT COALESCE(jsonb_object_agg(entry_id::text,author_note),'{}'::jsonb) FROM wordlist_items WHERE wordlist_id=$2 AND author_note<>''))").bind(request).bind(id).bind(list.revision+1).bind(list.name).bind(ids).bind(input.idempotency_key).bind(hash).execute(&mut *tx).await.map_err(AppError::internal)?;
         if automatic {
             super::management::approve_entries(&mut tx, id).await?;
             sqlx::query(
@@ -271,6 +271,12 @@ pub async fn admin_items(
             .fetch_one(&mut *tx)
             .await
             .map_err(AppError::internal)?;
+    let mut notes: sqlx::types::Json<std::collections::BTreeMap<Uuid, String>> =
+        sqlx::query_scalar("SELECT author_notes FROM wordlist_review_requests WHERE id=$1")
+            .bind(request)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
     let selected: Vec<_> = ids
         .iter()
         .enumerate()
@@ -287,6 +293,7 @@ pub async fn admin_items(
         .map(|(pos, id)| WordlistItem {
             entry_id: *id,
             position: pos as i32,
+            author_note: Some(notes.remove(id).unwrap_or_default()),
             entry: entries.remove(id),
         })
         .collect();

@@ -1,4 +1,5 @@
 pub mod admin_handler;
+mod annotations;
 pub mod dto;
 pub mod handler;
 pub mod management;

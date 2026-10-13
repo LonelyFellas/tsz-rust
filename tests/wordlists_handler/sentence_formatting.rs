@@ -43,7 +43,7 @@ async fn negotiated_read(state: &AppState, bearer: &str, path: &str, capable: bo
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get(header::VARY).unwrap(),
-        "x-tsz-sentence-formatting"
+        "x-tsz-sentence-formatting, x-tsz-wordlist-annotations"
     );
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }

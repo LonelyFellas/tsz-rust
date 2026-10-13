@@ -123,6 +123,7 @@ pub async fn items(
         .map(|r| WordlistItem {
             entry_id: r.entry_id,
             position: r.position,
+            author_note: Some(r.author_note),
             entry: entries.remove(&r.entry_id),
         })
         .collect();
