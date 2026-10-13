@@ -213,8 +213,17 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.access",
         "sentences",
-        "例句查看",
-        "查看后台共享例句",
+        "查看全部例句",
+        "查看平台全部例句，包括草稿和已发布状态",
+        "page",
+        [],
+        "low"
+    ),
+    permission!(
+        "sentences.read_published",
+        "sentences",
+        "查看已发布例句",
+        "查看平台全部已发布例句",
         "page",
         [],
         "low"
@@ -222,8 +231,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.create",
         "sentences",
-        "例句创建",
-        "创建归属于自己的共享例句",
+        "创建例句",
+        "创建自己可以编辑的例句",
         "action",
         ["sentences.access", "words.edit"],
         "medium"
@@ -231,8 +240,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.edit",
         "sentences",
-        "例句文本与音频编辑",
-        "编辑自己的例句文本、音频及其他内容；单词和短语关联需另行授权",
+        "编辑例句文本和发音",
+        "只有权编辑例句的文本并获取语音合成音频；关联单词和短语需另行授权",
         "action",
         ["sentences.access", "words.access"],
         "medium"
@@ -240,8 +249,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.associate",
         "sentences",
-        "例句单词与短语关联",
-        "编辑自己例句正文中的单词、短语及词形关联；不授予文本和音频编辑权限",
+        "为例句关联单词和短语",
+        "只有权为例句关联单词和短语；编辑例句文本和发音需另行授权",
         "action",
         ["sentences.access", "words.access"],
         "medium"
@@ -249,8 +258,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.edit_others",
         "sentences",
-        "可编辑他人的例句",
-        "将已获授权的内容编辑和关联操作扩展至他人的例句；不授予操作权限",
+        "有权编辑他人的例句",
+        "将已获授权的例句编辑权限扩展至他人的例句；需搭配编辑权限才能获取实际编辑能力",
         "scope",
         ["sentences.access"],
         "high"
@@ -258,8 +267,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.publish",
         "sentences",
-        "例句发布",
-        "发布自己的共享例句",
+        "发布公开例句",
+        "将草稿状态的例句发布成公开状态",
         "action",
         ["sentences.access"],
         "high"
@@ -267,17 +276,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.withdraw",
         "sentences",
-        "例句撤回",
-        "撤回自己已发布的共享例句",
-        "action",
-        ["sentences.access"],
-        "high"
-    ),
-    permission!(
-        "sentences.restore",
-        "sentences",
-        "恢复例句展示",
-        "恢复自己已下架的共享例句展示",
+        "撤回例句",
+        "将已发布的公开例句撤回至草稿状态",
         "action",
         ["sentences.access"],
         "high"
@@ -285,8 +285,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "sentences.rollback",
         "sentences",
-        "恢复到历史版本",
-        "将自己的共享例句恢复到历史发布版本",
+        "恢复例句至历史版本",
+        "将草稿状态的例句恢复至某个历史版本；已发布例句须先撤回",
         "action",
         ["sentences.access"],
         "high"
@@ -595,11 +595,11 @@ mod tests {
         for (key, label, scope) in [
             ("words.edit", "词条文本与音频编辑", "自己的"),
             ("words.edit_others", "可编辑他人的词条", "不授予操作权限"),
-            ("sentences.edit", "例句文本与音频编辑", "自己的"),
+            ("sentences.edit", "编辑例句文本和发音", "另行授权"),
             (
                 "sentences.edit_others",
-                "可编辑他人的例句",
-                "不授予操作权限",
+                "有权编辑他人的例句",
+                "需搭配编辑权限",
             ),
         ] {
             let permission = definition(key).unwrap();

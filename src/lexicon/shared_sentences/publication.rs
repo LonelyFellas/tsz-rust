@@ -77,7 +77,6 @@ pub(crate) struct PreparedSentence {
     pub content: SharedSentenceContent,
     pub revision: i64,
     pub lifecycle_revision: i64,
-    pub rollback_of: Option<Uuid>,
     pub is_new: bool,
 }
 
@@ -291,7 +290,6 @@ pub(crate) async fn prepare(
     actor: Uuid,
     super_admin: bool,
     item: &SentenceBatchItem,
-    historical: Option<(Uuid, SharedSentenceContent, i64)>,
     batch: Option<&PublicationBatchContext>,
 ) -> Result<PreparedSentence, AppError> {
     owner(
@@ -305,20 +303,10 @@ pub(crate) async fn prepare(
         },
     )
     .await?;
-    let (mut content, rollback_of, source_revision) = match historical {
-        Some((id, content, source_revision)) => (content, Some(id), source_revision),
-        None => (
-            read_on(tx, item.sentence_id).await?.content,
-            None,
-            item.base_revision,
-        ),
-    };
-    let existing = if rollback_of.is_none() {
-        sqlx::query("SELECT id,snapshot FROM lexicon.shared_sentence_publications WHERE sentence_id=$1 AND source_revision=$2 AND rollback_of_publication_id IS NULL")
-            .bind(item.sentence_id).bind(source_revision).fetch_optional(&mut **tx).await.map_err(AppError::internal)?
-    } else {
-        None
-    };
+    let mut content = read_on(tx, item.sentence_id).await?.content;
+    let source_revision = item.base_revision;
+    let existing = sqlx::query("SELECT id,snapshot FROM lexicon.shared_sentence_publications WHERE sentence_id=$1 AND source_revision=$2 AND rollback_of_publication_id IS NULL")
+        .bind(item.sentence_id).bind(source_revision).fetch_optional(&mut **tx).await.map_err(AppError::internal)?;
     if let Some(row) = &existing {
         content = serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?;
     }
@@ -335,7 +323,6 @@ pub(crate) async fn prepare(
         content,
         revision: source_revision,
         lifecycle_revision: item.base_lifecycle_revision,
-        rollback_of,
         is_new: existing.is_none(),
     })
 }
@@ -346,9 +333,9 @@ pub(crate) async fn insert_version(
     prepared: &PreparedSentence,
 ) -> Result<(), AppError> {
     if prepared.is_new {
-        sqlx::query("INSERT INTO lexicon.shared_sentence_publications(id,sentence_id,publication_number,source_revision,snapshot,published_by_admin_id,rollback_of_publication_id) SELECT $1,$2,COALESCE(max(publication_number),0)+1,$3,$4,$5,$6 FROM lexicon.shared_sentence_publications WHERE sentence_id=$2")
+        sqlx::query("INSERT INTO lexicon.shared_sentence_publications(id,sentence_id,publication_number,source_revision,snapshot,published_by_admin_id) SELECT $1,$2,COALESCE(max(publication_number),0)+1,$3,$4,$5 FROM lexicon.shared_sentence_publications WHERE sentence_id=$2")
             .bind(prepared.publication_id).bind(prepared.id).bind(prepared.revision)
-            .bind(serde_json::to_value(&prepared.content).map_err(AppError::internal)?).bind(actor).bind(prepared.rollback_of)
+            .bind(serde_json::to_value(&prepared.content).map_err(AppError::internal)?).bind(actor)
             .execute(&mut **tx).await.map_err(AppError::internal)?;
     }
     Ok(())
@@ -402,13 +389,13 @@ pub(crate) async fn activate(
                 .execute(&mut **tx).await.map_err(AppError::internal)?;
         }
     }
-    let changed = sqlx::query("UPDATE lexicon.shared_sentences SET current_publication_id=$2,lifecycle_revision=lifecycle_revision+1 WHERE id=$1 AND lifecycle_revision=$3 AND current_publication_id IS DISTINCT FROM $2")
+    let changed = sqlx::query("UPDATE lexicon.shared_sentences SET current_publication_id=$2,withdrawn_at=NULL,withdrawn_reason=NULL,lifecycle_revision=lifecycle_revision+1 WHERE id=$1 AND lifecycle_revision=$3 AND (current_publication_id IS DISTINCT FROM $2 OR withdrawn_at IS NOT NULL)")
         .bind(prepared.id).bind(prepared.publication_id).bind(prepared.lifecycle_revision)
         .execute(&mut **tx).await.map_err(AppError::internal)?.rows_affected();
     if changed == 1 {
         record_event(tx,actor,request,prepared.id,prepared.lifecycle_revision+1,
-            if prepared.rollback_of.is_some() {"lexicon.shared_sentence.rolled_back"} else {"lexicon.shared_sentence.published"},
-            serde_json::json!({"publication_id":prepared.publication_id,"rollback_of_publication_id":prepared.rollback_of})).await?;
+            "lexicon.shared_sentence.published",
+            serde_json::json!({"publication_id":prepared.publication_id,"rollback_of_publication_id":null})).await?;
     }
     read_on(tx, prepared.id).await
 }
@@ -445,22 +432,61 @@ async fn publish_command(
         return Ok(response);
     }
     let historical = if let Some(publication_id) = historical_id {
-        let row = sqlx::query("SELECT snapshot,source_revision FROM lexicon.shared_sentence_publications WHERE id=$1 AND sentence_id=$2")
+        let row = sqlx::query("SELECT snapshot FROM lexicon.shared_sentence_publications WHERE id=$1 AND sentence_id=$2")
             .bind(publication_id).bind(id).fetch_optional(&mut *tx).await.map_err(AppError::internal)?.ok_or_else(missing)?;
         Some((
             publication_id,
             serde_json::from_value::<SharedSentenceContent>(row.get("snapshot"))
                 .map_err(AppError::internal)?,
-            row.get("source_revision"),
         ))
     } else {
         None
     };
     let content = match &historical {
-        Some((_, content, _)) => content.clone(),
+        Some((_, content)) => content.clone(),
         None => read_on(&mut tx, id).await?.content,
     };
     lock_targets(&mut tx, Some(&content), None, Some(id)).await?;
+    if let Some((publication_id, content)) = historical {
+        owner(&mut tx, id, actor, super_admin, &input).await?;
+        let current = read_on(&mut tx, id).await?;
+        if current.current_publication_id.is_some() && current.withdrawn_at.is_none() {
+            return Err(AppError::conflict(
+                ErrorCode::RevisionConflict,
+                None,
+                "已发布例句须先撤回，只有草稿可以恢复历史版本",
+            ));
+        }
+        validate(&content)?;
+        validate_targets(&mut tx, &content, None, None).await?;
+        sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+        annotations(&mut tx, id, &content).await?;
+        sqlx::query("UPDATE lexicon.shared_sentences SET content=$2 WHERE id=$1")
+            .bind(id)
+            .bind(serde_json::to_value(&content.sentence).map_err(AppError::internal)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+        bump(&mut tx, id).await?;
+        record_event(
+            &mut tx,
+            actor,
+            request,
+            id,
+            input.base_revision + 1,
+            "lexicon.shared_sentence.draft_restored",
+            serde_json::json!({"publication_id":publication_id}),
+        )
+        .await?;
+        let response = read_on(&mut tx, id).await?;
+        remember(&mut tx, scope, actor, key, &hash, &response).await?;
+        tx.commit().await.map_err(AppError::internal)?;
+        return Ok(response);
+    }
     let prepared = prepare(
         &mut tx,
         actor,
@@ -470,7 +496,6 @@ async fn publish_command(
             base_revision: input.base_revision,
             base_lifecycle_revision: input.base_lifecycle_revision,
         },
-        historical,
         None,
     )
     .await?;
@@ -499,6 +524,7 @@ pub async fn publish(
     )
 }
 
+/// 将历史快照恢复到草稿；已公开例句必须先撤回，不创建或激活发布版本。
 #[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}/rollback",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
 pub async fn rollback(
     State(state): State<AppState>,
@@ -609,7 +635,7 @@ async fn visibility_command(
         if withdraw.is_some() {
             "sentences.withdraw"
         } else {
-            "sentences.restore"
+            "sentences.publish"
         },
     )
     .await?;
@@ -682,7 +708,7 @@ pub async fn withdraw(
     )
 }
 
-#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/restore",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无恢复权"),(status=409,description="版本或引用冲突")))]
+#[utoipa::path(post,path="/api/v1/admin/lexicon/sentences/{id}/restore",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("Idempotency-Key"=Uuid,Header),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),request_body=SentencePublicationInput,responses((status=200,body=SharedSentence),(status=403,description="无发布权或非创建者"),(status=409,description="版本或引用冲突")))]
 pub async fn restore(
     State(state): State<AppState>,
     auth: AdminAuth,

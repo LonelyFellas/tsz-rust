@@ -630,7 +630,7 @@ impl LexiconService {
         let mut prepared_sentences = Vec::new();
         for item in sentence_items {
             let prepared =
-                sentences::prepare(&mut tx, actor_id, is_super_admin, item, None, Some(&batch))
+                sentences::prepare(&mut tx, actor_id, is_super_admin, item, Some(&batch))
                     .await
                     .map_err(|error| sentence_batch_error(item.sentence_id, error))?;
             batch.sentences.insert(item.sentence_id);

@@ -312,13 +312,14 @@ async fn batch4_sentence_publication_isolated_history_and_idempotency(pool: PgPo
         Some(revisions(&second)),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{rolled}");
-    assert_ne!(rolled["current_publication_id"], first);
-    assert_eq!(rolled["content"], edited["content"]);
-    assert_eq!(rolled["revision"], edited["revision"]);
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "published sentence must be withdrawn first: {rolled}"
+    );
     assert_eq!(
         public_list(&state, &bearer, None).await["items"][0]["content"]["sentence"]["level"],
-        "B1"
+        "C1"
     );
     let (_, history) = call(
         &state,
@@ -329,8 +330,7 @@ async fn batch4_sentence_publication_isolated_history_and_idempotency(pool: PgPo
         None,
     )
     .await;
-    assert_eq!(history.as_array().unwrap().len(), 3);
-    assert_eq!(history[0]["rollback_of_publication_id"], first);
+    assert_eq!(history.as_array().unwrap().len(), 2);
     sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
         .bind(actor)
         .execute(&pool)
@@ -363,11 +363,11 @@ async fn batch4_sentence_publication_isolated_history_and_idempotency(pool: PgPo
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(count, 2);
 }
 
 #[sqlx::test]
-async fn batch4_withdrawal_requires_owner_confirmation_and_explicit_restore(pool: PgPool) {
+async fn batch4_withdrawal_history_restoration_and_republication(pool: PgPool) {
     let state = batch3_state(&pool).await;
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
@@ -378,6 +378,8 @@ async fn batch4_withdrawal_requires_owner_confirmation_and_explicit_restore(pool
     assert_eq!(status, StatusCode::CREATED);
     let draft = sentence(&state, &bearer, &word).await;
     let published = publish_sentence(&state, &bearer, &draft).await;
+    let historical_snapshot =
+        public_list(&state, &bearer, None).await["items"][0]["content"].clone();
     let path = format!("{ROOT}/sentences/{}", draft["id"].as_str().unwrap());
     let (_, impact) = call(
         &state,
@@ -436,37 +438,82 @@ async fn batch4_withdrawal_requires_owner_confirmation_and_explicit_restore(pool
     assert!(withdrawn["withdrawn_at"].is_string());
     assert_eq!(public_list(&state, &bearer, None).await["total"], 0);
     let edited = edit_level(&state, &bearer, &withdrawn, "C1").await;
-    let republished = publish_sentence(&state, &bearer, &edited).await;
-    assert!(republished["withdrawn_at"].is_string());
-    assert_eq!(public_list(&state, &bearer, None).await["total"], 0);
+    let rollback_path = format!(
+        "{path}/publications/{}/rollback",
+        published["current_publication_id"].as_str().unwrap()
+    );
+    let rollback_key = Uuid::now_v7();
     let (status, rolled) = call(
         &state,
         Method::POST,
-        &format!(
-            "{path}/publications/{}/rollback",
-            published["current_publication_id"].as_str().unwrap()
-        ),
+        &rollback_path,
         &bearer,
-        Some(Uuid::now_v7()),
-        Some(revisions(&republished)),
+        Some(rollback_key),
+        Some(revisions(&edited)),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{rolled}");
     assert!(rolled["withdrawn_at"].is_string());
+    assert_eq!(rolled["content"], historical_snapshot);
+    assert_eq!(
+        rolled["revision"].as_i64(),
+        Some(edited["revision"].as_i64().unwrap() + 1)
+    );
+    assert_eq!(rolled["lifecycle_revision"], edited["lifecycle_revision"]);
     assert_eq!(public_list(&state, &bearer, None).await["total"], 0);
-    let (status, restored) = call(
+    let (status, replay) = call(
         &state,
         Method::POST,
-        &format!("{path}/restore"),
+        &rollback_path,
         &bearer,
-        Some(Uuid::now_v7()),
-        Some(revisions(&rolled)),
+        Some(rollback_key),
+        Some(revisions(&edited)),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay, rolled);
+    let (status, _) = call(
+        &state,
+        Method::POST,
+        &rollback_path,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(revisions(&edited)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "stale draft revision must not overwrite later edits"
+    );
+    let (_, persisted) = call(
+        &state,
+        Method::GET,
+        &format!("{path}?view=draft"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(persisted["content"], historical_snapshot);
+    let (_, history) = call(
+        &state,
+        Method::GET,
+        &format!("{path}/publications"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        history.as_array().unwrap().len(),
+        1,
+        "restoring a draft must not create a publication"
+    );
+    let restored = publish_sentence(&state, &bearer, &rolled).await;
     assert!(restored["withdrawn_at"].is_null());
     assert_eq!(public_list(&state, &bearer, None).await["total"], 1);
-    assert_eq!(restored["content"], edited["content"]);
+    assert_eq!(restored["content"], historical_snapshot);
     let (status, _) = call(
         &state,
         Method::DELETE,
@@ -482,7 +529,7 @@ async fn batch4_withdrawal_requires_owner_confirmation_and_explicit_restore(pool
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(count, 2);
 }
 
 #[sqlx::test]
@@ -1075,4 +1122,118 @@ async fn permission_shared_sentence_body_scope_and_host_scope_are_independent(po
         sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key=ANY(ARRAY['words.edit_others','sentences.edit_others'])")
             .bind(outsider).execute(&pool).await.unwrap();
     }
+}
+
+#[sqlx::test]
+async fn batch4_published_only_reader_and_merged_restore_permission(pool: PgPool) {
+    let state = batch3_state(&pool).await;
+    let actor = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    let bearer = token(&state, actor);
+    let reader = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1")
+        .bind(reader)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'sentences.read_published',$1)").bind(reader).execute(&pool).await.unwrap();
+    let reader_bearer = token(&state, reader);
+    let word = batch3_word(&state, &bearer, "alpha").await;
+    let (status, _) = publish_ready_v3(&state, &bearer, &word).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let draft = sentence(&state, &bearer, &word).await;
+    let path = format!("{ROOT}/sentences/{}", draft["id"].as_str().unwrap());
+    assert_eq!(public_list(&state, &reader_bearer, None).await["total"], 0);
+    let (status, _) = call(&state, Method::GET, &path, &reader_bearer, None, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let published = publish_sentence(&state, &bearer, &draft).await;
+    let edited = edit_level(&state, &bearer, &published, "C1").await;
+    assert_eq!(
+        public_list(&state, &reader_bearer, None).await["items"][0]["content"]["sentence"]["level"],
+        "B1"
+    );
+    let (status, result) = call(&state, Method::GET, &path, &reader_bearer, None, None).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["content"]["sentence"]["level"], "B1");
+    for suffix in ["?view=draft", "/publications", "/withdrawal-impact"] {
+        let (status, result) = call(
+            &state,
+            Method::GET,
+            &format!("{path}{suffix}"),
+            &reader_bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{suffix}: {result}");
+    }
+    let (status, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/sentences?view=draft"),
+        &reader_bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, impact) = call(
+        &state,
+        Method::GET,
+        &format!("{path}/withdrawal-impact"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let mut input = revisions(&edited);
+    input["reason"] = json!("test withdrawal");
+    input["impact_fingerprint"] = impact["fingerprint"].clone();
+    let (status, withdrawn) = call(
+        &state,
+        Method::POST,
+        &format!("{path}/withdraw"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{withdrawn}");
+    assert_eq!(public_list(&state, &reader_bearer, None).await["total"], 0);
+    let (status, _) = call(&state, Method::GET, &path, &reader_bearer, None, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key NOT IN ('sentences.access','sentences.publish')").bind(actor).execute(&pool).await.unwrap();
+    let (status, restored) = call(
+        &state,
+        Method::POST,
+        &format!("{path}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(revisions(&withdrawn)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "publish permission alone restores prior display: {restored}"
+    );
+    assert_eq!(
+        public_list(&state, &reader_bearer, None).await["items"][0]["content"]["sentence"]["level"],
+        "B1"
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.publish'").bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'sentences.restore',$1)").bind(actor).execute(&pool).await.unwrap();
+    let (status, _) = call(
+        &state,
+        Method::POST,
+        &format!("{path}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(revisions(&restored)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "obsolete permission is not effective"
+    );
 }
