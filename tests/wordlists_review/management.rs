@@ -1,28 +1,12 @@
 use super::*;
 
 #[sqlx::test]
-async fn management_platform_create_edit_visibility_recommend_delete(pool: PgPool) {
+async fn historical_platform_read_visibility_recommend_delete(pool: PgPool) {
     let (state, user) = setup_bound(&pool).await;
     let manager = admin(&pool).await;
     let a = full_entry(&pool, "apple").await;
     let b = entry(&pool, "banana").await;
-    let body = json!({"idempotency_key":Uuid::now_v7(),"name":"平台词表","items":[{"entry_id":a,"admin_note":"后台机密"},{"entry_id":b,"admin_note":""}]});
-    let created = admin_call(
-        &state,
-        manager,
-        "POST",
-        "/api/v1/admin/wordlists",
-        body.clone(),
-    )
-    .await;
-    assert_eq!(created.0, StatusCode::OK, "{}", created.1);
-    assert_eq!(
-        created,
-        admin_call(&state, manager, "POST", "/api/v1/admin/wordlists", body).await
-    );
-    assert!(created.1["wordlist"]["owner_user_id"].is_null());
-    assert_eq!(created.1["review_state"], "none");
-    let id = created.1["wordlist"]["id"].as_str().unwrap();
+    let id = legacy_platform(&pool, manager, &[a, b]).await.to_string();
     let path = format!("/api/v1/admin/wordlists/{id}");
     sqlx::query(
         "INSERT INTO student_profiles(user_id,cefr_level,english_variant) VALUES($1,'A1','BrE')",
@@ -54,9 +38,6 @@ async fn management_platform_create_edit_visibility_recommend_delete(pool: PgPoo
         .0,
         StatusCode::NOT_FOUND
     );
-    let edited = admin_call(&state, manager, "GET", &format!("{path}/edit"), Value::Null).await;
-    assert_eq!(edited.1["items"][0]["admin_note"], "后台机密");
-    assert_eq!(edited.1["items"][0]["candidate"]["label"], "apple");
     assert_eq!(
         admin_call(
             &state,
@@ -151,8 +132,14 @@ async fn management_platform_create_edit_visibility_recommend_delete(pool: PgPoo
         .1["pagination"]["total"],
         0
     );
-    let update = json!({"expected_revision":3,"name":"改名","items":[{"entry_id":b,"admin_note":"先"},{"entry_id":a,"admin_note":"后"}]});
-    let saved = admin_call(&state, manager, "PUT", &path, update.clone()).await;
+    let saved = admin_call(
+        &state,
+        manager,
+        "POST",
+        &format!("{path}/visibility"),
+        json!({"expected_revision":3,"public":false}),
+    )
+    .await;
     assert_eq!(saved.0, StatusCode::OK, "{}", saved.1);
     assert_eq!(saved.1["wordlist"]["state"], "draft");
     assert_eq!(saved.1["recommended"], false);
@@ -169,10 +156,6 @@ async fn management_platform_create_edit_visibility_recommend_delete(pool: PgPoo
         StatusCode::CONFLICT
     );
     assert_eq!(
-        admin_call(&state, manager, "PUT", &path, update).await.0,
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
         call(
             &state,
             &user,
@@ -184,9 +167,6 @@ async fn management_platform_create_edit_visibility_recommend_delete(pool: PgPoo
         .1["pagination"]["total"],
         0
     );
-    let reopened = admin_call(&state, manager, "GET", &format!("{path}/edit"), Value::Null).await;
-    assert_eq!(reopened.1["items"][0]["entry_id"], b.to_string());
-    assert_eq!(reopened.1["items"][0]["admin_note"], "先");
     assert_eq!(
         admin_call(
             &state,
@@ -199,11 +179,7 @@ async fn management_platform_create_edit_visibility_recommend_delete(pool: PgPoo
         .0,
         StatusCode::NO_CONTENT
     );
-    for endpoint in [
-        path.clone(),
-        format!("{path}/edit"),
-        format!("{path}/items"),
-    ] {
+    for endpoint in [path.clone(), format!("{path}/items")] {
         assert_eq!(
             admin_call(&state, manager, "GET", &endpoint, Value::Null)
                 .await
@@ -226,10 +202,14 @@ async fn management_platform_create_edit_visibility_recommend_delete(pool: PgPoo
 }
 
 #[sqlx::test]
-async fn user_publication_override_preserves_review_and_edit_invalidates_snapshot(pool: PgPool) {
+async fn author_controls_publication_and_admin_cannot_author_even_with_legacy_grants(pool: PgPool) {
     let (state, user) = setup_bound(&pool).await;
     let manager = admin(&pool).await;
     let a = entry(&pool, "pending").await;
+    for key in ["wordlists.create", "wordlists.edit"] {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)")
+            .bind(manager).bind(key).execute(&pool).await.unwrap();
+    }
     let created = call(
         &state,
         &user,
@@ -238,8 +218,53 @@ async fn user_publication_override_preserves_review_and_edit_invalidates_snapsho
         create_body(&[a]),
     )
     .await;
+    assert_eq!(created.0, StatusCode::OK);
     let id = created.1["id"].as_str().unwrap();
     let path = format!("/api/v1/admin/wordlists/{id}");
+    for (method, endpoint, body) in [
+        (
+            "POST",
+            "/api/v1/admin/wordlists".into(),
+            json!({"idempotency_key":Uuid::now_v7(),"name":"越权","items":[{"entry_id":a,"admin_note":""}]}),
+        ),
+        (
+            "PUT",
+            path.clone(),
+            json!({"expected_revision":1,"name":"越权","items":[{"entry_id":a,"admin_note":""}]}),
+        ),
+        ("GET", format!("{path}/edit"), Value::Null),
+    ] {
+        let response = admin_call(&state, manager, method, &endpoint, body).await;
+        assert!(
+            matches!(
+                response.0,
+                StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+            ),
+            "{method} {endpoint}: {:?}",
+            response
+        );
+    }
+    assert_eq!(
+        admin_call(
+            &state,
+            manager,
+            "POST",
+            &format!("{path}/visibility"),
+            json!({"expected_revision":1,"public":true})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let unchanged = call(
+        &state,
+        &user,
+        "GET",
+        &format!("/api/v1/me/wordlists/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(unchanged.1, created.1);
     let pending = call(
         &state,
         &user,
@@ -248,46 +273,39 @@ async fn user_publication_override_preserves_review_and_edit_invalidates_snapsho
         json!({"expected_revision":1,"idempotency_key":Uuid::now_v7()}),
     )
     .await;
-    let request = pending.1["id"].as_str().unwrap();
-    for (revision, public) in [(2, true), (3, false)] {
-        let changed = admin_call(
-            &state,
-            manager,
-            "POST",
-            &format!("{path}/visibility"),
-            json!({"expected_revision":revision,"public":public}),
-        )
-        .await;
-        assert_eq!(changed.0, StatusCode::OK, "{}", changed.1);
-        assert_eq!(changed.1["review_state"], "pending");
-    }
-    let edit = admin_call(&state, manager, "GET", &format!("{path}/edit"), Value::Null).await;
-    assert!(!edit.1.to_string().contains("私密备注"));
-    let updated = admin_call(
-        &state,
-        manager,
-        "PUT",
-        &path,
-        json!({"expected_revision":4,"name":"管理员改名","items":[{"entry_id":a,"admin_note":""}]}),
-    )
-    .await;
-    assert_eq!(updated.0, StatusCode::OK, "{}", updated.1);
-    assert_eq!(
-        updated.1["wordlist"]["owner_user_id"],
-        user.subject.to_string()
-    );
+    assert_eq!(pending.0, StatusCode::OK, "{}", pending.1);
     assert_eq!(
         admin_call(
             &state,
             manager,
             "POST",
-            &format!("{path}/review-requests/{request}/decision"),
-            json!({"expected_revision":2,"approve":true,"reason":null})
+            &format!("{path}/visibility"),
+            json!({"expected_revision":2,"public":true})
         )
         .await
         .0,
-        StatusCode::CONFLICT
+        StatusCode::FORBIDDEN
     );
+    let request = pending.1["id"].as_str().unwrap();
+    let approved = admin_call(
+        &state,
+        manager,
+        "POST",
+        &format!("{path}/review-requests/{request}/decision"),
+        json!({"expected_revision":2,"approve":true,"reason":null}),
+    )
+    .await;
+    assert_eq!(approved.0, StatusCode::OK, "{}", approved.1);
+    assert_eq!(approved.1["state"], "published");
+    let visible = admin_call(
+        &state,
+        manager,
+        "GET",
+        &format!("{path}/items"),
+        Value::Null,
+    )
+    .await;
+    assert!(!visible.1.to_string().contains("私密备注"));
     let mine = call(
         &state,
         &user,
@@ -297,7 +315,17 @@ async fn user_publication_override_preserves_review_and_edit_invalidates_snapsho
     )
     .await;
     assert_eq!(mine.1["items"][0]["private_note"], "私密备注");
-    let body = json!({"expected_revision":5,"idempotency_key":Uuid::now_v7()});
+    let hidden = admin_call(
+        &state,
+        manager,
+        "POST",
+        &format!("{path}/visibility"),
+        json!({"expected_revision":3,"public":false}),
+    )
+    .await;
+    assert_eq!(hidden.0, StatusCode::OK);
+    assert_eq!(hidden.1["review_state"], "approved");
+    let body = json!({"expected_revision":4,"idempotency_key":Uuid::now_v7()});
     let published = call(
         &state,
         &user,
@@ -319,27 +347,6 @@ async fn user_publication_override_preserves_review_and_edit_invalidates_snapsho
         )
         .await
     );
-    assert_eq!(
-        call(
-            &state,
-            &user,
-            "GET",
-            &format!("/api/v1/wordlists/{id}"),
-            Value::Null
-        )
-        .await
-        .1["state"],
-        "published"
-    );
-    let hidden = admin_call(
-        &state,
-        manager,
-        "POST",
-        &format!("{path}/visibility"),
-        json!({"expected_revision":6,"public":false}),
-    )
-    .await;
-    assert_eq!(hidden.1["review_state"], "approved");
 }
 
 #[sqlx::test]
@@ -372,9 +379,7 @@ async fn management_permissions_and_migration_rollback_guard(pool: PgPool) {
     let (state, _) = setup_bound(&pool).await;
     let manager = admin(&pool).await;
     let a = entry(&pool, "permissions").await;
-    let created=admin_call(&state,manager,"POST","/api/v1/admin/wordlists",json!({"idempotency_key":Uuid::now_v7(),"name":"权限检查","items":[{"entry_id":a,"admin_note":""}]})).await;
-    assert_eq!(created.0, StatusCode::OK, "{}", created.1);
-    let id = created.1["wordlist"]["id"].as_str().unwrap();
+    let id = legacy_platform(&pool, manager, &[a]).await;
     assert!(
         sqlx::raw_sql(include_str!(
             "../../migrations/20261012120000_wordlist_management.down.sql"
@@ -405,21 +410,6 @@ async fn management_permissions_and_migration_rollback_guard(pool: PgPool) {
     for (method, path, body) in [
         (
             "POST",
-            "/api/v1/admin/wordlists".to_string(),
-            json!({"idempotency_key":Uuid::now_v7(),"name":"越权","items":[{"entry_id":a,"admin_note":""}]}),
-        ),
-        (
-            "GET",
-            format!("/api/v1/admin/wordlists/{id}/edit"),
-            Value::Null,
-        ),
-        (
-            "PUT",
-            format!("/api/v1/admin/wordlists/{id}"),
-            json!({"expected_revision":1,"name":"越权","items":[{"entry_id":a,"admin_note":""}]}),
-        ),
-        (
-            "POST",
             format!("/api/v1/admin/wordlists/{id}/visibility"),
             json!({"expected_revision":1,"public":true}),
         ),
@@ -440,4 +430,16 @@ async fn management_permissions_and_migration_rollback_guard(pool: PgPool) {
             "{method} {path}"
         );
     }
+}
+
+// Historical platform data remains readable/manageable; no API may create more of it.
+async fn legacy_platform(pool: &PgPool, owner: Uuid, entries: &[Uuid]) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO wordlists(id,owner_admin_id,name,create_key,create_hash) VALUES($1,$2,'平台词表',$3,'hash')")
+        .bind(id).bind(owner).bind(Uuid::now_v7()).execute(pool).await.unwrap();
+    for (position, entry) in entries.iter().enumerate() {
+        sqlx::query("INSERT INTO wordlist_items(wordlist_id,entry_id,position,admin_note) VALUES($1,$2,$3,'后台机密')")
+            .bind(id).bind(entry).bind(position as i32).execute(pool).await.unwrap();
+    }
+    id
 }
