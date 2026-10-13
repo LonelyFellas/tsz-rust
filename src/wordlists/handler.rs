@@ -1,5 +1,5 @@
+use super::annotations::response as formatting_response;
 use super::{dto::*, review, service};
-use crate::lexicon::sentence_formatting::response as formatting_response;
 use crate::{
     api::{ApiJson, ApiPath, ApiQuery},
     auth::extract::AuthUser,
@@ -86,7 +86,7 @@ pub async fn my_detail(
     Ok(Json(service::read(&state.pool, id, Some(&auth)).await?))
 }
 
-#[utoipa::path(get,path="/api/v1/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),
+#[utoipa::path(get,path="/api/v1/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),
 responses((status=200,description="当前发布内容；不可用条目不返回历史内容",body=WordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
 pub async fn public_items(
     State(state): State<AppState>,
@@ -108,6 +108,7 @@ pub async fn public_items(
         .map(|r| WordlistItem {
             entry_id: r.entry_id,
             position: r.position,
+            author_note: Some(r.author_note),
             entry: entries.remove(&r.entry_id),
         })
         .collect();
@@ -124,7 +125,7 @@ pub async fn public_items(
     )
 }
 
-#[utoipa::path(get,path="/api/v1/me/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/me/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),security(("bearer_auth"=[])),
 responses((status=403,description="需要先绑定手机号"),(status=200,description="当前发布内容；不可用条目不返回历史内容",body=MyWordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
 pub async fn my_items(
     State(state): State<AppState>,
@@ -147,6 +148,7 @@ pub async fn my_items(
         .map(|r| MyWordlistItem {
             entry_id: r.entry_id,
             position: r.position,
+            author_note: Some(r.author_note),
             entry: entries.remove(&r.entry_id),
             private_note: r.private_note,
             note_revision: r.note_revision,
