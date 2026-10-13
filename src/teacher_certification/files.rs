@@ -226,15 +226,28 @@ pub async fn read_admin(
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Response, AppError> {
-    permissions::load(&state, &auth)
-        .await?
-        .require("teacherapply.read_sensitive")?;
+    let authorization = permissions::load(&state, &auth).await?;
+    authorization.require("teacherapply.access")?;
+    // 按存储的材料类型授权，不能由调用方指定类型来绕过身份证权限。
+    let kind = sqlx::query_scalar::<_, String>("SELECT kind FROM teacher_certification_files f WHERE id=$1 AND state='ready' AND (expires_at IS NULL OR expires_at > now()) AND EXISTS (SELECT 1 FROM teacher_application_files a WHERE a.file_id=f.id)")
+        .bind(id).fetch_optional(&state.pool).await.map_err(AppError::internal)?
+        .ok_or_else(|| AppError::not_found("材料不存在"))?;
+    let key = material_permission(&kind).ok_or_else(|| AppError::not_found("材料不存在"))?;
+    authorization.require(key)?;
     let response = read(&state, id, None).await?;
     // 对象存储读取可能耗时；交付字节前再次核验撤权、禁用及会话状态。
-    permissions::reload(&state, &auth)
-        .await?
-        .require("teacherapply.read_sensitive")?;
+    let current = permissions::reload(&state, &auth).await?;
+    current.require("teacherapply.access")?;
+    current.require(key)?;
     Ok(response)
+}
+
+pub(crate) fn material_permission(kind: &str) -> Option<&'static str> {
+    match kind {
+        "id_front" | "id_back" => Some("teacherapply.read_identity"),
+        "education" | "language" => Some("teacherapply.read_certificates"),
+        _ => None,
+    }
 }
 
 #[utoipa::path(delete, path = "/api/v1/me/teacher-certification/files/{id}", tag = "teacher-certification",

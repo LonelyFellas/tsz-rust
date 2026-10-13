@@ -275,6 +275,9 @@ async fn delegated_catalog_permissions_cover_read_write_and_revocation(pool: PgP
             StatusCode::OK
         );
     }
+    // 废弃的统一编辑权限即使残留在数据库，也不能授权任何新操作。
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'lexicon_settings.edit',$1)")
+        .bind(actor).execute(&pool).await.unwrap();
     assert_eq!(
         call(
             &state,
@@ -287,7 +290,7 @@ async fn delegated_catalog_permissions_cover_read_write_and_revocation(pool: PgP
         .0,
         StatusCode::FORBIDDEN
     );
-    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'lexicon_settings.edit',$1)")
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'lexicon_settings.edit_basic',$1)")
         .bind(actor).execute(&pool).await.unwrap();
     let (status, _, created, _) =
         call(&state, Method::POST, ROOT, Some(&bearer), Some(payload)).await;
@@ -295,6 +298,20 @@ async fn delegated_catalog_permissions_cover_read_write_and_revocation(pool: PgP
     let id = created["id"].as_str().unwrap();
     let form_payload = json!({"part_of_speech_id":id,"code":"permission_form","name_zh":"权限词形","name_en":"Permission Form",
         "short_name_zh":"权形","abbreviation":"pf.","full_name_en":"permission form","sort_order":99});
+    assert_eq!(
+        call(
+            &state,
+            Method::POST,
+            "/api/v1/admin/settings/form-types",
+            Some(&bearer),
+            Some(form_payload.clone())
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'lexicon_settings.edit_forms',$1)")
+        .bind(actor).execute(&pool).await.unwrap();
     let (status, _, form, _) = call(
         &state,
         Method::POST,
@@ -304,7 +321,7 @@ async fn delegated_catalog_permissions_cover_read_write_and_revocation(pool: PgP
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{form}");
-    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='lexicon_settings.edit'")
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key IN ('lexicon_settings.edit_basic','lexicon_settings.edit_forms')")
         .bind(actor).execute(&pool).await.unwrap();
     let form_id = form["id"].as_str().unwrap();
     for uri in [
@@ -315,6 +332,45 @@ async fn delegated_catalog_permissions_cover_read_write_and_revocation(pool: PgP
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["code"], "forbidden");
     }
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'lexicon_settings.delete',$1)")
+        .bind(actor).execute(&pool).await.unwrap();
+    assert_eq!(
+        call(
+            &state,
+            Method::DELETE,
+            &format!("/api/v1/admin/settings/form-types/{form_id}?base_revision=1"),
+            Some(&bearer),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(
+            &state,
+            Method::DELETE,
+            &format!("{ROOT}/{id}?base_revision=1"),
+            Some(&bearer),
+            None
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let patch = json!({"base_revision":1,"name_zh":"禁止编辑","name_en":"Forbidden","abbreviation":"forb.","short_name_zh":"禁止","full_name_en":"forbidden","sort_order":100});
+    assert_eq!(
+        call(
+            &state,
+            Method::PATCH,
+            &format!("{ROOT}/{id}"),
+            Some(&bearer),
+            Some(patch)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
     // 绕过 handler 直接调用服务也不能在撤权后写入，不能把缺权限误报成对象仍被引用。
     let service = tsz_rust::catalog::service::CatalogService::new(
         tsz_rust::catalog::repository::CatalogRepository::new(pool.clone()),
@@ -335,7 +391,7 @@ async fn delegated_catalog_permissions_cover_read_write_and_revocation(pool: PgP
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(count, 0);
 }
 
 #[sqlx::test]

@@ -1164,3 +1164,121 @@ async fn audio_upload_migration_preserves_effective_writers_without_expanding_re
     sqlx::raw_sql(down).execute(&pool).await.unwrap();
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM admin_permission_grants WHERE permission_key='speech.upload_audio'").fetch_one(&pool).await.unwrap(),0);
 }
+
+#[sqlx::test]
+async fn teacher_catalog_retirement_removes_grants_and_tags_without_mapping(pool: PgPool) {
+    let actor = seed(&pool, AdminRole::Admin).await;
+    let tag = Uuid::now_v7();
+    sqlx::query("INSERT INTO permission_tags(id,name) VALUES($1,'退休权限测试')")
+        .bind(tag)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let retired = ["teacherapply.read_sensitive", "lexicon_settings.edit"];
+    let split = [
+        "teacherapply.read_certificates",
+        "teacherapply.read_identity",
+        "lexicon_settings.edit_basic",
+        "lexicon_settings.edit_sub",
+        "lexicon_settings.edit_forms",
+        "lexicon_settings.delete",
+    ];
+    let unchanged = [
+        "teacherapply.access",
+        "lexicon_settings.access",
+        "users.read_identity",
+    ];
+    for key in retired.iter().chain(unchanged.iter()) {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)")
+            .bind(actor).bind(key).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO permission_tag_items(tag_id,permission_key) VALUES($1,$2)")
+            .bind(tag)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let up = include_str!("../migrations/20261013010000_teacher_catalog_permissions.up.sql");
+    let down = include_str!("../migrations/20261013010000_teacher_catalog_permissions.down.sql");
+    for (script, version) in [(up, 1_i64), (up, 1_i64), (down, 1_i64)] {
+        sqlx::raw_sql(script).execute(&pool).await.unwrap();
+        let keys = sqlx::query_scalar::<_,String>("SELECT permission_key FROM admin_permission_grants WHERE admin_id=$1 ORDER BY permission_key")
+            .bind(actor).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            keys,
+            vec![
+                "lexicon_settings.access",
+                "teacherapply.access",
+                "users.read_identity"
+            ]
+        );
+        let tags = sqlx::query_scalar::<_,String>("SELECT permission_key FROM permission_tag_items WHERE tag_id=$1 ORDER BY permission_key")
+            .bind(tag).fetch_all(&pool).await.unwrap();
+        assert_eq!(tags, keys);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT permission_version FROM admins WHERE id=$1")
+                .bind(actor)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            version
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT version FROM permission_tags WHERE id=$1")
+                .bind(tag)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            version
+        );
+    }
+    for key in &split {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)")
+            .bind(actor).bind(key).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO permission_tag_items(tag_id,permission_key) VALUES($1,$2)")
+            .bind(tag)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM admin_permission_grants WHERE admin_id=$1"
+        )
+        .bind(actor)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM permission_tag_items WHERE tag_id=$1")
+            .bind(tag)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT permission_version FROM admins WHERE id=$1")
+            .bind(actor)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT version FROM permission_tags WHERE id=$1")
+            .bind(tag)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    // Retired keys are invalid even when manually left in storage.
+    for key in retired {
+        assert!(catalog::validate_keys(&[key.to_owned()]).is_err());
+    }
+}

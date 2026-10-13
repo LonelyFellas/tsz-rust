@@ -152,10 +152,6 @@ pub async fn review(
     }
     notify(&mut tx, owner, Some(id), kind, reason, reviewer).await?;
     tx.commit().await.map_err(AppError::internal)?;
-    let mut application = application;
-    if !authorization.has("teacherapply.read_sensitive") {
-        application.redact_sensitive();
-    }
     Ok(application)
 }
 

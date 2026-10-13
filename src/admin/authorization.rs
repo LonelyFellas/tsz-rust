@@ -293,7 +293,10 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "GET",
         "/teacher-certification/files/{id}",
-        RoutePolicy::All(&["teacherapply.read_sensitive"]),
+        RoutePolicy::Any(&[
+            "teacherapply.read_certificates",
+            "teacherapply.read_identity",
+        ]),
     ),
     (
         "GET",
@@ -330,47 +333,47 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "POST",
         "/settings/parts-of-speech",
-        RoutePolicy::All(&["lexicon_settings.edit"]),
+        RoutePolicy::All(&["lexicon_settings.edit_basic"]),
     ),
     (
         "PATCH",
         "/settings/parts-of-speech/{id}",
-        RoutePolicy::All(&["lexicon_settings.edit"]),
+        RoutePolicy::All(&["lexicon_settings.edit_basic"]),
     ),
     (
         "DELETE",
         "/settings/parts-of-speech/{id}",
-        RoutePolicy::All(&["lexicon_settings.edit"]),
+        RoutePolicy::SuperAdmin,
     ),
     (
         "POST",
         "/settings/parts-of-speech/{id}/sub-parts",
-        RoutePolicy::All(&["lexicon_settings.edit"]),
+        RoutePolicy::All(&["lexicon_settings.edit_sub"]),
     ),
     (
         "PATCH",
         "/settings/parts-of-speech/{id}/sub-parts/{sub_id}",
-        RoutePolicy::All(&["lexicon_settings.edit"]),
+        RoutePolicy::All(&["lexicon_settings.edit_sub"]),
     ),
     (
         "DELETE",
         "/settings/parts-of-speech/{id}/sub-parts/{sub_id}",
-        RoutePolicy::All(&["lexicon_settings.edit"]),
+        RoutePolicy::All(&["lexicon_settings.delete"]),
     ),
     (
         "POST",
         "/settings/form-types",
-        RoutePolicy::All(&["lexicon_settings.edit"]),
+        RoutePolicy::All(&["lexicon_settings.edit_forms"]),
     ),
     (
         "PATCH",
         "/settings/form-types/{id}",
-        RoutePolicy::All(&["lexicon_settings.edit"]),
+        RoutePolicy::All(&["lexicon_settings.edit_forms"]),
     ),
     (
         "DELETE",
         "/settings/form-types/{id}",
-        RoutePolicy::All(&["lexicon_settings.edit"]),
+        RoutePolicy::All(&["lexicon_settings.delete"]),
     ),
     (
         "GET",

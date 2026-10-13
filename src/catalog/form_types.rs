@@ -316,7 +316,7 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<FormTypeConfig>), AppError> {
     permissions::load(&state, &auth)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.edit_forms")?;
     if !crate::lexicon::form_types::valid_code(&request.code) {
         return Err(AppError::validation(
             ErrorCode::InvalidFormType,
@@ -327,7 +327,7 @@ pub async fn create(
     let mut tx = state.pool.begin().await.map_err(database_error)?;
     permissions::lock(&mut tx, auth.subject)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.edit_forms")?;
     require_part(&mut tx, request.part_of_speech_id).await?;
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO catalog.form_types(id,part_of_speech_id,code,name_zh,name_en,short_name_zh,abbreviation,full_name_en,sort_order,created_by_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
@@ -382,11 +382,11 @@ pub async fn update(
 ) -> Result<Json<FormTypeConfig>, AppError> {
     permissions::load(&state, &auth)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.edit_forms")?;
     let mut tx = state.pool.begin().await.map_err(database_error)?;
     permissions::lock(&mut tx, auth.subject)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.edit_forms")?;
     let current = lock(&mut tx, path.id, request.base_revision).await?;
     // 原形对所有词性通用，不接受归属；其余词形保持原归属或改挂到另一个词性。
     let part_of_speech_id = if current.code == "base" {
@@ -433,11 +433,11 @@ pub async fn remove(
 ) -> Result<StatusCode, AppError> {
     permissions::load(&state, &auth)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.delete")?;
     let mut tx = state.pool.begin().await.map_err(database_error)?;
     permissions::lock(&mut tx, auth.subject)
         .await?
-        .require("lexicon_settings.edit")?;
+        .require("lexicon_settings.delete")?;
     let value = lock(&mut tx, path.id, query.base_revision).await?;
     if value.code == "base" {
         return Err(AppError::conflict(

@@ -145,9 +145,10 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 - `POST /me/teacher-certification/applications`：姓名、联系方式、说明、身份证正反面、学历和语言证明全部必填；后两类各 1–10 张。待审／已认证时拒绝重复提交（409）。
 - `GET /me/teacher-certification/applications/{id}`：本人历史申请，不用最新申请代替通知关联的旧申请。
 - `GET /me/notifications`、`PATCH /me/notifications/{id}/read`：本人分页通知与幂等标已读。
-- `GET /admin/teacher-applications`、`GET /admin/teacher-applications/{id}`、`GET /admin/teacher-certification/files/{id}`：仅超管；列表支持 page/page_size/status，材料必须已关联申请。
-- `POST /admin/teacher-applications/{id}/review`：超管 approve/reject，驳回必须填写原因。
-- `DELETE /admin/users/{id}/teacher-certification`：超管撤销，必须填写原因；兼容没有申请记录的历史已认证用户。
+- `GET /admin/teacher-applications`、`GET /admin/teacher-applications/{id}`：需要 `teacherapply.access`；列表支持 page/page_size/status，返回姓名、联系方式、认证说明及审核/撤销结果。详情的 files 按材料权限筛选。
+- `GET /admin/teacher-certification/files/{id}`：身份证正反面需要 `teacherapply.read_identity`，学历/语言证书需要 `teacherapply.read_certificates`，二者均依赖 `teacherapply.access`。按数据库 kind 鉴权，材料必须已关联申请，交付字节前复核撤权。用户管理的 `users.read_identity` 仍是独立入口。
+- `POST /admin/teacher-applications/{id}/review`：需要 `teacherapply.review`，支持 approve/reject，驳回必须填写原因。
+- `DELETE /admin/users/{id}/teacher-certification`：需要 `teacherapply.revoke`，必须填写原因；支持没有申请记录的已认证用户。
 
 普通管理员只从用户列表／详情查看认证状态，以上管理接口均拒绝其访问。审核、资格变动、角色成员关系及站内通知同事务提交；重复审核返回 409，不重复发通知。驳回、撤销允许重新申请，保留历次记录。材料响应为 `Cache-Control: no-store`，前端使用 Blob URL，切换账号或卸载时释放。
 
@@ -189,3 +190,9 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 旧客户端替换词义或独立例句时，若当前内容已有新格式，后端在权限、行锁和 revision 核对后拒绝。词条使用既有 422 validation/meanings_storage_unsafe 提示刷新；独立例句使用 400 invalid_request_body 的中文 detail。本地输入保留，拒写不更改内容、关联、revision 或审计。普通词形修改保留服务器格式；删除带格式的 POS 时旧客户端必须更新。无新格式的旧写仍可用，新客户端可显式修改或清除格式。
 
 先部署兼容后端并验收，再发布声明能力的读取客户端和 `DEPLOY_SENTENCE_FORMATTING=true` 后台。无需人工确认全部标签页更新。已有新数据后回退应关闭写入口，保留兼容后端和读取能力，不回退旧 DTO。无新增数据库迁移。
+
+## 权限名称与边界（禅道 #125–#127）
+
+主记录在前端仓库 `docs/features/permissions-125-127/README.md`。项目尚未上线，本批不做旧授权兼容。迁移删除 `teacherapply.read_sensitive` 和 `lexicon_settings.edit` 的管理员及标签引用，不映射新权限；down 清除拆分权限，不恢复已删除授权。
+
+词性配置查看使用 `lexicon_settings.access`；新增/编辑基本词性、细分词性、词形变化分别需要 `edit_basic`、`edit_sub`、`edit_forms`。细分词性和词形变化删除需要 `lexicon_settings.delete`；基本词性删除仅限超管，仍受引用和 revision 限制。词条/例句编辑的辅助目录读取维持原规则。前后端同步更新，不支持混用版本。

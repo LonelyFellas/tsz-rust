@@ -8,11 +8,9 @@ use uuid::Uuid;
 pub struct TeacherApplication {
     pub id: Uuid,
     pub user_id: Uuid,
-    /// 管理端无 teacherapply.read_sensitive 时为空字符串；本人读取不脱敏。
+    /// 申请本人或拥有 teacherapply.access 的管理员可查看。
     pub real_name: String,
-    /// 管理端无 teacherapply.read_sensitive 时为空字符串。
     pub contact: String,
-    /// 管理端无 teacherapply.read_sensitive 时为空字符串。
     pub statement: String,
     pub status: String,
     pub submitted_at: DateTime<Utc>,
@@ -20,16 +18,6 @@ pub struct TeacherApplication {
     pub review_reason: Option<String>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub revoke_reason: Option<String>,
-}
-
-impl TeacherApplication {
-    pub(crate) fn redact_sensitive(&mut self) {
-        self.real_name.clear();
-        self.contact.clear();
-        self.statement.clear();
-        self.review_reason = None;
-        self.revoke_reason = None;
-    }
 }
 
 #[derive(Serialize, ToSchema)]

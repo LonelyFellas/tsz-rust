@@ -53,14 +53,9 @@ pub async fn list(
     {
         return Err(service::invalid("认证状态无效"));
     }
-    let mut items = sqlx::query_as::<_, TeacherApplication>(
+    let items = sqlx::query_as::<_, TeacherApplication>(
         "SELECT * FROM teacher_applications WHERE ($1::text IS NULL OR status = $1) ORDER BY submitted_at DESC, id DESC LIMIT $2 OFFSET $3",
     ).bind(&query.status).bind(limit).bind(offset).fetch_all(&state.pool).await.map_err(AppError::internal)?;
-    if !authorization.has("teacherapply.read_sensitive") {
-        items
-            .iter_mut()
-            .for_each(TeacherApplication::redact_sensitive);
-    }
     let total = sqlx::query_scalar(
         "SELECT count(*) FROM teacher_applications WHERE ($1::text IS NULL OR status = $1)",
     )
@@ -180,10 +175,9 @@ pub async fn admin_detail(
     let authorization = permissions::load(&state, &auth).await?;
     authorization.require("teacherapply.access")?;
     let Json(mut response) = detail(&state, id, None).await?;
-    if !authorization.has("teacherapply.read_sensitive") {
-        response.application.redact_sensitive();
-        response.files.clear();
-    }
+    response.files.retain(|file| {
+        super::files::material_permission(&file.kind).is_some_and(|key| authorization.has(key))
+    });
     Ok(Json(response))
 }
 
