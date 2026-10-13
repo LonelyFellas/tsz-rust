@@ -92,14 +92,6 @@ pub async fn detail(
 ) -> Result<Json<AdminWordlist>, AppError> {
     Ok(Json(management::detail(&state.pool, &auth, id).await?))
 }
-#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/edit",tag="wordlists",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,description="词表管理",body=AdminWordlistEdit),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
-pub async fn edit(
-    State(state): State<AppState>,
-    auth: AdminAuth,
-    ApiPath(id): ApiPath<Uuid>,
-) -> Result<Json<AdminWordlistEdit>, AppError> {
-    Ok(Json(management::edit(&state.pool, &auth, id).await?))
-}
 #[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/items",tag="wordlists",security(("bearer_auth"=[])),params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 保留完整句子格式")),responses((status=200,description="词表管理",body=WordlistItems),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
 pub async fn current_items(
     State(state): State<AppState>,
@@ -121,25 +113,6 @@ pub async fn catalog(
     ApiQuery(query): ApiQuery<WordlistQuery>,
 ) -> Result<Json<WordlistCatalog>, AppError> {
     Ok(Json(management::catalog(&state.pool, &auth, query).await?))
-}
-#[utoipa::path(post,path="/api/v1/admin/wordlists",tag="wordlists",security(("bearer_auth"=[])),request_body=CreateAdminWordlist,responses((status=200,description="词表管理",body=AdminWordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
-pub async fn create(
-    State(state): State<AppState>,
-    auth: AdminAuth,
-    ApiJson(input): ApiJson<CreateAdminWordlist>,
-) -> Result<Json<AdminWordlist>, AppError> {
-    Ok(Json(management::create(&state.pool, &auth, input).await?))
-}
-#[utoipa::path(put,path="/api/v1/admin/wordlists/{id}",tag="wordlists",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),request_body=UpdateAdminWordlist,responses((status=200,description="词表管理",body=AdminWordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
-pub async fn update(
-    State(state): State<AppState>,
-    auth: AdminAuth,
-    ApiPath(id): ApiPath<Uuid>,
-    ApiJson(input): ApiJson<UpdateAdminWordlist>,
-) -> Result<Json<AdminWordlist>, AppError> {
-    Ok(Json(
-        management::update(&state.pool, &auth, id, input).await?,
-    ))
 }
 #[utoipa::path(post,path="/api/v1/admin/wordlists/{id}/visibility",tag="wordlists",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),request_body=WordlistVisibility,responses((status=200,description="词表管理",body=AdminWordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
 pub async fn visibility(
@@ -172,15 +145,4 @@ pub async fn delete(
 ) -> Result<StatusCode, AppError> {
     management::delete(&state.pool, &auth, id, input).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-#[utoipa::path(get,path="/api/v1/admin/wordlists/suggestions",tag="wordlists",params(WordlistSuggestionQuery),security(("bearer_auth"=[])),responses((status=200,description="最多三个词条候选，无总数和分页",body=WordlistSuggestions),(status=400,description="查询无效"),(status=401,description="会话无效"),(status=403,description="权限不足")))]
-pub async fn suggestions(
-    State(state): State<AppState>,
-    auth: AdminAuth,
-    ApiQuery(query): ApiQuery<WordlistSuggestionQuery>,
-) -> Result<Json<WordlistSuggestions>, AppError> {
-    Ok(Json(
-        super::suggestions::for_admin(&state.pool, &auth, query).await?,
-    ))
 }

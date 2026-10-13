@@ -18,10 +18,6 @@ pub fn router(_state: AppState) -> Router<AppState> {
 
     Router::new()
         .route(
-            "/wordlists/suggestions",
-            get(crate::wordlists::admin_handler::suggestions),
-        )
-        .route(
             "/wordlists/management",
             get(crate::wordlists::admin_handler::management_list),
         )
@@ -31,12 +27,7 @@ pub fn router(_state: AppState) -> Router<AppState> {
         )
         .route(
             "/wordlists/{id}",
-            get(crate::wordlists::admin_handler::detail)
-                .put(crate::wordlists::admin_handler::update),
-        )
-        .route(
-            "/wordlists/{id}/edit",
-            get(crate::wordlists::admin_handler::edit),
+            get(crate::wordlists::admin_handler::detail),
         )
         .route(
             "/wordlists/{id}/items",
@@ -54,11 +45,7 @@ pub fn router(_state: AppState) -> Router<AppState> {
             "/wordlists/{id}/delete",
             post(crate::wordlists::admin_handler::delete),
         )
-        .route(
-            "/wordlists",
-            get(crate::wordlists::admin_handler::list)
-                .post(crate::wordlists::admin_handler::create),
-        )
+        .route("/wordlists", get(crate::wordlists::admin_handler::list))
         .route(
             "/wordlists/{id}/review-requests",
             get(crate::wordlists::admin_handler::reviews),

@@ -82,11 +82,6 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "GET",
-        "/wordlists/suggestions",
-        RoutePolicy::All(&["wordlists.access"]),
-    ),
-    (
-        "GET",
         "/wordlists/management",
         RoutePolicy::All(&["wordlists.access"]),
     ),
@@ -102,23 +97,8 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "GET",
-        "/wordlists/{id}/edit",
-        RoutePolicy::All(&["wordlists.edit"]),
-    ),
-    (
-        "GET",
         "/wordlists/{id}/items",
         RoutePolicy::All(&["wordlists.access"]),
-    ),
-    (
-        "POST",
-        "/wordlists",
-        RoutePolicy::All(&["wordlists.create"]),
-    ),
-    (
-        "PUT",
-        "/wordlists/{id}",
-        RoutePolicy::All(&["wordlists.edit"]),
     ),
     (
         "POST",

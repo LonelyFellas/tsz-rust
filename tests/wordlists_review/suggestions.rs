@@ -34,8 +34,8 @@ async fn suggestions_rank_words_dedupe_surfaces_and_return_only_lightweight_summ
             surface(&pool, id, label, "uk", None).await;
         }
     }
-    let get = |q: &str| format!("/api/v1/admin/wordlists/suggestions?q={q}");
-    let prefix = admin_call(&state, manager, "GET", &get("appl"), Value::Null).await;
+    let get = |q: &str| format!("/api/v1/wordlists/suggestions?q={q}");
+    let prefix = call(&state, &user, "GET", &get("appl"), Value::Null).await;
     assert_eq!(prefix.0, StatusCode::OK, "{}", prefix.1);
     assert_eq!(
         prefix.1["items"]
@@ -51,14 +51,14 @@ async fn suggestions_rank_words_dedupe_surfaces_and_return_only_lightweight_summ
     assert_eq!(item.as_object().unwrap().len(), 4);
     assert_eq!(item["glosses"], json!(["测试中文", "专用词义"]));
     assert!(!prefix.1.to_string().contains("ADMIN PRIVATE"));
-    let exact = admin_call(&state, manager, "GET", &get("APPLE"), Value::Null).await;
+    let exact = call(&state, &user, "GET", &get("APPLE"), Value::Null).await;
     assert_eq!(exact.1["items"][0]["entry_id"], apple.to_string());
-    let short = admin_call(&state, manager, "GET", &get("a"), Value::Null).await;
+    let short = call(&state, &user, "GET", &get("a"), Value::Null).await;
     assert_eq!(short.1["items"].as_array().unwrap().len(), 1);
     assert_eq!(short.1["items"][0]["label"], "a");
-    let short_none = admin_call(&state, manager, "GET", &get("ap"), Value::Null).await;
+    let short_none = call(&state, &user, "GET", &get("ap"), Value::Null).await;
     assert_eq!(short_none.1["items"], json!([]));
-    let typo = admin_call(&state, manager, "GET", &get("aple"), Value::Null).await;
+    let typo = call(&state, &user, "GET", &get("aple"), Value::Null).await;
     assert!(
         typo.1["items"]
             .as_array()
@@ -67,7 +67,7 @@ async fn suggestions_rank_words_dedupe_surfaces_and_return_only_lightweight_summ
             .any(|v| v["entry_id"] == apple.to_string())
     );
     assert!(typo.1["items"].as_array().unwrap().len() <= 3);
-    let phrase = admin_call(&state, manager, "GET", &get("look%20forward"), Value::Null).await;
+    let phrase = call(&state, &user, "GET", &get("look%20forward"), Value::Null).await;
     assert!(
         phrase.1["items"]
             .as_array()
@@ -75,7 +75,7 @@ async fn suggestions_rank_words_dedupe_surfaces_and_return_only_lightweight_summ
             .iter()
             .all(|v| v["label"].as_str().unwrap().starts_with("look forward"))
     );
-    let phrase_typo = admin_call(&state, manager, "GET", &get("look%20forwadr"), Value::Null).await;
+    let phrase_typo = call(&state, &user, "GET", &get("look%20forwadr"), Value::Null).await;
     assert_eq!(phrase_typo.0, StatusCode::OK, "{}", phrase_typo.1);
     let phrase_ids = phrase_typo.1["items"]
         .as_array()
@@ -89,11 +89,11 @@ async fn suggestions_rank_words_dedupe_surfaces_and_return_only_lightweight_summ
         "duplicates must not crowd out other entries: {}",
         phrase_typo.1
     );
-    let alias = admin_call(&state, manager, "GET", &get("it's%20wor"), Value::Null).await;
+    let alias = call(&state, &user, "GET", &get("it's%20wor"), Value::Null).await;
     assert_eq!(alias.1["items"][0]["entry_id"], apostrophe.to_string());
-    let normalized = admin_call(
+    let normalized = call(
         &state,
-        manager,
+        &user,
         "GET",
         &get("%EF%BC%A1%EF%BC%B0%EF%BC%B0%EF%BC%AC%EF%BC%A5"),
         Value::Null,
@@ -101,12 +101,12 @@ async fn suggestions_rank_words_dedupe_surfaces_and_return_only_lightweight_summ
     .await;
     assert_eq!(normalized.1["items"][0]["entry_id"], apple.to_string());
     for q in ["", "%20%20", "%25", "%5F%5F", "app%25", "zzxxyyqq"] {
-        let response = admin_call(&state, manager, "GET", &get(q), Value::Null).await;
+        let response = call(&state, &user, "GET", &get(q), Value::Null).await;
         assert_eq!(response.0, StatusCode::OK, "{}", response.1);
         assert_eq!(response.1["items"], json!([]));
     }
     assert_eq!(
-        admin_call(&state, manager, "GET", &get("a&page=2"), Value::Null)
+        call(&state, &user, "GET", &get("a&page=2"), Value::Null)
             .await
             .0,
         StatusCode::BAD_REQUEST
@@ -130,7 +130,7 @@ async fn suggestions_rank_words_dedupe_surfaces_and_return_only_lightweight_summ
     publish(&pool, apple, manager, "renamed", 3).await;
     surface(&pool, apple, "retired-key", "uk", Some(old)).await;
     assert_eq!(
-        admin_call(&state, manager, "GET", &get("retired-key"), Value::Null)
+        call(&state, &user, "GET", &get("retired-key"), Value::Null)
             .await
             .1["items"],
         json!([])
@@ -140,7 +140,7 @@ async fn suggestions_rank_words_dedupe_surfaces_and_return_only_lightweight_summ
         .execute(&pool)
         .await
         .unwrap();
-    let archived = admin_call(&state, manager, "GET", &get("apple"), Value::Null).await;
+    let archived = call(&state, &user, "GET", &get("apple"), Value::Null).await;
     assert!(
         !archived.1["items"]
             .as_array()
@@ -148,15 +148,15 @@ async fn suggestions_rank_words_dedupe_surfaces_and_return_only_lightweight_summ
             .iter()
             .any(|v| v["entry_id"] == apple.to_string())
     );
-    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
-        .bind(manager)
+    sqlx::query("UPDATE users SET status='disabled' WHERE id=$1")
+        .bind(user.subject)
         .execute(&pool)
         .await
         .unwrap();
     assert_eq!(
-        admin_call(&state, manager, "GET", &get("apple"), Value::Null)
+        call(&state, &user, "GET", &get("apple"), Value::Null)
             .await
             .0,
-        StatusCode::FORBIDDEN
+        StatusCode::UNAUTHORIZED
     );
 }

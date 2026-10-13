@@ -31,22 +31,6 @@ macro_rules! permission {
 
 pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
-        "wordlists.create",
-        "wordlists",
-        "创建词表",
-        "action",
-        ["wordlists.access"],
-        "medium"
-    ),
-    permission!(
-        "wordlists.edit",
-        "wordlists",
-        "编辑词表",
-        "action",
-        ["wordlists.access"],
-        "medium"
-    ),
-    permission!(
         "wordlists.visibility",
         "wordlists",
         "设置词表公开状态",

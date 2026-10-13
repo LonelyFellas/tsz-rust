@@ -346,35 +346,6 @@ pub struct WordlistManagementQuery {
     /// Exclusive upper bound.
     pub created_before: Option<DateTime<Utc>>,
 }
-#[derive(Deserialize, Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AdminWordlistItemInput {
-    pub entry_id: Uuid,
-    #[schema(max_length = 1000)]
-    pub admin_note: String,
-}
-#[derive(Deserialize, Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CreateAdminWordlist {
-    pub idempotency_key: Uuid,
-    #[schema(min_length = 1, max_length = 100)]
-    pub name: String,
-    #[schema(min_items = 1, max_items = 10000)]
-    pub items: Vec<AdminWordlistItemInput>,
-}
-#[derive(Deserialize, Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateAdminWordlist {
-    pub expected_revision: i64,
-    pub name: String,
-    pub items: Vec<AdminWordlistItemInput>,
-}
-#[derive(Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AdminWordlistEdit {
-    pub detail: AdminWordlist,
-    pub items: Vec<AdminWordlistEditItem>,
-}
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordlistVisibility {
@@ -386,15 +357,6 @@ pub struct WordlistVisibility {
 pub struct WordlistRecommendation {
     pub expected_revision: i64,
     pub recommended: bool,
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AdminWordlistEditItem {
-    pub entry_id: Uuid,
-    pub admin_note: String,
-    #[schema(required = true)]
-    pub candidate: Option<WordlistCandidate>,
 }
 
 #[derive(Deserialize, IntoParams)]
