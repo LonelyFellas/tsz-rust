@@ -365,6 +365,24 @@ pub struct AdminWordlistPage {
     pub items: Vec<AdminWordlist>,
     pub pagination: PaginationMeta,
 }
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WordlistReviewState {
+    None,
+    Pending,
+    Approved,
+    Rejected,
+}
+impl WordlistReviewState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+}
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in=Query)]
@@ -373,6 +391,7 @@ pub struct WordlistManagementQuery {
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub public: Option<bool>,
+    pub review_state: Option<WordlistReviewState>,
     pub recommended: Option<bool>,
     pub created_from: Option<DateTime<Utc>>,
     /// Exclusive upper bound.

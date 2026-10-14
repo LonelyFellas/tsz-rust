@@ -196,3 +196,9 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 主记录在前端仓库 `docs/features/permissions-125-127/README.md`。项目尚未上线，本批不做旧授权兼容。迁移删除 `teacherapply.read_sensitive` 和 `lexicon_settings.edit` 的管理员及标签引用，不映射新权限；down 清除拆分权限，不恢复已删除授权。
 
 词性配置查看使用 `lexicon_settings.access`；新增/编辑基本词性、细分词性、词形变化分别需要 `edit_basic`、`edit_sub`、`edit_forms`。细分词性和词形变化删除需要 `lexicon_settings.delete`；基本词性删除仅限超管，仍受引用和 revision 限制。词条/例句编辑的辅助目录读取维持原规则。前后端同步更新，不支持混用版本。
+
+## 用户词表公开申请人工审核（2026-10-14）
+
+历史已公开词表保持公开，后续 `/me/wordlists/{id}/publish` 与 `/review-requests` 均提交人工审核申请，返回 pending，不再自动批准。待审仍仅作者可见，审核通过后公开。管理查询新增可选 `review_state=none|pending|approved|rejected`，筛选在分页前生效。新前端筛选需先发布新后端；回退旧后端会恢复自动批准行为。
+
+跨仓主记录位于前端仓库 `docs/features/wordlist-publication-review/README.md`，本次无需数据库迁移，不修改历史审核记录。

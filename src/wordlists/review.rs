@@ -27,23 +27,6 @@ pub async fn submit(
     id: Uuid,
     input: SubmitWordlist,
 ) -> Result<WordlistReview, AppError> {
-    submit_mode(pool, auth, id, input, false).await
-}
-pub async fn publish(
-    pool: &PgPool,
-    auth: &AuthUser,
-    id: Uuid,
-    input: SubmitWordlist,
-) -> Result<WordlistReview, AppError> {
-    submit_mode(pool, auth, id, input, true).await
-}
-async fn submit_mode(
-    pool: &PgPool,
-    auth: &AuthUser,
-    id: Uuid,
-    input: SubmitWordlist,
-    automatic: bool,
-) -> Result<WordlistReview, AppError> {
     let hash = service::hash(&input)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     service::lock_user(&mut tx, auth).await?;
@@ -73,17 +56,6 @@ async fn submit_mode(
         let request = Uuid::now_v7();
         sqlx::query("UPDATE wordlists SET state='pending',review_state='pending',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("INSERT INTO wordlist_review_requests(id,wordlist_id,submitted_revision,name,entry_ids,submit_key,request_hash,author_notes) VALUES($1,$2,$3,$4,$5,$6,$7,(SELECT COALESCE(jsonb_object_agg(entry_id::text,author_note),'{}'::jsonb) FROM wordlist_items WHERE wordlist_id=$2 AND author_note<>''))").bind(request).bind(id).bind(list.revision+1).bind(list.name).bind(ids).bind(input.idempotency_key).bind(hash).execute(&mut *tx).await.map_err(AppError::internal)?;
-        if automatic {
-            super::management::approve_entries(&mut tx, id).await?;
-            sqlx::query(
-                "UPDATE wordlists SET state='published',review_state='approved' WHERE id=$1",
-            )
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::internal)?;
-            sqlx::query("UPDATE wordlist_review_requests SET state='approved',decided_at=clock_timestamp() WHERE id=$1").bind(request).execute(&mut *tx).await.map_err(AppError::internal)?;
-        }
         request
     };
     let result = review(&mut tx, id, request).await?;
