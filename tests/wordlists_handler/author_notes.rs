@@ -85,6 +85,28 @@ async fn author_annotations_are_public_content_and_old_clients_keep_their_shape(
     .await;
     assert_eq!(published.0, StatusCode::OK, "{}", published.1);
     let request = published.1["id"].as_str().unwrap();
+    assert_eq!(published.1["state"], "pending");
+    assert_eq!(
+        annotated(
+            &state,
+            other.subject,
+            false,
+            &format!("/api/v1/wordlists/{id}/items"),
+            "v1"
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let approved = admin_call(
+        &state,
+        manager,
+        "POST",
+        &format!("/api/v1/admin/wordlists/{id}/review-requests/{request}/decision"),
+        json!({"expected_revision":2,"approve":true,"reason":null}),
+    )
+    .await;
+    assert_eq!(approved.0, StatusCode::OK, "{}", approved.1);
     let public_path = format!("/api/v1/wordlists/{id}/items");
     let visible = annotated(&state, other.subject, false, &public_path, "v1").await;
     assert_eq!(visible.0, StatusCode::OK);
@@ -101,7 +123,7 @@ async fn author_annotations_are_public_content_and_old_clients_keep_their_shape(
             .is_none()
     );
     let update =
-        json!({"expected_revision":2,"content":content(entry,"更新后的注释"),"note_updates":[]});
+        json!({"expected_revision":3,"content":content(entry,"更新后的注释"),"note_updates":[]});
     assert_eq!(
         call(&state, &owner, "PUT", &path, update.clone()).await.0,
         StatusCode::CONFLICT
@@ -110,9 +132,9 @@ async fn author_annotations_are_public_content_and_old_clients_keep_their_shape(
         call(&state, &other, "PUT", &path, update).await.0,
         StatusCode::NOT_FOUND
     );
-    let private = call(&state,&owner,"PUT",&path,json!({"expected_revision":2,"content":null,"note_updates":[{"entry_id":entry,"expected_note_revision":1,"private_note":"仍然只有作者能看"}]})).await;
+    let private = call(&state,&owner,"PUT",&path,json!({"expected_revision":3,"content":null,"note_updates":[{"entry_id":entry,"expected_note_revision":1,"private_note":"仍然只有作者能看"}]})).await;
     assert_eq!(private.0, StatusCode::OK);
-    assert_eq!(private.1["revision"], 2);
+    assert_eq!(private.1["revision"], 3);
     assert_eq!(private.1["state"], "published");
     assert_eq!(
         call(
@@ -120,7 +142,7 @@ async fn author_annotations_are_public_content_and_old_clients_keep_their_shape(
             &owner,
             "POST",
             &format!("{path}/withdraw"),
-            json!({"expected_revision":2})
+            json!({"expected_revision":3})
         )
         .await
         .0,
@@ -131,11 +153,11 @@ async fn author_annotations_are_public_content_and_old_clients_keep_their_shape(
         &owner,
         "PUT",
         &path,
-        json!({"expected_revision":3,"content":content(entry,"更新后的注释"),"note_updates":[]}),
+        json!({"expected_revision":4,"content":content(entry,"更新后的注释"),"note_updates":[]}),
     )
     .await;
     assert_eq!(saved.0, StatusCode::OK, "{}", saved.1);
-    assert_eq!(saved.1["revision"], 4);
+    assert_eq!(saved.1["revision"], 5);
     let mine = annotated(&state, owner.subject, false, &format!("{path}/items"), "v1").await;
     assert_eq!(mine.1["items"][0]["author_note"], "更新后的注释");
     assert_eq!(mine.1["items"][0]["private_note"], "仍然只有作者能看");
@@ -151,7 +173,7 @@ async fn author_annotations_are_public_content_and_old_clients_keep_their_shape(
     assert_eq!(snapshot.1["items"][0]["author_note"], "给读者的原注释");
     assert!(!snapshot.1.to_string().contains("仍然只有作者能看"));
     // An old client changing retained content must not erase annotations it cannot read.
-    let legacy_save = call(&state,&owner,"PUT",&path,json!({"expected_revision":4,"content":{"name":"旧客户端改名","entry_ids":[entry]},"note_updates":[]})).await;
+    let legacy_save = call(&state,&owner,"PUT",&path,json!({"expected_revision":5,"content":{"name":"旧客户端改名","entry_ids":[entry]},"note_updates":[]})).await;
     assert_eq!(legacy_save.0, StatusCode::OK);
     assert_eq!(
         annotated(&state, owner.subject, false, &format!("{path}/items"), "v1")

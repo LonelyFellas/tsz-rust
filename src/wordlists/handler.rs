@@ -246,14 +246,14 @@ pub async fn recommended(
         super::management::recommended(&state.pool, query).await?,
     ))
 }
-#[utoipa::path(post,path="/api/v1/me/wordlists/{id}/publish",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=SubmitWordlist,responses((status=200,description="纯智能词表自动通过公开申请",body=WordlistReview),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
+#[utoipa::path(post,path="/api/v1/me/wordlists/{id}/publish",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=SubmitWordlist,responses((status=200,description="提交公开申请，等待管理员人工审核",body=WordlistReview),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
 pub async fn publish(
     State(state): State<AppState>,
     auth: AuthUser,
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<SubmitWordlist>,
 ) -> Result<Json<WordlistReview>, AppError> {
-    Ok(Json(review::publish(&state.pool, &auth, id, input).await?))
+    Ok(Json(review::submit(&state.pool, &auth, id, input).await?))
 }
 
 #[utoipa::path(get,path="/api/v1/wordlists/suggestions",tag="wordlists",params(WordlistSuggestionQuery),security(("bearer_auth"=[])),responses((status=200,description="最多三个词条候选，无总数和分页",body=WordlistSuggestions),(status=400,description="查询无效"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号")))]

@@ -63,7 +63,7 @@ pub async fn list(
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     review::lock_admin(&mut tx, auth, "wordlists.access").await?;
-    let filter = "w.deleted_at IS NULL AND (strpos(lower(w.name),lower($1))>0 OR strpos(lower(COALESCE(u.display_name,a.display_name)),lower($1))>0) AND ($2::boolean IS NULL OR (w.state='published')=$2) AND ($3::boolean IS NULL OR w.recommended=$3) AND ($4::timestamptz IS NULL OR w.created_at>=$4) AND ($5::timestamptz IS NULL OR w.created_at<$5)";
+    let filter = "w.deleted_at IS NULL AND (strpos(lower(w.name),lower($1))>0 OR strpos(lower(COALESCE(u.display_name,a.display_name)),lower($1))>0) AND ($2::boolean IS NULL OR (w.state='published')=$2) AND ($3::boolean IS NULL OR w.recommended=$3) AND ($4::timestamptz IS NULL OR w.created_at>=$4) AND ($5::timestamptz IS NULL OR w.created_at<$5) AND ($6::text IS NULL OR w.review_state=$6)";
     let from = "wordlists w LEFT JOIN users u ON u.id=w.owner_user_id LEFT JOIN admins a ON a.id=w.owner_admin_id";
     let total = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT count(*) FROM {from} WHERE {filter}"
@@ -73,11 +73,12 @@ pub async fn list(
     .bind(query.recommended)
     .bind(query.created_from)
     .bind(query.created_before)
+    .bind(query.review_state.as_ref().map(WordlistReviewState::as_str))
     .fetch_one(&mut *tx)
     .await
     .map_err(AppError::internal)?;
     let items = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{} WHERE {filter} ORDER BY w.created_at DESC,w.id DESC LIMIT $6 OFFSET $7",
+        "{} WHERE {filter} ORDER BY w.created_at DESC,w.id DESC LIMIT $7 OFFSET $8",
         selection()
     )))
     .bind(q)
@@ -85,6 +86,7 @@ pub async fn list(
     .bind(query.recommended)
     .bind(query.created_from)
     .bind(query.created_before)
+    .bind(query.review_state.as_ref().map(WordlistReviewState::as_str))
     .bind(i64::from(size))
     .bind(i64::from(page - 1) * i64::from(size))
     .fetch_all(&mut *tx)
