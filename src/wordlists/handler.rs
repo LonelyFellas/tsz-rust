@@ -34,9 +34,17 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/wordlists/suggestions", get(suggestions))
         .route("/api/v1/wordlists/{id}", get(public_detail))
         .route("/api/v1/wordlists/{id}/items", get(public_items))
+        .route(
+            "/api/v1/wordlists/{id}/availability",
+            get(public_availability),
+        )
         .route("/api/v1/me/wordlists", get(my_list).post(create))
         .route("/api/v1/me/wordlists/{id}", get(my_detail).put(update))
         .route("/api/v1/me/wordlists/{id}/items", get(my_items))
+        .route(
+            "/api/v1/me/wordlists/{id}/availability",
+            get(my_availability),
+        )
         .route("/api/v1/me/wordlists/{id}/edit", get(edit))
         .route(
             "/api/v1/me/wordlists/{id}/review-requests",
@@ -84,6 +92,27 @@ pub async fn my_detail(
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Wordlist>, AppError> {
     Ok(Json(service::read(&state.pool, id, Some(&auth)).await?))
+}
+
+#[utoipa::path(get,path="/api/v1/wordlists/{id}/availability",tag="wordlists",params(("id"=Uuid,Path)),
+responses((status=200,description="整张词表的当前可用数量，不受条目分页和搜索影响",body=WordlistAvailability),(status=404,description="不存在或不可访问")))]
+pub async fn public_availability(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<WordlistAvailability>, AppError> {
+    Ok(Json(service::availability(&state.pool, id, None).await?))
+}
+
+#[utoipa::path(get,path="/api/v1/me/wordlists/{id}/availability",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),
+responses((status=200,description="本人整张词表的当前可用数量",body=WordlistAvailability),(status=401,description="会话无效"),(status=403,description="需要先绑定手机号"),(status=404,description="不存在或不可访问")))]
+pub async fn my_availability(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<WordlistAvailability>, AppError> {
+    Ok(Json(
+        service::availability(&state.pool, id, Some(&auth)).await?,
+    ))
 }
 
 #[utoipa::path(get,path="/api/v1/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),

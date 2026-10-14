@@ -58,6 +58,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/entries", get(handler::list).post(handler::create))
         .route(
+            "/entries/archive-impact",
+            axum::routing::post(handler::lifecycle::archive_impact),
+        )
+        .route(
             "/entries/archive-batch",
             axum::routing::post(handler::archive_batch),
         )

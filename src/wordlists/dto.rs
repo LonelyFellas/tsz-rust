@@ -254,6 +254,16 @@ pub struct MyWordlistItem {
 }
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct WordlistAvailability {
+    pub revision: i64,
+    #[schema(minimum = 0)]
+    pub available_count: i64,
+    #[schema(minimum = 0)]
+    pub unavailable_count: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WordlistItems {
     pub items: Vec<WordlistItem>,
     pub revision: i64,

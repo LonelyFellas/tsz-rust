@@ -25,6 +25,38 @@ fn lifecycle_v3_capabilities_enabled(state: &AppState) -> bool {
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/v1/admin/lexicon/entries/archive-impact",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    request_body = EntryArchiveImpactInput,
+    responses(
+        (status = 200, description = "归档前有效词表及可能受影响的未结束练习数量；仅提供统计，不披露私密内容", body = EntryArchiveImpact),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "无归档权限或无所选词条的操作权限"),
+        (status = 404, description = "词条不存在"),
+        (status = 409, description = "词条版本已变化"),
+        (status = 422, description = "entries 或版本非法"),
+        (status = 503, description = "V3 能力未开启")
+    )
+)]
+pub async fn archive_impact(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiJson(input): ApiJson<EntryArchiveImpactInput>,
+) -> Result<Json<EntryArchiveImpact>, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    let ids: Vec<_> = input.entries.iter().map(|target| target.id).collect();
+    require_lifecycle_v3_capabilities(&state, &ids).await?;
+    Ok(Json(
+        service(&state)
+            .archive_impact(admin.id, input)
+            .await
+            .map_err(map_error)?,
+    ))
+}
+
+#[utoipa::path(
     delete,
     path = "/api/v1/admin/lexicon/entries/{id}",
     tag = "admin-lexicon",

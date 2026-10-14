@@ -462,6 +462,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "POST",
+        "/lexicon/entries/archive-impact",
+        RoutePolicy::All(&["words.archive"]),
+    ),
+    (
+        "POST",
         "/lexicon/entries/archive-batch",
         RoutePolicy::All(&["words.archive"]),
     ),

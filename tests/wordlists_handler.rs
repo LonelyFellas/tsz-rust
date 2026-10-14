@@ -45,6 +45,31 @@ async fn private_roundtrip_idempotency_revision_and_archive_boundary(pool: PgPoo
         .0,
         StatusCode::NOT_FOUND
     );
+    let availability_path = format!("{path}/availability");
+    let availability = call(&state, &auth, "GET", &availability_path, Value::Null).await;
+    assert_eq!(availability.0, StatusCode::OK, "{}", availability.1);
+    assert_eq!(
+        availability.1,
+        json!({"revision":1,"available_count":2,"unavailable_count":0})
+    );
+    assert_eq!(
+        call(&state, &other, "GET", &availability_path, Value::Null)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "GET",
+            &format!("/api/v1/wordlists/{id}/availability"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
     let items = call(&state, &auth, "GET", &format!("{path}/items"), Value::Null).await;
     assert_eq!(items.0, StatusCode::OK, "{}", items.1);
     assert_eq!(items.1["items"][0]["private_note"], "私密备注");
@@ -78,6 +103,12 @@ async fn private_roundtrip_idempotency_revision_and_archive_boundary(pool: PgPoo
         .1;
     assert!(items["items"][1]["entry"].is_null());
     assert!(!items.to_string().contains("apple"));
+    assert_eq!(
+        call(&state, &auth, "GET", &availability_path, Value::Null)
+            .await
+            .1,
+        json!({"revision":2,"available_count":1,"unavailable_count":1})
+    );
     let catalog = call(
         &state,
         &auth,
@@ -112,6 +143,23 @@ async fn private_roundtrip_idempotency_revision_and_archive_boundary(pool: PgPoo
     let legacy_items = call(&state, &auth, "GET", &format!("{path}/items"), Value::Null).await;
     assert_eq!(legacy_items.0, StatusCode::OK);
     assert!(legacy_items.1["items"][0]["entry"].is_null());
+    assert_eq!(
+        call(&state, &auth, "GET", &availability_path, Value::Null)
+            .await
+            .1,
+        json!({"revision":2,"available_count":0,"unavailable_count":2})
+    );
+    sqlx::query("UPDATE lexicon.entries SET archived_at=NULL WHERE id=$1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&state, &auth, "GET", &availability_path, Value::Null)
+            .await
+            .1,
+        json!({"revision":2,"available_count":1,"unavailable_count":1})
+    );
 }
 
 #[sqlx::test]

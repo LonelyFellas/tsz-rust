@@ -346,6 +346,25 @@ pub async fn read(pool: &PgPool, id: Uuid, auth: Option<&AuthUser>) -> Result<Wo
     tx.commit().await.map_err(AppError::internal)?;
     Ok(result)
 }
+pub async fn availability(
+    pool: &PgPool,
+    id: Uuid,
+    auth: Option<&AuthUser>,
+) -> Result<WordlistAvailability, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::internal)?;
+    let list = read_lock(&mut tx, id, auth).await?;
+    let (available_count, unavailable_count) = sqlx::query_as(
+        "SELECT count(*) FILTER(WHERE p.id IS NOT NULL),count(*) FILTER(WHERE p.id IS NULL) FROM wordlist_items i LEFT JOIN lexicon.entries e ON e.id=i.entry_id AND e.archived_at IS NULL LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3 WHERE i.wordlist_id=$1",
+    ).bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+    eligible_owner(&mut tx, list.owner_user_id).await?;
+    tx.commit().await.map_err(AppError::internal)?;
+    Ok(WordlistAvailability {
+        revision: list.revision,
+        available_count,
+        unavailable_count,
+    })
+}
+
 pub async fn edit_snapshot(
     pool: &PgPool,
     id: Uuid,

@@ -655,6 +655,22 @@ pub struct EntryLifecycleTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct EntryArchiveImpactInput {
+    #[schema(min_items = 1, max_items = 100)]
+    pub entries: Vec<EntryLifecycleTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryArchiveImpact {
+    #[schema(minimum = 0)]
+    pub wordlist_count: i64,
+    #[schema(minimum = 0)]
+    pub active_run_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EntryLifecycleBatchInput {
     pub entries: Vec<EntryLifecycleTarget>,
     #[serde(skip_serializing_if = "Option::is_none")]
