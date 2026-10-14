@@ -1,4 +1,6 @@
 use super::*;
+use crate::lexicon::dto::{EntryArchiveImpact, EntryArchiveImpactInput};
+use crate::wordlists::service::VISIBLE_OWNER;
 use chrono::DateTime;
 
 const ARCHIVE_SCOPE: &str = "lexicon.entry.archive";
@@ -23,6 +25,92 @@ impl TargetState {
 }
 
 impl LexiconService {
+    pub async fn archive_impact(
+        &self,
+        actor_id: Uuid,
+        input: EntryArchiveImpactInput,
+    ) -> Result<EntryArchiveImpact, LexiconServiceError> {
+        validate_targets(&input.entries)?;
+        let mut tx = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        let authorization = crate::admin::permissions::lock(&mut tx, actor_id).await?;
+        authorization.require("words.archive")?;
+        let ids: Vec<_> = input.entries.iter().map(|target| target.id).collect();
+        let rows: Vec<(Uuid, i64, i64, Uuid)> = sqlx::query_as(
+            "SELECT id,revision,lifecycle_revision,created_by_admin_id FROM lexicon.entries WHERE id=ANY($1) ORDER BY id FOR SHARE",
+        ).bind(&ids).fetch_all(&mut *tx).await.map_err(database_error)?;
+        for target in &input.entries {
+            let (_, revision, lifecycle_revision, owner) = rows
+                .iter()
+                .find(|row| row.0 == target.id)
+                .ok_or(LexiconServiceError::WordNotFound)?;
+            authorization
+                .require_owned_action("words.archive", *owner)
+                .map_err(|_| LexiconServiceError::EntryPublishForbidden)?;
+            if *revision != target.base_revision {
+                return Err(LexiconServiceError::RevisionConflict {
+                    current_revision: *revision,
+                });
+            }
+            if *lifecycle_revision != target.base_lifecycle_revision {
+                return Err(LexiconServiceError::LifecycleRevisionConflict {
+                    current_lifecycle_revision: *lifecycle_revision,
+                });
+            }
+        }
+        let wordlist_count = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(DISTINCT w.id) FROM wordlist_items i JOIN wordlists w ON w.id=i.wordlist_id JOIN lexicon.entries e ON e.id=i.entry_id JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3 LEFT JOIN users u ON u.id=w.owner_user_id WHERE e.id=ANY($1) AND e.archived_at IS NULL AND e.current_publication_id IS NOT NULL AND w.deleted_at IS NULL AND {VISIBLE_OWNER}",
+        ))).bind(&ids).fetch_one(&mut *tx).await.map_err(database_error)?;
+        let active_run_count = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(DISTINCT r.id)
+             FROM learning_questions q
+             JOIN learning_runs r ON r.id=q.run_id
+             JOIN learning_tasks t ON t.id=r.task_id
+             JOIN users learner ON learner.id=r.user_id
+             WHERE q.entry_id=ANY($1)
+               AND r.state='active'
+               AND (r.expires_at IS NULL OR r.expires_at>clock_timestamp())
+               AND t.state='active'
+               AND (t.ends_at IS NULL OR t.ends_at>clock_timestamp())
+               AND learner.status='active'
+               AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=learner.id AND d.status='pending' AND d.effective_at<=clock_timestamp())
+               AND NOT EXISTS(
+                   SELECT 1 FROM learning_questions source_question
+                   WHERE source_question.run_id=r.id
+                     AND NOT EXISTS(
+                         SELECT 1 FROM wordlists w
+                         LEFT JOIN users u ON u.id=w.owner_user_id
+                         JOIN wordlist_items i ON i.wordlist_id=w.id
+                             AND i.entry_id=source_question.entry_id
+                             AND i.learning_membership_id=source_question.source_membership_id
+                         JOIN lexicon.entries e ON e.id=i.entry_id
+                         JOIN lexicon.entry_publications p ON p.id=e.current_publication_id
+                             AND p.entry_id=e.id AND p.content_schema_version=3
+                         WHERE w.id=source_question.source_wordlist_id
+                           AND w.deleted_at IS NULL AND {VISIBLE_OWNER}
+                           AND ((w.owner_user_id=r.user_id AND source_question.source_public_generation IS NULL)
+                             OR (w.owner_user_id IS DISTINCT FROM r.user_id AND w.state='published'
+                                 AND source_question.source_public_generation=w.learning_public_generation))
+                           AND e.archived_at IS NULL
+                           AND source_question.entry_archive_generation=e.wordlist_archive_generation
+                     )
+               )",
+        )))
+        .bind(&ids)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(database_error)?;
+        tx.commit().await.map_err(database_error)?;
+        Ok(EntryArchiveImpact {
+            wordlist_count,
+            active_run_count,
+        })
+    }
+
     /// 生命周期命令只受理 V3 词条；库里出现别的 `content_schema_version` 属于不变量破损。
     pub async fn lifecycle_requires_v3(
         &self,

@@ -7,6 +7,216 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 #[sqlx::test]
+async fn archive_impact_is_private_aggregate_deduplicated_and_revision_checked(pool: PgPool) {
+    use wordlists_support::{admin, admin_call};
+    let (state, auth, list) = setup(&pool).await;
+    let state = state
+        .with_smart_lexicon_v3_flags_for_test(tsz_rust::config::SmartLexiconV3Flags::all_enabled());
+    let task = create(&state, &auth, list, "daily").await;
+    let run = start(&state, &auth, &task).await;
+    let entry: Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(list)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let actor = admin(&pool).await;
+    let path = "/api/v1/admin/lexicon/entries/archive-impact";
+    let target = json!({"id":entry,"base_revision":1,"base_lifecycle_revision":1});
+    let body = json!({"entries":[target.clone()]});
+    let impact = admin_call(&state, actor, "POST", path, body.clone()).await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(impact.1, json!({"wordlist_count":1,"active_run_count":1}));
+    let second = wordlists_support::entry(&pool, "batch-second").await;
+    let updated = call(&state, &auth, "PUT", &format!("/api/v1/me/wordlists/{list}"), json!({"expected_revision":1,"content":{"name":"batch impact","entry_ids":[entry,second]},"note_updates":[]})).await;
+    assert_eq!(updated.0, 200, "{}", updated.1);
+    let batch = admin_call(&state, actor, "POST", path, json!({"entries":[target.clone(),{"id":second,"base_revision":1,"base_lifecycle_revision":1}]})).await;
+    assert_eq!(batch.0, 200, "{}", batch.1);
+    assert_eq!(batch.1, json!({"wordlist_count":1,"active_run_count":1}));
+    assert_eq!(
+        admin_call(&state, actor, "POST", path, json!({"entries":[]}))
+            .await
+            .0,
+        422
+    );
+    assert_eq!(
+        admin_call(
+            &state,
+            actor,
+            "POST",
+            path,
+            json!({"entries":[target.clone(),target.clone()]})
+        )
+        .await
+        .0,
+        422
+    );
+    let mut stale = body.clone();
+    stale["entries"][0]["base_revision"] = json!(9);
+    assert_eq!(admin_call(&state, actor, "POST", path, stale).await.0, 409);
+    let mut stale = body.clone();
+    stale["entries"][0]["base_lifecycle_revision"] = json!(9);
+    assert_eq!(admin_call(&state, actor, "POST", path, stale).await.0, 409);
+    sqlx::query(
+        "UPDATE learning_runs SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+    )
+    .bind(Uuid::parse_str(run["id"].as_str().unwrap()).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        admin_call(&state, actor, "POST", path, body.clone())
+            .await
+            .1,
+        json!({"wordlist_count":1,"active_run_count":0})
+    );
+    sqlx::query("UPDATE wordlists SET deleted_at=clock_timestamp() WHERE id=$1")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        admin_call(&state, actor, "POST", path, body.clone())
+            .await
+            .1,
+        json!({"wordlist_count":0,"active_run_count":0})
+    );
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(admin_call(&state, actor, "POST", path, body).await.0, 403);
+}
+
+#[sqlx::test]
+async fn archive_impact_excludes_runs_with_unavailable_non_target_sources(pool: PgPool) {
+    use wordlists_support::{admin, admin_call};
+    let (state, auth, list) = setup(&pool).await;
+    let state = state
+        .with_smart_lexicon_v3_flags_for_test(tsz_rust::config::SmartLexiconV3Flags::all_enabled());
+    let entry: Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(list)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let second = wordlists_support::full_entry(&pool, "banana").await;
+    let updated = call(
+        &state,
+        &auth,
+        "PUT",
+        &format!("/api/v1/me/wordlists/{list}"),
+        json!({"expected_revision":1,"content":{"name":"whole run impact","entry_ids":[entry,second]},"note_updates":[]}),
+    )
+    .await;
+    assert_eq!(updated.0, 200, "{}", updated.1);
+    let mut input = create_body(list, "daily");
+    input["daily_question_count"] = json!(4);
+    let task = call(&state, &auth, "POST", "/api/v1/me/learning-tasks", input).await;
+    assert_eq!(task.0, 200, "{}", task.1);
+    let run = call(
+        &state,
+        &auth,
+        "POST",
+        &format!(
+            "/api/v1/me/learning-tasks/{}/runs",
+            task.1["id"].as_str().unwrap()
+        ),
+        start_body(None),
+    )
+    .await;
+    assert_eq!(run.0, 200, "{}", run.1);
+    let run_id = Uuid::parse_str(run.1["id"].as_str().unwrap()).unwrap();
+    let sources: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT entry_id FROM learning_questions WHERE run_id=$1 ORDER BY entry_id",
+    )
+    .bind(run_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut expected_sources = vec![entry, second];
+    expected_sources.sort();
+    assert_eq!(sources, expected_sources);
+    let actor = admin(&pool).await;
+    let path = "/api/v1/admin/lexicon/entries/archive-impact";
+    let body = json!({"entries":[{"id":entry,"base_revision":1,"base_lifecycle_revision":1}]});
+    let impact = admin_call(&state, actor, "POST", path, body.clone()).await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(impact.1, json!({"wordlist_count":1,"active_run_count":1}));
+
+    sqlx::query("UPDATE lexicon.entries SET archived_at=clock_timestamp() WHERE id=$1")
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let run_path = format!("/api/v1/me/learning-runs/{run_id}");
+    let invalidated = call(&state, &auth, "GET", &run_path, Value::Null).await;
+    assert_eq!(invalidated.0, 200, "{}", invalidated.1);
+    assert_eq!(invalidated.1["state"], "invalidated");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM learning_runs WHERE id=$1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "active"
+    );
+    let impact = admin_call(&state, actor, "POST", path, body.clone()).await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(impact.1, json!({"wordlist_count":1,"active_run_count":0}));
+
+    sqlx::query("UPDATE lexicon.entries SET archived_at=NULL WHERE id=$1")
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let generation_matches: bool = sqlx::query_scalar(
+        "SELECT bool_and(q.entry_archive_generation=e.wordlist_archive_generation) FROM learning_questions q JOIN lexicon.entries e ON e.id=q.entry_id WHERE q.run_id=$1 AND q.entry_id=$2",
+    )
+    .bind(run_id)
+    .bind(second)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!generation_matches);
+    let impact = admin_call(&state, actor, "POST", path, body.clone()).await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(impact.1, json!({"wordlist_count":1,"active_run_count":0}));
+
+    let mut input = create_body(list, "daily");
+    input["daily_question_count"] = json!(4);
+    let task = call(&state, &auth, "POST", "/api/v1/me/learning-tasks", input).await;
+    assert_eq!(task.0, 200, "{}", task.1);
+    let fresh = call(
+        &state,
+        &auth,
+        "POST",
+        &format!(
+            "/api/v1/me/learning-tasks/{}/runs",
+            task.1["id"].as_str().unwrap()
+        ),
+        start_body(None),
+    )
+    .await;
+    assert_eq!(fresh.0, 200, "{}", fresh.1);
+    assert_ne!(fresh.1["id"], run.1["id"]);
+    let impact = admin_call(&state, actor, "POST", path, body.clone()).await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(impact.1, json!({"wordlist_count":1,"active_run_count":1}));
+
+    sqlx::query("DELETE FROM wordlist_items WHERE wordlist_id=$1 AND entry_id=$2")
+        .bind(list)
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let impact = admin_call(&state, actor, "POST", path, body).await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(impact.1, json!({"wordlist_count":1,"active_run_count":0}));
+}
+
+#[sqlx::test]
 async fn eligibility_unknown_fields_preview_and_receipts(pool: PgPool) {
     let (state, auth, list) = setup(&pool).await;
     let mut input = create_body(list, "daily");
