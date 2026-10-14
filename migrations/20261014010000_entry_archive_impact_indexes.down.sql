@@ -1,0 +1,2 @@
+DROP INDEX learning_questions_entry_run_idx;
+DROP INDEX wordlist_items_entry_wordlist_idx;

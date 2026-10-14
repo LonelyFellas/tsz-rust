@@ -82,19 +82,27 @@ pub async fn lock_list(
     owner: Option<Uuid>,
     write: bool,
 ) -> Result<Wordlist, AppError> {
+    lock_list_metadata(tx, id, owner, write).await?;
+    meta(tx, id).await
+}
+async fn lock_list_metadata(
+    tx: &mut Tx<'_>,
+    id: Uuid,
+    owner: Option<Uuid>,
+    write: bool,
+) -> Result<(Option<Uuid>, WordlistState, i64), AppError> {
     let sql = if write {
-        "SELECT id FROM wordlists WHERE id=$1 AND deleted_at IS NULL AND ($2::uuid IS NULL OR owner_user_id=$2) FOR UPDATE"
+        "SELECT owner_user_id,state,revision FROM wordlists WHERE id=$1 AND deleted_at IS NULL AND ($2::uuid IS NULL OR owner_user_id=$2) FOR UPDATE"
     } else {
-        "SELECT id FROM wordlists WHERE id=$1 AND deleted_at IS NULL AND ($2::uuid IS NULL OR owner_user_id=$2) FOR SHARE"
+        "SELECT owner_user_id,state,revision FROM wordlists WHERE id=$1 AND deleted_at IS NULL AND ($2::uuid IS NULL OR owner_user_id=$2) FOR SHARE"
     };
-    sqlx::query_scalar::<_, Uuid>(sql)
+    sqlx::query_as(sql)
         .bind(id)
         .bind(owner)
         .fetch_optional(&mut **tx)
         .await
         .map_err(AppError::internal)?
-        .ok_or_else(|| AppError::not_found("wordlist not found"))?;
-    meta(tx, id).await
+        .ok_or_else(|| AppError::not_found("wordlist not found"))
 }
 pub async fn meta(tx: &mut Tx<'_>, id: Uuid) -> Result<Wordlist, AppError> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -320,9 +328,17 @@ pub async fn read_lock(
     id: Uuid,
     auth: Option<&AuthUser>,
 ) -> Result<Wordlist, AppError> {
+    read_lock_metadata(tx, id, auth).await?;
+    meta(tx, id).await
+}
+async fn read_lock_metadata(
+    tx: &mut Tx<'_>,
+    id: Uuid,
+    auth: Option<&AuthUser>,
+) -> Result<(Option<Uuid>, WordlistState, i64), AppError> {
     if let Some(auth) = auth {
         lock_user(tx, auth).await?;
-        return lock_list(tx, id, Some(auth.subject), false).await;
+        return lock_list_metadata(tx, id, Some(auth.subject), false).await;
     }
     let owner: Option<Uuid> = sqlx::query_scalar(
         "SELECT owner_user_id FROM wordlists WHERE id=$1 AND deleted_at IS NULL",
@@ -333,11 +349,11 @@ pub async fn read_lock(
     .map_err(AppError::internal)?
     .ok_or_else(|| AppError::not_found("wordlist not found"))?;
     eligible_owner(tx, owner).await?;
-    let list = lock_list(tx, id, None, false).await?;
-    if list.state != WordlistState::Published {
+    let metadata = lock_list_metadata(tx, id, None, false).await?;
+    if metadata.1 != WordlistState::Published {
         return Err(AppError::not_found("wordlist not found"));
     }
-    Ok(list)
+    Ok(metadata)
 }
 pub async fn read(pool: &PgPool, id: Uuid, auth: Option<&AuthUser>) -> Result<Wordlist, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
@@ -352,14 +368,14 @@ pub async fn availability(
     auth: Option<&AuthUser>,
 ) -> Result<WordlistAvailability, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
-    let list = read_lock(&mut tx, id, auth).await?;
+    let (owner, _, revision) = read_lock_metadata(&mut tx, id, auth).await?;
     let (available_count, unavailable_count) = sqlx::query_as(
         "SELECT count(*) FILTER(WHERE p.id IS NOT NULL),count(*) FILTER(WHERE p.id IS NULL) FROM wordlist_items i LEFT JOIN lexicon.entries e ON e.id=i.entry_id AND e.archived_at IS NULL LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3 WHERE i.wordlist_id=$1",
     ).bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
-    eligible_owner(&mut tx, list.owner_user_id).await?;
+    eligible_owner(&mut tx, owner).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistAvailability {
-        revision: list.revision,
+        revision,
         available_count,
         unavailable_count,
     })
