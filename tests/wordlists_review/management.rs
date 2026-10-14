@@ -335,7 +335,52 @@ async fn author_controls_publication_and_admin_cannot_author_even_with_legacy_gr
     )
     .await;
     assert_eq!(published.0, StatusCode::OK, "{}", published.1);
-    assert_eq!(published.1["state"], "approved");
+    assert_eq!(published.1["state"], "pending");
+    assert_eq!(
+        call(
+            &state,
+            &user,
+            "GET",
+            &format!("/api/v1/wordlists/{id}"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let filtered = admin_call(
+        &state,
+        manager,
+        "GET",
+        "/api/v1/admin/wordlists/management?review_state=pending",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(filtered.0, StatusCode::OK, "{}", filtered.1);
+    assert_eq!(filtered.1["pagination"]["total"], 1);
+    assert_eq!(filtered.1["items"][0]["wordlist"]["id"], id);
+    let empty = admin_call(
+        &state,
+        manager,
+        "GET",
+        "/api/v1/admin/wordlists/management?review_state=approved",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(empty.1["pagination"]["total"], 0);
+    assert_eq!(
+        admin_call(
+            &state,
+            manager,
+            "GET",
+            "/api/v1/admin/wordlists/management?review_state=invalid",
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+
     assert_eq!(
         published,
         call(
