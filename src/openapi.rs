@@ -235,6 +235,7 @@ use utoipa::{
             crate::learning_tasks::dto::LearningTaskState,
             crate::wordlists::dto::WordlistView,
             crate::wordlists::dto::WordlistSort,
+            crate::wordlists::dto::WordlistReviewState,
             crate::avatar::dto::AvatarUploadRequest,
             crate::avatar::dto::AvatarConfirmRequest,
             crate::avatar::dto::AvatarUpload,
@@ -1771,6 +1772,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn wordlist_review_filter_enum_is_registered_and_optional() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let params = doc["paths"]["/api/v1/admin/wordlists/management"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        let param = params.iter().find(|p| p["name"] == "review_state").unwrap();
+        assert_eq!(param["required"], false);
+        assert_eq!(
+            param["schema"]["$ref"],
+            "#/components/schemas/WordlistReviewState"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["WordlistReviewState"]["enum"],
+            serde_json::json!(["none", "pending", "approved", "rejected"])
+        );
     }
 
     #[test]
