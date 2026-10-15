@@ -444,6 +444,26 @@ pub async fn read_entries_view(
         .map(|(id, p, s)| Ok((id, projection::project(id, p, s, form_labels.as_ref())?)))
         .collect()
 }
+pub async fn unavailable_reasons(
+    tx: &mut Tx<'_>,
+    entry_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, WordlistUnavailableReason>, AppError> {
+    let rows: Vec<(Uuid, bool, Option<i16>)> = sqlx::query_as("SELECT e.id,e.archived_at IS NOT NULL,p.content_schema_version FROM lexicon.entries e LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id WHERE e.id=ANY($1)")
+        .bind(entry_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, archived, schema)| {
+            let reason = match (archived, schema) {
+                (true, _) => WordlistUnavailableReason::Archived,
+                (false, None) => WordlistUnavailableReason::Unpublished,
+                (false, Some(3)) => return None,
+                (false, Some(_)) => WordlistUnavailableReason::UnsupportedSchema,
+            };
+            Some((id, reason))
+        })
+        .collect())
+}
+
 pub async fn item_rows(
     tx: &mut Tx<'_>,
     id: Uuid,
