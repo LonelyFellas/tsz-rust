@@ -421,5 +421,7 @@ async fn revoked_permission_is_rechecked_after_waiting_for_owner(pool: PgPool) {
 
 #[path = "wordlists_review/management.rs"]
 mod management;
+#[path = "wordlists_review/publication_regressions.rs"]
+mod publication_regressions;
 #[path = "wordlists_review/suggestions.rs"]
 mod suggestions;
