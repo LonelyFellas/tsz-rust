@@ -244,6 +244,11 @@ pub struct WordlistItem {
 pub struct MyWordlistItem {
     pub entry_id: Uuid,
     pub position: i32,
+    /// Last published label for an unavailable reference, visible only to its owner
+    /// requesting X-TSZ-Wordlist-Entry-Labels: v1. Never includes draft content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub entry_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, max_length = 1000)]
     pub author_note: Option<String>,
