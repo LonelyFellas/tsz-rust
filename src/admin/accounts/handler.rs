@@ -15,9 +15,10 @@ use crate::{
         permissions,
     },
     api::{ApiJson, ApiPath, ApiQuery, ListQuery, PaginatedResponse, PaginationQuery},
+    auth::handler::map_phone_error,
     error::{AppError, ErrorCode},
     otp::{model::Purpose, service::OtpServiceError},
-    platform::{Phone, PhoneError},
+    platform::Phone,
     state::AppState,
     user::{
         display_name::generate_display_name,
@@ -554,14 +555,6 @@ fn map_governance_error(
     }
 }
 
-fn map_phone_error(error: PhoneError) -> AppError {
-    let message = match error {
-        PhoneError::Empty => "phone is missing",
-        PhoneError::Invalid => "invalid phone",
-    };
-    AppError::validation(ErrorCode::InvalidPhone, "phone", message)
-}
-
 fn map_display_name_error(error: DisplayNameError) -> AppError {
     AppError::validation(
         ErrorCode::InvalidDisplayName,
@@ -573,6 +566,24 @@ fn map_display_name_error(error: DisplayNameError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::PhoneError;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn phone_errors_keep_validation_response() {
+        for (error, detail) in [
+            (PhoneError::Empty, "phone is missing"),
+            (PhoneError::Invalid, "invalid phone"),
+        ] {
+            let response = map_phone_error(error).into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], "invalid_phone");
+            assert_eq!(body["field"], "phone");
+            assert_eq!(body["detail"], detail);
+        }
+    }
 
     #[test]
     fn existing_phone_maps_to_http_409() {

@@ -755,7 +755,7 @@ fn map_register_error(err: RegisterError, field: &'static str) -> AppError {
     }
 }
 
-fn map_phone_error(error: PhoneError) -> AppError {
+pub(crate) fn map_phone_error(error: PhoneError) -> AppError {
     let message = match error {
         PhoneError::Empty => "phone is missing",
         PhoneError::Invalid => "invalid phone",
