@@ -96,6 +96,38 @@ async fn independent_events_atomic_transfer_replays_and_financial_retention(pool
     );
     let count:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM wordlist_tips),(SELECT count(*) FROM coin_operations WHERE source_type='wordlist_tip'),(SELECT COALESCE(sum(e.delta),0)::bigint FROM coin_entries e JOIN coin_operations o ON o.id=e.operation_id WHERE o.source_type='wordlist_tip')").fetch_one(&pool).await.unwrap();
     assert_eq!(count, (2, 2, 0));
+    let stats = call(
+        &state,
+        &payer,
+        "GET",
+        &format!("/api/v1/wordlists/interactions?ids={id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(stats.1["items"][0]["tip_amount"], "10");
+    let favorite = call(
+        &state,
+        &payer,
+        "PUT",
+        &format!("/api/v1/me/wordlists/{id}/interactions"),
+        json!({"kind":"favorite","active":true}),
+    )
+    .await;
+    assert_eq!(favorite.0, StatusCode::OK);
+    // Reversing the additive migration loses only social relationships, never financial facts.
+    let mut migration_tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261015010000_wordlist_interactions.down.sql"
+    ))
+    .execute(&mut *migration_tx)
+    .await
+    .unwrap();
+    let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM wordlist_tips")
+        .fetch_one(&mut *migration_tx)
+        .await
+        .unwrap();
+    assert_eq!(retained, 2);
+    migration_tx.rollback().await.unwrap();
     let request = apply(&state, &author, "10").await;
     assert_eq!(
         call(&state, &payer, "POST", &path, input).await.0,
@@ -109,6 +141,13 @@ async fn independent_events_atomic_transfer_replays_and_financial_retention(pool
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM wordlists")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM wordlist_interactions")
             .fetch_one(&pool)
             .await
             .unwrap(),

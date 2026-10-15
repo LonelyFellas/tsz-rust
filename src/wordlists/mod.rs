@@ -2,6 +2,7 @@ pub mod admin_handler;
 mod annotations;
 pub mod dto;
 pub mod handler;
+pub mod interactions;
 pub mod management;
 mod projection;
 pub mod review;

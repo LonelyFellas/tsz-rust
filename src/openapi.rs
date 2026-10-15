@@ -51,6 +51,10 @@ use utoipa::{
         crate::learning_tasks::handler::answer,
         crate::learning_tasks::handler::reward_day,
 
+        crate::wordlists::interactions::stats,
+        crate::wordlists::interactions::states,
+        crate::wordlists::interactions::set,
+        crate::wordlists::interactions::favorites,
         crate::wordlists::tips::receipt,
         crate::wordlists::tips::create,
         crate::wordlists::tips::history,
