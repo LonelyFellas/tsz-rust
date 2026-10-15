@@ -209,19 +209,26 @@ pub async fn admin_reviews(
     pool: &PgPool,
     auth: &AdminAuth,
     id: Uuid,
-) -> Result<WordlistReviews, AppError> {
+    include_reviewer: bool,
+) -> Result<AdminWordlistReviews, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     admin_list_lock(&mut tx, auth, id, "wordlists.access", false).await?;
-    let items = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{REVIEW} WHERE wordlist_id=$1 ORDER BY created_at DESC,id DESC LIMIT 20"
-    )))
+    let mut items: Vec<AdminWordlistReview> = sqlx::query_as(
+        "SELECT r.id,r.wordlist_id,r.submitted_revision,r.name,r.state,r.reason,r.created_at,r.decided_at,r.reviewer_id,a.display_name AS reviewer_name FROM wordlist_review_requests r LEFT JOIN admins a ON a.id=r.reviewer_id WHERE r.wordlist_id=$1 ORDER BY r.created_at DESC,r.id DESC LIMIT 20"
+    )
     .bind(id)
     .fetch_all(&mut *tx)
     .await
     .map_err(AppError::internal)?;
+    if !include_reviewer {
+        for item in &mut items {
+            item.reviewer_id = None;
+            item.reviewer_name = None;
+        }
+    }
     let withdraw_reason=sqlx::query_scalar("SELECT CASE WHEN state='withdrawn' THEN withdraw_reason ELSE NULL END FROM wordlists WHERE id=$1").bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(WordlistReviews {
+    Ok(AdminWordlistReviews {
         items,
         withdraw_reason,
     })

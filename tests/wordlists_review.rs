@@ -70,6 +70,34 @@ async fn review_snapshot_notes_publication_and_disabled_author_withdraw(pool: Pg
     .await;
     assert_eq!(published.0, StatusCode::OK, "{}", published.1);
     assert_eq!(published.1["state"], "published");
+    let history_path = format!("/api/v1/admin/wordlists/{id}/review-requests");
+    let legacy = admin_call(&state, reviewer, "GET", &history_path, Value::Null).await;
+    assert_eq!(legacy.0, StatusCode::OK);
+    assert!(legacy.1["items"][0].get("reviewer_id").is_none());
+    assert!(legacy.1["items"][0].get("reviewer_name").is_none());
+    let history = admin_call(
+        &state,
+        reviewer,
+        "GET",
+        &format!("{history_path}?include_reviewer=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(history.0, StatusCode::OK, "{}", history.1);
+    assert_eq!(history.1["items"][0]["reviewer_id"], reviewer.to_string());
+    assert_eq!(history.1["items"][0]["reviewer_name"], "Reviewer");
+    let personal = call(
+        &state,
+        &auth,
+        "GET",
+        &format!("{path}/review-requests"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(personal.0, StatusCode::OK);
+    assert!(personal.1["items"][0].get("reviewer_id").is_none());
+    assert!(personal.1["items"][0].get("reviewer_name").is_none());
+
     let public = call(
         &state,
         &auth,
