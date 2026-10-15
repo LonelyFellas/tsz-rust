@@ -96,6 +96,35 @@ async fn independent_events_atomic_transfer_replays_and_financial_retention(pool
     );
     let count:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM wordlist_tips),(SELECT count(*) FROM coin_operations WHERE source_type='wordlist_tip'),(SELECT COALESCE(sum(e.delta),0)::bigint FROM coin_entries e JOIN coin_operations o ON o.id=e.operation_id WHERE o.source_type='wordlist_tip')").fetch_one(&pool).await.unwrap();
     assert_eq!(count, (2, 2, 0));
+    let notifications = call(
+        &state,
+        &author,
+        "GET",
+        "/api/v1/me/notifications",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(notifications.0, StatusCode::OK, "{}", notifications.1);
+    assert_eq!(notifications.1["total"], 2);
+    assert_eq!(notifications.1["unread_count"], 2);
+    let items = notifications.1["items"].as_array().unwrap();
+    assert_eq!(items[0]["kind"], "wordlist_tipped");
+    assert_eq!(items[0]["amount"], "3");
+    assert_eq!(items[1]["amount"], "7");
+    assert_eq!(items[0]["wordlist_id"], id.to_string());
+    assert_eq!(items[0]["actor_name"], "Deletion");
+    assert_eq!(
+        call(
+            &state,
+            &payer,
+            "GET",
+            "/api/v1/me/notifications",
+            Value::Null
+        )
+        .await
+        .1["total"],
+        0
+    );
     let stats = call(
         &state,
         &payer,
@@ -281,6 +310,27 @@ async fn concurrent_lists_do_not_deadlock_and_fact_failure_rolls_back_wallets(po
         .fetch_one(&pool)
         .await
         .unwrap(),
+        2
+    );
+    sqlx::raw_sql("DROP TRIGGER fail_tip_fact ON wordlist_tips; CREATE FUNCTION reject_notification() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'notification failure'; END $$; CREATE TRIGGER reject_notification BEFORE INSERT ON user_notifications FOR EACH ROW EXECUTE FUNCTION reject_notification();").execute(&pool).await.unwrap();
+    assert_eq!(
+        call(&state, &payer, "POST", &path_a, intent("1")).await.0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(balance(&pool, payer.subject).await, 4);
+    assert_eq!(balance(&pool, author.subject).await, 6);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM wordlist_tips")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM user_notifications")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
         2
     );
 }

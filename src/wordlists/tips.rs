@@ -184,6 +184,7 @@ pub async fn transfer(
         .await
         .map_err(coin_error)?;
     sqlx::query("INSERT INTO wordlist_tips(event_id,wordlist_id,payer_user_id,author_user_id,amount,request_key,request_hash,operation_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(input.event_id).bind(id).bind(auth.subject).bind(author).bind(value).bind(input.idempotency_key).bind(hash).bind(receipt.operation_id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    super::notifications::notify(&mut tx, author, auth.subject, id, Some(value)).await?;
     let result = sqlx::query_as(sqlx::AssertSqlSafe(format!("{TIP} WHERE event_id=$1")))
         .bind(input.event_id)
         .fetch_one(&mut *tx)

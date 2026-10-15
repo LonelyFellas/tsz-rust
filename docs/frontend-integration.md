@@ -145,6 +145,9 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 - `POST /me/teacher-certification/applications`：姓名、联系方式、说明、身份证正反面、学历和语言证明全部必填；后两类各 1–10 张。待审／已认证时拒绝重复提交（409）。
 - `GET /me/teacher-certification/applications/{id}`：本人历史申请，不用最新申请代替通知关联的旧申请。
 - `GET /me/notifications`、`PATCH /me/notifications/{id}/read`：本人分页通知与幂等标已读。
+
+公开个人词表互动通知（前端主记录：tsz `docs/features/wordlist-notifications/README.md`）：新增 `wordlist_liked`、`wordlist_tipped`。点赞仅新增关系时通知作者，取消不通知；投币每笔成功交易通知一次，幂等重试不重复。通知与业务同事务提交，历史事件不补发。响应按需返回 `wordlist_id`、`wordlist_name`、`actor_name`、`amount`（正整数字符串）；无关联值时省略，原教师通知形状保持不变。名称在读取时关联当前对象，删除后不保留名称快照。复用原未读统计与标已读接口，前端标签页按现有轮询/聚焦刷新提示。先发布能展示新增 kind 的前端，再发布后端；新增通知存在时迁移 down 明确拒绝，回退应用须保留迁移与通知数据。
+
 - `GET /admin/teacher-applications`、`GET /admin/teacher-applications/{id}`：需要 `teacherapply.access`；列表支持 page/page_size/status，返回姓名、联系方式、认证说明及审核/撤销结果。详情的 files 按材料权限筛选。
 - `GET /admin/teacher-certification/files/{id}`：身份证正反面需要 `teacherapply.read_identity`，学历/语言证书需要 `teacherapply.read_certificates`，二者均依赖 `teacherapply.access`。按数据库 kind 鉴权，材料必须已关联申请，交付字节前复核撤权。用户管理的 `users.read_identity` 仍是独立入口。
 - `POST /admin/teacher-applications/{id}/review`：需要 `teacherapply.review`，支持 approve/reject，驳回必须填写原因。
