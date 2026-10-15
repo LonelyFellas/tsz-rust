@@ -56,6 +56,16 @@ async fn empty_roundtrip_and_content_prevents_destructive_down(pool: PgPool) {
     .execute(&mut *tx)
     .await
     .unwrap();
+    sqlx::query("SET LOCAL enable_seqscan=off")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar("EXPLAIN (FORMAT JSON) SELECT COALESCE(sum(amount),0)::text FROM wordlist_tips WHERE wordlist_id=$1")
+        .bind(uuid::Uuid::now_v7()).fetch_one(&mut *tx).await.unwrap();
+    assert!(
+        plan.to_string().contains("wordlist_tips_wordlist"),
+        "public statistics must have a usable wordlist index: {plan}"
+    );
     tx.commit().await.unwrap();
     let (state, auth) = account_deletion_support::setup_bound(&pool).await;
     let id = wordlists_support::entry(&pool, "schema").await;

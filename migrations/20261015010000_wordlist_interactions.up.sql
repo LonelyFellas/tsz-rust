@@ -7,3 +7,5 @@ CREATE TABLE wordlist_interactions (
 );
 CREATE INDEX wordlist_interactions_user_favorites_idx
     ON wordlist_interactions(user_id, created_at DESC, wordlist_id) WHERE kind = 'favorite';
+-- Public card statistics aggregate by wordlist, independently of payer/author history.
+CREATE INDEX wordlist_tips_wordlist ON wordlist_tips(wordlist_id) INCLUDE (amount);
