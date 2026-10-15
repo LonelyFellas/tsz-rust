@@ -339,6 +339,40 @@ pub struct WordlistReviews {
     pub items: Vec<WordlistReview>,
 }
 
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+#[serde(deny_unknown_fields)]
+pub struct AdminWordlistReview {
+    pub id: Uuid,
+    pub wordlist_id: Uuid,
+    pub submitted_revision: i64,
+    pub name: String,
+    pub state: String,
+    #[schema(required = true)]
+    pub reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[schema(required = true)]
+    pub decided_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_name: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminWordlistReviews {
+    #[schema(required = true)]
+    pub withdraw_reason: Option<String>,
+    pub items: Vec<AdminWordlistReview>,
+}
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in=Query)]
+pub struct AdminWordlistReviewsQuery {
+    /// Opt in to reviewer identity; omitted for older strict clients.
+    #[serde(default)]
+    pub include_reviewer: bool,
+}
+
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in=Query)]
@@ -422,4 +456,37 @@ pub struct WordlistSuggestionQuery {
 pub struct WordlistSuggestions {
     #[schema(max_items = 3)]
     pub items: Vec<WordlistCandidate>,
+}
+
+#[cfg(test)]
+mod reviewer_tests {
+    use super::*;
+
+    #[test]
+    fn reviewer_identity_is_optional_for_legacy_admin_clients() {
+        let query: AdminWordlistReviewsQuery = serde_json::from_str("{}").unwrap();
+        assert!(!query.include_reviewer);
+        let mut review = AdminWordlistReview {
+            id: Uuid::now_v7(),
+            wordlist_id: Uuid::now_v7(),
+            submitted_revision: 2,
+            name: "词表".into(),
+            state: "approved".into(),
+            reason: None,
+            created_at: Utc::now(),
+            decided_at: Some(Utc::now()),
+            reviewer_id: None,
+            reviewer_name: None,
+        };
+        let legacy = serde_json::to_value(&review).unwrap();
+        assert!(legacy.get("reviewer_id").is_none());
+        assert!(legacy.get("reviewer_name").is_none());
+        let reviewer = Uuid::now_v7();
+        review.reviewer_id = Some(reviewer);
+        review.reviewer_name = Some("审核老师".into());
+        let enriched = serde_json::to_value(&review).unwrap();
+        assert_eq!(enriched["reviewer_id"], reviewer.to_string());
+        assert_eq!(enriched["reviewer_name"], "审核老师");
+        assert_eq!(enriched["id"], legacy["id"]);
+    }
 }

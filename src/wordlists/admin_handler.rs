@@ -23,14 +23,17 @@ pub async fn list(
     Ok(Json(review::admin_list(&state.pool, &auth, query).await?))
 }
 
-#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/review-requests",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),
-responses((status=200,description="词表管理",body=WordlistReviews),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
+#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/review-requests",tag="wordlists",params(("id"=Uuid,Path),AdminWordlistReviewsQuery),security(("bearer_auth"=[])),
+responses((status=200,description="词表管理",body=AdminWordlistReviews),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
 pub async fn reviews(
     State(state): State<AppState>,
     auth: AdminAuth,
     ApiPath(id): ApiPath<Uuid>,
-) -> Result<Json<WordlistReviews>, AppError> {
-    Ok(Json(review::admin_reviews(&state.pool, &auth, id).await?))
+    ApiQuery(query): ApiQuery<AdminWordlistReviewsQuery>,
+) -> Result<Json<AdminWordlistReviews>, AppError> {
+    Ok(Json(
+        review::admin_reviews(&state.pool, &auth, id, query.include_reviewer).await?,
+    ))
 }
 
 #[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/review-requests/{request_id}/items",tag="wordlists",params(("id"=Uuid,Path),("request_id"=Uuid,Path),WordlistQuery,("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),security(("bearer_auth"=[])),
