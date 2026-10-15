@@ -150,8 +150,14 @@ pub async fn set(
                 "不能给自己的词表点赞或收藏",
             ));
         }
-        sqlx::query("INSERT INTO wordlist_interactions(wordlist_id,user_id,kind) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(id).bind(auth.subject).bind(kind).execute(&mut *tx).await.map_err(AppError::internal)?;
+        let inserted = sqlx::query("INSERT INTO wordlist_interactions(wordlist_id,user_id,kind) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(id).bind(auth.subject).bind(kind).execute(&mut *tx).await.map_err(AppError::internal)?;
         service::eligible_owner(&mut tx, list.owner_user_id).await?;
+        if kind == "like"
+            && inserted.rows_affected() == 1
+            && let Some(author) = list.owner_user_id
+        {
+            super::notifications::notify(&mut tx, author, auth.subject, id, None).await?;
+        }
     } else {
         // Removal must remain possible after withdrawal, account suspension or deletion.
         sqlx::query(

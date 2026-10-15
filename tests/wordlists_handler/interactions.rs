@@ -309,3 +309,181 @@ async fn withdrawal_wins_against_waiting_addition(pool: PgPool) {
             .unwrap();
     assert_eq!(count, 0);
 }
+
+#[sqlx::test]
+async fn likes_notify_only_the_author_and_read_is_owner_scoped(pool: PgPool) {
+    let (state, author) = setup_bound(&pool).await;
+    let (_, reader) = setup_bound(&pool).await;
+    let e = entry(&pool, "notifications").await;
+    let created = call(
+        &state,
+        &author,
+        "POST",
+        "/api/v1/me/wordlists",
+        create_body(&[e]),
+    )
+    .await;
+    let id = created.1["id"].as_str().unwrap();
+    let uuid: Uuid = id.parse().unwrap();
+    sqlx::query("UPDATE wordlists SET state='published' WHERE id=$1")
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        interaction(&state, &reader, id, "like", true),
+        interaction(&state, &reader, id, "like", true)
+    );
+    assert_eq!(a.0, StatusCode::OK);
+    assert_eq!(a, b);
+    assert_eq!(
+        interaction(&state, &reader, id, "favorite", true).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        interaction(&state, &reader, id, "like", false).await.0,
+        StatusCode::OK
+    );
+    let list = call(
+        &state,
+        &author,
+        "GET",
+        "/api/v1/me/notifications",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(list.0, StatusCode::OK, "{}", list.1);
+    assert_eq!(list.1["total"], 1);
+    assert_eq!(list.1["unread_count"], 1);
+    let item = &list.1["items"][0];
+    assert_eq!(item["kind"], "wordlist_liked");
+    assert_eq!(item["wordlist_id"], id);
+    assert_eq!(item["wordlist_name"], "我的词表");
+    assert_eq!(item["actor_name"], "Deletion");
+    assert!(item.get("amount").is_none());
+    let read_path = format!(
+        "/api/v1/me/notifications/{}/read",
+        item["id"].as_str().unwrap()
+    );
+    assert_eq!(
+        call(
+            &state,
+            &reader,
+            "GET",
+            "/api/v1/me/notifications",
+            Value::Null
+        )
+        .await
+        .1["total"],
+        0
+    );
+    assert_eq!(
+        call(&state, &reader, "PATCH", &read_path, Value::Null)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let read = call(&state, &author, "PATCH", &read_path, Value::Null).await;
+    assert_eq!(read.0, StatusCode::OK);
+    assert_eq!(read.1["wordlist_name"], "我的词表");
+    assert!(!read.1["read_at"].is_null());
+    assert_eq!(
+        call(&state, &author, "PATCH", &read_path, Value::Null).await,
+        read
+    );
+    assert_eq!(
+        call(
+            &state,
+            &author,
+            "GET",
+            "/api/v1/me/notifications",
+            Value::Null
+        )
+        .await
+        .1["unread_count"],
+        0
+    );
+    assert_eq!(
+        interaction(&state, &reader, id, "like", true).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &state,
+            &author,
+            "GET",
+            "/api/v1/me/notifications",
+            Value::Null
+        )
+        .await
+        .1["unread_count"],
+        1
+    );
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(reader.subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM wordlists WHERE id=$1")
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let list = call(
+        &state,
+        &author,
+        "GET",
+        "/api/v1/me/notifications",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(list.1["total"], 2);
+    for item in list.1["items"].as_array().unwrap() {
+        assert!(item.get("wordlist_id").is_none());
+        assert!(item.get("wordlist_name").is_none());
+        assert!(item.get("actor_name").is_none());
+    }
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20261015020000_wordlist_notifications.down.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[sqlx::test]
+async fn notification_failure_rolls_back_a_new_like(pool: PgPool) {
+    let (state, author) = setup_bound(&pool).await;
+    let (_, reader) = setup_bound(&pool).await;
+    let e = entry(&pool, "rollback notification").await;
+    let created = call(
+        &state,
+        &author,
+        "POST",
+        "/api/v1/me/wordlists",
+        create_body(&[e]),
+    )
+    .await;
+    let id = created.1["id"].as_str().unwrap();
+    sqlx::query("UPDATE wordlists SET state='published' WHERE id=$1")
+        .bind(id.parse::<Uuid>().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE FUNCTION reject_notification() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'notification failure'; END $$; CREATE TRIGGER reject_notification BEFORE INSERT ON user_notifications FOR EACH ROW EXECUTE FUNCTION reject_notification();").execute(&pool).await.unwrap();
+    assert_eq!(
+        interaction(&state, &reader, id, "like", true).await.0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM wordlist_interactions")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+}

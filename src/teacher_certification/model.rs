@@ -95,6 +95,15 @@ pub struct RevokeCertification {
 
 #[derive(Serialize, FromRow, ToSchema)]
 pub struct UserNotification {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wordlist_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wordlist_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(pattern = "^[1-9][0-9]{0,18}$")]
+    pub amount: Option<String>,
     pub id: Uuid,
     pub application_id: Option<Uuid>,
     pub kind: String,

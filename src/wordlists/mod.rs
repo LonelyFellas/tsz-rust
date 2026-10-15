@@ -4,6 +4,7 @@ pub mod dto;
 pub mod handler;
 pub mod interactions;
 pub mod management;
+mod notifications;
 mod projection;
 pub mod review;
 pub mod service;

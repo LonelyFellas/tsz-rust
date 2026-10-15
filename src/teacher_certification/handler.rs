@@ -9,6 +9,8 @@ use crate::{
 use axum::{Json, extract::State, http::StatusCode};
 use uuid::Uuid;
 
+const NOTIFICATION_SELECT: &str = "SELECT n.id,n.application_id,n.kind,n.reason,n.created_at,n.read_at,n.wordlist_id,w.name AS wordlist_name,u.display_name AS actor_name,n.amount::text AS amount FROM user_notifications n LEFT JOIN wordlists w ON w.id=n.wordlist_id AND w.owner_user_id=n.user_id AND w.deleted_at IS NULL LEFT JOIN users u ON u.id=n.actor_user_id";
+
 #[utoipa::path(get, path = "/api/v1/me/teacher-certification", tag = "teacher-certification",
     responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 200, body = TeacherCertification), (status = 401)), security(("bearer_auth" = [])))]
 pub async fn mine(
@@ -118,7 +120,7 @@ pub async fn notifications(
     ApiQuery(query): ApiQuery<ListQuery>,
 ) -> Result<Json<NotificationList>, AppError> {
     let (limit, offset) = query.pagination()?;
-    let items = sqlx::query_as::<_, UserNotification>("SELECT * FROM user_notifications WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3")
+    let items = sqlx::query_as::<_, UserNotification>(sqlx::AssertSqlSafe(format!("{NOTIFICATION_SELECT} WHERE n.user_id=$1 ORDER BY n.created_at DESC,n.id DESC LIMIT $2 OFFSET $3")))
         .bind(auth.subject).bind(limit).bind(offset).fetch_all(&state.pool).await.map_err(AppError::internal)?;
     let (total, unread_count) = sqlx::query_as::<_, (i64,i64)>("SELECT count(*), count(*) FILTER (WHERE read_at IS NULL) FROM user_notifications WHERE user_id = $1")
         .bind(auth.subject).fetch_one(&state.pool).await.map_err(AppError::internal)?;
@@ -188,8 +190,20 @@ pub async fn read_notification(
     auth: AuthUser,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<UserNotification>, AppError> {
-    let notification = sqlx::query_as::<_, UserNotification>("UPDATE user_notifications SET read_at = COALESCE(read_at, now()) WHERE id = $1 AND user_id = $2 RETURNING *")
-        .bind(id).bind(auth.subject).fetch_optional(&state.pool).await.map_err(AppError::internal)?
-        .ok_or_else(|| AppError::not_found("通知不存在"))?;
+    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    let updated = sqlx::query("UPDATE user_notifications SET read_at = COALESCE(read_at, now()) WHERE id = $1 AND user_id = $2")
+        .bind(id).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::not_found("通知不存在"));
+    }
+    let notification = sqlx::query_as::<_, UserNotification>(sqlx::AssertSqlSafe(format!(
+        "{NOTIFICATION_SELECT} WHERE n.id=$1 AND n.user_id=$2"
+    )))
+    .bind(id)
+    .bind(auth.subject)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    tx.commit().await.map_err(AppError::internal)?;
     Ok(Json(notification))
 }
