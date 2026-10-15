@@ -16,6 +16,22 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
+            "/api/v1/wordlists/interactions",
+            get(super::interactions::stats),
+        )
+        .route(
+            "/api/v1/me/wordlist-interactions",
+            get(super::interactions::states),
+        )
+        .route(
+            "/api/v1/me/wordlist-favorites",
+            get(super::interactions::favorites),
+        )
+        .route(
+            "/api/v1/me/wordlists/{id}/interactions",
+            axum::routing::put(super::interactions::set),
+        )
+        .route(
             "/api/v1/me/wordlist-tips/{event_id}",
             get(super::tips::receipt),
         )

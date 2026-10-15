@@ -422,3 +422,6 @@ mod author_notes;
 
 #[path = "wordlists_handler/dictionary.rs"]
 mod dictionary;
+
+#[path = "wordlists_handler/interactions.rs"]
+mod interactions;

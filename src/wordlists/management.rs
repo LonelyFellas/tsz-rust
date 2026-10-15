@@ -228,6 +228,11 @@ pub async fn delete(
     }
     sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("UPDATE wordlists SET state='draft',deleted_at=clock_timestamp(),revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("DELETE FROM wordlist_interactions WHERE wordlist_id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
     audit(&mut tx, auth, id, "wordlist.delete", list.revision).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(())
