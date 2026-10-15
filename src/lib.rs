@@ -8,6 +8,7 @@ pub mod coins;
 pub mod config;
 pub mod constant;
 pub mod deployment_migrations;
+pub mod dictionary;
 pub mod error;
 pub mod invitations;
 pub mod learning_tasks;
@@ -85,6 +86,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/me/account-deletion/{id}/cancel",
             post(account_deletion::handler::cancel),
         )
+        .merge(dictionary::handler::router())
         .merge(wordlists::handler::router())
         .merge(learning_tasks::handler::router())
         .merge(avatar::router())

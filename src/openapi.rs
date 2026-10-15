@@ -33,6 +33,9 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::dictionary::handler::search,
+        crate::dictionary::handler::detail,
+        crate::dictionary::handler::audio,
         crate::lexicon::related_suggestions::suggest,
         crate::lexicon::related_suggestions::senses,
         crate::learning_tasks::handler::preview,

@@ -1,0 +1,49 @@
+use crate::{
+    api::PaginationMeta,
+    lexicon::dto::RichTextV3,
+    wordlists::dto::{WordlistEntry, WordlistText},
+};
+use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
+
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DictionaryAudio {
+    pub target_id: Uuid,
+    pub asset_id: Uuid,
+    pub locale: String,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DictionaryExample {
+    pub id: Uuid,
+    pub sense_id: Uuid,
+    pub texts: Vec<WordlistText>,
+    pub translation: RichTextV3,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DictionaryEntry {
+    pub content: WordlistEntry,
+    pub audio: Vec<DictionaryAudio>,
+    pub examples: Vec<DictionaryExample>,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DictionaryPage {
+    pub items: Vec<DictionaryEntry>,
+    pub pagination: PaginationMeta,
+}
+
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in=Query)]
+pub struct DictionaryQuery {
+    #[param(min_length = 1, max_length = 100)]
+    pub q: String,
+    #[param(minimum = 1, default = 1)]
+    pub page: Option<u32>,
+    #[param(minimum = 1, maximum = 100, default = 50)]
+    pub page_size: Option<u32>,
+}
