@@ -154,8 +154,8 @@ pub async fn public_items(
     )
 }
 
-#[utoipa::path(get,path="/api/v1/me/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),security(("bearer_auth"=[])),
-responses((status=403,description="需要先绑定手机号"),(status=200,description="当前发布内容；不可用条目不返回历史内容",body=MyWordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
+#[utoipa::path(get,path="/api/v1/me/wordlists/{id}/items",tag="wordlists",params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Wordlist-Entry-Labels"=Option<String>,Header,description="v1 为不可用引用返回最后发布词面，仅作者可见；缺省或未知值不返回新增字段",example="v1"),("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),security(("bearer_auth"=[])),
+responses((status=403,description="需要先绑定手机号"),(status=200,description="当前发布内容；不可用条目可按请求头返回词面，不返回历史释义",body=MyWordlistItems),(status=400,description="参数无效"),(status=404,description="不可访问"),(status=401,description="会话无效")))]
 pub async fn my_items(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -172,11 +172,29 @@ pub async fn my_items(
         query.view,
     )
     .await?;
+    let mut labels = if headers
+        .get("X-TSZ-Wordlist-Entry-Labels")
+        .is_some_and(|value| value == "v1")
+    {
+        let unavailable: Vec<_> = rows
+            .iter()
+            .filter(|r| !entries.contains_key(&r.entry_id))
+            .map(|r| r.entry_id)
+            .collect();
+        let labels: Vec<(Uuid, String)> = sqlx::query_as("SELECT DISTINCT ON (entry_id) entry_id, snapshot#>>'{presentation,label}' FROM lexicon.entry_publications WHERE entry_id=ANY($1) AND NULLIF(snapshot#>>'{presentation,label}', '') IS NOT NULL ORDER BY entry_id, publication_number DESC")
+            .bind(&unavailable).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+        labels
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>()
+    } else {
+        std::collections::HashMap::new()
+    };
     let items = rows
         .into_iter()
         .map(|r| MyWordlistItem {
             entry_id: r.entry_id,
             position: r.position,
+            entry_label: labels.remove(&r.entry_id),
             author_note: Some(r.author_note),
             entry: entries.remove(&r.entry_id),
             private_note: r.private_note,
@@ -185,7 +203,7 @@ pub async fn my_items(
         .collect();
     service::eligible_owner(&mut tx, list.owner_user_id).await?;
     tx.commit().await.map_err(AppError::internal)?;
-    formatting_response(
+    let mut response = formatting_response(
         &headers,
         StatusCode::OK,
         MyWordlistItems {
@@ -193,7 +211,14 @@ pub async fn my_items(
             revision: list.revision,
             pagination,
         },
-    )
+    )?;
+    response.headers_mut().insert(
+        axum::http::header::VARY,
+        axum::http::HeaderValue::from_static(
+            "x-tsz-sentence-formatting, x-tsz-wordlist-annotations, x-tsz-wordlist-entry-labels",
+        ),
+    );
+    Ok(response)
 }
 
 #[utoipa::path(post,path="/api/v1/me/wordlists",tag="wordlists",security(("bearer_auth"=[])),request_body=CreateWordlist,

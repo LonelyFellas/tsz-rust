@@ -329,3 +329,51 @@ fn old_creation_serialization_and_idempotency_hash_are_unchanged() {
     );
     assert_eq!(serde_json::to_vec(&parsed).unwrap(), expected.as_bytes());
 }
+
+#[sqlx::test]
+async fn owner_can_identify_unavailable_entries_without_reading_their_content(pool: PgPool) {
+    let (state, owner) = setup_bound(&pool).await;
+    let (_, other) = setup_bound(&pool).await;
+    let entry = entry(&pool, "apple").await;
+    let created = create(&state, &owner, entry, "").await;
+    let id = created["id"].as_str().unwrap();
+    let path = format!("/api/v1/me/wordlists/{id}/items");
+    sqlx::query("UPDATE lexicon.entries SET archived_at=clock_timestamp(),current_publication_id=NULL WHERE id=$1")
+        .bind(entry).execute(&pool).await.unwrap();
+    for (subject, version, expected) in [
+        (owner.subject, "v1", StatusCode::OK),
+        (owner.subject, "v2", StatusCode::OK),
+        (other.subject, "v1", StatusCode::NOT_FOUND),
+    ] {
+        let token = state
+            .token_manager
+            .generate_with_version(subject, "student", 0)
+            .unwrap();
+        let response = tsz_rust::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("X-TSZ-Wordlist-Entry-Labels", version)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        if expected == StatusCode::OK {
+            assert!(body["items"][0]["entry"].is_null());
+            if version == "v1" {
+                assert_eq!(body["items"][0]["entry_label"], "apple");
+            } else {
+                assert!(body["items"][0].get("entry_label").is_none());
+            }
+            assert!(!body.to_string().contains("ADMIN PRIVATE"));
+            assert!(!body.to_string().contains("测试中文"));
+        }
+    }
+    let old = call(&state, &owner, "GET", &path, Value::Null).await;
+    assert!(!old.1.to_string().contains("apple"));
+}
