@@ -1,0 +1,270 @@
+use super::*;
+use axum::{body::Body, http::Request};
+use tower::ServiceExt;
+use uuid::Uuid;
+
+#[sqlx::test]
+async fn dictionary_requires_login_and_reads_only_current_publications(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let apple = full_entry(&pool, "apple").await;
+    let other = entry(&pool, "pineapple").await;
+    let hidden = entry(&pool, "apple-hidden").await;
+    sqlx::query("UPDATE lexicon.entries SET archived_at=now() WHERE id=$1")
+        .bind(hidden)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/dictionary?q=apple")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let (status, body) = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/dictionary?q=APPLE&page_size=1",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["pagination"]["total"], 2);
+    assert_eq!(body["items"][0]["content"]["entry_id"], apple.to_string());
+    assert!(body["items"][0]["content"]["pos"][0]["forms"].is_array());
+    let rendered = body.to_string();
+    for secret in [
+        "ADMIN PRIVATE",
+        "PRIVATE ACTUAL",
+        "created_by",
+        "detection_snapshot",
+        "synthesis",
+        "object_key",
+    ] {
+        assert!(!rendered.contains(secret), "leaked {secret}");
+    }
+    let (_, second) = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/dictionary?q=apple&page_size=1&page=2",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(second["items"][0]["content"]["entry_id"], other.to_string());
+    for q in ["", "?q=", "?q=apple&page=0", "?q=apple&page_size=101"] {
+        assert_eq!(
+            call(
+                &state,
+                &auth,
+                "GET",
+                &format!("/api/v1/dictionary{q}"),
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let path = format!("/api/v1/dictionary/entries/{apple}");
+    assert_eq!(
+        call(&state, &auth, "GET", &path, Value::Null).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "GET",
+            &format!("/api/v1/dictionary/entries/{hidden}"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=NULL WHERE id=$1")
+        .bind(apple)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&state, &auth, "GET", &path, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, after) = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/dictionary?q=apple",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(after["pagination"]["total"], 1);
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "GET",
+            &format!(
+                "/api/v1/dictionary/entries/{other}/audio/{}",
+                Uuid::now_v7()
+            ),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[sqlx::test]
+async fn dictionary_matches_published_surface_but_not_draft_or_old_publication(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let id = full_entry(&pool, "centre").await;
+    let (publication, revision): (Uuid, i64) =
+        sqlx::query_as("SELECT current_publication_id,revision FROM lexicon.entries WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let variant = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.surface_sources(entry_id,source_id,source_kind,source_node_id,language,entry_kind,dialect,dialect_scope,surface,normalized_surface,normalization_version,source_revision,content_scope,publication_id,pos_id,pos,form_type,content_schema_version,form_id,variant_id,group_ids,projection_version) VALUES($1,$2,'form_variant',$3,'en','word','us','us','center','center',1,$4,'current_publication',$5,$6,'noun','base',3,$7,$3,ARRAY[$8]::uuid[],'v3-test')").bind(id).bind(variant.to_string()).bind(variant).bind(revision).bind(publication).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+    let (_, found) = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/dictionary?q=center",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(found["pagination"]["total"], 1, "{found}");
+    let manager = admin(&pool).await;
+    publish(&pool, id, manager, "new spelling", 3).await;
+    let (_, gone) = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/dictionary?q=center",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(gone["pagination"]["total"], 0);
+}
+
+#[sqlx::test]
+async fn dictionary_audio_signs_only_current_published_references(pool: PgPool) {
+    use tsz_rust::platform::storage::{
+        MemoryAdapter, StoragePolicy, StoragePrivacy, StorageRegistry, StorageSpace,
+    };
+    let (mut state, auth) = setup_bound(&pool).await;
+    let store = MemoryAdapter::object_store(
+        StorageSpace::parse("audio").unwrap(),
+        StoragePolicy::new(
+            StoragePrivacy::Private,
+            1024,
+            std::time::Duration::from_secs(60),
+            None,
+        )
+        .unwrap(),
+    );
+    state.object_storage = StorageRegistry::from_stores([store]).unwrap();
+    let id = full_entry(&pool, "sound").await;
+    let manager = admin(&pool).await;
+    let asset = Uuid::now_v7();
+    sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,'audio/mpeg',10,'en-GB','female','sound.mp3',$4)").bind(asset).bind(format!("assets/{asset}.mp3")).bind(format!("uploads/{asset}.mp3")).bind(manager).execute(&pool).await.unwrap();
+    let (publication, mut snapshot): (Uuid,Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"] = json!([{"id":asset,"locale":"en-GB","gender":"female","content_type":"audio/mpeg","size_bytes":10,"duration_ms":null,"original_name":"sound.mp3","created_at":"2026-10-15T00:00:00Z"}]);
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+        .bind(publication)
+        .bind(snapshot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/dictionary/entries/{id}/audio/{asset}");
+    let signed = call(&state, &auth, "GET", &path, Value::Null).await;
+    assert_eq!(signed.0, StatusCode::OK, "{}", signed.1);
+    assert_eq!(signed.1["url_expires_in_seconds"], 60);
+    let other = full_entry(&pool, "unrelated").await;
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "GET",
+            &format!("/api/v1/dictionary/entries/{other}/audio/{asset}"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("UPDATE lexicon.entries SET archived_at=now() WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&state, &auth, "GET", &path, Value::Null).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[sqlx::test]
+async fn dictionary_shared_examples_respect_hides_and_withdrawal(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let id = full_entry(&pool, "apple").await;
+    let manager = admin(&pool).await;
+    let (publication, snapshot): (Uuid,Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    let sense = Uuid::parse_str(
+        snapshot["meanings"]["pos"][0]["senses"][0]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    sqlx::query("INSERT INTO lexicon.nodes(id,entry_id,node_type) VALUES($1,$2,'sense')")
+        .bind(sense)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let sentence = Uuid::now_v7();
+    let published = Uuid::now_v7();
+    let rich = |text: &str| json!({"version":1,"text":text,"spans":[],"liaisons":[]});
+    let content = json!({"sentence":{"id":sentence,"level":"A1","en_text":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual","value":rich("An apple.")}},"zh_text_id":Uuid::now_v7(),"zh_text":rich("一个苹果。"),"zh_translations":[],"links":[]},"annotations":[]});
+    sqlx::query("INSERT INTO lexicon.shared_sentences(id,content,create_digest,created_by_admin_id) VALUES($1,$2,'dictionary-test',$3)").bind(sentence).bind(&content).bind(manager).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.shared_sentence_publications(id,sentence_id,publication_number,source_revision,snapshot,published_by_admin_id) VALUES($1,$2,1,1,$3,$4)").bind(published).bind(sentence).bind(content).bind(manager).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE lexicon.shared_sentences SET current_publication_id=$2 WHERE id=$1")
+        .bind(sentence)
+        .bind(published)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target = json!({"state":"linked","target_entry_id":id,"target_sense_id":sense,"target_publication_id":publication});
+    sqlx::query("INSERT INTO lexicon.shared_sentence_publication_annotations(publication_id,sentence_id,id,source_dialect,source_segments,target_entry_id,target_sense_id,target_ref) VALUES($1,$2,$3,'common',$4,$5,$6,$7)").bind(published).bind(sentence).bind(Uuid::now_v7()).bind(json!([{"start":3,"end":8,"surface":"apple"}])).bind(id).bind(sense).bind(target).execute(&pool).await.unwrap();
+    let path = format!("/api/v1/dictionary/entries/{id}");
+    let visible = call(&state, &auth, "GET", &path, Value::Null).await;
+    assert_eq!(visible.0, StatusCode::OK, "{}", visible.1);
+    assert_eq!(
+        visible.1["examples"][0]["translation"]["text"],
+        "一个苹果。"
+    );
+    sqlx::query("INSERT INTO lexicon.shared_sentence_publication_hides(publication_id,entry_id,sense_id,sentence_id) VALUES($1,$2,$3,$4)").bind(publication).bind(id).bind(sense).bind(sentence).execute(&pool).await.unwrap();
+    assert_eq!(
+        call(&state, &auth, "GET", &path, Value::Null).await.1["examples"],
+        json!([])
+    );
+    sqlx::query("DELETE FROM lexicon.shared_sentence_publication_hides WHERE publication_id=$1")
+        .bind(publication)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lexicon.shared_sentences SET withdrawn_at=now(),withdrawn_reason='test' WHERE id=$1").bind(sentence).execute(&pool).await.unwrap();
+    assert_eq!(
+        call(&state, &auth, "GET", &path, Value::Null).await.1["examples"],
+        json!([])
+    );
+}

@@ -419,3 +419,6 @@ mod sentence_formatting;
 
 #[path = "wordlists_handler/author_notes.rs"]
 mod author_notes;
+
+#[path = "wordlists_handler/dictionary.rs"]
+mod dictionary;
