@@ -239,6 +239,13 @@ pub struct WordlistItem {
     #[schema(required = true)]
     pub entry: Option<WordlistEntry>,
 }
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WordlistUnavailableReason {
+    Archived,
+    Unpublished,
+    UnsupportedSchema,
+}
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MyWordlistItem {
@@ -249,6 +256,11 @@ pub struct MyWordlistItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub entry_label: Option<String>,
+    /// Current reason for an unavailable reference; owner-only and returned only
+    /// when X-TSZ-Wordlist-Entry-Reasons: v1 is requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub unavailable_reason: Option<WordlistUnavailableReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, max_length = 1000)]
     pub author_note: Option<String>,

@@ -44,7 +44,7 @@ async fn negotiated_read(state: &AppState, bearer: &str, path: &str, capable: bo
     assert_eq!(
         response.headers().get(header::VARY).unwrap(),
         if path.starts_with("/api/v1/me/wordlists/") {
-            "x-tsz-sentence-formatting, x-tsz-wordlist-annotations, x-tsz-wordlist-entry-labels"
+            "x-tsz-sentence-formatting, x-tsz-wordlist-annotations, x-tsz-wordlist-entry-labels, x-tsz-wordlist-entry-reasons"
         } else {
             "x-tsz-sentence-formatting, x-tsz-wordlist-annotations"
         }

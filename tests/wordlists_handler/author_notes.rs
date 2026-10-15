@@ -377,3 +377,97 @@ async fn owner_can_identify_unavailable_entries_without_reading_their_content(po
     let old = call(&state, &owner, "GET", &path, Value::Null).await;
     assert!(!old.1.to_string().contains("apple"));
 }
+
+#[sqlx::test]
+async fn owner_gets_current_unavailability_reasons_only_when_requested(pool: PgPool) {
+    let (state, owner) = setup_bound(&pool).await;
+    let (_, other) = setup_bound(&pool).await;
+    let archived = entry(&pool, "tea").await;
+    let unpublished = entry(&pool, "bad").await;
+    let unsupported = entry(&pool, "legacy").await;
+    let available = entry(&pool, "apple").await;
+    let created = call(
+        &state,
+        &owner,
+        "POST",
+        "/api/v1/me/wordlists",
+        create_body(&[archived, unpublished, unsupported, available]),
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::OK);
+    let path = format!(
+        "/api/v1/me/wordlists/{}/items",
+        created.1["id"].as_str().unwrap()
+    );
+    sqlx::query("UPDATE lexicon.entries SET archived_at=clock_timestamp() WHERE id=$1")
+        .bind(archived)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=NULL WHERE id=$1")
+        .bind(unpublished)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lexicon.entry_publications SET content_schema_version=2 WHERE entry_id=$1")
+        .bind(unsupported)
+        .execute(&pool)
+        .await
+        .unwrap();
+    async fn read(
+        state: &AppState,
+        subject: Uuid,
+        path: &str,
+        version: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let token = state
+            .token_manager
+            .generate_with_version(subject, "student", 0)
+            .unwrap();
+        let mut request = Request::builder()
+            .uri(path)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-TSZ-Wordlist-Entry-Labels", "v1");
+        if let Some(version) = version {
+            request = request.header("X-TSZ-Wordlist-Entry-Reasons", version);
+        }
+        let response = tsz_rust::router(state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+    for version in [None, Some("v2"), Some("v1")] {
+        let response = read(&state, owner.subject, &path, version).await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        for (index, expected) in ["archived", "unpublished", "unsupported_schema"]
+            .iter()
+            .enumerate()
+        {
+            let item = &response.1["items"][index];
+            assert!(item["entry"].is_null());
+            if version == Some("v1") {
+                assert_eq!(item["unavailable_reason"], *expected);
+            } else {
+                assert!(item.get("unavailable_reason").is_none());
+            }
+        }
+        assert_eq!(response.1["items"][0]["entry_label"], "tea");
+        assert!(response.1["items"][3].get("unavailable_reason").is_none());
+        assert_eq!(response.1["items"][3]["entry"]["label"], "apple");
+    }
+    assert_eq!(
+        read(&state, other.subject, &path, Some("v1")).await.0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("UPDATE lexicon.entries SET archived_at=NULL WHERE id=$1")
+        .bind(archived)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let restored = read(&state, owner.subject, &path, Some("v1")).await;
+    assert!(restored.1["items"][0].get("unavailable_reason").is_none());
+    assert_eq!(restored.1["items"][0]["entry"]["label"], "tea");
+}
