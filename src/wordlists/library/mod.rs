@@ -103,9 +103,6 @@ fn path(nodes: &[Node], mut parent: Option<Uuid>) -> Result<Vec<LibraryCrumb>, A
             name: n.name.clone(),
         });
         parent = n.parent_id;
-        if result.len() > 20 {
-            return Err(invalid("文件夹最多 20 层"));
-        }
     }
     result.reverse();
     Ok(result)

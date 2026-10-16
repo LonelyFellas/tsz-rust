@@ -545,3 +545,72 @@ async fn library_rename_waiting_for_a_wordlist_rechecks_account_deadline(pool: P
         "我的词表"
     );
 }
+
+#[sqlx::test]
+async fn library_trash_paths_survive_moving_active_ancestors_to_maximum_depth(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let a = folder(&state, &auth, "owned", Value::Null, "A").await;
+    let b = folder(&state, &auth, "owned", a.clone(), "B").await;
+    let c = folder(&state, &auth, "owned", b.clone(), "C").await;
+    let d = folder(&state, &auth, "owned", b.clone(), "D").await;
+    op(
+        &state,
+        &auth,
+        "owned",
+        "trash",
+        vec![b.clone()],
+        Value::Null,
+    )
+    .await;
+    let mut parent = Value::Null;
+    for depth in 1..=19 {
+        parent = folder(&state, &auth, "owned", parent, &format!("level-{depth}")).await;
+    }
+    op(&state, &auth, "owned", "move", vec![a], parent).await;
+    let trash_children = listing(
+        &state,
+        &auth,
+        "owned",
+        &format!("?trash=true&parent_id={}", b.as_str().unwrap()),
+    )
+    .await;
+    assert_eq!(trash_children["ancestors"].as_array().unwrap().len(), 1);
+    assert_eq!(trash_children["items"].as_array().unwrap().len(), 2);
+    let search = listing(&state, &auth, "owned", "?trash=true&q=C").await;
+    assert_eq!(search["items"][0]["id"], c);
+    op(
+        &state,
+        &auth,
+        "owned",
+        "restore",
+        vec![c.clone()],
+        Value::Null,
+    )
+    .await;
+    assert!(
+        listing(&state, &auth, "owned", "").await["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == c)
+    );
+    let version = listing(&state, &auth, "owned", "").await["version"].clone();
+    let (status, body) = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/wordlist-library/owned/operations",
+        json!({"expected_version":version,"action":"restore","ids":[b,d],"target_id":null}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["folder_count"], 2);
+    let restored = listing(
+        &state,
+        &auth,
+        "owned",
+        &format!("?parent_id={}", b.as_str().unwrap()),
+    )
+    .await;
+    assert_eq!(restored["items"][0]["id"], d);
+}
