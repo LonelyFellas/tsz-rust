@@ -251,6 +251,23 @@ pub enum PhonemeLocaleV3 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct SynthesisSpeechV3 {
+    /// Same text as the owning spelling, containing only word-boundary pauses.
+    pub content: RichTextV2V3,
+    pub voice_profile: VoiceProfileV3,
+}
+
+fn deserialize_optional_synthesis_speech<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<SynthesisSpeechV3>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    SynthesisSpeechV3::deserialize(deserializer).map(|value| Some(Box::new(value)))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PronunciationSynthesisCandidateV3 {
     #[schema(max_length = 200)]
     pub ipa: String,
@@ -259,6 +276,20 @@ pub struct PronunciationSynthesisCandidateV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(max_items = 30)]
     pub ups_words: Option<Vec<UpsWordV3>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_synthesis_speech",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub ipa_speech: Option<Box<SynthesisSpeechV3>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_synthesis_speech",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub ups_speech: Option<Box<SynthesisSpeechV3>>,
 }
 
 /// Independent Azure synthesis candidates; dictionary notation remains display-only.

@@ -269,7 +269,28 @@ async fn call_with_speech_capabilities(
     body: Option<Value>,
     capabilities: (bool, bool, bool),
 ) -> (StatusCode, Value) {
-    let (markup, formatting, speech) = capabilities;
+    call_with_phoneme_capabilities(
+        state,
+        method,
+        uri,
+        bearer,
+        idempotency_key,
+        body,
+        (capabilities.0, capabilities.1, capabilities.2, true),
+    )
+    .await
+}
+
+async fn call_with_phoneme_capabilities(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    bearer: &str,
+    idempotency_key: Option<Uuid>,
+    body: Option<Value>,
+    capabilities: (bool, bool, bool, bool),
+) -> (StatusCode, Value) {
+    let (markup, formatting, speech, phoneme_speech) = capabilities;
     let request_kind = test_request_kind(&method, uri);
     let mut builder = Request::builder()
         .method(method)
@@ -283,6 +304,9 @@ async fn call_with_speech_capabilities(
     }
     if formatting {
         builder = builder.header("X-TSZ-Sentence-Formatting", "v1");
+    }
+    if phoneme_speech {
+        builder = builder.header("X-TSZ-Phoneme-Speech", "v1");
     }
     if let Some(idempotency_key) = idempotency_key {
         builder = builder.header("Idempotency-Key", idempotency_key.to_string());
@@ -340,7 +364,9 @@ async fn call_with_speech_capabilities(
     {
         assert_eq!(
             vary.as_ref().and_then(|value| value.to_str().ok()),
-            Some("x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-sentence-formatting")
+            Some(
+                "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting"
+            )
         );
     }
     (status, body)
@@ -18159,5 +18185,111 @@ async fn v3_spelling_speech_roundtrips_independently_and_survives_legacy_saves(p
     )
     .await;
     assert_eq!(loaded["word"]["forms"], cleared);
+    assert_eq!(loaded["word"]["revision"], saved["word"]["revision"]);
+}
+
+#[sqlx::test]
+async fn v3_phoneme_speech_roundtrips_and_survives_legacy_saves(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let ready = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let id = ready["word"]["id"].as_str().unwrap();
+    let path = "/pos/0/forms/0/regional_variants";
+    let mut forms = ready["word"]["forms"].clone();
+    for region in ["uk", "us"] {
+        let variant = &mut forms.pointer_mut(path).unwrap()[region];
+        variant["spelling"] = json!("hello there");
+        let speech = |duration| json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":duration}]},"voice_profile":{"voices":[{"voice_id":region,"enabled":true,"rate_percent":10}]}});
+        variant["pronunciations"][0]["synthesis"] = json!({"alphabet":"ipa","ipa":"","ups":"","use_spelling":false,"uk":{"ipa":"həˈləʊ ðeə","ups":"H AX L O DH EH","ipa_speech":speech(500),"ups_speech":speech(1000)},"us":{"ipa":"həˈloʊ ðɛɹ","ups":"H AX L O DH EH R","ipa_speech":speech(1500),"ups_speech":speech(2000)}});
+    }
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        ready["word"]["revision"].as_i64().unwrap(),
+        "save",
+        forms,
+    )
+    .await;
+    let expected = saved["word"]["forms"].clone();
+    let (status, loaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(loaded["word"]["forms"], expected);
+    let (_, legacy) = call_with_phoneme_capabilities(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+        (true, true, true, false),
+    )
+    .await;
+    for region in ["uk", "us"] {
+        for side in ["uk", "us"] {
+            for alphabet in ["ipa", "ups"] {
+                assert!(legacy["word"]["forms"].pointer(path).unwrap()[region]["pronunciations"][0]["synthesis"][side].get(format!("{alphabet}_speech")).is_none());
+            }
+        }
+    }
+    let (_, preserved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        saved["word"]["revision"].as_i64().unwrap(),
+        "save",
+        legacy["word"]["forms"].clone(),
+    )
+    .await;
+    assert_eq!(preserved["word"]["forms"], expected);
+    let mut cleared = expected.clone();
+    let speech = &mut cleared.pointer_mut(path).unwrap()["uk"]["pronunciations"][0]["synthesis"]["uk"]
+        ["ipa_speech"];
+    speech["content"]["annotations"] = json!([]);
+    speech["voice_profile"]["voices"] = json!([]);
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        preserved["word"]["revision"].as_i64().unwrap(),
+        "save",
+        cleared.clone(),
+    )
+    .await;
+    let (_, loaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(loaded["word"]["forms"], cleared);
+    let mut invalid = cleared;
+    invalid.pointer_mut(path).unwrap()["uk"]["pronunciations"][0]["synthesis"]["uk"]["ipa_speech"]
+        ["content"]["text"] = json!("wrong");
+    let (status, _) = call(&state, Method::PUT, &format!("{ROOT}/entries/{id}/steps/forms"), &bearer, None, Some(json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"save","content":invalid}))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, loaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
     assert_eq!(loaded["word"]["revision"], saved["word"]["revision"]);
 }
