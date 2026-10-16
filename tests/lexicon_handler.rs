@@ -1958,6 +1958,27 @@ async fn v3_grammar_form_links_save_first_pronunciation_and_clear(pool: PgPool) 
             }),
         "自身语法结构引用必须进入词形删除影响：{impact}"
     );
+    assert_eq!(impact["requires_confirmation"], true, "{impact}");
+    assert!(impact["confirmation_token"].is_string(), "{impact}");
+    let (status, _, missing_confirmation) = call_problem(
+        &state,
+        Method::PUT,
+        &format!("{ROOT}/entries/{entry_id}/steps/forms"),
+        &bearer,
+        None,
+        json!({
+            "schema_version": 3,
+            "base_revision": saved["word"]["revision"],
+            "intent": "save",
+            "content": removed_form
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{missing_confirmation}");
+    assert_eq!(
+        missing_confirmation["code"],
+        "downstream_confirmation_required"
+    );
     let (status, self_references) = call(
         &state,
         Method::GET,
@@ -4531,8 +4552,8 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
     let (impact, saved) =
         save_v3_forms_after_impact(&state, &bearer, entry_id, 1, "complete", forms).await;
     assert_eq!(impact["schema_version"], 3);
-    assert_eq!(impact["requires_confirmation"], true);
-    assert!(!impact["affected"].as_array().unwrap().is_empty());
+    assert_eq!(impact["requires_confirmation"], false);
+    assert_eq!(impact["affected"], json!([]));
     assert_eq!(saved["word"]["revision"], 2);
     assert_eq!(
         saved["word"]["forms"]["pos"][0]["forms"]
@@ -5125,7 +5146,9 @@ async fn v3_forms_projection_retains_tombstones_and_emits_one_replay_event(pool:
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{impact}");
-    assert_eq!(impact["requires_confirmation"], true);
+    assert_eq!(impact["requires_confirmation"], false);
+    assert_eq!(impact["affected"], json!([]));
+    assert!(impact.get("confirmation_token").is_none(), "{impact}");
     let (status, saved) = call(
         &state,
         Method::PUT,
@@ -5136,7 +5159,6 @@ async fn v3_forms_projection_retains_tombstones_and_emits_one_replay_event(pool:
             "schema_version": 3,
             "base_revision": word["word"]["revision"],
             "intent": "complete",
-            "confirmed_impact_token": impact["confirmation_token"],
             "content": proposed
         })),
     )
@@ -5194,7 +5216,7 @@ async fn v3_forms_projection_retains_tombstones_and_emits_one_replay_event(pool:
 }
 
 #[sqlx::test]
-async fn v3_forms_impact_canonicalizes_before_issuing_downstream_token(pool: PgPool) {
+async fn v3_forms_impact_canonicalizes_unlinked_changes_without_confirmation(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await
         .expect("测试 Redis 连接池应能创建");
@@ -5232,9 +5254,10 @@ async fn v3_forms_impact_canonicalizes_before_issuing_downstream_token(pool: PgP
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{impact}");
-    assert_eq!(impact["requires_confirmation"], true);
+    assert_eq!(impact["requires_confirmation"], false);
+    assert_eq!(impact["affected"], json!([]));
     assert!(impact.get("surface_match_page").is_none(), "{impact}");
-    assert!(impact["confirmation_token"].is_string(), "{impact}");
+    assert!(impact.get("confirmation_token").is_none(), "{impact}");
 
     let (status, saved) = call(
         &state,
@@ -5246,7 +5269,6 @@ async fn v3_forms_impact_canonicalizes_before_issuing_downstream_token(pool: PgP
             "schema_version": 3,
             "base_revision": base_revision,
             "intent": "complete",
-            "confirmed_impact_token": impact["confirmation_token"],
             "content": proposed
         })),
     )
@@ -8743,9 +8765,13 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
     let forms_token = impact["surface_match_page"]["surface_confirmation_token"]
         .as_str()
         .unwrap();
-    let forms_impact_token = impact["surface_match_page"]["impact_confirmation_token"]
-        .as_str()
-        .unwrap();
+    assert_eq!(impact["requires_confirmation"], false);
+    assert_eq!(impact["affected"], json!([]));
+    assert!(
+        impact["surface_match_page"]
+            .get("impact_confirmation_token")
+            .is_none()
+    );
 
     let forms_candidate_variant_ids = impact["surface_match_page"]["items"]
         .as_array()
@@ -8779,7 +8805,6 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
             "base_revision": 1,
             "intent": "complete",
             "confirmed_surface_match_token": forms_token,
-            "confirmed_impact_token": forms_impact_token,
             "content": editing_forms
         }),
     )
@@ -8811,7 +8836,6 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
             "base_revision": 1,
             "intent": "complete",
             "confirmed_surface_match_token": forms_token,
-            "confirmed_impact_token": forms_impact_token,
             "content": editing_forms
         }),
     )
@@ -8832,7 +8856,6 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
             "base_revision": 1,
             "intent": "complete",
             "confirmed_surface_match_token": forms_token,
-            "confirmed_impact_token": forms_impact_token,
             "content": changed_forms
         }),
     )
@@ -8843,10 +8866,11 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
         digest_changed["meta"]["surface_match_page"]["surface_confirmation_token"]
             .as_str()
             .unwrap();
-    let refreshed_impact_token =
-        digest_changed["meta"]["surface_match_page"]["impact_confirmation_token"]
-            .as_str()
-            .unwrap();
+    assert!(
+        digest_changed["meta"]["surface_match_page"]
+            .get("impact_confirmation_token")
+            .is_none()
+    );
     let (status, saved) = call(
         &state,
         Method::PUT,
@@ -8858,7 +8882,6 @@ async fn v3_surface_warning_tokens_bind_actor_command_revision_digest_and_policy
             "base_revision": 1,
             "intent": "complete",
             "confirmed_surface_match_token": refreshed_token,
-            "confirmed_impact_token": refreshed_impact_token,
             "content": changed_forms
         })),
     )

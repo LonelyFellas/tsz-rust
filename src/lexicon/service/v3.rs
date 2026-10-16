@@ -1735,12 +1735,6 @@ impl LexiconService {
         if !issues.is_empty() {
             return Err(v3_validation_failed(issues));
         }
-        let affected = forms_impact_v3(
-            &current.forms,
-            &input.content,
-            &current.meanings,
-            &input.sense_bindings,
-        )?;
         // 与保存同一判定：提前告诉客户端哪些入站引用会被这次词形变更破坏，确认条据此禁用确认。
         let mut reconciled_meanings = current.meanings.clone();
         reconcile_v3_meanings_after_forms(&mut reconciled_meanings, &input.content);
@@ -1765,6 +1759,13 @@ impl LexiconService {
         )
         .await?;
         reference_tx.commit().await.map_err(database_error)?;
+        let affected = forms_impact_v3(
+            &current.forms,
+            &input.content,
+            &current.meanings,
+            &input.sense_bindings,
+            !blocked.is_empty(),
+        )?;
         let blocked_references = (!blocked.is_empty()).then_some(blocked);
         if read_projection
             && let Some(surface_match_page) = self
@@ -1943,12 +1944,43 @@ impl LexiconService {
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
         let forms_was_complete = record.completed_steps.iter().any(|step| step == "forms");
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
-        let affected = forms_impact_v3(
+        let mut affected = forms_impact_v3(
             &current_forms,
             &input.content,
             &meanings,
             &input.sense_bindings,
+            false,
         )?;
+        if affected.is_empty() {
+            let removed_forms = forms_impact_v3(
+                &current_forms,
+                &input.content,
+                &meanings,
+                &input.sense_bindings,
+                true,
+            )?;
+            if !removed_forms.is_empty() {
+                let mut proposed_meanings = meanings.clone();
+                reconcile_v3_meanings_after_forms(&mut proposed_meanings, &input.content);
+                super::form_senses::apply_sense_bindings(
+                    &input.content,
+                    &mut proposed_meanings,
+                    &input.sense_bindings,
+                )?;
+                let blocked = super::inbound_references::inbound_reference_violations(
+                    &mut transaction,
+                    entry_id,
+                    &input.content,
+                    &proposed_meanings,
+                    super::inbound_references::InboundReferenceCheck::DraftPreview,
+                    Some((&current_forms, &meanings)),
+                )
+                .await?;
+                if !blocked.is_empty() {
+                    affected = removed_forms;
+                }
+            }
+        }
         if !write_projection && !affected.is_empty() {
             let Some(token) = input.confirmed_impact_token else {
                 return Err(LexiconServiceError::DownstreamConfirmationRequired(
@@ -4125,9 +4157,10 @@ fn forms_impact_v3(
     proposed: &DraftFormsStepContentV3,
     current_meanings: &DraftMeaningsStepContentV3,
     sense_bindings: &[crate::lexicon::dto::SenseFormGroupBindingV3],
+    has_affected_references: bool,
 ) -> Result<Vec<FormsImpactItemV3>, LexiconServiceError> {
     let proposed_ids = v3_form_node_types(proposed);
-    let mut affected = v3_form_node_types(current)
+    let removed_forms = v3_form_node_types(current)
         .into_iter()
         .filter_map(|(id, node_type)| {
             (!proposed_ids.contains_key(&id)).then_some(FormsImpactItemV3 {
@@ -4141,17 +4174,16 @@ fn forms_impact_v3(
     reconcile_v3_meanings_after_forms(&mut proposed_meanings, proposed);
     super::form_senses::apply_sense_bindings(proposed, &mut proposed_meanings, sense_bindings)?;
     let proposed_meaning_ids = v3_meaning_node_types(&proposed_meanings);
-    affected.extend(
-        v3_meaning_node_types(current_meanings)
-            .into_iter()
-            .filter_map(|(id, node_type)| {
-                (!proposed_meaning_ids.contains_key(&id)).then_some(FormsImpactItemV3 {
-                    node_id: id,
-                    node_type,
-                    reason: "downstream_node_removed_with_pos".to_owned(),
-                })
-            }),
-    );
+    let mut affected = v3_meaning_node_types(current_meanings)
+        .into_iter()
+        .filter_map(|(id, node_type)| {
+            (!proposed_meaning_ids.contains_key(&id)).then_some(FormsImpactItemV3 {
+                node_id: id,
+                node_type,
+                reason: "downstream_node_removed_with_pos".to_owned(),
+            })
+        })
+        .collect::<Vec<_>>();
     // 组被删掉或改回通用时，reconcile 会把绑定它的词义改回通用。词义节点本身还在，
     // 上面的节点差集看不出来，要单独报出来让管理员确认。
     let proposed_bindings = proposed_meanings
@@ -4179,6 +4211,10 @@ fn forms_impact_v3(
                 reason: "form_group_binding_cleared".to_owned(),
             }),
     );
+    // 仅编辑词形自身不需要确认；破坏活跃引用或下游数据时保留确认。
+    if !affected.is_empty() || has_affected_references {
+        affected.extend(removed_forms);
+    }
     affected.sort_by_key(|item| item.node_id);
     Ok(affected)
 }
@@ -6117,7 +6153,7 @@ mod tests {
         proposed: &DraftFormsStepContentV3,
         meanings: &DraftMeaningsStepContentV3,
     ) -> Vec<FormsImpactItemV3> {
-        match forms_impact_v3(current, proposed, meanings, &[]) {
+        match forms_impact_v3(current, proposed, meanings, &[], false) {
             Ok(items) => items,
             Err(_) => panic!("forms impact should be computable"),
         }
@@ -6128,6 +6164,38 @@ mod tests {
         meanings.pos[0].pos_id = fixed_id(100);
         meanings.pos[0].senses[0].form_group_id = form_group_id;
         meanings
+    }
+
+    #[test]
+    fn forms_impact_skips_unlinked_form_group_removal() {
+        let current = two_form_content(false);
+        let mut proposed = current.clone();
+        proposed.pos[0].form_groups.remove(1);
+        proposed.pos[0].forms.remove(1);
+        assert!(forms_impact(&current, &proposed, &meanings_bound_to(None)).is_empty());
+    }
+
+    #[test]
+    fn forms_impact_skips_unlinked_variant_and_pronunciation_replacement() {
+        let current = two_form_content(false);
+        let mut proposed = current.clone();
+        proposed.pos[0].forms[0] = common_form(fixed_id(400), fixed_id(801), fixed_id(802));
+        assert!(forms_impact(&current, &proposed, &meanings_bound_to(None)).is_empty());
+    }
+
+    #[test]
+    fn forms_impact_skips_empty_pos_but_keeps_downstream_meaning_removal() {
+        let current = two_form_content(false);
+        let proposed = DraftFormsStepContentV3 { pos: vec![] };
+        assert!(
+            forms_impact(&current, &proposed, &DraftMeaningsStepContentV3::default()).is_empty()
+        );
+        let affected = forms_impact(&current, &proposed, &meanings_bound_to(None));
+        assert!(affected.iter().any(|item| {
+            item.node_id == fixed_id(700)
+                && item.node_type == FormsImpactNodeTypeV3::Sense
+                && item.reason == "downstream_node_removed_with_pos"
+        }));
     }
 
     #[test]
