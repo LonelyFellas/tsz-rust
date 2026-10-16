@@ -177,6 +177,7 @@ fn materialize_suggested_v3_form(
             WordRegionalVariantsV3::Common {
                 common: WordCommonFormVariantV3 {
                     spelling_rich: None,
+                    spelling_speech: None,
                     is_regular: None,
                     id: Uuid::now_v7(),
                     dialect: CommonDialectV3::Common,
@@ -190,6 +191,7 @@ fn materialize_suggested_v3_form(
         (SuggestedRegionalVariantsV3::Common { common }, _) => WordRegionalVariantsV3::UkUs {
             uk: WordUkFormVariantV3 {
                 spelling_rich: None,
+                spelling_speech: None,
                 is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: UkDialectV3::Uk,
@@ -200,6 +202,7 @@ fn materialize_suggested_v3_form(
             },
             us: WordUsFormVariantV3 {
                 spelling_rich: None,
+                spelling_speech: None,
                 is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: UsDialectV3::Us,
@@ -212,6 +215,7 @@ fn materialize_suggested_v3_form(
         (SuggestedRegionalVariantsV3::UkUs { uk, us }, _) => WordRegionalVariantsV3::UkUs {
             uk: WordUkFormVariantV3 {
                 spelling_rich: None,
+                spelling_speech: None,
                 is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: UkDialectV3::Uk,
@@ -222,6 +226,7 @@ fn materialize_suggested_v3_form(
             },
             us: WordUsFormVariantV3 {
                 spelling_rich: None,
+                spelling_speech: None,
                 is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: UsDialectV3::Us,
@@ -246,6 +251,7 @@ fn blank_v3_base_form() -> WordConcreteFormV3 {
         regional_variants: WordRegionalVariantsV3::Common {
             common: WordCommonFormVariantV3 {
                 spelling_rich: None,
+                spelling_speech: None,
                 is_regular: None,
                 id: Uuid::now_v7(),
                 dialect: CommonDialectV3::Common,
@@ -394,6 +400,7 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                         form.regional_variants = WordRegionalVariantsV3::UkUs {
                             uk: WordUkFormVariantV3 {
                                 spelling_rich: common.spelling_rich.clone(),
+                                spelling_speech: common.spelling_speech.clone(),
                                 is_regular: None,
                                 id: common.id,
                                 dialect: UkDialectV3::Uk,
@@ -404,6 +411,7 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                             },
                             us: WordUsFormVariantV3 {
                                 spelling_rich: common.spelling_rich.clone(),
+                                spelling_speech: common.spelling_speech.clone(),
                                 is_regular: None,
                                 id: Uuid::now_v7(),
                                 dialect: UsDialectV3::Us,
@@ -447,11 +455,13 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                         ) => {
                             us.spelling.clone_from(&uk.spelling);
                             us.spelling_rich.clone_from(&uk.spelling_rich);
+                            us.spelling_speech.clone_from(&uk.spelling_speech);
                         }
                         (WordRegionalVariantsV3::UkUs { uk, .. }, DialectRulesV3::UNIFIED) => {
                             form.regional_variants = WordRegionalVariantsV3::Common {
                                 common: WordCommonFormVariantV3 {
                                     spelling_rich: uk.spelling_rich.clone(),
+                                    spelling_speech: uk.spelling_speech.clone(),
                                     is_regular: None,
                                     id: uk.id,
                                     dialect: CommonDialectV3::Common,
@@ -479,6 +489,7 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                     if variant.spelling != *common {
                         variant.origin = TextOrigin::Manual;
                         variant.spelling_rich = None;
+                        variant.spelling_speech = None;
                     }
                     variant.spelling.clone_from(common);
                 }
@@ -486,10 +497,12 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                     if uk.spelling != *common {
                         uk.origin = TextOrigin::Manual;
                         uk.spelling_rich = None;
+                        uk.spelling_speech = None;
                     }
                     if us.spelling != *common {
                         us.origin = TextOrigin::Manual;
                         us.spelling_rich = None;
+                        us.spelling_speech = None;
                     }
                     uk.spelling.clone_from(common);
                     us.spelling.clone_from(common);
@@ -505,10 +518,12 @@ fn apply_confirmed_v3_headwords(forms: &mut DraftFormsStepContentV3, headwords: 
                     if uk.spelling != *confirmed_uk {
                         uk.origin = TextOrigin::Manual;
                         uk.spelling_rich = None;
+                        uk.spelling_speech = None;
                     }
                     if us.spelling != *confirmed_us {
                         us.origin = TextOrigin::Manual;
                         us.spelling_rich = None;
+                        us.spelling_speech = None;
                     }
                     uk.spelling.clone_from(confirmed_uk);
                     us.spelling.clone_from(confirmed_us);
@@ -695,7 +710,7 @@ fn normalize_form_regularity(
     }
 }
 
-/// An omitted field from an older client must not erase unchanged spelling decorations.
+/// Older clients omit speech settings; preserve them independently of visual edits.
 fn preserve_missing_spelling_rich(
     proposed: &mut DraftFormsStepContentV3,
     current: &DraftFormsStepContentV3,
@@ -706,37 +721,66 @@ fn preserve_missing_spelling_rich(
             WordRegionalVariantsV3::Common { common } => {
                 stored.insert(
                     (common.id, Dialect::Common),
-                    (&common.spelling, &common.spelling_rich),
+                    (
+                        &common.spelling,
+                        &common.spelling_rich,
+                        &common.spelling_speech,
+                    ),
                 );
             }
             WordRegionalVariantsV3::UkUs { uk, us } => {
-                stored.insert((uk.id, Dialect::Uk), (&uk.spelling, &uk.spelling_rich));
-                stored.insert((us.id, Dialect::Us), (&us.spelling, &us.spelling_rich));
+                stored.insert(
+                    (uk.id, Dialect::Uk),
+                    (&uk.spelling, &uk.spelling_rich, &uk.spelling_speech),
+                );
+                stored.insert(
+                    (us.id, Dialect::Us),
+                    (&us.spelling, &us.spelling_rich, &us.spelling_speech),
+                );
             }
         }
     }
     let preserve =
-        |id, dialect, spelling: &String, rich: &mut Option<crate::lexicon::dto::RichTextV2V3>| {
-            if rich.is_none()
-                && let Some((stored_spelling, stored_rich)) = stored.get(&(id, dialect))
+        |id,
+         dialect,
+         spelling: &String,
+         rich: &mut Option<crate::lexicon::dto::RichTextV2V3>,
+         speech: &mut Option<Box<crate::lexicon::dto::SpellingSpeechV3>>| {
+            if let Some((stored_spelling, stored_rich, stored_speech)) = stored.get(&(id, dialect))
                 && *stored_spelling == spelling
             {
-                rich.clone_from(stored_rich);
+                if rich.is_none() {
+                    rich.clone_from(stored_rich);
+                }
+                if speech.is_none() {
+                    speech.clone_from(stored_speech);
+                }
             }
         };
     for form in proposed.pos.iter_mut().flat_map(|pos| &mut pos.forms) {
         match &mut form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => {
-                preserve(
-                    common.id,
-                    Dialect::Common,
-                    &common.spelling,
-                    &mut common.spelling_rich,
-                );
-            }
+            WordRegionalVariantsV3::Common { common } => preserve(
+                common.id,
+                Dialect::Common,
+                &common.spelling,
+                &mut common.spelling_rich,
+                &mut common.spelling_speech,
+            ),
             WordRegionalVariantsV3::UkUs { uk, us } => {
-                preserve(uk.id, Dialect::Uk, &uk.spelling, &mut uk.spelling_rich);
-                preserve(us.id, Dialect::Us, &us.spelling, &mut us.spelling_rich);
+                preserve(
+                    uk.id,
+                    Dialect::Uk,
+                    &uk.spelling,
+                    &mut uk.spelling_rich,
+                    &mut uk.spelling_speech,
+                );
+                preserve(
+                    us.id,
+                    Dialect::Us,
+                    &us.spelling,
+                    &mut us.spelling_rich,
+                    &mut us.spelling_speech,
+                );
             }
         }
     }
@@ -5244,15 +5288,30 @@ fn canonicalize_v3_forms(content: &mut DraftFormsStepContentV3) -> Result<(), Le
                     if let Some(rich) = &mut common.spelling_rich {
                         crate::lexicon::rich_text::canonicalize_spelling(rich);
                     }
+                    if let Some(speech) = &mut common.spelling_speech {
+                        crate::lexicon::rich_text::canonicalize_spelling_speech(
+                            &mut speech.content,
+                        );
+                    }
                 }
                 WordRegionalVariantsV3::UkUs { uk, us } => {
                     canonicalize_v3_spelling(&mut uk.spelling)?;
                     if let Some(rich) = &mut uk.spelling_rich {
                         crate::lexicon::rich_text::canonicalize_spelling(rich);
                     }
+                    if let Some(speech) = &mut uk.spelling_speech {
+                        crate::lexicon::rich_text::canonicalize_spelling_speech(
+                            &mut speech.content,
+                        );
+                    }
                     canonicalize_v3_spelling(&mut us.spelling)?;
                     if let Some(rich) = &mut us.spelling_rich {
                         crate::lexicon::rich_text::canonicalize_spelling(rich);
+                    }
+                    if let Some(speech) = &mut us.spelling_speech {
+                        crate::lexicon::rich_text::canonicalize_spelling_speech(
+                            &mut speech.content,
+                        );
                     }
                 }
             }
@@ -5799,6 +5858,7 @@ mod tests {
             regional_variants: WordRegionalVariantsV3::Common {
                 common: WordCommonFormVariantV3 {
                     spelling_rich: None,
+                    spelling_speech: None,
                     is_regular: None,
                     id: variant_id,
                     dialect: CommonDialectV3::Common,
@@ -6024,6 +6084,56 @@ mod tests {
                 .pointer(path)
                 .unwrap()["spelling_rich"]["annotations"],
             json!([])
+        );
+    }
+
+    #[test]
+    fn spelling_speech_preserves_legacy_visual_edits_and_supports_explicit_clear() {
+        let mut raw = serde_json::to_value(two_form_content(false)).unwrap();
+        let path = "/pos/0/forms/0/regional_variants/common";
+        let spelling = raw.pointer(path).unwrap()["spelling"].clone();
+        let speech = json!({"content":{"version":2,"text":spelling,"annotations":[]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]}});
+        raw.pointer_mut(path).unwrap()["spelling_speech"] = speech.clone();
+        let current: DraftFormsStepContentV3 = serde_json::from_value(raw.clone()).unwrap();
+        raw.pointer_mut(path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("spelling_speech");
+        // 即使旧客户端显式更新展示标注，独立试听配置仍保留。
+        raw.pointer_mut(path).unwrap()["spelling_rich"] =
+            json!({"version":2,"text":spelling,"annotations":[]});
+        let mut proposed: DraftFormsStepContentV3 = serde_json::from_value(raw.clone()).unwrap();
+        preserve_missing_spelling_rich(&mut proposed, &current);
+        assert_eq!(
+            serde_json::to_value(&proposed)
+                .unwrap()
+                .pointer(path)
+                .unwrap()["spelling_speech"],
+            speech
+        );
+        let mut cleared = serde_json::to_value(&proposed).unwrap();
+        cleared.pointer_mut(path).unwrap()["spelling_speech"]["voice_profile"]["voices"] =
+            json!([]);
+        let mut cleared: DraftFormsStepContentV3 = serde_json::from_value(cleared).unwrap();
+        preserve_missing_spelling_rich(&mut cleared, &current);
+        assert_eq!(
+            serde_json::to_value(cleared)
+                .unwrap()
+                .pointer(path)
+                .unwrap()["spelling_speech"]["voice_profile"]["voices"],
+            json!([])
+        );
+        raw.pointer_mut(path).unwrap()["spelling"] = json!("different");
+        let mut changed: DraftFormsStepContentV3 = serde_json::from_value(raw).unwrap();
+        preserve_missing_spelling_rich(&mut changed, &current);
+        assert!(
+            serde_json::to_value(changed)
+                .unwrap()
+                .pointer(path)
+                .unwrap()
+                .get("spelling_speech")
+                .is_none()
         );
     }
 

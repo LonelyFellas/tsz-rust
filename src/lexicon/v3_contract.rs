@@ -416,6 +416,32 @@ pub(crate) fn validate_dialect_rules(
     issues
 }
 
+fn spelling_speech_equal(
+    left: Option<&crate::lexicon::dto::SpellingSpeechV3>,
+    right: Option<&crate::lexicon::dto::SpellingSpeechV3>,
+) -> bool {
+    let canonical = |speech: Option<&crate::lexicon::dto::SpellingSpeechV3>| {
+        let mut content = speech
+            .map(|speech| speech.content.clone())
+            .unwrap_or(RichTextV2V3 {
+                version: 2,
+                text: String::new(),
+                annotations: Vec::new(),
+            });
+        if !crate::lexicon::rich_text::canonicalize_spelling_speech(&mut content) {
+            return None;
+        }
+        let mut voices = speech
+            .map(|speech| speech.voice_profile.voices.clone())
+            .unwrap_or_default();
+        voices.sort_by(|left, right| left.voice_id.cmp(&right.voice_id));
+        Some((content.annotations, voices))
+    };
+    canonical(left)
+        .zip(canonical(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
 fn regional_variants_match_rules(variants: &WordRegionalVariantsV3, rules: DialectRulesV3) -> bool {
     match (rules.spelling_mode, rules.phonetic_mode, variants) {
         (DialectModeV3::Unified, DialectModeV3::Unified, WordRegionalVariantsV3::Common { .. }) => {
@@ -437,6 +463,10 @@ fn regional_variants_match_rules(variants: &WordRegionalVariantsV3, rules: Diale
             };
             uk.spelling == us.spelling
                 && uk.is_regular == us.is_regular
+                && spelling_speech_equal(
+                    uk.spelling_speech.as_deref(),
+                    us.spelling_speech.as_deref(),
+                )
                 && canonical(uk.spelling_rich.as_ref())
                     .zip(canonical(us.spelling_rich.as_ref()))
                     .is_some_and(|(left, right)| left == right)
@@ -1020,6 +1050,7 @@ fn validate_form_content(
             Dialect::Common,
             &common.spelling,
             common.spelling_rich.as_ref(),
+            common.spelling_speech.as_deref(),
             &common.pronunciations,
             complete,
             node_roles,
@@ -1033,6 +1064,7 @@ fn validate_form_content(
                 Dialect::Uk,
                 &uk.spelling,
                 uk.spelling_rich.as_ref(),
+                uk.spelling_speech.as_deref(),
                 &uk.pronunciations,
                 complete,
                 node_roles,
@@ -1045,6 +1077,7 @@ fn validate_form_content(
                 Dialect::Us,
                 &us.spelling,
                 us.spelling_rich.as_ref(),
+                us.spelling_speech.as_deref(),
                 &us.pronunciations,
                 complete,
                 node_roles,
@@ -1062,6 +1095,7 @@ fn validate_variant(
     dialect: Dialect,
     spelling: &str,
     spelling_rich: Option<&RichTextV2V3>,
+    spelling_speech: Option<&crate::lexicon::dto::SpellingSpeechV3>,
     pronunciations: &[crate::lexicon::dto::WordPronunciationV3],
     complete: bool,
     node_roles: &mut HashMap<Uuid, &'static str>,
@@ -1100,6 +1134,26 @@ fn validate_variant(
             "variant spelling exceeds the shared 200-codepoint limit",
             variant_location.clone(),
         ));
+    }
+    if let Some(speech) = spelling_speech {
+        let valid = speech.content.text == spelling
+            && crate::lexicon::rich_text::canonicalize_spelling_speech(&mut speech.content.clone());
+        if !valid {
+            issues.push(issue(
+                V3ValidationIssueCode::SpellingRichTextInvalid,
+                "spelling_speech",
+                variant_id,
+                "spelling speech must match spelling and contain only valid pauses",
+                variant_location.clone(),
+            ));
+        }
+        let start = issues.len();
+        validate_voice_profile(Some(&speech.voice_profile), variant_id, issues);
+        for issue in &mut issues[start..] {
+            issue.field = "spelling_speech".to_owned();
+            issue.step = PersistedWordStep::Forms;
+            issue.node_location = Some(variant_location.clone());
+        }
     }
     if let Some(rich) = spelling_rich
         && (rich.text != spelling
@@ -1721,6 +1775,77 @@ mod tests {
                         && issue.field == "spelling_rich"
                         && issue.node_id.to_string() == "019d2a80-0000-7000-8000-000000000003")
             );
+        }
+    }
+
+    #[test]
+    fn spelling_speech_equality_compares_settings_and_pauses_semantically() {
+        let speech = |voices| {
+            serde_json::from_value::<crate::lexicon::dto::SpellingSpeechV3>(json!({"content":{"version":2,"text":"hello there","annotations":[]},"voice_profile":{"voices":voices}})).unwrap()
+        };
+        let empty = speech(json!([]));
+        assert!(spelling_speech_equal(None, Some(&empty)));
+        let sonia = json!({"voice_id":"sonia","enabled":true,"rate_percent":0});
+        let guy = json!({"voice_id":"guy","enabled":false,"rate_percent":10});
+        let left = speech(json!([sonia, guy]));
+        let right = speech(json!([guy, sonia]));
+        assert!(spelling_speech_equal(Some(&left), Some(&right)));
+        assert!(!spelling_speech_equal(
+            Some(&left),
+            Some(&speech(json!([sonia])))
+        ));
+    }
+
+    #[test]
+    fn spelling_speech_is_independent_and_rejects_invalid_content_or_voices() {
+        let path = "/content/pos/0/forms/0/regional_variants/common";
+        let mut raw = valid_request();
+        raw.pointer_mut(path).unwrap()["spelling"] = json!("hello there");
+        let pronunciations = raw.pointer(path).unwrap()["pronunciations"].clone();
+        let speech = json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":500}]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]}});
+        raw.pointer_mut(path).unwrap()["spelling_speech"] = speech.clone();
+        let input = decode_valid(raw.clone());
+        assert!(validate_forms(&input.content, StepSaveIntent::Save).is_empty());
+        let saved = serde_json::to_value(&input).unwrap();
+        assert_eq!(saved.pointer(path).unwrap()["spelling_speech"], speech);
+        assert_eq!(
+            saved.pointer(path).unwrap()["pronunciations"],
+            pronunciations
+        );
+        for (pointer, value) in [
+            ("/content/text", json!("wrong")),
+            (
+                "/content/annotations",
+                json!([{"type":"italic","start":0,"end":2}]),
+            ),
+            ("/content/annotations/0/at", json!(999)),
+            ("/content/annotations/0/duration_ms", json!(0)),
+            ("/content/annotations/0/duration_ms", json!(5001)),
+            ("/voice_profile/voices/0/rate_percent", json!(101)),
+            ("/voice_profile/voices/0/voice_id", json!(" ")),
+            (
+                "/voice_profile/voices",
+                json!([{"voice_id":"sonia","enabled":true,"rate_percent":0},{"voice_id":"sonia","enabled":false,"rate_percent":0}]),
+            ),
+        ] {
+            let mut invalid = raw.clone();
+            *invalid.pointer_mut(path).unwrap()["spelling_speech"]
+                .pointer_mut(pointer)
+                .unwrap() = value;
+            let issues = validate_forms(&decode_valid(invalid).content, StepSaveIntent::Save);
+            assert!(
+                issues.iter().any(|issue| issue.field == "spelling_speech"
+                    && issue.step == PersistedWordStep::Forms
+                    && issue.node_location.as_ref().unwrap().variant_id.is_some()),
+                "{pointer}: {issues:?}"
+            );
+        }
+        for invalid in [
+            json!(null),
+            json!({"content":{"version":1,"text":"hello there","spans":[],"liaisons":[]},"voice_profile":{"voices":[]}}),
+        ] {
+            raw.pointer_mut(path).unwrap()["spelling_speech"] = invalid;
+            assert!(decode_v3_forms_request::<SaveFormsStepInputV3>(raw.clone()).is_err());
         }
     }
 
@@ -2718,6 +2843,7 @@ mod tests {
                 Uuid::new_v4(),
                 dialect,
                 "cat",
+                None,
                 None,
                 std::slice::from_ref(&pronunciation),
                 true,

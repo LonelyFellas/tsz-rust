@@ -7,18 +7,34 @@ use serde::Serialize;
 use crate::lexicon::dto::{DraftFormsStepContentV3, WordRegionalVariantsV3};
 
 const HEADER: &str = "x-tsz-spelling-markup";
+const SPEECH_HEADER: &str = "x-tsz-spelling-speech";
 
 /// Only project the owned response after the service has preserved canonical data.
 pub(super) fn project_spelling_markup(headers: &HeaderMap, forms: &mut DraftFormsStepContentV3) {
-    if headers.get(HEADER).is_some_and(|value| value == "v1") {
-        return;
-    }
+    let capability = headers.get(HEADER);
+    let markup = capability.is_some_and(|value| value == "v1");
+    let speech = headers
+        .get(SPEECH_HEADER)
+        .is_some_and(|value| value == "v1");
     for form in forms.pos.iter_mut().flat_map(|pos| &mut pos.forms) {
         match &mut form.regional_variants {
-            WordRegionalVariantsV3::Common { common } => common.spelling_rich = None,
+            WordRegionalVariantsV3::Common { common } => {
+                if !markup {
+                    common.spelling_rich = None;
+                }
+                if !speech {
+                    common.spelling_speech = None;
+                }
+            }
             WordRegionalVariantsV3::UkUs { uk, us } => {
-                uk.spelling_rich = None;
-                us.spelling_rich = None;
+                if !markup {
+                    uk.spelling_rich = None;
+                    us.spelling_rich = None;
+                }
+                if !speech {
+                    uk.spelling_speech = None;
+                    us.spelling_speech = None;
+                }
             }
         }
     }
@@ -32,7 +48,9 @@ pub(super) fn spelling_markup_response<T: Serialize>(
     let mut response = crate::lexicon::sentence_formatting::response(headers, status, body)?;
     response.headers_mut().insert(
         header::VARY,
-        axum::http::HeaderValue::from_static("x-tsz-spelling-markup, x-tsz-sentence-formatting"),
+        axum::http::HeaderValue::from_static(
+            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-sentence-formatting",
+        ),
     );
     Ok(response)
 }
@@ -42,6 +60,44 @@ mod tests {
     use super::*;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn speech_projection_requires_its_own_capability_and_preserves_storage() {
+        let stored: DraftFormsStepContentV3 = serde_json::from_value(json!({"pos":[{
+            "pos_id":Uuid::now_v7(),"pos":"verb","form_groups":[],"forms":[{
+                "id":Uuid::now_v7(),"form_type":"base","regional_variants":{"mode":"common","common":{
+                    "id":Uuid::now_v7(),"dialect":"common","spelling":"give up","origin":"manual","pronunciations":[],
+                    "spelling_rich":{"version":2,"text":"give up","annotations":[{"type":"italic","start":0,"end":4}]},
+                    "spelling_speech":{"content":{"version":2,"text":"give up","annotations":[{"type":"pause","at":4,"duration_ms":500}]},"voice_profile":{"voices":[]}}
+                }}
+            }]
+        }]})).unwrap();
+        let path = "/pos/0/forms/0/regional_variants/common";
+        let canonical = serde_json::to_value(&stored).unwrap();
+        for capability in [None, Some("unknown"), Some("v1")] {
+            let mut headers = HeaderMap::new();
+            headers.insert(HEADER, "v1".parse().unwrap());
+            if let Some(capability) = capability {
+                headers.insert(SPEECH_HEADER, capability.parse().unwrap());
+            }
+            let mut projected = stored.clone();
+            project_spelling_markup(&headers, &mut projected);
+            let value = serde_json::to_value(projected).unwrap();
+            assert_eq!(
+                value
+                    .pointer(path)
+                    .unwrap()
+                    .get("spelling_speech")
+                    .is_some(),
+                capability == Some("v1")
+            );
+            assert_eq!(
+                value.pointer(path).unwrap()["spelling_rich"],
+                canonical.pointer(path).unwrap()["spelling_rich"]
+            );
+            assert_eq!(serde_json::to_value(&stored).unwrap(), canonical);
+        }
+    }
 
     #[test]
     fn response_projection_preserves_canonical_data_for_all_regions() {
