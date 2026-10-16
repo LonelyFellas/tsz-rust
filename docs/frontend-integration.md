@@ -205,3 +205,10 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 历史已公开词表保持公开，后续 `/me/wordlists/{id}/publish` 与 `/review-requests` 均提交人工审核申请，返回 pending，不再自动批准。待审仍仅作者可见，审核通过后公开。管理查询新增可选 `review_state=none|pending|approved|rejected`，筛选在分页前生效。新前端筛选需先发布新后端；回退旧后端会恢复自动批准行为。
 
 跨仓主记录位于前端仓库 `docs/features/wordlist-publication-review/README.md`，本次无需数据库迁移，不修改历史审核记录。
+
+
+## 2026-10-16：C 端 Excel 导入匹配
+
+新增 `POST /api/v1/wordlists/import-matches`，需登录且绑定手机号。每批 `words` 为 1–100 个词汇，每词归一化后 1–200 字；按原顺序返回 `items`，每行含 `status: matched|ambiguous|unmatched` 与最多三个轻量 `candidates`。只对当前有效发布做精确匹配，同一词条的方言/多词形去重；候选在锁等待期间发生变化时该行不自动绑定。此接口不写词表。
+
+模板、文件解析、预览修正和用户确认在 C 端；保存复用已有创建/更新接口，不新增自定义词或迁移。主记录位于前端仓库 `docs/features/wordlist-excel-import/design.md`。后端先更新再开放新版 Web；旧端点响应保持不变。完整候选链路已在任务隔离环境验证；本次没有合并或部署。

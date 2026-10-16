@@ -477,6 +477,37 @@ pub struct WordlistSuggestions {
     pub items: Vec<WordlistCandidate>,
 }
 
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistImportMatchRequest {
+    #[schema(min_items = 1, max_items = 100)]
+    pub words: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WordlistImportMatchStatus {
+    Matched,
+    Ambiguous,
+    Unmatched,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistImportMatch {
+    pub status: WordlistImportMatchStatus,
+    #[schema(max_items = 3)]
+    pub candidates: Vec<WordlistCandidate>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistImportMatches {
+    /// Results preserve the request order, including repeated inputs.
+    #[schema(min_items = 1, max_items = 100)]
+    pub items: Vec<WordlistImportMatch>,
+}
+
 #[cfg(test)]
 mod reviewer_tests {
     use super::*;

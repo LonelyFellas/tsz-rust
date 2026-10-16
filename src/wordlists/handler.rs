@@ -49,6 +49,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v1/wordlists/catalog", get(catalog))
         .route("/api/v1/wordlists/suggestions", get(suggestions))
+        .route(
+            "/api/v1/wordlists/import-matches",
+            axum::routing::post(import_matches),
+        )
         .route("/api/v1/wordlists/{id}", get(public_detail))
         .route("/api/v1/wordlists/{id}/items", get(public_items))
         .route(
@@ -345,5 +349,16 @@ pub async fn suggestions(
 ) -> Result<Json<WordlistSuggestions>, AppError> {
     Ok(Json(
         super::suggestions::for_user(&state.pool, &auth, query).await?,
+    ))
+}
+
+#[utoipa::path(post,path="/api/v1/wordlists/import-matches",tag="wordlists",request_body=WordlistImportMatchRequest,security(("bearer_auth"=[])),responses((status=200,description="按输入顺序返回精确匹配，不写入词表",body=WordlistImportMatches),(status=400,description="每批 1–100 个词汇，每词 1–200 字"),(status=401,description="会话无效"),(status=403,description="需要绑定手机号")))]
+pub async fn import_matches(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ApiJson(input): ApiJson<WordlistImportMatchRequest>,
+) -> Result<Json<WordlistImportMatches>, AppError> {
+    Ok(Json(
+        super::suggestions::match_import(&state.pool, &auth, input).await?,
     ))
 }

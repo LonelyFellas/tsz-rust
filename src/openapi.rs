@@ -94,6 +94,7 @@ use utoipa::{
         crate::wordlists::handler::edit,
         crate::wordlists::handler::catalog,
         crate::wordlists::handler::suggestions,
+        crate::wordlists::handler::import_matches,
         crate::invitations::handler::overview,
         crate::invitations::handler::create_code,
         crate::invitations::handler::records,
