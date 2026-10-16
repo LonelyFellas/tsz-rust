@@ -1237,6 +1237,45 @@ fn validate_variant(
         }
         if let Some(synthesis) = &pronunciation.synthesis {
             use crate::lexicon::dto::PhonemeLocaleV3;
+            for (side, candidate) in [("uk", &synthesis.uk), ("us", &synthesis.us)] {
+                let Some(candidate) = candidate else { continue };
+                for (alphabet, speech) in [
+                    ("ipa", &candidate.ipa_speech),
+                    ("ups", &candidate.ups_speech),
+                ] {
+                    let Some(speech) = speech else { continue };
+                    let field = format!("synthesis.{side}.{alphabet}_speech");
+                    let chars: Vec<_> = spelling.chars().collect();
+                    let valid_gaps = speech.content.annotations.iter().all(|mark| {
+                        let crate::lexicon::dto::RichTextAnnotationV3::Pause { at, .. } = mark
+                        else {
+                            return false;
+                        };
+                        let at = *at;
+                        at > 0
+                            && at < chars.len()
+                            && (chars[at - 1].is_whitespace() || chars[at].is_whitespace())
+                            && chars[..at].iter().any(|c| !c.is_whitespace())
+                            && chars[at..].iter().any(|c| !c.is_whitespace())
+                    });
+                    if speech.content.text != spelling
+                        || !valid_gaps
+                        || !crate::lexicon::rich_text::canonicalize_spelling_speech(
+                            &mut speech.content.clone(),
+                        )
+                    {
+                        issues.push(issue(V3ValidationIssueCode::PhoneticRichTextInvalid, &field,
+                            pronunciation.id, "synthesis settings must match spelling and contain only valid word-boundary pauses", pronunciation_location.clone()));
+                    }
+                    let offset = issues.len();
+                    validate_voice_profile(Some(&speech.voice_profile), pronunciation.id, issues);
+                    for issue in &mut issues[offset..] {
+                        issue.field.clone_from(&field);
+                        issue.step = PersistedWordStep::Forms;
+                        issue.node_location = Some(pronunciation_location.clone());
+                    }
+                }
+            }
             let dual = synthesis.uk.is_some() || synthesis.us.is_some();
             let uk = synthesis.for_locale(PhonemeLocaleV3::EnGb, dialect);
             let us = synthesis.for_locale(PhonemeLocaleV3::EnUs, dialect);
@@ -1776,6 +1815,45 @@ mod tests {
                         && issue.node_id.to_string() == "019d2a80-0000-7000-8000-000000000003")
             );
         }
+    }
+
+    #[test]
+    fn phoneme_speech_is_independent_and_validates_pauses_and_profiles() {
+        let path = "/content/pos/0/forms/0/regional_variants/common";
+        let mut raw = valid_request();
+        raw.pointer_mut(path).unwrap()["spelling"] = json!("hello there");
+        let speech = |duration| json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":duration}]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]}});
+        raw.pointer_mut(path).unwrap()["pronunciations"][0]["synthesis"] = json!({"alphabet":"ipa","ipa":"","ups":"","uk":{"ipa":"həˈləʊ ðeə","ups":"H AX L O DH EH","ipa_speech":speech(500),"ups_speech":speech(1000)},"us":{"ipa":"həˈloʊ ðɛɹ","ups":"H AX L O DH EH R","ipa_speech":speech(1500),"ups_speech":speech(2000)}});
+        raw.pointer_mut(path).unwrap()["component_usages"] = json!([]);
+        let input = decode_valid(raw.clone());
+        assert!(validate_forms(&input.content, StepSaveIntent::Save).is_empty());
+        assert_eq!(serde_json::to_value(input).unwrap(), raw);
+        let speech_path = format!("{path}/pronunciations/0/synthesis/uk/ipa_speech");
+        for (pointer, value) in [
+            ("/content/text", json!("wrong")),
+            ("/content/annotations/0/at", json!(2)),
+            ("/content/annotations/0/duration_ms", json!(5001)),
+            (
+                "/content/annotations",
+                json!([{"type":"liaison","start":0,"end":7}]),
+            ),
+            ("/voice_profile/voices/0/rate_percent", json!(101)),
+        ] {
+            let mut invalid = raw.clone();
+            *invalid
+                .pointer_mut(&speech_path)
+                .unwrap()
+                .pointer_mut(pointer)
+                .unwrap() = value;
+            let issues = validate_forms(&decode_valid(invalid).content, StepSaveIntent::Save);
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.field == "synthesis.uk.ipa_speech")
+            );
+        }
+        *raw.pointer_mut(&speech_path).unwrap() = Value::Null;
+        assert!(decode_v3_forms_request::<SaveFormsStepInputV3>(raw).is_err());
     }
 
     #[test]

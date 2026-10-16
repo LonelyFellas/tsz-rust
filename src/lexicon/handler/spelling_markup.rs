@@ -16,7 +16,26 @@ pub(super) fn project_spelling_markup(headers: &HeaderMap, forms: &mut DraftForm
     let speech = headers
         .get(SPEECH_HEADER)
         .is_some_and(|value| value == "v1");
+    let phoneme_speech = headers
+        .get("x-tsz-phoneme-speech")
+        .is_some_and(|value| value == "v1");
     for form in forms.pos.iter_mut().flat_map(|pos| &mut pos.forms) {
+        if !phoneme_speech {
+            let pronunciations = match &mut form.regional_variants {
+                WordRegionalVariantsV3::Common { common } => vec![&mut common.pronunciations],
+                WordRegionalVariantsV3::UkUs { uk, us } => {
+                    vec![&mut uk.pronunciations, &mut us.pronunciations]
+                }
+            };
+            for pronunciation in pronunciations.into_iter().flatten() {
+                if let Some(synthesis) = &mut pronunciation.synthesis {
+                    for candidate in [&mut synthesis.uk, &mut synthesis.us].into_iter().flatten() {
+                        candidate.ipa_speech = None;
+                        candidate.ups_speech = None;
+                    }
+                }
+            }
+        }
         match &mut form.regional_variants {
             WordRegionalVariantsV3::Common { common } => {
                 if !markup {
@@ -49,7 +68,7 @@ pub(super) fn spelling_markup_response<T: Serialize>(
     response.headers_mut().insert(
         header::VARY,
         axum::http::HeaderValue::from_static(
-            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-sentence-formatting",
+            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting",
         ),
     );
     Ok(response)
@@ -60,6 +79,28 @@ mod tests {
     use super::*;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn phoneme_settings_require_their_own_capability() {
+        let speech = serde_json::json!({"content":{"version":2,"text":"cat","annotations":[]},"voice_profile":{"voices":[]}});
+        let stored: DraftFormsStepContentV3 = serde_json::from_value(json!({"pos":[{"pos_id":Uuid::now_v7(),"pos":"noun","form_groups":[],"forms":[{"id":Uuid::now_v7(),"form_type":"base","regional_variants":{"mode":"common","common":{"id":Uuid::now_v7(),"dialect":"common","spelling":"cat","origin":"manual","pronunciations":[{"id":Uuid::now_v7(),"dict_phonetic":"kæt","actual_pron":"kæt","synthesis":{"alphabet":"ipa","ipa":"","ups":"","uk":{"ipa":"kæt","ups":"K AE T","ipa_speech":speech,"ups_speech":speech},"us":{"ipa":"kæt","ups":"K AE T","ipa_speech":speech,"ups_speech":speech}}}]}}}]}]})).unwrap();
+        let original = stored.clone();
+        for value in [None, Some("unknown"), Some("v1")] {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = value {
+                headers.insert("x-tsz-phoneme-speech", value.parse().unwrap());
+            }
+            let mut projected = stored.clone();
+            project_spelling_markup(&headers, &mut projected);
+            let json = serde_json::to_value(projected).unwrap();
+            for side in ["uk", "us"] {
+                for alphabet in ["ipa", "ups"] {
+                    assert_eq!(json.pointer(&format!("/pos/0/forms/0/regional_variants/common/pronunciations/0/synthesis/{side}")).unwrap().get(format!("{alphabet}_speech")).is_some(), value == Some("v1"));
+                }
+            }
+            assert_eq!(stored, original);
+        }
+    }
 
     #[test]
     fn speech_projection_requires_its_own_capability_and_preserves_storage() {

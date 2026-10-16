@@ -786,10 +786,79 @@ fn preserve_missing_spelling_rich(
     }
 }
 
+/// Preserve settings hidden from old clients, only for the same spelling, node and phonemes.
+fn preserve_missing_phoneme_speech(
+    proposed: &mut DraftFormsStepContentV3,
+    current: &DraftFormsStepContentV3,
+) {
+    let mut stored = HashMap::new();
+    for form in current.pos.iter().flat_map(|pos| &pos.forms) {
+        let variants = match &form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => vec![(
+                common.id,
+                Dialect::Common,
+                &common.spelling,
+                &common.pronunciations,
+            )],
+            WordRegionalVariantsV3::UkUs { uk, us } => vec![
+                (uk.id, Dialect::Uk, &uk.spelling, &uk.pronunciations),
+                (us.id, Dialect::Us, &us.spelling, &us.pronunciations),
+            ],
+        };
+        for (id, dialect, spelling, pronunciations) in variants {
+            for pronunciation in pronunciations {
+                stored.insert((id, dialect, pronunciation.id), (spelling, pronunciation));
+            }
+        }
+    }
+    for form in proposed.pos.iter_mut().flat_map(|pos| &mut pos.forms) {
+        let variants = match &mut form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => vec![(
+                common.id,
+                Dialect::Common,
+                &common.spelling,
+                &mut common.pronunciations,
+            )],
+            WordRegionalVariantsV3::UkUs { uk, us } => vec![
+                (uk.id, Dialect::Uk, &uk.spelling, &mut uk.pronunciations),
+                (us.id, Dialect::Us, &us.spelling, &mut us.pronunciations),
+            ],
+        };
+        for (id, dialect, spelling, pronunciations) in variants {
+            for pronunciation in pronunciations {
+                let Some((old_spelling, old)) = stored.get(&(id, dialect, pronunciation.id)) else {
+                    continue;
+                };
+                if *old_spelling != spelling {
+                    continue;
+                }
+                let (Some(next), Some(old)) = (&mut pronunciation.synthesis, &old.synthesis) else {
+                    continue;
+                };
+                for (candidate, previous) in [(&mut next.uk, &old.uk), (&mut next.us, &old.us)] {
+                    let (Some(candidate), Some(previous)) = (candidate, previous) else {
+                        continue;
+                    };
+                    if candidate.ipa_speech.is_none() && candidate.ipa == previous.ipa {
+                        candidate.ipa_speech.clone_from(&previous.ipa_speech);
+                    }
+                    if candidate.ups_speech.is_none()
+                        && candidate.ups == previous.ups
+                        && candidate.ups_words == previous.ups_words
+                    {
+                        candidate.ups_speech.clone_from(&previous.ups_speech);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn preserve_missing_component_usages(
     proposed: &mut DraftFormsStepContentV3,
     current: &DraftFormsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
+    preserve_missing_phoneme_speech(proposed, current);
     let mut current_by_variant = HashMap::<Uuid, (Dialect, Vec<PhraseComponentUsageV3>)>::new();
     for form in current.pos.iter().flat_map(|pos| &pos.forms) {
         match &form.regional_variants {
@@ -5335,6 +5404,16 @@ fn canonicalize_pronunciation_extensions(pronunciations: &mut [WordPronunciation
         }) {
             pronunciation.synthesis = None;
         }
+        if let Some(synthesis) = &mut pronunciation.synthesis {
+            for candidate in [&mut synthesis.uk, &mut synthesis.us].into_iter().flatten() {
+                for speech in [&mut candidate.ipa_speech, &mut candidate.ups_speech]
+                    .into_iter()
+                    .flatten()
+                {
+                    crate::lexicon::rich_text::canonicalize_spelling_speech(&mut speech.content);
+                }
+            }
+        }
         if let Some(rich) = &mut pronunciation.dict_phonetic_rich {
             rich.strip_liaisons();
         }
@@ -6031,6 +6110,68 @@ mod tests {
             preserve_missing_component_usages(&mut deleted, &current),
             Err(LexiconServiceError::ReferenceConflict)
         ));
+    }
+
+    #[test]
+    fn phoneme_speech_legacy_omission_preserves_only_unchanged_inputs() {
+        let current = two_form_content(false);
+        let mut raw = serde_json::to_value(current).unwrap();
+        let path = "/pos/0/forms/0/regional_variants/common";
+        let speech = json!({"content":{"version":2,"text":raw.pointer(path).unwrap()["spelling"],"annotations":[]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":0}]}});
+        raw.pointer_mut(path).unwrap()["pronunciations"][0]["synthesis"] = json!({"alphabet":"ipa","ipa":"","ups":"","uk":{"ipa":"kæt","ups":"K AE T","ipa_speech":speech,"ups_speech":speech}});
+        let current: DraftFormsStepContentV3 = serde_json::from_value(raw.clone()).unwrap();
+        let candidate_path = format!("{path}/pronunciations/0/synthesis/uk");
+        for field in ["ipa_speech", "ups_speech"] {
+            raw.pointer_mut(&candidate_path)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+        }
+        let mut proposed = serde_json::from_value(raw.clone()).unwrap();
+        preserve_missing_phoneme_speech(&mut proposed, &current);
+        assert_eq!(proposed, current);
+        raw.pointer_mut(&candidate_path).unwrap()["ipa"] = json!("kɛt");
+        let mut changed = serde_json::from_value(raw.clone()).unwrap();
+        preserve_missing_phoneme_speech(&mut changed, &current);
+        let changed = serde_json::to_value(changed).unwrap();
+        assert!(
+            changed
+                .pointer(&candidate_path)
+                .unwrap()
+                .get("ipa_speech")
+                .is_none()
+        );
+        assert_eq!(
+            changed.pointer(&candidate_path).unwrap()["ups_speech"],
+            speech
+        );
+        raw.pointer_mut(&candidate_path).unwrap()["ups_speech"] = json!({"content":{"version":2,"text":speech["content"]["text"],"annotations":[]},"voice_profile":{"voices":[]}});
+        let mut cleared = serde_json::from_value(raw.clone()).unwrap();
+        preserve_missing_phoneme_speech(&mut cleared, &current);
+        assert_eq!(
+            serde_json::to_value(cleared)
+                .unwrap()
+                .pointer(&candidate_path)
+                .unwrap()["ups_speech"]["voice_profile"]["voices"],
+            json!([])
+        );
+        raw.pointer_mut(path).unwrap()["spelling"] = json!("changed");
+        raw.pointer_mut(&candidate_path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("ups_speech");
+        let mut changed = serde_json::from_value(raw).unwrap();
+        preserve_missing_phoneme_speech(&mut changed, &current);
+        assert!(
+            serde_json::to_value(changed)
+                .unwrap()
+                .pointer(&candidate_path)
+                .unwrap()
+                .get("ups_speech")
+                .is_none()
+        );
     }
 
     #[test]
