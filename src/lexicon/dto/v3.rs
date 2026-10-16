@@ -378,6 +378,25 @@ where
     RichTextV2V3::deserialize(deserializer).map(Some)
 }
 
+/// 独立的拼写试听配置；content 与 spelling 同文，仅允许停顿标注。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpellingSpeechV3 {
+    pub content: RichTextV2V3,
+    pub voice_profile: VoiceProfileV3,
+}
+
+fn deserialize_optional_spelling_speech<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<SpellingSpeechV3>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    SpellingSpeechV3::deserialize(deserializer)
+        .map(Box::new)
+        .map(Some)
+}
+
 fn deserialize_optional_regularity<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
 where
     D: Deserializer<'de>,
@@ -400,6 +419,14 @@ pub struct WordCommonFormVariantV3 {
     )]
     #[schema(nullable = false)]
     pub spelling_rich: Option<RichTextV2V3>,
+    /// 仅用于词形拼写试听，不影响 pronunciations 中的合成配置。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_spelling_speech",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub spelling_speech: Option<Box<SpellingSpeechV3>>,
     /// 该拼写是否规则变化；缺省兼容历史组级值。
     #[serde(
         default,
@@ -431,6 +458,14 @@ pub struct WordUkFormVariantV3 {
     )]
     #[schema(nullable = false)]
     pub spelling_rich: Option<RichTextV2V3>,
+    /// 仅用于词形拼写试听，不影响 pronunciations 中的合成配置。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_spelling_speech",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub spelling_speech: Option<Box<SpellingSpeechV3>>,
     /// 该拼写是否规则变化；缺省兼容历史组级值。
     #[serde(
         default,
@@ -462,6 +497,14 @@ pub struct WordUsFormVariantV3 {
     )]
     #[schema(nullable = false)]
     pub spelling_rich: Option<RichTextV2V3>,
+    /// 仅用于词形拼写试听，不影响 pronunciations 中的合成配置。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_spelling_speech",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(nullable = false)]
+    pub spelling_speech: Option<Box<SpellingSpeechV3>>,
     /// 该拼写是否规则变化；缺省兼容历史组级值。
     #[serde(
         default,

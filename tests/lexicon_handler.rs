@@ -206,7 +206,16 @@ async fn call(
     idempotency_key: Option<Uuid>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
-    call_with_spelling_markup(state, method, uri, bearer, idempotency_key, body, true).await
+    call_with_speech_capabilities(
+        state,
+        method,
+        uri,
+        bearer,
+        idempotency_key,
+        body,
+        (true, true, true),
+    )
+    .await
 }
 
 async fn call_with_spelling_markup(
@@ -239,7 +248,28 @@ async fn call_with_capabilities(
     body: Option<Value>,
     capabilities: (bool, bool),
 ) -> (StatusCode, Value) {
-    let (markup, formatting) = capabilities;
+    call_with_speech_capabilities(
+        state,
+        method,
+        uri,
+        bearer,
+        idempotency_key,
+        body,
+        (capabilities.0, capabilities.1, false),
+    )
+    .await
+}
+
+async fn call_with_speech_capabilities(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    bearer: &str,
+    idempotency_key: Option<Uuid>,
+    body: Option<Value>,
+    capabilities: (bool, bool, bool),
+) -> (StatusCode, Value) {
+    let (markup, formatting, speech) = capabilities;
     let request_kind = test_request_kind(&method, uri);
     let mut builder = Request::builder()
         .method(method)
@@ -247,6 +277,9 @@ async fn call_with_capabilities(
         .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
     if markup {
         builder = builder.header("X-TSZ-Spelling-Markup", "v1");
+    }
+    if speech {
+        builder = builder.header("X-TSZ-Spelling-Speech", "v1");
     }
     if formatting {
         builder = builder.header("X-TSZ-Sentence-Formatting", "v1");
@@ -307,7 +340,7 @@ async fn call_with_capabilities(
     {
         assert_eq!(
             vary.as_ref().and_then(|value| value.to_str().ok()),
-            Some("x-tsz-spelling-markup, x-tsz-sentence-formatting")
+            Some("x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-sentence-formatting")
         );
     }
     (status, body)
@@ -17743,6 +17776,7 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
     let mut forms = ready["word"]["forms"].clone();
     let variant = forms.pointer_mut(path).unwrap();
     variant["spelling_rich"] = json!({"version":2,"text":variant["spelling"],"annotations":[{"type":"italic","start":0,"end":2},{"type":"liaison","start":1,"end":4}]});
+    variant["spelling_speech"] = json!({"content":{"version":2,"text":variant["spelling"],"annotations":[]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]}});
     let pronunciation = &mut variant["pronunciations"][0];
     pronunciation["actual_pron_rich"] = json!({"version":2,"text":pronunciation["actual_pron"],"annotations":[{"type":"liaison","start":0,"end":2}]});
     let (_, saved) = save_v3_forms_after_impact(
@@ -17766,6 +17800,7 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
     let mut empty = published["word"]["forms"].clone();
     let variant = empty.pointer_mut(path).unwrap();
     variant["spelling_rich"]["annotations"] = json!([]);
+    variant["spelling_speech"]["voice_profile"]["voices"] = json!([]);
     variant["pronunciations"][0]["actual_pron_rich"]["annotations"] = json!([]);
     let (_, changed) = save_v3_forms_after_impact(
         &state,
@@ -18023,3 +18058,106 @@ async fn independent_edit_permissions_ignore_persisted_response_only_fields(pool
 
 #[path = "lexicon_handler/related_suggestions.rs"]
 mod related_suggestions;
+
+#[sqlx::test]
+async fn v3_spelling_speech_roundtrips_independently_and_survives_legacy_saves(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = token(&state, actor);
+    let ready = create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &[]).await;
+    let id = ready["word"]["id"].as_str().unwrap();
+    let path = "/pos/0/forms/0/regional_variants";
+    let mut forms = ready["word"]["forms"].clone();
+    let speech = json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":500}]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]}});
+    for side in ["uk", "us"] {
+        forms.pointer_mut(path).unwrap()[side]["spelling"] = json!("hello there");
+        forms.pointer_mut(path).unwrap()[side]["spelling_speech"] = speech.clone();
+    }
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        ready["word"]["revision"].as_i64().unwrap(),
+        "save",
+        forms,
+    )
+    .await;
+    let expected = saved["word"]["forms"].clone();
+    for side in ["uk", "us"] {
+        assert_eq!(
+            expected.pointer(path).unwrap()[side]["spelling_speech"],
+            speech
+        );
+        assert_eq!(
+            expected.pointer(path).unwrap()[side]["pronunciations"],
+            ready["word"]["forms"].pointer(path).unwrap()[side]["pronunciations"]
+        );
+    }
+    let (status, loaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(loaded["word"]["forms"], expected);
+    let (_, legacy) = call_with_capabilities(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+        (true, true),
+    )
+    .await;
+    for side in ["uk", "us"] {
+        assert!(
+            legacy["word"]["forms"].pointer(path).unwrap()[side]
+                .get("spelling_speech")
+                .is_none()
+        );
+    }
+    let (_, preserved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        saved["word"]["revision"].as_i64().unwrap(),
+        "save",
+        legacy["word"]["forms"].clone(),
+    )
+    .await;
+    assert_eq!(preserved["word"]["forms"], expected);
+    let mut cleared = expected;
+    for side in ["uk", "us"] {
+        cleared.pointer_mut(path).unwrap()[side]["spelling_speech"]["content"]["annotations"] =
+            json!([]);
+        cleared.pointer_mut(path).unwrap()[side]["spelling_speech"]["voice_profile"]["voices"] =
+            json!([]);
+    }
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        id,
+        preserved["word"]["revision"].as_i64().unwrap(),
+        "save",
+        cleared.clone(),
+    )
+    .await;
+    let (_, loaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(loaded["word"]["forms"], cleared);
+    assert_eq!(loaded["word"]["revision"], saved["word"]["revision"]);
+}

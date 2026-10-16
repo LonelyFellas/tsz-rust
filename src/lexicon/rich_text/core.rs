@@ -40,6 +40,26 @@ pub fn canonicalize_spelling(value: &mut crate::lexicon::dto::RichTextV2V3) -> b
     true
 }
 
+pub fn canonicalize_spelling_speech(value: &mut crate::lexicon::dto::RichTextV2V3) -> bool {
+    if value.annotations.iter().any(|annotation| {
+        !matches!(
+            annotation,
+            crate::lexicon::dto::RichTextAnnotationV3::Pause { .. }
+        )
+    }) {
+        return false;
+    }
+    let mut native = RichTextV3::V2(value.clone());
+    if !canonicalize_native(&mut native) {
+        return false;
+    }
+    let RichTextV3::V2(canonical) = native else {
+        return false;
+    };
+    *value = canonical;
+    true
+}
+
 /// Validates and canonicalizes every rich-text value in the meanings payload.
 ///
 /// Invalid values are left untouched so the regular draft validator can attach
