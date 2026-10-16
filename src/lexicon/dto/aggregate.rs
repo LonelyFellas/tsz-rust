@@ -33,6 +33,7 @@ pub enum AdminWordStatus {
 #[serde(rename_all = "snake_case")]
 pub enum PronunciationStyle {
     Normal,
+    Citation,
     Strong,
     Weak,
 }

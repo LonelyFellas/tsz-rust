@@ -5225,6 +5225,7 @@ const fn text_origin_name(value: TextOrigin) -> &'static str {
 const fn pronunciation_style_name(value: PronunciationStyle) -> &'static str {
     match value {
         PronunciationStyle::Normal => "normal",
+        PronunciationStyle::Citation => "citation",
         PronunciationStyle::Strong => "strong",
         PronunciationStyle::Weak => "weak",
     }

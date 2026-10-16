@@ -10,7 +10,7 @@ use axum::{
 use futures_util::{StreamExt, stream};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -1338,6 +1338,119 @@ async fn step_content_body_limit_is_raised_bounded_and_scoped_per_route(pool: Pg
         "批量接口不应跟着放宽：{problem}"
     );
     assert_eq!(problem["code"], "payload_too_large");
+}
+
+#[sqlx::test]
+async fn v3_reading_styles_persist_and_round_trip_independently(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let initial = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let entry_id = initial["word"]["id"].as_str().unwrap();
+    let mut forms = initial["word"]["forms"].clone();
+    let pronunciations =
+        &mut forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"];
+    let template = pronunciations[0].clone();
+    let styles = ["normal", "citation", "strong", "weak"];
+    *pronunciations = Value::Array(
+        styles
+            .iter()
+            .map(|style| {
+                let mut pronunciation = template.clone();
+                pronunciation["id"] = json!(Uuid::now_v7());
+                pronunciation["style"] = json!(style);
+                pronunciation
+            })
+            .collect(),
+    );
+    let (_, saved) = save_v3_forms_after_impact(
+        &state,
+        &bearer,
+        entry_id,
+        initial["word"]["revision"].as_i64().unwrap(),
+        "complete",
+        forms.clone(),
+    )
+    .await;
+    assert_eq!(saved["word"]["forms"], forms);
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(reloaded["word"]["forms"], forms);
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT style FROM lexicon.v3_pronunciations WHERE entry_id = $1 AND form_variant_id = $2 ORDER BY ordinal"
+    ).bind(Uuid::parse_str(entry_id).unwrap())
+        .bind(Uuid::parse_str(forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["id"].as_str().unwrap()).unwrap())
+        .fetch_all(&pool).await.unwrap();
+    assert_eq!(stored, styles);
+
+    let down =
+        include_str!("../migrations/20261016010000_add_citation_pronunciation_style.down.sql");
+    let up = include_str!("../migrations/20261016010000_add_citation_pronunciation_style.up.sql");
+    let mut tx = pool.begin().await.unwrap();
+    let rollback = sqlx::raw_sql(down).execute(&mut *tx).await;
+    assert!(matches!(rollback, Err(sqlx::Error::Database(ref error))
+        if error.code().as_deref() == Some("23514")));
+    tx.rollback().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("DELETE FROM lexicon.v3_pronunciations WHERE entry_id = $1 AND style = 'citation'")
+        .bind(Uuid::parse_str(entry_id).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let rollback = sqlx::raw_sql(down).execute(&mut *tx).await;
+    assert!(matches!(rollback, Err(sqlx::Error::Database(ref error))
+        if error.message().contains("citation readings must be preserved")));
+    tx.rollback().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("DELETE FROM lexicon.v3_pronunciations WHERE entry_id = $1 AND style = 'citation'")
+        .bind(Uuid::parse_str(entry_id).unwrap())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lexicon.entry_editor_projection SET forms = jsonb_set(forms, '{pos,0,forms,0,regional_variants,uk,pronunciations,1,style}', '\"normal\"') WHERE entry_id = $1")
+        .bind(Uuid::parse_str(entry_id).unwrap()).execute(&mut *tx).await.unwrap();
+    let mut publication_tx = tx.begin().await.unwrap();
+    sqlx::query("INSERT INTO lexicon.entry_publications (id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id) VALUES ($1,$2,1,1,3,$3,$4,$5)")
+        .bind(Uuid::now_v7()).bind(Uuid::parse_str(entry_id).unwrap())
+        .bind(json!({"forms": forms})).bind(b"task133".as_slice()).bind(admin_id)
+        .execute(&mut *publication_tx).await.unwrap();
+    let rollback = sqlx::raw_sql(down).execute(&mut *publication_tx).await;
+    assert!(matches!(rollback, Err(sqlx::Error::Database(ref error))
+        if error.message().contains("citation readings must be preserved")));
+    publication_tx.rollback().await.unwrap();
+
+    sqlx::raw_sql(down).execute(&mut *tx).await.unwrap();
+    let constraint: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'lexicon_v3_pronunciations_style_check'"
+    ).fetch_one(&mut *tx).await.unwrap();
+    assert!(!constraint.contains("citation"));
+    sqlx::raw_sql(up).execute(&mut *tx).await.unwrap();
+    let remaining: Vec<String> = sqlx::query_scalar(
+        "SELECT style FROM lexicon.v3_pronunciations WHERE entry_id = $1 ORDER BY style",
+    )
+    .bind(Uuid::parse_str(entry_id).unwrap())
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert!(!remaining.is_empty());
+    assert!(
+        remaining
+            .iter()
+            .all(|style| ["normal", "strong", "weak"].contains(&style.as_str()))
+    );
+    tx.rollback().await.unwrap();
 }
 
 #[sqlx::test]
