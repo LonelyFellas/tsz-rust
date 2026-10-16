@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .merge(super::library::router())
         .route(
             "/api/v1/wordlists/interactions",
             get(super::interactions::stats),

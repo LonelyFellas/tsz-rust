@@ -3,6 +3,7 @@ mod annotations;
 pub mod dto;
 pub mod handler;
 pub mod interactions;
+pub mod library;
 pub mod management;
 mod notifications;
 mod projection;

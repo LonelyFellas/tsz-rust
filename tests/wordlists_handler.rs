@@ -425,3 +425,6 @@ mod dictionary;
 
 #[path = "wordlists_handler/interactions.rs"]
 mod interactions;
+
+#[path = "wordlists_handler/library.rs"]
+mod library;

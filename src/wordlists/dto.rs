@@ -93,6 +93,8 @@ pub struct CreateWordlistItem {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWordlist {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<Uuid>,
     pub idempotency_key: Uuid,
     #[schema(min_length = 1, max_length = 100)]
     pub name: String,
