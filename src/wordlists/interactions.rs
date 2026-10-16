@@ -75,6 +75,7 @@ pub enum WordlistInteractionKind {
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetWordlistInteraction {
+    pub folder_id: Option<Uuid>,
     pub kind: WordlistInteractionKind,
     pub active: bool,
 }
@@ -132,6 +133,7 @@ pub async fn set(
 ) -> Result<Response, AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     service::lock_user(&mut tx, &auth).await?;
+    super::library::lock(&mut tx, auth.subject).await?;
     // Serialize even opposite intents from the same account; additions also lock public visibility.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
         .bind(format!("wordlist-interaction:{}:{id}", auth.subject))
@@ -151,6 +153,16 @@ pub async fn set(
             ));
         }
         let inserted = sqlx::query("INSERT INTO wordlist_interactions(wordlist_id,user_id,kind) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(id).bind(auth.subject).bind(kind).execute(&mut *tx).await.map_err(AppError::internal)?;
+        if kind == "favorite" {
+            super::library::add_wordlist(
+                &mut tx,
+                auth.subject,
+                super::library::dto::LibrarySpace::Favorites,
+                id,
+                input.folder_id,
+            )
+            .await?;
+        }
         service::eligible_owner(&mut tx, list.owner_user_id).await?;
         if kind == "like"
             && inserted.rows_affected() == 1
@@ -159,6 +171,9 @@ pub async fn set(
             super::notifications::notify(&mut tx, author, auth.subject, id, None).await?;
         }
     } else {
+        if kind == "favorite" {
+            super::library::remove_favorite(&mut tx, auth.subject, id).await?;
+        }
         // Removal must remain possible after withdrawal, account suspension or deletion.
         sqlx::query(
             "DELETE FROM wordlist_interactions WHERE wordlist_id=$1 AND user_id=$2 AND kind=$3",
@@ -190,7 +205,7 @@ pub async fn favorites(
         .map_err(AppError::internal)?;
     service::lock_user(&mut tx, &auth).await?;
     let filter = format!(
-        "i.user_id=$1 AND i.kind='favorite' AND w.deleted_at IS NULL AND ($2='' OR (w.state='published' AND {} AND strpos(lower(w.name),lower($2))>0))",
+        "i.user_id=$1 AND i.kind='favorite' AND ($2='' OR (w.deleted_at IS NULL AND w.state='published' AND {} AND strpos(lower(w.name),lower($2))>0))",
         service::VISIBLE_OWNER
     );
     let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM wordlist_interactions i JOIN wordlists w ON w.id=i.wordlist_id LEFT JOIN users u ON u.id=w.owner_user_id WHERE {filter}"))).bind(auth.subject).bind(&q).fetch_one(&mut *tx).await.map_err(AppError::internal)?;

@@ -166,6 +166,7 @@ pub async fn create(
     let request_hash = hash(&input)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_user(&mut tx, auth).await?;
+    super::library::lock(&mut tx, auth.subject).await?;
     // Serialize the creator's request key before taking entry locks (including retries).
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
         .bind(format!(
@@ -203,6 +204,14 @@ pub async fn create(
             .collect();
         let author_notes: Vec<_> = input.items.iter().map(|i| i.author_note.as_str()).collect();
         sqlx::query("INSERT INTO wordlist_items(wordlist_id,entry_id,position,private_note,author_note) SELECT $1,x.id,(x.n-1)::integer,x.note,x.author_note FROM unnest($2::uuid[],$3::text[],$4::text[]) WITH ORDINALITY AS x(id,note,author_note,n)").bind(id).bind(&entry_ids).bind(notes).bind(author_notes).execute(&mut *tx).await.map_err(AppError::internal)?;
+        super::library::add_wordlist(
+            &mut tx,
+            auth.subject,
+            super::library::dto::LibrarySpace::Owned,
+            id,
+            input.folder_id,
+        )
+        .await?;
         id
     };
     let result = meta(&mut tx, id).await?;
@@ -244,6 +253,7 @@ pub async fn update(
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_user(&mut tx, auth).await?;
+    super::library::lock(&mut tx, auth.subject).await?;
     let current = lock_list(&mut tx, id, Some(auth.subject), true).await?;
     if current.revision != input.expected_revision {
         return Err(conflict());
@@ -258,6 +268,10 @@ pub async fn update(
                 None,
                 "请先撤回词表再修改内容",
             ));
+        }
+        if current.name != c.name.trim() {
+            sqlx::query("UPDATE wordlist_library_nodes SET revision=revision+1 WHERE user_id=$1 AND space='owned' AND wordlist_id=$2")
+                .bind(auth.subject).bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         }
         lock_entries(&mut tx, &c.entry_ids, true).await?;
         sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;

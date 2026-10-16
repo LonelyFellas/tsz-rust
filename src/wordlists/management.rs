@@ -233,6 +233,13 @@ pub async fn delete(
         .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+    // Administrative deletion is final for the author's directory; references owned
+    // by other users remain as unavailable entries in their personal library.
+    sqlx::query("DELETE FROM wordlist_library_nodes WHERE wordlist_id=$1 AND space='owned'")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
     audit(&mut tx, auth, id, "wordlist.delete", list.revision).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(())
