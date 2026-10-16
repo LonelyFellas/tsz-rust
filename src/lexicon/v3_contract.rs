@@ -14,7 +14,7 @@ use crate::{
         DraftValidationIssue, EnglishTextV3, FormGroupScopeV3, PersistedWordStep, RichText,
         RichTextV2V3, RichTextV3, RichTextVariantV3, SentenceTranslationBandV3, StepSaveIntent,
         TranslationLanguageV3, V3DraftNodeLocation, V3DraftValidationIssue, V3ValidationIssueCode,
-        VoiceProfileV3, WordConcreteFormV3, WordDefinitionV3, WordFormTypeV2, WordFormTypeV3,
+        VoiceProfileV3, WordConcreteFormV3, WordDefinitionV3, WordFormTypeV3,
         WordRegionalVariantsV3, WordSentenceTranslationV3,
     },
     lexicon::validation::MAX_ENTRY_NODES,
@@ -205,8 +205,8 @@ pub(crate) fn validate_forms(
                     ),
                 ));
             }
-            let form_type = form_type_name(&form.form_type);
-            if form.form_type != "base" && !crate::lexicon::form_types::valid_code(form_type) {
+            if form.form_type != "base" && !crate::lexicon::form_types::valid_code(&form.form_type)
+            {
                 issues.push(issue(
                     V3ValidationIssueCode::InvalidFormTypeForPartOfSpeech,
                     "form_type",
@@ -1400,9 +1400,7 @@ pub(crate) fn v3_issue(issue: &DraftValidationIssue) -> V3DraftValidationIssue {
             form_id: location.and_then(|location| location.form_id),
             variant_id: location.and_then(|location| location.variant_id),
             pronunciation_id: location.and_then(|location| location.pronunciation_id),
-            form_type: location
-                .and_then(|location| location.form_type.clone())
-                .map(v3_form_type),
+            form_type: location.and_then(|location| location.form_type.clone()),
             dialect: location.and_then(|location| location.dialect),
         },
     }
@@ -1410,14 +1408,6 @@ pub(crate) fn v3_issue(issue: &DraftValidationIssue) -> V3DraftValidationIssue {
 
 pub(crate) fn v3_issues(issues: &[DraftValidationIssue]) -> Vec<V3DraftValidationIssue> {
     issues.iter().map(v3_issue).collect()
-}
-
-fn v3_form_type(value: WordFormTypeV2) -> WordFormTypeV3 {
-    value
-}
-
-fn form_type_name(value: &str) -> &str {
-    value
 }
 
 fn normalize_pronunciation_text(value: &str) -> String {
