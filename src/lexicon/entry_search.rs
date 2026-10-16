@@ -9,7 +9,7 @@ use crate::{
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 type Tx<'a> = Transaction<'a, Postgres>;
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub(crate) struct EntrySuggestionSummary {
     pub entry_id: Uuid,
     pub publication_id: Uuid,
@@ -23,6 +23,60 @@ const PREFIX: &str = include_str!("search_sql/suggest_prefix.sql");
 const FUZZY_WORD: &str = include_str!("search_sql/suggest_fuzzy_word.sql");
 const FUZZY: &str = include_str!("search_sql/suggest_fuzzy.sql");
 const SUMMARY: &str = include_str!("search_sql/suggest_summary.sql");
+
+/// Batch exact matches only. Ambiguous spellings remain ambiguous even when
+/// their display labels differ (aliases and regional forms share the index).
+pub(crate) async fn exact_batch(
+    tx: &mut Tx<'_>,
+    words: &[String],
+) -> Result<Vec<Vec<EntrySuggestionSummary>>, AppError> {
+    let keys = words
+        .iter()
+        .map(|word| normalize_headword(word).map(|word| word.key))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AppError::bad_request(ErrorCode::InvalidQuery, "请输入 1–200 字的词汇"))?;
+    let matches: Vec<(i64, Uuid, Uuid)> =
+        sqlx::query_as(include_str!("search_sql/import_exact.sql"))
+            .bind(&keys)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(AppError::internal)?;
+    let ids: Vec<_> = matches.iter().map(|(_, id, _)| *id).collect();
+    published::lock_entries_in(tx, &ids).await?;
+    let summaries: Vec<EntrySuggestionSummary> = sqlx::query_as(SUMMARY)
+        .bind(&ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(AppError::internal)?;
+    let summaries: std::collections::HashMap<_, _> = summaries
+        .into_iter()
+        .map(|item| (item.entry_id, item))
+        .collect();
+    // A publication swap while acquiring locks must not turn an ambiguous
+    // spelling into an apparently unique match. Match that input again instead.
+    let changed_rows: std::collections::HashSet<_> = matches
+        .iter()
+        .filter(|(_, id, publication)| {
+            summaries
+                .get(id)
+                .is_none_or(|item| item.publication_id != *publication)
+        })
+        .map(|(row, _, _)| *row)
+        .collect();
+    let mut rows = vec![vec![]; words.len()];
+    for (row, id, publication) in matches {
+        if changed_rows.contains(&row) {
+            continue;
+        }
+        if let Some(item) = summaries
+            .get(&id)
+            .filter(|item| item.publication_id == publication)
+        {
+            rows[row as usize - 1].push(item.clone());
+        }
+    }
+    Ok(rows)
+}
 fn exclusions(ids: &[Uuid], exclude: Option<Uuid>) -> Vec<Uuid> {
     ids.iter().copied().chain(exclude).collect()
 }
