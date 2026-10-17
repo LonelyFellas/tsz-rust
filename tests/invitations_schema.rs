@@ -60,8 +60,20 @@ async fn immutable_attribution_and_reward_shape(pool: PgPool) {
 #[sqlx::test]
 async fn empty_roundtrip_but_issued_codes_prevent_down(pool: PgPool) {
     let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261018060000_qualified_invitation_rewards.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     sqlx::raw_sql(DOWN).execute(&mut *tx).await.unwrap();
     sqlx::raw_sql(UP).execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261018060000_qualified_invitation_rewards.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     let inviter = seed(&pool, OwnerType::User, Uuid::now_v7()).await;
     sqlx::query("INSERT INTO invitation_codes(user_id,code) VALUES($1,'0123456789ABCDEF')")
@@ -76,4 +88,50 @@ async fn empty_roundtrip_but_issued_codes_prevent_down(pool: PgPool) {
         .bind(Uuid::now_v7()).bind(inviter.owner_id).execute(&pool).await.unwrap();
     assert_eq!(balance(&pool, inviter).await, "0");
     reconciled(&pool).await;
+}
+
+#[sqlx::test]
+async fn qualification_attribution_survives_account_deletion_and_blocks_destructive_down(
+    pool: PgPool,
+) {
+    let inviter = seed(&pool, OwnerType::User, Uuid::now_v7()).await;
+    let invitee = seed(&pool, OwnerType::User, Uuid::now_v7()).await;
+    sqlx::query("INSERT INTO invitation_codes(user_id,code) VALUES($1,'0123456789ABCDEF')")
+        .bind(inviter.owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO invitation_reward_candidates(invitee_user_id,inviter_user_id,reward_amount) VALUES($1,$2,10)").bind(invitee.owner_id).bind(inviter.owner_id).execute(&pool).await.unwrap();
+    for statement in [
+        "DELETE FROM invitation_reward_candidates",
+        "UPDATE invitation_reward_candidates SET reward_amount=20",
+        "INSERT INTO invitation_reward_candidates SELECT * FROM invitation_reward_candidates",
+    ] {
+        assert!(sqlx::query(statement).execute(&pool).await.is_err());
+    }
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261018060000_qualified_invitation_rewards.down.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    );
+    tx.rollback().await.unwrap();
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(invitee.owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT reward_status FROM invitation_reward_records WHERE invitee_user_id=$1"
+        )
+        .bind(invitee.owner_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "pending_qualification"
+    );
 }

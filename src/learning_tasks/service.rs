@@ -463,6 +463,7 @@ pub async fn answer(
     auth: &AuthUser,
     id: Uuid,
     input: SubmitLearningAnswer,
+    invitation_rewards_enabled: bool,
 ) -> Result<LearningAnswerReceipt, AppError> {
     let h = hash(&input)?;
     let mut receipt = begin(pool, auth, &[]).await?;
@@ -543,6 +544,13 @@ pub async fn answer(
             .await
             .map_err(AppError::internal)?;
         super::rewards::settle_completion_in(&mut tx, completion_id).await?;
+        crate::invitations::service::settle_qualified_in(
+            &mut tx,
+            completion_id,
+            auth.subject,
+            invitation_rewards_enabled,
+        )
+        .await?;
     }
     // Source owners can cross their deletion deadline while locks are held.
     let final_access = sources_for_questions(&mut tx, auth, &lists, &qs).await?;

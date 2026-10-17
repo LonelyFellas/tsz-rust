@@ -131,5 +131,14 @@ pub async fn answer(
     ApiPath(id): ApiPath<Uuid>,
     ApiJson(input): ApiJson<SubmitLearningAnswer>,
 ) -> Result<Json<LearningAnswerReceipt>, AppError> {
-    Ok(Json(service::answer(&state.pool, &auth, id, input).await?))
+    Ok(Json(
+        service::answer(
+            &state.pool,
+            &auth,
+            id,
+            input,
+            state.invitation_reward_amount.is_some(),
+        )
+        .await?,
+    ))
 }
