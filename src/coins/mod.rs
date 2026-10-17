@@ -4,6 +4,7 @@ pub mod admin_handler;
 pub mod admin_service;
 pub mod dto;
 pub mod handler;
+pub mod login_reward;
 pub mod model;
 pub mod repository;
 pub mod service;

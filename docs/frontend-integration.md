@@ -212,3 +212,9 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 新增 `POST /api/v1/wordlists/import-matches`，需登录且绑定手机号。每批 `words` 为 1–100 个词汇，每词归一化后 1–200 字；按原顺序返回 `items`，每行含 `status: matched|ambiguous|unmatched` 与最多三个轻量 `candidates`。只对当前有效发布做精确匹配，同一词条的方言/多词形去重；候选在锁等待期间发生变化时该行不自动绑定。此接口不写词表。
 
 模板、文件解析、预览修正和用户确认在 C 端；保存复用已有创建/更新接口，不新增自定义词或迁移。主记录位于前端仓库 `docs/features/wordlist-excel-import/design.md`。后端先更新再开放新版 Web；旧端点响应保持不变。完整候选链路已在任务隔离环境验证；本次没有合并或部署。
+
+## 每日登录奖励（2026-10-17，待发布）
+
+新增 `POST /api/v1/me/coins/login-reward`，空 JSON 对象；C 端已绑手机账号按北京时间 04:00 业务日每天固定 1 币。重复请求返回同一 operation_id，不影响原登录、钱包和学习响应。金额与日期只由服务器决定；后台管理员不参与。Web 仅在打开、返回或交互时尝试结算，静置跨日不发。服务端 `LOGIN_REWARD_ENABLED` 默认 false，需全部实例配置后重启，关闭时新结算返回 `reward_disabled`，已到账记录不撤销。
+
+学习奖励已确认 10 个去重单元发 5 币；`ops/enable-learning-rewards.sql` 为两种奖励共同排期到下一业务日，已有政策时拒绝覆盖。新增迁移 `20261017080000` 允许保留暂停记录后，同日再次完成任务追加一次学习到账记录；读接口不补发，过去日期不补发。存在同日恢复记录时 down 拒绝回退，旧二进制不作为新 schema 可回退组合。需先后端再 Web，配置政策属于发布步骤；本次没有对线上执行配置。主记录见配套前端 `docs/features/coins-system/daily-login-reward.md`，不在后端重复维护需求与验收台账。

@@ -9,6 +9,124 @@ use tsz_rust::{auth::extract::AuthUser, state::AppState};
 use uuid::Uuid;
 const REWARDS: &str = "/api/v1/me/coins/learning-rewards";
 
+#[sqlx::test]
+async fn approved_five_for_ten_policy_and_login_reward_are_independent(pool: PgPool) {
+    sqlx::raw_sql("CREATE SCHEMA reward_clock; CREATE TABLE reward_clock.instant(at timestamptz NOT NULL); INSERT INTO reward_clock.instant VALUES('2026-10-17T06:00:00Z'); CREATE FUNCTION reward_clock.clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE AS 'SELECT at FROM reward_clock.instant';").execute(&pool).await.unwrap();
+    let timed = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(6)
+        .after_connect(|c, _| {
+            Box::pin(async move {
+                sqlx::query("SET search_path TO reward_clock,public,pg_catalog")
+                    .execute(c)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../ops/enable-learning-rewards.sql"))
+        .execute(&timed)
+        .await
+        .unwrap();
+    let (mut state, auth, _) = setup(&timed).await;
+    state.login_reward_enabled = true;
+    assert_eq!(reward(&state, &auth).await["status"], "reward_disabled");
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/coins/login-reward",
+            json!({})
+        )
+        .await
+        .1["status"],
+        "reward_disabled"
+    );
+    assert_eq!(issuance(&pool).await, (0, 0));
+    sqlx::query("UPDATE reward_clock.instant SET at='2026-10-17T20:00:00Z'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = reward(&state, &auth).await;
+    assert_eq!(before["daily_amount"], "5");
+    assert_eq!(before["minimum_units"], 10);
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/coins/login-reward",
+            json!({})
+        )
+        .await
+        .1["awarded_amount"],
+        "1"
+    );
+    for (batch, size) in [(0, 9), (1, 1)] {
+        let mut ids = Vec::new();
+        for i in 0..size {
+            ids.push(wordlists_support::full_entry(&timed, &format!("rewardword{batch}{i}")).await);
+        }
+        let list = call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/wordlists",
+            wordlists_support::create_body(&ids),
+        )
+        .await;
+        assert_eq!(list.0, 200, "{}", list.1);
+        let list = Uuid::parse_str(list.1["id"].as_str().unwrap()).unwrap();
+        let mut body = create_body(list, "daily");
+        body["daily_question_count"] = json!(size);
+        let task = call(&state, &auth, "POST", "/api/v1/me/learning-tasks", body).await;
+        assert_eq!(task.0, 200, "{}", task.1);
+        let run = start(&state, &auth, &task.1).await;
+        let qs = questions(&state, &auth, &run).await;
+        for q in qs["items"].as_array().unwrap() {
+            assert_eq!(
+                call(
+                    &state,
+                    &auth,
+                    "POST",
+                    &answer_path(&run),
+                    answer_body(q, "wrong")
+                )
+                .await
+                .0,
+                200
+            );
+        }
+        assert_eq!(
+            reward(&state, &auth).await["awarded_amount"],
+            if batch == 0 { "0" } else { "5" }
+        );
+    }
+    assert_eq!(issuance(&pool).await, (1, 5));
+    assert_eq!(
+        call(&state, &auth, "GET", "/api/v1/me/coins/wallet", Value::Null)
+            .await
+            .1["balance"],
+        "6"
+    );
+    // Re-running the deployment operation must not silently overwrite future policy.
+    let mut connection = timed.acquire().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!("../ops/enable-learning-rewards.sql"))
+            .execute(&mut *connection)
+            .await
+            .is_err()
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    timed.close().await;
+}
+
 // Isolated fixture only: emulate a policy published before today's 04:00. The
 // production schedule trigger is restored before any API call. No runtime bypass.
 async fn policy(pool: &PgPool, enabled: bool, minimum: i32) {
@@ -165,9 +283,29 @@ async fn disabled_longterm_and_paused_completion_are_not_credited(pool: PgPool) 
     )
     .await;
     assert_eq!(cancelled.0, 200, "{}", cancelled.1);
-    complete(&s2, &a2, l2, "daily").await;
+    // Read-only lookup cannot award; recovery needs a new completed daily round.
     assert_eq!(reward(&s2, &a2).await["status"], "wallet_unavailable");
     assert_eq!(issuance(&pool).await, (0, 0));
+    tokio::join!(
+        complete(&s2, &a2, l2, "daily"),
+        complete(&s2, &a2, l2, "daily")
+    );
+    assert_eq!(reward(&s2, &a2).await["status"], "awarded");
+    assert_eq!(issuance(&pool).await, (1, 13));
+    let records: (i64,i64) = sqlx::query_as("SELECT count(*) FILTER(WHERE status='wallet_unavailable'),count(*) FILTER(WHERE status='awarded') FROM learning_reward_settlements WHERE user_id=$1")
+        .bind(a2.subject).fetch_one(&pool).await.unwrap();
+    assert_eq!(records, (1, 1));
+    // Recovery history cannot be rolled back into the old one-row model.
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261017080000_learning_reward_recovery.down.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    );
+    tx.rollback().await.unwrap();
 }
 #[sqlx::test]
 async fn audit_failure_and_deadline_after_reward_roll_back_everything(pool: PgPool) {
@@ -552,5 +690,66 @@ async fn policy_publication_and_replay_across_four_am(pool: PgPool) {
                 .unwrap();
         assert_eq!(count, 0);
     }
+    timed.close().await;
+}
+
+#[sqlx::test]
+async fn recovered_wallet_can_earn_today_without_backfilling_yesterday(pool: PgPool) {
+    sqlx::raw_sql("CREATE SCHEMA reward_clock; CREATE TABLE reward_clock.instant(at timestamptz NOT NULL); INSERT INTO reward_clock.instant VALUES('2026-10-17T06:00:00Z'); CREATE FUNCTION reward_clock.clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE AS 'SELECT at FROM reward_clock.instant';").execute(&pool).await.unwrap();
+    let timed = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(6)
+        .after_connect(|c, _| {
+            Box::pin(async move {
+                sqlx::query("SET search_path TO reward_clock,public,pg_catalog")
+                    .execute(c)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let (state, auth, list) = setup(&timed).await;
+    policy(&timed, true, 2).await;
+    let deletion = account_deletion_support::apply(&state, &auth, "0").await;
+    complete(&state, &auth, list, "daily").await;
+    complete(&state, &auth, list, "daily").await;
+    let skips: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM learning_reward_settlements WHERE user_id=$1")
+            .bind(auth.subject)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(skips, 1);
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            &format!("/api/v1/me/account-deletion/{}/cancel", deletion.id),
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+    sqlx::query("UPDATE reward_clock.instant SET at='2026-10-17T20:00:00Z'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    complete(&state, &auth, list, "daily").await;
+    assert_eq!(reward(&state, &auth).await["status"], "awarded");
+    assert_eq!(issuance(&pool).await, (1, 13));
+    let old = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/me/coins/learning-rewards?business_day=2026-10-17",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(old.0, 200);
+    assert_eq!(old.1["status"], "wallet_unavailable");
+    assert_eq!(old.1["awarded_amount"], "0");
     timed.close().await;
 }

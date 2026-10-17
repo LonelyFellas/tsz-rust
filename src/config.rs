@@ -110,6 +110,9 @@ pub struct Config {
     /// 邀请奖励默认关闭；金额缺省时不发放。
     #[serde(default)]
     pub invitation_reward_enabled: bool,
+    /// 独立登录奖励停发开关；仍须每日奖励政策到达生效日。修改后须重启全部实例。
+    #[serde(default)]
+    pub login_reward_enabled: bool,
     #[serde(default)]
     pub invitation_reward_amount: Option<i64>,
     pub database_url: String,
@@ -369,6 +372,17 @@ mod tests {
         let mut disabled = valid_baseline();
         disabled.push(("AVATAR_PUBLIC_BASE_URL", "https://api.example/avatars"));
         assert!(parse(&disabled).is_err());
+    }
+
+    #[test]
+    fn login_reward_switch_defaults_off_and_requires_a_boolean() {
+        assert!(!parse(&valid_baseline()).unwrap().login_reward_enabled);
+        let mut input = valid_baseline();
+        input.push(("LOGIN_REWARD_ENABLED", "true"));
+        assert!(parse(&input).unwrap().login_reward_enabled);
+        input.pop();
+        input.push(("LOGIN_REWARD_ENABLED", "yes"));
+        assert!(parse(&input).is_err());
     }
 
     #[test]
