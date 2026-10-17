@@ -111,6 +111,7 @@ use utoipa::{
         crate::coins::admin_handler::reverse,
         crate::coins::admin_handler::operations,
         crate::coins::handler::user_wallet,
+        crate::coins::login_reward::claim,
         crate::coins::handler::user_entries,
         crate::coins::handler::admin_wallet,
         crate::coins::handler::admin_entries,

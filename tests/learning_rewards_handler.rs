@@ -9,6 +9,110 @@ use tsz_rust::{auth::extract::AuthUser, state::AppState};
 use uuid::Uuid;
 const REWARDS: &str = "/api/v1/me/coins/learning-rewards";
 
+#[sqlx::test]
+async fn approved_five_for_ten_policy_and_login_reward_are_independent(pool: PgPool) {
+    sqlx::raw_sql("CREATE SCHEMA reward_clock; CREATE TABLE reward_clock.instant(at timestamptz NOT NULL); INSERT INTO reward_clock.instant VALUES('2026-10-17T06:00:00Z'); CREATE FUNCTION reward_clock.clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE AS 'SELECT at FROM reward_clock.instant';").execute(&pool).await.unwrap();
+    let timed = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(6)
+        .after_connect(|c, _| {
+            Box::pin(async move {
+                sqlx::query("SET search_path TO reward_clock,public,pg_catalog")
+                    .execute(c)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../ops/enable-learning-rewards.sql"))
+        .execute(&timed)
+        .await
+        .unwrap();
+    let (state, auth, _) = setup(&timed).await;
+    assert_eq!(reward(&state, &auth).await["status"], "reward_disabled");
+    sqlx::query("UPDATE reward_clock.instant SET at='2026-10-17T20:00:00Z'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = reward(&state, &auth).await;
+    assert_eq!(before["daily_amount"], "5");
+    assert_eq!(before["minimum_units"], 10);
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/coins/login-reward",
+            json!({})
+        )
+        .await
+        .1["awarded_amount"],
+        "1"
+    );
+    for (batch, size) in [(0, 9), (1, 1)] {
+        let mut ids = Vec::new();
+        for i in 0..size {
+            ids.push(wordlists_support::full_entry(&timed, &format!("rewardword{batch}{i}")).await);
+        }
+        let list = call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/wordlists",
+            wordlists_support::create_body(&ids),
+        )
+        .await;
+        assert_eq!(list.0, 200, "{}", list.1);
+        let list = Uuid::parse_str(list.1["id"].as_str().unwrap()).unwrap();
+        let mut body = create_body(list, "daily");
+        body["daily_question_count"] = json!(size);
+        let task = call(&state, &auth, "POST", "/api/v1/me/learning-tasks", body).await;
+        assert_eq!(task.0, 200, "{}", task.1);
+        let run = start(&state, &auth, &task.1).await;
+        let qs = questions(&state, &auth, &run).await;
+        for q in qs["items"].as_array().unwrap() {
+            assert_eq!(
+                call(
+                    &state,
+                    &auth,
+                    "POST",
+                    &answer_path(&run),
+                    answer_body(q, "wrong")
+                )
+                .await
+                .0,
+                200
+            );
+        }
+        assert_eq!(
+            reward(&state, &auth).await["awarded_amount"],
+            if batch == 0 { "0" } else { "5" }
+        );
+    }
+    assert_eq!(issuance(&pool).await, (1, 5));
+    assert_eq!(
+        call(&state, &auth, "GET", "/api/v1/me/coins/wallet", Value::Null)
+            .await
+            .1["balance"],
+        "6"
+    );
+    // Re-running the deployment operation must not silently overwrite future policy.
+    let mut connection = timed.acquire().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!("../ops/enable-learning-rewards.sql"))
+            .execute(&mut *connection)
+            .await
+            .is_err()
+    );
+    sqlx::query("ROLLBACK")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    drop(connection);
+    timed.close().await;
+}
+
 // Isolated fixture only: emulate a policy published before today's 04:00. The
 // production schedule trigger is restored before any API call. No runtime bypass.
 async fn policy(pool: &PgPool, enabled: bool, minimum: i32) {

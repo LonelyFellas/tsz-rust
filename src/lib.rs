@@ -76,6 +76,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/me/coins/wallet", get(coins::handler::user_wallet))
         .route(
+            "/api/v1/me/coins/login-reward",
+            post(coins::login_reward::claim),
+        )
+        .route(
             "/api/v1/me/coins/entries",
             get(coins::handler::user_entries),
         )

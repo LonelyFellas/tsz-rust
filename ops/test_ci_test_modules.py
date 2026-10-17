@@ -102,6 +102,7 @@ EXPECTED_TARGETS = {
     },
     "platform": {
         "coins_handler",
+        "coins_login_reward",
         "coins_ledger",
         "coins_schema",
         "catalog_handler",
@@ -133,7 +134,7 @@ class CiTestModulesTests(unittest.TestCase):
         )
         flattened = [target for targets in actual.values() for target in targets]
         self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertEqual(len(flattened), 92)
+        self.assertEqual(len(flattened), 93)
 
     def test_ci02_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(
