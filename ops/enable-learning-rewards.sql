@@ -1,3 +1,6 @@
+-- Common activation day for login (1 coin) and learning rewards.
+-- Set LOGIN_REWARD_ENABLED=true on all API instances before the scheduled day.
+-- No login award is issued before the enabled policy becomes effective.
 -- Approved rule: 10 distinct completed daily units earn 5 coins, once per user/day.
 -- Run explicitly with psql -X -v ON_ERROR_STOP=1 -f ops/enable-learning-rewards.sql.
 -- No historical rewards are backfilled. The first active business day starts at

@@ -10,8 +10,11 @@ use uuid::Uuid;
 const PATH: &str = "/api/v1/me/coins/login-reward";
 async fn setup(pool: &PgPool) -> (AppState, AuthUser, Owner) {
     let owner = seed(pool, OwnerType::User, Uuid::now_v7()).await;
+    enable_policy(pool).await;
+    let mut state = AppState::for_test(pool.clone());
+    state.login_reward_enabled = true;
     (
-        AppState::for_test(pool.clone()),
+        state,
         AuthUser {
             subject: owner.owner_id,
             role: "student".into(),
@@ -19,6 +22,24 @@ async fn setup(pool: &PgPool) -> (AppState, AuthUser, Owner) {
         },
         owner,
     )
+}
+async fn enable_policy(pool: &PgPool) {
+    let mut tx = pool.begin().await.unwrap();
+    // Isolated fixture: emulate the common policy having been scheduled yesterday.
+    sqlx::query(
+        "ALTER TABLE learning_reward_policies DISABLE TRIGGER learning_reward_policy_schedule",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO learning_reward_policies(id,rule_version,effective_business_day,enabled,daily_amount,minimum_units) SELECT gen_random_uuid(),'login-fixture',((clock_timestamp() AT TIME ZONE 'Asia/Shanghai')-interval '4 hours')::date,true,5,10 WHERE NOT EXISTS(SELECT 1 FROM learning_reward_policies)").execute(&mut *tx).await.unwrap();
+    sqlx::query(
+        "ALTER TABLE learning_reward_policies ENABLE TRIGGER learning_reward_policy_schedule",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
 }
 async fn claim(state: &AppState, auth: &AuthUser) -> Value {
     let r = call(state, auth, "POST", PATH, json!({})).await;
@@ -43,7 +64,7 @@ async fn concurrent_visits_devices_and_roles_issue_one_coin(pool: PgPool) {
         role: "teacher".into(),
         security_version: 0,
     };
-    let r = tsz_rust::coins::login_reward::settle(&pool, &teacher)
+    let r = tsz_rust::coins::login_reward::settle(&pool, &teacher, true)
         .await
         .unwrap();
     assert_eq!(
@@ -137,7 +158,9 @@ async fn wait_for_lock(pool: &PgPool) {
 
 #[sqlx::test]
 async fn pending_skips_until_recovery_and_closure_preserves_ledger(pool: PgPool) {
-    let (state, auth) = account_deletion_support::setup_bound(&pool).await;
+    let (mut state, auth) = account_deletion_support::setup_bound(&pool).await;
+    state.login_reward_enabled = true;
+    enable_policy(&pool).await;
     let request = account_deletion_support::apply(&state, &auth, "0").await;
     assert_eq!(claim(&state, &auth).await["status"], "wallet_unavailable");
     assert_eq!(
@@ -154,7 +177,8 @@ async fn pending_skips_until_recovery_and_closure_preserves_ledger(pool: PgPool)
     );
     let first = claim(&state, &auth).await;
     assert_eq!(first["awarded_amount"], "1");
-    let state = AppState::for_test(pool.clone());
+    let mut state = AppState::for_test(pool.clone());
+    state.login_reward_enabled = true;
     let request = account_deletion_support::apply(&state, &auth, "1").await;
     assert_eq!(
         claim(&state, &auth).await["operation_id"],
@@ -242,4 +266,24 @@ async fn server_day_boundary_wallet_wait_and_failed_write_are_atomic(pool: PgPoo
     assert_eq!(claim(&other, &c).await["awarded_amount"], "1");
     reconciled(&pool).await;
     timed.close().await;
+}
+
+#[sqlx::test]
+async fn server_switch_blocks_new_awards_and_preserves_existing_receipts(pool: PgPool) {
+    let (mut state, auth, owner) = setup(&pool).await;
+    state.login_reward_enabled = false;
+    assert_eq!(claim(&state, &auth).await["status"], "reward_disabled");
+    assert_eq!(balance(&pool, owner).await, "0");
+    state.login_reward_enabled = true;
+    let awarded = claim(&state, &auth).await;
+    assert_eq!(awarded["awarded_amount"], "1");
+    state.login_reward_enabled = false;
+    assert_eq!(
+        claim(&state, &auth).await["operation_id"],
+        awarded["operation_id"]
+    );
+    let (_, other, other_owner) = setup(&pool).await;
+    assert_eq!(claim(&state, &other).await["status"], "reward_disabled");
+    assert_eq!(balance(&pool, other_owner).await, "0");
+    reconciled(&pool).await;
 }

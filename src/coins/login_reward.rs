@@ -23,6 +23,7 @@ pub struct LoginRewardRequest {}
 pub enum LoginRewardStatus {
     Awarded,
     WalletUnavailable,
+    RewardDisabled,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -45,7 +46,11 @@ async fn now(tx: &mut Transaction<'_, Postgres>) -> Result<DateTime<Utc>, AppErr
         .map_err(AppError::internal)
 }
 
-pub async fn settle(pool: &PgPool, auth: &AuthUser) -> Result<LoginRewardDay, AppError> {
+pub async fn settle(
+    pool: &PgPool,
+    auth: &AuthUser,
+    enabled: bool,
+) -> Result<LoginRewardDay, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     // Serialize against account deletion/security changes before any ledger locks.
     let account: Option<(String, i64, Option<String>)> =
@@ -73,6 +78,11 @@ pub async fn settle(pool: &PgPool, auth: &AuthUser) -> Result<LoginRewardDay, Ap
         ));
     }
     crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
+    // Share the learning policy schedule, so neither reward starts before the common day.
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(72120400)")
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
     let at = now(&mut tx).await?;
     let (day, _, next_day) = business_window(at);
     let event = format!("{}:{day}", auth.subject);
@@ -83,8 +93,13 @@ pub async fn settle(pool: &PgPool, auth: &AuthUser) -> Result<LoginRewardDay, Ap
     .fetch_optional(&mut *tx)
     .await
     .map_err(AppError::internal)?;
+    let policy_enabled: bool = sqlx::query_scalar("SELECT COALESCE((SELECT enabled FROM learning_reward_policies WHERE effective_business_day <= $1 ORDER BY effective_business_day DESC LIMIT 1),false)")
+        .bind(day).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+    let enabled = enabled && policy_enabled;
     let operation = if old.is_some() {
         old
+    } else if !enabled {
+        None
     } else {
         let unavailable: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM account_deletion_requests WHERE user_id=$1 AND status='pending') OR EXISTS(SELECT 1 FROM coin_wallets WHERE owner_type='user' AND owner_id=$1 AND status<>'open')")
             .bind(auth.subject).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
@@ -132,6 +147,8 @@ pub async fn settle(pool: &PgPool, auth: &AuthUser) -> Result<LoginRewardDay, Ap
         next_day_starts_at: next_day,
         status: if operation.is_some() {
             LoginRewardStatus::Awarded
+        } else if !enabled {
+            LoginRewardStatus::RewardDisabled
         } else {
             LoginRewardStatus::WalletUnavailable
         },
@@ -152,5 +169,7 @@ pub async fn claim(
     ApiQuery(_query): ApiQuery<LoginRewardRequest>,
     ApiJson(_body): ApiJson<LoginRewardRequest>,
 ) -> Result<Json<LoginRewardDay>, AppError> {
-    Ok(Json(settle(&state.pool, &auth).await?))
+    Ok(Json(
+        settle(&state.pool, &auth, state.login_reward_enabled).await?,
+    ))
 }

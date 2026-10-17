@@ -27,6 +27,7 @@ pub struct AppState {
     pub otp_service: Arc<OtpService>,
     pub cookie_secure: bool,
     pub invitation_reward_amount: Option<i64>,
+    pub login_reward_enabled: bool,
     pub object_storage: StorageRegistry,
     pub test_resources: Option<Arc<crate::test_resources::TestResourcesConfig>>,
     pub avatar_public_base_url: Option<String>,
@@ -96,6 +97,7 @@ impl AppState {
             otp_service,
             cookie_secure: false,
             invitation_reward_amount: None,
+            login_reward_enabled: false,
             object_storage: StorageRegistry::empty(),
             test_resources: None,
             avatar_public_base_url: None,
@@ -129,6 +131,7 @@ impl AppState {
             pool,
             cookie_secure: false,
             invitation_reward_amount: None,
+            login_reward_enabled: false,
             token_manager: Arc::new(TokenManager::new(
                 "test-secret",
                 Realm::Web,

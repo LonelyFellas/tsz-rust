@@ -4,6 +4,12 @@ use uuid::Uuid;
 #[sqlx::test]
 async fn empty_roundtrip_and_policy_immutability(pool: PgPool) {
     sqlx::raw_sql(include_str!(
+        "../migrations/20261017080000_learning_reward_recovery.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20261007020000_learning_rewards.down.sql"
     ))
     .execute(&pool)
@@ -11,6 +17,12 @@ async fn empty_roundtrip_and_policy_immutability(pool: PgPool) {
     .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20261007020000_learning_rewards.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261017080000_learning_reward_recovery.up.sql"
     ))
     .execute(&pool)
     .await

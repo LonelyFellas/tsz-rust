@@ -318,6 +318,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         otp_service,
         cookie_secure: config.cookie_secure,
         invitation_reward_amount,
+        login_reward_enabled: config.login_reward_enabled,
         object_storage,
         test_resources: config.test_resources.map(Arc::new),
         avatar_public_base_url: config.avatar_public_base_url,

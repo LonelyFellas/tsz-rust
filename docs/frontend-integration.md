@@ -215,6 +215,6 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 
 ## 每日登录奖励（2026-10-17，待发布）
 
-新增 `POST /api/v1/me/coins/login-reward`，空 JSON 对象；C 端已绑手机账号按北京时间 04:00 业务日每天固定 1 币。重复请求返回同一 operation_id，不影响原登录、钱包和学习响应。金额与日期只由服务器决定；后台管理员不参与。Web 确认会话后自动调用，保持登录无需退出重登。
+新增 `POST /api/v1/me/coins/login-reward`，空 JSON 对象；C 端已绑手机账号按北京时间 04:00 业务日每天固定 1 币。重复请求返回同一 operation_id，不影响原登录、钱包和学习响应。金额与日期只由服务器决定；后台管理员不参与。Web 仅在打开、返回或交互时尝试结算，静置跨日不发。服务端 `LOGIN_REWARD_ENABLED` 默认 false，需全部实例配置后重启，关闭时新结算返回 `reward_disabled`，已到账记录不撤销。
 
-学习奖励已确认 10 个去重单元发 5 币；`ops/enable-learning-rewards.sql` 显式排期到下一业务日，已有政策时拒绝覆盖。需先后端再 Web，配置政策属于发布步骤；本次没有对线上执行配置。主记录见配套前端 `docs/features/coins-system/daily-login-reward.md`，不在后端重复维护需求与验收台账。
+学习奖励已确认 10 个去重单元发 5 币；`ops/enable-learning-rewards.sql` 为两种奖励共同排期到下一业务日，已有政策时拒绝覆盖。新增迁移 `20261017080000` 允许保留暂停记录后，同日再次完成任务追加一次学习到账记录；读接口不补发，过去日期不补发。存在同日恢复记录时 down 拒绝回退，旧二进制不作为新 schema 可回退组合。需先后端再 Web，配置政策属于发布步骤；本次没有对线上执行配置。主记录见配套前端 `docs/features/coins-system/daily-login-reward.md`，不在后端重复维护需求与验收台账。

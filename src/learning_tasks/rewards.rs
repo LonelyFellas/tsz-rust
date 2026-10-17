@@ -40,7 +40,7 @@ async fn receipt(
     day: NaiveDate,
     at: DateTime<Utc>,
 ) -> Result<Option<LearningRewardDay>, AppError> {
-    sqlx::query_as("SELECT business_day,$3::timestamptz AS server_time,rule_version,minimum_units,daily_amount::text,qualifying_units,status,awarded_amount::text,operation_id,settled_at FROM learning_reward_settlements WHERE user_id=$1 AND business_day=$2")
+    sqlx::query_as("SELECT business_day,$3::timestamptz AS server_time,rule_version,minimum_units,daily_amount::text,qualifying_units,status,awarded_amount::text,operation_id,settled_at FROM learning_reward_settlements WHERE user_id=$1 AND business_day=$2 ORDER BY (status='wallet_unavailable'),settled_at DESC,id DESC LIMIT 1")
         .bind(user).bind(day).bind(at).fetch_optional(&mut **tx).await.map_err(AppError::internal)
 }
 
@@ -60,7 +60,11 @@ pub(super) async fn settle_completion_in(
     let Some(day) = day else {
         return Ok(());
     };
-    if receipt(tx, user, day, completed_at).await?.is_some() {
+    let previous = receipt(tx, user, day, completed_at).await?;
+    if previous
+        .as_ref()
+        .is_some_and(|r| r.status != LearningRewardStatus::WalletUnavailable)
+    {
         return Ok(());
     }
     policy_lock(tx).await?;
@@ -108,6 +112,10 @@ pub(super) async fn settle_completion_in(
             operation = Some(awarded.operation_id);
             status = LearningRewardStatus::Awarded;
         } else {
+            // Preserve the original skipped attempt without creating unbounded audit rows.
+            if previous.is_some() {
+                return Ok(());
+            }
             status = LearningRewardStatus::WalletUnavailable;
         }
     }
