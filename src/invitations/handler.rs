@@ -103,13 +103,13 @@ pub async fn records(
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     lock_user(&mut tx, &auth).await?;
     let total: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM invitation_registrations WHERE inviter_user_id=$1",
+        "SELECT count(*) FROM invitation_reward_records WHERE inviter_user_id=$1",
     )
     .bind(auth.subject)
     .fetch_one(&mut *tx)
     .await
     .map_err(AppError::internal)?;
-    let items = sqlx::query_as("SELECT r.invitee_user_id,u.display_name AS invitee_name,r.reward_status,r.reward_amount::text AS reward_amount,r.created_at FROM invitation_registrations r LEFT JOIN users u ON u.id=r.invitee_user_id WHERE r.inviter_user_id=$1 ORDER BY r.created_at DESC,r.invitee_user_id DESC LIMIT $2 OFFSET $3")
+    let items = sqlx::query_as("SELECT r.invitee_user_id,u.display_name AS invitee_name,r.reward_status,r.reward_amount::text AS reward_amount,r.created_at FROM invitation_reward_records r LEFT JOIN users u ON u.id=r.invitee_user_id WHERE r.inviter_user_id=$1 ORDER BY r.created_at DESC,r.invitee_user_id DESC LIMIT $2 OFFSET $3")
         .bind(auth.subject).bind(i64::from(page_size)).bind(i64::from(page-1)*i64::from(page_size))
         .fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;

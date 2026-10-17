@@ -91,6 +91,16 @@ pub async fn begin<'a>(
             .fetch_all(&mut *tx)
             .await
             .map_err(AppError::internal)?;
+    // Attribution is immutable. Include the inviter before taking any participant,
+    // task, source or wallet lock so reciprocal/concurrent learning cannot deadlock.
+    let inviter: Option<Uuid> = sqlx::query_scalar(
+        "SELECT inviter_user_id FROM invitation_reward_candidates WHERE invitee_user_id=$1",
+    )
+    .bind(auth.subject)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    accounts.extend(inviter);
     accounts.push(auth.subject);
     accounts.sort();
     accounts.dedup();
