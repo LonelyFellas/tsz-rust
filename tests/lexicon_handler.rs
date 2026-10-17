@@ -7139,6 +7139,129 @@ async fn complete_v3_phrase_draft(
 }
 
 #[sqlx::test]
+async fn v3_form_phrase_components_reject_invalid_form_type_before_storage(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let target_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_id = Uuid::parse_str(target_published["word"]["id"].as_str().unwrap()).unwrap();
+    let publication_id = current_publication_id(&pool, target_id).await;
+    let mut component = resolved_component_json(&target_published, publication_id, "uk", "native");
+    component["target_form_type"] = json!("bad-code");
+    let (entry_id, mut forms) =
+        create_v3_phrase_draft(&state, &bearer, "invalid form component").await;
+    forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] = json!([component]);
+
+    for intent in ["save", "complete"] {
+        let (status, rejected) = save_v3_forms_raw(
+            &state,
+            &bearer,
+            &entry_id,
+            json!({
+                "schema_version": 3,
+                "base_revision": 1,
+                "intent": intent,
+                "content": forms
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{intent}: {rejected}");
+        assert_eq!(rejected["code"], "invalid_request_body", "{rejected}");
+    }
+
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(reloaded["word"]["revision"], 1, "{reloaded}");
+}
+
+#[sqlx::test]
+async fn v3_sense_phrase_components_reject_invalid_form_type_before_storage(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url())
+        .await
+        .expect("测试 Redis 连接池应能创建");
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let admin_id = seed_admin(&pool).await;
+    let bearer = token(&state, admin_id);
+    let target_draft =
+        create_ready_v3_draft_with_sentences(&state, &pool, &bearer, &["The harbour is calm."])
+            .await;
+    let (status, target_published) = publish_ready_v3(&state, &bearer, &target_draft).await;
+    assert_eq!(status, StatusCode::CREATED, "{target_published}");
+    let target_id = Uuid::parse_str(target_published["word"]["id"].as_str().unwrap()).unwrap();
+    let publication_id = current_publication_id(&pool, target_id).await;
+    let component = resolved_component_json(&target_published, publication_id, "uk", "native");
+    let saved = create_v3_phrase_with_sense_components(
+        &state,
+        &bearer,
+        "invalid sense component",
+        json!([component.clone()]),
+    )
+    .await;
+    let entry_id = saved["word"]["id"].as_str().unwrap();
+    let mut meanings = writable_v3_meanings(&saved);
+    meanings["pos"][0]["senses"][0]["component_usages"][0]["target_form_type"] = json!("bad-code");
+
+    for intent in ["save", "complete"] {
+        let (status, rejected) = call(
+            &state,
+            Method::PUT,
+            &format!("{ROOT}/entries/{entry_id}/steps/meanings"),
+            &bearer,
+            None,
+            Some(json!({
+                "schema_version": 3,
+                "base_revision": saved["word"]["revision"],
+                "intent": intent,
+                "content": meanings
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{intent}: {rejected}"
+        );
+        assert_eq!(rejected["code"], "validation_failed", "{rejected}");
+        let issue = sense_component_issue(&rejected, "phrase_component_target_stale");
+        assert_eq!(issue["node_id"], component["id"], "{rejected}");
+        assert_eq!(issue["field"], "target", "{rejected}");
+    }
+
+    let (status, reloaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reloaded}");
+    assert_eq!(reloaded["word"]["revision"], saved["word"]["revision"]);
+    assert_eq!(
+        reloaded["word"]["meanings"]["pos"][0]["senses"][0]["component_usages"],
+        json!([component])
+    );
+}
+
+#[sqlx::test]
 async fn v3_phrase_components_may_target_phrases_with_cycle_and_depth_guards(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url())
         .await

@@ -3309,7 +3309,9 @@ pub(super) fn phrase_component_matches_target(
     // 词形类型不再做硬拒绝：改类型不换 `form.id`，引用在业务上绑的是「这个词形 + 方言侧」。
     // 类型漂移（引用时记的 `target_form_type` 与当前 form 类型不一致）不再让引用失效，
     // 而是由保存侧的确认流提示「会让 N 处引用失效」（见 inbound_references）。
-    let _target_form_type = target_form_type;
+    if !crate::lexicon::form_types::valid_code(&target_form_type) {
+        return false;
+    }
     // 变体定位：先走 id 快速路径（同结构、存量引用完全不变）；未命中时按方言侧重解析。
     // 结构漂移（common ↔ uk_us）会换掉变体实例 id，而 common/uk/us 之间双向可映射
     // （见 dialect_side_available：该判定当前恒为 true），因此漂移不构成失效；真正的失效由
