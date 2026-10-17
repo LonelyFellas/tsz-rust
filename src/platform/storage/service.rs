@@ -55,6 +55,9 @@ pub(crate) trait ObjectStoreBackend: Send + Sync {
 pub trait ObjectStore: Send + Sync {
     fn space(&self) -> &StorageSpace;
     fn policy(&self) -> &StoragePolicy;
+    fn qualify_key(&self, key: ObjectKey) -> Result<ObjectKey, super::ObjectKeyError> {
+        Ok(key)
+    }
 
     async fn put(
         &self,

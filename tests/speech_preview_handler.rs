@@ -244,3 +244,39 @@ async fn provider_failures_have_stable_status_and_problem_code(pool: PgPool) {
         assert_eq!(content_type, "application/problem+json");
     }
 }
+
+#[sqlx::test]
+async fn explicit_test_header_cannot_silently_generate_into_normal_storage(pool: PgPool) {
+    let admin = seed_admin(&pool).await;
+    let state = AppState::for_test(pool.clone());
+    let token = state
+        .admin_token_manager
+        .generate(admin, AdminRole::SuperAdmin.as_str())
+        .unwrap();
+    for (run, expected) in [
+        ("fixture-20261017", StatusCode::FORBIDDEN),
+        ("../escape", StatusCode::BAD_REQUEST),
+    ] {
+        let response = tsz_rust::router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/admin/speech/previews")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("X-TSZ-Test-Run", run)
+                    .body(Body::from(serde_json::to_vec(&valid_request()).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM speech.preview_cache")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+}

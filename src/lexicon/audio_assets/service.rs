@@ -132,8 +132,12 @@ impl AudioAssetService {
         if request.size > max_bytes {
             return Err(AudioAssetServiceError::FileTooLarge);
         }
-        let key = ObjectKey::generate(&format!("{PENDING_PREFIX}/{admin_id}"), Some(extension))
-            .expect("常量前缀、签发人 UUID 与白名单扩展名构成合法对象键");
+        let key = storage
+            .qualify_key(
+                ObjectKey::generate(&format!("{PENDING_PREFIX}/{admin_id}"), Some(extension))
+                    .expect("常量前缀、签发人 UUID 与白名单扩展名构成合法对象键"),
+            )
+            .expect("validated test prefix fits generated key");
         let options = PutOptions::new(Some(
             ObjectContentType::parse(content_type).expect("白名单 MIME 是合法媒体类型"),
         ));
@@ -241,6 +245,12 @@ impl AudioAssetService {
         let id = Uuid::now_v7();
         let asset_key = ObjectKey::parse(format!("{ASSET_PREFIX}/{id}.{extension}"))
             .expect("常量前缀与 UUID 构成合法对象键");
+        let asset_key = storage
+            .qualify_key(
+                crate::platform::storage::related_object_key(&pending_key, asset_key)
+                    .expect("derived key fits test namespace"),
+            )
+            .expect("validated test prefix fits generated key");
 
         // copy 是「read 源 + put 目标」：OSS 提交了 PUT 但响应丢了同样会返回 Err，
         // 此时目标对象已经真实存在。delete 是幂等的，没写成也只是一次 no-op。
@@ -385,6 +395,16 @@ fn canonical_content_type(value: &str) -> Option<(&'static str, &'static str)> {
 
 /// 只接受安全的暂存键形状；旧无签发人 key 仅供已确认资产按真实 creator 重放。
 fn parse_pending_key(value: &str) -> Option<(ObjectKey, Option<Uuid>)> {
+    let original = value;
+    let value = if value.starts_with("temporary-tests/") {
+        let (_, space, inner) = crate::platform::storage::test_key_parts(value)?;
+        if space != "audio" {
+            return None;
+        }
+        inner
+    } else {
+        value
+    };
     let (name, extension) = value
         .strip_prefix(PENDING_PREFIX)?
         .strip_prefix('/')?
@@ -400,7 +420,7 @@ fn parse_pending_key(value: &str) -> Option<(ObjectKey, Option<Uuid>)> {
     {
         return None;
     }
-    Some((ObjectKey::parse(value).ok()?, owner))
+    Some((ObjectKey::parse(original).ok()?, owner))
 }
 
 async fn compensate_delete(storage: &Arc<dyn ObjectStore>, key: &ObjectKey) {
@@ -409,5 +429,24 @@ async fn compensate_delete(storage: &Arc<dyn ObjectStore>, key: &ObjectKey) {
             error_kind = "storage_delete",
             "audio asset compensation failed"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_resource_key_tests {
+    use super::*;
+    #[test]
+    fn temporary_upload_keys_retain_owner_validation_and_full_namespace() {
+        let owner = Uuid::now_v7();
+        let upload = Uuid::now_v7();
+        let normal = format!("{PENDING_PREFIX}/{owner}/{upload}.mp3");
+        let scoped = format!("temporary-tests/fixture-20261017/audio/{normal}");
+        let (parsed, actor) = parse_pending_key(&scoped).unwrap();
+        assert_eq!(parsed.as_str(), scoped);
+        assert_eq!(actor, Some(owner));
+        assert_eq!(parse_pending_key(&normal).unwrap().1, Some(owner));
+        assert!(parse_pending_key(&scoped.replace("/audio/", "/speech/")).is_none());
+        assert!(parse_pending_key(&scoped.replace(&owner.to_string(), "not-an-owner")).is_none());
+        assert!(parse_pending_key(&scoped.replace("fixture-20261017", "../escape")).is_none());
     }
 }

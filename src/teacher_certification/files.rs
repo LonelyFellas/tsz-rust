@@ -59,7 +59,7 @@ fn unavailable() -> AppError {
 }
 
 #[utoipa::path(post, path = "/api/v1/me/teacher-certification/files", tag = "teacher-certification",
-    params(UploadQuery), request_body(content((inline(CertificationImage) = "image/jpeg"), (inline(CertificationImage) = "image/png"), (inline(CertificationImage) = "image/webp"))),
+    params(UploadQuery,("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")), request_body(content((inline(CertificationImage) = "image/jpeg"), (inline(CertificationImage) = "image/png"), (inline(CertificationImage) = "image/webp"))),
     responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status = 201, body = CertificationFile), (status = 401), (status = 409), (status = 413), (status = 422), (status = 503)), security(("bearer_auth" = [])))]
 pub async fn upload(
     State(state): State<AppState>,
@@ -68,6 +68,7 @@ pub async fn upload(
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<(StatusCode, Json<CertificationFile>), AppError> {
+    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, false)?;
     let body = body.map_err(|error| {
         if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
             AppError::request_error(ErrorCode::PayloadTooLarge, "图片不能超过10MB")
@@ -109,7 +110,9 @@ pub async fn upload(
     .map_err(AppError::internal)??;
     let storage = store(&state)?;
     let id = Uuid::now_v7();
-    let key = ObjectKey::parse(format!("materials/{id}")).map_err(AppError::internal)?;
+    let key = storage
+        .qualify_key(ObjectKey::parse(format!("materials/{id}")).map_err(AppError::internal)?)
+        .map_err(AppError::internal)?;
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let owner = sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 AND status = 'active' AND security_version = $2 FOR UPDATE")
         .bind(auth.subject).bind(auth.security_version).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;

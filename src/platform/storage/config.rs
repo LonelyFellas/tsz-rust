@@ -178,6 +178,41 @@ impl ObjectStorageConfig {
             .map(|binding| &binding.policy)
     }
 
+    pub fn build_test_routed_registry(
+        &self,
+        temporary: &OssAdapterConfig,
+        run: Option<&str>,
+    ) -> Result<StorageRegistry, super::StorageError> {
+        let mut stores = Vec::new();
+        for binding in &self.bindings {
+            if binding.adapter.bucket() == temporary.bucket()
+                && roots_overlap(binding.adapter.root(), temporary.root())
+            {
+                return Err(super::StorageError::backend(
+                    &binding.space,
+                    super::StorageOperation::Configure,
+                    super::BackendErrorKind::AccessDenied,
+                ));
+            }
+            let normal = OssAdapter::object_store(
+                binding.space.clone(),
+                binding.policy.clone(),
+                binding.adapter.clone(),
+            )?;
+            let temporary = OssAdapter::object_store(
+                binding.space.clone(),
+                binding.policy.clone(),
+                temporary.clone(),
+            )?;
+            stores.push(std::sync::Arc::new(super::test_scope::TestRoutedStore {
+                normal,
+                temporary,
+                run: run.map(str::to_owned),
+            }) as std::sync::Arc<dyn super::ObjectStore>);
+        }
+        StorageRegistry::from_stores(stores)
+    }
+
     pub fn len(&self) -> usize {
         self.bindings.len()
     }

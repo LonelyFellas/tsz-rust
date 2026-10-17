@@ -1,4 +1,9 @@
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 
 use crate::{
     admin::{AdminAuth, authorization::require_active_admin},
@@ -30,6 +35,7 @@ fn service(state: &AppState) -> AudioAssetService {
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
     request_body = CreateAudioUploadRequest,
+    params(("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")),
     responses(
         (status = 200, description = "直传许可", body = CreateAudioUploadResponse),
         (status = 400, description = "音频类型不在白名单"),
@@ -44,9 +50,11 @@ fn service(state: &AppState) -> AudioAssetService {
 pub async fn create_audio_upload(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiJson(request): ApiJson<CreateAudioUploadRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
+    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     let response = service(&state)
         .create_upload(auth.subject, request)
         .await
@@ -60,6 +68,7 @@ pub async fn create_audio_upload(
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
     request_body = ConfirmAudioAssetRequest,
+    params(("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")),
     responses(
         (status = 201, description = "音频资产已登记", body = ConfirmAudioAssetResponse),
         (status = 400, description = "对象键非法、上传未完成、类型不在白名单或 original_name 非法"),
@@ -74,9 +83,11 @@ pub async fn create_audio_upload(
 pub async fn confirm_audio_asset(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiJson(request): ApiJson<ConfirmAudioAssetRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
+    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     let response = service(&state)
         .confirm(auth.subject, request)
         .await
@@ -89,7 +100,7 @@ pub async fn confirm_audio_asset(
     path = "/api/v1/admin/lexicon/audio-assets/{id}/url",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
-    params(AudioAssetPath),
+    params(AudioAssetPath,("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")),
     responses(
         (status = 200, description = "短期只读 URL", body = AudioAssetUrlResponse),
         (status = 401, description = "管理员身份无效"),
@@ -102,9 +113,11 @@ pub async fn confirm_audio_asset(
 pub async fn audio_asset_url(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiPath(path): ApiPath<AudioAssetPath>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
+    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     let response = service(&state)
         .presign_url(auth.subject, path.id)
         .await

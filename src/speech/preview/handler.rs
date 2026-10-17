@@ -1,4 +1,9 @@
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 
 use crate::{
     admin::{AdminAuth, authorization::require_active_admin},
@@ -56,6 +61,7 @@ pub async fn list_voices(
     tag = "admin-speech",
     security(("bearer_auth" = [])),
     request_body = CreatePreviewRequest,
+    params(("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")),
     responses(
         (status = 200, description = "试听缓存命中或生成成功", body = PreviewResponse),
         (status = 400, description = "RichText 或语音参数非法"),
@@ -72,10 +78,13 @@ pub async fn list_voices(
 pub async fn create_preview(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiJson(request): ApiJson<CreatePreviewRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
+    let (state, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     let response = service(&state)
+        .with_test_run(run)
         .create_preview(auth.subject, request)
         .await
         .map_err(map_error)?;

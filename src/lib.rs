@@ -23,6 +23,7 @@ pub mod session;
 pub mod speech;
 pub mod state;
 pub mod teacher_certification;
+pub mod test_resources;
 pub mod user;
 pub mod wordlists;
 
@@ -264,7 +265,10 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     let _ = platform::dummy_hash();
 
     // 构建仅做本地配置装配，不发远端请求；未配置时得到空 registry。
-    let object_storage = config.object_storage.build_registry()?;
+    let object_storage = match &config.test_resources {
+        Some(test) => test.registry(None)?,
+        None => config.object_storage.build_registry()?,
+    };
     let speech_provider = config
         .azure_speech
         .as_ref()
@@ -311,6 +315,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         cookie_secure: config.cookie_secure,
         invitation_reward_amount,
         object_storage,
+        test_resources: config.test_resources.map(Arc::new),
         avatar_public_base_url: config.avatar_public_base_url,
         speech_provider,
         smart_lexicon_v3_flags: config.smart_lexicon_v3_flags,
