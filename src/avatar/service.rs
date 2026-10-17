@@ -89,6 +89,7 @@ pub async fn create_upload(
     let id = Uuid::now_v7();
     let key = ObjectKey::parse(format!("uploads/avatars/{id}/original.{extension}"))
         .map_err(AppError::internal)?;
+    let key = store.qualify_key(key).map_err(AppError::internal)?;
     let ttl = store.policy().presign_ttl().as_secs();
     repository::create(&state.pool, auth, id, key.as_str(), &request, ttl as i64).await?;
     let options = PutOptions::new(Some(
@@ -178,6 +179,12 @@ pub async fn confirm(
     .await
     .map_err(AppError::internal)??;
     let key = ObjectKey::parse(format!("images/avatars/{}.webp", Uuid::now_v7()))
+        .map_err(AppError::internal)?;
+    let key = store
+        .qualify_key(
+            crate::platform::storage::related_object_key(&source, key)
+                .map_err(AppError::internal)?,
+        )
         .map_err(AppError::internal)?;
     let task = Uuid::now_v7();
     if !repository::register_candidate(&state.pool, auth, upload.id, key.as_str(), task).await? {

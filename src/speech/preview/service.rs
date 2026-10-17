@@ -51,6 +51,7 @@ pub struct PreviewService {
     redis: RedisPool,
     provider: Option<Arc<dyn SpeechProvider>>,
     storage: Option<Arc<dyn ObjectStore>>,
+    test_run: Option<String>,
 }
 
 impl PreviewService {
@@ -70,7 +71,13 @@ impl PreviewService {
             redis,
             provider,
             storage,
+            test_run: None,
         }
+    }
+
+    pub fn with_test_run(mut self, run: Option<String>) -> Self {
+        self.test_run = run;
+        self
     }
 
     async fn authorize(
@@ -125,8 +132,11 @@ impl PreviewService {
             input.pitch_semitones,
         )?;
         let request = SynthesisRequest::new(voice.voice, options, input.content)?;
-        let request_hash =
-            versioned_hash(request.fingerprint().as_bytes(), &voice.provider_version);
+        let request_hash = scoped_hash(
+            request.fingerprint().as_bytes(),
+            &voice.provider_version,
+            self.test_run.as_deref(),
+        );
         let content_hash: [u8; 32] = Sha256::digest(request.normalized_content()).into();
         let storage = self.storage.clone().ok_or(PreviewServiceError::Storage(
             StorageError::SpaceNotConfigured(
@@ -226,8 +236,12 @@ impl PreviewService {
             )));
         }
         let stale = self.repository.cache_by_hash(request_hash).await?;
-        let key = ObjectKey::generate("previews", Some("mp3"))
-            .expect("constant speech preview namespace and extension are valid");
+        let key = storage
+            .qualify_key(
+                ObjectKey::generate("previews", Some("mp3"))
+                    .expect("constant speech preview namespace and extension are valid"),
+            )
+            .expect("validated test prefix fits generated key");
         let size_bytes = i64::try_from(audio.bytes.len())
             .map_err(|_| PreviewServiceError::InvalidRequest(SpeechModelError::InvalidRichText))?;
         self.authorize(actor_id, true).await?;
@@ -326,4 +340,33 @@ fn versioned_hash(fingerprint: &[u8; 32], provider_version: &str) -> [u8; 32] {
     hasher.update((provider_version.len() as u64).to_be_bytes());
     hasher.update(provider_version.as_bytes());
     hasher.finalize().into()
+}
+
+fn scoped_hash(fingerprint: &[u8; 32], version: &str, run: Option<&str>) -> [u8; 32] {
+    let normal = versioned_hash(fingerprint, version);
+    match run {
+        None => normal,
+        Some(run) => versioned_hash(&normal, &format!("temporary-tests/{run}")),
+    }
+}
+
+#[cfg(test)]
+mod test_scope_hash_tests {
+    use super::*;
+    #[test]
+    fn preview_cache_preserves_normal_fingerprints_and_isolates_each_test_batch() {
+        let fingerprint = [42; 32];
+        let normal = versioned_hash(&fingerprint, "azure-v1");
+        assert_eq!(scoped_hash(&fingerprint, "azure-v1", None), normal);
+        let first = scoped_hash(&fingerprint, "azure-v1", Some("fixture-20261017"));
+        assert_ne!(first, normal);
+        assert_ne!(
+            first,
+            scoped_hash(&fingerprint, "azure-v1", Some("another-20261017"))
+        );
+        assert_eq!(
+            first,
+            scoped_hash(&fingerprint, "azure-v1", Some("fixture-20261017"))
+        );
+    }
 }

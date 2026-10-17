@@ -140,6 +140,8 @@ pub struct Config {
     pub smart_lexicon_v3_flags: SmartLexiconV3Flags,
     #[serde(skip)]
     pub object_storage: ObjectStorageConfig,
+    #[serde(skip)]
+    pub test_resources: Option<crate::test_resources::TestResourcesConfig>,
     #[serde(default)]
     pub avatar_public_base_url: Option<String>,
     #[serde(skip)]
@@ -240,8 +242,12 @@ impl Config {
             .map_err(|error| envy::Error::Custom(error.to_string()))?;
         let azure_speech = AzureSpeechConfig::from_pairs(pairs.iter().cloned())
             .map_err(|error| envy::Error::Custom(error.to_string()))?;
+        let test_resources =
+            crate::test_resources::TestResourcesConfig::from_pairs(&pairs, &object_storage)
+                .map_err(envy::Error::Custom)?;
         let mut cfg: Self = envy::from_iter(pairs)?;
         cfg.object_storage = object_storage;
+        cfg.test_resources = test_resources;
         cfg.azure_speech = azure_speech;
         cfg.validate_avatar_config()?;
         if cfg

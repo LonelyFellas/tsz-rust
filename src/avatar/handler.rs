@@ -3,30 +3,34 @@ use crate::{api::ApiJson, auth::extract::AuthUser, error::AppError, state::AppSt
 use axum::{
     Json,
     extract::State,
-    http::header,
+    http::{HeaderMap, header},
     response::{IntoResponse, Response},
 };
 use uuid::Uuid;
 
-#[utoipa::path(post,path="/api/v1/me/avatar/upload-url",tag="avatar",request_body=AvatarUploadRequest,
+#[utoipa::path(post,path="/api/v1/me/avatar/upload-url",tag="avatar",request_body=AvatarUploadRequest, params(("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")),
     responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status=200,body=AvatarUploadResponse),(status=400),(status=401),(status=413),(status=422),(status=429),(status=500),(status=501),(status=503)),security(("bearer_auth"=[])))]
 pub async fn create_upload(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     ApiJson(request): ApiJson<AvatarUploadRequest>,
 ) -> Result<Json<AvatarUploadResponse>, AppError> {
+    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, false)?;
     service::create_upload(&state, &auth, request)
         .await
         .map(Json)
 }
 
-#[utoipa::path(post,path="/api/v1/me/avatar",tag="avatar",request_body=AvatarConfirmRequest,
+#[utoipa::path(post,path="/api/v1/me/avatar",tag="avatar",request_body=AvatarConfirmRequest, params(("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")),
     responses((status = 403, description = "phone_binding_required：需先绑定手机号"), (status=200,body=AvatarConfirmResponse),(status=400),(status=401),(status=409),(status=413),(status=422),(status=500),(status=501),(status=503)),security(("bearer_auth"=[])))]
 pub async fn confirm(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     ApiJson(request): ApiJson<AvatarConfirmRequest>,
 ) -> Result<Json<AvatarConfirmResponse>, AppError> {
+    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, false)?;
     Ok(Json(AvatarConfirmResponse {
         user: service::confirm(&state, &auth, &request.key).await?,
     }))
