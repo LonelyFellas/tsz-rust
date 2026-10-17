@@ -893,6 +893,43 @@ mod dialect_structure_drift {
     }
 
     #[test]
+    fn phrase_component_reference_validates_form_type_code_without_rejecting_drift() {
+        let fixture = v3_fixture(1);
+        let (_word, target) = component_target(&fixture.snapshot);
+        let longest_code = "a".repeat(32);
+        let too_long_code = "a".repeat(33);
+        for (form_type, expected) in [
+            ("base", true),
+            ("past_tense", true),
+            ("custom_2", true),
+            (longest_code.as_str(), true),
+            ("", false),
+            ("bad-code", false),
+            ("Base", false),
+            ("1base", false),
+            ("_base", false),
+            ("词形", false),
+            (too_long_code.as_str(), false),
+        ] {
+            assert_eq!(
+                phrase_component_matches_target(
+                    &target,
+                    fixture.pos_id,
+                    fixture.form_ids[0],
+                    fixture.sense_id,
+                    fixture.form_ids[0],
+                    fixture.variant_ids[0],
+                    Dialect::Common,
+                    form_type.to_owned(),
+                    None,
+                ),
+                expected,
+                "unexpected form type validation result for {form_type:?}"
+            );
+        }
+    }
+
+    #[test]
     fn phrase_component_reference_still_fails_when_form_is_gone() {
         let fixture = v3_fixture(1);
         let form_id = fixture.form_ids[0];
