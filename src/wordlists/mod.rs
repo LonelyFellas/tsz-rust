@@ -1,5 +1,6 @@
 pub mod admin_handler;
 mod annotations;
+pub mod deletion;
 pub mod dto;
 pub mod handler;
 pub mod interactions;

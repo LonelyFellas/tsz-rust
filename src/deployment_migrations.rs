@@ -122,7 +122,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261018060000;
+    const CURRENT_RELEASE_VERSION: i64 = 20261018070000;
 
     #[sqlx::test]
     async fn deployment_undo_preserves_author_annotations_and_ledger(pool: PgPool) {

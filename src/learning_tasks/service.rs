@@ -263,7 +263,7 @@ pub async fn start(
     if let Some(last) = latest {
         let row = run(&mut tx, auth, last).await?;
         let qs = questions(&mut tx, last).await?;
-        let access = sources_for_questions(&mut tx, auth, &lists, &qs).await?;
+        let access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
         let view = run_view(&mut tx, &row, &qs, &access).await?;
         if view.state != row.state {
             sqlx::query("UPDATE learning_runs SET state=$2 WHERE id=$1")
@@ -345,7 +345,7 @@ pub async fn start(
     save_start(&mut tx, auth, id, run_id, &input, h).await?;
     let final_run = run(&mut tx, auth, run_id).await?;
     let fixed = questions(&mut tx, run_id).await?;
-    let final_access = sources_for_questions(&mut tx, auth, &lists, &fixed).await?;
+    let final_access = sources_for_questions(&mut tx, auth, &lists, &final_run, &fixed).await?;
     if final_run.state == LearningRunState::Active
         && fixed.iter().any(|q| !final_access.available(q))
     {
@@ -368,7 +368,7 @@ pub async fn get_run(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Learnin
     task(&mut tx, auth, task_id).await?;
     let row = run(&mut tx, auth, id).await?;
     let qs = questions(&mut tx, id).await?;
-    let access = sources_for_questions(&mut tx, auth, &lists, &qs).await?;
+    let access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
     let result = run_view(&mut tx, &row, &qs, &access).await?;
     learner(&mut tx, auth).await?;
     tx.commit().await.map_err(AppError::internal)?;
@@ -385,9 +385,9 @@ pub async fn get_questions(
     let lists = task_lists(pool, auth, task_id).await?;
     let mut tx = begin(pool, auth, &lists).await?;
     task(&mut tx, auth, task_id).await?;
-    run(&mut tx, auth, id).await?;
+    let row = run(&mut tx, auth, id).await?;
     let qs = questions(&mut tx, id).await?;
-    let access = sources_for_questions(&mut tx, auth, &lists, &qs).await?;
+    let access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
     let ans = answers(&mut tx, id).await?;
     let total = qs.len() as i64;
     let items = qs
@@ -436,7 +436,7 @@ async fn receipt_view(
     task(&mut tx, auth, task_id).await?;
     let row = run(&mut tx, auth, run_id).await?;
     let qs = questions(&mut tx, run_id).await?;
-    let access = sources_for_questions(&mut tx, auth, &lists, &qs).await?;
+    let access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
     let ans = answers(&mut tx, run_id).await?;
     let a = ans
         .values()
@@ -508,7 +508,7 @@ pub async fn answer(
     let snapshot: AnswerSnapshot =
         serde_json::from_value(q.answer_snapshot.clone()).map_err(AppError::internal)?;
     let (normalized, correct) = grade_spelling(&snapshot, &input.answer)?;
-    let access = sources_for_questions(&mut tx, auth, &lists, &qs).await?;
+    let access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
     let view = run_view(&mut tx, &row, &qs, &access).await?;
     if view.state != LearningRunState::Active
         || t.state != LearningTaskState::Active
@@ -535,7 +535,9 @@ pub async fn answer(
     .fetch_one(&mut *tx)
     .await
     .map_err(AppError::internal)?;
+    let mut completed = false;
     if answered == i64::from(row.target_count) {
+        completed = true;
         let completion_id = Uuid::now_v7();
         sqlx::query("INSERT INTO learning_completions(id,run_id,task_id,user_id,task_type,business_day,task_revision,target_count,answered_count,correct_count,completed_at,generation_version,grading_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)").bind(completion_id).bind(id).bind(task_id).bind(auth.subject).bind(row.task_type).bind(row.business_day).bind(row.task_revision).bind(row.target_count).bind(answered as i32).bind(correct_count as i32).bind(at).bind(&row.generation_version).bind(&row.grading_version).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("UPDATE learning_runs SET state='completed' WHERE id=$1")
@@ -553,9 +555,28 @@ pub async fn answer(
         .await?;
     }
     // Source owners can cross their deletion deadline while locks are held.
-    let final_access = sources_for_questions(&mut tx, auth, &lists, &qs).await?;
+    let final_access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
     if qs.iter().any(|q| !final_access.available(q)) {
         return Err(unavailable());
+    }
+    // A run kept alive only by a deleted source ends with this completion. Archive
+    // the task in the same transaction so no later run can be started from it.
+    if completed && !access.grace.is_empty() {
+        sqlx::query(
+            "UPDATE learning_tasks SET state='archived',revision=revision+1 WHERE id=$1 AND state='active'",
+        )
+        .bind(task_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+        sqlx::query(
+            "UPDATE learning_runs SET state='cancelled' WHERE task_id=$1 AND state='active' AND id<>$2",
+        )
+        .bind(task_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
     }
     learner(&mut tx, auth).await?;
     let end = now(&mut tx).await?;

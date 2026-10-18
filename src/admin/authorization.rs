@@ -111,6 +111,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::All(&["wordlists.recommend"]),
     ),
     (
+        "GET",
+        "/wordlists/{id}/delete-impact",
+        RoutePolicy::All(&["wordlists.delete"]),
+    ),
+    (
         "POST",
         "/wordlists/{id}/delete",
         RoutePolicy::All(&["wordlists.delete"]),

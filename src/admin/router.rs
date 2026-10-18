@@ -42,6 +42,10 @@ pub fn router(_state: AppState) -> Router<AppState> {
             post(crate::wordlists::admin_handler::recommend),
         )
         .route(
+            "/wordlists/{id}/delete-impact",
+            get(crate::wordlists::admin_handler::delete_impact),
+        )
+        .route(
             "/wordlists/{id}/delete",
             post(crate::wordlists::admin_handler::delete),
         )

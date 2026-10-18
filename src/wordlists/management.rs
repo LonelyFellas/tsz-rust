@@ -1,4 +1,5 @@
 use super::{
+    deletion::{self, DeletionActor},
     dto::*,
     review,
     service::{self, Tx},
@@ -215,6 +216,41 @@ pub async fn recommend(
     tx.commit().await.map_err(AppError::internal)?;
     Ok(result)
 }
+pub async fn delete_impact(
+    pool: &PgPool,
+    auth: &AdminAuth,
+    id: Uuid,
+) -> Result<WordlistDeleteImpact, AppError> {
+    let mut tx = pool.begin().await.map_err(AppError::internal)?;
+    let list = review::admin_list_lock(&mut tx, auth, id, "wordlists.delete", false).await?;
+    let impact = if list.state == WordlistState::Published {
+        sqlx::query_as(
+            "SELECT count(DISTINCT t.id) FILTER (WHERE r.id IS NOT NULL) AS active_task_count,count(DISTINCT r.id) AS active_run_count,count(DISTINCT t.user_id) FILTER (WHERE r.id IS NOT NULL) AS affected_user_count,count(DISTINCT t.id) FILTER (WHERE r.id IS NULL) AS blocked_task_count FROM learning_tasks t LEFT JOIN learning_runs r ON r.task_id=t.id AND r.state='active' AND (r.expires_at IS NULL OR r.expires_at>clock_timestamp()) WHERE t.state='active' AND $1=ANY(t.wordlist_ids)",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::internal)?
+    } else {
+        // A non-public wordlist has no in-flight grace. Its deletion only blocks
+        // tasks that still reference it.
+        let blocked_task_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM learning_tasks WHERE state='active' AND $1=ANY(wordlist_ids)",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+        WordlistDeleteImpact {
+            active_run_count: 0,
+            active_task_count: 0,
+            affected_user_count: 0,
+            blocked_task_count,
+        }
+    };
+    tx.commit().await.map_err(AppError::internal)?;
+    Ok(impact)
+}
 pub async fn delete(
     pool: &PgPool,
     auth: &AdminAuth,
@@ -226,8 +262,13 @@ pub async fn delete(
     if list.revision != input.expected_revision {
         return Err(service::conflict());
     }
+    let deleted_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
     sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
-    sqlx::query("UPDATE wordlists SET state='draft',deleted_at=clock_timestamp(),revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    deletion::record(&mut tx, id, deleted_at, DeletionActor::Admin(auth.subject)).await?;
+    sqlx::query("UPDATE wordlists SET state='draft',deleted_at=$2,revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(deleted_at).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("DELETE FROM wordlist_interactions WHERE wordlist_id=$1")
         .bind(id)
         .execute(&mut *tx)
