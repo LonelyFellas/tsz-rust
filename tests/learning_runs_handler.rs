@@ -565,3 +565,5 @@ async fn source_owner_expiring_while_read_waits_hides_questions_and_receipts(poo
         assert!(q["feedback"].is_null());
     }
 }
+
+mod learning_plans;

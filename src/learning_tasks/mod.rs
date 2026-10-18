@@ -1,6 +1,8 @@
 pub mod dto;
 pub mod handler;
 pub mod question;
-mod repository;
+pub(crate) mod repository;
 mod rewards;
 pub mod service;
+
+pub mod plans;

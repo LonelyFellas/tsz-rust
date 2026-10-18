@@ -106,3 +106,15 @@ pub struct LibraryImpact {
     pub folder_count: i64,
     pub wordlist_count: i64,
 }
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LibrarySelectionInput {
+    pub expected_version: String,
+    pub node_ids: Vec<Uuid>,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LibrarySelection {
+    pub version: String,
+    pub wordlists: Vec<Wordlist>,
+}

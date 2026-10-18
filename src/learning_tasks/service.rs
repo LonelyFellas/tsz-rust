@@ -7,7 +7,7 @@ use crate::{
 use sqlx::PgPool;
 use std::collections::HashSet;
 use uuid::Uuid;
-fn validate(
+pub(super) fn validate(
     kind: LearningTaskType,
     ids: &[Uuid],
     n: Option<i32>,
@@ -29,7 +29,7 @@ fn name(value: &str) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn match_hash(old: &[u8], new: &[u8]) -> Result<(), AppError> {
+pub(super) fn match_hash(old: &[u8], new: &[u8]) -> Result<(), AppError> {
     if old != new {
         return Err(AppError::conflict(
             ErrorCode::IdempotencyConflict,
@@ -39,7 +39,7 @@ fn match_hash(old: &[u8], new: &[u8]) -> Result<(), AppError> {
     }
     Ok(())
 }
-async fn pool_for(
+pub(super) async fn pool_for(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     ids: &[Uuid],
@@ -194,12 +194,13 @@ pub async fn archive(
         .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+    super::plans::cancel_cycles(&mut tx, id).await?;
     let result = task(&mut tx, auth, id).await?;
     learner(&mut tx, auth).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(result)
 }
-async fn start_receipt(
+pub(super) async fn start_receipt(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     key: Uuid,
@@ -213,7 +214,7 @@ async fn start_receipt(
         Ok(None)
     }
 }
-async fn save_start(
+pub(super) async fn save_start(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     task_id: Uuid,
@@ -512,6 +513,7 @@ pub async fn answer(
     let view = run_view(&mut tx, &row, &qs, &access).await?;
     if view.state != LearningRunState::Active
         || t.state != LearningTaskState::Active
+        || !access.available(q)
         || row.grading_version != GRADING_VERSION
     {
         if view.state != row.state {
@@ -527,7 +529,8 @@ pub async fn answer(
     }
     let at = now(&mut tx).await?;
     let answer_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO learning_answers(id,run_id,question_id,request_key,request_hash,submitted_answer,normalized_answer,is_correct,accepted_at,grading_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)").bind(answer_id).bind(id).bind(q.id).bind(input.idempotency_key).bind(h).bind(&input.answer).bind(normalized).bind(correct).bind(at).bind(&row.grading_version).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO learning_answers(id,run_id,question_id,request_key,request_hash,submitted_answer,normalized_answer,is_correct,accepted_at,grading_version,cycle_unit_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)").bind(answer_id).bind(id).bind(q.id).bind(input.idempotency_key).bind(h).bind(&input.answer).bind(normalized).bind(correct).bind(at).bind(&row.grading_version).bind(q.cycle_unit_id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    super::plans::cover(&mut tx, q.cycle_unit_id, answer_id).await?;
     let (answered, correct_count): (i64, i64) = sqlx::query_as(
         "SELECT count(*),count(*) FILTER(WHERE is_correct) FROM learning_answers WHERE run_id=$1",
     )
@@ -556,7 +559,9 @@ pub async fn answer(
     }
     // Source owners can cross their deletion deadline while locks are held.
     let final_access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
-    if qs.iter().any(|q| !final_access.available(q)) {
+    if !final_access.available(q)
+        || (row.cycle_id.is_none() && qs.iter().any(|q| !final_access.available(q)))
+    {
         return Err(unavailable());
     }
     // A run kept alive only by a deleted source ends with this completion. Archive
@@ -577,6 +582,9 @@ pub async fn answer(
         .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+    }
+    if completed && !access.grace.is_empty() {
+        super::plans::cancel_cycles(&mut tx, task_id).await?;
     }
     learner(&mut tx, auth).await?;
     let end = now(&mut tx).await?;
