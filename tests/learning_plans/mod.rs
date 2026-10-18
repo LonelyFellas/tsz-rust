@@ -232,7 +232,7 @@ async fn coverage_tail_partial_days_and_persistent_receipts(pool: PgPool) {
     let mut tx = pool.begin().await.unwrap();
     assert!(
         sqlx::raw_sql(include_str!(
-            "../../migrations/20261018090000_learning_coverage.down.sql"
+            "../../migrations/20261018130000_learning_coverage.down.sql"
         ))
         .execute(&mut *tx)
         .await
