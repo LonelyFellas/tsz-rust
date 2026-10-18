@@ -14,8 +14,9 @@ pub enum DeletionActor {
     Admin(Uuid),
 }
 
-/// Persist the deletion fact and notify owners of active tasks that reference it.
-/// This must run inside the same transaction that marks the wordlist deleted.
+/// Persist the deletion fact and notify owners of active tasks that still have
+/// an in-flight run referencing it. This must run inside the same transaction
+/// that marks the wordlist deleted.
 pub async fn record(
     tx: &mut Tx<'_>,
     wordlist_id: Uuid,
@@ -66,7 +67,7 @@ pub async fn record(
             "词表「{name}」已被删除。已开始的学习轮次请在本轮正常截止前完成：日任务仍受当天窗口限制，长期任务最晚可在 {deadline}（北京时间）前完成。完成后任务将结束；未开始的轮次无法再开始。"
         );
         sqlx::query(
-            "INSERT INTO user_notifications(id,user_id,kind,wordlist_id,actor_user_id,reason) SELECT gen_random_uuid(),u.user_id,'wordlist_deleted',$1,$2,$3 FROM (SELECT DISTINCT user_id FROM learning_tasks WHERE state='active' AND $1=ANY(wordlist_ids)) u WHERE $4::uuid IS NULL OR u.user_id<>$4",
+            "INSERT INTO user_notifications(id,user_id,kind,wordlist_id,actor_user_id,reason) SELECT gen_random_uuid(),u.user_id,'wordlist_deleted',$1,$2,$3 FROM (SELECT DISTINCT t.user_id FROM learning_tasks t WHERE t.state='active' AND $1=ANY(t.wordlist_ids) AND EXISTS (SELECT 1 FROM learning_runs r WHERE r.task_id=t.id AND r.state='active' AND (r.expires_at IS NULL OR r.expires_at>clock_timestamp()))) u WHERE $4::uuid IS NULL OR u.user_id<>$4",
         )
         .bind(wordlist_id)
         .bind(actor_user_id)
