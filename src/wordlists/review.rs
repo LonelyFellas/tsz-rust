@@ -53,9 +53,10 @@ pub async fn submit(
         let ids = service::ids(&mut tx, id).await?;
         service::lock_entries(&mut tx, &ids, true).await?;
         sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+        let snapshots = service::content_items(&mut tx, id).await?;
         let request = Uuid::now_v7();
         sqlx::query("UPDATE wordlists SET state='pending',review_state='pending',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
-        sqlx::query("INSERT INTO wordlist_review_requests(id,wordlist_id,submitted_revision,name,entry_ids,submit_key,request_hash,author_notes) VALUES($1,$2,$3,$4,$5,$6,$7,(SELECT COALESCE(jsonb_object_agg(entry_id::text,author_note),'{}'::jsonb) FROM wordlist_items WHERE wordlist_id=$2 AND author_note<>''))").bind(request).bind(id).bind(list.revision+1).bind(list.name).bind(ids).bind(input.idempotency_key).bind(hash).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO wordlist_review_requests(id,wordlist_id,submitted_revision,name,entry_ids,submit_key,request_hash,author_notes,item_snapshots) VALUES($1,$2,$3,$4,$5,$6,$7,(SELECT COALESCE(jsonb_object_agg(item_id::text,author_note),'{}'::jsonb) FROM wordlist_items WHERE wordlist_id=$2 AND author_note<>''),$8)").bind(request).bind(id).bind(list.revision+1).bind(list.name).bind(ids).bind(input.idempotency_key).bind(hash).bind(serde_json::to_value(snapshots).map_err(AppError::internal)?).execute(&mut *tx).await.map_err(AppError::internal)?;
         request
     };
     let result = review(&mut tx, id, request).await?;
@@ -259,31 +260,53 @@ pub async fn admin_items(
             .fetch_one(&mut *tx)
             .await
             .map_err(AppError::internal)?;
-    let selected: Vec<_> = ids
-        .iter()
+    let snapshot: Option<sqlx::types::Json<Vec<WordlistContentItem>>> =
+        sqlx::query_scalar("SELECT item_snapshots FROM wordlist_review_requests WHERE id=$1")
+            .bind(request)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+    let snapshots = snapshot.map(|v| v.0).unwrap_or_else(|| {
+        ids.iter()
+            .map(|id| WordlistContentItem {
+                item_id: *id,
+                entry_id: Some(*id),
+                custom_word: None,
+                author_note: notes.remove(id).unwrap_or_default(),
+            })
+            .collect()
+    });
+    let total = snapshots.len() as i64;
+    let selected: Vec<_> = snapshots
+        .into_iter()
         .enumerate()
         .skip((page as usize - 1) * size as usize)
         .take(size as usize)
         .collect();
     let mut entries = service::read_entries(
         &mut tx,
-        &selected.iter().map(|(_, id)| **id).collect::<Vec<_>>(),
+        &selected
+            .iter()
+            .filter_map(|(_, i)| i.entry_id)
+            .collect::<Vec<_>>(),
     )
     .await?;
     let items = selected
         .into_iter()
-        .map(|(pos, id)| WordlistItem {
-            entry_id: *id,
+        .map(|(pos, item)| WordlistItem {
+            entry_id: item.entry_id,
+            item_id: Some(item.item_id),
+            custom_word: item.custom_word,
             position: pos as i32,
-            author_note: Some(notes.remove(id).unwrap_or_default()),
-            entry: entries.remove(id),
+            author_note: Some(item.author_note),
+            entry: item.entry_id.and_then(|id| entries.remove(&id)),
         })
         .collect();
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistItems {
         items,
         revision: review.submitted_revision,
-        pagination: service::page_meta(page, size, ids.len() as i64),
+        pagination: service::page_meta(page, size, total),
     })
 }
 pub async fn admin_list(

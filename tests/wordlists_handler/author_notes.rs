@@ -325,7 +325,8 @@ fn old_creation_serialization_and_idempotency_hash_are_unchanged() {
     assert_eq!(serde_json::to_value(&parsed).unwrap(), input);
     let expected = format!(
         r#"{{"idempotency_key":"{}","name":"我的词表","items":[{{"entry_id":"{}","private_note":"私密备注"}}]}}"#,
-        parsed.idempotency_key, parsed.items[0].entry_id
+        parsed.idempotency_key,
+        parsed.items[0].entry_id.unwrap()
     );
     assert_eq!(serde_json::to_vec(&parsed).unwrap(), expected.as_bytes());
 }

@@ -79,10 +79,40 @@ pub struct WordlistItemsQuery {
     #[serde(default)]
     pub sort: WordlistSort,
 }
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CustomWord {
+    #[schema(min_length = 1, max_length = 50)]
+    pub word: String,
+    #[schema(min_length = 1, max_length = 200)]
+    pub definition: String,
+}
+#[derive(Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistContentItem {
+    pub item_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub entry_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub custom_word: Option<CustomWord>,
+    #[serde(default)]
+    #[schema(max_length = 1000)]
+    pub author_note: String,
+}
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWordlistItem {
-    pub entry_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub entry_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub item_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub custom_word: Option<CustomWord>,
     #[schema(max_length = 1000)]
     pub private_note: String,
     /// Author's annotation, visible to anyone who can read the wordlist.
@@ -104,7 +134,12 @@ pub struct CreateWordlist {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordlistNoteUpdate {
-    pub entry_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub entry_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub item_id: Option<Uuid>,
     #[schema(minimum = 1)]
     pub expected_note_revision: i64,
     #[schema(max_length = 1000)]
@@ -123,7 +158,12 @@ pub struct WordlistContentUpdate {
     #[schema(min_length = 1, max_length = 100)]
     pub name: String,
     #[schema(min_items = 1, max_items = 10000)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entry_ids: Vec<Uuid>,
+    /// Complete ordered content for clients supporting custom items; exclusive with entry_ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, min_items = 1, max_items = 10000)]
+    pub items: Option<Vec<WordlistContentItem>>,
     /// Complete annotation list when present; omitted legacy writes preserve retained annotations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(max_items = 10000)]
@@ -144,6 +184,9 @@ pub struct UpdateWordlist {
 pub struct WordlistEditSnapshot {
     pub wordlist: Wordlist,
     pub entry_ids: Vec<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub items: Option<Vec<WordlistContentItem>>,
 }
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -231,7 +274,14 @@ pub struct WordlistEntry {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WordlistItem {
-    pub entry_id: Uuid,
+    #[schema(required = true)]
+    pub entry_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub item_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub custom_word: Option<CustomWord>,
     pub position: i32,
     /// Returned only for clients requesting X-TSZ-Wordlist-Annotations: v1.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -251,7 +301,14 @@ pub enum WordlistUnavailableReason {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MyWordlistItem {
-    pub entry_id: Uuid,
+    #[schema(required = true)]
+    pub entry_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub item_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub custom_word: Option<CustomWord>,
     pub position: i32,
     /// Last published label for an unavailable reference, visible only to its owner
     /// requesting X-TSZ-Wordlist-Entry-Labels: v1. Never includes draft content.
@@ -275,6 +332,9 @@ pub struct MyWordlistItem {
 #[serde(deny_unknown_fields)]
 pub struct WordlistAvailability {
     pub revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, minimum = 0)]
+    pub custom_count: Option<i64>,
     #[schema(minimum = 0)]
     pub available_count: i64,
     #[schema(minimum = 0)]

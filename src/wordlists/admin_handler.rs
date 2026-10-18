@@ -36,7 +36,7 @@ pub async fn reviews(
     ))
 }
 
-#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/review-requests/{request_id}/items",tag="wordlists",params(("id"=Uuid,Path),("request_id"=Uuid,Path),WordlistQuery,("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/review-requests/{request_id}/items",tag="wordlists",params(("id"=Uuid,Path),("request_id"=Uuid,Path),WordlistQuery,("X-TSZ-Wordlist-Custom-Items"=Option<String>,Header,description="v1 返回自定义项；旧客户端读取自定义内容返回 409",example="v1"),("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),security(("bearer_auth"=[])),
 responses((status=200,description="词表管理",body=WordlistItems),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
 pub async fn items(
     State(state): State<AppState>,
@@ -95,7 +95,7 @@ pub async fn detail(
 ) -> Result<Json<AdminWordlist>, AppError> {
     Ok(Json(management::detail(&state.pool, &auth, id).await?))
 }
-#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/items",tag="wordlists",security(("bearer_auth"=[])),params(("id"=Uuid,Path),WordlistItemsQuery,("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 保留完整句子格式")),responses((status=200,description="词表管理",body=WordlistItems),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
+#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/items",tag="wordlists",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("X-TSZ-Wordlist-Custom-Items"=Option<String>,Header,description="v1 返回稳定项标识、自定义词汇和计数；旧客户端读取自定义内容返回 409",example="v1"),WordlistItemsQuery,("X-TSZ-Wordlist-Annotations"=Option<String>,Header,description="v1 返回作者注释；缺省或未知值保持旧客户端响应结构",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 保留完整句子格式")),responses((status=200,description="词表管理",body=WordlistItems),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
 pub async fn current_items(
     State(state): State<AppState>,
     auth: AdminAuth,

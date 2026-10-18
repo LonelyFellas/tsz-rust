@@ -140,7 +140,7 @@ pub async fn lock_entries(
     Ok(())
 }
 pub async fn ids(tx: &mut Tx<'_>, id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1 ORDER BY position")
+    sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1 AND entry_id IS NOT NULL ORDER BY position")
         .bind(id)
         .fetch_all(&mut **tx)
         .await
@@ -149,19 +149,113 @@ pub async fn ids(tx: &mut Tx<'_>, id: Uuid) -> Result<Vec<Uuid>, AppError> {
 pub fn hash(input: &impl serde::Serialize) -> Result<Vec<u8>, AppError> {
     Ok(Sha256::digest(serde_json::to_vec(input).map_err(AppError::internal)?).to_vec())
 }
+pub fn validate_items(name: &str, items: &[WordlistContentItem]) -> Result<(), AppError> {
+    validate_content(name, &items.iter().map(|i| i.item_id).collect::<Vec<_>>())?;
+    let mut entries = HashSet::new();
+    for item in items {
+        if item.author_note.chars().count() > 1000 {
+            return Err(invalid("注不能超过 1000 字"));
+        }
+        match (&item.entry_id, &item.custom_word) {
+            (Some(entry), None) if item.item_id == *entry && entries.insert(*entry) => {}
+            (None, Some(custom))
+                if !custom.word.trim().is_empty()
+                    && custom.word.chars().count() <= 50
+                    && !custom.definition.trim().is_empty()
+                    && custom.definition.chars().count() <= 200 => {}
+            _ => {
+                return Err(invalid(
+                    "请选择平台词条，或填写自定义词汇（1–50 字）及释义（1–200 字）",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+type ContentRow = (
+    Uuid,
+    Option<Uuid>,
+    Option<sqlx::types::Json<CustomWord>>,
+    String,
+);
+pub async fn content_items(
+    tx: &mut Tx<'_>,
+    id: Uuid,
+) -> Result<Vec<WordlistContentItem>, AppError> {
+    let rows: Vec<ContentRow> = sqlx::query_as(
+        "SELECT item_id,entry_id,custom_word,author_note FROM wordlist_items WHERE wordlist_id=$1 ORDER BY position"
+    ).bind(id).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(item_id, entry_id, custom_word, author_note)| WordlistContentItem {
+                item_id,
+                entry_id,
+                custom_word: custom_word.map(|v| v.0),
+                author_note,
+            },
+        )
+        .collect())
+}
+async fn write_items(
+    tx: &mut Tx<'_>,
+    id: Uuid,
+    items: &[WordlistContentItem],
+) -> Result<(), AppError> {
+    let entry_ids: Vec<_> = items.iter().filter_map(|i| i.entry_id).collect();
+    lock_entries(tx, &entry_ids, true).await?;
+    let keys: Vec<_> = items.iter().map(|i| i.item_id).collect();
+    // Preserve retained rows (including private notes and learning membership IDs).
+    // A stable item can change text but cannot change source or platform identity.
+    let old: std::collections::HashMap<_, _> = content_items(tx, id)
+        .await?
+        .into_iter()
+        .map(|i| (i.item_id, i.entry_id))
+        .collect();
+    if items.iter().any(|n| {
+        old.get(&n.item_id)
+            .is_some_and(|entry| *entry != n.entry_id)
+    }) {
+        return Err(invalid("词条来源不能直接修改，请删除后重新添加"));
+    }
+    sqlx::query("DELETE FROM wordlist_items WHERE wordlist_id=$1 AND NOT(item_id=ANY($2))")
+        .bind(id)
+        .bind(keys)
+        .execute(&mut **tx)
+        .await
+        .map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO wordlist_items(wordlist_id,item_id,entry_id,custom_word,position,author_note) SELECT $1,(x.value->>'item_id')::uuid,(x.value->>'entry_id')::uuid,x.value->'custom_word',(x.n-1)::integer,x.value->>'author_note' FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS x(value,n) ON CONFLICT(wordlist_id,item_id) DO UPDATE SET position=excluded.position,custom_word=excluded.custom_word,author_note=excluded.author_note")
+        .bind(id).bind(serde_json::to_value(items).map_err(AppError::internal)?).execute(&mut **tx).await.map_err(AppError::internal)?;
+    Ok(())
+}
 pub async fn create(
     pool: &PgPool,
     auth: &AuthUser,
     input: CreateWordlist,
 ) -> Result<Wordlist, AppError> {
-    let entry_ids: Vec<_> = input.items.iter().map(|i| i.entry_id).collect();
-    validate_content(&input.name, &entry_ids)?;
-    if input
+    let items: Vec<_> = input
         .items
         .iter()
-        .any(|i| i.private_note.chars().count() > 1000 || i.author_note.chars().count() > 1000)
-    {
-        return Err(invalid("备注不能超过 1000 字"));
+        .map(|i| {
+            Ok(WordlistContentItem {
+                item_id: i
+                    .entry_id
+                    .or(i.item_id)
+                    .ok_or_else(|| invalid("自定义词缺少稳定标识"))?,
+                entry_id: i.entry_id,
+                custom_word: i.custom_word.clone(),
+                author_note: i.author_note.clone(),
+            })
+        })
+        .collect::<Result<_, AppError>>()?;
+    validate_items(&input.name, &items)?;
+    if input.items.iter().any(|i| {
+        i.private_note.chars().count() > 1000
+            || i.entry_id
+                .zip(i.item_id)
+                .is_some_and(|(entry, item)| entry != item)
+    }) {
+        return Err(invalid("备注不能超过 1000 字，平台词条标识须一致"));
     }
     let request_hash = hash(&input)?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
@@ -194,16 +288,17 @@ pub async fn create(
         }
         id
     } else {
-        lock_entries(&mut tx, &entry_ids, true).await?;
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO wordlists(id,owner_user_id,name,create_key,create_hash) VALUES($1,$2,$3,$4,$5)").bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.idempotency_key).bind(request_hash).execute(&mut *tx).await.map_err(AppError::internal)?;
+        write_items(&mut tx, id, &items).await?;
+        let item_ids: Vec<_> = items.iter().map(|i| i.item_id).collect();
         let notes: Vec<_> = input
             .items
             .iter()
             .map(|i| i.private_note.as_str())
             .collect();
-        let author_notes: Vec<_> = input.items.iter().map(|i| i.author_note.as_str()).collect();
-        sqlx::query("INSERT INTO wordlist_items(wordlist_id,entry_id,position,private_note,author_note) SELECT $1,x.id,(x.n-1)::integer,x.note,x.author_note FROM unnest($2::uuid[],$3::text[],$4::text[]) WITH ORDINALITY AS x(id,note,author_note,n)").bind(id).bind(&entry_ids).bind(notes).bind(author_notes).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("UPDATE wordlist_items i SET private_note=x.note FROM unnest($2::uuid[],$3::text[]) AS x(id,note) WHERE i.wordlist_id=$1 AND i.item_id=x.id")
+            .bind(id).bind(item_ids).bind(notes).execute(&mut *tx).await.map_err(AppError::internal)?;
         super::library::add_wordlist(
             &mut tx,
             auth.subject,
@@ -226,14 +321,16 @@ pub async fn update(
     input: UpdateWordlist,
 ) -> Result<Wordlist, AppError> {
     if input.note_updates.len() > 10000
+        || input.note_updates.iter().any(|n| {
+            n.private_note.chars().count() > 1000
+                || n.expected_note_revision < 1
+                || n.item_id.or(n.entry_id).is_none()
+                || (n.item_id.is_some() && n.entry_id.is_some())
+        })
         || input
             .note_updates
             .iter()
-            .any(|n| n.private_note.chars().count() > 1000 || n.expected_note_revision < 1)
-        || input
-            .note_updates
-            .iter()
-            .map(|n| n.entry_id)
+            .map(|n| n.item_id.or(n.entry_id))
             .collect::<HashSet<_>>()
             .len()
             != input.note_updates.len()
@@ -241,7 +338,14 @@ pub async fn update(
         return Err(invalid("invalid note updates"));
     }
     if let Some(c) = &input.content {
-        validate_content(&c.name, &c.entry_ids)?;
+        if let Some(items) = &c.items {
+            if !c.entry_ids.is_empty() || c.author_notes.is_some() {
+                return Err(invalid("items 不可与旧版选词字段混用"));
+            }
+            validate_items(&c.name, items)?;
+        } else {
+            validate_content(&c.name, &c.entry_ids)?;
+        }
         if let Some(notes) = &c.author_notes
             && (notes.len() != c.entry_ids.len()
                 || notes.iter().zip(&c.entry_ids).any(|(note, id)| {
@@ -273,24 +377,42 @@ pub async fn update(
             sqlx::query("UPDATE wordlist_library_nodes SET revision=revision+1 WHERE user_id=$1 AND space='owned' AND wordlist_id=$2")
                 .bind(auth.subject).bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         }
-        lock_entries(&mut tx, &c.entry_ids, true).await?;
+        let items = if let Some(items) = &c.items {
+            items.clone()
+        } else {
+            let old = content_items(&mut tx, id).await?;
+            if old.iter().any(|i| i.custom_word.is_some()) {
+                return Err(AppError::conflict(
+                    ErrorCode::WordListConflict,
+                    None,
+                    "此词表包含自定义词汇，请刷新页面后重新编辑",
+                ));
+            }
+            let notes: std::collections::HashMap<_, _> = old
+                .into_iter()
+                .map(|i| (i.item_id, i.author_note))
+                .collect();
+            c.entry_ids
+                .iter()
+                .enumerate()
+                .map(|(position, entry)| WordlistContentItem {
+                    item_id: *entry,
+                    entry_id: Some(*entry),
+                    custom_word: None,
+                    author_note: c
+                        .author_notes
+                        .as_ref()
+                        .map(|notes| notes[position].author_note.clone())
+                        .unwrap_or_else(|| notes.get(entry).cloned().unwrap_or_default()),
+                })
+                .collect()
+        };
+        write_items(&mut tx, id, &items).await?;
         sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
-        sqlx::query("DELETE FROM wordlist_items WHERE wordlist_id=$1 AND NOT(entry_id=ANY($2))")
-            .bind(id)
-            .bind(&c.entry_ids)
-            .execute(&mut *tx)
-            .await
-            .map_err(AppError::internal)?;
-        sqlx::query("INSERT INTO wordlist_items(wordlist_id,entry_id,position) SELECT $1,x.id,(x.n-1)::integer FROM unnest($2::uuid[]) WITH ORDINALITY AS x(id,n) ON CONFLICT(wordlist_id,entry_id) DO UPDATE SET position=excluded.position").bind(id).bind(&c.entry_ids).execute(&mut *tx).await.map_err(AppError::internal)?;
-        if let Some(notes) = &c.author_notes {
-            let text: Vec<_> = notes.iter().map(|note| note.author_note.as_str()).collect();
-            sqlx::query("UPDATE wordlist_items i SET author_note=x.note FROM unnest($2::uuid[],$3::text[]) AS x(id,note) WHERE i.wordlist_id=$1 AND i.entry_id=x.id")
-                .bind(id).bind(&c.entry_ids).bind(text).execute(&mut *tx).await.map_err(AppError::internal)?;
-        }
         sqlx::query("UPDATE wordlists SET name=$2,state='draft',review_state='none',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(c.name.trim()).execute(&mut *tx).await.map_err(AppError::internal)?;
     }
     for note in input.note_updates {
-        let result=sqlx::query("UPDATE wordlist_items SET private_note=$3,note_revision=note_revision+1 WHERE wordlist_id=$1 AND entry_id=$2 AND note_revision=$4").bind(id).bind(note.entry_id).bind(note.private_note).bind(note.expected_note_revision).execute(&mut *tx).await.map_err(AppError::internal)?;
+        let result=sqlx::query("UPDATE wordlist_items SET private_note=$3,note_revision=note_revision+1 WHERE wordlist_id=$1 AND item_id=$2 AND note_revision=$4").bind(id).bind(note.item_id.or(note.entry_id)).bind(note.private_note).bind(note.expected_note_revision).execute(&mut *tx).await.map_err(AppError::internal)?;
         if result.rows_affected() != 1 {
             return Err(conflict());
         }
@@ -383,13 +505,14 @@ pub async fn availability(
 ) -> Result<WordlistAvailability, AppError> {
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     let (owner, _, revision) = read_lock_metadata(&mut tx, id, auth).await?;
-    let (available_count, unavailable_count) = sqlx::query_as(
-        "SELECT count(*) FILTER(WHERE p.id IS NOT NULL),count(*) FILTER(WHERE p.id IS NULL) FROM wordlist_items i LEFT JOIN lexicon.entries e ON e.id=i.entry_id AND e.archived_at IS NULL LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3 WHERE i.wordlist_id=$1",
+    let (available_count, unavailable_count, custom_count) = sqlx::query_as(
+        "SELECT count(*) FILTER(WHERE p.id IS NOT NULL OR i.custom_word IS NOT NULL),count(*) FILTER(WHERE p.id IS NULL AND i.custom_word IS NULL),count(*) FILTER(WHERE i.custom_word IS NOT NULL) FROM wordlist_items i LEFT JOIN lexicon.entries e ON e.id=i.entry_id AND e.archived_at IS NULL LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3 WHERE i.wordlist_id=$1",
     ).bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     eligible_owner(&mut tx, owner).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistAvailability {
         revision,
+        custom_count: Some(custom_count),
         available_count,
         unavailable_count,
     })
@@ -403,16 +526,20 @@ pub async fn edit_snapshot(
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     let wordlist = read_lock(&mut tx, id, Some(auth)).await?;
     let entry_ids = ids(&mut tx, id).await?;
+    let items = Some(content_items(&mut tx, id).await?);
     crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistEditSnapshot {
         wordlist,
         entry_ids,
+        items,
     })
 }
 #[derive(sqlx::FromRow)]
 pub struct ItemRow {
-    pub entry_id: Uuid,
+    pub item_id: Uuid,
+    pub entry_id: Option<Uuid>,
+    pub custom_word: Option<sqlx::types::Json<CustomWord>>,
     pub position: i32,
     pub author_note: String,
     pub private_note: String,
@@ -490,7 +617,7 @@ pub async fn item_rows(
     })?;
     // Use only visible current publication labels for both matching and ordering.
     let from = "wordlist_items i LEFT JOIN lexicon.entries e ON e.id=i.entry_id AND e.archived_at IS NULL LEFT JOIN lexicon.entry_publications p ON p.id=e.current_publication_id AND p.entry_id=e.id AND p.content_schema_version=3";
-    let filter = "i.wordlist_id=$1 AND ($2='' OR strpos(lower(p.snapshot#>>'{presentation,label}'),lower($2))>0)";
+    let filter = "i.wordlist_id=$1 AND ($2='' OR strpos(lower(COALESCE(i.custom_word->>'word',p.snapshot#>>'{presentation,label}')),lower($2))>0)";
     let total = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT count(*) FROM {from} WHERE {filter}"
     )))
@@ -502,13 +629,13 @@ pub async fn item_rows(
     let order = match query.sort {
         WordlistSort::Author => "i.position",
         WordlistSort::LabelAsc => {
-            "lower(p.snapshot#>>'{presentation,label}') COLLATE \"C\" ASC NULLS LAST,i.position"
+            "lower(COALESCE(i.custom_word->>'word',p.snapshot#>>'{presentation,label}')) COLLATE \"C\" ASC NULLS LAST,i.position"
         }
         WordlistSort::LabelDesc => {
-            "lower(p.snapshot#>>'{presentation,label}') COLLATE \"C\" DESC NULLS LAST,i.position"
+            "lower(COALESCE(i.custom_word->>'word',p.snapshot#>>'{presentation,label}')) COLLATE \"C\" DESC NULLS LAST,i.position"
         }
     };
-    let rows=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT i.entry_id,i.position,i.author_note,i.private_note,i.note_revision FROM {from} WHERE {filter} ORDER BY {order} LIMIT $3 OFFSET $4"))).bind(id).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let rows=sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT i.item_id,i.entry_id,i.custom_word,i.position,i.author_note,i.private_note,i.note_revision FROM {from} WHERE {filter} ORDER BY {order} LIMIT $3 OFFSET $4"))).bind(id).bind(q).bind(i64::from(size)).bind(i64::from(page-1)*i64::from(size)).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     Ok((rows, page_meta(page, size, total)))
 }
 pub async fn catalog(

@@ -117,7 +117,7 @@ pub async fn items(
     let (rows, pagination) = service::item_rows(&mut tx, id, &query).await?;
     let mut entries = service::read_entries_view(
         &mut tx,
-        &rows.iter().map(|r| r.entry_id).collect::<Vec<_>>(),
+        &rows.iter().filter_map(|r| r.entry_id).collect::<Vec<_>>(),
         query.view,
     )
     .await?;
@@ -125,9 +125,11 @@ pub async fn items(
         .into_iter()
         .map(|r| WordlistItem {
             entry_id: r.entry_id,
+            item_id: Some(r.item_id),
+            custom_word: r.custom_word.map(|v| v.0),
             position: r.position,
             author_note: Some(r.author_note),
-            entry: entries.remove(&r.entry_id),
+            entry: r.entry_id.and_then(|id| entries.remove(&id)),
         })
         .collect();
     tx.commit().await.map_err(AppError::internal)?;
