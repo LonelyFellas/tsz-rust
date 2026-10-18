@@ -135,6 +135,7 @@ pub async fn run_task(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Uuid, 
 }
 #[derive(sqlx::FromRow)]
 pub struct RunRow {
+    pub cycle_id: Option<Uuid>,
     pub id: Uuid,
     pub task_id: Uuid,
     pub task_type: LearningTaskType,
@@ -159,6 +160,7 @@ pub async fn run(tx: &mut Tx<'_>, auth: &AuthUser, id: Uuid) -> Result<RunRow, A
 }
 #[derive(sqlx::FromRow)]
 pub struct QuestionRow {
+    pub cycle_unit_id: Option<Uuid>,
     pub id: Uuid,
     pub position: i32,
     pub source_wordlist_id: Uuid,
@@ -219,6 +221,14 @@ pub async fn sources_for_questions(
 ) -> Result<SourceAccess, AppError> {
     let entries: Vec<_> = questions.iter().map(|q| q.entry_id).collect();
     source_access(tx, auth, ids, Some(&entries), Some(run)).await
+}
+pub async fn sources_for_units(
+    tx: &mut Tx<'_>,
+    auth: &AuthUser,
+    ids: &[Uuid],
+    entries: &[Uuid],
+) -> Result<SourceAccess, AppError> {
+    source_access(tx, auth, ids, Some(entries), None).await
 }
 async fn deletion_grace(
     tx: &mut Tx<'_>,
@@ -424,7 +434,7 @@ pub async fn run_view(
         .await
         .map_err(AppError::internal)?;
     let state = if row.state == LearningRunState::Active {
-        if qs.iter().any(|q| !access.available(q)) {
+        if row.cycle_id.is_none() && qs.iter().any(|q| !access.available(q)) {
             LearningRunState::Invalidated
         } else if row.expires_at.is_some_and(|e| e <= time) {
             LearningRunState::Expired

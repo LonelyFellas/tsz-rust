@@ -13,6 +13,10 @@ use axum::{
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/v1/me/wordlist-library/{space}/selection",
+            post(select),
+        )
         .route("/api/v1/me/wordlist-library/{space}", get(list))
         .route("/api/v1/me/wordlist-library/{space}/folders", post(folder))
         .route(
@@ -80,5 +84,16 @@ pub async fn apply(
 ) -> Result<Response, AppError> {
     Ok(private(
         operation(&state.pool, &auth, space, input, false).await?,
+    ))
+}
+#[utoipa::path(post,path="/api/v1/me/wordlist-library/{space}/selection",tag="wordlists",params(("space"=LibrarySpace,Path)),security(("bearer_auth"=[])),request_body=LibrarySelectionInput,responses((status=200,description="展开正常子树并返回去重词表",body=LibrarySelection),(status=400,description="选择为空或超限"),(status=401,description="会话失效"),(status=403,description="需要学生资格"),(status=404,description="节点不存在"),(status=409,description="目录版本变化或来源不可用"),(status=422,description="JSON不符合契约")))]
+pub async fn select(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ApiPath(space): ApiPath<LibrarySpace>,
+    ApiJson(input): ApiJson<LibrarySelectionInput>,
+) -> Result<Response, AppError> {
+    Ok(private(
+        expand_selection(&state.pool, &auth, space, input).await?,
     ))
 }

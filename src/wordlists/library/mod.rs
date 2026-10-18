@@ -577,3 +577,67 @@ pub async fn operation(
     commit(tx, auth).await?;
     Ok(impact)
 }
+
+pub async fn expand_selection(
+    pool: &PgPool,
+    auth: &AuthUser,
+    space: LibrarySpace,
+    input: LibrarySelectionInput,
+) -> Result<LibrarySelection, AppError> {
+    if input.node_ids.is_empty() || input.node_ids.len() > 100 {
+        return Err(invalid("请选择目录项目"));
+    }
+    // Resolve owners before any library/task/source locks, then validate the tree under its lock.
+    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT wordlist_id FROM wordlist_library_nodes WHERE user_id=$1 AND space=$2 AND wordlist_id IS NOT NULL").bind(auth.subject).bind(space.as_str()).fetch_all(pool).await.map_err(AppError::internal)?;
+    let mut tx = crate::learning_tasks::repository::begin(pool, auth, &ids).await?;
+    lock(&mut tx, auth.subject).await?;
+    let nodes = load(&mut tx, auth.subject, space).await?;
+    check_version(&nodes, &input.expected_version)?;
+    if nodes
+        .iter()
+        .filter_map(|n| n.wordlist_id)
+        .any(|id| !ids.contains(&id))
+    {
+        return Err(conflict("目录已变化，请刷新后重新选择"));
+    }
+    let mut chosen = HashSet::new();
+    for id in &input.node_ids {
+        let root = find(&nodes, *id)?;
+        if root.trashed_at.is_some() {
+            return Err(invalid("回收站内容不能用于学习任务"));
+        }
+        let descendants: Vec<_> = nodes
+            .iter()
+            .filter(|n| {
+                n.trashed_at.is_none()
+                    && (n.id == *id
+                        || path(&nodes, n.parent_id).is_ok_and(|p| p.iter().any(|a| a.id == *id)))
+            })
+            .filter_map(|n| n.wordlist_id)
+            .collect();
+        if descendants.is_empty() {
+            return Err(invalid("所选文件夹没有词表，请调整选择"));
+        }
+        chosen.extend(descendants);
+    }
+    if chosen.len() > 5 {
+        return Err(invalid("展开后超过 5 份词表，请减少选择"));
+    }
+    let mut ids: Vec<_> = chosen.into_iter().collect();
+    ids.sort();
+    let access = crate::learning_tasks::repository::sources(&mut tx, auth, &ids).await?;
+    if access.lists.len() != ids.len() {
+        return Err(conflict("包含不可用来源，请逐份选择可用词表"));
+    }
+    let wordlists = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{} WHERE w.id=ANY($1) ORDER BY w.name,w.id",
+        service::META
+    )))
+    .bind(ids)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    let version = version(&nodes)?;
+    commit(tx, auth).await?;
+    Ok(LibrarySelection { version, wordlists })
+}
