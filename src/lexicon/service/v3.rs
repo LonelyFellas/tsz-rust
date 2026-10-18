@@ -4237,7 +4237,7 @@ pub(super) async fn replace_v3_sense_component_usages(
                     .bind(target_form_id)
                     .bind(target_variant_id)
                     .bind(crate::lexicon::node_identity::dialect_name(*target_dialect))
-                    .bind(v3_form_type_name(target_form_type))
+                    .bind(target_form_type.as_str())
                     .bind(target_headword)
                     .bind(target_gloss)
                     .execute(&mut **tx)
@@ -4966,7 +4966,7 @@ async fn replace_v3_forms(
             .bind(form.id)
             .bind(entry_id)
             .bind(pos.pos_id)
-            .bind(v3_form_type_name(&form.form_type))
+            .bind(form.form_type.as_str())
             .bind(form_ordinal as i32)
             .execute(&mut **tx)
             .await
@@ -5180,7 +5180,7 @@ async fn insert_v3_variant(
                 .bind(target_form_id)
                 .bind(target_variant_id)
                 .bind(crate::lexicon::node_identity::dialect_name(*target_dialect))
-                .bind(v3_form_type_name(target_form_type))
+                .bind(target_form_type.as_str())
                 .bind(target_headword)
                 .bind(target_gloss)
                 .execute(&mut **tx)
@@ -5323,10 +5323,6 @@ async fn update_v3_step_progress<T: serde::Serialize>(
     .await
     .map(|_| ())
     .map_err(database_error)
-}
-
-fn v3_form_type_name(value: &str) -> &str {
-    value
 }
 
 const fn text_origin_name(value: TextOrigin) -> &'static str {
@@ -5549,7 +5545,7 @@ async fn replace_v3_surface_projection(
         .bind(event_offset)
         .bind(source.pos_id)
         .bind(source.pos)
-        .bind(v3_form_type_name(&source.form_type))
+        .bind(source.form_type.as_str())
         .bind(source.form_id)
         .bind(source.variant_id)
         .bind(source.group_ids)

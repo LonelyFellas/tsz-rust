@@ -428,7 +428,7 @@ impl PublishedAssociationTarget {
                             base_form_ids.dedup();
                             PublishedAssociationForm {
                                 id: form.id,
-                                form_type: v3_form_type_name(&form.form_type).to_owned(),
+                                form_type: form.form_type.clone(),
                                 base_form_ids,
                                 allowed_sense_ids: super::form_senses::allowed_form_senses(
                                     forms,
@@ -670,10 +670,6 @@ fn v3_form_variants(
 
 fn parse_v3_form_type_name(value: &str) -> Option<WordFormTypeV3> {
     crate::lexicon::form_types::parse_code(value).ok()
-}
-
-fn v3_form_type_name(form_type: &str) -> &str {
-    form_type
 }
 
 impl LexiconService {

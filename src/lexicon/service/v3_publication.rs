@@ -1826,7 +1826,7 @@ async fn upsert_v3_publication_surface(
     .bind(publication_id)
     .bind(source.pos_id)
     .bind(&source.pos)
-    .bind(v3_form_type_name(&source.form_type))
+    .bind(source.form_type.as_str())
     .bind(source.form_id)
     .bind(source.variant_id)
     .bind(&source.group_ids)
@@ -2011,10 +2011,6 @@ async fn insert_v3_command_response(
     .await
     .map(|_| ())
     .map_err(database_error)
-}
-
-fn v3_form_type_name(value: &str) -> &str {
-    value
 }
 
 pub(super) async fn lock_lexicon_publisher(
