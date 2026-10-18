@@ -624,6 +624,7 @@ pub async fn list(
 ) -> Result<LearningTaskPage, AppError> {
     let (p, s) = page(&query)?;
     let mut tx = begin(pool, auth, &[]).await?;
+    super::plans::require_legacy_in(&mut tx, auth, None).await?;
     let state = query.state.unwrap_or(LearningTaskState::Active);
     let total: i64 =
         sqlx::query_scalar("SELECT count(*) FROM learning_tasks WHERE user_id=$1 AND state=$2")

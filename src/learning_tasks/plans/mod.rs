@@ -270,11 +270,19 @@ pub async fn require_legacy(
     id: Option<Uuid>,
 ) -> Result<(), AppError> {
     let mut tx = begin(pool, auth, &[]).await?;
-    let has:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM learning_tasks WHERE user_id=$1 AND ($2::uuid IS NULL OR id=$2) AND generation_policy='coverage_v1')").bind(auth.subject).bind(id).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
+    require_legacy_in(&mut tx, auth, id).await?;
+    tx.commit().await.map_err(AppError::internal)?;
+    Ok(())
+}
+pub(super) async fn require_legacy_in(
+    tx: &mut Tx<'_>,
+    auth: &AuthUser,
+    id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let has:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM learning_tasks WHERE user_id=$1 AND ($2::uuid IS NULL OR id=$2) AND generation_policy='coverage_v1')").bind(auth.subject).bind(id).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
     if has {
         return Err(conflict("任务功能已更新，请刷新页面后继续"));
     }
-    tx.commit().await.map_err(AppError::internal)?;
     Ok(())
 }
 pub(super) async fn cancel_cycles(tx: &mut Tx<'_>, id: Uuid) -> Result<(), AppError> {
@@ -354,7 +362,7 @@ async fn source_cards(
     auth: &AuthUser,
     t: &LearningTask,
 ) -> Result<Vec<LearningPlanSource>, AppError> {
-    let access = sources(tx, auth, &t.wordlist_ids).await?;
+    let access = super::repository::sources_for_units(tx, auth, &t.wordlist_ids, &[]).await?;
     let mut cards = vec![];
     for id in &t.wordlist_ids {
         let visible = access.lists.contains_key(id);
@@ -765,6 +773,9 @@ async fn cycle_preview_in(
         schedule: schedule(m),
     };
     let (p, cs) = preview_in(tx, auth, &req, Some(earliest)).await?;
+    if p.business_day != day {
+        return Err(conflict("学习日已变化，请重新核对新轮计划"));
+    }
     Ok((
         LearningCyclePreview {
             preview: p,
@@ -882,7 +893,8 @@ pub async fn cycle_create(
     sqlx::query("INSERT INTO learning_cycle_requests(user_id,idempotency_key,request_hash,task_id,after_cycle_id,operation,result_cycle_id) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(auth.subject).bind(input.idempotency_key).bind(h).bind(id).bind(c.id).bind(if input.operation==CycleOperation::Next{"next"}else{"restart_blocked"}).bind(result).execute(&mut *tx).await.map_err(AppError::internal)?;
     ensure_cycle_sources(&mut tx, auth, &lists, result).await?;
     learner(&mut tx, auth).await?;
-    if business_window(now(&mut tx).await?).0 != p.preview.business_day {
+    let end = now(&mut tx).await?;
+    if business_window(end).0 != p.preview.business_day || t.ends_at.is_some_and(|e| e <= end) {
         return Err(conflict("学习日已变化，请核对新轮计划"));
     }
     tx.commit().await.map_err(AppError::internal)?;

@@ -60,7 +60,6 @@ pub async fn list(
     auth: AuthUser,
     ApiQuery(query): ApiQuery<LearningPageQuery>,
 ) -> Result<Json<LearningTaskPage>, AppError> {
-    super::plans::require_legacy(&state.pool, &auth, None).await?;
     Ok(Json(service::list(&state.pool, &auth, query).await?))
 }
 #[utoipa::path(get,path="/api/v1/me/learning-tasks/{id}",tag="learning_tasks",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,description="本人学习事实",body=LearningTaskDetail),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="需要已绑定手机的学生资格"),(status=404,description="资源不存在"),(status=409,description="版本、请求键、轮次或来源冲突"),(status=422,description="JSON不符合契约")))]

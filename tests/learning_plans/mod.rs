@@ -772,3 +772,186 @@ async fn blocked_source_can_shorten_a_future_daily_batch_without_completing_the_
     assert!(d["estimated_learning_days"].is_null());
     timed.close().await;
 }
+
+#[sqlx::test]
+async fn existing_plan_metadata_survives_a_large_source_append(pool: PgPool) {
+    let (state, auth, list) = fixture(&pool, 2).await;
+    let (p, _) = create_plan(&state, &auth, list, Some(1)).await;
+    let legacy = create(&state, &auth, list, "longterm").await;
+    let entry: Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(list)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let metadata: Value =
+        sqlx::query_scalar("SELECT to_jsonb(e) FROM lexicon.entries e WHERE id=$1")
+            .bind(entry)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    for i in 1..=1000 {
+        let id = Uuid::now_v7();
+        let mut row = metadata.clone();
+        row["id"] = json!(id);
+        row["current_publication_id"] = Value::Null;
+        row["draft_based_on_publication_id"] = Value::Null;
+        sqlx::query("INSERT INTO lexicon.entries SELECT * FROM jsonb_populate_record(NULL::lexicon.entries,$1)").bind(row).execute(&mut *tx).await.unwrap();
+        sqlx::query(
+            "INSERT INTO wordlist_items(wordlist_id,item_id,entry_id,position) VALUES($1,$2,$2,$3)",
+        )
+        .bind(list)
+        .bind(id)
+        .bind(i)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    let detail = get(&state, &auth, &p).await;
+    assert_eq!(detail["current_cycle"]["total_count"], 2);
+    assert_eq!(detail["sources"][0]["item_count"], 1001);
+    let listing = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/me/learning-plans",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(listing.0, 200, "{}", listing.1);
+    assert_eq!(listing.1["items"].as_array().unwrap().len(), 2);
+    let old = call(
+        &state,
+        &auth,
+        "GET",
+        &format!(
+            "/api/v1/me/learning-plans/{}",
+            legacy["id"].as_str().unwrap()
+        ),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(old.0, 200, "{}", old.1);
+    let r = open(&state, &auth, &p).await;
+    assert_eq!(r["target_count"], 1);
+}
+
+#[sqlx::test]
+async fn legacy_list_rechecks_policy_after_an_earlier_guard_transaction(pool: PgPool) {
+    let (state, auth, list) = fixture(&pool, 2).await;
+    tsz_rust::learning_tasks::plans::require_legacy(&pool, &auth, None)
+        .await
+        .unwrap();
+    let _ = create_plan(&state, &auth, list, Some(1)).await;
+    let query = tsz_rust::learning_tasks::dto::LearningPageQuery {
+        page: None,
+        page_size: None,
+        state: None,
+    };
+    let result = tsz_rust::learning_tasks::service::list(&pool, &auth, query).await;
+    assert!(
+        result.is_err(),
+        "a coverage task created after the earlier guard must not be encoded as a legacy list item"
+    );
+}
+
+#[sqlx::test]
+async fn cycle_candidate_lock_wait_cannot_cross_the_last_scheduled_day(pool: PgPool) {
+    let timed = controlled_clock(&pool).await;
+    let (state, auth, list) = fixture(&timed, 2).await;
+    let mut body = preview_body(list, Some(10));
+    body["schedule"] = json!({"start_date":"2026-10-17","end_date":"2026-10-18"});
+    let p = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/learning-plans/preview",
+        body.clone(),
+    )
+    .await;
+    body["name"] = json!("续轮边界");
+    body["idempotency_key"] = json!(Uuid::now_v7());
+    body["preview_fingerprint"] = p.1["preview_fingerprint"].clone();
+    let created = call(&state, &auth, "POST", "/api/v1/me/learning-plans", body).await;
+    assert_eq!(created.0, 200, "{}", created.1);
+    let p = created.1;
+    let run = open(&state, &auth, &p).await;
+    answer_n(&state, &auth, &run, 2).await;
+    let extra = crate::wordlists_support::full_entry(&timed, "banana").await;
+    sqlx::query(
+        "INSERT INTO wordlist_items(wordlist_id,item_id,entry_id,position) VALUES($1,$2,$2,1)",
+    )
+    .bind(list)
+    .bind(extra)
+    .execute(&timed)
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/me/learning-plans/{}/cycles",
+        p["task"]["id"].as_str().unwrap()
+    );
+    let input =
+        json!({"operation":"next","after_cycle_id":p["current_cycle"]["id"],"expected_revision":1});
+    for create in [true, false] {
+        sqlx::query("UPDATE plan_clock.instant SET at='2026-10-18T19:59:59Z'")
+            .execute(&timed)
+            .await
+            .unwrap();
+        let preview = call(
+            &state,
+            &auth,
+            "POST",
+            &format!("{path}/preview"),
+            input.clone(),
+        )
+        .await;
+        assert_eq!(preview.0, 200, "{}", preview.1);
+        let mut request = input.clone();
+        let url = if create {
+            request["idempotency_key"] = json!(Uuid::now_v7());
+            request["preview_fingerprint"] = preview.1["preview"]["preview_fingerprint"].clone();
+            path.clone()
+        } else {
+            format!("{path}/preview")
+        };
+        let mut blocker = timed.begin().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM lexicon.entries WHERE id=$1 FOR UPDATE")
+            .bind(extra)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let release = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5),async{
+    loop{
+     let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND $1=ANY(pg_blocking_pids(a.pid)))").bind(pid).fetch_one(&timed).await.unwrap();
+     if waiting{break;}
+     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+   }).await.unwrap();
+            sqlx::query("UPDATE plan_clock.instant SET at='2026-10-18T20:00:00Z'")
+                .execute(&timed)
+                .await
+                .unwrap();
+            blocker.commit().await.unwrap();
+        };
+        let (result, ()) = tokio::join!(call(&state, &auth, "POST", &url, request), release);
+        assert_eq!(result.0, 409, "create={create}: {}", result.1);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM learning_cycles")
+            .fetch_one(&timed)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM learning_cycle_requests")
+            .fetch_one(&timed)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    timed.close().await;
+}
