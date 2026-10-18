@@ -104,7 +104,7 @@ pub async fn confirm_audio_asset(
     responses(
         (status = 200, description = "短期只读 URL", body = AudioAssetUrlResponse),
         (status = 401, description = "管理员身份无效"),
-        (status = 403, description = "账号已禁用或必须先改密"),
+        (status = 403, description = "账号不可用或没有词条、例句读取权限"),
         (status = 404, description = "音频资产不存在或不可读"),
         (status = 501, description = "音频存储未开通"),
         (status = 503, description = "音频存储不可用")

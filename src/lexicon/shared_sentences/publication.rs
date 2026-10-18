@@ -311,6 +311,7 @@ pub(crate) async fn prepare(
         content = serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?;
     }
     validate_published_targets(tx, &mut content, batch).await?;
+    audio::normalize(tx, actor, item.sentence_id, &mut content.sentence.en_text).await?;
     // Reusing a publication must not rewrite its immutable annotation anchors.
     if let Some(row) = &existing {
         content = serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?;
@@ -337,6 +338,13 @@ pub(crate) async fn insert_version(
             .bind(prepared.publication_id).bind(prepared.id).bind(prepared.revision)
             .bind(serde_json::to_value(&prepared.content).map_err(AppError::internal)?).bind(actor)
             .execute(&mut **tx).await.map_err(AppError::internal)?;
+        audio::insert(
+            tx,
+            prepared.id,
+            Some(prepared.publication_id),
+            &prepared.content.sentence.en_text,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -447,7 +455,7 @@ async fn publish_command(
         None => read_on(&mut tx, id).await?.content,
     };
     lock_targets(&mut tx, Some(&content), None, Some(id)).await?;
-    if let Some((publication_id, content)) = historical {
+    if let Some((publication_id, mut content)) = historical {
         owner(&mut tx, id, actor, super_admin, &input).await?;
         let current = read_on(&mut tx, id).await?;
         if current.current_publication_id.is_some() && current.withdrawn_at.is_none() {
@@ -459,6 +467,7 @@ async fn publish_command(
         }
         validate(&content)?;
         validate_targets(&mut tx, &content, None, None).await?;
+        audio::normalize(&mut tx, actor, id, &mut content.sentence.en_text).await?;
         sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
             .bind(id)
             .execute(&mut *tx)
@@ -472,6 +481,7 @@ async fn publish_command(
             .await
             .map_err(AppError::internal)?;
         bump(&mut tx, id).await?;
+        audio::replace_draft(&mut tx, id, &content.sentence.en_text).await?;
         record_event(
             &mut tx,
             actor,

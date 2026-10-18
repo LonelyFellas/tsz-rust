@@ -876,6 +876,10 @@ pub struct RichTextVariantV3 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub voice_profile: Option<VoiceProfileV3>,
+    /// Uploaded audio metadata is canonicalized from the asset registry on save.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 8)]
+    pub audio_assets: Vec<AudioAsset>,
     /// 人工指定的正文关联；缺键保留存量，显式空数组清除。
     #[serde(default, skip_serializing_if = "PresenceAwareVec::is_empty")]
     #[schema(value_type = Vec<TextLinkV3>, max_items = 100)]

@@ -105,7 +105,11 @@ impl AudioAssetService {
                 "sentences.edit",
             ][..]
         } else {
-            &["words.access", "sentences.access"][..]
+            &[
+                "words.access",
+                "sentences.access",
+                "sentences.read_published",
+            ][..]
         };
         if !keys.iter().any(|key| authorization.has(key)) {
             return Err(crate::error::AppError::forbidden(
@@ -338,17 +342,25 @@ impl AudioAssetService {
             .find(asset_id)
             .await?
             .ok_or(AudioAssetServiceError::NotFound)?;
-        // 非创建者必须同时能读词条且有真实词条引用；超管也不豁免私有资产。
-        if record.created_by_admin_id != authorization.admin_id
-            && (!authorization.has("words.access")
-                || !self.repository.is_referenced_by_word(asset_id).await?)
+        let private_access =
+            authorization.has("words.access") || authorization.has("sentences.access");
+        if !(record.created_by_admin_id == authorization.admin_id && private_access)
+            && !self
+                .repository
+                .has_readable_reference(
+                    asset_id,
+                    authorization.has("words.access"),
+                    authorization.has("sentences.access"),
+                    authorization.has("sentences.read_published"),
+                )
+                .await?
         {
             return Err(AudioAssetServiceError::NotFound);
         }
         Ok(record)
     }
 
-    /// 签发短期只读 URL：创建者本人可读；非创建者须有 words.access 和真实词条引用。
+    /// 签发短期只读 URL；公开例句读者只能读取当前仍公开的发布引用。
     pub async fn presign_url(
         &self,
         admin_id: Uuid,

@@ -1406,22 +1406,8 @@ async fn insert_v3_publication_audio_references(
     word: &AdminWordV3,
 ) -> Result<(), LexiconServiceError> {
     let mut inserted = HashSet::new();
-    let requested = word
-        .meanings
-        .pos
-        .iter()
-        .flat_map(|pos| &pos.grammar_structures)
-        .flat_map(|grammar| &grammar.variants)
-        .map(|variant| {
-            (
-                variant.id,
-                variant
-                    .audio_assets
-                    .iter()
-                    .map(|asset| asset.id)
-                    .collect::<Vec<_>>(),
-            )
-        })
+    let requested = super::v3::requested_audio_assets(&word.meanings)
+        .into_iter()
         .chain(super::v3::requested_pronunciation_audio_assets(&word.forms));
     for (variant_id, asset_ids) in requested {
         for asset_id in asset_ids {

@@ -803,6 +803,16 @@ async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(po
     let bearer = bearer(&state, admin_id);
     let entry = create_entry(&state, &pool, &bearer, "audiopublish").await;
     let asset = upload_asset(&state, &store, &bearer, "published.mp3").await;
+    let mut meanings = complete_meanings(&entry, json!([asset.clone()]));
+    meanings["pos"][0]["senses"][0]["definitions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "definition_mode":"en_definition","id":Uuid::now_v7(),"level":"A2",
+            "grammar_structure_id":entry.grammar_id,
+            "content":{"mode":"unified","common":{"id":Uuid::now_v7(),"origin":"manual",
+                "value":rich_text("a test meaning"),"audio_assets":[asset.clone()]}}
+        }));
 
     let (status, saved) = call(
         &state,
@@ -814,7 +824,7 @@ async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(po
             "schema_version": 3,
             "base_revision": entry.revision,
             "intent": "complete",
-            "content": complete_meanings(&entry, json!([asset.clone()]))
+            "content": meanings
         })),
     )
     .await;
@@ -839,6 +849,11 @@ async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(po
             .fetch_one(&pool)
             .await
             .unwrap();
+    assert_eq!(
+        snapshot["meanings"]["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["audio_assets"]
+            [0],
+        asset
+    );
     assert_eq!(
         snapshot["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["audio_assets"][0]
             ["id"]
@@ -868,6 +883,8 @@ async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(po
             .unwrap();
     let mut without_audio = saved["word"]["meanings"].clone();
     without_audio["pos"][0]["grammar_structures"][0]["variants"][0]["audio_assets"] = json!([]);
+    without_audio["pos"][0]["senses"][0]["definitions"][1]["content"]["common"]["audio_assets"] =
+        json!([]);
     let (status, draft) = call(
         &state,
         Method::PUT,

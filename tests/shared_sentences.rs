@@ -11,6 +11,8 @@ use tsz_rust::{
     state::AppState,
 };
 use uuid::Uuid;
+#[path = "shared_sentences/audio.rs"]
+mod audio_tests;
 #[sqlx::test]
 async fn minimum_sentence_creation_grant_supports_owned_source_and_cascades_revocation(
     pool: PgPool,
@@ -116,6 +118,53 @@ async fn minimum_sentence_creation_grant_supports_owned_source_and_cascades_revo
 }
 
 const ROOT: &str = "/api/v1/admin/lexicon/sentences";
+
+async fn audio_asset(pool: &PgPool, owner: Uuid) -> Value {
+    let id = Uuid::now_v7();
+    let created_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,'audio/wav',3,'en-GB','female','sentence.wav',$4) RETURNING created_at",
+    )
+    .bind(id)
+    .bind(format!("assets/{id}.wav"))
+    .bind(format!("uploads/{id}.wav"))
+    .bind(owner)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    json!({"id":id,"locale":"en-GB","gender":"female","content_type":"audio/wav","size_bytes":3,"duration_ms":null,"original_name":"sentence.wav","created_at":created_at})
+}
+
+#[sqlx::test]
+async fn sentence_audio_survives_create_and_independent_read(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let asset = audio_asset(&pool, actor).await;
+    let mut input = content(source);
+    input["sentence"]["en_text"]["common"]["audio_assets"] = json!([asset]);
+    let id = input["sentence"]["id"].as_str().unwrap().to_owned();
+    let (status, body) = call(
+        &state,
+        actor,
+        Method::POST,
+        ROOT,
+        Some(json!({
+            "source_entry_id":source,"source_sense_id":sense_id(source),"content":input
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "uploaded audio must be writable: {body}"
+    );
+    let (status, saved) = call(&state, actor, Method::GET, &format!("{ROOT}/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["content"]["sentence"]["en_text"]["common"]["audio_assets"],
+        input["sentence"]["en_text"]["common"]["audio_assets"]
+    );
+}
 
 async fn admin(pool: &PgPool) -> Uuid {
     admin_with_role(pool, AdminRole::SuperAdmin).await
@@ -806,6 +855,12 @@ async fn origin_deletion_does_not_lock_or_remove_independently_published_sentenc
 #[sqlx::test]
 async fn shared_schema_can_be_reverted_and_reapplied_in_isolation(pool: PgPool) {
     sqlx::raw_sql(include_str!(
+        "../migrations/20261018140000_shared_sentence_audio.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20260923030000_shared_sentence_publications.down.sql"
     ))
     .execute(&pool)
@@ -864,6 +919,12 @@ async fn shared_schema_can_be_reverted_and_reapplied_in_isolation(pool: PgPool) 
         .await
         .unwrap();
     assert_eq!(count, 0);
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261018140000_shared_sentence_audio.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
 }
 
 #[sqlx::test]

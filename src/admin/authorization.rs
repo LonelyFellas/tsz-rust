@@ -575,7 +575,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "GET",
         "/lexicon/audio-assets/{id}/url",
-        RoutePolicy::Any(&["words.access", "sentences.access"]),
+        RoutePolicy::Any(&[
+            "words.access",
+            "sentences.access",
+            "sentences.read_published",
+        ]),
     ),
 ];
 
