@@ -2,7 +2,7 @@ use sqlx::PgPool;
 #[sqlx::test]
 async fn empty_down_up_roundtrip(pool: PgPool) {
     sqlx::raw_sql(include_str!(
-        "../migrations/20261018090000_learning_coverage.down.sql"
+        "../migrations/20261018130000_learning_coverage.down.sql"
     ))
     .execute(&pool)
     .await
@@ -87,13 +87,13 @@ async fn coverage_migration_preserves_legacy_and_rejects_partial_schedule(pool: 
     .unwrap();
     sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,daily_question_count,create_key,create_hash) VALUES($1,$2,'legacy','daily',ARRAY[$3]::uuid[],1,$4,'hash')").bind(task).bind(user).bind(uuid::Uuid::now_v7()).bind(uuid::Uuid::now_v7()).execute(&pool).await.unwrap();
     sqlx::raw_sql(include_str!(
-        "../migrations/20261018090000_learning_coverage.down.sql"
+        "../migrations/20261018130000_learning_coverage.down.sql"
     ))
     .execute(&pool)
     .await
     .unwrap();
     sqlx::raw_sql(include_str!(
-        "../migrations/20261018090000_learning_coverage.up.sql"
+        "../migrations/20261018130000_learning_coverage.up.sql"
     ))
     .execute(&pool)
     .await

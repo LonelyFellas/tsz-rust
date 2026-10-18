@@ -122,7 +122,57 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261018120000;
+    const CURRENT_RELEASE_VERSION: i64 = 20261018130000;
+
+    #[sqlx::test]
+    async fn coverage_release_undo_restores_the_deployed_custom_item_schema(pool: PgPool) {
+        let current: i64 =
+            sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let report = undo(&pool, 20261018120000, current).await.expect(
+            "the pending coverage migration must be inside the deployment rollback interval",
+        );
+        assert_eq!(report.current_version, 20261018120000);
+        assert!(sqlx::query_scalar::<_,bool>("SELECT to_regclass('learning_cycles') IS NULL AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='wordlist_items' AND column_name='custom_word')").fetch_one(&pool).await.unwrap());
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT to_regclass('learning_cycles') IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[sqlx::test]
+    async fn coverage_release_undo_preserves_coverage_facts_and_ledger(pool: PgPool) {
+        let user = Uuid::now_v7();
+        sqlx::query("INSERT INTO users(id,email,password_hash,display_name) VALUES($1,$2,'hash','coverage rollback')").bind(user).bind(format!("{user}@example.test")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,daily_question_count,create_key,create_hash,generation_policy) VALUES($1,$2,'coverage','daily',ARRAY[$3]::uuid[],1,$4,'hash','coverage_v1')").bind(Uuid::now_v7()).bind(user).bind(Uuid::now_v7()).bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+        let current: i64 =
+            sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let error = undo(&pool, 20261018120000, current).await.unwrap_err();
+        assert!(format!("{error:#}").contains("coverage learning data exists"));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            current
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM learning_tasks WHERE user_id=$1")
+                .bind(user)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
 
     #[sqlx::test]
     async fn deployment_undo_preserves_author_annotations_and_ledger(pool: PgPool) {
