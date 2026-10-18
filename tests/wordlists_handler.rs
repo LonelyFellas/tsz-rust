@@ -428,3 +428,6 @@ mod interactions;
 
 #[path = "wordlists_handler/library.rs"]
 mod library;
+
+#[path = "wordlists_handler/custom_items.rs"]
+mod custom_items;

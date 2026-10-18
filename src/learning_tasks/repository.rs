@@ -290,7 +290,7 @@ async fn source_access(
         .copied()
         .filter(|id| lists.contains_key(id))
         .collect();
-    let members:Vec<(Uuid,Uuid,Uuid)>=sqlx::query_as("SELECT wordlist_id,entry_id,learning_membership_id FROM wordlist_items WHERE wordlist_id=ANY($1) AND ($2::uuid[] IS NULL OR entry_id=ANY($2)) ORDER BY array_position($1,wordlist_id),position").bind(&visible_ids).bind(fixed_entries).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let members:Vec<(Uuid,Uuid,Uuid)>=sqlx::query_as("SELECT wordlist_id,entry_id,learning_membership_id FROM wordlist_items WHERE wordlist_id=ANY($1) AND entry_id IS NOT NULL AND ($2::uuid[] IS NULL OR entry_id=ANY($2)) ORDER BY array_position($1,wordlist_id),position").bind(&visible_ids).bind(fixed_entries).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     let mut entry_ids: Vec<_> = match fixed_entries {
         Some(entries) => entries.to_vec(),
         None => members.iter().map(|(_, e, _)| *e).collect(),
