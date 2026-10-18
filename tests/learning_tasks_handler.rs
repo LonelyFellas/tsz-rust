@@ -738,6 +738,21 @@ async fn completed_before_deletion_gets_no_grace(pool: PgPool) {
     )
     .await;
     assert_eq!(created.0, 409, "{}", created.1);
+
+    let notice = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        "/api/v1/me/notifications",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(notice.0, 200, "{}", notice.1);
+    assert_eq!(
+        notice.1["items"],
+        json!([]),
+        "completed runs must not receive a deletion-grace notification"
+    );
 }
 
 #[sqlx::test]
