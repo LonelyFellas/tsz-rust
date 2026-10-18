@@ -229,4 +229,4 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 
 管理员删除或作者移入回收站后，公开词表立即停止新阅读、新任务和新轮次；删除前已开始且未完成的轮次可继续完成，完成后任务自动归档。宽限固定 7 天并写入 `wordlist_deletion_events`；只有删除前仍为 `published` 的词表产生宽限，恢复词表不会撤销已产生的宽限，管理员 `withdrawn` 治理下架会立即终止已有宽限。日任务仍受当天窗口限制，长期任务最多使用宽限截止。
 
-新增 `GET /api/v1/admin/wordlists/{id}/delete-impact`（权限 `wordlists.delete`），返回可继续轮次、涉及任务/用户及没有可继续轮次的任务数。删除事务内写入 `wordlist_deleted` 站内通知；通知正文含宽限截止时间（北京时间）。迁移 `20261018070000` 新增删除事件表并扩展通知 kind；down 会删除事件和该类通知，回退后在途轮次按旧逻辑失效。后端迁移与代码需配套发布；前端通知 kind 和影响预览可先行兼容。主记录位于 tsz 仓库 `docs/features/wordlist-deletion-grace/design.md`。
+新增 `GET /api/v1/admin/wordlists/{id}/delete-impact`（权限 `wordlists.delete`），返回可继续轮次、涉及任务/用户及没有可继续轮次的任务数。删除事务内写入 `wordlist_deleted` 站内通知；通知正文含宽限截止时间（北京时间）。迁移 `20261018070000` 新增删除事件表并扩展通知 kind；down 在已投递 `wordlist_deleted` 通知时拒绝回退，需要先归档通知；成功回退会删除事件表，在途轮次按旧逻辑失效。后端迁移与代码需配套发布；前端通知 kind 和影响预览可先行兼容。主记录位于 tsz 仓库 `docs/features/wordlist-deletion-grace/design.md`。

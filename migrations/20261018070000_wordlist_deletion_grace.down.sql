@@ -1,3 +1,10 @@
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM user_notifications WHERE kind = 'wordlist_deleted') THEN
+        RAISE EXCEPTION 'wordlist deletion notifications must be archived before rollback';
+    END IF;
+END $$;
+
 DELETE FROM user_notifications WHERE kind = 'wordlist_deleted';
 
 ALTER TABLE user_notifications DROP CONSTRAINT user_notifications_kind_check;

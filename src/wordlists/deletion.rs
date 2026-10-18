@@ -22,8 +22,8 @@ pub async fn record(
     deleted_at: DateTime<Utc>,
     actor: DeletionActor,
 ) -> Result<(), AppError> {
-    let (name, prior_state): (String, String) =
-        sqlx::query_as("SELECT name,state FROM wordlists WHERE id=$1")
+    let (name, prior_state, public_generation): (String, String, i64) =
+        sqlx::query_as("SELECT name,state,learning_public_generation FROM wordlists WHERE id=$1")
             .bind(wordlist_id)
             .fetch_one(&mut **tx)
             .await
@@ -38,13 +38,14 @@ pub async fn record(
         DeletionActor::Admin(id) => (None, Some(id)),
     };
     sqlx::query(
-        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state,deleted_by_user_id,deleted_by_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7)",
+        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state,public_generation,deleted_by_user_id,deleted_by_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
     )
     .bind(Uuid::now_v7())
     .bind(wordlist_id)
     .bind(deleted_at)
     .bind(grace_until)
     .bind(&prior_state)
+    .bind(public_generation)
     .bind(deleted_by_user_id)
     .bind(deleted_by_admin_id)
     .execute(&mut **tx)
@@ -81,6 +82,7 @@ pub async fn record(
     tracing::info!(
         wordlist_id = %wordlist_id,
         prior_state,
+        public_generation,
         grace_until = %grace_until,
         notified,
         "recorded wordlist deletion"

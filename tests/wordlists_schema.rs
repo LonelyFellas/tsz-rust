@@ -142,7 +142,7 @@ async fn deletion_events_keep_grace_and_notification_kind(pool: PgPool) {
         .unwrap();
     assert!(
         sqlx::query(
-            "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state) VALUES($1,$2,clock_timestamp(),clock_timestamp(),'published')",
+            "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state,public_generation) VALUES($1,$2,clock_timestamp(),clock_timestamp(),'published',0)",
         )
         .bind(uuid::Uuid::now_v7())
         .bind(uuid::Uuid::now_v7())
@@ -152,11 +152,32 @@ async fn deletion_events_keep_grace_and_notification_kind(pool: PgPool) {
         "grace must end after deletion"
     );
     sqlx::query(
-        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state) VALUES($1,$2,clock_timestamp(),clock_timestamp()+interval '7 days','published')",
+        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state,public_generation) VALUES($1,$2,clock_timestamp(),clock_timestamp()+interval '7 days','published',0)",
     )
     .bind(uuid::Uuid::now_v7())
     .bind(uuid::Uuid::now_v7())
     .execute(&pool)
     .await
     .unwrap();
+}
+
+#[sqlx::test]
+async fn deletion_grace_down_refuses_delivered_notifications(pool: PgPool) {
+    let (_, auth) = account_deletion_support::setup_bound(&pool).await;
+    sqlx::query("INSERT INTO user_notifications(id,user_id,kind) VALUES($1,$2,'wordlist_deleted')")
+        .bind(uuid::Uuid::now_v7())
+        .bind(auth.subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261018070000_wordlist_deletion_grace.down.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    );
+    tx.rollback().await.unwrap();
 }

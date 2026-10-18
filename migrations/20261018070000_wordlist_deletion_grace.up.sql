@@ -6,6 +6,7 @@ CREATE TABLE wordlist_deletion_events (
     deleted_at TIMESTAMPTZ NOT NULL,
     grace_until TIMESTAMPTZ NOT NULL,
     prior_state TEXT NOT NULL CHECK (prior_state IN ('draft','pending','published','rejected','withdrawn')),
+    public_generation BIGINT NOT NULL CHECK (public_generation>=0),
     deleted_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
     deleted_by_admin_id UUID REFERENCES admins(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),

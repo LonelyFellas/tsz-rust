@@ -934,7 +934,7 @@ async fn uncommitted_delete_cannot_invalidate_a_waiting_run(pool: PgPool) {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state) VALUES($1,$2,$3,$3+interval '7 days','published')",
+        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state,public_generation) VALUES($1,$2,$3,$3+interval '7 days','published',0)",
     )
     .bind(Uuid::now_v7())
     .bind(list)
@@ -1145,4 +1145,81 @@ async fn delete_impact_does_not_promise_grace_for_a_non_public_wordlist(pool: Pg
             "blocked_task_count": 1
         })
     );
+}
+
+#[sqlx::test]
+async fn deletion_does_not_revive_a_run_from_an_older_public_generation(pool: PgPool) {
+    use wordlists_support::{admin, admin_call};
+    let (state, owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    let actor = admin(&pool).await;
+    publish_list(&pool, list).await;
+    let task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    let run = start(&borrower_state, &borrower_auth, &task).await;
+
+    let withdrawn = call(
+        &state,
+        &owner,
+        "POST",
+        &format!("/api/v1/me/wordlists/{list}/withdraw"),
+        json!({"expected_revision":1}),
+    )
+    .await;
+    assert_eq!(withdrawn.0, 200, "{}", withdrawn.1);
+    let run_path = format!("/api/v1/me/learning-runs/{}", run["id"].as_str().unwrap());
+    let invalidated = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &run_path,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(invalidated.1["state"], "invalidated", "{}", invalidated.1);
+
+    // Republish the newer generation, then delete it. The old run must not revive.
+    sqlx::query("UPDATE wordlists SET state='published' WHERE id=$1")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let detail = admin_call(
+        &state,
+        actor,
+        "GET",
+        &format!("/api/v1/admin/wordlists/{list}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(detail.0, 200, "{}", detail.1);
+    let revision = detail.1["wordlist"]["revision"].as_i64().unwrap();
+    let deleted = admin_call(
+        &state,
+        actor,
+        "POST",
+        &format!("/api/v1/admin/wordlists/{list}/delete"),
+        json!({"expected_revision":revision}),
+    )
+    .await;
+    assert_eq!(deleted.0, 204, "{}", deleted.1);
+
+    let still = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &run_path,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(still.1["state"], "invalidated", "{}", still.1);
+    let qs = questions(&borrower_state, &borrower_auth, &run).await;
+    let answered = call(
+        &borrower_state,
+        &borrower_auth,
+        "POST",
+        &answer_path(&run),
+        answer_body(&qs["items"][0], "definitely-wrong"),
+    )
+    .await;
+    assert_eq!(answered.0, 409, "{}", answered.1);
 }

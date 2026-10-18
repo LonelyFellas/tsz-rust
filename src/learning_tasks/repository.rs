@@ -197,8 +197,9 @@ pub struct SourceAccess {
     pub(crate) entries: HashMap<Uuid, CurrentPublication>,
     pub members: HashMap<(Uuid, Uuid), Uuid>,
     pub ordered: Vec<(Uuid, Uuid)>,
-    /// Sources whose deletion happened during this run and whose grace is still open.
-    pub grace: HashMap<Uuid, DateTime<Utc>>,
+    /// Per source, the public generations whose deletion grace is still open.
+    /// A borrowed question only qualifies when its recorded generation matches.
+    pub grace: HashMap<Uuid, HashMap<i64, DateTime<Utc>>>,
 }
 pub async fn sources(
     tx: &mut Tx<'_>,
@@ -223,15 +224,15 @@ async fn deletion_grace(
     tx: &mut Tx<'_>,
     run: &RunRow,
     ids: &[Uuid],
-) -> Result<HashMap<Uuid, DateTime<Utc>>, AppError> {
+) -> Result<HashMap<Uuid, HashMap<i64, DateTime<Utc>>>, AppError> {
     let completed_at: Option<DateTime<Utc>> =
         sqlx::query_scalar("SELECT completed_at FROM learning_completions WHERE run_id=$1")
             .bind(run.id)
             .fetch_optional(&mut **tx)
             .await
             .map_err(AppError::internal)?;
-    let rows: Vec<(Uuid, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT wordlist_id,max(grace_until) FROM wordlist_deletion_events WHERE wordlist_id=ANY($1) AND prior_state='published' AND deleted_at>$2 AND grace_until>clock_timestamp() AND ($3::timestamptz IS NULL OR deleted_at<=$3) GROUP BY wordlist_id",
+    let rows: Vec<(Uuid, i64, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT wordlist_id,public_generation,max(grace_until) FROM wordlist_deletion_events WHERE wordlist_id=ANY($1) AND prior_state='published' AND deleted_at>$2 AND grace_until>clock_timestamp() AND ($3::timestamptz IS NULL OR deleted_at<=$3) GROUP BY wordlist_id,public_generation",
     )
     .bind(ids)
     .bind(run.started_at)
@@ -239,7 +240,11 @@ async fn deletion_grace(
     .fetch_all(&mut **tx)
     .await
     .map_err(AppError::internal)?;
-    Ok(rows.into_iter().collect())
+    let mut grace: HashMap<Uuid, HashMap<i64, DateTime<Utc>>> = HashMap::new();
+    for (id, generation, until) in rows {
+        grace.entry(id).or_default().insert(generation, until);
+    }
+    Ok(grace)
 }
 async fn source_access(
     tx: &mut Tx<'_>,
@@ -302,7 +307,10 @@ async fn source_access(
         .fetch_one(&mut **tx)
         .await
         .map_err(AppError::internal)?;
-    grace.retain(|_, until| *until > now);
+    for generations in grace.values_mut() {
+        generations.retain(|_, until| *until > now);
+    }
+    grace.retain(|_, generations| !generations.is_empty());
     let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w LEFT JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND w.deleted_at IS NULL AND (w.owner_admin_id IS NOT NULL OR (u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())))").bind(&visible_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     lists.retain(|id, _| grace.contains_key(id) || visible.contains(id));
     Ok(SourceAccess {
@@ -319,10 +327,14 @@ impl SourceAccess {
             .entries
             .get(&q.entry_id)
             .is_some_and(|p| p.archive_generation == q.entry_archive_generation);
-        if self.grace.contains_key(&q.source_wordlist_id) {
+        if let Some(generations) = self.grace.get(&q.source_wordlist_id) {
             // The wordlist and its membership may already be gone. Frozen question
-            // snapshots remain sufficient for the in-flight run.
-            return entry_available;
+            // snapshots remain sufficient for the in-flight run, but a borrowed
+            // question must belong to the generation that was live at deletion.
+            let generation_matches = q
+                .source_public_generation
+                .is_none_or(|generation| generations.contains_key(&generation));
+            return generation_matches && entry_available;
         }
         self.lists
             .get(&q.source_wordlist_id)
