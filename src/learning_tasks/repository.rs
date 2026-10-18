@@ -197,82 +197,144 @@ pub struct SourceAccess {
     pub(crate) entries: HashMap<Uuid, CurrentPublication>,
     pub members: HashMap<(Uuid, Uuid), Uuid>,
     pub ordered: Vec<(Uuid, Uuid)>,
+    /// Sources whose deletion happened during this run and whose grace is still open.
+    pub grace: HashMap<Uuid, DateTime<Utc>>,
 }
 pub async fn sources(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     ids: &[Uuid],
 ) -> Result<SourceAccess, AppError> {
-    source_access(tx, auth, ids, None).await
+    source_access(tx, auth, ids, None, None).await
 }
+/// Grace is scoped to a run, not a task or user: only a run that was already in
+/// flight when the wordlist was deleted may finish from its frozen questions.
 pub async fn sources_for_questions(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     ids: &[Uuid],
+    run: &RunRow,
     questions: &[QuestionRow],
 ) -> Result<SourceAccess, AppError> {
     let entries: Vec<_> = questions.iter().map(|q| q.entry_id).collect();
-    source_access(tx, auth, ids, Some(&entries)).await
+    source_access(tx, auth, ids, Some(&entries), Some(run)).await
+}
+async fn deletion_grace(
+    tx: &mut Tx<'_>,
+    run: &RunRow,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, DateTime<Utc>>, AppError> {
+    let completed_at: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT completed_at FROM learning_completions WHERE run_id=$1")
+            .bind(run.id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(AppError::internal)?;
+    let rows: Vec<(Uuid, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT wordlist_id,max(grace_until) FROM wordlist_deletion_events WHERE wordlist_id=ANY($1) AND prior_state='published' AND deleted_at>$2 AND grace_until>clock_timestamp() AND ($3::timestamptz IS NULL OR deleted_at<=$3) GROUP BY wordlist_id",
+    )
+    .bind(ids)
+    .bind(run.started_at)
+    .bind(completed_at)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(AppError::internal)?;
+    Ok(rows.into_iter().collect())
 }
 async fn source_access(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     ids: &[Uuid],
     fixed_entries: Option<&[Uuid]>,
+    run: Option<&RunRow>,
 ) -> Result<SourceAccess, AppError> {
-    let rows:Vec<(Uuid,Option<Uuid>,String,i64,i64)>=sqlx::query_as("SELECT id,owner_user_id,state,revision,learning_public_generation FROM wordlists WHERE id=ANY($1) AND deleted_at IS NULL ORDER BY id FOR SHARE").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    // Lock the wordlist rows before reading deletion events. A concurrent delete
+    // holds the same row lock and inserts its event in the same transaction, so
+    // this order cannot observe a deleted row without its grace event.
+    let rows:Vec<(Uuid,Option<Uuid>,String,i64,i64)>=sqlx::query_as("SELECT id,owner_user_id,state,revision,learning_public_generation FROM wordlists WHERE id=ANY($1) ORDER BY id FOR SHARE").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let mut grace = match run {
+        Some(run) => deletion_grace(tx, run, ids).await?,
+        None => HashMap::new(),
+    };
     let mut lists = HashMap::new();
     for (id, owner, state, revision, generation) in rows {
         let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users u WHERE id=$1 AND status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp()))").bind(owner).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
-        if (owner.is_none() || active) && (owner == Some(auth.subject) || state == "published") {
+        let in_grace = grace.contains_key(&id);
+        if in_grace
+            || ((owner.is_none() || active)
+                && (owner == Some(auth.subject) || state == "published"))
+        {
             lists.insert(
                 id,
                 (
                     revision,
-                    (owner != Some(auth.subject)).then_some(generation),
+                    if in_grace {
+                        None
+                    } else {
+                        (owner != Some(auth.subject)).then_some(generation)
+                    },
                 ),
             );
         }
+    }
+    for id in grace.keys() {
+        lists.entry(*id).or_insert((0, None));
     }
     let visible_ids: Vec<_> = ids
         .iter()
         .copied()
         .filter(|id| lists.contains_key(id))
         .collect();
-    let members:Vec<(Uuid,Uuid,Uuid)>=sqlx::query_as("SELECT wordlist_id,entry_id,learning_membership_id FROM wordlist_items WHERE wordlist_id=ANY($1) AND ($2::uuid[] IS NULL OR entry_id=ANY($2)) ORDER BY array_position($1,wordlist_id),position").bind(visible_ids).bind(fixed_entries).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
-    let mut entry_ids: Vec<_> = members.iter().map(|(_, e, _)| *e).collect();
+    let members:Vec<(Uuid,Uuid,Uuid)>=sqlx::query_as("SELECT wordlist_id,entry_id,learning_membership_id FROM wordlist_items WHERE wordlist_id=ANY($1) AND ($2::uuid[] IS NULL OR entry_id=ANY($2)) ORDER BY array_position($1,wordlist_id),position").bind(&visible_ids).bind(fixed_entries).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    let mut entry_ids: Vec<_> = match fixed_entries {
+        Some(entries) => entries.to_vec(),
+        None => members.iter().map(|(_, e, _)| *e).collect(),
+    };
     entry_ids.sort();
     entry_ids.dedup();
     if entry_ids.len() > 1000 {
         return Err(invalid("来源超过 1000 个词条，请拆分任务"));
     }
     let entries = published::read_current_in(tx, &entry_ids).await?;
-    // Entry locks may have waited across an owner's deletion deadline. Project only
-    // after rechecking all owners with the database clock; these account locks are held.
-    let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w LEFT JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND w.deleted_at IS NULL AND (w.owner_admin_id IS NOT NULL OR (u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())))").bind(ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
-    lists.retain(|id, _| visible.contains(id));
+    // Entry locks may have waited across an owner's deletion deadline or the grace
+    // deadline. Project only after rechecking both with the database clock.
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(AppError::internal)?;
+    grace.retain(|_, until| *until > now);
+    let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w LEFT JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND w.deleted_at IS NULL AND (w.owner_admin_id IS NOT NULL OR (u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())))").bind(&visible_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
+    lists.retain(|id, _| grace.contains_key(id) || visible.contains(id));
     Ok(SourceAccess {
         lists,
         entries,
         members: members.iter().map(|(l, e, m)| ((*l, *e), *m)).collect(),
         ordered: members.into_iter().map(|(l, e, _)| (l, e)).collect(),
+        grace,
     })
 }
 impl SourceAccess {
     pub fn available(&self, q: &QuestionRow) -> bool {
+        let entry_available = self
+            .entries
+            .get(&q.entry_id)
+            .is_some_and(|p| p.archive_generation == q.entry_archive_generation);
+        if self.grace.contains_key(&q.source_wordlist_id) {
+            // The wordlist and its membership may already be gone. Frozen question
+            // snapshots remain sufficient for the in-flight run.
+            return entry_available;
+        }
         self.lists
             .get(&q.source_wordlist_id)
             .is_some_and(|(_, generation)| *generation == q.source_public_generation)
             && self.members.get(&(q.source_wordlist_id, q.entry_id))
                 == Some(&q.source_membership_id)
-            && self
-                .entries
-                .get(&q.entry_id)
-                .is_some_and(|p| p.archive_generation == q.entry_archive_generation)
+            && entry_available
     }
     pub fn learning_sources(&self) -> Result<Vec<LearningSource>, AppError> {
         self.ordered
             .iter()
+            .filter(|(list, _)| !self.grace.contains_key(list))
             .filter_map(|(list, entry)| {
                 self.lists.get(list).zip(self.entries.get(entry)).map(
                     |((revision, generation), publication)| {

@@ -464,6 +464,11 @@ async fn management_permissions_and_migration_rollback_guard(pool: PgPool) {
             json!({"expected_revision":1,"recommended":true}),
         ),
         (
+            "GET",
+            format!("/api/v1/admin/wordlists/{id}/delete-impact"),
+            Value::Null,
+        ),
+        (
             "POST",
             format!("/api/v1/admin/wordlists/{id}/delete"),
             json!({"expected_revision":1}),

@@ -502,3 +502,647 @@ async fn candidate_projection_obeys_cefr_context_and_form_relationships(pool: Pg
         2
     );
 }
+
+async fn borrower(pool: &PgPool) -> (tsz_rust::state::AppState, tsz_rust::auth::extract::AuthUser) {
+    let (state, auth) = account_deletion_support::setup_bound(pool).await;
+    sqlx::query(
+        "INSERT INTO student_profiles(user_id,cefr_level,english_variant) VALUES($1,'A1','BrE')",
+    )
+    .bind(auth.subject)
+    .execute(pool)
+    .await
+    .unwrap();
+    (state, auth)
+}
+
+async fn publish_list(pool: &PgPool, list: Uuid) {
+    sqlx::query("UPDATE wordlists SET state='published' WHERE id=$1")
+        .bind(list)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn admin_delete(
+    state: &tsz_rust::state::AppState,
+    admin: Uuid,
+    list: Uuid,
+) -> (axum::http::StatusCode, Value) {
+    use wordlists_support::admin_call;
+    admin_call(
+        state,
+        admin,
+        "POST",
+        &format!("/api/v1/admin/wordlists/{list}/delete"),
+        json!({"expected_revision":1}),
+    )
+    .await
+}
+
+async fn complete_run(
+    state: &tsz_rust::state::AppState,
+    auth: &tsz_rust::auth::extract::AuthUser,
+    run: &Value,
+) {
+    let qs = questions(state, auth, run).await;
+    for q in qs["items"].as_array().unwrap() {
+        let r = call(
+            state,
+            auth,
+            "POST",
+            &answer_path(run),
+            answer_body(q, "definitely-wrong"),
+        )
+        .await;
+        assert_eq!(r.0, 200, "{}", r.1);
+    }
+}
+
+#[sqlx::test]
+async fn deleted_wordlist_lets_started_run_finish_and_archives_task(pool: PgPool) {
+    use wordlists_support::{admin, admin_call};
+    let (state, _owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    let actor = admin(&pool).await;
+    publish_list(&pool, list).await;
+    let task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    let run = start(&borrower_state, &borrower_auth, &task).await;
+    let blocked = create(&borrower_state, &borrower_auth, list, "daily").await;
+
+    let impact = admin_call(
+        &state,
+        actor,
+        "GET",
+        &format!("/api/v1/admin/wordlists/{list}/delete-impact"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(
+        impact.1,
+        json!({
+            "active_run_count": 1,
+            "active_task_count": 1,
+            "affected_user_count": 1,
+            "blocked_task_count": 1
+        })
+    );
+
+    let deleted = admin_delete(&state, actor, list).await;
+    assert_eq!(deleted.0, 204, "{}", deleted.1);
+
+    let notice = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        "/api/v1/me/notifications",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(notice.0, 200, "{}", notice.1);
+    assert_eq!(notice.1["items"][0]["kind"], "wordlist_deleted");
+    assert!(
+        notice.1["items"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("已被删除")
+    );
+
+    let run_path = format!("/api/v1/me/learning-runs/{}", run["id"].as_str().unwrap());
+    let current = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &run_path,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(current.0, 200, "{}", current.1);
+    assert_eq!(current.1["state"], "active");
+    let qs = questions(&borrower_state, &borrower_auth, &run).await;
+    assert!(
+        qs["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["content_available"] == true && q["prompt"].is_object())
+    );
+
+    complete_run(&borrower_state, &borrower_auth, &run).await;
+
+    let detail = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &format!("/api/v1/me/learning-tasks/{}", task["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(detail.0, 200, "{}", detail.1);
+    assert_eq!(detail.1["task"]["state"], "archived");
+    let revision = detail.1["task"]["revision"].as_i64().unwrap();
+    let again = call(
+        &borrower_state,
+        &borrower_auth,
+        "POST",
+        &format!(
+            "/api/v1/me/learning-tasks/{}/runs",
+            task["id"].as_str().unwrap()
+        ),
+        json!({"idempotency_key":Uuid::now_v7(),"expected_revision":revision,"after_run_id":run["id"]}),
+    )
+    .await;
+    assert_eq!(again.0, 409, "{}", again.1);
+
+    let blocked_start = call(
+        &borrower_state,
+        &borrower_auth,
+        "POST",
+        &format!(
+            "/api/v1/me/learning-tasks/{}/runs",
+            blocked["id"].as_str().unwrap()
+        ),
+        start_body(None),
+    )
+    .await;
+    assert_eq!(blocked_start.0, 409, "{}", blocked_start.1);
+
+    let created = call(
+        &borrower_state,
+        &borrower_auth,
+        "POST",
+        "/api/v1/me/learning-tasks",
+        create_body(list, "daily"),
+    )
+    .await;
+    assert_eq!(created.0, 409, "{}", created.1);
+}
+
+#[sqlx::test]
+async fn completed_before_deletion_gets_no_grace(pool: PgPool) {
+    use wordlists_support::admin;
+    let (state, _owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    let actor = admin(&pool).await;
+    publish_list(&pool, list).await;
+    let task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    let run = start(&borrower_state, &borrower_auth, &task).await;
+    complete_run(&borrower_state, &borrower_auth, &run).await;
+    assert_eq!(admin_delete(&state, actor, list).await.0, 204);
+
+    let run_path = format!("/api/v1/me/learning-runs/{}", run["id"].as_str().unwrap());
+    let current = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &run_path,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(current.1["state"], "completed");
+    let qs = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &format!("{run_path}/questions"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(qs.0, 200, "{}", qs.1);
+    assert!(
+        qs.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["content_available"] == false && q["prompt"].is_null())
+    );
+
+    let again = call(
+        &borrower_state,
+        &borrower_auth,
+        "POST",
+        &format!(
+            "/api/v1/me/learning-tasks/{}/runs",
+            task["id"].as_str().unwrap()
+        ),
+        json!({"idempotency_key":Uuid::now_v7(),"expected_revision":1,"after_run_id":run["id"]}),
+    )
+    .await;
+    assert_eq!(again.0, 409, "{}", again.1);
+    let created = call(
+        &borrower_state,
+        &borrower_auth,
+        "POST",
+        "/api/v1/me/learning-tasks",
+        create_body(list, "daily"),
+    )
+    .await;
+    assert_eq!(created.0, 409, "{}", created.1);
+}
+
+#[sqlx::test]
+async fn grace_survives_restore_and_expires(pool: PgPool) {
+    use wordlists_support::admin;
+    let (state, _owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    let actor = admin(&pool).await;
+    publish_list(&pool, list).await;
+    let task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    let run = start(&borrower_state, &borrower_auth, &task).await;
+    assert_eq!(admin_delete(&state, actor, list).await.0, 204);
+
+    // Restore as private; the deletion event must keep the in-flight run alive.
+    sqlx::query("UPDATE wordlists SET deleted_at=NULL,state='draft' WHERE id=$1")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let run_path = format!("/api/v1/me/learning-runs/{}", run["id"].as_str().unwrap());
+    let active = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &run_path,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(active.1["state"], "active", "{}", active.1);
+
+    sqlx::query(
+        "UPDATE wordlist_deletion_events SET deleted_at=r.started_at+interval '1 microsecond',grace_until=r.started_at+interval '2 microseconds' FROM learning_runs r WHERE wordlist_id=$1 AND r.id=$2",
+    )
+    .bind(list)
+    .bind(Uuid::parse_str(run["id"].as_str().unwrap()).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let expired = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &run_path,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(expired.1["state"], "invalidated", "{}", expired.1);
+    let qs = questions(&borrower_state, &borrower_auth, &run).await;
+    let answered = call(
+        &borrower_state,
+        &borrower_auth,
+        "POST",
+        &answer_path(&run),
+        answer_body(&qs["items"][0], "definitely-wrong"),
+    )
+    .await;
+    assert_eq!(answered.0, 409, "{}", answered.1);
+}
+
+#[sqlx::test]
+async fn entry_archive_still_invalidates_grace(pool: PgPool) {
+    use wordlists_support::admin;
+    let (state, _owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    let actor = admin(&pool).await;
+    publish_list(&pool, list).await;
+    let task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    let run = start(&borrower_state, &borrower_auth, &task).await;
+    assert_eq!(admin_delete(&state, actor, list).await.0, 204);
+    sqlx::query("UPDATE lexicon.entries SET archived_at=clock_timestamp() WHERE id=(SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1)")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let current = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &format!("/api/v1/me/learning-runs/{}", run["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(current.1["state"], "invalidated", "{}", current.1);
+}
+
+#[sqlx::test]
+async fn owner_trash_also_grants_grace(pool: PgPool) {
+    let (state, owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    publish_list(&pool, list).await;
+    let task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    let run = start(&borrower_state, &borrower_auth, &task).await;
+
+    let library = call(
+        &state,
+        &owner,
+        "GET",
+        "/api/v1/me/wordlist-library/owned",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(library.0, 200, "{}", library.1);
+    let node = library.1["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["wordlist_id"] == list.to_string())
+        .unwrap()["id"]
+        .clone();
+    let trashed = call(
+        &state,
+        &owner,
+        "POST",
+        "/api/v1/me/wordlist-library/owned/operations",
+        json!({
+            "expected_version": library.1["version"],
+            "action": "trash",
+            "ids": [node]
+        }),
+    )
+    .await;
+    assert_eq!(trashed.0, 200, "{}", trashed.1);
+
+    let current = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &format!("/api/v1/me/learning-runs/{}", run["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(current.1["state"], "active", "{}", current.1);
+
+    // Permanent deletion removes wordlist_items; frozen questions must still finish.
+    let trash = call(
+        &state,
+        &owner,
+        "GET",
+        "/api/v1/me/wordlist-library/owned?trash=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(trash.0, 200, "{}", trash.1);
+    let trashed = trash.1["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["wordlist_id"] == list.to_string())
+        .unwrap()["id"]
+        .clone();
+    let purged = call(
+        &state,
+        &owner,
+        "POST",
+        "/api/v1/me/wordlist-library/owned/operations",
+        json!({
+            "expected_version": trash.1["version"],
+            "action": "purge",
+            "ids": [trashed]
+        }),
+    )
+    .await;
+    assert_eq!(purged.0, 200, "{}", purged.1);
+    let still = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &format!("/api/v1/me/learning-runs/{}", run["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(still.1["state"], "active", "{}", still.1);
+    complete_run(&borrower_state, &borrower_auth, &run).await;
+}
+
+#[sqlx::test]
+async fn uncommitted_delete_cannot_invalidate_a_waiting_run(pool: PgPool) {
+    let (_state, _owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    publish_list(&pool, list).await;
+    let task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    let run = start(&borrower_state, &borrower_auth, &task).await;
+    let qs = questions(&borrower_state, &borrower_auth, &run).await;
+    let body = answer_body(&qs["items"][0], "definitely-wrong");
+
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM wordlists WHERE id=$1 FOR UPDATE")
+        .bind(list)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let deleted_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state) VALUES($1,$2,$3,$3+interval '7 days','published')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(list)
+    .bind(deleted_at)
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE wordlists SET deleted_at=$2,state='draft' WHERE id=$1")
+        .bind(list)
+        .bind(deleted_at)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let s = borrower_state.clone();
+    let auth = tsz_rust::auth::extract::AuthUser {
+        subject: borrower_auth.subject,
+        role: "student".into(),
+        security_version: borrower_auth.security_version,
+    };
+    let path = answer_path(&run);
+    let answer = tokio::spawn(async move { call(&s, &auth, "POST", &path, body).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT id,owner_user_id,state,revision,learning_public_generation%')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    blocker.commit().await.unwrap();
+    let result = answer.await.unwrap();
+    assert_eq!(result.0, 200, "{}", result.1);
+}
+
+#[sqlx::test]
+async fn withdraw_then_delete_does_not_revive_an_invalidated_run(pool: PgPool) {
+    let (state, owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    publish_list(&pool, list).await;
+    let task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    let run = start(&borrower_state, &borrower_auth, &task).await;
+
+    let withdrawn = call(
+        &state,
+        &owner,
+        "POST",
+        &format!("/api/v1/me/wordlists/{list}/withdraw"),
+        json!({"expected_revision":1}),
+    )
+    .await;
+    assert_eq!(withdrawn.0, 200, "{}", withdrawn.1);
+    let run_path = format!("/api/v1/me/learning-runs/{}", run["id"].as_str().unwrap());
+    let invalidated = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &run_path,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(invalidated.1["state"], "invalidated", "{}", invalidated.1);
+
+    let library = call(
+        &state,
+        &owner,
+        "GET",
+        "/api/v1/me/wordlist-library/owned",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(library.0, 200, "{}", library.1);
+    let node = library.1["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["wordlist_id"] == list.to_string())
+        .unwrap()["id"]
+        .clone();
+    let trashed = call(
+        &state,
+        &owner,
+        "POST",
+        "/api/v1/me/wordlist-library/owned/operations",
+        json!({
+            "expected_version": library.1["version"],
+            "action": "trash",
+            "ids": [node]
+        }),
+    )
+    .await;
+    assert_eq!(trashed.0, 200, "{}", trashed.1);
+
+    let still = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &run_path,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(still.1["state"], "invalidated", "{}", still.1);
+    let qs = questions(&borrower_state, &borrower_auth, &run).await;
+    let answered = call(
+        &borrower_state,
+        &borrower_auth,
+        "POST",
+        &answer_path(&run),
+        answer_body(&qs["items"][0], "definitely-wrong"),
+    )
+    .await;
+    assert_eq!(answered.0, 409, "{}", answered.1);
+    let notice = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        "/api/v1/me/notifications",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(notice.0, 200, "{}", notice.1);
+    assert_eq!(notice.1["items"], json!([]));
+}
+
+#[sqlx::test]
+async fn restore_then_governance_withdraw_ends_existing_grace(pool: PgPool) {
+    use wordlists_support::{admin, admin_call};
+    let (state, _owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    let actor = admin(&pool).await;
+    publish_list(&pool, list).await;
+    let task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    let run = start(&borrower_state, &borrower_auth, &task).await;
+    assert_eq!(admin_delete(&state, actor, list).await.0, 204);
+
+    sqlx::query("UPDATE wordlists SET deleted_at=NULL,state='published' WHERE id=$1")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let detail = admin_call(
+        &state,
+        actor,
+        "GET",
+        &format!("/api/v1/admin/wordlists/{list}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(detail.0, 200, "{}", detail.1);
+    let revision = detail.1["wordlist"]["revision"].as_i64().unwrap();
+    let withdrawn = admin_call(
+        &state,
+        actor,
+        "POST",
+        &format!("/api/v1/admin/wordlists/{list}/withdraw"),
+        json!({"expected_revision":revision,"reason":"治理下架"}),
+    )
+    .await;
+    assert_eq!(withdrawn.0, 200, "{}", withdrawn.1);
+
+    let current = call(
+        &borrower_state,
+        &borrower_auth,
+        "GET",
+        &format!("/api/v1/me/learning-runs/{}", run["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(current.1["state"], "invalidated", "{}", current.1);
+}
+
+#[sqlx::test]
+async fn delete_impact_does_not_promise_grace_for_a_non_public_wordlist(pool: PgPool) {
+    use wordlists_support::{admin, admin_call};
+    let (state, _owner, list) = setup(&pool).await;
+    let (borrower_state, borrower_auth) = borrower(&pool).await;
+    let actor = admin(&pool).await;
+    publish_list(&pool, list).await;
+    let _task = create(&borrower_state, &borrower_auth, list, "longterm").await;
+    sqlx::query("UPDATE wordlists SET state='withdrawn' WHERE id=$1")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let impact = admin_call(
+        &state,
+        actor,
+        "GET",
+        &format!("/api/v1/admin/wordlists/{list}/delete-impact"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(impact.0, 200, "{}", impact.1);
+    assert_eq!(
+        impact.1,
+        json!({
+            "active_run_count": 0,
+            "active_task_count": 0,
+            "affected_user_count": 0,
+            "blocked_task_count": 1
+        })
+    );
+}

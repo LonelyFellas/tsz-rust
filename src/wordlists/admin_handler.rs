@@ -139,6 +139,16 @@ pub async fn recommend(
         management::recommend(&state.pool, &auth, id, input).await?,
     ))
 }
+#[utoipa::path(get,path="/api/v1/admin/wordlists/{id}/delete-impact",tag="wordlists",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,description="删除前的在途学习影响",body=WordlistDeleteImpact),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在")))]
+pub async fn delete_impact(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<WordlistDeleteImpact>, AppError> {
+    Ok(Json(
+        management::delete_impact(&state.pool, &auth, id).await?,
+    ))
+}
 #[utoipa::path(post,path="/api/v1/admin/wordlists/{id}/delete",tag="wordlists",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),request_body=WithdrawWordlist,responses((status=204,description="词表管理"),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=403,description="权限不足"),(status=404,description="不存在"),(status=409,description="版本或状态冲突")))]
 pub async fn delete(
     State(state): State<AppState>,

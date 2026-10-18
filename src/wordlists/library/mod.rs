@@ -2,6 +2,7 @@
 pub mod dto;
 mod handler;
 use super::{
+    deletion::{self, DeletionActor},
     dto::{Wordlist, WordlistState},
     service::{self, Tx},
 };
@@ -415,7 +416,10 @@ pub async fn operation(
         commit(tx, auth).await?;
         return Ok(impact);
     }
-    let now = Utc::now();
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
     match input.action {
         LibraryAction::Move => {
             target(&nodes, input.target_id)?;
@@ -527,8 +531,18 @@ pub async fn operation(
                 .await
                 .map_err(AppError::internal)?;
             } else {
+                let deleted_at = if input.action == LibraryAction::Trash {
+                    let at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(AppError::internal)?;
+                    deletion::record(&mut tx, id, at, DeletionActor::User(auth.subject)).await?;
+                    Some(at)
+                } else {
+                    None
+                };
                 sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
-                sqlx::query("UPDATE wordlists SET deleted_at=$2,state='draft',review_state='none',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(if input.action==LibraryAction::Trash {Some(now)}else{None}).execute(&mut *tx).await.map_err(AppError::internal)?;
+                sqlx::query("UPDATE wordlists SET deleted_at=$2,state='draft',review_state='none',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(deleted_at).execute(&mut *tx).await.map_err(AppError::internal)?;
             }
         } else if space == LibrarySpace::Favorites {
             if input.action == LibraryAction::Restore {

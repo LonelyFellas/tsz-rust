@@ -7,6 +7,12 @@ const DOWN: &str = include_str!("../migrations/20261006040000_wordlists.down.sql
 async fn empty_roundtrip_and_content_prevents_destructive_down(pool: PgPool) {
     let mut tx = pool.begin().await.unwrap();
     sqlx::raw_sql(include_str!(
+        "../migrations/20261018070000_wordlist_deletion_grace.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20261016090000_wordlist_library.down.sql"
     ))
     .execute(&mut *tx)
@@ -80,6 +86,12 @@ async fn empty_roundtrip_and_content_prevents_destructive_down(pool: PgPool) {
     .execute(&mut *tx)
     .await
     .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261018070000_wordlist_deletion_grace.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     sqlx::query("SET LOCAL enable_seqscan=off")
         .execute(&mut *tx)
         .await
@@ -117,4 +129,34 @@ async fn empty_roundtrip_and_content_prevents_destructive_down(pool: PgPool) {
             .await
             .is_err()
     );
+}
+
+#[sqlx::test]
+async fn deletion_events_keep_grace_and_notification_kind(pool: PgPool) {
+    let (_, auth) = account_deletion_support::setup_bound(&pool).await;
+    sqlx::query("INSERT INTO user_notifications(id,user_id,kind) VALUES($1,$2,'wordlist_deleted')")
+        .bind(uuid::Uuid::now_v7())
+        .bind(auth.subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state) VALUES($1,$2,clock_timestamp(),clock_timestamp(),'published')",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(uuid::Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .is_err(),
+        "grace must end after deletion"
+    );
+    sqlx::query(
+        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state) VALUES($1,$2,clock_timestamp(),clock_timestamp()+interval '7 days','published')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(uuid::Uuid::now_v7())
+    .execute(&pool)
+    .await
+    .unwrap();
 }

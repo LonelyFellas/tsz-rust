@@ -68,6 +68,7 @@ use utoipa::{
         crate::wordlists::admin_handler::catalog,
         crate::wordlists::admin_handler::visibility,
         crate::wordlists::admin_handler::recommend,
+        crate::wordlists::admin_handler::delete_impact,
         crate::wordlists::admin_handler::delete,
         crate::wordlists::handler::recommended,
         crate::wordlists::handler::publish,

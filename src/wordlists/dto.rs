@@ -418,6 +418,19 @@ pub struct AdminWordlistPage {
     pub items: Vec<AdminWordlist>,
     pub pagination: PaginationMeta,
 }
+/// Current learning impact before a wordlist is deleted.
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistDeleteImpact {
+    /// Active, unexpired runs that may finish under the deletion grace.
+    pub active_run_count: i64,
+    /// Tasks owning at least one such run.
+    pub active_task_count: i64,
+    /// Distinct owners of such runs.
+    pub affected_user_count: i64,
+    /// Active tasks that reference the list but have no run that can continue.
+    pub blocked_task_count: i64,
+}
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WordlistReviewState {

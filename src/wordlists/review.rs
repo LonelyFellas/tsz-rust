@@ -169,6 +169,9 @@ pub async fn admin_withdraw(
         return Err(service::conflict());
     }
     sqlx::query("UPDATE wordlists SET state='withdrawn',revision=revision+1,updated_at=clock_timestamp(),withdraw_reason=$2 WHERE id=$1").bind(id).bind(explanation).execute(&mut *tx).await.map_err(AppError::internal)?;
+    // Governance withdrawal must win over any deletion grace, including one
+    // granted before the wordlist was restored and republished.
+    sqlx::query("UPDATE wordlist_deletion_events SET grace_until=deleted_at+interval '1 microsecond' WHERE wordlist_id=$1 AND grace_until>clock_timestamp()").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     permissions::service::audit(
         &mut tx,
         auth.subject,
