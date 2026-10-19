@@ -487,3 +487,56 @@ async fn notification_failure_rolls_back_a_new_like(pool: PgPool) {
         0
     );
 }
+
+#[sqlx::test]
+async fn management_statistics_include_private_lists_and_follow_removed_interactions(pool: PgPool) {
+    let (state, author) = setup_bound(&pool).await;
+    let (_, reader) = setup_bound(&pool).await;
+    let (_, other) = setup_bound(&pool).await;
+    let manager = admin(&pool).await;
+    let e = entry(&pool, "statistics").await;
+    let created = call(
+        &state,
+        &author,
+        "POST",
+        "/api/v1/me/wordlists",
+        create_body(&[e]),
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::OK, "{}", created.1);
+    let id = created.1["id"].as_str().unwrap();
+    let uuid: Uuid = id.parse().unwrap();
+    sqlx::query("UPDATE wordlists SET state='published' WHERE id=$1")
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (user, kind) in [(&reader, "like"), (&other, "like"), (&reader, "favorite")] {
+        let result = interaction(&state, user, id, kind, true).await;
+        assert_eq!(result.0, StatusCode::OK, "{}", result.1);
+    }
+    let path = "/api/v1/admin/wordlists/management?include_stats=true";
+    for state_name in ["published", "withdrawn"] {
+        sqlx::query("UPDATE wordlists SET state=$2 WHERE id=$1")
+            .bind(uuid)
+            .bind(state_name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let result = admin_call(&state, manager, "GET", path, Value::Null).await;
+        assert_eq!(result.0, StatusCode::OK, "{}", result.1);
+        let row = &result.1["items"][0];
+        assert_eq!(row["wordlist"]["id"], id);
+        assert_eq!(row["like_count"], 2);
+        assert_eq!(row["favorite_count"], 1);
+        assert_eq!(row["has_custom_words"], false);
+    }
+    for kind in ["like", "favorite"] {
+        let result = interaction(&state, &reader, id, kind, false).await;
+        assert_eq!(result.0, StatusCode::OK, "{}", result.1);
+    }
+    let refreshed = admin_call(&state, manager, "GET", path, Value::Null).await;
+    assert_eq!(refreshed.0, StatusCode::OK, "{}", refreshed.1);
+    assert_eq!(refreshed.1["items"][0]["like_count"], 1);
+    assert_eq!(refreshed.1["items"][0]["favorite_count"], 0);
+}

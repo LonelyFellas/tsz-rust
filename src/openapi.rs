@@ -1807,6 +1807,39 @@ mod tests {
     }
 
     #[test]
+    fn wordlist_management_stats_are_optional_and_non_null() {
+        let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let params = doc["paths"]["/api/v1/admin/wordlists/management"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        let param = params
+            .iter()
+            .find(|p| p["name"] == "include_stats")
+            .unwrap();
+        assert_eq!(param["required"], false);
+        assert_eq!(param["schema"]["type"], "boolean");
+        let schema = &doc["components"]["schemas"]["AdminWordlist"];
+        assert_eq!(schema["additionalProperties"], false);
+        for (field, kind) in [
+            ("has_custom_words", "boolean"),
+            ("like_count", "integer"),
+            ("favorite_count", "integer"),
+        ] {
+            assert_eq!(schema["properties"][field]["type"], kind);
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|required| required == field)
+            );
+        }
+        for field in ["like_count", "favorite_count"] {
+            assert_eq!(schema["properties"][field]["minimum"].as_f64(), Some(0.0));
+        }
+    }
+
+    #[test]
     fn wordlist_review_filter_enum_is_registered_and_optional() {
         let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
         let params = doc["paths"]["/api/v1/admin/wordlists/management"]["get"]["parameters"]

@@ -471,6 +471,15 @@ pub struct AdminWordlist {
     pub recommended: bool,
     /// Total coins, represented as a decimal string without precision loss.
     pub tip_amount: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub has_custom_words: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, minimum = 0)]
+    pub like_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false, minimum = 0)]
+    pub favorite_count: Option<i64>,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -513,6 +522,9 @@ impl WordlistReviewState {
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in=Query)]
 pub struct WordlistManagementQuery {
+    /// Opt in to management statistics; omitted for older strict clients.
+    #[serde(default)]
+    pub include_stats: bool,
     pub q: Option<String>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
