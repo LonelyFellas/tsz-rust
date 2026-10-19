@@ -2936,6 +2936,35 @@ mod tests {
     }
 
     #[test]
+    fn manual_source_selection_validates_only_the_selected_source() {
+        let mut raw = valid_request();
+        let path = "/content/pos/0/forms/0/regional_variants/common/pronunciations/0";
+        raw.pointer_mut(path).unwrap()["synthesis"] = json!({
+            "alphabet":"ipa", "use_spelling":false, "ipa":"", "ups":"",
+            "uk":{"ipa":"kæt", "ups":"K AE T"},
+            "us":{"ipa":"kæt", "ups":""}
+        });
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete).is_empty()
+        );
+        raw.pointer_mut(path).unwrap()["synthesis"]["uk"]["ipa"] = json!("");
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete)
+                .iter()
+                .any(|issue| issue.field == "synthesis.uk.ipa")
+        );
+        raw.pointer_mut(path).unwrap()["synthesis"]["uk"]["ipa"] = json!("kæt");
+        raw.pointer_mut(path).unwrap()["synthesis"]["alphabet"] = json!("ups");
+        assert!(
+            validate_forms(&decode_valid(raw.clone()).content, StepSaveIntent::Complete)
+                .iter()
+                .any(|issue| issue.field == "synthesis.us.ups")
+        );
+        raw.pointer_mut(path).unwrap()["synthesis"]["use_spelling"] = json!(true);
+        assert!(validate_forms(&decode_valid(raw).content, StepSaveIntent::Complete).is_empty());
+    }
+
+    #[test]
     fn synthesis_dual_accent_round_trip_and_selected_side_validation() {
         let mut raw = valid_request();
         let path = "/content/pos/0/forms/0/regional_variants/common/pronunciations/0/synthesis";
