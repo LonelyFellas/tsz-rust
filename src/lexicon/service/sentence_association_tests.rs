@@ -643,7 +643,7 @@ fn dedicated_forms_limit_candidates_and_saved_targets_to_bound_senses_in_the_sam
                     *form_id,
                     fixture.variant_ids[index],
                     Dialect::Common,
-                    "base".into(),
+                    "base",
                     None,
                 ),
                 expected
@@ -862,7 +862,7 @@ mod dialect_structure_drift {
             form_id,
             uk_id,
             Dialect::Uk,
-            "base".into(),
+            "base",
             None,
         ));
     }
@@ -885,7 +885,7 @@ mod dialect_structure_drift {
                 form_id,
                 variant_id,
                 Dialect::Common,
-                "base".into(),
+                "base",
                 None,
             ),
             "词形类型漂移不应让成分引用失效"
@@ -920,7 +920,7 @@ mod dialect_structure_drift {
                     fixture.form_ids[0],
                     fixture.variant_ids[0],
                     Dialect::Common,
-                    form_type.to_owned(),
+                    form_type,
                     None,
                 ),
                 expected,
@@ -945,7 +945,7 @@ mod dialect_structure_drift {
                 Uuid::now_v7(),
                 variant_id,
                 Dialect::Common,
-                "base".into(),
+                "base",
                 None,
             ),
             "目标词形不存在时引用必须失效"
@@ -1032,7 +1032,7 @@ mod dialect_structure_drift {
                 form_id,
                 Uuid::now_v7(),
                 Dialect::Uk,
-                "base".into(),
+                "base",
                 None,
             ),
             "变体实例 id 漂移不应让成分引用失效"
@@ -1053,7 +1053,7 @@ mod dialect_structure_drift {
                 form_id,
                 fixture.variant_ids[0],
                 Dialect::Common,
-                "base".into(),
+                "base",
                 None,
             ),
             "目标词义不存在时引用必须失效"
