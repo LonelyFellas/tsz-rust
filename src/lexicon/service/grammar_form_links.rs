@@ -318,6 +318,29 @@ mod tests {
     }
 
     #[test]
+    fn manual_source_selection_keeps_grammar_annotations_consistent() {
+        for (alphabet, use_spelling) in [("ipa", false), ("ups", false), ("ipa", true)] {
+            let row: WordPronunciationV3 = serde_json::from_value(json!({
+                "id":Uuid::new_v4(), "dict_phonetic":"", "actual_pron":"",
+                "synthesis":{"alphabet":alphabet, "use_spelling":use_spelling, "ipa":"", "ups":"",
+                    "us":{"ipa":"fɑɹ", "ups":"F AA R"}}
+            }))
+            .unwrap();
+            let annotation = first_annotation(&[row], 0, 3, Dialect::Us, Dialect::Common).unwrap();
+            if use_spelling {
+                assert!(annotation.is_none());
+            } else {
+                let value = serde_json::to_value(annotation.unwrap()).unwrap();
+                assert_eq!(value["alphabet"], alphabet);
+                assert_eq!(
+                    value["phoneme"],
+                    if alphabet == "ipa" { "fɑɹ" } else { "F AA R" }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn grammar_form_does_not_borrow_unlabelled_legacy_uk_phonemes_for_us() {
         let row: WordPronunciationV3 = serde_json::from_value(
             json!({"id":Uuid::new_v4(), "dict_phonetic":"", "actual_pron":"",
