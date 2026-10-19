@@ -1166,6 +1166,190 @@ async fn audio_upload_migration_preserves_effective_writers_without_expanding_re
 }
 
 #[sqlx::test]
+async fn retired_wordlist_permissions_do_not_break_tag_authorization_after_upgrade(pool: PgPool) {
+    let migrator = sqlx::migrate!("./migrations");
+    migrator.undo(&pool, 20261018140000).await.unwrap();
+    let super_id = seed(&pool, AdminRole::SuperAdmin).await;
+    let holder = seed(&pool, AdminRole::Admin).await;
+    let recipient = seed(&pool, AdminRole::Admin).await;
+    let tag_id = Uuid::now_v7();
+    sqlx::query("INSERT INTO permission_tags(id,name,color) VALUES($1,'历史词表管理','blue')")
+        .bind(tag_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for key in [
+        "wordlists.access",
+        "wordlists.create",
+        "wordlists.edit",
+        "wordlists.review",
+    ] {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)")
+            .bind(holder).bind(key).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO permission_tag_items(tag_id,permission_key) VALUES($1,$2)")
+            .bind(tag_id)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    migrator.run(&pool).await.unwrap();
+
+    let state = AppState::for_test(pool.clone());
+    let bearer = token(&state, super_id, AdminRole::SuperAdmin);
+    let (status, catalog) = request(&state, &bearer, "GET", "/permissions", None).await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let tag = catalog["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tag| tag["id"] == tag_id.to_string())
+        .unwrap();
+    let keys: Vec<_> = tag["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap())
+        .collect();
+    let preview = preview(&state, &bearer, &[recipient], &keys, &[]).await;
+    assert_eq!(tag["name"], "历史词表管理");
+    assert_eq!(tag["color"], "blue");
+    assert_eq!(tag["version"], 1);
+    assert_eq!(
+        tag["permissions"],
+        json!(["wordlists.access", "wordlists.review"])
+    );
+    let (status, committed) = request(
+        &state,
+        &bearer,
+        "POST",
+        "/permission-changes",
+        Some(commit_input(&preview)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["targets"][0]["permissions"], tag["permissions"]);
+    let recipient_bearer = token(&state, recipient, AdminRole::Admin);
+    let (status, profile) = request(&state, &recipient_bearer, "GET", "/profile", None).await;
+    assert_eq!(status, StatusCode::OK, "{profile}");
+    assert_eq!(profile["permissions"], tag["permissions"]);
+    let (status, edited) = request(
+        &state,
+        &bearer,
+        "POST",
+        "/permission-tag-changes",
+        Some(json!({
+            "catalog_version": catalog["catalog_version"],
+            "targets": [{
+                "tag_id": tag_id,
+                "expected_version": tag["version"],
+                "add": [],
+                "remove": ["wordlists.review"]
+            }]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited[0]["id"], tag_id.to_string());
+    assert_eq!(edited[0]["permissions"], json!(["wordlists.access"]));
+    assert_eq!(edited[0]["version"], 2);
+    let holder_keys = sqlx::query_scalar::<_, String>(
+        "SELECT permission_key FROM admin_permission_grants WHERE admin_id=$1 ORDER BY permission_key",
+    )
+    .bind(holder)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(holder_keys, vec!["wordlists.access", "wordlists.review"]);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT permission_version FROM admins WHERE id=$1")
+            .bind(holder)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[sqlx::test]
+async fn retired_wordlist_permission_cleanup_is_idempotent_and_not_restored_on_rollback(
+    pool: PgPool,
+) {
+    let holder = seed(&pool, AdminRole::Admin).await;
+    let unaffected = seed(&pool, AdminRole::Admin).await;
+    let tag = Uuid::now_v7();
+    let unaffected_tag = Uuid::now_v7();
+    for (id, name) in [(tag, "历史词表权限"), (unaffected_tag, "其他权限")] {
+        sqlx::query("INSERT INTO permission_tags(id,name) VALUES($1,$2)")
+            .bind(id)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for key in ["wordlists.access", "wordlists.create", "wordlists.edit"] {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)")
+            .bind(holder).bind(key).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO permission_tag_items(tag_id,permission_key) VALUES($1,$2)")
+            .bind(tag)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'users.access',$1)")
+        .bind(unaffected).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO permission_tag_items(tag_id,permission_key) VALUES($1,'users.access')",
+    )
+    .bind(unaffected_tag)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let up =
+        include_str!("../migrations/20261019090000_retire_wordlist_authoring_permissions.up.sql");
+    let down =
+        include_str!("../migrations/20261019090000_retire_wordlist_authoring_permissions.down.sql");
+    for script in [up, up, down, down] {
+        sqlx::raw_sql(script).execute(&pool).await.unwrap();
+        for (admin, tag_id, expected_keys, expected_version) in [
+            (holder, tag, vec!["wordlists.access"], 1_i64),
+            (unaffected, unaffected_tag, vec!["users.access"], 0_i64),
+        ] {
+            let grants = sqlx::query_scalar::<_, String>(
+                "SELECT permission_key FROM admin_permission_grants WHERE admin_id=$1 ORDER BY permission_key",
+            )
+            .bind(admin).fetch_all(&pool).await.unwrap();
+            let members = sqlx::query_scalar::<_, String>(
+                "SELECT permission_key FROM permission_tag_items WHERE tag_id=$1 ORDER BY permission_key",
+            )
+            .bind(tag_id).fetch_all(&pool).await.unwrap();
+            assert_eq!(grants, expected_keys);
+            assert_eq!(members, expected_keys);
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT permission_version FROM admins WHERE id=$1")
+                    .bind(admin)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                expected_version
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT version FROM permission_tags WHERE id=$1")
+                    .bind(tag_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                expected_version
+            );
+        }
+    }
+    for key in ["wordlists.create", "wordlists.edit"] {
+        assert!(catalog::validate_keys(&[key.to_owned()]).is_err());
+    }
+}
+
+#[sqlx::test]
 async fn teacher_catalog_retirement_removes_grants_and_tags_without_mapping(pool: PgPool) {
     let actor = seed(&pool, AdminRole::Admin).await;
     let tag = Uuid::now_v7();
