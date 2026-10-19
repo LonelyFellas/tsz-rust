@@ -403,6 +403,70 @@ pub async fn rollback_publication(
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/v1/admin/lexicon/entries/{id}/publications/{publication_id}/restore-draft",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    params(PublicationPath,
+        ("Idempotency-Key" = Uuid, Header, description = "历史 publication activation 命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
+    request_body = crate::lexicon::dto::RestoreDraftFromPublicationV3Input,
+    responses(
+        (status = 200, description = "发布历史内容已恢复到草稿，不改变线上版本", body = AdminWordV3Envelope),
+        (status = 400, description = "路径、header 或 JSON 非法"),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "账号已禁用、必须先改密或词条已归档"),
+        (status = 404, description = "词条或 publication 不存在"),
+        (status = 409, description = "revision、surface、policy、visibility 或幂等键冲突"),
+        (status = 410, description = "surface 确认 snapshot 已过期"),
+        (status = 422, description = "revision 取值非法或 schema_version 不是 3"),
+        (status = 503, description = "surface 确认服务不可用")
+    )
+)]
+pub async fn restore_draft_from_publication(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    ApiPath(path): ApiPath<PublicationPath>,
+    ApiJson(input): ApiJson<Value>,
+) -> Result<impl IntoResponse, AppError> {
+    let admin = require_active_admin(&state, &auth).await?;
+    let idempotency_key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
+    v3_contract::require_schema_version_3(&input)?;
+    let input: crate::lexicon::dto::RestoreDraftFromPublicationV3Input =
+        v3_contract::decode_request(input)?;
+    v3_contract::require_positive_revision("base_revision", input.base_revision)?;
+    v3_contract::require_positive_revision(
+        "base_lifecycle_revision",
+        input.base_lifecycle_revision,
+    )?;
+    if !state.smart_lexicon_v3_flags.edit {
+        return Err(v3_storage_unavailable());
+    }
+    if !state.smart_lexicon_v3_flags.projection {
+        return Err(v3_storage_unavailable());
+    }
+    let mut response = service(&state)
+        .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(&headers))
+        .restore_draft_from_publication_v3(
+            admin.id,
+            request_id.as_uuid(),
+            path.id,
+            path.publication_id,
+            idempotency_key,
+            input,
+        )
+        .await
+        .map_err(map_error)?;
+    apply_capability_flags(
+        &mut response.word.capabilities,
+        state.smart_lexicon_v3_flags,
+    );
+    project_spelling_markup(&headers, &mut response.word.forms);
+    spelling_markup_response(&headers, StatusCode::OK, response)
+}
+
+#[utoipa::path(
     patch, path = "/api/v1/admin/lexicon/entries/{id}/annotation", tag = "admin-lexicon",
     security(("bearer_auth" = [])), params(EntryPath),
     request_body = crate::lexicon::dto::UpdateEntryAnnotationInput,

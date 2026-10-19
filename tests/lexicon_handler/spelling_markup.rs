@@ -97,7 +97,7 @@ async fn markup_negotiation_preserves_cached_publish_history_and_lifecycle(pool:
         ("restore", false),
     ] {
         let input = json!({"base_revision":current["revision"],"base_lifecycle_revision":current["lifecycle_revision"]});
-        let (path, body) = if batch {
+        let (path, mut body) = if batch {
             (
                 format!("{ROOT}/entries/{operation}-batch"),
                 json!({"entries":[{
@@ -107,6 +107,9 @@ async fn markup_negotiation_preserves_cached_publish_history_and_lifecycle(pool:
         } else {
             (format!("{ROOT}/entries/{id}/{operation}"), input)
         };
+        if operation == "restore" {
+            body["restore_as"] = json!("draft");
+        }
         let key = Uuid::now_v7();
         let (status, old) = call_with_spelling_markup(
             &state,

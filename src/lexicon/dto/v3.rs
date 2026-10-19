@@ -1725,6 +1725,21 @@ pub struct RollbackPublicationV3Input {
     pub confirmed_surface_match_token: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreDraftFromPublicationV3Input {
+    #[serde(deserialize_with = "deserialize_schema_version_3")]
+    #[schema(schema_with = schema_version_3_schema)]
+    pub schema_version: u8,
+    #[schema(minimum = 1)]
+    pub base_revision: i64,
+    #[schema(minimum = 1)]
+    pub base_lifecycle_revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FormsImpactNodeTypeV3 {

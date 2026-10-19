@@ -147,9 +147,9 @@ pub async fn archive(
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
     params(EntryPath, ("Idempotency-Key" = Uuid, Header, description = "恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
-    request_body = EntryLifecycleInput,
+    request_body = EntryRestoreInput,
     responses(
-        (status = 200, description = "词条已恢复且 publication 历史保持不变", body = AdminWordV3Envelope),
+        (status = 200, description = "词条已恢复为草稿，不自动公开，publication 历史保持不变", body = AdminWordV3Envelope),
         (status = 400, description = "路径、header 或 JSON 非法"),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用、必须先改密，或非超管操作他人的未发布草稿"),
@@ -166,7 +166,7 @@ pub async fn restore(
     Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
     ApiPath(path): ApiPath<EntryPath>,
-    ApiJson(input): ApiJson<EntryLifecycleInput>,
+    ApiJson(input): ApiJson<EntryRestoreInput>,
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
@@ -177,7 +177,7 @@ pub async fn restore(
             request_id.as_uuid(),
             path.id,
             key,
-            input,
+            input.into(),
             lifecycle_v3_capabilities_enabled(&state),
             admin.is_super_admin(),
         )
@@ -289,7 +289,7 @@ pub async fn archive_batch(
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),
     params(("Idempotency-Key" = Uuid, Header, description = "批量恢复命令幂等键（UUID）"), ("X-TSZ-Spelling-Markup" = Option<String>, Header, description = "v1 返回拼写标注；缺省或未知值返回旧客户端兼容视图，不改变存储与幂等命令。", example = "v1"), ("X-TSZ-Spelling-Speech" = Option<String>, Header, description = "v1 返回独立拼写试听配置；缺省或未知值省略该字段，不改变存储。", example = "v1"), ("X-TSZ-Phoneme-Speech" = Option<String>, Header, description = "v1 返回各口音 IPA/UPS 独立停顿与音色配置；缺省或未知值省略配置，不改变存储。", example = "v1"), ("X-TSZ-Sentence-Formatting" = Option<String>, Header, description = "v1 返回完整句子格式；缺省或未知值隐藏新增格式，并拒绝可能覆盖已有格式的旧保存。", example = "v1")),
-    request_body = EntryLifecycleBatchInput,
+    request_body = EntryRestoreBatchInput,
     responses(
         (status = 200, description = "原子批量恢复结果", body = EntryLifecycleBatchResponse),
         (status = 400, description = "header 或 JSON 非法"),
@@ -307,7 +307,7 @@ pub async fn restore_batch(
     auth: AdminAuth,
     Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
-    ApiJson(input): ApiJson<EntryLifecycleBatchInput>,
+    ApiJson(input): ApiJson<EntryRestoreBatchInput>,
 ) -> Result<impl IntoResponse, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     let key = required_idempotency_key(&headers).map_err(idempotency_key_error)?;
@@ -322,7 +322,7 @@ pub async fn restore_batch(
             admin.id,
             request_id.as_uuid(),
             key,
-            input,
+            input.into(),
             lifecycle_v3_capabilities_enabled(&state),
             admin.is_super_admin(),
         )

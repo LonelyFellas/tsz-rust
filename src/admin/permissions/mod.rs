@@ -69,7 +69,7 @@ impl AdminAuthorization {
     pub fn require_owned_action(&self, key: &str, owner: Uuid) -> Result<(), AppError> {
         self.require(key)?;
         let others = match key {
-            "words.edit" | "words.associate" => Some("words.edit_others"),
+            "words.edit" | "words.associate" | "words.rollback" => Some("words.edit_others"),
             "sentences.edit" | "sentences.associate" => Some("sentences.edit_others"),
             _ => None,
         };

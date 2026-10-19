@@ -60,6 +60,7 @@ pub enum SurfaceConsumptionCommand {
     RestoreEntry,
     RestoreEntriesBatch,
     ActivatePublication,
+    RestoreDraftFromPublication,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

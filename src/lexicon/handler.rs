@@ -20,12 +20,13 @@ use crate::{
             DetectLexiconSurfaceResponseV3, DetectLexiconSurfaceV3Input, DraftValidationResponseV3,
             EntryArchiveImpact, EntryArchiveImpactInput, EntryDeleteBatchInput,
             EntryDeleteBatchResponse, EntryLifecycleBatchInput, EntryLifecycleBatchResponse,
-            EntryLifecycleInput, EntryPath, FormsImpactResponseV3, InboundReferencesV3,
-            PreviewFormsImpactInputV3, PublicationPath, PublishAdminWordV3Input,
-            RelatedSearchQuery, RelatedSearchResponse, RollbackPublicationV3Input,
-            SaveFormsStepInputV3, SaveMeaningsStepInputV3, SearchComponentTargetsV3Input,
-            SearchComponentTargetsV3Response, StepSaveIntent, SurfaceMatchPageV3,
-            SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2, ValidateAdminWordV3Input,
+            EntryLifecycleInput, EntryPath, EntryRestoreBatchInput, EntryRestoreInput,
+            FormsImpactResponseV3, InboundReferencesV3, PreviewFormsImpactInputV3, PublicationPath,
+            PublishAdminWordV3Input, RelatedSearchQuery, RelatedSearchResponse,
+            RollbackPublicationV3Input, SaveFormsStepInputV3, SaveMeaningsStepInputV3,
+            SearchComponentTargetsV3Input, SearchComponentTargetsV3Response, StepSaveIntent,
+            SurfaceMatchPageV3, SurfaceMatchSnapshotPathV2, SurfaceMatchSnapshotQueryV2,
+            ValidateAdminWordV3Input,
         },
         impact_store::ImpactStore,
         repository::LexiconRepository,
@@ -46,8 +47,8 @@ mod spelling_markup;
 use spelling_markup::{project_spelling_markup, spelling_markup_response};
 
 pub use commands::{
-    create, detect, preview_forms_impact, publish, rollback_publication, save_forms, save_meanings,
-    validate,
+    create, detect, preview_forms_impact, publish, restore_draft_from_publication,
+    rollback_publication, save_forms, save_meanings, validate,
 };
 pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
 pub use query::{

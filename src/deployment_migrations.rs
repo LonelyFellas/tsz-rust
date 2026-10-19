@@ -122,7 +122,7 @@ mod tests {
     use uuid::Uuid;
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261018140000;
+    const CURRENT_RELEASE_VERSION: i64 = 20261019100000;
 
     #[sqlx::test]
     async fn coverage_release_undo_restores_the_deployed_custom_item_schema(pool: PgPool) {

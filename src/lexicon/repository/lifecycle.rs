@@ -140,10 +140,18 @@ impl LexiconRepository {
             word.published_revision,
         );
         let archived = matches!(status, crate::lexicon::dto::AdminWordStatus::Archived);
+        let previous_publication_id = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT current_publication_id FROM lexicon.entries WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(LexiconRepositoryError::Database)?;
         let updated = sqlx::query(
             r#"
             UPDATE lexicon.entries
-            SET lifecycle_revision = $2,
+            SET current_publication_id = CASE WHEN $3 THEN current_publication_id ELSE NULL END,
+                lifecycle_revision = $2,
                 archived_at = CASE WHEN $3 THEN $4 ELSE NULL END,
                 archived_by_admin_id = CASE WHEN $3 THEN $5 ELSE NULL END,
                 updated_by_admin_id = $5,
@@ -208,7 +216,9 @@ impl LexiconRepository {
             request_id,
             serde_json::json!({
                 "lifecycle_revision": lifecycle_revision,
-                "current_publication_preserved": published_revision.is_some(),
+                "previous_publication_id": previous_publication_id,
+                "current_publication_preserved": archived && published_revision.is_some(),
+                "restored_as_draft": !archived,
             }),
         )
         .await
