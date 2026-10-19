@@ -748,13 +748,16 @@ async fn cleanup_claim_history_prevents_candidate_confirmation_even_after_lease_
         .is_err()
     );
     tx.rollback().await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
     assert!(
         sqlx::query("UPDATE avatar_cleanup_tasks SET attempts=0 WHERE id=$1")
             .bind(task)
-            .execute(&pool)
+            .execute(&mut *tx)
             .await
             .is_err()
     );
+    // Finish the failed transaction before SKIP LOCKED tries the same row.
+    tx.rollback().await.unwrap();
     let reclaimed = cleanup::claim(&pool).await.unwrap();
     assert_eq!(reclaimed.len(), 1);
     let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM avatar_cleanup_tasks WHERE id=$1")

@@ -14,13 +14,18 @@ use uuid::Uuid;
 fn invalid(message: &str) -> AppError {
     AppError::bad_request(ErrorCode::ValidationFailed, message)
 }
-fn selection() -> String {
-    service::META.replace(" FROM wordlists w", ",w.review_state,w.recommended,(SELECT COALESCE(sum(t.amount),0)::text FROM wordlist_tips t WHERE t.wordlist_id=w.id) AS tip_amount FROM wordlists w")
+fn selection(include_stats: bool) -> String {
+    let stats = if include_stats {
+        "EXISTS (SELECT 1 FROM wordlist_items i WHERE i.wordlist_id=w.id AND i.custom_word IS NOT NULL) AS has_custom_words,(SELECT count(*) FROM wordlist_interactions i WHERE i.wordlist_id=w.id AND i.kind='like') AS like_count,(SELECT count(*) FROM wordlist_interactions i WHERE i.wordlist_id=w.id AND i.kind='favorite') AS favorite_count"
+    } else {
+        "NULL::boolean AS has_custom_words,NULL::bigint AS like_count,NULL::bigint AS favorite_count"
+    };
+    service::META.replace(" FROM wordlists w", &format!(",w.review_state,w.recommended,(SELECT COALESCE(sum(t.amount),0)::text FROM wordlist_tips t WHERE t.wordlist_id=w.id) AS tip_amount,{stats} FROM wordlists w"))
 }
 async fn meta(tx: &mut Tx<'_>, id: Uuid) -> Result<AdminWordlist, AppError> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{} WHERE w.id=$1",
-        selection()
+        selection(false)
     )))
     .bind(id)
     .fetch_one(&mut **tx)
@@ -80,7 +85,7 @@ pub async fn list(
     .map_err(AppError::internal)?;
     let items = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "{} WHERE {filter} ORDER BY w.created_at DESC,w.id DESC LIMIT $7 OFFSET $8",
-        selection()
+        selection(query.include_stats)
     )))
     .bind(q)
     .bind(query.public)

@@ -60,6 +60,9 @@ async fn historical_platform_read_visibility_recommend_delete(pool: PgPool) {
     .await;
     assert_eq!(public.0, StatusCode::OK, "{}", public.1);
     assert_eq!(public.1["review_state"], "none");
+    for field in ["has_custom_words", "like_count", "favorite_count"] {
+        assert!(public.1.get(field).is_none());
+    }
     let learning = call(
         &state,
         &user,
@@ -79,6 +82,9 @@ async fn historical_platform_read_visibility_recommend_delete(pool: PgPool) {
     )
     .await;
     assert_eq!(recommended.0, StatusCode::OK, "{}", recommended.1);
+    for field in ["has_custom_words", "like_count", "favorite_count"] {
+        assert!(recommended.1.get(field).is_none());
+    }
     let found = call(
         &state,
         &user,

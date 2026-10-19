@@ -317,3 +317,146 @@ async fn custom_item_migration_empty_roundtrip(pool: PgPool) {
     .unwrap();
     tx.commit().await.unwrap();
 }
+
+#[sqlx::test]
+async fn management_custom_word_presence_is_opt_in_and_tracks_current_members(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let manager = admin(&pool).await;
+    let a = entry(&pool, "apple").await;
+    let b = entry(&pool, "banana").await;
+    let c = entry(&pool, "cherry").await;
+    let platform_items = vec![
+        json!({"item_id":a,"entry_id":a}),
+        json!({"item_id":b,"entry_id":b}),
+        json!({"item_id":c,"entry_id":c}),
+    ];
+    let mut mixed_items = platform_items.clone();
+    mixed_items.push(custom(Uuid::now_v7(), "T"));
+    for item in &mut mixed_items {
+        item["private_note"] = json!("");
+    }
+    let mixed = create_custom(&state, &auth, mixed_items).await;
+    let platform =
+        create_custom(&state, &auth, vec![json!({"entry_id":a,"private_note":""})]).await;
+    let mut custom_item = custom(Uuid::now_v7(), "T");
+    custom_item["private_note"] = json!("");
+    let only_custom = create_custom(&state, &auth, vec![custom_item]).await;
+    let empty = Uuid::now_v7();
+    sqlx::query("INSERT INTO wordlists(id,owner_admin_id,name,create_key,create_hash) VALUES($1,$2,'历史空词表',$3,'hash')")
+        .bind(empty).bind(manager).bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+    let cases = [
+        (empty.to_string(), false, 0),
+        (platform["id"].as_str().unwrap().to_owned(), false, 1),
+        (mixed["id"].as_str().unwrap().to_owned(), true, 4),
+        (only_custom["id"].as_str().unwrap().to_owned(), true, 1),
+    ];
+    let base = "/api/v1/admin/wordlists/management";
+    for suffix in ["", "?include_stats=false"] {
+        let legacy = admin_call(
+            &state,
+            manager,
+            "GET",
+            &format!("{base}{suffix}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(legacy.0, StatusCode::OK, "{}", legacy.1);
+        assert_eq!(legacy.1["pagination"]["total"], 4);
+        for item in legacy.1["items"].as_array().unwrap() {
+            for field in ["has_custom_words", "like_count", "favorite_count"] {
+                assert!(item.get(field).is_none());
+            }
+        }
+    }
+    let path = format!("{base}?include_stats=true");
+    let found = admin_call(&state, manager, "GET", &path, Value::Null).await;
+    assert_eq!(found.0, StatusCode::OK, "{}", found.1);
+    assert_eq!(found.1["pagination"]["total"], 4);
+    for (id, expected, count) in &cases {
+        let item = found.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["wordlist"]["id"] == *id)
+            .unwrap();
+        assert_eq!(item["has_custom_words"], *expected, "{id}");
+        assert_eq!(item["wordlist"]["item_count"], *count, "{id}");
+        let detail = admin_call(
+            &state,
+            manager,
+            "GET",
+            &format!("/api/v1/admin/wordlists/{id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(detail.0, StatusCode::OK, "{}", detail.1);
+        for field in ["has_custom_words", "like_count", "favorite_count"] {
+            assert!(detail.1.get(field).is_none());
+        }
+    }
+    let id = mixed["id"].as_str().unwrap();
+    let owner_path = format!("/api/v1/me/wordlists/{id}");
+    let pending = call(
+        &state,
+        &auth,
+        "POST",
+        &format!("{owner_path}/publish"),
+        json!({"expected_revision":1,"idempotency_key":Uuid::now_v7()}),
+    )
+    .await;
+    assert_eq!(pending.0, StatusCode::OK, "{}", pending.1);
+    let withdrawn = call(
+        &state,
+        &auth,
+        "POST",
+        &format!("{owner_path}/withdraw"),
+        json!({"expected_revision":2}),
+    )
+    .await;
+    assert_eq!(withdrawn.0, StatusCode::OK, "{}", withdrawn.1);
+    let updated = call(&state, &auth, "PUT", &owner_path,
+        json!({"expected_revision":3,"content":{"name":"混合词表","items":platform_items},"note_updates":[]})).await;
+    assert_eq!(updated.0, StatusCode::OK, "{}", updated.1);
+    let review_id = pending.1["id"].as_str().unwrap();
+    let history = modern(
+        &state,
+        manager,
+        true,
+        &format!("/api/v1/admin/wordlists/{id}/review-requests/{review_id}/items"),
+    )
+    .await;
+    assert_eq!(history.0, StatusCode::OK, "{}", history.1);
+    assert!(
+        history.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["custom_word"]["word"] == "T")
+    );
+    sqlx::query("UPDATE lexicon.entries SET archived_at=clock_timestamp() WHERE id=$1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refreshed = admin_call(&state, manager, "GET", &path, Value::Null).await;
+    assert_eq!(refreshed.0, StatusCode::OK, "{}", refreshed.1);
+    assert_eq!(refreshed.1["pagination"]["total"], 4);
+    for (id, _, count) in &cases {
+        let item = refreshed.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["wordlist"]["id"] == *id)
+            .unwrap();
+        assert_eq!(
+            item["has_custom_words"],
+            *id == only_custom["id"].as_str().unwrap()
+        );
+        let expected_count = if *id == mixed["id"].as_str().unwrap() {
+            3
+        } else {
+            *count
+        };
+        assert_eq!(item["wordlist"]["item_count"], expected_count);
+    }
+}
