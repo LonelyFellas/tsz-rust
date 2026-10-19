@@ -915,7 +915,7 @@ fn evaluate(
                         form_id,
                         variant_id,
                         *dialect,
-                        form_type.clone(),
+                        form_type,
                         None,
                     ),
                     _ => false,
