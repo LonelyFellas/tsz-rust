@@ -3728,7 +3728,7 @@ fn preserve_missing_sense_component_usages(
     }
 }
 
-/// 单个语法结构变体最多挂几条录音。与 `GrammarVariantV3.audio_assets` 的 `max_items` 同一个数。
+/// 单个正文或发音变体最多挂几条录音，与 DTO 的 `max_items` 一致。
 const MAX_VARIANT_AUDIO_ASSETS: usize = 8;
 
 /// 按草稿内容重建音频资产的引用行。整条删掉再插，与 `replace_v3_sense_component_usages` 同款：
@@ -3781,8 +3781,10 @@ pub(super) async fn replace_v3_audio_asset_references(
 }
 
 /// 按变体收集草稿引用的音频资产 id，保持出现顺序。
-fn requested_audio_assets(content: &DraftMeaningsStepContentV3) -> Vec<(Uuid, Vec<Uuid>)> {
-    content
+pub(super) fn requested_audio_assets(
+    content: &DraftMeaningsStepContentV3,
+) -> Vec<(Uuid, Vec<Uuid>)> {
+    let mut requested = content
         .pos
         .iter()
         .flat_map(|pos| &pos.grammar_structures)
@@ -3794,7 +3796,25 @@ fn requested_audio_assets(content: &DraftMeaningsStepContentV3) -> Vec<(Uuid, Ve
                 variant.audio_assets.iter().map(|asset| asset.id).collect(),
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    requested.extend(
+        content
+            .pos
+            .iter()
+            .flat_map(source_english_texts)
+            .flat_map(|text| {
+                crate::lexicon::v3_contract::english_text_variants(text)
+                    .into_iter()
+                    .filter(|variant| !variant.audio_assets.is_empty())
+                    .map(|variant| {
+                        (
+                            variant.id,
+                            variant.audio_assets.iter().map(|asset| asset.id).collect(),
+                        )
+                    })
+            }),
+    );
+    requested
 }
 
 pub(super) fn pronunciation_rows(forms: &DraftFormsStepContentV3) -> Vec<&WordPronunciationV3> {
@@ -3916,7 +3936,7 @@ async fn validate_requested_audio_assets(
             issues.push(audio_asset_issue(
                 *variant_id,
                 &format!(
-                    "a pronunciation or grammar variant may reference at most {MAX_VARIANT_AUDIO_ASSETS} audio assets"
+                    "a text or pronunciation variant may reference at most {MAX_VARIANT_AUDIO_ASSETS} audio assets"
                 ),
             ));
         }
@@ -3924,7 +3944,7 @@ async fn validate_requested_audio_assets(
         if asset_ids.iter().any(|id| !seen.insert(*id)) {
             issues.push(audio_asset_issue(
                 *variant_id,
-                "a pronunciation or grammar variant must not reference the same audio asset twice",
+                "a text or pronunciation variant must not reference the same audio asset twice",
             ));
         }
     }
@@ -3936,6 +3956,11 @@ async fn validate_requested_audio_assets(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    sqlx::query("SELECT id FROM lexicon.audio_assets WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+        .bind(&unique_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(database_error)?;
     let rows = sqlx::query(
         r#"
         SELECT asset.id,
@@ -3946,12 +3971,14 @@ async fn validate_requested_audio_assets(
                EXISTS (
                    SELECT 1 FROM lexicon.v3_audio_asset_references reference
                    WHERE reference.asset_id = asset.id AND reference.entry_id <> $2
+               ) OR EXISTS (
+                   SELECT 1 FROM lexicon.shared_sentence_audio_asset_references reference
+                   WHERE reference.asset_id = asset.id
                ) AS taken
         FROM lexicon.audio_assets asset
         WHERE asset.id = ANY($1) AND asset.reclamation_started_at IS NULL
-        -- 与回收 worker 的 FOR UPDATE 串行：不加锁的话，校验通过之后、引用行写入之前，
-        -- worker 可能刚好把这条资产的对象删掉，留下引用完好但播不出声的资产。
-        FOR SHARE OF asset
+        -- Asset locks above serialize reclamation and cross-resource claims;
+        -- this separate statement sees references committed while waiting.
         "#,
     )
     .bind(&unique_ids)
@@ -4026,6 +4053,19 @@ pub(super) async fn hydrate_audio_asset_metadata(
                     .collect()
             })
             .unwrap_or_default();
+    }
+    for variant in content
+        .pos
+        .iter_mut()
+        .flat_map(target_english_texts)
+        .flat_map(english_text_variants_mut)
+    {
+        for asset in &mut variant.audio_assets {
+            *asset = canonical
+                .get(&asset.id)
+                .cloned()
+                .ok_or_else(invariant_record)?;
+        }
     }
     Ok(())
 }

@@ -1,4 +1,5 @@
 //! Shared sentence drafts and independent immutable publications.
+mod audio;
 pub(crate) mod publication;
 pub(crate) mod reading;
 pub(crate) mod visibility;
@@ -747,7 +748,7 @@ pub async fn create(
     State(state): State<AppState>,
     auth: AdminAuth,
     headers: HeaderMap,
-    ApiJson(input): ApiJson<CreateSharedSentence>,
+    ApiJson(mut input): ApiJson<CreateSharedSentence>,
 ) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     validate(&input.content)?;
@@ -770,6 +771,7 @@ pub async fn create(
     )
     .await?;
     writable_entry(&mut tx, input.source_entry_id, &authorization).await?;
+    audio::normalize(&mut tx, admin.id, id, &mut input.content.sentence.en_text).await?;
     validate_targets(
         &mut tx,
         &input.content,
@@ -798,6 +800,7 @@ pub async fn create(
         }
     } else {
         annotations(&mut tx, id, &input.content).await?;
+        audio::replace_draft(&mut tx, id, &input.content.sentence.en_text).await?;
     }
     tx.commit().await.map_err(AppError::internal)?;
     formatting_response(&headers, StatusCode::OK, read(&state.pool, id).await?)
@@ -809,7 +812,7 @@ pub async fn update(
     auth: AdminAuth,
     headers: HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
-    ApiJson(input): ApiJson<UpdateSharedSentence>,
+    ApiJson(mut input): ApiJson<UpdateSharedSentence>,
 ) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     validate(&input.content)?;
@@ -848,6 +851,7 @@ pub async fn update(
         &serde_json::to_value(&current.content).map_err(AppError::internal)?,
         &serde_json::to_value(&input.content).map_err(AppError::internal)?,
     )?;
+    audio::normalize(&mut tx, admin.id, id, &mut input.content.sentence.en_text).await?;
     if !sentence_formatting::supported(&headers) {
         let current = read_on(&mut tx, id).await?;
         if sentence_formatting::contains_new_formats(
@@ -871,6 +875,7 @@ pub async fn update(
         .await
         .map_err(AppError::internal)?;
     bump(&mut tx, id).await?;
+    audio::replace_draft(&mut tx, id, &input.content.sentence.en_text).await?;
     tx.commit().await.map_err(AppError::internal)?;
     formatting_response(&headers, StatusCode::OK, read(&state.pool, id).await?)
 }
@@ -894,6 +899,8 @@ pub async fn delete(
     lock_targets(&mut tx, None, None, Some(id)).await?;
     lock(&mut tx, id, input.base_revision).await?;
     writable_sentence(&mut tx, id, &authorization, true).await?;
+    sqlx::query("DELETE FROM lexicon.shared_sentence_audio_asset_references WHERE sentence_id=$1 AND scope='draft'")
+        .bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("UPDATE lexicon.shared_sentences SET deleted_at=now(),updated_at=now(),revision=revision+1 WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
         .bind(id)

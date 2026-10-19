@@ -52,7 +52,7 @@ pub fn run_worker(pool: PgPool, storage: Option<Arc<dyn ObjectStore>>) {
 ///
 /// 锁是必须的。不加锁的话，「查到零引用」与「删对象」之间有一个窗口，
 /// 管理员恰好在这一刻把这条资产存进草稿，就会得到一条引用完好、对象已被删掉的资产——
-/// 线上播不出声且不可恢复。保存路径的校验对同一行取 `FOR SHARE`，于是两者必然串行：
+/// 线上播不出声且不可恢复。保存路径的校验对同一行取 `FOR UPDATE`，于是两者必然串行：
 /// 要么保存先拿到锁、worker 随后看到引用而跳过，要么 worker 先标记、保存的校验拒绝该资产。
 /// 标记必须先提交：对象可能已删除但响应丢失，失败回滚不能让资产再次被引用。
 /// 锁只在一次对象删除期间持有，且只挡住引用同一条资产的保存。
@@ -76,6 +76,10 @@ pub async fn reclaim_once(
                   SELECT 1 FROM lexicon.v3_audio_asset_references reference
                   WHERE reference.asset_id = asset.id
               )
+              AND NOT EXISTS (
+                  SELECT 1 FROM lexicon.shared_sentence_audio_asset_references reference
+                  WHERE reference.asset_id = asset.id
+              )
             ORDER BY asset.created_at
             LIMIT 1
             FOR UPDATE OF asset SKIP LOCKED
@@ -94,7 +98,7 @@ pub async fn reclaim_once(
         // 候选查询的语句快照可能早于并发保存提交。持有资产排他锁后，
         // 用新的 READ COMMITTED 快照再次确认，不能先删对象再靠 FK 拒绝删行。
         let referenced: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1)",
+            "SELECT EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1 UNION ALL SELECT 1 FROM lexicon.shared_sentence_audio_asset_references WHERE asset_id = $1)",
         )
         .bind(id)
         .fetch_one(&mut *tx)

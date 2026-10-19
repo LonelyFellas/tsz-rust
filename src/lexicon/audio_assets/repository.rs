@@ -75,14 +75,28 @@ impl AudioAssetRepository {
         }))
     }
 
-    /// 资产是否有真实词条引用（草稿或发布皆算）；此表不表示例句引用。
-    pub async fn is_referenced_by_word(&self, asset_id: Uuid) -> Result<bool, sqlx::Error> {
+    pub async fn has_readable_reference(
+        &self,
+        asset_id: Uuid,
+        words: bool,
+        sentences: bool,
+        published_sentences: bool,
+    ) -> Result<bool, sqlx::Error> {
         sqlx::query_scalar(
             r#"SELECT EXISTS(
-                   SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1
+                   SELECT 1 FROM lexicon.v3_audio_asset_references WHERE asset_id = $1 AND $2
+                   UNION ALL
+                   SELECT 1 FROM lexicon.shared_sentence_audio_asset_references r
+                   JOIN lexicon.shared_sentences s ON s.id=r.sentence_id
+                   WHERE r.asset_id=$1 AND s.deleted_at IS NULL
+                     AND ($3 OR ($4 AND r.scope='publication'
+                        AND r.publication_id=s.current_publication_id AND s.withdrawn_at IS NULL))
                )"#,
         )
         .bind(asset_id)
+        .bind(words)
+        .bind(sentences)
+        .bind(published_sentences)
         .fetch_one(&self.pool)
         .await
     }
