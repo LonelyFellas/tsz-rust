@@ -78,6 +78,7 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(handler::commands::publish_batch),
         )
         .route("/entries/stats", get(handler::stats))
+        .route("/entries/creators", get(handler::creators))
         .route("/entries/related-search", get(handler::related_search))
         .route(
             "/entries/related-suggestions",

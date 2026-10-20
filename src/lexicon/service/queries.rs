@@ -394,6 +394,7 @@ impl LexiconService {
         }
         for (field, value) in [
             ("q", query.q.as_deref()),
+            ("headword", query.headword.as_deref()),
             ("gloss", query.gloss.as_deref()),
             ("pos", query.pos.as_deref()),
         ] {
@@ -407,6 +408,8 @@ impl LexiconService {
 
         let filter = ListFilter {
             q: trimmed(query.q),
+            headword: trimmed(query.headword),
+            created_by: query.created_by,
             gloss: trimmed(query.gloss),
             kind: query.kind.map(kind_string_owned),
             pos: trimmed(query.pos),
@@ -541,6 +544,20 @@ impl LexiconService {
                 total,
             },
         })
+    }
+
+    pub async fn creators(
+        &self,
+        include_v3: bool,
+    ) -> Result<Vec<AdminWordCreator>, LexiconServiceError> {
+        Ok(self
+            .repository
+            .creators(include_v3)
+            .await
+            .map_err(repository_error)?
+            .into_iter()
+            .map(|(id, display_name)| AdminWordCreator { id, display_name })
+            .collect())
     }
 
     pub async fn stats(&self, include_v3: bool) -> Result<AdminWordStats, LexiconServiceError> {

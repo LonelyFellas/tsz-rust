@@ -790,6 +790,9 @@ pub struct AdminWordListQuery {
     #[param(default = 20, minimum = 1, maximum = 100)]
     pub page_size: Option<u32>,
     pub q: Option<String>,
+    /// 仅匹配词条词面；与旧 q、其他筛选取交集。
+    pub headword: Option<String>,
+    pub created_by: Option<Uuid>,
     pub gloss: Option<String>,
     pub kind: Option<EntryKind>,
     pub pos: Option<String>,
@@ -865,6 +868,12 @@ pub struct AdminWordListPage {
 pub struct AdminWordListResponse {
     pub words: Vec<AdminWordListItemV3>,
     pub page: AdminWordListPage,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AdminWordCreator {
+    pub id: Uuid,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

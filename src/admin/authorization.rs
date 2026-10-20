@@ -372,6 +372,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "GET",
+        "/lexicon/entries/creators",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
         "/lexicon/entries/related-search",
         RoutePolicy::All(&["words.access"]),
     ),

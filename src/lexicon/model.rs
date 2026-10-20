@@ -367,6 +367,8 @@ pub(crate) struct StatsRecord {
 #[derive(Debug)]
 pub(crate) struct ListFilter {
     pub q: Option<String>,
+    pub headword: Option<String>,
+    pub created_by: Option<Uuid>,
     pub gloss: Option<String>,
     pub kind: Option<String>,
     pub pos: Option<String>,
