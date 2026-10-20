@@ -1,10 +1,8 @@
 //! Pure Smart Lexicon V3 presentation and form-variant surface projection builders.
 //!
-//! Presentation walks every peer concrete form in wire order. `form_type=base` has no special
-//! selection semantics, so these helpers cannot accidentally recreate a hidden primary headword.
+//! Presentation uses base forms in wire order; every concrete form contributes searchable surfaces.
 //! Draft variants with blank spellings are valid incomplete nodes, but do not produce presentation
 //! or searchable surfaces until a spelling is supplied.
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,7 +15,6 @@ use crate::lexicon::{
     },
 };
 
-pub(crate) const LEGACY_PRESENTATION_STRATEGY_VERSION: &str = "legacy_headwords_v1";
 pub(crate) const NATIVE_PRESENTATION_STRATEGY_VERSION: &str = "surface_summary_v1";
 pub(crate) const EMPTY_PRESENTATION_STRATEGY_VERSION: &str = "short_uuid_v1";
 pub(crate) const V3_SURFACE_PROJECTION_VERSION: &str = "form_variant_surface_v1";
@@ -173,7 +170,6 @@ pub(crate) fn form_variant_sources(
             let group_ids =
                 group_ids_by_form
                     .get(&form.id)
-                    .cloned()
                     .ok_or(V3ProjectionError::OrphanForm {
                         pos_id: pos.pos_id,
                         form_id: form.id,
@@ -186,9 +182,9 @@ pub(crate) fn form_variant_sources(
                         entry_id,
                         pos.pos_id,
                         &pos.pos,
-                        &group_ids,
+                        group_ids,
                         form.id,
-                        form.form_type.clone(),
+                        &form.form_type,
                         common.id,
                         V3SurfaceDialect::Common,
                         &common.spelling,
@@ -202,9 +198,9 @@ pub(crate) fn form_variant_sources(
                         entry_id,
                         pos.pos_id,
                         &pos.pos,
-                        &group_ids,
+                        group_ids,
                         form.id,
-                        form.form_type.clone(),
+                        &form.form_type,
                         uk.id,
                         V3SurfaceDialect::Uk,
                         &uk.spelling,
@@ -216,9 +212,9 @@ pub(crate) fn form_variant_sources(
                         entry_id,
                         pos.pos_id,
                         &pos.pos,
-                        &group_ids,
+                        group_ids,
                         form.id,
-                        form.form_type.clone(),
+                        &form.form_type,
                         us.id,
                         V3SurfaceDialect::Us,
                         &us.spelling,
@@ -259,7 +255,7 @@ fn push_variant_sources(
     pos: &str,
     group_ids: &[Uuid],
     form_id: Uuid,
-    form_type: WordFormTypeV3,
+    form_type: &str,
     variant_id: Uuid,
     dialect: V3SurfaceDialect,
     spelling: &str,
@@ -278,7 +274,7 @@ fn push_variant_sources(
             group_ids: group_ids.to_vec(),
             form_id,
             variant_id,
-            form_type: form_type.clone(),
+            form_type: form_type.to_owned(),
             dialect,
             dialect_scope: *dialect_scope,
             surface: normalized.display.clone(),
@@ -585,11 +581,13 @@ mod tests {
         let variant_id = id(103);
         let first_group_id = id(104);
         let second_group_id = id(105);
+        let mut form = common_form(form_id, variant_id, "Workspaces");
+        form.form_type = "custom_plural".to_owned();
         let forms = DraftFormsStepContentV3 {
             pos: vec![WordPosFormsV3 {
                 pos_id,
                 pos: "noun".to_owned(),
-                forms: vec![common_form(form_id, variant_id, "Workspaces")],
+                forms: vec![form],
                 form_groups: vec![
                     WordFormGroupV3 {
                         id: first_group_id,
@@ -627,6 +625,11 @@ mod tests {
         assert_eq!(sources[1].dialect_scope, V3SurfaceDialectScope::Us);
         assert_eq!(sources[0].normalized_surface, "workspaces");
         assert_eq!(sources[0].form_id, form_id);
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.form_type == "custom_plural")
+        );
         assert_eq!(sources[0].variant_id, variant_id);
         assert_eq!(sources[0].group_ids, [first_group_id, second_group_id]);
         assert_eq!(sources[1].group_ids, [first_group_id, second_group_id]);

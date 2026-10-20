@@ -98,6 +98,9 @@ jobs:
       - name: Test isolated backup restore drill safety
         run: python3 -m unittest discover -s ops -p 'test_backup_restore_drill.py'
 
+      - name: Test local Git hooks
+        run: python3 -m unittest ops/test_rule_doc_hook.py ops/test_pre_push_hook.py
+
       - name: Test CI module partitioning
         run: python3 -m unittest ops/test_ci_test_modules.py
 
