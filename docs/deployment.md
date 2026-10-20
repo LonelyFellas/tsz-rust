@@ -13,7 +13,7 @@
 - `run` 在监听之前应用内嵌迁移并初始化所需数据；升级不是简单替换二进制，必须遵守部署手册的数据库预检、恢复点与迁移兼容检查。
 - `/healthz` 与 `/readyz` 是运行探针；服务 active 或探针成功不能替代登录、刷新、退出等完整 smoke，也不能证明部署来源正确。
 - 生产环境使用 HTTPS 与 Secure cookie；`COOKIE_SECURE=false` 只适用于明确的临时 HTTP 测试环境，不能作为生产部署方案。
-- 当前默认启动仍使用 `OtpSender::Mock`，详见 [lib.rs](../src/lib.rs) 和 [sender.rs](../src/otp/sender.rs)。不能把测试验证码通道当作真实短信发送能力。
+- release 构建禁止使用 `OtpSender::Mock`：未接入真实验证码 provider 时服务会拒绝启动。开发构建（`debug_assertions`）仍可使用固定码 `000000` 联调，详见 [lib.rs](../src/lib.rs) 和 [sender.rs](../src/otp/sender.rs)。
 
 ## 运维专题
 

@@ -295,11 +295,19 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         Duration::minutes(config.admin_access_ttl_minutes as i64),
     ));
 
+    let otp_sender = OtpSender::Mock;
+    // release 构建必须接入真实验证码通道：Mock 固定码会让任意账号的
+    // 登录、改密、注册和联系方式绑定失去第二因子。
+    otp_sender.ensure_release_ready().map_err(|error| {
+        tracing::error!(
+            event = "otp_provider_not_configured",
+            "release builds must configure a real OTP provider; refusing to start with OtpSender::Mock"
+        );
+        anyhow::Error::new(error)
+    })?;
     let otp_service = Arc::new(OtpService::new(
         OtpStore::new(redis.clone()),
-        // 当前约定：所有 OTP（包括 account_deletion）暂用固定码 000000；
-        // sender 日志不得包含验证码或联系方式，真实 provider 后续替换此装配点。
-        OtpSender::Mock,
+        otp_sender,
         StdDuration::from_secs(config.otp_cooldown_seconds), // cooldown
         config.otp_daily_limit,                              // daily_limit
         StdDuration::from_secs(config.otp_ttl_minutes * 60), // ttl
