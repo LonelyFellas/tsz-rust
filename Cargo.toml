@@ -62,6 +62,8 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 unicode-general-category = "1.1.0"
 unicode-normalization = "0.1.24"
+ip2region = { git = "https://github.com/lionsoul2014/ip2region.git", rev = "f8b0792b0cd729f5b2593f690aeed225e49c1967" }
+tempfile = "3.27.0"
 uuid = { version = "1.23.4", features = ["v7", "serde"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 time = "0.3.53"

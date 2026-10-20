@@ -97,6 +97,10 @@ pub fn router(_state: AppState) -> Router<AppState> {
             patch(admin::profile::handler::update_admin_preferences),
         )
         .route(
+            "/users/{id}/registration-region",
+            get(admin::accounts::user_resources::registration_region),
+        )
+        .route(
             "/users/{id}/coin-wallet",
             get(admin::accounts::user_resources::wallet),
         )
