@@ -22,8 +22,8 @@ use crate::lexicon::{
         RelatedWordSenseV3, RelationReferencePreviewV2, RelationTypeV2,
         SentenceAssociationOriginV2, SentenceAssociationStateV1, SentenceAssociationsStateV2,
         SentenceSourceRangeV1, SourceDialect, StepSaveIntent, SurfaceConfirmationReasonV2,
-        SurfaceMatchPageV3, SurfacePolicyBlockCodeV2, SurfacePolicyNameV2, WordCreationStep,
-        WordDefinitionV3, WordEntryKindV3, WordHeadwordsV2, WordRegionalVariantsV3, WordSenseV3,
+        SurfaceMatchPageV3, SurfacePolicyNameV2, WordCreationStep, WordDefinitionV3,
+        WordEntryKindV3, WordHeadwordsV2, WordRegionalVariantsV3, WordSenseV3,
     },
     impact_store::{ImpactConfirmation, ImpactStore, ImpactStoreError},
     model::{

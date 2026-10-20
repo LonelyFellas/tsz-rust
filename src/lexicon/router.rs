@@ -115,6 +115,10 @@ pub fn router() -> Router<AppState> {
             "/entries/{id}/publications/{publication_id}/rollback",
             axum::routing::post(handler::rollback_publication),
         )
+        .route(
+            "/entries/{id}/publications/{publication_id}/restore-draft",
+            axum::routing::post(handler::restore_draft_from_publication),
+        )
         // 只有这三条路由承载整步草稿内容，需要高于 axum 默认 2 MiB 的请求体上限。
         // 其余接口的请求体都被自身契约框住（批量最多 100 条、其余是定长字段），
         // 继续吃默认值即可，不跟着放宽。

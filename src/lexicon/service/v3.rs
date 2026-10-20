@@ -1272,7 +1272,7 @@ impl LexiconService {
         actor_id: Uuid,
         input: DetectLexiconSurfaceV3Input,
     ) -> Result<DetectLexiconSurfaceResponseV3, LexiconServiceError> {
-        self.authorize_any_action(actor_id, &["words.create", "words.detect"])
+        self.authorize_any_action(actor_id, &["words.create"])
             .await?;
         let normalized = NormalizedHeadword::parse(&input.surface).map_err(map_surface_error)?;
         let active_term = self
@@ -1818,7 +1818,7 @@ impl LexiconService {
         mut input: PreviewFormsImpactInputV3,
         read_projection: bool,
     ) -> Result<FormsImpactResponseV3, LexiconServiceError> {
-        self.authorize_any_action(actor_id, &["words.edit", "words.publish", "words.validate"])
+        self.authorize_any_action(actor_id, &["words.create", "words.edit", "words.publish"])
             .await?;
         input.sense_bindings.sort_by_key(|binding| binding.sense_id);
         canonicalize_v3_forms(&mut input.content)?;
@@ -1939,6 +1939,351 @@ impl LexiconService {
             surface_match_page: None,
             blocked_references,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn restore_draft_from_publication_v3(
+        &self,
+        actor_id: Uuid,
+        request_id: Uuid,
+        entry_id: Uuid,
+        publication_id: Uuid,
+        idempotency_key: Uuid,
+        input: crate::lexicon::dto::RestoreDraftFromPublicationV3Input,
+    ) -> Result<AdminWordV3Envelope, LexiconServiceError> {
+        const SCOPE: &str = "lexicon.entry.restore_draft_from_publication.v3";
+        let mut word = self.get_v3(entry_id).await?;
+        let request_hash = sha256_json(
+            &serde_json::json!({"entry_id":entry_id,"publication_id":publication_id,"input":input}),
+        )
+        .map_err(serialization_error)?;
+        let mut tx = self
+            .repository
+            .pool()
+            .begin()
+            .await
+            .map_err(database_error)?;
+        let authorization = lock_action(&mut tx, actor_id, "words.rollback").await?;
+        let record = LexiconRepository::entry_by_id_on(&mut *tx, entry_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(LexiconServiceError::WordNotFound)?;
+        authorization.require_owned_action("words.rollback", record.created_by_admin_id)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!("{SCOPE}:{actor_id}:{idempotency_key}"))
+            .execute(&mut *tx)
+            .await
+            .map_err(database_error)?;
+        if let Some(previous) =
+            LexiconRepository::idempotency(&mut tx, SCOPE, actor_id, idempotency_key)
+                .await
+                .map_err(repository_error)?
+        {
+            if previous.request_hash != request_hash {
+                return Err(LexiconServiceError::IdempotencyConflict);
+            }
+            tx.commit().await.map_err(database_error)?;
+            return serde_json::from_value(previous.response_body).map_err(serialization_error);
+        }
+        ensure_native_v3_entry_in(&mut tx, &record).await?;
+        ensure_history_restore_version(&record, &input)?;
+        let historical =
+            super::v3_publication::draft_restore_snapshot(&mut tx, entry_id, publication_id)
+                .await?;
+        if historical.kind != word.kind || historical.language != word.language {
+            return Err(invariant_record());
+        }
+        let mut forms = historical.forms;
+        let mut meanings = historical.meanings;
+        canonicalize_v3_forms(&mut forms)?;
+        normalize_form_regularity(&mut forms, None);
+        crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
+        let rich_text_is_safe = canonicalize_meanings(&mut meanings);
+        crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
+        super::v3_publication::clear_v3_sentence_associations(&mut meanings);
+        let mut issues = crate::lexicon::v3_contract::validate_forms(&forms, StepSaveIntent::Save);
+        issues.extend(crate::lexicon::v3_contract::validate_meanings(
+            &meanings,
+            StepSaveIntent::Save,
+        ));
+        issues.extend(crate::lexicon::v3_contract::validate_aggregate_node_limit(
+            &forms, &meanings,
+        ));
+        issues.extend(crate::lexicon::v3_contract::validate_sense_form_groups(
+            &forms,
+            &meanings,
+            StepSaveIntent::Save,
+        ));
+        if !issues.is_empty() {
+            return Err(v3_validation_failed(issues));
+        }
+        if !self.sentence_formatting_supported
+            && [
+                &record.forms,
+                &record.meanings,
+                &serde_json::to_value(&forms).map_err(serialization_error)?,
+                &serde_json::to_value(&meanings).map_err(serialization_error)?,
+            ]
+            .iter()
+            .any(|content| crate::lexicon::sentence_formatting::contains_new_formats(content))
+        {
+            return Err(crate::lexicon::sentence_formatting::word_write_error(
+                entry_id,
+                PersistedWordStep::Meanings,
+            )
+            .into());
+        }
+        let current_forms: DraftFormsStepContentV3 =
+            serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
+        let current_meanings: DraftMeaningsStepContentV3 =
+            serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
+        let mut contexts = relation_target_entry_ids(&current_meanings);
+        contexts.extend(relation_target_entry_ids(&meanings));
+        contexts.push(entry_id);
+        contexts.sort_unstable();
+        contexts.dedup();
+        LexiconRepository::lock_surface_contexts(&mut tx, &contexts)
+            .await
+            .map_err(repository_error)?;
+        let surface = self
+            .confirm_v3_draft_restore_surface(
+                &mut tx,
+                actor_id,
+                entry_id,
+                publication_id,
+                &input,
+                &current_forms,
+                &forms,
+                &meanings,
+            )
+            .await?;
+        let record = LexiconRepository::entry_by_id_for_update(&mut tx, entry_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(LexiconServiceError::WordNotFound)?;
+        authorization.require_owned_action("words.rollback", record.created_by_admin_id)?;
+        ensure_native_v3_entry_in(&mut tx, &record).await?;
+        ensure_history_restore_version(&record, &input)?;
+        let kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
+        ensure_phrase_component_ownership(kind, &forms)?;
+        validate_phrase_components(&mut tx, entry_id, kind, &mut forms).await?;
+        normalize_pronunciation_audio_assets(&mut tx, &authorization, entry_id, &mut forms).await?;
+        let component_issues =
+            validate_sense_phrase_components(&mut tx, entry_id, kind, &mut meanings).await?;
+        if !component_issues.is_empty() {
+            return Err(v3_validation_failed(component_issues));
+        }
+        let audio_issues =
+            validate_audio_assets(&mut tx, &authorization, entry_id, &meanings).await?;
+        if !audio_issues.is_empty() {
+            return Err(v3_validation_failed(audio_issues));
+        }
+        let presentation =
+            crate::lexicon::v3_projection::presentation_from_native_forms(entry_id, &forms)
+                .map_err(|_| invariant_record())?;
+        super::text_links::validate_targets(
+            &mut tx,
+            entry_id,
+            &forms,
+            &presentation.label,
+            &mut meanings,
+        )
+        .await?;
+        super::grammar_form_links::validate_targets(
+            &mut tx,
+            entry_id,
+            kind,
+            &forms,
+            &mut meanings,
+            None,
+            false,
+        )
+        .await?;
+        let resolution = resolve_meaning_references(
+            &mut tx,
+            entry_id,
+            &mut meanings,
+            ReferenceResolutionMode::Canonicalize,
+            false,
+        )
+        .await?;
+        if !resolution.issues.is_empty() {
+            return Err(v3_validation_failed(resolution.issues));
+        }
+        let catalog = self
+            .catalog_context_for_reference(&mut tx, &forms, &record.kind)
+            .await?;
+        let semantic_issues =
+            validate_meanings(entry_id, &forms, &meanings, &catalog.sub_part_parents);
+        if !rich_text_is_safe
+            || !meaning_storage_is_safe(entry_id, &forms, &meanings, &catalog.sub_part_parents)
+        {
+            return Err(v3_validation_failed(meanings_storage_issues(
+                entry_id,
+                semantic_issues,
+            )));
+        }
+        hydrate_audio_asset_metadata(&mut tx, &mut meanings).await?;
+        super::inbound_references::ensure_self_text_link_references(entry_id, &forms, &meanings)?;
+        super::inbound_references::ensure_inbound_references(
+            &mut tx,
+            entry_id,
+            &forms,
+            &meanings,
+            super::inbound_references::InboundReferenceCheck::DraftPreview,
+            Some((&current_forms, &current_meanings)),
+        )
+        .await?;
+        let mut proposed = v3_form_proposed_nodes(&forms);
+        proposed.extend(proposed_meaning_nodes(&meanings));
+        let ids = sorted_unique_node_ids(proposed.iter().map(|node| node.id));
+        LexiconRepository::lock_node_ids(&mut tx, &ids)
+            .await
+            .map_err(repository_error)?;
+        let identities = LexiconRepository::node_identities(&mut tx, entry_id, &ids)
+            .await
+            .map_err(repository_error)?;
+        let node_issues = validate_node_identities(entry_id, &forms, &proposed, &identities);
+        if node_issues
+            .iter()
+            .any(|issue| issue.code == "stable_node_id_changed")
+        {
+            return Err(LexiconServiceError::StableNodeIdChanged);
+        }
+        if !node_issues.is_empty() {
+            return Err(v3_validation_failed(node_issues));
+        }
+        let catalog_parts = resolve_v3_catalog_parts(&mut tx, &forms, &record.kind).await?;
+        // 恢复两步完整内容：先建立历史词性/词形，再写回依赖它们的释义。
+        replace_v3_forms(&mut tx, entry_id, &forms, &catalog_parts, &record.kind).await?;
+        LexiconRepository::prepare_v3_sentence_translation_aliases(&mut tx, entry_id, &meanings)
+            .await
+            .map_err(repository_error)?;
+        LexiconRepository::replace_meanings_content(
+            &mut tx,
+            entry_id,
+            &meanings,
+            &catalog.sub_part_ids,
+        )
+        .await
+        .map_err(repository_error)?;
+        LexiconRepository::replace_v3_sentence_translations(&mut tx, entry_id, &meanings)
+            .await
+            .map_err(repository_error)?;
+        replace_v3_sense_component_usages(&mut tx, entry_id, &meanings).await?;
+        replace_v3_audio_asset_references(&mut tx, entry_id, &forms, &meanings).await?;
+        let next_revision = record.revision + 1;
+        let now = Utc::now();
+        let updated = sqlx::query("UPDATE lexicon.entries SET revision=$2,updated_by_admin_id=$3,updated_at=$4 WHERE id=$1 AND revision=$5 AND lifecycle_revision=$6 AND current_publication_id IS NULL AND archived_at IS NULL")
+            .bind(entry_id).bind(next_revision).bind(actor_id).bind(now).bind(record.revision).bind(record.lifecycle_revision).execute(&mut *tx).await.map_err(database_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(LexiconServiceError::RevisionConflict {
+                current_revision: record.revision,
+            });
+        }
+        sqlx::query("UPDATE lexicon.entry_editor_projection SET forms=$2,meanings=$3,rebuilt_revision=$4,updated_at=$5 WHERE entry_id=$1")
+            .bind(entry_id).bind(serde_json::to_value(&forms).map_err(serialization_error)?).bind(serde_json::to_value(&meanings).map_err(serialization_error)?).bind(next_revision).bind(now).execute(&mut *tx).await.map_err(database_error)?;
+        let forms_complete =
+            crate::lexicon::v3_contract::validate_forms(&forms, StepSaveIntent::Complete)
+                .is_empty();
+        let meanings_complete = forms_complete
+            && semantic_issues.is_empty()
+            && crate::lexicon::v3_contract::validate_meanings(&meanings, StepSaveIntent::Complete)
+                .is_empty()
+            && crate::lexicon::v3_contract::validate_complete_definition_grammar(&meanings)
+                .is_empty()
+            && crate::lexicon::v3_contract::validate_sense_form_groups(
+                &forms,
+                &meanings,
+                StepSaveIntent::Complete,
+            )
+            .is_empty();
+        update_v3_step_progress(
+            &mut tx,
+            entry_id,
+            "forms",
+            next_revision,
+            &forms,
+            forms_complete,
+        )
+        .await?;
+        update_v3_step_progress(
+            &mut tx,
+            entry_id,
+            "meanings",
+            next_revision,
+            &meanings,
+            meanings_complete,
+        )
+        .await?;
+        sqlx::query("UPDATE lexicon.v3_entry_state SET first_v3_write_revision=COALESCE(first_v3_write_revision,$2) WHERE entry_id=$1").bind(entry_id).bind(next_revision).execute(&mut *tx).await.map_err(database_error)?;
+        upsert_presentation(&mut tx, entry_id, next_revision, &presentation).await?;
+        replace_v3_surface_projection(&mut tx, entry_id, kind, next_revision, &forms).await?;
+        if let Some(evidence) = &surface.evidence {
+            LexiconRepository::upsert_forms_surface_acknowledgement(&mut tx, evidence)
+                .await
+                .map_err(repository_error)?;
+        } else {
+            LexiconRepository::delete_forms_surface_acknowledgement(&mut tx, entry_id)
+                .await
+                .map_err(repository_error)?;
+        }
+        let updated = LexiconRepository::entry_by_id_on(&mut *tx, entry_id)
+            .await
+            .map_err(repository_error)?
+            .ok_or(LexiconServiceError::WordNotFound)?;
+        word.forms = forms;
+        word.meanings = meanings;
+        word.presentation = presentation;
+        word.status = AdminWordStatus::Draft;
+        word.revision = next_revision;
+        word.lifecycle_revision = updated.lifecycle_revision;
+        word.annotation = updated.annotation;
+        word.annotation_revision = updated.annotation_revision;
+        word.published_revision = None;
+        word.published_at = None;
+        word.archived_at = None;
+        word.archived_by = None;
+        word.has_unpublished_changes = false;
+        word.updated_at = now;
+        word.completed_steps = updated
+            .completed_steps
+            .iter()
+            .filter_map(|step| match step.as_str() {
+                "basics" => Some(PersistedWordStep::Basics),
+                "forms" => Some(PersistedWordStep::Forms),
+                "meanings" => Some(PersistedWordStep::Meanings),
+                _ => None,
+            })
+            .collect();
+        word.max_reachable_step = max_reachable_step(&updated.completed_steps);
+        let response = AdminWordV3Envelope { word };
+        insert_v3_audit(&mut tx, actor_id, request_id, "lexicon.entry.draft.restore.v3", entry_id, next_revision,
+            serde_json::json!({"source_publication_id":publication_id,"base_revision":record.revision,"lifecycle_revision":record.lifecycle_revision,"surface_snapshot_id":surface.verified_surface.as_ref().map(|value|value.snapshot_id)})).await?;
+        sqlx::query("INSERT INTO platform.outbox_events(id,aggregate_type,aggregate_id,aggregate_revision,event_type,payload,occurred_at,available_at) VALUES($1,'lexicon.entry',$2,$3,'lexicon.entry.draft_restored.v3',$4,now(),now())")
+            .bind(Uuid::now_v7()).bind(entry_id).bind(next_revision).bind(serde_json::json!({"entry_id":entry_id,"source_revision":next_revision,"source_publication_id":publication_id})).execute(&mut *tx).await.map_err(database_error)?;
+        LexiconRepository::insert_idempotent_response(
+            &mut tx,
+            SCOPE,
+            actor_id,
+            idempotency_key,
+            &request_hash,
+            Some(entry_id),
+            &response,
+            200,
+        )
+        .await
+        .map_err(repository_error)?;
+        tx.commit().await.map_err(database_error)?;
+        if let Some(confirmation) = &surface.verified_surface
+            && let Err(error) = self.surface_snapshots.remove_verified(confirmation).await
+        {
+            tracing::warn!(
+                error_kind = crate::safe_log::error_kind(&error),
+                "restored V3 draft but failed to remove surface confirmation"
+            );
+        }
+        Ok(response)
     }
 
     pub async fn save_forms_v3(
@@ -2768,7 +3113,7 @@ impl LexiconService {
         entry_id: Uuid,
         input: ValidateAdminWordV3Input,
     ) -> Result<DraftValidationResponseV3, LexiconServiceError> {
-        self.authorize_any_action(actor_id, &["words.edit", "words.publish", "words.validate"])
+        self.authorize_any_action(actor_id, &["words.create", "words.edit", "words.publish"])
             .await?;
         let mut word = self.get_v3(entry_id).await?;
         ensure_v3_active(&word)?;
@@ -2879,6 +3224,32 @@ fn ensure_v3_active(word: &AdminWordV3) -> Result<(), LexiconServiceError> {
     } else {
         Ok(())
     }
+}
+
+fn ensure_history_restore_version(
+    record: &EntryRecord,
+    input: &crate::lexicon::dto::RestoreDraftFromPublicationV3Input,
+) -> Result<(), LexiconServiceError> {
+    ensure_v3_record_active(record)?;
+    if record.current_publication_id.is_some() {
+        return Err(crate::error::AppError::conflict(
+            crate::error::ErrorCode::RevisionConflict,
+            None,
+            "only draft entries can restore publication history",
+        )
+        .into());
+    }
+    if record.revision != input.base_revision {
+        return Err(LexiconServiceError::RevisionConflict {
+            current_revision: record.revision,
+        });
+    }
+    if record.lifecycle_revision != input.base_lifecycle_revision {
+        return Err(LexiconServiceError::LifecycleRevisionConflict {
+            current_lifecycle_revision: record.lifecycle_revision,
+        });
+    }
+    Ok(())
 }
 
 fn ensure_v3_record_active(record: &EntryRecord) -> Result<(), LexiconServiceError> {
@@ -5490,7 +5861,7 @@ fn canonicalize_v3_spelling(spelling: &mut String) -> Result<(), LexiconServiceE
     Ok(())
 }
 
-async fn replace_v3_surface_projection(
+pub(super) async fn replace_v3_surface_projection(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     entry_kind: WordEntryKindV3,

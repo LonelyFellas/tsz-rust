@@ -98,35 +98,17 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.access",
         "words",
-        "词条查看",
-        "查看后台词条",
+        "查看词条",
+        "查看平台所有词条，包含已发布词条和草稿。",
         "page",
         [],
         "low"
     ),
     permission!(
-        "words.detect",
-        "words",
-        "词形识别",
-        "识别词形，为新建词条做准备",
-        "action",
-        ["words.access"],
-        "medium"
-    ),
-    permission!(
-        "words.validate",
-        "words",
-        "词条校验",
-        "校验词条内容，预览形态变更的影响",
-        "action",
-        ["words.access"],
-        "low"
-    ),
-    permission!(
         "words.create",
         "words",
-        "词条创建",
-        "创建归属于自己的词条",
+        "创建词条",
+        "在智能词库中创建新词条，利用内置辞典识别基本词性和英美拼写，同时检测词库中是否已存在同名词条。",
         "action",
         ["words.access"],
         "medium"
@@ -134,8 +116,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.edit",
         "words",
-        "词条文本与音频编辑",
-        "编辑自己的词条文本、音频及其他内容；单词和短语关联需另行授权",
+        "编辑词条文本和发音",
+        "编辑自己创建的词条文本相关内容，管理语音合成来源；关联操作需另行授权。",
         "action",
         ["words.access"],
         "medium"
@@ -143,8 +125,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.associate",
         "words",
-        "词条单词与短语关联",
-        "编辑自己词条正文中的单词、短语及词形关联；不授予文本和音频编辑权限",
+        "为词条关联单词或短语",
+        "将词条内的文本内容关联至其他单词或短语，使该文本能够正确切换英美拼写，并建立起词条与例句之间的关系；词条编辑操作需另行授权。",
         "action",
         ["words.access"],
         "medium"
@@ -152,8 +134,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.edit_others",
         "words",
-        "可编辑他人的词条",
-        "将已获授权的内容编辑和关联操作扩展至他人的词条；不授予操作权限",
+        "有权编辑其他人创建的词条",
+        "将已获授权的词条编辑、关联、恢复至历史版本等权限，扩展至其他人创建的词条；若仅仅获得本权限还无法编辑词条，需搭配编辑相关权限才能真正实现编辑操作。",
         "scope",
         ["words.access"],
         "high"
@@ -161,8 +143,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.publish",
         "words",
-        "词条发布",
-        "发布自己的词条",
+        "发布词条",
+        "发布自己创建的词条，使其变为公开状态，可以被用户看到并使用。",
         "action",
         ["words.access"],
         "high"
@@ -170,8 +152,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.archive",
         "words",
-        "词条归档",
-        "归档自己的词条",
+        "删除词条",
+        "将自己创建的词条删除至垃圾桶，使其变为不可用状态，但该词条的数据不会完全消失。",
         "action",
         ["words.access"],
         "high"
@@ -179,8 +161,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.restore",
         "words",
-        "从垃圾桶恢复",
-        "将已删入垃圾桶的词条恢复到智能词库中，重返可编辑状态",
+        "从垃圾桶恢复词条",
+        "将已删入垃圾桶的词条恢复到智能词库，重返草稿状态，可以被编辑，但不会自动公开。",
         "action",
         ["words.access"],
         "high"
@@ -188,8 +170,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "words.rollback",
         "words",
-        "恢复到历史版本",
-        "将可编辑词条恢复到它的某个历史版本",
+        "恢复词条至历史版本",
+        "将自己创建的草稿词条，恢复至它的某个历史版本。",
         "action",
         ["words.access"],
         "high"
@@ -438,8 +420,8 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "speech.upload_audio",
         "words",
-        "选择发音 – 上传音频",
-        "能够在智能词库选择发音时，直接上传音频给文本配音。",
+        "语音合成 上传音频",
+        "为词条选择语音来源时，若不满现有发音版本，可以直接上传音频给文本配音。",
         "action",
         [],
         "medium"
@@ -447,11 +429,20 @@ pub const CATALOG: &[PermissionDefinition] = &[
     permission!(
         "speech.generate",
         "speech",
-        "语音预览",
-        "生成语音预览，会消耗语音服务资源。",
+        "预览新语音",
+        "有权请求生成新的语音合成音频，以供预览，该操作会产生语音服务费用。",
         "action",
         ["words.access"],
         "medium"
+    ),
+    permission!(
+        "speech.global_dubbing",
+        "speech",
+        "全局配音",
+        "有权在配音中心设置某种全局配音，例如给全局特定文字进行专门的配音设置。预留权限，功能尚未接入。",
+        "action",
+        [],
+        "high"
     ),
 ];
 
@@ -566,7 +557,7 @@ mod tests {
             .iter()
             .filter(|permission| matches!(permission.module_key, "words" | "sentences"))
             .collect();
-        assert_eq!(content.len(), 21);
+        assert_eq!(content.len(), 19);
         for permission in content {
             assert_ne!(
                 permission.label, permission.description,
@@ -577,8 +568,12 @@ mod tests {
             assert!(!permission.label.contains("不包含"));
         }
         for (key, label, scope) in [
-            ("words.edit", "词条文本与音频编辑", "自己的"),
-            ("words.edit_others", "可编辑他人的词条", "不授予操作权限"),
+            ("words.edit", "编辑词条文本和发音", "自己创建的"),
+            (
+                "words.edit_others",
+                "有权编辑其他人创建的词条",
+                "需搭配编辑相关权限",
+            ),
             ("sentences.edit", "编辑例句文本和发音", "另行授权"),
             (
                 "sentences.edit_others",
@@ -595,8 +590,11 @@ mod tests {
     #[test]
     fn speech_permission_keeps_resource_notice_in_description() {
         let permission = definition("speech.generate").unwrap();
-        assert_eq!(permission.label, "语音预览");
-        assert_eq!(permission.description, "生成语音预览，会消耗语音服务资源。");
+        assert_eq!(permission.label, "预览新语音");
+        assert_eq!(
+            permission.description,
+            "有权请求生成新的语音合成音频，以供预览，该操作会产生语音服务费用。"
+        );
         assert_eq!(permission.requires, &["words.access"]);
     }
 

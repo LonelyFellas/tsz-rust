@@ -4,9 +4,9 @@ use crate::wordlists::service::VISIBLE_OWNER;
 use chrono::DateTime;
 
 const ARCHIVE_SCOPE: &str = "lexicon.entry.archive";
-const RESTORE_SCOPE: &str = "lexicon.entry.restore";
+const RESTORE_SCOPE: &str = "lexicon.entry.restore_draft";
 const ARCHIVE_BATCH_SCOPE: &str = "lexicon.entry.archive_batch";
-const RESTORE_BATCH_SCOPE: &str = "lexicon.entry.restore_batch";
+const RESTORE_BATCH_SCOPE: &str = "lexicon.entry.restore_draft_batch";
 const DELETE_BATCH_SCOPE: &str = "lexicon.entry.delete_batch";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -567,6 +567,17 @@ impl LexiconService {
                 .require_owned_action(action, record.created_by_admin_id)
                 .map_err(|_| LexiconServiceError::EntryPublishForbidden)?;
             ensure_lifecycle_schema_capability(record.content_schema_version, allow_v3)?;
+            if target_state == TargetState::Active
+                && record.archived_at.is_none()
+                && record.current_publication_id.is_some()
+            {
+                return Err(crate::error::AppError::conflict(
+                    crate::error::ErrorCode::RevisionConflict,
+                    None,
+                    "only archived entries can be restored as drafts",
+                )
+                .into());
+            }
             let record_revision = record.revision;
             let record_lifecycle_revision = record.lifecycle_revision;
             let current = self.get_v3(record.id).await?;
@@ -696,31 +707,26 @@ impl LexiconService {
                         references,
                     ));
                 }
-            } else {
-                LexiconRepository::lock_current_outbound_sense_ref_targets_for_entry(
-                    &mut transaction,
-                    current.id,
-                )
-                .await
-                .map_err(repository_error)?;
-                let references = LexiconRepository::unavailable_outbound_sense_refs_for_restore(
-                    &mut transaction,
-                    current.id,
-                    &restoring_entries,
-                )
-                .await
-                .map_err(repository_error)?;
-                if !references.is_empty() {
-                    return Err(LexiconServiceError::EntryHasUnavailablePublicationRefs(
-                        references,
-                    ));
-                }
             }
             let next = lifecycle_word(current, target_state, actor_id);
             LexiconRepository::transition_lifecycle(&mut transaction, &next, actor_id, request_id)
                 .await
                 .map_err(repository_error)?;
             if target_state == TargetState::Active {
+                super::v3_publication::retire_publication_for_restore(
+                    &mut transaction,
+                    next.id,
+                    next.revision,
+                )
+                .await?;
+                super::v3::replace_v3_surface_projection(
+                    &mut transaction,
+                    next.id,
+                    next.kind,
+                    next.revision,
+                    &next.forms,
+                )
+                .await?;
                 restored_audit_targets.push((next.id, next.revision));
             }
             affected += 1;
@@ -746,32 +752,6 @@ impl LexiconService {
                         false,
                     )
                     .await?;
-                }
-            }
-            let snapshots = LexiconRepository::current_publication_snapshots(
-                &mut transaction,
-                &restoring_entries,
-            )
-            .await
-            .map_err(repository_error)?;
-            for record in snapshots {
-                let mut word = serde_json::from_value::<AdminWordV3>(record.snapshot)
-                    .map_err(serialization_error)?;
-                super::grammar_form_links::validate_targets(
-                    &mut transaction,
-                    word.id,
-                    word.kind,
-                    &word.forms,
-                    &mut word.meanings,
-                    None,
-                    true,
-                )
-                .await?;
-                let issues =
-                    super::inbound_references::outbound_publication_issues(&mut transaction, &word)
-                        .await?;
-                if !issues.is_empty() {
-                    return Err(v3_validation_failed(issues));
                 }
             }
         }
@@ -833,20 +813,6 @@ impl LexiconService {
         all_targets: &[EntryLifecycleTarget],
         token: Option<&str>,
     ) -> Result<Option<VerifiedSurfaceConfirmation>, LexiconServiceError> {
-        let additions = crate::lexicon::visibility::headword_memberships(&[]);
-        let mut requested = additions
-            .iter()
-            .map(|(scope, _)| scope.clone())
-            .collect::<Vec<_>>();
-        requested.sort();
-        requested.dedup();
-        let before =
-            LexiconRepository::active_headword_memberships_in_transaction(transaction, &requested)
-                .await
-                .map_err(repository_error)?;
-        let transitions = crate::lexicon::visibility::transitions(before, [], additions);
-        let visibility_required =
-            crate::lexicon::visibility::requires_multiple_active_confirmation(&transitions);
         let selection = all_targets
             .iter()
             .map(|target| {
@@ -857,17 +823,10 @@ impl LexiconService {
                 })
             })
             .collect::<Vec<_>>();
-        let _active_ids = transitions
-            .iter()
-            .flat_map(|item| item.after_active_ids.iter().copied())
-            .collect::<std::collections::HashSet<_>>();
-        let items = std::collections::BTreeMap::new();
-        let contexts: std::collections::BTreeMap<Uuid, MatchedEntryContextV2> =
-            std::collections::BTreeMap::new();
         let v3_contribution = self
             .v3_restore_surface_contribution(transaction, pending)
             .await?;
-        let mut items = items;
+        let mut items = std::collections::BTreeMap::new();
         for item in &v3_contribution.items {
             if items.insert(item.match_id.clone(), item.clone()).is_some() {
                 return Err(invariant_record());
@@ -888,36 +847,16 @@ impl LexiconService {
             }
             return Ok(None);
         }
-        let _ = contexts;
         let v3_page_data = self
             .v3_restore_page_data(transaction, &items, &v3_contribution.page_items)
             .await?;
         let contexts = super::v3_surface::v3_restore_synthetic_contexts(&v3_page_data);
-        let policy = if visibility_required {
-            self.surface_policies
-                .multiple_active_exact_headword_publications()
-                .await
-        } else {
-            self.surface_policies
-                .policy(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
-                .await
-        }
-        .map_err(LexiconServiceError::SurfacePolicy)?;
-        let confirmation_reasons = if visibility_required {
-            if items.iter().any(|item| {
-                item.confirmation_reasons
-                    .contains(&SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches)
-            }) {
-                vec![
-                    SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches,
-                    SurfaceConfirmationReasonV2::VisibilityActivation,
-                ]
-            } else {
-                vec![SurfaceConfirmationReasonV2::VisibilityActivation]
-            }
-        } else {
-            vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches]
-        };
+        let policy = self
+            .surface_policies
+            .policy(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
+            .await
+            .map_err(LexiconServiceError::SurfacePolicy)?;
+        let confirmation_reasons = vec![SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches];
         let entry_state_evidence = pending
             .iter()
             .map(|(_, word, already_target)| {
@@ -935,7 +874,6 @@ impl LexiconService {
             "command": if scope == RESTORE_SCOPE { "restore_entry" } else { "restore_entries_batch" },
             "selection": selection,
             "entry_state_evidence": entry_state_evidence,
-            "transitions": transitions,
             "match_ids": items.iter().map(|item| &item.match_id).collect::<Vec<_>>(),
             "confirmation_reasons": confirmation_reasons,
         });
@@ -960,9 +898,7 @@ impl LexiconService {
         let create_snapshot = || CreateSurfaceSnapshot {
             binding: binding.clone(),
             policy_enabled: policy.enabled,
-            policy_block_code: (!policy.enabled && visibility_required).then_some(
-                SurfacePolicyBlockCodeV2::MultipleActiveExactHeadwordPublicationsNotEnabled,
-            ),
+            policy_block_code: None,
             items: items.clone(),
             matched_entry_contexts: contexts.clone(),
             confirmation_reasons: confirmation_reasons.clone(),
@@ -978,13 +914,6 @@ impl LexiconService {
             let page =
                 crate::lexicon::surface_snapshot::surface_page_v3(snapshot.page, &owner_bundle)
                     .map_err(LexiconServiceError::SurfaceSnapshot)?;
-            if !policy.enabled && visibility_required {
-                return Err(
-                    LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabledV3(
-                        Box::new(page),
-                    ),
-                );
-            }
             return Err(LexiconServiceError::SurfaceMatchAcknowledgementRequiredV3(
                 Box::new(page),
             ));
@@ -1019,21 +948,6 @@ impl LexiconService {
             }
             Err(error) => return Err(LexiconServiceError::SurfaceSnapshot(error)),
         };
-        if !policy.enabled && visibility_required {
-            let snapshot = self
-                .surface_snapshots
-                .create(create_snapshot())
-                .await
-                .map_err(LexiconServiceError::SurfaceSnapshot)?;
-            let page =
-                crate::lexicon::surface_snapshot::surface_page_v3(snapshot.page, &owner_bundle)
-                    .map_err(LexiconServiceError::SurfaceSnapshot)?;
-            return Err(
-                LexiconServiceError::MultipleActiveExactHeadwordPublicationsNotEnabledV3(Box::new(
-                    page,
-                )),
-            );
-        }
         let current_ids = items
             .iter()
             .map(|item| item.match_id.as_str())
@@ -1121,13 +1035,17 @@ fn ensure_lifecycle_schema_capability(
 
 fn lifecycle_word(mut word: AdminWordV3, target_state: TargetState, actor_id: Uuid) -> AdminWordV3 {
     let now = Utc::now();
+    if target_state == TargetState::Active {
+        word.published_revision = None;
+        word.published_at = None;
+        word.has_unpublished_changes = false;
+    }
     word.lifecycle_revision += 1;
     word.updated_at = now;
     apply_lifecycle_state(
         &mut word.status,
         &mut word.archived_at,
         &mut word.archived_by,
-        word.published_revision,
         target_state,
         actor_id,
         now,
@@ -1140,7 +1058,6 @@ fn apply_lifecycle_state(
     status: &mut AdminWordStatus,
     archived_at: &mut Option<DateTime<Utc>>,
     archived_by: &mut Option<Uuid>,
-    published_revision: Option<i64>,
     target_state: TargetState,
     actor_id: Uuid,
     now: DateTime<Utc>,
@@ -1152,11 +1069,7 @@ fn apply_lifecycle_state(
             *archived_by = Some(actor_id);
         }
         TargetState::Active => {
-            *status = if published_revision.is_some() {
-                AdminWordStatus::Published
-            } else {
-                AdminWordStatus::Draft
-            };
+            *status = AdminWordStatus::Draft;
             *archived_at = None;
             *archived_by = None;
         }

@@ -643,6 +643,54 @@ pub struct EntryLifecycleInput {
     pub confirmed_surface_match_token: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryRestoreState {
+    Draft,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryRestoreInput {
+    pub restore_as: EntryRestoreState,
+    #[schema(minimum = 1)]
+    pub base_revision: i64,
+    #[schema(minimum = 1)]
+    pub base_lifecycle_revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
+}
+
+impl From<EntryRestoreInput> for EntryLifecycleInput {
+    fn from(input: EntryRestoreInput) -> Self {
+        Self {
+            base_revision: input.base_revision,
+            base_lifecycle_revision: input.base_lifecycle_revision,
+            confirmed_surface_match_token: input.confirmed_surface_match_token,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryRestoreBatchInput {
+    pub restore_as: EntryRestoreState,
+    pub entries: Vec<EntryLifecycleTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub confirmed_surface_match_token: Option<String>,
+}
+
+impl From<EntryRestoreBatchInput> for EntryLifecycleBatchInput {
+    fn from(input: EntryRestoreBatchInput) -> Self {
+        Self {
+            entries: input.entries,
+            confirmed_surface_match_token: input.confirmed_surface_match_token,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EntryLifecycleTarget {
@@ -861,4 +909,26 @@ pub struct RelatedEntrySenses {
     pub entry_id: Uuid,
     pub publication_id: Uuid,
     pub senses: Vec<super::RelatedWordSenseV3>,
+}
+
+#[cfg(test)]
+mod draft_restore_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn both_versions_reject_incompatible_restore_semantics_before_writing() {
+        let legacy = json!({"base_revision": 1, "base_lifecycle_revision": 2});
+        assert!(serde_json::from_value::<EntryRestoreInput>(legacy.clone()).is_err());
+        let mut draft = legacy;
+        draft["restore_as"] = json!("draft");
+        assert!(serde_json::from_value::<EntryRestoreInput>(draft.clone()).is_ok());
+        assert!(serde_json::from_value::<EntryLifecycleInput>(draft).is_err());
+        let legacy_batch = json!({"entries": []});
+        assert!(serde_json::from_value::<EntryRestoreBatchInput>(legacy_batch.clone()).is_err());
+        let mut draft_batch = legacy_batch;
+        draft_batch["restore_as"] = json!("draft");
+        assert!(serde_json::from_value::<EntryRestoreBatchInput>(draft_batch.clone()).is_ok());
+        assert!(serde_json::from_value::<EntryLifecycleBatchInput>(draft_batch).is_err());
+    }
 }

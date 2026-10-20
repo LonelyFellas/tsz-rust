@@ -367,15 +367,6 @@ impl LexiconService {
                 continue;
             }
             let mut keys = forms_surface_keys(word.id, &word.forms)?;
-            let current_publication_keys = current_publication_surface_keys_v3(tx, word.id).await?;
-            keys.extend(
-                current_publication_keys
-                    .iter()
-                    .map(|key| V3SurfaceQueryKey {
-                        dialect_scope: key.dialect_scope.clone(),
-                        normalized_surface: key.normalized_surface.clone(),
-                    }),
-            );
             let initial_keys = self.v3_initial_headword_query_keys(tx, word.id).await?;
             keys.extend(initial_keys);
             keys.sort();
@@ -414,13 +405,6 @@ impl LexiconService {
                 "current_lifecycle_revision": word.lifecycle_revision,
                 "published_revision": word.published_revision,
                 "forms_content_digest": canonical_v3_forms_digest(&word.forms)?,
-                "current_publication_surface_keys": current_publication_keys.iter().map(|key| {
-                    serde_json::json!({
-                        "language": key.language,
-                        "dialect_scope": key.dialect_scope,
-                        "normalized_surface": key.normalized_surface,
-                    })
-                }).collect::<Vec<_>>(),
                 "candidate_surface_keys": keys.iter().map(|key| {
                     serde_json::json!({
                         "dialect_scope": key.dialect_scope,
@@ -921,28 +905,18 @@ impl LexiconService {
         .map(Some)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn verify_v3_forms_surface_for_save(
+    async fn lock_v3_forms_surface_material(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        actor_id: Uuid,
         entry_id: Uuid,
-        base_revision: i64,
-        next_revision: i64,
         previous: &DraftFormsStepContentV3,
         content: &DraftFormsStepContentV3,
-        sense_bindings: &[crate::lexicon::dto::SenseFormGroupBindingV3],
-        affected: &[FormsImpactItemV3],
-        surface_token: Option<&str>,
-        impact_token: Option<Uuid>,
-    ) -> Result<V3FormsSurfaceConfirmation, LexiconServiceError> {
+    ) -> Result<V3SurfaceMaterial, LexiconServiceError> {
         let previous_keys = forms_surface_keys(entry_id, previous)?;
         let keys = forms_surface_keys(entry_id, content)?;
         LexiconRepository::lock_surface_policy_writer(tx)
             .await
             .map_err(repository_error)?;
-        // Initial keys contribute to annotation groups while forms are empty;
-        // lock them both when leaving that group and when returning to it.
         let initial_keys = if previous_keys.is_empty() || keys.is_empty() {
             self.v3_initial_headword_query_keys(tx, entry_id).await?
         } else {
@@ -959,8 +933,121 @@ impl LexiconService {
         LexiconRepository::lock_surface_keys(tx, &surface_lock_keys_v3(&lock_keys))
             .await
             .map_err(repository_error)?;
+        self.v3_surface_material_in(tx, &keys, Some(entry_id), true)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn confirm_v3_draft_restore_surface(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        actor_id: Uuid,
+        entry_id: Uuid,
+        publication_id: Uuid,
+        input: &crate::lexicon::dto::RestoreDraftFromPublicationV3Input,
+        previous: &DraftFormsStepContentV3,
+        forms: &DraftFormsStepContentV3,
+        meanings: &crate::lexicon::dto::DraftMeaningsStepContentV3,
+    ) -> Result<V3FormsSurfaceConfirmation, LexiconServiceError> {
         let material = self
-            .v3_surface_material_in(tx, &keys, Some(entry_id), true)
+            .lock_v3_forms_surface_material(tx, entry_id, previous, forms)
+            .await?;
+        let token = input.confirmed_surface_match_token.as_deref();
+        let owner_context = format!(
+            "{entry_id}:{publication_id}:{}",
+            input.base_lifecycle_revision
+        );
+        if material.matches.is_empty() {
+            if let Some(token) = token {
+                self.verify_v3_surface_owner(
+                    token,
+                    actor_id,
+                    SurfaceConsumptionCommand::RestoreDraftFromPublication,
+                    owner_context,
+                )
+                .await?;
+                return Err(LexiconServiceError::SurfaceMatchesChangedWithoutSnapshot);
+            }
+            return Ok(V3FormsSurfaceConfirmation {
+                verified_surface: None,
+                verified_impact: None,
+                evidence: None,
+            });
+        }
+        let policy = self
+            .surface_policies
+            .policy(SurfacePolicyNameV2::SurfaceWarningAcknowledgement)
+            .await
+            .map_err(LexiconServiceError::SurfacePolicy)?;
+        let digest = hash_serializable(&(
+            publication_id,
+            input.base_lifecycle_revision,
+            forms,
+            meanings,
+        ))?;
+        let (binding, bundle) = owner_binding(
+            actor_id,
+            SurfaceConsumptionCommand::RestoreDraftFromPublication,
+            owner_context,
+            Some(input.base_revision),
+            digest,
+            serde_json::json!({"owner_kind":"v3_draft_restore","entry_id":entry_id,"publication_id":publication_id,"base_revision":input.base_revision,"base_lifecycle_revision":input.base_lifecycle_revision,V3_SURFACE_PAGE_DATA_KEY:material.page_data()}),
+            policy,
+        )?;
+        let Some(token) = token else {
+            let page = self
+                .create_v3_surface_snapshot(binding, bundle, &material, false, policy)
+                .await?;
+            return Err(LexiconServiceError::SurfaceMatchAcknowledgementRequiredV3(
+                Box::new(page),
+            ));
+        };
+        let confirmation = self
+            .verify_v3_surface_token(token, binding, bundle, &material, false, policy)
+            .await?;
+        let items = material.synthetic_items()?;
+        let evidence = FormsSurfaceAcknowledgementRecord {
+            entry_id,
+            forms_revision: input.base_revision + 1,
+            forms_content_digest: canonical_v3_forms_digest(forms)?,
+            match_ids: material.match_ids(),
+            match_digest: crate::lexicon::surface_snapshot::surface_match_digest(
+                &items,
+                &[SurfaceConfirmationReasonV2::UnacknowledgedSurfaceMatches],
+            )
+            .map_err(LexiconServiceError::SurfaceSnapshot)?,
+            acknowledged_by_admin_id: actor_id,
+            acknowledged_at: Utc::now(),
+            policy_name: "surface_warning_acknowledgement".to_owned(),
+            policy_epoch: i64::try_from(policy.epoch).map_err(|_| invariant_record())?,
+            normalization_version: i32::from(
+                crate::lexicon::normalization::HEADWORD_NORMALIZATION_VERSION,
+            ),
+        };
+        Ok(V3FormsSurfaceConfirmation {
+            verified_surface: Some(confirmation),
+            verified_impact: None,
+            evidence: Some(evidence),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn verify_v3_forms_surface_for_save(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        actor_id: Uuid,
+        entry_id: Uuid,
+        base_revision: i64,
+        next_revision: i64,
+        previous: &DraftFormsStepContentV3,
+        content: &DraftFormsStepContentV3,
+        sense_bindings: &[crate::lexicon::dto::SenseFormGroupBindingV3],
+        affected: &[FormsImpactItemV3],
+        surface_token: Option<&str>,
+        impact_token: Option<Uuid>,
+    ) -> Result<V3FormsSurfaceConfirmation, LexiconServiceError> {
+        let material = self
+            .lock_v3_forms_surface_material(tx, entry_id, previous, content)
             .await?;
         let content_digest = canonical_v3_forms_digest(content)?;
         let command_digest = if sense_bindings.is_empty() {

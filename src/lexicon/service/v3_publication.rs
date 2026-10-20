@@ -820,6 +820,7 @@ impl LexiconService {
             .await
             .map_err(database_error)?;
         let authorization = lock_lexicon_publisher(&mut tx, actor_id, "words.rollback").await?;
+        authorization.require("words.publish")?;
         let is_super_admin = authorization.is_super_admin;
         lock_v3_idempotency(&mut tx, V3_ROLLBACK_SCOPE, actor_id, idempotency_key).await?;
         if let Some(existing) =
@@ -1115,6 +1116,18 @@ async fn v3_publication_by_revision_for_update(
     .fetch_optional(&mut **tx)
     .await
     .map_err(database_error)
+}
+
+pub(super) async fn draft_restore_snapshot(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    publication_id: Uuid,
+) -> Result<AdminWordV3, LexiconServiceError> {
+    let publication = versioned_publication(tx, entry_id, publication_id)
+        .await?
+        .ok_or(LexiconServiceError::PublicationNotFound)?;
+    ensure_publication_snapshot_identity(&publication, entry_id)?;
+    serde_json::from_value(publication.snapshot).map_err(serialization_error)
 }
 
 async fn versioned_publication(
@@ -1691,7 +1704,7 @@ async fn replace_current_publication_surfaces_v3(
     insert_surface_projection_event(
         tx,
         entry_id,
-        publication_id,
+        Some(publication_id),
         source_revision,
         event_offset,
         3,
@@ -1823,10 +1836,19 @@ async fn upsert_v3_publication_surface(
     .map_err(database_error)
 }
 
+pub(super) async fn retire_publication_for_restore(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    source_revision: i64,
+) -> Result<(), LexiconServiceError> {
+    let event_offset = retire_current_publication_surfaces(tx, entry_id, source_revision).await?;
+    insert_surface_projection_event(tx, entry_id, None, source_revision, event_offset, 3).await
+}
+
 async fn insert_surface_projection_event(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
-    publication_id: Uuid,
+    publication_id: Option<Uuid>,
     source_revision: i64,
     event_offset: i64,
     content_schema_version: i16,

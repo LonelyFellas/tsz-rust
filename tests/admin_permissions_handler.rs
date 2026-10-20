@@ -1466,3 +1466,141 @@ async fn teacher_catalog_retirement_removes_grants_and_tags_without_mapping(pool
         assert!(catalog::validate_keys(&[key.to_owned()]).is_err());
     }
 }
+
+#[sqlx::test]
+async fn word_creation_retirement_preserves_creation_and_supports_guarded_rollback(pool: PgPool) {
+    let creator = seed(&pool, AdminRole::Admin).await;
+    let checker = seed(&pool, AdminRole::Admin).await;
+    let untouched = seed(&pool, AdminRole::Admin).await;
+    let tag = Uuid::now_v7();
+    sqlx::query("INSERT INTO permission_tags(id,name) VALUES($1,'合并创建权限')")
+        .bind(tag)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (id, keys) in [
+        (
+            creator,
+            vec![
+                "words.access",
+                "words.create",
+                "words.detect",
+                "words.validate",
+            ],
+        ),
+        (checker, vec!["words.access", "words.validate"]),
+        (untouched, vec!["words.access", "words.create"]),
+    ] {
+        for key in keys {
+            sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by,granted_at) VALUES($1,$2,$1,'2026-10-01T00:00:00Z')").bind(id).bind(key).execute(&pool).await.unwrap();
+        }
+    }
+    for key in ["words.access", "words.validate"] {
+        sqlx::query("INSERT INTO permission_tag_items(tag_id,permission_key) VALUES($1,$2)")
+            .bind(tag)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let up = include_str!("../migrations/20261019100000_merge_word_creation_permissions.up.sql");
+    let down =
+        include_str!("../migrations/20261019100000_merge_word_creation_permissions.down.sql");
+    for _ in 0..2 {
+        sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    }
+    let keys = |id| {
+        sqlx::query_scalar::<_,String>("SELECT permission_key FROM admin_permission_grants WHERE admin_id=$1 ORDER BY permission_key").bind(id)
+    };
+    assert_eq!(
+        keys(creator).fetch_all(&pool).await.unwrap(),
+        ["words.access", "words.create"]
+    );
+    assert_eq!(
+        keys(checker).fetch_all(&pool).await.unwrap(),
+        ["words.access"]
+    );
+    assert_eq!(
+        keys(untouched).fetch_all(&pool).await.unwrap(),
+        ["words.access", "words.create"]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT permission_version FROM admins WHERE id=$1")
+            .bind(checker)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT permission_version FROM admins WHERE id=$1")
+            .bind(untouched)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT permission_key FROM permission_tag_items WHERE tag_id=$1"
+        )
+        .bind(tag)
+        .fetch_all(&pool)
+        .await
+        .unwrap(),
+        ["words.access"]
+    );
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    assert_eq!(
+        keys(creator).fetch_all(&pool).await.unwrap(),
+        [
+            "words.access",
+            "words.create",
+            "words.detect",
+            "words.validate"
+        ]
+    );
+    assert_eq!(
+        keys(checker).fetch_all(&pool).await.unwrap(),
+        ["words.access", "words.validate"]
+    );
+    assert!(sqlx::query_scalar::<_,bool>("SELECT granted_by=admin_id AND granted_at='2026-10-01T00:00:00Z' FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.validate'").bind(checker).fetch_one(&pool).await.unwrap());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT version FROM permission_tags WHERE id=$1")
+            .bind(tag)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[sqlx::test]
+async fn word_creation_retirement_rollback_rejects_later_authorization(pool: PgPool) {
+    let actor = seed(&pool, AdminRole::Admin).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.validate',$1)").bind(actor).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261019100000_merge_word_creation_permissions.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE admins SET permission_version=permission_version+1 WHERE id=$1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let down =
+        include_str!("../migrations/20261019100000_merge_word_creation_permissions.down.sql");
+    assert!(sqlx::raw_sql(down).execute(&pool).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM admin_permission_grants WHERE admin_id=$1"
+        )
+        .bind(actor)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+}

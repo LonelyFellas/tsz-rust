@@ -23,7 +23,6 @@ pub(crate) mod v3_contract;
 pub mod v3_initial_headword_backfill;
 pub(crate) mod v3_projection;
 pub mod validation;
-mod visibility;
 
 pub(crate) mod entry_search;
 pub mod related_suggestions;

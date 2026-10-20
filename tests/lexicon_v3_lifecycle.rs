@@ -505,7 +505,7 @@ async fn v3_single_lifecycle_delete_and_legacy_bridge_are_versioned(pool: PgPool
         &format!("{ROOT}/entries/{native_id}/restore"),
         &bearer,
         Some(Uuid::now_v7()),
-        Some(json!({"base_revision": 1, "base_lifecycle_revision": 2})),
+        Some(json!({"restore_as":"draft","base_revision": 1, "base_lifecycle_revision": 2})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{restored}");
@@ -635,7 +635,8 @@ async fn empty_v3_restore_allows_same_headwords_for_single_batch_and_locks(pool:
     let restoring = seed_v3_empty_skeleton(&pool, admin_id, &surface).await;
     archive_v3_entry(&state, &bearer, restoring).await;
     let _incumbent = seed_v3_empty_skeleton(&pool, admin_id, &surface).await;
-    let restore_body = json!({"base_revision": 1, "base_lifecycle_revision": 2});
+    let restore_body =
+        json!({"restore_as":"draft","base_revision": 1, "base_lifecycle_revision": 2});
     let (status, duplicate) = call(
         &state,
         Method::POST,
@@ -704,7 +705,7 @@ async fn empty_v3_restore_allows_same_headwords_for_single_batch_and_locks(pool:
         &format!("{ROOT}/entries/restore-batch"),
         &bearer,
         Some(Uuid::now_v7()),
-        Some(json!({
+        Some(json!({"restore_as":"draft",
             "entries": [
                 {"id": first, "base_revision": 1, "base_lifecycle_revision": 2},
                 {"id": second, "base_revision": 1, "base_lifecycle_revision": 2}
@@ -743,7 +744,8 @@ async fn v3_restore_requires_one_snapshot_then_audits_and_replays(pool: PgPool) 
     assert_eq!(status, StatusCode::OK, "{archived}");
     let collision_id = seed_v3_entry(&pool, admin_id).await;
 
-    let restore_body = json!({"base_revision": 1, "base_lifecycle_revision": 2});
+    let restore_body =
+        json!({"restore_as":"draft","base_revision": 1, "base_lifecycle_revision": 2});
     let key = Uuid::now_v7();
     let (status, required) = call(
         &state,
@@ -840,7 +842,8 @@ async fn v3_restore_stale_candidate_and_policy_epoch_fail_without_writes(pool: P
     .await;
     assert_eq!(status, StatusCode::OK, "{archived}");
     seed_v3_entry(&pool, admin_id).await;
-    let restore_body = json!({"base_revision": 1, "base_lifecycle_revision": 2});
+    let restore_body =
+        json!({"restore_as":"draft","base_revision": 1, "base_lifecycle_revision": 2});
     let key = Uuid::now_v7();
     let (status, required) = call(
         &state,
@@ -1014,4 +1017,455 @@ async fn v3_lifecycle_reads_the_projection_committed_under_the_entry_lock(pool: 
         archived["word"]["presentation"]["label"],
         "locked projection"
     );
+}
+
+#[sqlx::test]
+async fn publication_history_restores_only_a_draft_without_republishing(pool: PgPool) {
+    let state = AppState::for_test_with_smart_lexicon_v3_flags(
+        pool.clone(),
+        SmartLexiconV3Flags::all_enabled(),
+    );
+    let actor = seed_admin(&pool).await;
+    let bearer = bearer(&state, actor);
+    let (id, publication, snapshot) = seed_v3_history(&state, &pool, actor).await;
+    for path in [
+        format!("{ROOT}/entries/{id}/publications"),
+        format!("{ROOT}/entries/{id}/publications/{publication}"),
+    ] {
+        let (status, history) = call(&state, Method::GET, &path, &bearer, None, None).await;
+        assert_eq!(status, StatusCode::OK, "{history}");
+        let item = history
+            .get("publication")
+            .unwrap_or(&history["publications"][0]);
+        assert_eq!(item["is_current"], false);
+    }
+
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=$2 WHERE id=$1")
+        .bind(id)
+        .bind(publication)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO lexicon.surface_sources(entry_id,source_id,source_kind,source_node_id,language,entry_kind,dialect,dialect_scope,surface,normalized_surface,normalization_version,source_revision,is_deleted,content_scope,publication_id,pos_id,pos,form_type,content_schema_version,form_id,variant_id,group_ids,projection_version) SELECT entry_id,source_id,source_kind,source_node_id,language,entry_kind,dialect,dialect_scope,surface,normalized_surface,normalization_version,source_revision,is_deleted,'current_publication',$2,pos_id,pos,form_type,content_schema_version,form_id,variant_id,group_ids,projection_version FROM lexicon.surface_sources WHERE entry_id=$1 AND content_scope='draft'")
+        .bind(id).bind(publication).execute(&pool).await.unwrap();
+    let route = format!("{ROOT}/entries/{id}/publications/{publication}/restore-draft");
+    let input = json!({"schema_version":3,"base_revision":1,"base_lifecycle_revision":1});
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    let archived = archive_v3_entry(&state, &bearer, id).await;
+    let restore_body = json!({"restore_as":"draft","base_revision":1,"base_lifecycle_revision":archived["word"]["lifecycle_revision"]});
+    let (status, restored) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{id}/restore"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(restore_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["word"]["status"], "draft");
+    assert!(restored["word"].get("published_revision").is_none());
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM lexicon.surface_sources WHERE entry_id=$1 AND content_scope='current_publication' AND NOT is_deleted").bind(id).fetch_one(&pool).await.unwrap(),0);
+    sqlx::query("UPDATE lexicon.entry_editor_projection SET forms=jsonb_set(forms,'{pos,0,forms,0,regional_variants,common,spelling}','\"changed-draft\"'),rebuilt_revision=2 WHERE entry_id=$1").bind(id).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE lexicon.entry_presentation_projection SET source_revision=2 WHERE entry_id=$1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE lexicon.entries SET revision=2 WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let key = Uuid::now_v7();
+    let input = json!({"schema_version":3,"base_revision":2,"base_lifecycle_revision":3});
+    let (status, result) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer,
+        Some(key),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["word"]["status"], "draft");
+    assert_eq!(result["word"]["revision"], 3);
+    assert_eq!(result["word"]["lifecycle_revision"], 3);
+    assert_eq!(result["word"]["forms"], snapshot["forms"]);
+    assert_eq!(result["word"]["created_by"], actor.to_string());
+    let (status, replay) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer,
+        Some(key),
+        Some(input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay, result);
+    let (_, loaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(loaded["word"]["forms"], snapshot["forms"]);
+    assert_eq!(loaded["word"]["revision"], 3);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM lexicon.entry_publications WHERE entry_id=$1"
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert!(
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT current_publication_id FROM lexicon.entries WHERE id=$1"
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .is_none()
+    );
+}
+
+async fn seed_v3_history(state: &AppState, pool: &PgPool, actor: Uuid) -> (Uuid, Uuid, Value) {
+    use sha2::{Digest, Sha256};
+    let bearer = bearer(state, actor);
+    let id = seed_v3_entry(pool, actor).await;
+    let (_, historical) = call(
+        state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let publication = Uuid::now_v7();
+    let snapshot = historical["word"].clone();
+    let hash = Sha256::digest(serde_json::to_vec(&snapshot).unwrap()).to_vec();
+    sqlx::query("INSERT INTO lexicon.entry_publications(id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id) VALUES($1,$2,1,1,3,$3,$4,$5)")
+        .bind(publication).bind(id).bind(snapshot.clone()).bind(hash).bind(actor).execute(pool).await.unwrap();
+    (id, publication, snapshot)
+}
+
+#[sqlx::test]
+async fn historical_draft_restore_requires_action_and_scoped_ownership_even_on_replay(
+    pool: PgPool,
+) {
+    let state = AppState::for_test_with_smart_lexicon_v3_flags(
+        pool.clone(),
+        SmartLexiconV3Flags::all_enabled(),
+    );
+    let owner = seed_admin(&pool).await;
+    let other = seed_admin(&pool).await;
+    let (id, publication, _) = seed_v3_history(&state, &pool, owner).await;
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=ANY($1)")
+        .bind(vec![owner, other])
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (actor, keys) in [
+        (owner, vec!["words.access", "words.rollback"]),
+        (other, vec!["words.access", "words.edit_others"]),
+    ] {
+        for key in keys {
+            sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)").bind(actor).bind(key).execute(&pool).await.unwrap();
+        }
+    }
+    let route = format!("{ROOT}/entries/{id}/publications/{publication}/restore-draft");
+    let input = json!({"schema_version":3,"base_revision":1,"base_lifecycle_revision":1});
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer(&state, other),
+        Some(Uuid::now_v7()),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer(&state, owner),
+        Some(Uuid::now_v7()),
+        Some(input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["word"]["revision"], 2);
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'words.rollback',$1)").bind(other).execute(&pool).await.unwrap();
+    let key = Uuid::now_v7();
+    let input = json!({"schema_version":3,"base_revision":2,"base_lifecycle_revision":1});
+    let (status, restored) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer(&state, other),
+        Some(key),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["word"]["created_by"], owner.to_string());
+    let legacy = format!("{ROOT}/entries/{id}/publications/{publication}/rollback");
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &legacy,
+        &bearer(&state, owner),
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"base_revision":3,"base_lifecycle_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{rejected}");
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.edit_others'").bind(other).execute(&pool).await.unwrap();
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer(&state, other),
+        Some(key),
+        Some(input),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{rejected}");
+    let (status, stale) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer(&state, owner),
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"base_revision":2,"base_lifecycle_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    let forged = format!(
+        "{ROOT}/entries/{id}/publications/{}/restore-draft",
+        Uuid::now_v7()
+    );
+    let (status, missing) = call(
+        &state,
+        Method::POST,
+        &forged,
+        &bearer(&state, owner),
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"base_revision":3,"base_lifecycle_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM lexicon.entries WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        3
+    );
+}
+
+#[sqlx::test]
+async fn historical_draft_restore_rolls_back_every_write_when_projection_fails(pool: PgPool) {
+    let state = AppState::for_test_with_smart_lexicon_v3_flags(
+        pool.clone(),
+        SmartLexiconV3Flags::all_enabled(),
+    );
+    let actor = seed_admin(&pool).await;
+    let (id, publication, snapshot) = seed_v3_history(&state, &pool, actor).await;
+    sqlx::raw_sql("CREATE FUNCTION fail_restore_surface() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected restore projection failure'; END $$; CREATE TRIGGER fail_restore_surface BEFORE UPDATE OR INSERT ON lexicon.surface_sources FOR EACH ROW EXECUTE FUNCTION fail_restore_surface();").execute(&pool).await.unwrap();
+    let key = Uuid::now_v7();
+    let route = format!("{ROOT}/entries/{id}/publications/{publication}/restore-draft");
+    let (status, response) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer(&state, actor),
+        Some(key),
+        Some(json!({"schema_version":3,"base_revision":1,"base_lifecycle_revision":1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{response}");
+    let (_, loaded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer(&state, actor),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(loaded["word"]["forms"], snapshot["forms"]);
+    assert_eq!(loaded["word"]["revision"], 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM lexicon.nodes WHERE entry_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM platform.idempotency_records WHERE idempotency_key=$1"
+        )
+        .bind(key)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM audit.admin_actions WHERE resource_id=$1 AND action='lexicon.entry.draft.restore.v3'").bind(id).fetch_one(&pool).await.unwrap(),0);
+}
+
+#[sqlx::test]
+async fn historical_draft_restore_binds_confirmation_to_the_source_publication(pool: PgPool) {
+    use sha2::{Digest, Sha256};
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let actor = seed_admin(&pool).await;
+    let bearer = bearer(&state, actor);
+    let (id, publication, snapshot) = seed_v3_history(&state, &pool, actor).await;
+    seed_v3_entry(&pool, actor).await;
+    let other = Uuid::now_v7();
+    let mut second_snapshot = snapshot;
+    second_snapshot["annotation"] = json!("second history");
+    second_snapshot["revision"] = json!(2);
+    let hash = Sha256::digest(serde_json::to_vec(&second_snapshot).unwrap()).to_vec();
+    sqlx::query("INSERT INTO lexicon.entry_publications(id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id) VALUES($1,$2,2,2,3,$3,$4,$5)")
+        .bind(other).bind(id).bind(second_snapshot).bind(hash).bind(actor).execute(&pool).await.unwrap();
+    for query in [
+        "UPDATE lexicon.entries SET revision=3 WHERE id=$1",
+        "UPDATE lexicon.entry_editor_projection SET rebuilt_revision=3 WHERE entry_id=$1",
+        "UPDATE lexicon.entry_presentation_projection SET source_revision=3 WHERE entry_id=$1",
+    ] {
+        sqlx::query(query).bind(id).execute(&pool).await.unwrap();
+    }
+    let route = format!("{ROOT}/entries/{id}/publications/{publication}/restore-draft");
+    let input = json!({"schema_version":3,"base_revision":3,"base_lifecycle_revision":1});
+    let key = Uuid::now_v7();
+    let (status, required) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer,
+        Some(key),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{required}");
+    assert_eq!(required["code"], "surface_match_acknowledgement_required");
+    let mut confirmed = input;
+    confirmed["confirmed_surface_match_token"] =
+        required["meta"]["surface_match_page"]["surface_confirmation_token"].clone();
+    let (status, rejected) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/{id}/publications/{other}/restore-draft"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(confirmed.clone()),
+    )
+    .await;
+    assert!(status.is_client_error(), "{status}: {rejected}");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM lexicon.entries WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        3
+    );
+    let (status, restored) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer,
+        Some(key),
+        Some(confirmed.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["word"]["revision"], 4);
+    let (status, replay) = call(
+        &state,
+        Method::POST,
+        &route,
+        &bearer,
+        Some(key),
+        Some(confirmed),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay, restored);
+}
+
+#[sqlx::test]
+async fn concurrent_history_restores_accept_only_one_base_revision(pool: PgPool) {
+    let state = AppState::for_test_with_smart_lexicon_v3_flags(
+        pool.clone(),
+        SmartLexiconV3Flags::all_enabled(),
+    );
+    let actor = seed_admin(&pool).await;
+    let bearer = bearer(&state, actor);
+    let (id, publication, _) = seed_v3_history(&state, &pool, actor).await;
+    let route = format!("{ROOT}/entries/{id}/publications/{publication}/restore-draft");
+    let input = json!({"schema_version":3,"base_revision":1,"base_lifecycle_revision":1});
+    let (first, second) = tokio::join!(
+        call(
+            &state,
+            Method::POST,
+            &route,
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(input.clone())
+        ),
+        call(
+            &state,
+            Method::POST,
+            &route,
+            &bearer,
+            Some(Uuid::now_v7()),
+            Some(input)
+        ),
+    );
+    let mut statuses = [first.0, second.0];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::CONFLICT],
+        "{first:?}, {second:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM lexicon.entries WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM audit.admin_actions WHERE resource_id=$1 AND action='lexicon.entry.draft.restore.v3'").bind(id).fetch_one(&pool).await.unwrap(), 1);
 }

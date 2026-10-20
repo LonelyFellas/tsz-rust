@@ -28,7 +28,7 @@ impl LexiconRepository {
                    publication.snapshot,
                    publication.published_by_admin_id,
                    publication.published_at,
-                   entry.current_publication_id = publication.id AS is_current
+                   COALESCE(entry.current_publication_id = publication.id, FALSE) AS is_current
             FROM lexicon.entry_publications publication
             JOIN lexicon.entries entry ON entry.id = publication.entry_id
             WHERE publication.entry_id = $1
@@ -58,7 +58,7 @@ impl LexiconRepository {
                    publication.snapshot,
                    publication.published_by_admin_id,
                    publication.published_at,
-                   entry.current_publication_id = publication.id AS is_current
+                   COALESCE(entry.current_publication_id = publication.id, FALSE) AS is_current
             FROM lexicon.entry_publications publication
             JOIN lexicon.entries entry ON entry.id = publication.entry_id
             WHERE publication.entry_id = $1 AND publication.id = $2
@@ -419,66 +419,6 @@ impl LexiconRepository {
         .map_err(map_target_publication_lock_error)
     }
 
-    pub(crate) async fn unavailable_outbound_sense_refs_for_restore(
-        tx: &mut Transaction<'_, Postgres>,
-        source_entry_id: Uuid,
-        restoring_entry_ids: &[Uuid],
-    ) -> Result<Vec<InboundSenseReferenceRecord>, LexiconRepositoryError> {
-        sqlx::query_as::<_, InboundSenseReferenceRecord>(
-            r#"
-            SELECT sense_ref.target_sense_id,
-                   sense_ref.entry_id AS source_entry_id,
-                   sense_ref.publication_id AS source_publication_id,
-                   sense_ref.source_node_id,
-                   sense_ref.reference_kind
-            FROM lexicon.entry_publication_sense_refs sense_ref
-            JOIN lexicon.entries source_entry
-              ON source_entry.id = sense_ref.entry_id
-             AND source_entry.current_publication_id = sense_ref.publication_id
-            JOIN lexicon.entries target_entry
-              ON target_entry.id = sense_ref.target_entry_id
-            LEFT JOIN lexicon.entry_publication_nodes target_node
-              ON target_node.publication_id = target_entry.current_publication_id
-             AND target_node.entry_id = target_entry.id
-             AND target_node.node_id = sense_ref.target_sense_id
-             AND target_node.node_type = 'sense'
-            LEFT JOIN lexicon.nodes target_draft_node
-              ON target_draft_node.id = sense_ref.target_sense_id
-             AND target_draft_node.entry_id = target_entry.id
-             AND target_draft_node.node_type = 'sense'
-            WHERE sense_ref.entry_id = $1
-              AND (
-                   (
-                       target_entry.archived_at IS NOT NULL
-                       AND NOT (target_entry.id = ANY($2::uuid[]))
-                   )
-                   OR (
-                       sense_ref.reference_kind = 'sentence_context'
-                       AND target_node.node_id IS NULL
-                   )
-                   OR (
-                       -- 短语成分与关联词同款：目标词义既不在目标当前发布里、
-                       -- 草稿侧也已消失，这条出引用就悬空了。
-                       sense_ref.reference_kind IN ('relation', 'phrase_component', 'text_link')
-                       AND target_node.node_id IS NULL
-                       AND (
-                           target_draft_node.id IS NULL
-                           OR target_draft_node.removed_from_draft_at IS NOT NULL
-                       )
-                   )
-              )
-            ORDER BY sense_ref.target_sense_id,
-                     sense_ref.entry_id,
-                     sense_ref.source_node_id
-            "#,
-        )
-        .bind(source_entry_id)
-        .bind(restoring_entry_ids)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(LexiconRepositoryError::Database)
-    }
-
     pub(crate) async fn current_publication_relation_target_entry_ids(
         tx: &mut Transaction<'_, Postgres>,
         entry_ids: &[Uuid],
@@ -502,31 +442,6 @@ impl LexiconRepository {
         .fetch_all(&mut **tx)
         .await
         .map_err(LexiconRepositoryError::Database)
-    }
-
-    pub(crate) async fn lock_current_outbound_sense_ref_targets_for_entry(
-        tx: &mut Transaction<'_, Postgres>,
-        entry_id: Uuid,
-    ) -> Result<(), LexiconRepositoryError> {
-        sqlx::query_scalar::<_, Uuid>(
-            r#"
-            SELECT target_entry.id
-            FROM lexicon.entries source_entry
-            JOIN lexicon.entry_publication_sense_refs sense_ref
-              ON sense_ref.publication_id = source_entry.current_publication_id
-             AND sense_ref.entry_id = source_entry.id
-            JOIN lexicon.entries target_entry
-              ON target_entry.id = sense_ref.target_entry_id
-            WHERE source_entry.id = $1
-            ORDER BY target_entry.id
-            FOR SHARE OF target_entry NOWAIT
-            "#,
-        )
-        .bind(entry_id)
-        .fetch_all(&mut **tx)
-        .await
-        .map(|_| ())
-        .map_err(map_target_publication_lock_error)
     }
 
     /// 发布时核验草稿范围的目标词义（正文关联与短语成分共用）：目标词条行 `FOR SHARE NOWAIT` 锁住，

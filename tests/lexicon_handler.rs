@@ -140,7 +140,7 @@ async fn seed_admin_with_role(pool: &PgPool, role: AdminRole) -> Uuid {
         .await
         .expect("seed admin 应成功");
     if ordinary {
-        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest(ARRAY['words.access','words.create','words.edit','words.associate','words.publish','words.archive','words.restore','words.rollback','words.detect','words.validate','sentences.access','sentences.create','sentences.edit','sentences.associate','sentences.publish','sentences.withdraw','sentences.restore','sentences.rollback','speech.generate']), $1")
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) SELECT $1, unnest(ARRAY['words.access','words.create','words.edit','words.associate','words.publish','words.archive','words.restore','words.rollback','sentences.access','sentences.create','sentences.edit','sentences.associate','sentences.publish','sentences.withdraw','sentences.restore','sentences.rollback','speech.generate']), $1")
             .bind(id).execute(pool).await.unwrap();
     }
     id
@@ -2248,7 +2248,7 @@ async fn v3_grammar_form_links_save_first_pronunciation_and_clear(pool: PgPool) 
     assert_eq!(status, StatusCode::OK, "{archived_source}");
     let (status, archived_target) = call(&state, Method::POST, &format!("{ROOT}/entries/{entry_id}/archive"), &bearer, Some(Uuid::now_v7()), Some(json!({"base_revision": target_changed["word"]["revision"], "base_lifecycle_revision": target_changed["word"]["lifecycle_revision"]}))).await;
     assert_eq!(status, StatusCode::OK, "{archived_target}");
-    let (status, blocked_restore) = call(&state, Method::POST, &format!("{ROOT}/entries/{source_id}/restore"), &bearer, Some(Uuid::now_v7()), Some(json!({"base_revision": archived_source["word"]["revision"], "base_lifecycle_revision": archived_source["word"]["lifecycle_revision"]}))).await;
+    let (status, blocked_restore) = call(&state, Method::POST, &format!("{ROOT}/entries/{source_id}/restore"), &bearer, Some(Uuid::now_v7()), Some(json!({"restore_as":"draft","base_revision": archived_source["word"]["revision"], "base_lifecycle_revision": archived_source["word"]["lifecycle_revision"]}))).await;
     assert_eq!(
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -5119,36 +5119,39 @@ async fn v3_real_http_create_edit_read_validate_and_native_publish(pool: PgPool)
         &format!("{ROOT}/entries/{entry_id}/restore"),
         &bearer,
         Some(Uuid::now_v7()),
-        Some(json!({
+        Some(json!({"restore_as":"draft",
             "base_revision": second_published["word"]["revision"],
             "base_lifecycle_revision": lifecycle_revision
         })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{restored}");
-    assert_eq!(restored["word"]["status"], "published");
+    assert_eq!(restored["word"]["status"], "draft");
     assert_eq!(
         restored["word"]["lifecycle_revision"],
         lifecycle_revision + 1
     );
-    let current_after_restore: Uuid =
+    let current_after_restore: Option<Uuid> =
         sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id = $1")
             .bind(entry_uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_ne!(current_after_restore, second_publication_id);
-    let source: Uuid = sqlx::query_scalar(
-        "SELECT rollback_of_publication_id FROM lexicon.entry_publications WHERE id=$1",
-    )
-    .bind(current_after_restore)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(source, second_publication_id);
+    assert!(current_after_restore.is_none());
+    assert!(
+        live_surface_publication_ids(&pool, entry_uuid)
+            .await
+            .is_empty()
+    );
     assert_eq!(
-        live_surface_publication_ids(&pool, entry_uuid).await,
-        vec![current_after_restore]
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM lexicon.entry_publications WHERE entry_id=$1"
+        )
+        .bind(entry_uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        4
     );
 }
 
@@ -6978,7 +6981,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
         &format!("{ROOT}/entries/{entry_id}/restore"),
         &bearer,
         Some(Uuid::now_v7()),
-        Some(json!({
+        Some(json!({"restore_as":"draft",
             "base_revision": archived["word"]["revision"],
             "base_lifecycle_revision": archived["word"]["lifecycle_revision"]
         })),
@@ -6987,7 +6990,7 @@ async fn v3_phrase_detection_and_creation_use_native_aggregate(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "{restored}");
     assert_eq!(restored["word"]["schema_version"], 3);
     assert_eq!(restored["word"]["kind"], "phrase");
-    assert_eq!(restored["word"]["status"], "published");
+    assert_eq!(restored["word"]["status"], "draft");
 
     let (status, list) = call(
         &state,
@@ -8513,36 +8516,35 @@ async fn v3_sense_phrase_component_refs_guard_target_sense_removal_and_restore(p
     let (status, word_republished) = publish_ready_v3(&state, &bearer, &word_resaved).await;
     assert_eq!(status, StatusCode::CREATED, "{word_republished}");
 
-    // 恢复短语时它的当前发布仍指着一条已消失的词义——出站守卫必须认得成分引用。
+    // 垃圾桶只恢复草稿；旧发布中的失效成分不得自动公开，重新发布仍须校验。
     let (status, restore_blocked) = call(
         &state,
         Method::POST,
         &format!("{ROOT}/entries/{phrase_entry_id}/restore"),
         &bearer,
         Some(Uuid::now_v7()),
-        Some(json!({
+        Some(json!({"restore_as":"draft",
             "base_revision": phrase_archived["word"]["revision"],
             "base_lifecycle_revision": phrase_archived["word"]["lifecycle_revision"]
         })),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "成分目标词义已消失时不得恢复：{restore_blocked}"
-    );
-    assert_eq!(
-        restore_blocked["code"],
-        "entry_has_unavailable_publication_refs"
-    );
+    assert_eq!(status, StatusCode::OK, "{restore_blocked}");
+    assert_eq!(restore_blocked["word"]["status"], "draft");
     assert!(
-        restore_blocked["meta"]["reference_locations"]
-            .as_array()
-            .is_some_and(|locations| locations
-                .iter()
-                .any(|location| location["reference_kind"] == "phrase_component"
-                    && location["source_node_id"] == component_id.to_string())),
-        "出站守卫必须点名那条成分引用：{restore_blocked}"
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT current_publication_id FROM lexicon.entries WHERE id=$1"
+        )
+        .bind(Uuid::parse_str(&phrase_entry_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let (status, blocked_publish) = publish_ready_v3(&state, &bearer, &restore_blocked).await;
+    assert!(
+        status.is_client_error(),
+        "失效成分必须在重新发布时拒绝：{blocked_publish}"
     );
 }
 
@@ -13749,7 +13751,7 @@ async fn v3_draft_saves_ignore_references_already_stale_in_saved_content(pool: P
         &format!("{ROOT}/entries/{source_uuid}/restore"),
         &bearer,
         Some(Uuid::now_v7()),
-        Some(json!({
+        Some(json!({"restore_as":"draft",
             "base_revision": source_revision,
             "base_lifecycle_revision": source_lifecycle_revision
         })),

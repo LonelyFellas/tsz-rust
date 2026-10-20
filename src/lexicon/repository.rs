@@ -45,7 +45,7 @@ mod surfaces;
 
 use entries::*;
 use projections::*;
-pub(crate) use surface_writes::{SurfaceLockKey, SurfaceProjectionSource, surface_lock_keys};
+pub(crate) use surface_writes::{SurfaceLockKey, surface_lock_keys};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LexiconRepositoryError {

@@ -403,7 +403,7 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "POST",
         "/lexicon/detections",
-        RoutePolicy::Any(&["words.create", "words.detect"]),
+        RoutePolicy::Any(&["words.create"]),
     ),
     (
         "POST",
@@ -413,12 +413,12 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "POST",
         "/lexicon/entries/{id}/steps/forms/impact",
-        RoutePolicy::Any(&["words.edit", "words.publish", "words.validate"]),
+        RoutePolicy::Any(&["words.create", "words.edit", "words.publish"]),
     ),
     (
         "POST",
         "/lexicon/entries/{id}/validate",
-        RoutePolicy::Any(&["words.edit", "words.publish", "words.validate"]),
+        RoutePolicy::Any(&["words.create", "words.edit", "words.publish"]),
     ),
     (
         "POST",
@@ -458,6 +458,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "POST",
         "/lexicon/entries/{id}/publications/{publication_id}/rollback",
+        RoutePolicy::All(&["words.publish", "words.rollback"]),
+    ),
+    (
+        "POST",
+        "/lexicon/entries/{id}/publications/{publication_id}/restore-draft",
         RoutePolicy::All(&["words.rollback"]),
     ),
     (
