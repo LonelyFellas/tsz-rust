@@ -229,6 +229,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ("GET", "/permission-audits", RoutePolicy::SuperAdmin),
     (
         "GET",
+        "/users/{id}/registration-region",
+        RoutePolicy::All(&["users.read_registration_region"]),
+    ),
+    (
+        "GET",
         "/users/{id}/coin-wallet",
         RoutePolicy::All(&["users.read_coin_balance"]),
     ),

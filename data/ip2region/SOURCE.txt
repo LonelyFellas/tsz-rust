@@ -1,0 +1,65 @@
+Offline registration-city database
+==================================
+
+Upstream: https://github.com/lionsoul2014/ip2region
+Pinned commit: f8b0792b0cd729f5b2593f690aeed225e49c1967
+Retrieved: 2026-10-20
+License: Apache-2.0 OR MIT; complete upstream text is LICENSE.ip2region.
+
+Both XDB files are unmodified upstream data, wrapped in deterministic gzip
+(compression level 9, mtime 0, no filename). They are embedded in the executable;
+there is no runtime download, third-party request, data path, or deployment setting.
+The application lazily decompresses each address family once and verifies its
+uncompressed size and SHA-256 before allowing queries. A checksum/format failure
+is an initialization/lookup failure, never a silent unknown city.
+
+IPv4:
+  Source: https://raw.githubusercontent.com/lionsoul2014/ip2region/f8b0792b0cd729f5b2593f690aeed225e49c1967/data/ip2region_v4.xdb
+  Uncompressed bytes: 11122642
+  Uncompressed SHA-256: 27ecba8c9a6d5e3b280aedbe7ee15c65372b179fbd0dad3845d8c608f2fcace1
+  Compressed file: ip2region_v4.xdb.gz
+  Compressed bytes: 4269584
+  Compressed SHA-256: 39ff3a72f06dc4599a5d1a9cfbe67f20fe4271d126eef3f3addd76a8804bb98f
+
+IPv6:
+  Source: https://raw.githubusercontent.com/lionsoul2014/ip2region/f8b0792b0cd729f5b2593f690aeed225e49c1967/data/ip2region_v6.xdb
+  Uncompressed bytes: 37277813
+  Uncompressed SHA-256: 939f6b46bd2b8bec3cf7c5ceb8ba782266ae9b1f35b5ba7916700dec0b7506ed
+  Compressed file: ip2region_v6.xdb.gz
+  Compressed bytes: 7258475
+  Compressed SHA-256: 48c178c003219495e7df5b85c2fbf26d8ec4ac9f289664905763215c18335ae9
+
+The pinned files use XDB format 3, with 14-byte IPv4 and 38-byte IPv6 index
+segments, 4-byte little-endian data pointers, little-endian IPv4 addresses, and
+network-order IPv6 addresses. Region fields are:
+  country|province|city|ISP|country_code
+They are not the older country|region|province|city|ISP layout.
+
+City semantics: use only the city field and remove a trailing Chinese 市.
+An empty/0 city is unknown, except explicit Beijing/Shanghai/Tianjin/Chongqing
+province fields may supply the municipality. Do not infer other cities from
+provinces. Reserved, invalid and non-public addresses have no city. IP-derived
+location is approximate and is not proof of a user's residence.
+
+Reproduction from separately downloaded upstream files (run outside downloads):
+  python -I -c 'import gzip,pathlib,sys; pathlib.Path(sys.argv[2]).write_bytes(gzip.compress(pathlib.Path(sys.argv[1]).read_bytes(),compresslevel=9,mtime=0))' SOURCE_XDB OUTPUT_GZ
+
+Pinned reader
+=============
+
+Official Rust binding: ip2region 0.2.1
+Source: https://github.com/lionsoul2014/ip2region/tree/f8b0792b0cd729f5b2593f690aeed225e49c1967/binding/rust/ip2region
+Cargo pins the Git revision to the same commit as the database; Cargo.lock records
+all dependencies. No local copy or patched reader is maintained.
+
+The official Searcher accepts a file path. During one-time initialization the
+verified embedded data is written to a securely created temporary file, the
+FullMemory cache is populated through vector_index(), and the temporary file is
+removed. Subsequent searches use the initialized memory cache only. Tests verify
+lookups after removal, IPv4/IPv6 city samples, and reserved ranges.
+
+Regression samples are public service addresses (Baidu 180.76.76.76,
+123.125.114.144; Shanghai Telecom 180.163.0.1; AliDNS 223.5.5.5 and
+2400:3200::1) plus public allocations in the pinned IPv6 database:
+2001:250:: (Beijing), 2001:250:600f:: (Shanghai), 2001:da8:e00e:: (Hangzhou).
+No user addresses or account data are included.

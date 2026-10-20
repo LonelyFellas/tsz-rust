@@ -303,6 +303,15 @@ pub const CATALOG: &[PermissionDefinition] = &[
         "high"
     ),
     permission!(
+        "users.read_registration_region",
+        "users",
+        "查看用户注册地区",
+        "查看注册 IP 对应的城市，不包含原始 IP 地址",
+        "action",
+        ["users.access"],
+        "high"
+    ),
+    permission!(
         "users.read_sensitive",
         "users",
         "查看用户电话和邮箱",
@@ -596,6 +605,32 @@ mod tests {
             "有权请求生成新的语音合成音频，以供预览，该操作会产生语音服务费用。"
         );
         assert_eq!(permission.requires, &["words.access"]);
+    }
+
+    #[test]
+    fn registration_region_permission_is_independent_and_revoked_with_user_access() {
+        let mut keys = BTreeSet::from(["users.read_registration_region".to_owned()]);
+        expand_grants(&mut keys);
+        assert_eq!(
+            keys,
+            BTreeSet::from([
+                "users.access".to_owned(),
+                "users.read_registration_region".to_owned(),
+            ])
+        );
+        let preview = crate::admin::permissions::service::preview_change(
+            uuid::Uuid::nil(),
+            0,
+            &keys,
+            &[],
+            &["users.access".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            preview.dependency_revocations,
+            vec!["users.read_registration_region"]
+        );
+        assert!(preview.after.is_empty());
     }
 
     #[test]

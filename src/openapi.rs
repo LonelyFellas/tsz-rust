@@ -114,6 +114,7 @@ use utoipa::{
         crate::account_deletion::handler::get,
         crate::account_deletion::handler::create,
         crate::account_deletion::handler::cancel,
+        crate::admin::accounts::user_resources::registration_region,
         crate::admin::accounts::user_resources::wallet,
         crate::admin::accounts::user_resources::entries,
         crate::admin::accounts::user_resources::identity_documents,

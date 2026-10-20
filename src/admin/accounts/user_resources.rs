@@ -35,6 +35,63 @@ async fn authorize(
     Ok(())
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationRegionStatus {
+    Resolved,
+    NotRecorded,
+    Unknown,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UserRegistrationRegion {
+    #[schema(required = true)]
+    pub city: Option<String>,
+    pub status: RegistrationRegionStatus,
+}
+
+#[utoipa::path(get, path="/api/v1/admin/users/{id}/registration-region", tag="admin-users", security(("bearer_auth"=[])),
+params(("id"=Uuid,Path)), responses((status=200,body=UserRegistrationRegion),(status=403),(status=404)))]
+pub async fn registration_region(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<UserRegistrationRegion>, AppError> {
+    permissions::load(&state, &auth)
+        .await?
+        .require("users.read_registration_region")?;
+    let ip =
+        sqlx::query_scalar::<_, Option<String>>("SELECT registration_ip FROM users WHERE id=$1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(AppError::internal)?
+            .ok_or_else(|| AppError::not_found("用户不存在"))?;
+    let response = match ip {
+        None => UserRegistrationRegion {
+            city: None,
+            status: RegistrationRegionStatus::NotRecorded,
+        },
+        Some(ip) => {
+            let city =
+                tokio::task::spawn_blocking(move || super::registration_region_lookup::city(&ip))
+                    .await
+                    .map_err(AppError::internal)?;
+            let status = if city.is_some() {
+                RegistrationRegionStatus::Resolved
+            } else {
+                RegistrationRegionStatus::Unknown
+            };
+            UserRegistrationRegion { city, status }
+        }
+    };
+    permissions::reload(&state, &auth)
+        .await?
+        .require("users.read_registration_region")?;
+    Ok(Json(response))
+}
+
 #[utoipa::path(get, path="/api/v1/admin/users/{id}/coin-wallet", tag="admin-users", security(("bearer_auth"=[])),
 params(("id"=Uuid,Path)), responses((status=200,body=CoinWallet),(status=403),(status=404)))]
 pub async fn wallet(

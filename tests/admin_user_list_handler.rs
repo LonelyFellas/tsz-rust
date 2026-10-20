@@ -330,7 +330,12 @@ async fn list_only_permission_does_not_disclose_basic_profile_or_filter_roles(po
             .0,
         StatusCode::FORBIDDEN
     );
-    for path in ["coin-wallet", "coin-entries", "identity-documents"] {
+    for path in [
+        "coin-wallet",
+        "coin-entries",
+        "identity-documents",
+        "registration-region",
+    ] {
         assert_eq!(
             get(
                 &state,
@@ -384,4 +389,90 @@ async fn list_only_permission_does_not_disclose_basic_profile_or_filter_roles(po
         .0,
         StatusCode::NOT_FOUND
     );
+}
+
+#[sqlx::test]
+async fn registration_region_requires_its_own_permission_and_never_exposes_ip(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool).await;
+    let user = seed_user(&pool, "地区用户", &["student"]).await;
+    let bearer = admin_token(&state, admin);
+    let path = format!("/api/v1/admin/users/{user}/registration-region");
+    sqlx::query("UPDATE users SET registration_ip='220.181.38.148' WHERE id=$1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(get(&state, &path, &bearer).await.0, StatusCode::FORBIDDEN);
+    // 地区读取不依赖基本资料或联系方式的授权。
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key <> 'users.access'")
+        .bind(admin).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.read_registration_region',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = get(&state, &path, &bearer).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        serde_json::json!({
+            "city": "北京", "status": "resolved"
+        })
+    );
+    for uri in [
+        "/api/v1/admin/users".to_owned(),
+        format!("/api/v1/admin/users/{user}"),
+    ] {
+        let (status, body) = get(&state, &uri, &bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.contains("220.181.38.148"));
+        assert!(!body.contains("registration_ip"));
+        assert!(!body.contains("北京"));
+    }
+    assert_eq!(
+        get(
+            &state,
+            &format!("/api/v1/admin/users/{}/registration-region", Uuid::now_v7()),
+            &bearer
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_registration_region'")
+        .bind(admin).execute(&pool).await.unwrap();
+    assert_eq!(get(&state, &path, &bearer).await.0, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn registration_region_distinguishes_missing_ip_from_unknown_city(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.read_registration_region',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    let user = seed_user(&pool, "历史用户", &["student"]).await;
+    let path = format!("/api/v1/admin/users/{user}/registration-region");
+    let bearer = admin_token(&state, admin);
+    let (status, body) = get(&state, &path, &bearer).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        serde_json::json!({
+            "city": null, "status": "not_recorded"
+        })
+    );
+    for ip in ["127.0.0.1", "192.168.1.1", "invalid"] {
+        sqlx::query("UPDATE users SET registration_ip=$2 WHERE id=$1")
+            .bind(user)
+            .bind(ip)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, body) = get(&state, &path, &bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            serde_json::json!({
+                "city": null, "status": "unknown"
+            })
+        );
+    }
 }
