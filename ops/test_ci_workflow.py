@@ -17,6 +17,12 @@ class CiWorkflowTests(unittest.TestCase):
             self._job("quality"),
         )
 
+    def test_git_hook_regressions_run_in_quality(self) -> None:
+        self.assertIn(
+            "python3 -m unittest ops/test_rule_doc_hook.py ops/test_pre_push_hook.py",
+            self._job("quality"),
+        )
+
     def test_ci07_integration_matrix_is_parallel_and_complete(self) -> None:
         integration = self._job("integration")
 

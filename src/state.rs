@@ -111,49 +111,18 @@ impl AppState {
     /// 再驱动 handler 走真实 `verify`。这里保留注入能力，以便测试任意验证码与异常分支，
     /// 不与 `OtpSender::Mock` 当前使用的固定码耦合。
     pub fn for_test_with_otp_store(pool: PgPool) -> (Self, OtpStore) {
-        let redis_url = std::env::var("TEST_REDIS_URL")
-            .unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned());
-        let redis = deadpool_redis::Config::from_url(redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("测试 redis pool 应能创建（惰性）");
+        let mut state = Self::for_test(pool);
         let prefix = format!("test:{}:", Uuid::now_v7());
         // 同一 prefix 造两个 handle：store 给测试注入码、service 给 handler verify——同 keyspace 才对得上。
-        let store = OtpStore::with_prefix(redis.clone(), prefix.clone());
-        let otp_service = Arc::new(OtpService::new(
-            OtpStore::with_prefix(redis.clone(), prefix),
+        let store = OtpStore::with_prefix(state.redis.clone(), prefix.clone());
+        state.otp_service = Arc::new(OtpService::new(
+            OtpStore::with_prefix(state.redis.clone(), prefix),
             OtpSender::Mock,
             StdDuration::from_secs(60),
             10,
             StdDuration::from_secs(300),
             5,
         ));
-        let state = Self {
-            pool,
-            cookie_secure: false,
-            invitation_reward_amount: None,
-            login_reward_enabled: false,
-            token_manager: Arc::new(TokenManager::new(
-                "test-secret",
-                Realm::Web,
-                Duration::minutes(15),
-            )),
-            admin_token_manager: Arc::new(TokenManager::new(
-                "test-admin-secret",
-                Realm::Admin,
-                Duration::minutes(15),
-            )),
-            related_search_cursor_key: Arc::from(b"test-related-search-cursor-key".as_slice()),
-            refresh_ttl: Duration::days(30),
-            admin_refresh_ttl: Duration::days(7),
-            redis,
-            surface_policy_prefix: format!("test:{}:lexicon:surface-policy:", Uuid::now_v7()),
-            otp_service,
-            object_storage: StorageRegistry::empty(),
-            test_resources: None,
-            avatar_public_base_url: None,
-            speech_provider: None,
-            smart_lexicon_v3_flags: SmartLexiconV3Flags::all_disabled(),
-        };
         (state, store)
     }
 }
@@ -201,13 +170,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_defaults_every_smart_lexicon_v3_flag_to_disabled() {
-        let state = AppState::for_test(lazy_pool());
-
-        assert_eq!(
-            smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
-            [false; 5]
-        );
-        assert!(!state.smart_lexicon_v3_flags.draft_relation_prebinding);
+        let (otp_state, _) = AppState::for_test_with_otp_store(lazy_pool());
+        for state in [AppState::for_test(lazy_pool()), otp_state] {
+            assert_eq!(
+                smart_lexicon_v3_flag_values(state.smart_lexicon_v3_flags),
+                [false; 5]
+            );
+            assert!(!state.smart_lexicon_v3_flags.draft_relation_prebinding);
+        }
     }
 
     #[tokio::test]
