@@ -390,6 +390,93 @@ async fn plain_admin_can_read_user_detail(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn learning_settings_are_preserved_by_detail_and_updates_and_require_basic_permission(
+    pool: PgPool,
+) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool, AdminRole::Admin).await;
+    let user = seed_user(&pool, "已配置学生", &["student"]).await;
+    let bearer = token(&state, admin, AdminRole::Admin);
+    let uri = format!("/api/v1/admin/users/{user}");
+    sqlx::query(
+        "INSERT INTO student_profiles (user_id, cefr_level, english_variant) VALUES ($1, 'B2', 'AmE')",
+    )
+    .bind(user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.edit',$1),($1,'users.set_status',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+
+    for (method, path, body) in [
+        ("GET", uri.clone(), None),
+        (
+            "PATCH",
+            uri.clone(),
+            Some(json!({"display_name": "新昵称"})),
+        ),
+        (
+            "PATCH",
+            format!("{uri}/status"),
+            Some(json!({"status": "disabled"})),
+        ),
+    ] {
+        let (status, body) = request(&state, method, &path, Some(&bearer), body).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let response: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            response.get("learning_settings"),
+            Some(&json!({"cefr_level": "B2", "english_variant": "AmE"})),
+            "{body}"
+        );
+    }
+
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_basic'")
+        .bind(admin).execute(&pool).await.unwrap();
+    for (method, body) in [
+        ("GET", None),
+        ("PATCH", Some(json!({"display_name": "仍可改昵称"}))),
+    ] {
+        let (status, body) = request(&state, method, &uri, Some(&bearer), body).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let response: Value = serde_json::from_str(&body).unwrap();
+        assert!(response.get("learning_settings").is_none(), "{body}");
+    }
+}
+
+#[sqlx::test]
+async fn detail_returns_null_for_missing_or_unconfigured_learning_settings(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool, AdminRole::Admin).await;
+    let bearer = token(&state, admin, AdminRole::Admin);
+    let missing = seed_user(&pool, "无学生资料", &["student"]).await;
+    let unconfigured = seed_user(&pool, "未配置学习设置", &["student"]).await;
+    sqlx::query("INSERT INTO student_profiles (user_id) VALUES ($1)")
+        .bind(unconfigured)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for user in [missing, unconfigured] {
+        let (status, body) = request(
+            &state,
+            "GET",
+            &format!("/api/v1/admin/users/{user}"),
+            Some(&bearer),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let response: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            response.get("learning_settings"),
+            Some(&Value::Null),
+            "{body}"
+        );
+    }
+}
+
+#[sqlx::test]
 async fn teacher_verification_is_preserved_by_detail_and_updates(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin = seed_admin(&pool, AdminRole::SuperAdmin).await;

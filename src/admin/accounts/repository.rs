@@ -65,8 +65,9 @@ impl AdminAccountsRepository {
             SELECT u.id, NULL::text AS phone, NULL::text AS email, u.display_name, u.avatar_url, u.status,
                 ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id ORDER BY CASE r.role WHEN 'student' THEN 1 ELSE 2 END) AS roles,
                 EXISTS(SELECT 1 FROM teacher_profiles p WHERE p.user_id = u.id AND p.verified) AS teacher_verified,
-                u.created_at, u.updated_at
+                sp.cefr_level, sp.english_variant, u.created_at, u.updated_at
             FROM users u
+            LEFT JOIN student_profiles sp ON sp.user_id = u.id
             WHERE ($1::text IS NULL OR EXISTS(SELECT 1 FROM user_roles r WHERE r.user_id = u.id AND r.role = $1))
               AND ($2::text IS NULL OR u.display_name ILIKE $2 ESCAPE '\')
               AND ($3::timestamptz IS NULL OR u.created_at >= $3)
@@ -95,8 +96,10 @@ impl AdminAccountsRepository {
             )
             SELECT u.*,
                 ARRAY(SELECT r.role FROM user_roles r WHERE r.user_id = u.id ORDER BY CASE r.role WHEN 'student' THEN 1 ELSE 2 END) AS roles,
-                EXISTS(SELECT 1 FROM teacher_profiles p WHERE p.user_id = u.id AND p.verified) AS teacher_verified
+                EXISTS(SELECT 1 FROM teacher_profiles p WHERE p.user_id = u.id AND p.verified) AS teacher_verified,
+                sp.cefr_level, sp.english_variant
             FROM updated u
+            LEFT JOIN student_profiles sp ON sp.user_id = u.id
         "#).bind(id).bind(status.map(|value| value.as_str())).bind(display_name)
             .fetch_optional(&mut **tx).await.map_err(AdminAccountsRepositoryError::Database)
     }

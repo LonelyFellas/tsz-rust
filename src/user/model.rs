@@ -198,6 +198,8 @@ pub(crate) struct UserListRecord {
     pub avatar_url: String,
     pub roles: Vec<UserRole>,
     pub teacher_verified: bool,
+    pub cefr_level: Option<CefrLevel>,
+    pub english_variant: Option<EnglishVariant>,
     pub status: UserStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
