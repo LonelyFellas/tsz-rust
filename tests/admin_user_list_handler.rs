@@ -208,6 +208,53 @@ async fn user_list_uses_admin_users_path_and_documents_contract(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn user_list_reads_learning_settings_and_requires_basic_permission(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool).await;
+    let configured = seed_user(&pool, "已配置", &["student"]).await;
+    let unconfigured = seed_user(&pool, "未配置", &["student"]).await;
+    let no_profile = seed_user(&pool, "无学生资料", &["teacher"]).await;
+    sqlx::query("INSERT INTO student_profiles (user_id, cefr_level, english_variant) VALUES ($1, 'C1', 'BrE'), ($2, NULL, NULL)")
+        .bind(configured).bind(unconfigured).execute(&pool).await.unwrap();
+    let bearer = admin_token(&state, admin);
+
+    for read_sensitive in [true, false] {
+        if !read_sensitive {
+            sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_sensitive'")
+                .bind(admin).execute(&pool).await.unwrap();
+        }
+        let (status, body) = get(&state, "/api/v1/admin/users", &bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let response: Value = serde_json::from_str(&body).unwrap();
+        let items = response["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3, "{body}");
+        for (id, expected) in [
+            (
+                configured,
+                serde_json::json!({"cefr_level": "C1", "english_variant": "BrE"}),
+            ),
+            (unconfigured, Value::Null),
+            (no_profile, Value::Null),
+        ] {
+            let item = items
+                .iter()
+                .find(|item| item["id"] == id.to_string())
+                .unwrap();
+            assert_eq!(item.get("learning_settings"), Some(&expected), "{item}");
+        }
+    }
+
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_basic'")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = get(&state, "/api/v1/admin/users", &bearer).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    for item in response["items"].as_array().unwrap() {
+        assert!(item.get("learning_settings").is_none(), "{item}");
+    }
+}
+
+#[sqlx::test]
 async fn user_list_reads_teacher_verification_without_inferring_from_roles(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin = seed_admin(&pool).await;

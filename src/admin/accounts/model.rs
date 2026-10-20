@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     admin::{AdminRole, AdminStatus},
     api::{ListQuery, PaginatedResponse},
-    user::model::{UserRole, UserStatus},
+    user::model::{LearningSettings, UserRole, UserStatus},
 };
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -52,6 +52,9 @@ pub struct AdminAccountUserResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub teacher_verified: Option<bool>,
+    /// 仅对 users.read_basic 可见；尚未配置学习设置时为 null，无权限时省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learning_settings: Option<Option<LearningSettings>>,
     /// 仅对 users.read_basic 可见。
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]

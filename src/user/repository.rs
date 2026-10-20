@@ -3,7 +3,10 @@ use uuid::Uuid;
 
 use crate::{
     platform::{EmailError, PhoneError, is_unique_violation},
-    user::model::{LearningSettings, User, UserListFilter, UserListRecord, UserRole, UserStatus},
+    user::model::{
+        CefrLevel, EnglishVariant, LearningSettings, User, UserListFilter, UserListRecord,
+        UserRole, UserStatus,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -311,9 +314,12 @@ impl UserRepository {
                 EXISTS (
                     SELECT 1 FROM teacher_profiles tp WHERE tp.user_id = u.id AND tp.verified
                 ) AS "teacher_verified!",
+                sp.cefr_level AS "cefr_level?: CefrLevel",
+                sp.english_variant AS "english_variant?: EnglishVariant",
                 u.created_at,
                 u.updated_at
             FROM users u
+            LEFT JOIN student_profiles sp ON sp.user_id = u.id
             WHERE u.id = $1
             "#,
             id,
@@ -390,9 +396,12 @@ impl UserRepository {
                 EXISTS (
                     SELECT 1 FROM teacher_profiles tp WHERE tp.user_id = a.id AND tp.verified
                 ) AS teacher_verified,
+                sp.cefr_level,
+                sp.english_variant,
                 a.created_at,
                 a.updated_at
             FROM users a
+            LEFT JOIN student_profiles sp ON sp.user_id = a.id
             WHERE (
                     $1::text IS NULL
                     OR EXISTS (
