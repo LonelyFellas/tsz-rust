@@ -6285,6 +6285,113 @@ async fn v3_create_materializes_builtin_and_existing_pos_suggestions(pool: PgPoo
 }
 
 #[sqlx::test]
+async fn list_filters_separate_headwords_and_creators_and_keep_totals(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let first = seed_admin(&pool).await;
+    let second = seed_admin(&pool).await;
+    sqlx::query("UPDATE admins SET display_name='shared-creator' WHERE id=ANY($1)")
+        .bind(vec![first, second])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let first_token = token(&state, first);
+    let second_token = token(&state, second);
+    let alpha = create_legacy_v3_empty_skeleton(&state, &first_token, "alpha").await;
+    create_legacy_v3_empty_skeleton(&state, &first_token, "beta").await;
+    create_legacy_v3_empty_skeleton(&state, &second_token, "alphabet").await;
+    let reader = seed_admin_with_role(&pool, AdminRole::Admin).await;
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key<>'words.access'",
+    )
+    .bind(reader)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let bearer = token(&state, reader);
+
+    for (query, expected) in [
+        ("q=shared-creator".to_owned(), 3),
+        ("headword=shared-creator".to_owned(), 0),
+        ("headword=alpha".to_owned(), 2),
+        (format!("headword=alpha&created_by={first}"), 1),
+        (format!("headword=beta&created_by={second}"), 0),
+        (format!("created_by={first}"), 2),
+        (
+            format!("headword=alpha&created_by={first}&page=2&page_size=1"),
+            1,
+        ),
+    ] {
+        let (status, list) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries?{query}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{query}: {list}");
+        assert_eq!(list["page"]["total"], expected, "{query}: {list}");
+        if query.contains("page=2") {
+            assert_eq!(list["words"], json!([]), "{list}");
+        } else if query.starts_with("headword=alpha&created_by=") {
+            assert_eq!(list["words"][0]["id"], alpha.to_string());
+        }
+    }
+    sqlx::query("UPDATE admins SET status='disabled' WHERE id=$1")
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, creators) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/creators"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{creators}");
+    let options = creators.as_array().unwrap();
+    assert_eq!(options.len(), 2, "没有创建词条的管理员不出现在选项中");
+    for id in [first, second] {
+        let item = options
+            .iter()
+            .find(|item| item["id"] == id.to_string())
+            .unwrap();
+        assert_eq!(item, &json!({"id":id,"display_name":"shared-creator"}));
+    }
+    let (status, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?created_by=not-a-uuid"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1")
+        .bind(reader)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/creators"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
 async fn v3_empty_draft_list_keeps_initial_name_and_matches_detection(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)

@@ -326,6 +326,30 @@ pub async fn related_search(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/admin/lexicon/entries/creators",
+    tag = "admin-lexicon",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "词条创建人筛选选项（含已停用的创建人）", body = Vec<AdminWordCreator>),
+        (status = 401, description = "管理员身份无效"),
+        (status = 403, description = "无词库访问权限"),
+        (status = 500, description = "数据库查询失败")
+    )
+)]
+pub async fn creators(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+) -> Result<impl IntoResponse, AppError> {
+    require_active_admin(&state, &auth).await?;
+    let response = service(&state)
+        .creators(state.smart_lexicon_v3_flags.read)
+        .await
+        .map_err(map_error)?;
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/admin/lexicon/entries/stats",
     tag = "admin-lexicon",
     security(("bearer_auth" = [])),

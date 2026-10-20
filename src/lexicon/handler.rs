@@ -14,7 +14,7 @@ use crate::{
     lexicon::{
         detection_store::DetectionStore,
         dto::{
-            AdminWordDraftV3Envelope, AdminWordListQuery, AdminWordListResponse,
+            AdminWordCreator, AdminWordDraftV3Envelope, AdminWordListQuery, AdminWordListResponse,
             AdminWordPublicationEnvelope, AdminWordPublicationListResponse, AdminWordStats,
             AdminWordV3Capabilities, AdminWordV3Envelope, CreateAdminWordV3Input, DeleteDraftInput,
             DetectLexiconSurfaceResponseV3, DetectLexiconSurfaceV3Input, DraftValidationResponseV3,
@@ -52,7 +52,7 @@ pub use commands::{
 };
 pub use lifecycle::{archive, archive_batch, delete_batch, delete_draft, restore, restore_batch};
 pub use query::{
-    get, get_publication, inbound_references, list, list_publications, related_search,
+    creators, get, get_publication, inbound_references, list, list_publications, related_search,
     search_component_targets, stats, surface_match_snapshot_page,
 };
 

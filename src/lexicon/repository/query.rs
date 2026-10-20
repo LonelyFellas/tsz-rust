@@ -254,6 +254,35 @@ impl LexiconRepository {
                          AND array_to_string(draft_label.matched_surfaces, ' ')
                              ILIKE '%' || $1 || '%'
                    ))
+              AND ($12::text IS NULL
+                   -- 空草稿按初始名称找回；已有有效词面的词条沿用当前词面搜索。
+                   OR (NOT EXISTS (
+                       SELECT 1 FROM lexicon.surface_sources source
+                       WHERE source.entry_id = entry.id AND source.is_deleted = FALSE
+                   ) AND (
+                       state.initial_headwords ->> 'common' ILIKE '%' || $12 || '%'
+                       OR state.initial_headwords ->> 'uk' ILIKE '%' || $12 || '%'
+                       OR state.initial_headwords ->> 'us' ILIKE '%' || $12 || '%'
+                       OR (state.initial_headwords IS NULL
+                           AND entry.detection_snapshot ->> 'normalized_surface' ILIKE '%' || $12 || '%')
+                   ))
+                   OR EXISTS (
+                       SELECT 1 FROM lexicon.surface_sources surface
+                       WHERE surface.entry_id = entry.id
+                         AND surface.content_schema_version = 3
+                         AND surface.is_deleted = FALSE
+                         AND surface.source_revision = entry.revision
+                         AND surface.surface ILIKE '%' || $12 || '%'
+                   )
+                   -- 还没填词形的在途草稿没有词面记录可匹配，按展示投影里的词面摘要找。
+                   OR EXISTS (
+                       SELECT 1 FROM lexicon.entry_presentation_projection draft_label
+                       WHERE draft_label.entry_id = entry.id
+                         AND draft_label.source_revision = entry.revision
+                         AND array_to_string(draft_label.matched_surfaces, ' ')
+                             ILIKE '%' || $12 || '%'
+                   ))
+              AND ($13::uuid IS NULL OR entry.created_by_admin_id = $13)
               AND ($2::text IS NULL OR EXISTS (
                    SELECT 1 FROM lexicon.text_variants v
                    JOIN lexicon.definitions d ON d.id = v.owner_node_id
@@ -285,6 +314,8 @@ impl LexiconRepository {
         .bind(filter.limit)
         .bind(filter.offset)
         .bind(filter.include_v3)
+        .bind(filter.headword.as_deref())
+        .bind(filter.created_by)
         .fetch_all(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)
@@ -342,6 +373,35 @@ impl LexiconRepository {
                          AND array_to_string(draft_label.matched_surfaces, ' ')
                              ILIKE '%' || $1 || '%'
                    ))
+              AND ($10::text IS NULL
+                   -- 空草稿按初始名称找回；已有有效词面的词条沿用当前词面搜索。
+                   OR (NOT EXISTS (
+                       SELECT 1 FROM lexicon.surface_sources source
+                       WHERE source.entry_id = entry.id AND source.is_deleted = FALSE
+                   ) AND (
+                       state.initial_headwords ->> 'common' ILIKE '%' || $10 || '%'
+                       OR state.initial_headwords ->> 'uk' ILIKE '%' || $10 || '%'
+                       OR state.initial_headwords ->> 'us' ILIKE '%' || $10 || '%'
+                       OR (state.initial_headwords IS NULL
+                           AND entry.detection_snapshot ->> 'normalized_surface' ILIKE '%' || $10 || '%')
+                   ))
+                   OR EXISTS (
+                       SELECT 1 FROM lexicon.surface_sources surface
+                       WHERE surface.entry_id = entry.id
+                         AND surface.content_schema_version = 3
+                         AND surface.is_deleted = FALSE
+                         AND surface.source_revision = entry.revision
+                         AND surface.surface ILIKE '%' || $10 || '%'
+                   )
+                   -- 还没填词形的在途草稿没有词面记录可匹配，按展示投影里的词面摘要找。
+                   OR EXISTS (
+                       SELECT 1 FROM lexicon.entry_presentation_projection draft_label
+                       WHERE draft_label.entry_id = entry.id
+                         AND draft_label.source_revision = entry.revision
+                         AND array_to_string(draft_label.matched_surfaces, ' ')
+                             ILIKE '%' || $10 || '%'
+                   ))
+              AND ($11::uuid IS NULL OR entry.created_by_admin_id = $11)
               AND ($2::text IS NULL OR EXISTS (
                    SELECT 1 FROM lexicon.text_variants v
                    JOIN lexicon.definitions d ON d.id = v.owner_node_id
@@ -369,7 +429,26 @@ impl LexiconRepository {
         .bind(filter.created_from)
         .bind(filter.created_to)
         .bind(filter.include_v3)
+        .bind(filter.headword.as_deref())
+        .bind(filter.created_by)
         .fetch_one(&self.pool)
+        .await
+        .map_err(LexiconRepositoryError::Database)
+    }
+
+    pub(crate) async fn creators(
+        &self,
+        include_v3: bool,
+    ) -> Result<Vec<(Uuid, String)>, LexiconRepositoryError> {
+        sqlx::query_as(
+            "SELECT DISTINCT creator.id, creator.display_name
+             FROM admins creator JOIN lexicon.entries entry ON entry.created_by_admin_id = creator.id
+             JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
+             WHERE ($1 OR entry.content_schema_version = 2)
+             ORDER BY creator.display_name, creator.id",
+        )
+        .bind(include_v3)
+        .fetch_all(&self.pool)
         .await
         .map_err(LexiconRepositoryError::Database)
     }
