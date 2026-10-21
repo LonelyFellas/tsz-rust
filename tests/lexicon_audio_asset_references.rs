@@ -1501,16 +1501,23 @@ async fn pronunciation_editor_survives_steps_and_publication(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(
-        snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]
-            ["dict_phonetic_rich"],
-        expected_rich
-    );
-    assert_eq!(
-        snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]
-            ["voice_profile"],
-        expected_profile
-    );
+    assert_eq!(snapshot["forms"]["forms_format"], "shared_v1");
+    let binding = &snapshot["forms"]["pos"][0]["forms"][0];
+    let content = snapshot["forms"]["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|content| content["id"] == binding["content_id"])
+        .unwrap();
+    let slot_id = &binding["regional_bindings"]["common"]["pronunciations"][0]["content_slot_id"];
+    let pronunciation = content["regional_variants"]["common"]["pronunciations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| &row["id"] == slot_id)
+        .unwrap();
+    assert_eq!(pronunciation["dict_phonetic_rich"], expected_rich);
+    assert_eq!(pronunciation["voice_profile"], expected_profile);
     let refs:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='publication'").bind(entry.id).fetch_one(&pool).await.unwrap();
     assert_eq!(refs, 1);
 }

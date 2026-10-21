@@ -443,7 +443,7 @@ use utoipa::{
             crate::lexicon::dto::DialectModeV3,
             crate::lexicon::dto::DialectRulesV3,
             crate::lexicon::dto::WordPosFormsV3,
-            crate::lexicon::dto::DraftFormsStepContentV3,
+            crate::lexicon::dto::FormsStepRepresentationV3,
             crate::lexicon::dto::RichTextSpanV3,
             crate::lexicon::dto::RichTextAnnotationV3,
             crate::lexicon::dto::RichTextV1V3,
@@ -655,6 +655,8 @@ impl Modify for SmartLexiconV3SchemaAddon {
         for (name, discriminator) in [
             ("WordHeadwordsV2", "mode"),
             ("WordRegionalVariantsV3", "mode"),
+            ("FormContentRegionalVariantsV3", "mode"),
+            ("FormRegionalBindingsV3", "mode"),
             ("V3PublicationCapability", "mode"),
             ("DialectVariantRichTextSlotV3", "state"),
             ("EnglishTextV3", "mode"),
@@ -2098,7 +2100,8 @@ mod tests {
             "DialectRulesV3",
             "WordPosFormsV3",
             "WordPronunciationV3",
-            "DraftFormsStepContentV3",
+            "ExpandedFormsStepContentV3",
+            "SharedFormsStepContentV3",
             "RichTextVariantV3",
             "GrammarVariantV3",
             "VoiceProfileV3",
@@ -2432,9 +2435,15 @@ mod tests {
             200
         );
         assert_eq!(
-            schemas["DraftFormsStepContentV3"]["properties"]["pos"]["maxItems"],
-            2000
+            schemas["FormsStepRepresentationV3"]["oneOf"],
+            serde_json::json!([
+                {"$ref": "#/components/schemas/SharedFormsStepContentV3"},
+                {"$ref": "#/components/schemas/ExpandedFormsStepContentV3"}
+            ])
         );
+        for name in ["ExpandedFormsStepContentV3", "SharedFormsStepContentV3"] {
+            assert_eq!(schemas[name]["properties"]["pos"]["maxItems"], 2000);
+        }
         assert_eq!(
             schemas["AdminWordDraftV3Envelope"]["properties"]["retired_stable_nodes"]["items"]["$ref"],
             "#/components/schemas/RetiredStableNodeV3"

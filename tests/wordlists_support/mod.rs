@@ -62,6 +62,95 @@ pub async fn admin_call(
     (status, serde_json::from_slice(&data).unwrap_or(Value::Null))
 }
 
+pub async fn share_current_publication(pool: &PgPool, entry_id: Uuid) {
+    let mut snapshot: Value = sqlx::query_scalar("SELECT p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(entry_id).fetch_one(pool).await.unwrap();
+    let mut contents = Vec::new();
+    for pos in snapshot["forms"]["pos"].as_array_mut().unwrap() {
+        let groups = pos["form_groups"].as_array().unwrap().clone();
+        for form in pos["forms"].as_array_mut().unwrap() {
+            let content_id = Uuid::now_v7();
+            let group = groups
+                .iter()
+                .find(|group| {
+                    group["members"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|member| member["form_id"] == form["id"])
+                })
+                .unwrap();
+            let mut regions = form
+                .as_object_mut()
+                .unwrap()
+                .remove("regional_variants")
+                .unwrap();
+            let mut bindings = json!({"mode":regions["mode"]});
+            for side in ["common", "uk", "us"] {
+                if let Some(variant) = regions.get_mut(side) {
+                    let reference_id = variant["id"].clone();
+                    let slot_id = Uuid::now_v7();
+                    let pronunciations: Vec<_> = variant["pronunciations"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .map(|row| {
+                            let id = row["id"].clone();
+                            let slot = Uuid::now_v7();
+                            row["id"] = json!(slot);
+                            json!({"id":id,"content_slot_id":slot})
+                        })
+                        .collect();
+                    variant["id"] = json!(slot_id);
+                    let object = variant.as_object_mut().unwrap();
+                    object.remove("dialect");
+                    let regular = object
+                        .remove("is_regular")
+                        .unwrap_or_else(|| group["is_regular"].clone());
+                    let usages = object.remove("component_usages");
+                    bindings[side] = json!({"id":reference_id,"content_slot_id":slot_id,"is_regular":regular,"pronunciations":pronunciations});
+                    if let Some(usages) = usages {
+                        bindings[side]["component_usages"] = usages;
+                    }
+                }
+            }
+            contents.push(json!({"id":content_id,"dialect_rules":group["dialect_rules"],"regional_variants":regions}));
+            form["content_id"] = json!(content_id);
+            form["regional_bindings"] = bindings;
+        }
+        for group in pos["form_groups"].as_array_mut().unwrap() {
+            group.as_object_mut().unwrap().remove("dialect_rules");
+        }
+    }
+    // A second grammatical use shares the first content, with independent reference nodes.
+    let mut form = snapshot["forms"]["pos"][0]["forms"][0].clone();
+    let id = Uuid::now_v7();
+    form["id"] = json!(id);
+    form["form_type"] = json!("plural");
+    for side in ["common", "uk", "us"] {
+        if let Some(variant) = form["regional_bindings"].get_mut(side) {
+            variant["id"] = json!(Uuid::now_v7());
+            for row in variant["pronunciations"].as_array_mut().unwrap() {
+                row["id"] = json!(Uuid::now_v7());
+            }
+        }
+    }
+    snapshot["forms"]["pos"][0]["forms"]
+        .as_array_mut()
+        .unwrap()
+        .push(form);
+    snapshot["forms"]["pos"][0]["form_groups"][0]["members"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":Uuid::now_v7(),"form_id":id}));
+    snapshot["forms"]["forms_format"] = json!("shared_v1");
+    snapshot["forms"]["contents"] = json!(contents);
+    let _: tsz_rust::lexicon::dto::SharedFormsStepContentV3 =
+        serde_json::from_value(snapshot["forms"].clone()).unwrap();
+    let _: tsz_rust::lexicon::dto::AdminWordV3 = serde_json::from_value(snapshot.clone()).unwrap();
+    // Replace only this test fixture's current publication; production snapshots remain immutable.
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=(SELECT current_publication_id FROM lexicon.entries WHERE id=$1)").bind(entry_id).bind(snapshot).execute(pool).await.unwrap();
+}
+
 /// A published read fixture with multiple bases, dialects and dedicated sense bindings.
 pub async fn full_entry(pool: &PgPool, label: &str) -> Uuid {
     let id = entry(pool, label).await;

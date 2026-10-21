@@ -199,9 +199,15 @@ pub struct LexiconService {
     surface_policies: SurfacePolicyStore,
     related_search_cursor_key: std::sync::Arc<[u8]>,
     sentence_formatting_supported: bool,
+    form_contents_supported: bool,
 }
 
 impl LexiconService {
+    pub(crate) fn with_form_contents_support(mut self, supported: bool) -> Self {
+        self.form_contents_supported = supported;
+        self
+    }
+
     pub(crate) fn with_sentence_formatting_support(mut self, supported: bool) -> Self {
         self.sentence_formatting_supported = supported;
         self
@@ -223,6 +229,7 @@ impl LexiconService {
             surface_policies,
             related_search_cursor_key,
             sentence_formatting_supported: true,
+            form_contents_supported: true,
         }
     }
 }

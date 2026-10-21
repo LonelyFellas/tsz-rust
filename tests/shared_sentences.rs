@@ -1796,13 +1796,10 @@ async fn referenced_sense_draft_can_be_removed_and_stale_annotation_can_be_unlin
     );
 }
 
-#[sqlx::test]
-async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: PgPool) {
-    let actor = admin(&pool).await;
-    let source = entry(&pool, actor, "wonderful").await;
-    // 此用例现在真正保存词形，补齐 fixture 原先绕过的关系行与稳定节点父子身份。
+async fn bind_form_fixture(pool: &PgPool, source: Uuid) {
+    // 词形影响与保存都验证稳定身份，夹具需要对应的关系行和父子绑定。
     sqlx::query("INSERT INTO lexicon.entry_pos(id,entry_id,part_of_speech_id,entry_kind,sort_order) SELECT $1,$2,id,'word',0 FROM catalog.parts_of_speech WHERE code='verb'")
-        .bind(node_id(source, 1)).bind(source).execute(&pool).await.unwrap();
+        .bind(node_id(source, 1)).bind(source).execute(pool).await.unwrap();
     for (tag, parent, role, stable) in [
         (1, None, "forms.pos", false),
         (2, Some(1), "forms.concrete_form", false),
@@ -1816,10 +1813,17 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         .bind(parent.map(|tag| node_id(source, tag)))
         .bind(role)
         .bind(stable)
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
     }
+}
+
+#[sqlx::test]
+async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: PgPool) {
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    bind_form_fixture(&pool, source).await;
     let redis_url = std::env::var("TEST_REDIS_URL")
         .or_else(|_| std::env::var("REDIS_URL"))
         .expect("isolated Redis URL");
@@ -1886,8 +1890,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
     .await;
     assert_single_stale_sentence_reference(&affected["items"], source, id);
 
-    // TASK#58：单独换掉变体实例 id（common ↔ uk_us 结构漂移的常态）不再让标注失效——
-    // 绑定坐标是「词形 + 方言侧」。
+    // 同一地区不能替换稳定变体 ID；合法的 common ↔ uk_us 切换另行验证。
     let mut drifted = snapshot["forms"].clone();
     drifted["pos"][0]["forms"][0]["regional_variants"]["common"]["id"] = json!(Uuid::now_v7());
     let (status, impact) = call(
@@ -1898,11 +1901,8 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
         Some(json!({"schema_version":3,"base_revision":2,"content":drifted})),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{impact}");
-    assert!(
-        impact.get("blocked_references").is_none(),
-        "变体实例 id 漂移不该列出被破坏的引用：{impact}"
-    );
+    assert_eq!(status, StatusCode::CONFLICT, "{impact}");
+    assert_eq!(impact["code"], "stable_node_id_changed");
     // A historical version without the referenced sense cannot become current.
     snapshot["meanings"]["pos"][0]["senses"] = json!([]);
     let empty_publication = Uuid::now_v7();
@@ -2339,6 +2339,7 @@ async fn inbound_references_list_sentence_targets_with_stale_first(pool: PgPool)
 async fn forms_impact_flags_only_changes_that_break_sentence_targets(pool: PgPool) {
     let actor = admin(&pool).await;
     let source = entry(&pool, actor, "wonderful").await;
+    bind_form_fixture(&pool, source).await;
     let redis_url = std::env::var("TEST_REDIS_URL")
         .or_else(|_| std::env::var("REDIS_URL"))
         .expect("isolated Redis URL");
@@ -2414,8 +2415,6 @@ async fn forms_impact_flags_only_changes_that_break_sentence_targets(pool: PgPoo
     assert_eq!(revision, 1);
 
     // 只补一条发音：引用照旧成立，预览不带 blocked_references。
-    // （这份手工夹具的节点没有父子绑定，走不完整条保存链路；无关改动能保存成功
-    // 由 lexicon_handler 里的真实词条用例覆盖。）
     let mut harmless = forms.clone();
     harmless["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"] = json!([{
         "id": Uuid::now_v7(),

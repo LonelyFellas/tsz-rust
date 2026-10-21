@@ -305,6 +305,7 @@ async fn full_reading_is_opt_in_and_sorting_precedes_pagination_without_editing(
     let (state, auth) = setup_bound(&pool).await;
     let (_, other) = setup_bound(&pool).await;
     let z = full_entry(&pool, "zebra").await;
+    share_current_publication(&pool, z).await;
     let a = entry(&pool, "apple").await;
     let same = entry(&pool, "APPLE").await;
     let created = call(
@@ -334,7 +335,7 @@ async fn full_reading_is_opt_in_and_sorting_precedes_pagination_without_editing(
     assert_eq!(pos["label"], "名词");
     assert_eq!(pos["senses"][0]["sub_pos_label"], "可数名词");
     let forms = &pos["forms"];
-    assert_eq!(forms.as_array().unwrap().len(), 3);
+    assert_eq!(forms.as_array().unwrap().len(), 4);
     assert_eq!(
         forms[0]["variants"][0]["pronunciations"]
             .as_array()

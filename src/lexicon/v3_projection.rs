@@ -389,6 +389,7 @@ mod tests {
         let mut comparative = common_form(comparative_form_id, id(33), "more colourful");
         comparative.form_type = "comparative".to_owned();
         let forms = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id: id(10),
                 pos: "adjective".to_owned(),
@@ -455,6 +456,7 @@ mod tests {
         let us_variant_id = id(505);
         let group_id = id(506);
         let forms = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id: id(500),
                 pos: "noun".to_owned(),
@@ -507,6 +509,7 @@ mod tests {
         let entry_id = Uuid::parse_str("87654321-9abc-def0-1234-56789abcdef0").unwrap();
         let form_id = id(601);
         let forms = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id: id(600),
                 pos: "verb".to_owned(),
@@ -539,6 +542,7 @@ mod tests {
         let form_id = id(701);
         let variant_id = id(702);
         let forms = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id: id(700),
                 pos: "noun".to_owned(),
@@ -584,6 +588,7 @@ mod tests {
         let mut form = common_form(form_id, variant_id, "Workspaces");
         form.form_type = "custom_plural".to_owned();
         let forms = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id,
                 pos: "noun".to_owned(),
@@ -649,6 +654,7 @@ mod tests {
         let us_variant_id = id(204);
         let group_id = id(205);
         let forms = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id: id(201),
                 pos: "noun".to_owned(),
@@ -689,6 +695,7 @@ mod tests {
     fn variant_sources_fail_closed_for_orphan_and_cross_pos_memberships() {
         let orphan_form_id = id(301);
         let orphan_forms = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id: id(300),
                 pos: "noun".to_owned(),
@@ -706,6 +713,7 @@ mod tests {
 
         let cross_pos_form_id = id(302);
         let forms = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id: id(300),
                 pos: "noun".to_owned(),

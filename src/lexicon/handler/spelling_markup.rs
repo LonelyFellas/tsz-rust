@@ -64,11 +64,13 @@ pub(super) fn spelling_markup_response<T: Serialize>(
     status: StatusCode,
     body: T,
 ) -> Result<Response, crate::error::AppError> {
-    let mut response = crate::lexicon::sentence_formatting::response(headers, status, body)?;
+    let mut value = serde_json::to_value(body).map_err(crate::error::AppError::internal)?;
+    super::super::shared_forms::project_response(headers, &mut value)?;
+    let mut response = crate::lexicon::sentence_formatting::response(headers, status, value)?;
     response.headers_mut().insert(
         header::VARY,
         axum::http::HeaderValue::from_static(
-            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting",
+            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents",
         ),
     );
     Ok(response)

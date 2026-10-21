@@ -1359,6 +1359,9 @@ async fn insert_v3_publication_rows(
     .await
     .map_err(database_error)?;
     let mut snapshot_word = word.clone();
+    snapshot_word.forms.enable_shared().map_err(|error| {
+        LexiconServiceError::Authorization(crate::error::AppError::internal(anyhow::anyhow!(error)))
+    })?;
     clear_v3_sentence_associations(&mut snapshot_word.meanings);
     let snapshot = serde_json::to_value(&snapshot_word).map_err(serialization_error)?;
     let snapshot_hash = sha256_json(&snapshot_word).map_err(serialization_error)?;
@@ -2100,6 +2103,9 @@ async fn insert_rollback_publication(
     let number = sqlx::query_scalar::<_, i32>("SELECT COALESCE(MAX(publication_number),0)+1 FROM lexicon.entry_publications WHERE entry_id=$1")
         .bind(word.id).fetch_one(&mut **tx).await.map_err(database_error)?;
     let mut snapshot_word = word.clone();
+    snapshot_word.forms.enable_shared().map_err(|error| {
+        LexiconServiceError::Authorization(crate::error::AppError::internal(anyhow::anyhow!(error)))
+    })?;
     clear_v3_sentence_associations(&mut snapshot_word.meanings);
     let snapshot = serde_json::to_value(&snapshot_word).map_err(serialization_error)?;
     let hash = sha256_json(&snapshot_word).map_err(serialization_error)?;

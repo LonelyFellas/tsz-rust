@@ -64,6 +64,15 @@ pub(crate) fn decode_v3_forms_request<T: DeserializeOwned>(value: Value) -> Resu
     if !issues.is_empty() {
         return Err(contract_validation_error(&issues));
     }
+    if let Some(content) = value.get("content")
+        && content.get("forms_format").is_some()
+    {
+        let shared: crate::lexicon::dto::SharedFormsStepContentV3 =
+            decode_request(content.clone())?;
+        shared
+            .resolve()
+            .map_err(crate::lexicon::shared_forms::MappingError::into_app_error)?;
+    }
     decode_request(value)
 }
 
@@ -391,7 +400,10 @@ pub(crate) fn validate_dialect_rules(
         }
         for form in &pos.forms {
             // 不属于任何（规则合法的）组的词形没有规则可查：孤儿由 orphan_form 报。
-            let Some(rules) = form_rules.get(&form.id).copied() else {
+            let Some(rules) = content
+                .content_rules(form.id)
+                .or_else(|| form_rules.get(&form.id).copied())
+            else {
                 continue;
             };
             if !regional_variants_match_rules(&form.regional_variants, rules) {
@@ -1483,6 +1495,8 @@ pub(crate) fn v3_issue(issue: &DraftValidationIssue) -> V3DraftValidationIssue {
             .expect("V3 contract validators only emit the closed V3 issue catalog"),
         message: issue.message.clone(),
         node_location: V3DraftNodeLocation {
+            content_id: None,
+            content_slot_id: None,
             node_role: location
                 .map_or_else(|| "entry".to_owned(), |location| location.node_role.clone()),
             ancestor_node_ids: location
@@ -1608,6 +1622,13 @@ fn raw_forms_issues(value: &Value) -> Vec<DraftValidationIssue> {
         &mut issues,
         None,
     );
+    if value
+        .get("content")
+        .and_then(|content| content.get("forms_format"))
+        .is_some()
+    {
+        return issues;
+    }
     let Some(pos_items) = value
         .get("content")
         .and_then(|content| content.get("pos"))
@@ -2647,7 +2668,10 @@ mod tests {
 
     #[test]
     fn draft_allows_zero_or_empty_groups_but_complete_rejects_orphans_and_empty_groups() {
-        let no_pos = DraftFormsStepContentV3 { pos: Vec::new() };
+        let no_pos = DraftFormsStepContentV3 {
+            pos: Vec::new(),
+            shared: None,
+        };
         assert!(validate_forms(&no_pos, StepSaveIntent::Save).is_empty());
         assert!(has_code(
             &validate_forms(&no_pos, StepSaveIntent::Complete),
@@ -2655,6 +2679,7 @@ mod tests {
         ));
 
         let empty_draft = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![crate::lexicon::dto::WordPosFormsV3 {
                 pos_id: Uuid::now_v7(),
                 pos: "noun".to_owned(),

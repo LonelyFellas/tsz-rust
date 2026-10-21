@@ -167,7 +167,7 @@ async fn markup_negotiation_preserves_cached_publish_history_and_lifecycle(pool:
     assert_eq!(status, StatusCode::CREATED, "{new}");
     assert_eq!(new["words"][0]["forms"], changed["word"]["forms"]);
     assert_eq!(
-        current_publication_snapshot(&pool, entry_id).await["forms"],
+        expanded_publication_forms(&current_publication_snapshot(&pool, entry_id).await),
         changed["word"]["forms"]
     );
     let latest = &new["words"][0];
@@ -188,7 +188,7 @@ async fn markup_negotiation_preserves_cached_publish_history_and_lifecycle(pool:
     assert_legacy_word(&old["word"]);
     let rolled = current_publication_id(&pool, entry_id).await;
     assert_eq!(
-        current_publication_snapshot(&pool, entry_id).await["forms"],
+        expanded_publication_forms(&current_publication_snapshot(&pool, entry_id).await),
         expected
     );
     let (status, new) = call(&state, Method::POST, &path, &bearer, Some(key), Some(body)).await;

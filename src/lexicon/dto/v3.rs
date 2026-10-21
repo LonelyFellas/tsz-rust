@@ -667,11 +667,13 @@ pub struct WordPosFormsV3 {
     pub form_groups: Vec<WordFormGroupV3>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, ToSchema)]
 pub struct DraftFormsStepContentV3 {
     #[schema(max_items = 2000)]
     pub pos: Vec<WordPosFormsV3>,
+    /// Canonical graph; pos is a derived reference projection for internal consumers.
+    #[schema(ignore)]
+    pub(crate) shared: Option<Box<SharedFormsStepContentV3>>,
 }
 
 fn rich_text_version_1_schema() -> Object {
@@ -1438,6 +1440,9 @@ pub enum V3PublicationCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordV3Capabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub shared_form_contents: Option<bool>,
     /// 支持在词形影响预览及保存中原子更新既有词义绑定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
@@ -1496,6 +1501,7 @@ pub struct AdminWordV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false, read_only)]
     pub detection_basis_dialect: Option<SourceDialect>,
+    #[schema(value_type = FormsStepRepresentationV3)]
     pub forms: DraftFormsStepContentV3,
     /// Phase 1 sense 仍只按 `pos_id` 归属，不含 group/form 可选字段。
     pub meanings: DraftMeaningsStepContentV3,
@@ -1527,6 +1533,9 @@ pub struct AdminWordDraftV3Envelope {
     pub word: AdminWordV3,
     /// response-only 的已退役稳定节点；刷新/换设备后恢复地区模式时不得生成新 UUID。
     pub retired_stable_nodes: Vec<RetiredStableNodeV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub retired_content_slots: Option<Vec<RetiredContentSlotV3>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1551,6 +1560,12 @@ pub struct RetiredStableNodeV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub parent_node_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub content_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub content_slot_id: Option<Uuid>,
     pub retired_at: DateTime<Utc>,
 }
 
@@ -1617,6 +1632,7 @@ pub struct PreviewFormsImpactInputV3 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(max_items = 2000)]
     pub sense_bindings: Vec<SenseFormGroupBindingV3>,
+    #[schema(value_type = FormsStepRepresentationV3)]
     pub content: DraftFormsStepContentV3,
 }
 
@@ -1638,6 +1654,7 @@ pub struct SaveFormsStepInputV3 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schema(max_items = 2000)]
     pub sense_bindings: Vec<SenseFormGroupBindingV3>,
+    #[schema(value_type = FormsStepRepresentationV3)]
     pub content: DraftFormsStepContentV3,
 }
 
@@ -1936,6 +1953,7 @@ pub struct InboundReferencesV3 {
 #[serde(rename_all = "snake_case")]
 pub enum V3ValidationIssueCode {
     InvalidRegionalVariantShape,
+    FormContentMappingInvalid,
     DialectRulesInvalid,
     InvalidFormTypeForPartOfSpeech,
     PartOfSpeechKindMismatch,
@@ -2021,6 +2039,7 @@ impl V3ValidationIssueCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidRegionalVariantShape => "invalid_regional_variant_shape",
+            Self::FormContentMappingInvalid => "form_content_mapping_invalid",
             Self::DialectRulesInvalid => "dialect_rules_invalid",
             Self::InvalidFormTypeForPartOfSpeech => "invalid_form_type_for_part_of_speech",
             Self::PartOfSpeechKindMismatch => "part_of_speech_kind_mismatch",
@@ -2106,6 +2125,7 @@ impl V3ValidationIssueCode {
     pub fn from_wire(value: &str) -> Option<Self> {
         Some(match value {
             "invalid_regional_variant_shape" => Self::InvalidRegionalVariantShape,
+            "form_content_mapping_invalid" => Self::FormContentMappingInvalid,
             "dialect_rules_invalid" => Self::DialectRulesInvalid,
             "invalid_form_type_for_part_of_speech" => Self::InvalidFormTypeForPartOfSpeech,
             "part_of_speech_kind_mismatch" => Self::PartOfSpeechKindMismatch,
@@ -2193,6 +2213,12 @@ impl V3ValidationIssueCode {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct V3DraftNodeLocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub content_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub content_slot_id: Option<Uuid>,
     pub node_role: String,
     pub ancestor_node_ids: Vec<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
