@@ -90,7 +90,8 @@ impl PreviewService {
         if generate {
             authorization.require("words.access")?;
             authorization.require("speech.generate")?;
-        } else if !authorization.has("words.access") {
+        } else if !authorization.has("words.access") && !authorization.has("speech.global_dubbing")
+        {
             authorization.require("sentences.access")?;
         }
         tx.commit().await?;

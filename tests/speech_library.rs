@@ -41,6 +41,7 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
         repository
             .save_groups(
                 actor,
+                0,
                 SaveDubbingGroupsRequest {
                     groups: vec![group.clone()],
                     base_revision: 0
@@ -55,6 +56,7 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
     repository
         .save_groups(
             actor,
+            0,
             SaveDubbingGroupsRequest {
                 groups: vec![group.clone()],
                 base_revision: 0,
@@ -69,6 +71,7 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
         repository
             .save_groups(
                 actor,
+                0,
                 SaveDubbingGroupsRequest {
                     groups: vec![group.clone(), invalid],
                     base_revision: 1
@@ -83,6 +86,7 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
         repository
             .save_groups(
                 actor,
+                0,
                 SaveDubbingGroupsRequest {
                     groups: vec![invalid],
                     base_revision: 1
@@ -98,6 +102,7 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
         repository
             .save_groups(
                 actor,
+                0,
                 SaveDubbingGroupsRequest {
                     groups: vec![],
                     base_revision: 0
@@ -111,6 +116,7 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
     repository
         .save_groups(
             actor,
+            0,
             SaveDubbingGroupsRequest {
                 groups: vec![],
                 base_revision: 1,
@@ -119,6 +125,207 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
         .await
         .unwrap();
     assert!(repository.groups(actor).await.unwrap().groups.is_empty());
+}
+
+#[sqlx::test]
+async fn global_dubbing_only_can_manage_library_but_revoked_sessions_cannot_write(pool: PgPool) {
+    voice(&pool).await;
+    let actor = admin(&pool).await;
+    sqlx::query("UPDATE admin_permission_grants SET permission_key='speech.global_dubbing' WHERE admin_id=$1").bind(actor).execute(&pool).await.unwrap();
+    let repository = VoiceLibraryRepository::new(pool.clone());
+    assert_eq!(repository.list(actor).await.unwrap().items.len(), 1);
+    repository.groups(actor).await.unwrap();
+    repository
+        .save_settings(actor, "en-us-jenny", 0, settings(0, "valid"))
+        .await
+        .unwrap();
+    repository
+        .save_description(
+            actor,
+            "en-us-jenny",
+            0,
+            SaveVoiceDescriptionRequest {
+                description_zh: "介绍".into(),
+                base_revision: 0,
+            },
+        )
+        .await
+        .unwrap();
+    repository
+        .save_groups(
+            actor,
+            0,
+            SaveDubbingGroupsRequest {
+                groups: vec![],
+                base_revision: 0,
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE admins SET security_version=security_version+1 WHERE id=$1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .save_settings(actor, "en-us-jenny", 0, settings(1, "stale"))
+            .await
+            .unwrap_err()
+            .code(),
+        ErrorCode::InvalidToken
+    );
+    assert_eq!(
+        repository
+            .save_description(
+                actor,
+                "en-us-jenny",
+                0,
+                SaveVoiceDescriptionRequest {
+                    description_zh: "stale".into(),
+                    base_revision: 1
+                }
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        ErrorCode::InvalidToken
+    );
+    assert_eq!(
+        repository
+            .save_groups(
+                actor,
+                0,
+                SaveDubbingGroupsRequest {
+                    groups: vec![],
+                    base_revision: 1
+                }
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        ErrorCode::InvalidToken
+    );
+    assert_eq!(
+        repository.list(actor).await.unwrap().items[0].notes,
+        "valid"
+    );
+}
+
+#[sqlx::test]
+async fn nul_text_is_rejected_before_database_writes(pool: PgPool) {
+    voice(&pool).await;
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    let repository = VoiceLibraryRepository::new(pool);
+    assert_eq!(
+        repository
+            .save_settings(actor, "en-us-jenny", 0, settings(0, "bad\0text"))
+            .await
+            .unwrap_err()
+            .status_code()
+            .as_u16(),
+        400
+    );
+    assert_eq!(
+        repository
+            .save_description(
+                actor,
+                "en-us-jenny",
+                0,
+                SaveVoiceDescriptionRequest {
+                    description_zh: "bad\0text".into(),
+                    base_revision: 0
+                }
+            )
+            .await
+            .unwrap_err()
+            .status_code()
+            .as_u16(),
+        400
+    );
+    let rec = DubbingRecommendation {
+        id: Uuid::now_v7(),
+        name: "bad\0name".into(),
+        voice_alias: "en-us-jenny".into(),
+        parameters: settings(0, "").parameters.unwrap(),
+    };
+    let group = DubbingGroup {
+        id: Uuid::now_v7(),
+        name: "bad\0group".into(),
+        areas: vec!["word".into()],
+        uk: vec![rec.clone()],
+        us: vec![rec],
+    };
+    assert_eq!(
+        repository
+            .save_groups(
+                actor,
+                0,
+                SaveDubbingGroupsRequest {
+                    groups: vec![group.clone()],
+                    base_revision: 0
+                }
+            )
+            .await
+            .unwrap_err()
+            .status_code()
+            .as_u16(),
+        400
+    );
+    let mut invalid_recommendation = group;
+    invalid_recommendation.name = "valid group".into();
+    assert_eq!(
+        repository
+            .save_groups(
+                actor,
+                0,
+                SaveDubbingGroupsRequest {
+                    groups: vec![invalid_recommendation],
+                    base_revision: 0
+                }
+            )
+            .await
+            .unwrap_err()
+            .status_code()
+            .as_u16(),
+        400
+    );
+    assert_eq!(repository.groups(actor).await.unwrap().revision, 0);
+}
+
+#[sqlx::test]
+async fn group_save_waits_for_catalog_sync_lock(pool: PgPool) {
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    let mut catalog = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
+        .execute(&mut *catalog)
+        .await
+        .unwrap();
+    let repository = VoiceLibraryRepository::new(pool.clone());
+    let pending = tokio::spawn(async move {
+        repository
+            .save_groups(
+                actor,
+                0,
+                SaveDubbingGroupsRequest {
+                    groups: vec![],
+                    base_revision: 0,
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND classid=0 AND objid=734892105)").fetch_one(&pool).await.unwrap();
+            if waiting { break; }
+            assert!(!pending.is_finished(), "group save must wait for catalog sync");
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    catalog.commit().await.unwrap();
+    assert_eq!(pending.await.unwrap().unwrap().revision, 1);
 }
 
 async fn admin(pool: &PgPool) -> Uuid {
@@ -165,7 +372,7 @@ async fn personal_settings_read_back_and_do_not_leak_between_admins(pool: PgPool
     let b = admin(&pool).await;
     let repository = VoiceLibraryRepository::new(pool.clone());
     let saved = repository
-        .save_settings(a, "en-us-jenny", settings(0, "适合慢读"))
+        .save_settings(a, "en-us-jenny", 0, settings(0, "适合慢读"))
         .await
         .unwrap();
     assert_eq!(saved.personal_revision, 1);
@@ -179,6 +386,7 @@ async fn personal_settings_read_back_and_do_not_leak_between_admins(pool: PgPool
         .save_settings(
             a,
             "en-us-jenny",
+            0,
             SaveVoiceSettingsRequest {
                 parameters: None,
                 notes: "保留笔记".into(),
@@ -198,8 +406,8 @@ async fn stale_and_concurrent_updates_do_not_overwrite_saved_settings(pool: PgPo
     let actor = admin(&pool).await;
     let repository = VoiceLibraryRepository::new(pool);
     let (first, second) = tokio::join!(
-        repository.save_settings(actor, "en-us-jenny", settings(0, "first")),
-        repository.save_settings(actor, "en-us-jenny", settings(0, "second"))
+        repository.save_settings(actor, "en-us-jenny", 0, settings(0, "first")),
+        repository.save_settings(actor, "en-us-jenny", 0, settings(0, "second"))
     );
     assert_ne!(first.is_ok(), second.is_ok());
     let failure = if let Err(error) = first {
@@ -221,7 +429,7 @@ async fn shared_description_requires_global_permission_and_preserves_personal_da
     let b = admin(&pool).await;
     let repository = VoiceLibraryRepository::new(pool.clone());
     repository
-        .save_settings(a, "en-us-jenny", settings(0, "private"))
+        .save_settings(a, "en-us-jenny", 0, settings(0, "private"))
         .await
         .unwrap();
     let description = || SaveVoiceDescriptionRequest {
@@ -230,7 +438,7 @@ async fn shared_description_requires_global_permission_and_preserves_personal_da
     };
     assert_eq!(
         repository
-            .save_description(a, "en-us-jenny", description())
+            .save_description(a, "en-us-jenny", 0, description())
             .await
             .unwrap_err()
             .code(),
@@ -239,7 +447,7 @@ async fn shared_description_requires_global_permission_and_preserves_personal_da
     sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)")
         .bind(a).execute(&pool).await.unwrap();
     repository
-        .save_description(a, "en-us-jenny", description())
+        .save_description(a, "en-us-jenny", 0, description())
         .await
         .unwrap();
     let other = repository.list(b).await.unwrap();
@@ -251,7 +459,7 @@ async fn shared_description_requires_global_permission_and_preserves_personal_da
     assert_eq!(repository.list(a).await.unwrap().items[0].notes, "private");
     assert_eq!(
         repository
-            .save_description(a, "en-us-jenny", description())
+            .save_description(a, "en-us-jenny", 0, description())
             .await
             .unwrap_err()
             .code(),
@@ -268,7 +476,7 @@ async fn invalid_parameters_disabled_voices_and_revoked_access_are_rejected(pool
     request.parameters.as_mut().unwrap().rate_percent = -100;
     assert_eq!(
         repository
-            .save_settings(actor, "en-us-jenny", request)
+            .save_settings(actor, "en-us-jenny", 0, request)
             .await
             .unwrap_err()
             .status_code()
@@ -279,13 +487,13 @@ async fn invalid_parameters_disabled_voices_and_revoked_access_are_rejected(pool
     request.parameters.as_mut().unwrap().style = Some("unsupported".into());
     assert!(
         repository
-            .save_settings(actor, "en-us-jenny", request)
+            .save_settings(actor, "en-us-jenny", 0, request)
             .await
             .is_err()
     );
     assert!(
         repository
-            .save_settings(actor, "en-us-jenny", settings(0, &"字".repeat(3001)))
+            .save_settings(actor, "en-us-jenny", 0, settings(0, &"字".repeat(3001)))
             .await
             .is_err()
     );
@@ -295,7 +503,7 @@ async fn invalid_parameters_disabled_voices_and_revoked_access_are_rejected(pool
         .unwrap();
     assert_eq!(
         repository
-            .save_settings(actor, "en-us-jenny", settings(0, ""))
+            .save_settings(actor, "en-us-jenny", 0, settings(0, ""))
             .await
             .unwrap_err()
             .code(),

@@ -40,7 +40,7 @@ pub async fn save_groups(
     require_active_admin(&state, &auth).await?;
     Ok(Json(
         VoiceLibraryRepository::new(state.pool)
-            .save_groups(auth.subject, request)
+            .save_groups(auth.subject, auth.security_version, request)
             .await?,
     ))
 }
@@ -78,7 +78,7 @@ pub async fn save_settings(
     require_active_admin(&state, &auth).await?;
     Ok(Json(
         VoiceLibraryRepository::new(state.pool)
-            .save_settings(auth.subject, &alias, request)
+            .save_settings(auth.subject, &alias, auth.security_version, request)
             .await?,
     ))
 }
@@ -99,7 +99,7 @@ pub async fn save_description(
     require_active_admin(&state, &auth).await?;
     Ok(Json(
         VoiceLibraryRepository::new(state.pool)
-            .save_description(auth.subject, &alias, request)
+            .save_description(auth.subject, &alias, auth.security_version, request)
             .await?,
     ))
 }

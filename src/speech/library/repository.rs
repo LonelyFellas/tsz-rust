@@ -68,11 +68,32 @@ async fn authorize(
     shared: bool,
 ) -> Result<(), AppError> {
     let authorization = permissions::lock(tx, actor).await?;
-    if !authorization.has("words.access") {
+    if !authorization.has("words.access") && !authorization.has("speech.global_dubbing") {
         authorization.require("sentences.access")?;
     }
     if shared {
         authorization.require("speech.global_dubbing")?;
+    }
+    Ok(())
+}
+
+async fn authorize_write(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: Uuid,
+    security_version: i64,
+    shared: bool,
+) -> Result<(), AppError> {
+    authorize(tx, actor, shared).await?;
+    let current: i64 = sqlx::query_scalar("SELECT security_version FROM admins WHERE id=$1")
+        .bind(actor)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(AppError::internal)?;
+    if current != security_version {
+        return Err(AppError::unauthorized(
+            ErrorCode::InvalidToken,
+            "invalid token",
+        ));
     }
     Ok(())
 }
@@ -139,6 +160,7 @@ impl VoiceLibraryRepository {
     pub async fn save_groups(
         &self,
         actor: Uuid,
+        security_version: i64,
         request: SaveDubbingGroupsRequest,
     ) -> Result<DubbingGroupsResponse, AppError> {
         use std::collections::BTreeSet;
@@ -146,7 +168,7 @@ impl VoiceLibraryRepository {
             return Err(invalid());
         }
         let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
-        authorize(&mut tx, actor, true).await?;
+        authorize_write(&mut tx, actor, security_version, true).await?;
         let revision: i64 = sqlx::query_scalar(
             "SELECT revision FROM speech.dubbing_groups WHERE singleton FOR UPDATE",
         )
@@ -156,12 +178,18 @@ impl VoiceLibraryRepository {
         if revision != request.base_revision {
             return Err(conflict());
         }
+        // Share the catalog synchronizer's lock before acquiring multiple voice rows.
+        sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
         let mut areas = BTreeSet::new();
         let mut ids = BTreeSet::new();
         let mut names = BTreeSet::new();
         for group in &request.groups {
             if group.name.trim().is_empty()
                 || group.name.chars().count() > 30
+                || group.name.contains('\0')
                 || group.areas.is_empty()
                 || !ids.insert(group.id)
                 || !names.insert(group.name.trim())
@@ -182,6 +210,7 @@ impl VoiceLibraryRepository {
                 for recommendation in recommendations {
                     if recommendation.name.trim().is_empty()
                         || recommendation.name.chars().count() > 40
+                        || recommendation.name.contains('\0')
                         || !ids.insert(recommendation.id)
                     {
                         return Err(invalid());
@@ -228,13 +257,17 @@ impl VoiceLibraryRepository {
         &self,
         actor: Uuid,
         alias: &str,
+        security_version: i64,
         request: SaveVoiceSettingsRequest,
     ) -> Result<VoiceLibraryItem, AppError> {
-        if request.base_revision < 0 || request.notes.chars().count() > 3000 {
+        if request.base_revision < 0
+            || request.notes.chars().count() > 3000
+            || request.notes.contains('\0')
+        {
             return Err(invalid());
         }
         let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
-        authorize(&mut tx, actor, false).await?;
+        authorize_write(&mut tx, actor, security_version, false).await?;
         let voice = lock_voice(&mut tx, alias).await?;
         if let Some(parameters) = &request.parameters {
             validate_parameters(&voice, parameters)?;
@@ -287,13 +320,17 @@ impl VoiceLibraryRepository {
         &self,
         actor: Uuid,
         alias: &str,
+        security_version: i64,
         request: SaveVoiceDescriptionRequest,
     ) -> Result<VoiceLibraryItem, AppError> {
-        if request.base_revision < 0 || request.description_zh.chars().count() > 3000 {
+        if request.base_revision < 0
+            || request.description_zh.chars().count() > 3000
+            || request.description_zh.contains('\0')
+        {
             return Err(invalid());
         }
         let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
-        authorize(&mut tx, actor, true).await?;
+        authorize_write(&mut tx, actor, security_version, true).await?;
         let id: Uuid = lock_voice(&mut tx, alias).await?.get("id");
         let revision: Option<i64> =
             sqlx::query_scalar("SELECT revision FROM speech.voice_descriptions WHERE voice_id=$1")
