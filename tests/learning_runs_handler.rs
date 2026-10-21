@@ -8,6 +8,13 @@ use sqlx::PgPool;
 #[sqlx::test]
 async fn source_update_archive_and_deleted_source_receipt(pool: PgPool) {
     let (state, auth, list) = setup(&pool).await;
+    let shared_entry: uuid::Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(list)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    wordlists_support::share_current_publication(&pool, shared_entry).await;
     let task = create(&state, &auth, list, "longterm").await;
     let start_input = start_body(None);
     let start_path = format!(
@@ -34,7 +41,7 @@ async fn source_update_archive_and_deleted_source_receipt(pool: PgPool) {
     let admin = wordlists_support::admin(&pool).await;
     let mut snapshot: Value = sqlx::query_scalar("SELECT p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1")
         .bind(entry).fetch_one(&pool).await.unwrap();
-    snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["spelling"] =
+    snapshot["forms"]["contents"][0]["regional_variants"]["uk"]["spelling"] =
         serde_json::json!("new-answer");
     snapshot["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
         serde_json::json!("重发后的释义");

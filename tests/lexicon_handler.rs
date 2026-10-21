@@ -30,6 +30,8 @@ mod batch4;
 mod batch5;
 #[path = "lexicon_handler/fixtures.rs"]
 mod fixtures;
+#[path = "lexicon_handler/shared_forms.rs"]
+mod shared_forms;
 #[path = "lexicon_handler/spelling_markup.rs"]
 mod spelling_markup;
 
@@ -290,6 +292,30 @@ async fn call_with_phoneme_capabilities(
     body: Option<Value>,
     capabilities: (bool, bool, bool, bool),
 ) -> (StatusCode, Value) {
+    call_with_form_capability(
+        state,
+        method,
+        uri,
+        bearer,
+        idempotency_key,
+        body,
+        capabilities,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn call_with_form_capability(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    bearer: &str,
+    idempotency_key: Option<Uuid>,
+    body: Option<Value>,
+    capabilities: (bool, bool, bool, bool),
+    shared_forms: bool,
+) -> (StatusCode, Value) {
     let (markup, formatting, speech, phoneme_speech) = capabilities;
     let request_kind = test_request_kind(&method, uri);
     let mut builder = Request::builder()
@@ -307,6 +333,9 @@ async fn call_with_phoneme_capabilities(
     }
     if phoneme_speech {
         builder = builder.header("X-TSZ-Phoneme-Speech", "v1");
+    }
+    if shared_forms {
+        builder = builder.header("X-TSZ-Form-Contents", "v1");
     }
     if let Some(idempotency_key) = idempotency_key {
         builder = builder.header("Idempotency-Key", idempotency_key.to_string());
@@ -365,7 +394,7 @@ async fn call_with_phoneme_capabilities(
         assert_eq!(
             vary.as_ref().and_then(|value| value.to_str().ok()),
             Some(
-                "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting"
+                "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents"
             )
         );
     }
@@ -11374,6 +11403,13 @@ async fn current_sense_ref_anchors(
     .unwrap()
 }
 
+fn expanded_publication_forms(snapshot: &Value) -> Value {
+    assert_eq!(snapshot["forms"]["forms_format"], "shared_v1");
+    let forms: tsz_rust::lexicon::dto::DraftFormsStepContentV3 =
+        serde_json::from_value(snapshot["forms"].clone()).unwrap();
+    json!({"pos": forms.pos})
+}
+
 async fn current_publication_snapshot(pool: &PgPool, entry_id: Uuid) -> Value {
     sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id = $1")
         .bind(current_publication_id(pool, entry_id).await)
@@ -11543,21 +11579,34 @@ async fn definition_links_self_references_block_destructive_form_edits(pool: PgP
     let revision = source["word"]["revision"].as_i64().unwrap();
     let mut forms = source["word"]["forms"].clone();
     forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["id"] = json!(Uuid::now_v7());
-    let impact = preview_v3_forms_impact(&state, &bearer, entry_id, revision, &forms).await;
-    assert!(
-        impact["blocked_references"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item["kind"] == "draft_text_link")),
-        "{impact}"
-    );
-    let (status, rejected) = save_v3_forms_raw(
+    for (method, suffix) in [(Method::POST, "/impact"), (Method::PUT, "")] {
+        let mut input = json!({"schema_version":3,"base_revision":revision,"content":forms});
+        if method == Method::PUT {
+            input["intent"] = json!("save");
+        }
+        let (status, rejected) = call(
+            &state,
+            method,
+            &format!("{ROOT}/entries/{entry_id}/steps/forms{suffix}"),
+            &bearer,
+            None,
+            Some(input),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        assert_eq!(rejected["code"], "stable_node_id_changed");
+    }
+    let (status, fresh) = call(
         &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{entry_id}"),
         &bearer,
-        entry_id,
-        forms_input_after_impact(&impact, revision, "save", forms),
+        None,
+        None,
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(status, StatusCode::OK, "{fresh}");
+    assert_eq!(fresh["word"]["forms"], source["word"]["forms"]);
     assert_eq!(
         entry_revision(&pool, Uuid::parse_str(entry_id).unwrap()).await,
         revision
@@ -15964,8 +16013,22 @@ async fn v3_dedicated_form_group_binds_senses_publishes_and_clears_through_impac
         snapshot["forms"]["pos"][0]["form_groups"][1]["scope"],
         "dedicated"
     );
+    assert_eq!(snapshot["forms"]["forms_format"], "shared_v1");
+    let form_id = &snapshot["forms"]["pos"][0]["form_groups"][1]["members"][0]["form_id"];
+    let binding = snapshot["forms"]["pos"][0]["forms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|form| &form["id"] == form_id)
+        .unwrap();
+    let content = snapshot["forms"]["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|content| content["id"] == binding["content_id"])
+        .unwrap();
     assert_eq!(
-        snapshot["forms"]["pos"][0]["form_groups"][1]["dialect_rules"],
+        content["dialect_rules"],
         json!({"spelling_mode": "unified", "phonetic_mode": "distinguish"})
     );
     assert_eq!(
@@ -16447,11 +16510,12 @@ async fn v3_synthesis_survives_forms_meanings_publication_and_history(pool: PgPo
         let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
         assert_eq!(status, StatusCode::CREATED, "{published}");
         let snapshot = current_publication_snapshot(&pool, entry_uuid).await;
+        let snapshot_forms = expanded_publication_forms(&snapshot);
         assert_eq!(
-            snapshot["forms"].pointer(path).unwrap()["synthesis"],
+            snapshot_forms.pointer(path).unwrap()["synthesis"],
             synthesis
         );
-        let pronunciation_id: Uuid = snapshot["forms"].pointer(path).unwrap()["id"]
+        let pronunciation_id: Uuid = snapshot_forms.pointer(path).unwrap()["id"]
             .as_str()
             .unwrap()
             .parse()
@@ -16682,7 +16746,7 @@ async fn v3_spelling_regularity_round_trips_without_group_or_dialect_leakage(poo
     let (status, published) = publish_ready_v3(&state, &bearer, &resaved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let snapshot = current_publication_snapshot(&pool, Uuid::parse_str(id).unwrap()).await;
-    assert_eq!(snapshot["forms"], expected);
+    assert_eq!(expanded_publication_forms(&snapshot), expected);
     // 已写入新格式数据时拒绝回退，避免旧 DTO 无法读取以及独立标记丢失。
     let error = sqlx::raw_sql(include_str!(
         "../migrations/20260917180000_add_form_variant_regularity.down.sql"
@@ -17237,9 +17301,22 @@ async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
         .await
         .unwrap_err();
     assert!(
-        format!("{down_error:#}").contains("cannot revert while rollback publications exist"),
+        format!("{down_error:#}").contains("shared form content is present"),
         "{down_error:#}"
     );
+    let mut tx = pool.begin().await.unwrap();
+    let rollback_guard = sqlx::raw_sql(include_str!(
+        "../migrations/20260922151000_lexicon_rollback_publications.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap_err();
+    assert!(
+        rollback_guard
+            .to_string()
+            .contains("cannot revert while rollback publications exist")
+    );
+    tx.rollback().await.unwrap();
     let version: i64 =
         sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
             .fetch_one(&pool)
@@ -18050,7 +18127,10 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
     assert_eq!(status, StatusCode::CREATED, "{published}");
     let original = current_publication_id(&pool, id).await;
     let snapshot = current_publication_snapshot(&pool, id).await;
-    let expected = snapshot["forms"].pointer(path).unwrap().clone();
+    let expected = expanded_publication_forms(&snapshot)
+        .pointer(path)
+        .unwrap()
+        .clone();
     assert_eq!(
         expected,
         saved["word"]["forms"].pointer(path).unwrap().clone()
@@ -18099,7 +18179,7 @@ async fn v3_spelling_rich_publication_history_and_rollback_preserve_annotations(
     assert_eq!(status, StatusCode::CREATED, "{rolled}");
     assert_ne!(current_publication_id(&pool, id).await, original);
     assert_eq!(
-        current_publication_snapshot(&pool, id).await["forms"]
+        expanded_publication_forms(&current_publication_snapshot(&pool, id).await)
             .pointer(path)
             .unwrap(),
         &expected

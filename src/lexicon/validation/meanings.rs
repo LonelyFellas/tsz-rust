@@ -496,6 +496,7 @@ mod tests {
 
     fn forms(pos: &str, pos_id: Uuid) -> DraftFormsStepContentV3 {
         DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![
                 serde_json::from_value(json!({
                     "pos_id": pos_id,

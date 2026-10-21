@@ -116,6 +116,7 @@ pub enum ErrorCode {
     SentenceNotFound,
     SentenceAssociationsUnresolved,
     SentenceAssociationClientUpgradeRequired,
+    FormContentsClientUpgradeRequired,
     PendingSentenceAssociationNotFound,
     PendingSentenceAssociationClaimed,
     PublicationNotFound,
@@ -157,7 +158,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 134] = [
+    pub const ALL: [Self; 135] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -261,6 +262,7 @@ impl ErrorCode {
         Self::EntryHasUnavailablePublicationRefs,
         Self::WordNotFound,
         Self::SentenceAssociationClientUpgradeRequired,
+        Self::FormContentsClientUpgradeRequired,
         Self::PendingSentenceAssociationNotFound,
         Self::PendingSentenceAssociationClaimed,
         Self::PublicationNotFound,
@@ -807,6 +809,11 @@ impl ErrorCode {
             Self::SentenceAssociationsUnresolved => (
                 "sentence_associations_unresolved",
                 "Sentence associations are not resolved for the current text",
+                StatusCode::CONFLICT,
+            ),
+            Self::FormContentsClientUpgradeRequired => (
+                "form_contents_client_upgrade_required",
+                "Shared form content requires an updated client",
                 StatusCode::CONFLICT,
             ),
             Self::SentenceAssociationClientUpgradeRequired => (

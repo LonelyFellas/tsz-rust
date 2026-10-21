@@ -26,4 +26,5 @@ pub mod validation;
 
 pub(crate) mod entry_search;
 pub mod related_suggestions;
+pub(crate) mod shared_forms;
 pub mod shared_sentences;

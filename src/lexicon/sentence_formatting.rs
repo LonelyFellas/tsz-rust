@@ -85,6 +85,8 @@ pub(crate) fn word_write_error(id: Uuid, step: PersistedWordStep) -> AppError {
             code: V3ValidationIssueCode::MeaningsStorageUnsafe,
             message: UPGRADE_MESSAGE.into(),
             node_location: V3DraftNodeLocation {
+                content_id: None,
+                content_slot_id: None,
                 node_role: "entry".into(),
                 ancestor_node_ids: vec![],
                 pos_id: None,

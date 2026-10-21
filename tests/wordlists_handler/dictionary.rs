@@ -7,6 +7,7 @@ use uuid::Uuid;
 async fn dictionary_requires_login_and_reads_only_current_publications(pool: PgPool) {
     let (state, auth) = setup_bound(&pool).await;
     let apple = full_entry(&pool, "apple").await;
+    share_current_publication(&pool, apple).await;
     let other = entry(&pool, "pineapple").await;
     let hidden = entry(&pool, "apple-hidden").await;
     sqlx::query("UPDATE lexicon.entries SET archived_at=now() WHERE id=$1")

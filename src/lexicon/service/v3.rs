@@ -104,6 +104,8 @@ struct V3RelationTargetStatusRecord {
 struct RetiredV3NodeRecord {
     id: Uuid,
     parent_node_id: Option<Uuid>,
+    content_id: Option<Uuid>,
+    content_slot_id: Option<Uuid>,
     node_role: String,
     retired_at: DateTime<Utc>,
 }
@@ -312,7 +314,7 @@ fn materialize_v3_detection_forms(
             }
         })
         .collect();
-    DraftFormsStepContentV3 { pos }
+    DraftFormsStepContentV3 { pos, shared: None }
 }
 
 fn cloned_v3_pronunciations(values: &[WordPronunciationV3]) -> Vec<WordPronunciationV3> {
@@ -715,6 +717,9 @@ fn preserve_missing_spelling_rich(
     proposed: &mut DraftFormsStepContentV3,
     current: &DraftFormsStepContentV3,
 ) {
+    if proposed.shared.is_some() {
+        return;
+    }
     let mut stored = HashMap::new();
     for form in current.pos.iter().flat_map(|pos| &pos.forms) {
         match &form.regional_variants {
@@ -791,6 +796,9 @@ fn preserve_missing_phoneme_speech(
     proposed: &mut DraftFormsStepContentV3,
     current: &DraftFormsStepContentV3,
 ) {
+    if proposed.shared.is_some() {
+        return;
+    }
     let mut stored = HashMap::new();
     for form in current.pos.iter().flat_map(|pos| &pos.forms) {
         let variants = match &form.regional_variants {
@@ -935,9 +943,13 @@ impl LexiconService {
         }
         let word = self.entry_v3_from_record(record).await?;
         let retired_stable_nodes = self.retired_v3_nodes(id).await?;
+        let retired_content_slots = sqlx::query_as::<_, crate::lexicon::dto::RetiredContentSlotV3>(
+            "SELECT id,content_id,parent_slot_id,role,retired_at FROM lexicon.v3_form_content_slots WHERE entry_id=$1 AND retired_at IS NOT NULL ORDER BY retired_at,id",
+        ).bind(id).fetch_all(self.repository.pool()).await.map_err(database_error)?;
         Ok(AdminWordDraftV3Envelope {
             word,
             retired_stable_nodes,
+            retired_content_slots: Some(retired_content_slots),
         })
     }
 
@@ -1030,6 +1042,9 @@ impl LexiconService {
         let mut forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
         normalize_form_regularity(&mut forms, None);
+        if !self.form_contents_supported && !forms.legacy_readable() {
+            return Err(crate::lexicon::shared_forms::upgrade_error().into());
+        }
         let mut meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
@@ -1088,6 +1103,7 @@ impl LexiconService {
                 .is_some_and(|revision| revision != record.revision),
             presentation,
             capabilities: AdminWordV3Capabilities {
+                shared_form_contents: None,
                 atomic_form_sense_bindings: Some(true),
                 multi_group_sense_bindings: Some(true),
                 text_links: Some(true),
@@ -1166,13 +1182,16 @@ impl LexiconService {
     ) -> Result<Vec<RetiredStableNodeV3>, LexiconServiceError> {
         let records = sqlx::query_as::<_, RetiredV3NodeRecord>(
             r#"
-            SELECT id, parent_node_id, node_role,
-                   removed_from_draft_at AS retired_at
-            FROM lexicon.nodes
-            WHERE entry_id = $1
-              AND removed_from_draft_at IS NOT NULL
-              AND node_role = ANY($2)
-            ORDER BY removed_from_draft_at, id
+            SELECT n.id, n.parent_node_id, n.node_role,
+                   n.removed_from_draft_at AS retired_at,
+                   m.content_id, m.content_slot_id
+            FROM lexicon.nodes n
+            LEFT JOIN lexicon.v3_form_content_node_slots m
+              ON m.entry_id = n.entry_id AND m.node_id = n.id
+            WHERE n.entry_id = $1
+              AND n.removed_from_draft_at IS NOT NULL
+              AND n.node_role = ANY($2)
+            ORDER BY n.removed_from_draft_at, n.id
             "#,
         )
         .bind(entry_id)
@@ -1196,6 +1215,8 @@ impl LexiconService {
                     id: record.id,
                     node_role: retired_role(&record.node_role)?,
                     parent_node_id: record.parent_node_id,
+                    content_id: record.content_id,
+                    content_slot_id: record.content_slot_id,
                     retired_at: record.retired_at,
                 })
             })
@@ -1590,6 +1611,13 @@ impl LexiconService {
             compatibility_v3_headwords(&detection, &forms)?
         };
         normalize_form_regularity(&mut forms, None);
+        if self.form_contents_supported {
+            forms.enable_shared().map_err(|error| {
+                LexiconServiceError::Authorization(crate::error::AppError::internal(
+                    anyhow::anyhow!(error),
+                ))
+            })?;
+        }
         let detection_basis_dialect = detection_basis_dialect_for_headwords(
             &detection.normalized_surface,
             &confirmed_headwords,
@@ -1754,6 +1782,7 @@ impl LexiconService {
             has_unpublished_changes: false,
             presentation,
             capabilities: AdminWordV3Capabilities {
+                shared_form_contents: None,
                 atomic_form_sense_bindings: Some(true),
                 multi_group_sense_bindings: Some(true),
                 text_links: Some(true),
@@ -1825,6 +1854,7 @@ impl LexiconService {
         let current = self.get_v3(entry_id).await?;
         ensure_v3_active(&current)?;
         ensure_v3_revision(&current, input.base_revision)?;
+        crate::lexicon::shared_forms::ensure_write(&current.forms, &input.content)?;
         preserve_missing_component_usages(&mut input.content, &current.forms)?;
         preserve_missing_spelling_rich(&mut input.content, &current.forms);
         normalize_form_regularity(&mut input.content, Some(&current.forms));
@@ -1840,6 +1870,25 @@ impl LexiconService {
             entry_id,
             current.kind,
             &mut input.content,
+        )
+        .await?;
+        crate::lexicon::shared_forms::preserve_pronunciation_slots(
+            &mut validation_tx,
+            entry_id,
+            &mut input.content,
+        )
+        .await?;
+        preflight_v3_form_node_identities(
+            &mut validation_tx,
+            entry_id,
+            &current.forms,
+            &input.content,
+        )
+        .await?;
+        crate::lexicon::shared_forms::preflight_identities(
+            &mut validation_tx,
+            entry_id,
+            &input.content,
         )
         .await?;
         validation_tx.commit().await.map_err(database_error)?;
@@ -1994,6 +2043,16 @@ impl LexiconService {
             return Err(invariant_record());
         }
         let mut forms = historical.forms;
+        forms.enable_shared().map_err(|error| {
+            LexiconServiceError::Authorization(crate::error::AppError::internal(anyhow::anyhow!(
+                error
+            )))
+        })?;
+        if !self.form_contents_supported && !forms.legacy_readable() {
+            return Err(crate::lexicon::shared_forms::upgrade_error().into());
+        }
+        crate::lexicon::shared_forms::preserve_pronunciation_slots(&mut tx, entry_id, &mut forms)
+            .await?;
         let mut meanings = historical.meanings;
         canonicalize_v3_forms(&mut forms)?;
         normalize_form_regularity(&mut forms, None);
@@ -2318,6 +2377,7 @@ impl LexiconService {
         let mut compatibility_forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms).map_err(serialization_error)?;
         normalize_form_regularity(&mut compatibility_forms, None);
+        crate::lexicon::shared_forms::ensure_write(&compatibility_forms, &input.content)?;
         preserve_missing_component_usages(&mut input.content, &compatibility_forms)?;
         preserve_missing_spelling_rich(&mut input.content, &compatibility_forms);
         normalize_form_regularity(&mut input.content, Some(&compatibility_forms));
@@ -2354,6 +2414,25 @@ impl LexiconService {
         .await?;
         let current_forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
+        crate::lexicon::shared_forms::preserve_pronunciation_slots(
+            &mut transaction,
+            entry_id,
+            &mut input.content,
+        )
+        .await?;
+        let audit_node_delta = preflight_v3_form_node_identities(
+            &mut transaction,
+            entry_id,
+            &current_forms,
+            &input.content,
+        )
+        .await?;
+        crate::lexicon::shared_forms::preflight_identities(
+            &mut transaction,
+            entry_id,
+            &input.content,
+        )
+        .await?;
         let current_form_pos_ids = current_forms
             .pos
             .iter()
@@ -2509,13 +2588,6 @@ impl LexiconService {
         if !aggregate_issues.is_empty() {
             return Err(v3_validation_failed(aggregate_issues));
         }
-        let audit_node_delta = preflight_v3_form_node_identities(
-            &mut transaction,
-            entry_id,
-            &current_forms,
-            &input.content,
-        )
-        .await?;
         let sub_parts = LexiconRepository::catalog_sub_parts_for_reference(&mut transaction)
             .await
             .map_err(repository_error)?
@@ -2803,6 +2875,9 @@ impl LexiconService {
         }
         let forms: DraftFormsStepContentV3 =
             serde_json::from_value(record.forms.clone()).map_err(serialization_error)?;
+        if !self.form_contents_supported && !forms.legacy_readable() {
+            return Err(crate::lexicon::shared_forms::upgrade_error().into());
+        }
         let entry_kind = parse_v3_kind(&record.kind).ok_or_else(invariant_record)?;
         let presentation =
             Self::v3_presentation_on(&mut *transaction, entry_id, record.revision, &forms).await?;
@@ -5222,6 +5297,7 @@ async fn replace_v3_forms(
     // entry_kind 与 resolve_v3_catalog_parts 校验时用的是同一个值：校验哪个 kind，就写哪个 kind。
     entry_kind: &str,
 ) -> Result<(), LexiconServiceError> {
+    crate::lexicon::shared_forms::persist(tx, entry_id, content).await?;
     sqlx::query(
         r#"
         UPDATE lexicon.nodes
@@ -6382,6 +6458,7 @@ mod tests {
                 literal: "component".to_owned(),
             });
         let content = DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id: fixed_id(5),
                 pos: "phrase".to_owned(),
@@ -6758,6 +6835,7 @@ mod tests {
             )
         };
         DraftFormsStepContentV3 {
+            shared: None,
             pos: vec![WordPosFormsV3 {
                 pos_id: fixed_id(100),
                 pos: "noun".to_owned(),
@@ -6847,7 +6925,10 @@ mod tests {
     #[test]
     fn forms_impact_skips_empty_pos_but_keeps_downstream_meaning_removal() {
         let current = two_form_content(false);
-        let proposed = DraftFormsStepContentV3 { pos: vec![] };
+        let proposed = DraftFormsStepContentV3 {
+            pos: vec![],
+            shared: None,
+        };
         assert!(
             forms_impact(&current, &proposed, &DraftMeaningsStepContentV3::default()).is_empty()
         );

@@ -3,6 +3,9 @@
 //! These tests deliberately exercise PostgreSQL constraints directly. Service-level
 //! completeness and authorization remain separate concerns.
 
+#[path = "lexicon_v3_storage_schema/shared_forms.rs"]
+mod shared_forms;
+
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
