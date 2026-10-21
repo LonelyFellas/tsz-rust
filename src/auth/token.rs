@@ -52,7 +52,7 @@ pub struct TokenManager {
 
 #[derive(Serialize, Deserialize)]
 struct TokenPayload {
-    sub: String,
+    sub: Uuid,
     aud: String,
     role: String,
     iat: i64,
@@ -85,7 +85,7 @@ impl TokenManager {
     ) -> Result<String, TokenError> {
         let now = chrono::Utc::now();
         let payload = TokenPayload {
-            sub: subject.to_string(),
+            sub: subject,
             aud: self.realm.as_aud().to_string(),
             role: role.to_string(),
             iat: now.timestamp(),
@@ -105,7 +105,7 @@ impl TokenManager {
             },
         )?;
         Ok(Claims {
-            subject: Uuid::parse_str(&data.claims.sub).map_err(|_| TokenError::Invalid)?,
+            subject: data.claims.sub,
             realm: self.realm,
             role: data.claims.role,
             security_version: data.claims.security_version.unwrap_or(0),
@@ -122,5 +122,54 @@ impl TokenManager {
     }
     pub fn ttl_seconds(&self) -> i64 {
         self.ttl.num_seconds()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn subject_wire_format_and_legacy_tokens_remain_compatible() {
+        let manager = TokenManager::new("test-secret", Realm::Web, Duration::minutes(5));
+        let subject = Uuid::now_v7();
+        let token = manager
+            .generate_with_version(subject, "student", 7)
+            .unwrap();
+        let payload =
+            decode::<serde_json::Value>(&token, &manager.decoding_key, &manager.validation)
+                .unwrap()
+                .claims;
+        assert_eq!(payload["sub"], subject.to_string());
+        assert_eq!(manager.parse(&token).unwrap().subject, subject);
+        assert_eq!(manager.parse(&token).unwrap().security_version, 7);
+
+        for raw in [subject.to_string(), subject.simple().to_string()] {
+            let payload = json!({
+                "sub": raw, "aud": "web", "role": "student",
+                "iat": chrono::Utc::now().timestamp(),
+                "exp": (chrono::Utc::now() + Duration::minutes(5)).timestamp()
+            });
+            let token = encode(
+                &Header::new(Algorithm::HS256),
+                &payload,
+                &manager.encoding_key,
+            )
+            .unwrap();
+            let claims = manager.parse(&token).unwrap();
+            assert_eq!(claims.subject, subject);
+            assert_eq!(claims.security_version, 0);
+
+            let mut invalid = payload;
+            invalid["sub"] = json!("invalid-uuid");
+            let token = encode(
+                &Header::new(Algorithm::HS256),
+                &invalid,
+                &manager.encoding_key,
+            )
+            .unwrap();
+            assert!(matches!(manager.parse(&token), Err(TokenError::Invalid)));
+        }
     }
 }
