@@ -1,5 +1,6 @@
 pub(crate) mod handler;
 mod model;
+mod registration_region_lookup;
 mod repository;
 mod router;
 mod service;

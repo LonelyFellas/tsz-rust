@@ -114,6 +114,7 @@ use utoipa::{
         crate::account_deletion::handler::get,
         crate::account_deletion::handler::create,
         crate::account_deletion::handler::cancel,
+        crate::admin::accounts::user_resources::registration_region,
         crate::admin::accounts::user_resources::wallet,
         crate::admin::accounts::user_resources::entries,
         crate::admin::accounts::user_resources::identity_documents,
@@ -1304,6 +1305,7 @@ mod tests {
             "display_name",
             "avatar_url",
             "roles",
+            "learning_settings",
             "status",
             "created_at",
             "updated_at",
@@ -1326,6 +1328,26 @@ mod tests {
                 "{field} 不应出现在 required 中"
             );
         }
+        assert!(
+            !user_required
+                .iter()
+                .any(|field| field == "learning_settings"),
+            "无 users.read_basic 时应省略 learning_settings"
+        );
+        let learning_settings_variants = user_properties["learning_settings"]["oneOf"]
+            .as_array()
+            .expect("learning_settings 应为可空的学习配置");
+        assert!(
+            learning_settings_variants
+                .iter()
+                .any(|schema| schema["type"] == "null"),
+            "已授权但未配置时 learning_settings 应允许 null"
+        );
+        assert!(
+            learning_settings_variants
+                .iter()
+                .any(|schema| { schema["$ref"] == "#/components/schemas/LearningSettings" })
+        );
         // 三条单用户端点：鉴权 + 路径参数 + 与列表条目同一个响应 schema。
         for (method, path) in [
             ("get", "/api/v1/admin/users/{id}"),

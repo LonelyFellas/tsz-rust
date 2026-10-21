@@ -208,6 +208,53 @@ async fn user_list_uses_admin_users_path_and_documents_contract(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn user_list_reads_learning_settings_and_requires_basic_permission(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool).await;
+    let configured = seed_user(&pool, "已配置", &["student"]).await;
+    let unconfigured = seed_user(&pool, "未配置", &["student"]).await;
+    let no_profile = seed_user(&pool, "无学生资料", &["teacher"]).await;
+    sqlx::query("INSERT INTO student_profiles (user_id, cefr_level, english_variant) VALUES ($1, 'C1', 'BrE'), ($2, NULL, NULL)")
+        .bind(configured).bind(unconfigured).execute(&pool).await.unwrap();
+    let bearer = admin_token(&state, admin);
+
+    for read_sensitive in [true, false] {
+        if !read_sensitive {
+            sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_sensitive'")
+                .bind(admin).execute(&pool).await.unwrap();
+        }
+        let (status, body) = get(&state, "/api/v1/admin/users", &bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let response: Value = serde_json::from_str(&body).unwrap();
+        let items = response["items"].as_array().unwrap();
+        assert_eq!(items.len(), 3, "{body}");
+        for (id, expected) in [
+            (
+                configured,
+                serde_json::json!({"cefr_level": "C1", "english_variant": "BrE"}),
+            ),
+            (unconfigured, Value::Null),
+            (no_profile, Value::Null),
+        ] {
+            let item = items
+                .iter()
+                .find(|item| item["id"] == id.to_string())
+                .unwrap();
+            assert_eq!(item.get("learning_settings"), Some(&expected), "{item}");
+        }
+    }
+
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_basic'")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = get(&state, "/api/v1/admin/users", &bearer).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    for item in response["items"].as_array().unwrap() {
+        assert!(item.get("learning_settings").is_none(), "{item}");
+    }
+}
+
+#[sqlx::test]
 async fn user_list_reads_teacher_verification_without_inferring_from_roles(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let admin = seed_admin(&pool).await;
@@ -330,7 +377,12 @@ async fn list_only_permission_does_not_disclose_basic_profile_or_filter_roles(po
             .0,
         StatusCode::FORBIDDEN
     );
-    for path in ["coin-wallet", "coin-entries", "identity-documents"] {
+    for path in [
+        "coin-wallet",
+        "coin-entries",
+        "identity-documents",
+        "registration-region",
+    ] {
         assert_eq!(
             get(
                 &state,
@@ -384,4 +436,90 @@ async fn list_only_permission_does_not_disclose_basic_profile_or_filter_roles(po
         .0,
         StatusCode::NOT_FOUND
     );
+}
+
+#[sqlx::test]
+async fn registration_region_requires_its_own_permission_and_never_exposes_ip(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool).await;
+    let user = seed_user(&pool, "地区用户", &["student"]).await;
+    let bearer = admin_token(&state, admin);
+    let path = format!("/api/v1/admin/users/{user}/registration-region");
+    sqlx::query("UPDATE users SET registration_ip='220.181.38.148' WHERE id=$1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(get(&state, &path, &bearer).await.0, StatusCode::FORBIDDEN);
+    // 地区读取不依赖基本资料或联系方式的授权。
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key <> 'users.access'")
+        .bind(admin).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.read_registration_region',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    let (status, body) = get(&state, &path, &bearer).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        serde_json::json!({
+            "city": "北京", "status": "resolved"
+        })
+    );
+    for uri in [
+        "/api/v1/admin/users".to_owned(),
+        format!("/api/v1/admin/users/{user}"),
+    ] {
+        let (status, body) = get(&state, &uri, &bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.contains("220.181.38.148"));
+        assert!(!body.contains("registration_ip"));
+        assert!(!body.contains("北京"));
+    }
+    assert_eq!(
+        get(
+            &state,
+            &format!("/api/v1/admin/users/{}/registration-region", Uuid::now_v7()),
+            &bearer
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='users.read_registration_region'")
+        .bind(admin).execute(&pool).await.unwrap();
+    assert_eq!(get(&state, &path, &bearer).await.0, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn registration_region_distinguishes_missing_ip_from_unknown_city(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let admin = seed_admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES ($1,'users.read_registration_region',$1)")
+        .bind(admin).execute(&pool).await.unwrap();
+    let user = seed_user(&pool, "历史用户", &["student"]).await;
+    let path = format!("/api/v1/admin/users/{user}/registration-region");
+    let bearer = admin_token(&state, admin);
+    let (status, body) = get(&state, &path, &bearer).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        serde_json::json!({
+            "city": null, "status": "not_recorded"
+        })
+    );
+    for ip in ["127.0.0.1", "192.168.1.1", "invalid"] {
+        sqlx::query("UPDATE users SET registration_ip=$2 WHERE id=$1")
+            .bind(user)
+            .bind(ip)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, body) = get(&state, &path, &bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            serde_json::json!({
+                "city": null, "status": "unknown"
+            })
+        );
+    }
 }

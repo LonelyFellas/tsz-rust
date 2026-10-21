@@ -16,7 +16,7 @@ use crate::{
     api::{PaginatedResponse, PaginationMeta},
     platform::{Password, PasswordError, validate_password},
     user::{
-        model::{UserListFilter, UserListRecord, UserStatus},
+        model::{LearningSettings, UserListFilter, UserListRecord, UserStatus},
         repository::{UserError, UserRepository},
     },
 };
@@ -489,6 +489,15 @@ fn user_response_from(
         avatar_url: read_basic.then_some(record.avatar_url),
         roles: read_basic.then_some(record.roles),
         teacher_verified: read_basic.then_some(record.teacher_verified),
+        learning_settings: read_basic.then(|| {
+            record
+                .cefr_level
+                .zip(record.english_variant)
+                .map(|(cefr_level, english_variant)| LearningSettings {
+                    cefr_level,
+                    english_variant,
+                })
+        }),
         status: read_basic.then_some(record.status),
         created_at: record.created_at,
         updated_at: read_basic.then_some(record.updated_at),

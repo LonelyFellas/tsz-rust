@@ -96,7 +96,10 @@ fn leaks(prompt: &str, key: &str) -> bool {
     static WORD_CHAR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"^[\p{Script=Latin}\p{Mark}\p{Number}]$").expect("Latin word boundary")
     });
-    let word_char = |c: char| WORD_CHAR.is_match(&c.to_string());
+    let word_char = |c: char| {
+        let mut buffer = [0; 4];
+        WORD_CHAR.is_match(c.encode_utf8(&mut buffer))
+    };
     text.match_indices(key).any(|(i, _)| {
         text[..i].chars().next_back().is_none_or(|c| !word_char(c))
             && text[i + key.len()..]

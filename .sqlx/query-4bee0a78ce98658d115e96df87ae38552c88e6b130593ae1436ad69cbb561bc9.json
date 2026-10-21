@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT\n                u.id,\n                u.phone,\n                u.email,\n                u.display_name,\n                u.avatar_url,\n                u.status as \"status: UserStatus\",\n                ARRAY(\n                    SELECT ur.role\n                    FROM user_roles ur\n                    WHERE ur.user_id = u.id\n                    ORDER BY CASE ur.role WHEN 'student' THEN 1 ELSE 2 END\n                ) AS \"roles!: Vec<UserRole>\",\n                EXISTS (\n                    SELECT 1 FROM teacher_profiles tp WHERE tp.user_id = u.id AND tp.verified\n                ) AS \"teacher_verified!\",\n                u.created_at,\n                u.updated_at\n            FROM users u\n            WHERE u.id = $1\n            ",
+  "query": "\n            SELECT\n                u.id,\n                u.phone,\n                u.email,\n                u.display_name,\n                u.avatar_url,\n                u.status as \"status: UserStatus\",\n                ARRAY(\n                    SELECT ur.role\n                    FROM user_roles ur\n                    WHERE ur.user_id = u.id\n                    ORDER BY CASE ur.role WHEN 'student' THEN 1 ELSE 2 END\n                ) AS \"roles!: Vec<UserRole>\",\n                EXISTS (\n                    SELECT 1 FROM teacher_profiles tp WHERE tp.user_id = u.id AND tp.verified\n                ) AS \"teacher_verified!\",\n                sp.cefr_level AS \"cefr_level?: CefrLevel\",\n                sp.english_variant AS \"english_variant?: EnglishVariant\",\n                u.created_at,\n                u.updated_at\n            FROM users u\n            LEFT JOIN student_profiles sp ON sp.user_id = u.id\n            WHERE u.id = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -83,6 +83,28 @@
       },
       {
         "ordinal": 8,
+        "name": "cefr_level?: CefrLevel",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "student_profiles",
+            "name": "cefr_level"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "english_variant?: EnglishVariant",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "student_profiles",
+            "name": "english_variant"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -93,7 +115,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 11,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -118,9 +140,11 @@
       false,
       null,
       null,
+      true,
+      true,
       false,
       false
     ]
   },
-  "hash": "3b45068e84e749dc1798e013703e640d59e016753d0551173b8e247f994d80de"
+  "hash": "4bee0a78ce98658d115e96df87ae38552c88e6b130593ae1436ad69cbb561bc9"
 }

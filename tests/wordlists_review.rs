@@ -44,6 +44,22 @@ async fn review_snapshot_notes_publication_and_disabled_author_withdraw(pool: Pg
         .await
     );
     let request = pending.1["id"].as_str().unwrap();
+    let history_path = format!("/api/v1/admin/wordlists/{id}/review-requests");
+    let history = admin_call(
+        &state,
+        reviewer,
+        "GET",
+        &format!("{history_path}?include_reviewer=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(history.0, StatusCode::OK, "{}", history.1);
+    assert_eq!(history.1["items"].as_array().unwrap().len(), 1);
+    assert_eq!(history.1["items"][0]["id"], request);
+    assert_eq!(history.1["items"][0]["state"], "pending");
+    assert!(history.1["items"][0]["decided_at"].is_null());
+    assert!(history.1["items"][0].get("reviewer_id").is_none());
+    assert!(history.1["items"][0].get("reviewer_name").is_none());
     let note = json!({"expected_revision":2,"content":null,"note_updates":[{"entry_id":a,"expected_note_revision":1,"private_note":"TOP SECRET"}]});
     let saved = call(&state, &auth, "PUT", &path, note).await;
     assert_eq!(saved.0, StatusCode::OK);
@@ -70,11 +86,19 @@ async fn review_snapshot_notes_publication_and_disabled_author_withdraw(pool: Pg
     .await;
     assert_eq!(published.0, StatusCode::OK, "{}", published.1);
     assert_eq!(published.1["state"], "published");
-    let history_path = format!("/api/v1/admin/wordlists/{id}/review-requests");
     let legacy = admin_call(&state, reviewer, "GET", &history_path, Value::Null).await;
     assert_eq!(legacy.0, StatusCode::OK);
     assert!(legacy.1["items"][0].get("reviewer_id").is_none());
     assert!(legacy.1["items"][0].get("reviewer_name").is_none());
+    let excluded = admin_call(
+        &state,
+        reviewer,
+        "GET",
+        &format!("{history_path}?include_reviewer=false"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(excluded, legacy);
     let history = admin_call(
         &state,
         reviewer,
@@ -198,6 +222,21 @@ async fn withdrawn_request_cannot_be_approved_and_audit_failure_rolls_back(pool:
         .0,
         StatusCode::OK
     );
+    let history = admin_call(
+        &state,
+        reviewer,
+        "GET",
+        &format!("/api/v1/admin/wordlists/{id}/review-requests?include_reviewer=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(history.0, StatusCode::OK, "{}", history.1);
+    assert_eq!(history.1["items"].as_array().unwrap().len(), 1);
+    assert_eq!(history.1["items"][0]["id"], request);
+    assert_eq!(history.1["items"][0]["state"], "cancelled");
+    assert!(history.1["items"][0]["decided_at"].is_string());
+    assert!(history.1["items"][0].get("reviewer_id").is_none());
+    assert!(history.1["items"][0].get("reviewer_name").is_none());
     assert_eq!(
         admin_call(
             &state,
@@ -236,6 +275,151 @@ async fn withdrawn_request_cannot_be_approved_and_audit_failure_rolls_back(pool:
         call(&state, &auth, "GET", &path, Value::Null).await.1["state"],
         "pending"
     );
+}
+
+#[sqlx::test]
+async fn rejected_review_history_preserves_identity_when_admin_is_missing(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let a = entry(&pool, "rejected review").await;
+    let reviewer = admin(&pool).await;
+    let created = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/wordlists",
+        create_body(&[a]),
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::OK, "{}", created.1);
+    let id = created.1["id"].as_str().unwrap();
+    let submit = call(
+        &state,
+        &auth,
+        "POST",
+        &format!("/api/v1/me/wordlists/{id}/review-requests"),
+        json!({"expected_revision":1,"idempotency_key":Uuid::now_v7()}),
+    )
+    .await;
+    assert_eq!(submit.0, StatusCode::OK, "{}", submit.1);
+    let request: Uuid = submit.1["id"].as_str().unwrap().parse().unwrap();
+    let rejected = admin_call(
+        &state,
+        reviewer,
+        "POST",
+        &format!("/api/v1/admin/wordlists/{id}/review-requests/{request}/decision"),
+        json!({"expected_revision":2,"approve":false,"reason":"请补充内容"}),
+    )
+    .await;
+    assert_eq!(rejected.0, StatusCode::OK, "{}", rejected.1);
+    assert_eq!(rejected.1["state"], "rejected");
+    let path = format!("/api/v1/admin/wordlists/{id}/review-requests?include_reviewer=true");
+    let history = admin_call(&state, reviewer, "GET", &path, Value::Null).await;
+    assert_eq!(history.0, StatusCode::OK, "{}", history.1);
+    assert_eq!(history.1["items"].as_array().unwrap().len(), 1);
+    assert_eq!(history.1["items"][0]["id"], request.to_string());
+    assert_eq!(history.1["items"][0]["state"], "rejected");
+    assert_eq!(history.1["items"][0]["reason"], "请补充内容");
+    assert!(history.1["items"][0]["decided_at"].is_string());
+    assert_eq!(history.1["items"][0]["reviewer_id"], reviewer.to_string());
+    assert_eq!(history.1["items"][0]["reviewer_name"], "Reviewer");
+
+    // reviewer_id has no foreign key; historical identities may lack an admin row.
+    let missing_reviewer = Uuid::now_v7();
+    sqlx::query("UPDATE wordlist_review_requests SET reviewer_id=$2 WHERE id=$1")
+        .bind(request)
+        .bind(missing_reviewer)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let orphaned = admin_call(&state, reviewer, "GET", &path, Value::Null).await;
+    assert_eq!(orphaned.0, StatusCode::OK, "{}", orphaned.1);
+    let mut expected = history.1;
+    expected["items"][0]["reviewer_id"] = json!(missing_reviewer);
+    expected["items"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("reviewer_name");
+    assert_eq!(orphaned.1, expected);
+}
+
+#[sqlx::test]
+async fn reviewer_opt_in_requires_current_wordlist_access(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let a = entry(&pool, "review history access").await;
+    let manager = admin(&pool).await;
+    let reader = admin(&pool).await;
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(reader)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let created = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/wordlists",
+        create_body(&[a]),
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::OK, "{}", created.1);
+    let id = created.1["id"].as_str().unwrap();
+    let submit = call(
+        &state,
+        &auth,
+        "POST",
+        &format!("/api/v1/me/wordlists/{id}/review-requests"),
+        json!({"expected_revision":1,"idempotency_key":Uuid::now_v7()}),
+    )
+    .await;
+    assert_eq!(submit.0, StatusCode::OK, "{}", submit.1);
+    let request = submit.1["id"].as_str().unwrap();
+    let approved = admin_call(
+        &state,
+        manager,
+        "POST",
+        &format!("/api/v1/admin/wordlists/{id}/review-requests/{request}/decision"),
+        json!({"expected_revision":2,"approve":true,"reason":null}),
+    )
+    .await;
+    assert_eq!(approved.0, StatusCode::OK, "{}", approved.1);
+    let path = format!("/api/v1/admin/wordlists/{id}/review-requests");
+    for suffix in ["", "?include_reviewer=false", "?include_reviewer=true"] {
+        let forbidden = admin_call(
+            &state,
+            reader,
+            "GET",
+            &format!("{path}{suffix}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(forbidden.0, StatusCode::FORBIDDEN, "{}", forbidden.1);
+    }
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'wordlists.access',$2)")
+        .bind(reader).bind(manager).execute(&pool).await.unwrap();
+    let history = admin_call(
+        &state,
+        reader,
+        "GET",
+        &format!("{path}?include_reviewer=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(history.0, StatusCode::OK, "{}", history.1);
+    assert_eq!(history.1["items"].as_array().unwrap().len(), 1);
+    assert_eq!(history.1["items"][0]["id"], request);
+    assert_eq!(history.1["items"][0]["reviewer_id"], manager.to_string());
+    assert_eq!(history.1["items"][0]["reviewer_name"], "Reviewer");
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='wordlists.access'")
+        .bind(reader).execute(&pool).await.unwrap();
+    let revoked = admin_call(
+        &state,
+        reader,
+        "GET",
+        &format!("{path}?include_reviewer=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(revoked.0, StatusCode::FORBIDDEN, "{}", revoked.1);
 }
 
 #[sqlx::test]
