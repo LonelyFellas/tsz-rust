@@ -717,15 +717,23 @@ fn preserve_missing_spelling_rich(
     proposed: &mut DraftFormsStepContentV3,
     current: &DraftFormsStepContentV3,
 ) {
-    if proposed.shared.is_some() {
-        return;
-    }
+    let (current_ids, proposed_ids) = if proposed.shared.is_some() {
+        (current.setting_node_ids(), proposed.setting_node_ids())
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
     let mut stored = HashMap::new();
     for form in current.pos.iter().flat_map(|pos| &pos.forms) {
         match &form.regional_variants {
             WordRegionalVariantsV3::Common { common } => {
                 stored.insert(
-                    (common.id, Dialect::Common),
+                    (
+                        current_ids
+                            .get(&common.id)
+                            .copied()
+                            .unwrap_or((common.id, common.id)),
+                        Dialect::Common,
+                    ),
                     (
                         &common.spelling,
                         &common.spelling_rich,
@@ -735,11 +743,17 @@ fn preserve_missing_spelling_rich(
             }
             WordRegionalVariantsV3::UkUs { uk, us } => {
                 stored.insert(
-                    (uk.id, Dialect::Uk),
+                    (
+                        current_ids.get(&uk.id).copied().unwrap_or((uk.id, uk.id)),
+                        Dialect::Uk,
+                    ),
                     (&uk.spelling, &uk.spelling_rich, &uk.spelling_speech),
                 );
                 stored.insert(
-                    (us.id, Dialect::Us),
+                    (
+                        current_ids.get(&us.id).copied().unwrap_or((us.id, us.id)),
+                        Dialect::Us,
+                    ),
                     (&us.spelling, &us.spelling_rich, &us.spelling_speech),
                 );
             }
@@ -751,7 +765,9 @@ fn preserve_missing_spelling_rich(
          spelling: &String,
          rich: &mut Option<crate::lexicon::dto::RichTextV2V3>,
          speech: &mut Option<Box<crate::lexicon::dto::SpellingSpeechV3>>| {
-            if let Some((stored_spelling, stored_rich, stored_speech)) = stored.get(&(id, dialect))
+            let identity = proposed_ids.get(&id).copied().unwrap_or((id, id));
+            if let Some((stored_spelling, stored_rich, stored_speech)) =
+                stored.get(&(identity, dialect))
                 && *stored_spelling == spelling
             {
                 if rich.is_none() {
@@ -796,9 +812,11 @@ fn preserve_missing_phoneme_speech(
     proposed: &mut DraftFormsStepContentV3,
     current: &DraftFormsStepContentV3,
 ) {
-    if proposed.shared.is_some() {
-        return;
-    }
+    let (current_ids, proposed_ids) = if proposed.shared.is_some() {
+        (current.setting_node_ids(), proposed.setting_node_ids())
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
     let mut stored = HashMap::new();
     for form in current.pos.iter().flat_map(|pos| &pos.forms) {
         let variants = match &form.regional_variants {
@@ -815,7 +833,17 @@ fn preserve_missing_phoneme_speech(
         };
         for (id, dialect, spelling, pronunciations) in variants {
             for pronunciation in pronunciations {
-                stored.insert((id, dialect, pronunciation.id), (spelling, pronunciation));
+                stored.insert(
+                    (
+                        current_ids.get(&id).copied().unwrap_or((id, id)),
+                        dialect,
+                        current_ids
+                            .get(&pronunciation.id)
+                            .copied()
+                            .unwrap_or((pronunciation.id, pronunciation.id)),
+                    ),
+                    (spelling, pronunciation),
+                );
             }
         }
     }
@@ -834,7 +862,14 @@ fn preserve_missing_phoneme_speech(
         };
         for (id, dialect, spelling, pronunciations) in variants {
             for pronunciation in pronunciations {
-                let Some((old_spelling, old)) = stored.get(&(id, dialect, pronunciation.id)) else {
+                let identity = proposed_ids.get(&id).copied().unwrap_or((id, id));
+                let pronunciation_identity = proposed_ids
+                    .get(&pronunciation.id)
+                    .copied()
+                    .unwrap_or((pronunciation.id, pronunciation.id));
+                let Some((old_spelling, old)) =
+                    stored.get(&(identity, dialect, pronunciation_identity))
+                else {
                     continue;
                 };
                 if *old_spelling != spelling {

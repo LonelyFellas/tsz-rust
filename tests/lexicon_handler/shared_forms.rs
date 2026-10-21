@@ -27,12 +27,34 @@ async fn save_shared(
     revision: i64,
     content: Value,
 ) -> Value {
-    let (status, impact) = shared_call(
+    save_shared_with_capabilities(
         state,
         bearer,
+        id,
+        revision,
+        content,
+        (true, true, true, true),
+    )
+    .await
+}
+
+async fn save_shared_with_capabilities(
+    state: &AppState,
+    bearer: &str,
+    id: &str,
+    revision: i64,
+    content: Value,
+    capabilities: (bool, bool, bool, bool),
+) -> Value {
+    let (status, impact) = call_with_form_capability(
+        state,
         Method::POST,
         &format!("{ROOT}/entries/{id}/steps/forms/impact"),
+        bearer,
+        None,
         Some(json!({"schema_version":3,"base_revision":revision,"content":content})),
+        capabilities,
+        true,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{impact}");
@@ -52,16 +74,257 @@ async fn save_shared(
             body[target] = json!(token);
         }
     }
-    let (status, saved) = shared_call(
+    let (status, saved) = call_with_form_capability(
         state,
-        bearer,
         Method::PUT,
         &format!("{ROOT}/entries/{id}/steps/forms"),
+        bearer,
+        None,
         Some(body),
+        capabilities,
+        true,
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     saved
+}
+
+#[sqlx::test]
+async fn shared_forms_omitted_components_preserve_but_explicit_empty_clears(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let (id, mut forms) = create_v3_phrase_draft(&state, &bearer, "shared component").await;
+    let component = json!({"id":Uuid::now_v7(),"state":"unresolved","literal":"shared"});
+    forms["pos"][0]["forms"][0]["regional_variants"]["uk"]["component_usages"] = json!([component]);
+    let (_, saved) = save_v3_forms_after_impact(&state, &bearer, &id, 1, "save", forms).await;
+    let (_, read) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    let mut content = read["word"]["forms"].clone();
+    let path = "/pos/0/forms/0/regional_bindings/uk";
+    content
+        .pointer_mut(path)
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("component_usages");
+    let preserved = save_shared(
+        &state,
+        &bearer,
+        &id,
+        saved["word"]["revision"].as_i64().unwrap(),
+        content,
+    )
+    .await;
+    let (_, fresh) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        fresh["word"]["forms"].pointer(path).unwrap()["component_usages"],
+        json!([component])
+    );
+    let entry_id = Uuid::parse_str(&id).unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.v3_phrase_variant_component_usages WHERE entry_id=$1",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    let mut content = fresh["word"]["forms"].clone();
+    content.pointer_mut(path).unwrap()["component_usages"] = json!([]);
+    save_shared(
+        &state,
+        &bearer,
+        &id,
+        preserved["word"]["revision"].as_i64().unwrap(),
+        content,
+    )
+    .await;
+    let (_, fresh) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        fresh["word"]["forms"].pointer(path).unwrap()["component_usages"],
+        json!([])
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.v3_phrase_variant_component_usages WHERE entry_id=$1",
+    )
+    .bind(entry_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test]
+async fn shared_forms_partial_capabilities_preserve_settings_across_binding_changes(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let legacy = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let id = legacy["word"]["id"].as_str().unwrap();
+    let (_, read) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    let mut content = read["word"]["forms"].clone();
+    for side in ["uk", "us"] {
+        let variant = &mut content["contents"][0]["regional_variants"][side];
+        let speech = json!({"content":{"version":2,"text":variant["spelling"],"annotations":[]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]}});
+        variant["spelling_rich"] = json!({"version":2,"text":variant["spelling"],"annotations":[{"type":"italic","start":0,"end":1}]});
+        variant["spelling_speech"] = speech.clone();
+        variant["pronunciations"][0]["synthesis"] = json!({"alphabet":"ipa","ipa":"","ups":"","uk":{"ipa":"kæt","ups":"K AE T","ipa_speech":speech,"ups_speech":speech}});
+    }
+    let saved = save_shared(
+        &state,
+        &bearer,
+        id,
+        legacy["word"]["revision"].as_i64().unwrap(),
+        content,
+    )
+    .await;
+    let expected = saved["word"]["forms"]["contents"].clone();
+    let mut revision = saved["word"]["revision"].as_i64().unwrap();
+    for (capabilities, binding_change) in [
+        ((false, true, false, false), 0),
+        ((true, true, false, true), 0),
+        ((false, true, true, false), 0),
+        ((false, true, false, false), 1),
+        ((false, true, false, false), 2),
+    ] {
+        let (_, limited) = call_with_form_capability(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries/{id}"),
+            &bearer,
+            None,
+            None,
+            capabilities,
+            true,
+        )
+        .await;
+        let mut content = limited["word"]["forms"].clone();
+        assert_eq!(
+            content["contents"][0]["regional_variants"]["uk"]
+                .get("spelling_rich")
+                .is_some(),
+            capabilities.0
+        );
+        assert_eq!(
+            content["contents"][0]["regional_variants"]["uk"]
+                .get("spelling_speech")
+                .is_some(),
+            capabilities.2
+        );
+        assert_eq!(content["contents"][0]["regional_variants"]["uk"]["pronunciations"][0]["synthesis"]["uk"].get("ipa_speech").is_some(), capabilities.3);
+        if binding_change == 1 {
+            add_verb_binding(&mut content);
+        } else if binding_change == 2 {
+            for pos in content["pos"].as_array_mut().unwrap() {
+                let mut replacements = Vec::new();
+                for form in pos["forms"].as_array_mut().unwrap() {
+                    let previous = form["id"].clone();
+                    form["id"] = json!(Uuid::now_v7());
+                    replacements.push((previous, form["id"].clone()));
+                    for side in ["uk", "us"] {
+                        let variant = &mut form["regional_bindings"][side];
+                        variant["id"] = json!(Uuid::now_v7());
+                        for row in variant["pronunciations"].as_array_mut().unwrap() {
+                            row["id"] = json!(Uuid::now_v7());
+                        }
+                    }
+                }
+                for group in pos["form_groups"].as_array_mut().unwrap() {
+                    for member in group["members"].as_array_mut().unwrap() {
+                        let replacement = replacements
+                            .iter()
+                            .find(|(old, _)| old == &member["form_id"])
+                            .unwrap();
+                        member["id"] = json!(Uuid::now_v7());
+                        member["form_id"] = replacement.1.clone();
+                    }
+                }
+            }
+        }
+        let saved =
+            save_shared_with_capabilities(&state, &bearer, id, revision, content, capabilities)
+                .await;
+        revision = saved["word"]["revision"].as_i64().unwrap();
+        let (_, fresh) = shared_call(
+            &state,
+            &bearer,
+            Method::GET,
+            &format!("{ROOT}/entries/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(fresh["word"]["forms"]["contents"], expected);
+        for content in expected.as_array().unwrap() {
+            let stored: Value = sqlx::query_scalar(
+                "SELECT content FROM lexicon.v3_form_contents WHERE entry_id=$1 AND id=$2",
+            )
+            .bind(Uuid::parse_str(id).unwrap())
+            .bind(Uuid::parse_str(content["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(&stored, content);
+        }
+    }
+    let (_, fresh) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    let mut content = fresh["word"]["forms"].clone();
+    for side in ["uk", "us"] {
+        let variant = &mut content["contents"][0]["regional_variants"][side];
+        variant["spelling_rich"]["annotations"] = json!([]);
+        variant["spelling_speech"]["voice_profile"]["voices"] = json!([]);
+        for alphabet in ["ipa_speech", "ups_speech"] {
+            variant["pronunciations"][0]["synthesis"]["uk"][alphabet]["voice_profile"]["voices"] =
+                json!([]);
+        }
+    }
+    let expected = content["contents"].clone();
+    save_shared(&state, &bearer, id, revision, content).await;
+    let (_, fresh) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(fresh["word"]["forms"]["contents"], expected);
 }
 
 fn add_verb_binding(content: &mut Value) -> Value {

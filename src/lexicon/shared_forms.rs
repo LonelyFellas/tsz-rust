@@ -344,6 +344,39 @@ impl DraftFormsStepContentV3 {
         Ok(())
     }
 
+    pub(crate) fn setting_node_ids(&self) -> HashMap<Uuid, (Uuid, Uuid)> {
+        let mut ids = HashMap::new();
+        if let Some(shared) = &self.shared {
+            for form in shared.pos.iter().flat_map(|pos| &pos.forms) {
+                for (_, variant) in binding_variants(&form.regional_bindings) {
+                    ids.insert(variant.id, (form.content_id, variant.content_slot_id));
+                    for row in &variant.pronunciations {
+                        ids.insert(row.id, (form.content_id, row.content_slot_id));
+                    }
+                }
+            }
+        } else {
+            for form in self.pos.iter().flat_map(|pos| &pos.forms) {
+                let content_id = legacy_slot("content", form.id);
+                let variants = match &form.regional_variants {
+                    WordRegionalVariantsV3::Common { common } => {
+                        vec![(common.id, &common.pronunciations)]
+                    }
+                    WordRegionalVariantsV3::UkUs { uk, us } => {
+                        vec![(uk.id, &uk.pronunciations), (us.id, &us.pronunciations)]
+                    }
+                };
+                for (id, rows) in variants {
+                    ids.insert(id, (content_id, legacy_slot("variant", id)));
+                    for row in rows {
+                        ids.insert(row.id, (content_id, legacy_slot("pronunciation", row.id)));
+                    }
+                }
+            }
+        }
+        ids
+    }
+
     pub(crate) fn legacy_readable(&self) -> bool {
         self.pos.iter().all(|pos| {
             pos.form_groups.iter().all(|group| {
@@ -405,10 +438,12 @@ fn expand_variant(
         "pronunciations".into(),
         serde_json::to_value(rows).map_err(|e| e.to_string())?,
     );
-    object.insert(
-        "component_usages".into(),
-        serde_json::to_value(&binding.component_usages).map_err(|e| e.to_string())?,
-    );
+    if binding.component_usages.was_present() {
+        object.insert(
+            "component_usages".into(),
+            serde_json::to_value(&binding.component_usages).map_err(|e| e.to_string())?,
+        );
+    }
     Ok(value)
 }
 
