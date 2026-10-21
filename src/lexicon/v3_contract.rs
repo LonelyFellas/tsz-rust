@@ -975,6 +975,12 @@ fn validate_voice_profile(
                 || !seen.insert(voice_id.as_str())
                 || !(MIN_SPEECH_RATE_PERCENT..=MAX_SPEECH_RATE_PERCENT)
                     .contains(&voice.rate_percent)
+                || voice
+                    .pitch_semitones
+                    .is_some_and(|pitch| !(-12..=12).contains(&pitch))
+                || voice.style.as_ref().is_some_and(|style| {
+                    style.trim().is_empty() || style.chars().count() > 64 || style.contains('\0')
+                })
         });
     if voices_invalid {
         issues.push(meanings_issue(
@@ -3608,6 +3614,35 @@ mod tests {
 mod sense_group_voice_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn voice_parameters_round_trip_and_validate_without_changing_legacy_defaults() {
+        let legacy = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":0}]});
+        let parsed: VoiceProfileV3 = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+        let configured = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":-25,"pitch_semitones":2,"style":"cheerful"}]});
+        let profile: VoiceProfileV3 = serde_json::from_value(configured.clone()).unwrap();
+        let mut issues = vec![];
+        validate_voice_profile(Some(&profile), Uuid::now_v7(), &mut issues);
+        assert!(issues.is_empty());
+        assert_eq!(serde_json::to_value(profile).unwrap(), configured);
+        for (key, value) in [
+            ("pitch_semitones", json!(13)),
+            ("style", json!(" ")),
+            ("style", json!("x".repeat(65))),
+        ] {
+            let mut bad = configured.clone();
+            bad["voices"][0][key] = value;
+            let profile = serde_json::from_value(bad).unwrap();
+            let mut issues = vec![];
+            validate_voice_profile(Some(&profile), Uuid::now_v7(), &mut issues);
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.code == V3ValidationIssueCode::VoiceProfileInvalid.as_str())
+            );
+        }
+    }
+
     #[test]
     fn sense_group_voice_validates_text_and_profile() {
         let raw = json!({"sense_groups": [{"id": Uuid::new_v4(), "name_zh": "工作", "name_en": "work", "name_en_rich": {"version": 2, "text": "work", "annotations": [{"type":"emphasis", "start":0,"end":4,"level":"core"}]}, "voice_profile": {"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":0}]}}],"pos":[]});

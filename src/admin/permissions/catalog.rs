@@ -448,7 +448,7 @@ pub const CATALOG: &[PermissionDefinition] = &[
         "speech.global_dubbing",
         "speech",
         "全局配音",
-        "有权在配音中心设置某种全局配音，例如给全局特定文字进行专门的配音设置。预留权限，功能尚未接入。",
+        "维护音色库中共享的中文介绍与全局配音设置。",
         "action",
         [],
         "high"

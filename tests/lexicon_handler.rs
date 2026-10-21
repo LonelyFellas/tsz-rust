@@ -2506,9 +2506,8 @@ async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool)
     );
 
     // A complete catalog exceeds the former 20-item limit; also cover the new boundary.
-    let grammar_profile = json!({"voices": (0..2000).map(|index| json!({"voice_id": format!("voice-{index}"), "enabled": index % 2 == 0, "rate_percent": if index % 2 == 0 { -25 } else { 10 }})).collect::<Vec<_>>()});
-    let sentence_profile =
-        json!({"voices": [{"voice_id":"jenny", "enabled":true, "rate_percent":20}]});
+    let grammar_profile = json!({"voices": (0..2000).map(|index| json!({"voice_id": format!("voice-{index}"), "enabled": index % 2 == 0, "rate_percent": if index % 2 == 0 { -25 } else { 10 }, "pitch_semitones":2, "style":"cheerful"})).collect::<Vec<_>>()});
+    let sentence_profile = json!({"voices": [{"voice_id":"jenny", "enabled":true, "rate_percent":20, "pitch_semitones":2, "style":"cheerful"}]});
     let mut meanings = word["word"]["meanings"].clone();
     meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
         grammar_profile.clone();
@@ -18408,7 +18407,7 @@ async fn v3_spelling_speech_roundtrips_independently_and_survives_legacy_saves(p
     let id = ready["word"]["id"].as_str().unwrap();
     let path = "/pos/0/forms/0/regional_variants";
     let mut forms = ready["word"]["forms"].clone();
-    let speech = json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":500}]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10}]}});
+    let speech = json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":500}]},"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":10,"pitch_semitones":2,"style":"cheerful"}]}});
     for side in ["uk", "us"] {
         forms.pointer_mut(path).unwrap()[side]["spelling"] = json!("hello there");
         forms.pointer_mut(path).unwrap()[side]["spelling_speech"] = speech.clone();
@@ -18514,7 +18513,7 @@ async fn v3_phoneme_speech_roundtrips_and_survives_legacy_saves(pool: PgPool) {
     for region in ["uk", "us"] {
         let variant = &mut forms.pointer_mut(path).unwrap()[region];
         variant["spelling"] = json!("hello there");
-        let speech = |duration| json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":duration}]},"voice_profile":{"voices":[{"voice_id":region,"enabled":true,"rate_percent":10}]}});
+        let speech = |duration| json!({"content":{"version":2,"text":"hello there","annotations":[{"type":"pause","at":5,"duration_ms":duration}]},"voice_profile":{"voices":[{"voice_id":region,"enabled":true,"rate_percent":10,"pitch_semitones":2,"style":"cheerful"}]}});
         variant["pronunciations"][0]["synthesis"] = json!({"alphabet":"ipa","ipa":"","ups":"","use_spelling":false,"uk":{"ipa":"həˈləʊ ðeə","ups":"H AX L O DH EH","ipa_speech":speech(500),"ups_speech":speech(1000)},"us":{"ipa":"həˈloʊ ðɛɹ","ups":"H AX L O DH EH R","ipa_speech":speech(1500),"ups_speech":speech(2000)}});
     }
     let (_, saved) = save_v3_forms_after_impact(

@@ -1,6 +1,7 @@
 mod azure;
 mod catalog;
 mod config;
+pub mod library;
 mod model;
 pub mod preview;
 mod product_catalog;
