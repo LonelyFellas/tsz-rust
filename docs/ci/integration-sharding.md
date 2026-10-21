@@ -8,10 +8,12 @@ fail-closed aggregate, so branch protection does not need to change.
 ## Partition
 
 - `lexicon-pagination`: the existing 251-entry/2008-candidate pagination case,
-  selected by its complete libtest name with `--exact`.
+  selected by its complete libtest name with `--exact`, plus all `learning_*`
+  targets. Learning targets run without the pagination filter.
 - `lexicon-handler`: every other case in the same `lexicon_handler` executable.
   The skip filter is rejected if it could accidentally match another case.
-- `lexicon-other`: every other target in the original lexicon module.
+- `lexicon-other`: every other target in the original lexicon module, excluding
+  `lexicon_handler` and `learning_*`.
 - `admin`, `identity`, `platform`: their original complete target sets.
 
 The old module classifier still requires every repository integration target to
@@ -61,6 +63,16 @@ and confirm the same 92 targets, case identities and existing ignored set. Also
 report runner-minute cost; one hosted-runner comparison is evidence, not an SLA.
 Results and candidate SHA are recorded in the PR after CI completes, avoiding a
 new measurement run caused only by committing the report.
+
+The current partition also balances the existing six jobs without adding a
+runner: in successful main run [39575328075](https://github.com/LonelyFellas/tsz-rust/actions/runs/39575328075),
+`lexicon-pagination` executed in 234 s, `lexicon-handler` in 472 s and
+`lexicon-other` in 443 s. The five `learning_*` targets accounted for about 170 s
+of serial execution in `lexicon-other`. Moving those complete targets to the
+pagination job preserves every case and each job's isolated services. This is
+an execution-time estimate, not a measured improvement: the moved targets add
+compilation work to pagination, and the actual longest job must be compared in
+CI after publication.
 
 ## Identity lifecycle measurements
 

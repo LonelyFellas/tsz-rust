@@ -14,7 +14,7 @@ from ci_test_shards import (PAGINATION, ROOT, SHARD_MODULES, build, filters_for,
 class IntegrationShardsTests(unittest.TestCase):
     def setUp(self):
         self.grouped = {
-            "lexicon": ("lexicon_handler", "wordlists_test"),
+            "lexicon": ("lexicon_handler", "learning_runs_handler", "wordlists_test"),
             "admin": ("admin_test",), "identity": ("identity_test",), "platform": ("platform_test",),
         }
         self.reports = []
@@ -29,7 +29,7 @@ class IntegrationShardsTests(unittest.TestCase):
             self.reports.append({"shard": shard, "sha": "exact-sha", "inventory": inventory, "executed": executed})
 
     def test_complete_partition_and_workflow_matrix(self):
-        self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha"), {"targets": 5, "cases": 7, "shards": 6})
+        self.assertEqual(verify_manifests(self.reports, self.grouped, "exact-sha"), {"targets": 6, "cases": 8, "shards": 6})
         import re
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         matrix = re.search(r"module: \[([^\]]+)\]", workflow)[1].split(", ")
@@ -62,15 +62,18 @@ class IntegrationShardsTests(unittest.TestCase):
         for names in [["ordinary"], [PAGINATION, PAGINATION], [PAGINATION, PAGINATION + "_extra"]]:
             with self.assertRaises(ClassificationError):
                 selected_cases("lexicon-handler", "lexicon_handler", names)
-        self.assertEqual(filters_for("lexicon-pagination"), [PAGINATION, "--exact"])
-        self.assertEqual(filters_for("lexicon-handler"), ["--skip", PAGINATION])
+        self.assertEqual(filters_for("lexicon-pagination", "lexicon_handler"), [PAGINATION, "--exact"])
+        self.assertEqual(filters_for("lexicon-handler", "lexicon_handler"), ["--skip", PAGINATION])
+        self.assertEqual(filters_for("lexicon-pagination", "learning_runs_handler"), [])
+        self.assertEqual(targets_for("lexicon-pagination", self.grouped), ("lexicon_handler", "learning_runs_handler"))
+        self.assertEqual(targets_for("lexicon-other", self.grouped), ("wordlists_test",))
 
     def test_build_uses_locked_all_feature_target_and_records_real_executable(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch("ci_test_shards.subprocess.run") as runner:
-            runner.return_value.stdout = json.dumps({"reason": "compiler-artifact", "target": {"name": "lexicon_handler"}, "executable": "/binary"})
+            runner.return_value.stdout = "\n".join(json.dumps({"reason": "compiler-artifact", "target": {"name": target}, "executable": f"/{target}"}) for target in ("lexicon_handler", "learning_runs_handler"))
             build("lexicon-pagination", self.grouped, Path(directory))
-            self.assertEqual(runner.call_args.args[0], ["cargo", "test", "--locked", "--all-features", "--test", "lexicon_handler", "--no-run", "--message-format=json"])
-            self.assertEqual(json.loads((Path(directory) / "lexicon-pagination-executables.json").read_text()), {"lexicon_handler": "/binary"})
+            self.assertEqual(runner.call_args.args[0], ["cargo", "test", "--locked", "--all-features", "--test", "lexicon_handler", "--test", "learning_runs_handler", "--no-run", "--message-format=json"])
+            self.assertEqual(json.loads((Path(directory) / "lexicon-pagination-executables.json").read_text()), {"lexicon_handler": "/lexicon_handler", "learning_runs_handler": "/learning_runs_handler"})
 
     def test_malformed_list_is_rejected(self):
         with mock.patch("ci_test_shards.subprocess.run") as runner:
@@ -96,15 +99,27 @@ else:
     for name in names: print('test ' + name + ' ... ' + ('ignored' if name == 'ignored_case' else 'ok'))
 ''')
             binary.chmod(0o755)
+            learning = root / "learning"
+            learning.write_text(f'''#!{sys.executable}
+import sys
+assert '--exact' not in sys.argv and '--skip' not in sys.argv
+if '--list' in sys.argv:
+    if '--ignored' not in sys.argv: print('learning_case: test')
+    print(('0' if '--ignored' in sys.argv else '1') + ' tests, 0 benchmarks')
+else:
+    print('test learning_case ... ok')
+''')
+            learning.chmod(0o755)
             for shard in ["lexicon-pagination", "lexicon-handler"]:
-                (root / f"{shard}-executables.json").write_text(json.dumps({"lexicon_handler": str(binary)}))
+                executables = {target: str(binary if target == "lexicon_handler" else learning) for target in targets_for(shard, self.grouped)}
+                (root / f"{shard}-executables.json").write_text(json.dumps(executables))
                 with mock.patch.dict("os.environ", {"GITHUB_SHA": "exact-sha"}):
                     run(shard, self.grouped, root, root / f"{shard}-report.json")
             heavy = json.loads((root / "lexicon-pagination-report.json").read_text())
             rest = json.loads((root / "lexicon-handler-report.json").read_text())
-            self.assertEqual([row["name"] for row in heavy["executed"]], [PAGINATION])
+            self.assertEqual([row["name"] for row in heavy["executed"]], ["learning_case", PAGINATION])
             self.assertEqual([row["name"] for row in rest["executed"]], ["ordinary", "ignored_case"])
-            self.assertEqual(heavy["inventory"], rest["inventory"])
+            self.assertEqual(heavy["inventory"]["lexicon_handler"], rest["inventory"]["lexicon_handler"])
 
 
 if __name__ == "__main__":
