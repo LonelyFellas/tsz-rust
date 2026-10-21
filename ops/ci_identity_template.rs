@@ -119,6 +119,7 @@ async fn snapshot(name: &str) -> Result<Value> {
                     &["created_at", "updated_at"]
                 }
                 ("lexicon", "sentence_discovery_generation") => &["last_txid"],
+                ("speech", "dubbing_groups") => &["updated_at"],
                 _ => &[],
             };
             for field in fields {
