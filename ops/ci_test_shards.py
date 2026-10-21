@@ -29,10 +29,12 @@ def targets_for(shard, grouped):
     if shard not in SHARD_MODULES:
         raise ClassificationError(f"unknown shard: {shard}")
     targets = grouped[SHARD_MODULES[shard]]
-    if shard in ("lexicon-pagination", "lexicon-handler"):
+    if shard == "lexicon-pagination":
+        return tuple(target for target in targets if target == "lexicon_handler" or target.startswith("learning_"))
+    if shard == "lexicon-handler":
         return ("lexicon_handler",)
     if shard == "lexicon-other":
-        return tuple(target for target in targets if target != "lexicon_handler")
+        return tuple(target for target in targets if target != "lexicon_handler" and not target.startswith("learning_"))
     return targets
 
 
@@ -52,7 +54,9 @@ def selected_cases(shard, target, names):
     return names
 
 
-def filters_for(shard):
+def filters_for(shard, target):
+    if target != "lexicon_handler":
+        return []
     if shard == "lexicon-pagination":
         return [PAGINATION, "--exact"]
     if shard == "lexicon-handler":
@@ -115,7 +119,7 @@ def run(shard, grouped, directory, report):
         selected = selected_cases(shard, target, names)
         results = []
         print(f"Running {target}: shard={shard}, selected={len(selected)}, discovered={len(names)}", flush=True)
-        with subprocess.Popen([executable, *filters_for(shard), "--show-output"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
+        with subprocess.Popen([executable, *filters_for(shard, target), "--show-output"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as process:
             for line in process.stdout:
                 print(line, end="", flush=True)
                 cleaned = ANSI.sub("", line).strip()
