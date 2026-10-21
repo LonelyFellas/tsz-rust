@@ -344,8 +344,8 @@ impl AudioAssetService {
             .ok_or(AudioAssetServiceError::NotFound)?;
         let private_access =
             authorization.has("words.access") || authorization.has("sentences.access");
-        if !(record.created_by_admin_id == authorization.admin_id && private_access)
-            && !self
+        if !(record.created_by_admin_id == authorization.admin_id && private_access
+            || self
                 .repository
                 .has_readable_reference(
                     asset_id,
@@ -353,7 +353,7 @@ impl AudioAssetService {
                     authorization.has("sentences.access"),
                     authorization.has("sentences.read_published"),
                 )
-                .await?
+                .await?)
         {
             return Err(AudioAssetServiceError::NotFound);
         }

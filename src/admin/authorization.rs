@@ -573,6 +573,31 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::Any(&["words.access", "sentences.access"]),
     ),
     (
+        "GET",
+        "/speech/groups",
+        RoutePolicy::Any(&["words.access", "sentences.access"]),
+    ),
+    (
+        "PUT",
+        "/speech/groups",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "GET",
+        "/speech/library",
+        RoutePolicy::Any(&["words.access", "sentences.access"]),
+    ),
+    (
+        "PUT",
+        "/speech/library/{alias}/personal",
+        RoutePolicy::Any(&["words.access", "sentences.access"]),
+    ),
+    (
+        "PUT",
+        "/speech/library/{alias}/description",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
         "POST",
         "/speech/previews",
         RoutePolicy::All(&["speech.generate"]),

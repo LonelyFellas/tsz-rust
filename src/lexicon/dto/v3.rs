@@ -857,6 +857,32 @@ pub struct VoiceSettingV3 {
     pub enabled: bool,
     #[schema(minimum = -50, maximum = 100)]
     pub rate_percent: i16,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_voice_pitch"
+    )]
+    #[schema(minimum = -12, maximum = 12, nullable = false)]
+    pub pitch_semitones: Option<i8>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_voice_style"
+    )]
+    #[schema(max_length = 64, nullable = false)]
+    pub style: Option<String>,
+}
+
+fn deserialize_optional_voice_pitch<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i8>, D::Error> {
+    i8::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_voice_style<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 
 /// 此段文本的逐音色配置。未出现的音色默认不启用、原速。

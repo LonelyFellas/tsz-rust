@@ -262,6 +262,11 @@ use utoipa::{
         crate::lexicon::audio_assets::handler::audio_asset_url,
         crate::speech::preview::handler::list_voices,
         crate::speech::preview::handler::create_preview,
+        crate::speech::library::handler::list,
+        crate::speech::library::handler::groups,
+        crate::speech::library::handler::save_groups,
+        crate::speech::library::handler::save_settings,
+        crate::speech::library::handler::save_description,
     ),
     components(
         schemas(
@@ -553,6 +558,15 @@ use utoipa::{
             crate::speech::preview::dto::VoiceListResponse,
             crate::speech::preview::dto::PreviewCacheStatus,
             crate::speech::preview::dto::PreviewResponse,
+            crate::speech::library::dto::DubbingRecommendation,
+            crate::speech::library::dto::DubbingGroup,
+            crate::speech::library::dto::DubbingGroupsResponse,
+            crate::speech::library::dto::SaveDubbingGroupsRequest,
+            crate::speech::library::dto::VoiceParameters,
+            crate::speech::library::dto::VoiceLibraryItem,
+            crate::speech::library::dto::VoiceLibraryResponse,
+            crate::speech::library::dto::SaveVoiceSettingsRequest,
+            crate::speech::library::dto::SaveVoiceDescriptionRequest,
         )
     ),
     tags(

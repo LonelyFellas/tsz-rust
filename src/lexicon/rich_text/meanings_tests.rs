@@ -12,7 +12,7 @@ fn text() -> Value {
 }
 
 fn complete_content() -> DraftMeaningsStepContentV3 {
-    let profile = json!({"voices": [{"voice_id": "sonia", "enabled": true, "rate_percent": 10}]});
+    let profile = json!({"voices": [{"voice_id": "sonia", "enabled": true, "rate_percent": 10, "pitch_semitones": 2, "style": "cheerful"}]});
     let variant = json!({
         "id": Uuid::now_v7(), "value": text(), "origin": "manual",
         "voice_profile": profile,
