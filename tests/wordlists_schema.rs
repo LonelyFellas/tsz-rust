@@ -152,19 +152,23 @@ async fn deletion_events_keep_grace_and_notification_kind(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(
-        sqlx::query(
-            "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state,public_generation) VALUES($1,$2,clock_timestamp(),clock_timestamp(),'published',0)",
+    for offset_us in [0, -1] {
+        let error = sqlx::query(
+            "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state,public_generation) VALUES($1,$2,statement_timestamp(),statement_timestamp()+$3*interval '1 microsecond','published',0)",
         )
         .bind(uuid::Uuid::now_v7())
         .bind(uuid::Uuid::now_v7())
+        .bind(offset_us)
         .execute(&pool)
         .await
-        .is_err(),
-        "grace must end after deletion"
-    );
+        .expect_err("grace must end after deletion");
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("23514")
+        );
+    }
     sqlx::query(
-        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state,public_generation) VALUES($1,$2,clock_timestamp(),clock_timestamp()+interval '7 days','published',0)",
+        "INSERT INTO wordlist_deletion_events(id,wordlist_id,deleted_at,grace_until,prior_state,public_generation) VALUES($1,$2,statement_timestamp(),statement_timestamp()+interval '7 days','published',0)",
     )
     .bind(uuid::Uuid::now_v7())
     .bind(uuid::Uuid::now_v7())
