@@ -110,17 +110,21 @@ async fn review_snapshot_notes_publication_and_disabled_author_withdraw(pool: Pg
     assert_eq!(history.0, StatusCode::OK, "{}", history.1);
     assert_eq!(history.1["items"][0]["reviewer_id"], reviewer.to_string());
     assert_eq!(history.1["items"][0]["reviewer_name"], "Reviewer");
-    let personal = call(
-        &state,
-        &auth,
-        "GET",
-        &format!("{path}/review-requests"),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(personal.0, StatusCode::OK);
-    assert!(personal.1["items"][0].get("reviewer_id").is_none());
-    assert!(personal.1["items"][0].get("reviewer_name").is_none());
+    for suffix in ["", "?include_reviewer=false", "?include_reviewer=true"] {
+        let personal = call(
+            &state,
+            &auth,
+            "GET",
+            &format!("{path}/review-requests{suffix}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(personal.0, StatusCode::OK, "{}", personal.1);
+        assert_eq!(personal.1["items"].as_array().unwrap().len(), 1);
+        assert_eq!(personal.1["items"][0]["id"], request);
+        assert!(personal.1["items"][0].get("reviewer_id").is_none());
+        assert!(personal.1["items"][0].get("reviewer_name").is_none());
+    }
 
     let public = call(
         &state,
