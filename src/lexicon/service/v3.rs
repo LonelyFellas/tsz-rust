@@ -117,6 +117,12 @@ struct V3AuditNodeDelta {
     retired_node_ids: Vec<Uuid>,
 }
 
+#[derive(Debug)]
+struct V3FormNodePreflight {
+    delta: V3AuditNodeDelta,
+    identities: Vec<NodeIdentityRecord>,
+}
+
 fn blank_v3_pronunciation() -> WordPronunciationV3 {
     WordPronunciationV3 {
         dict_phonetic_rich: None,
@@ -1139,6 +1145,7 @@ impl LexiconService {
             presentation,
             capabilities: AdminWordV3Capabilities {
                 shared_form_contents: None,
+                form_content_reassignment: None,
                 atomic_form_sense_bindings: Some(true),
                 multi_group_sense_bindings: Some(true),
                 text_links: Some(true),
@@ -1751,12 +1758,28 @@ impl LexiconService {
         .execute(&mut *transaction)
         .await
         .map_err(database_error)?;
+        let node_preflight = preflight_v3_form_node_identities(
+            &mut transaction,
+            entry_id,
+            &DraftFormsStepContentV3::default(),
+            &forms,
+        )
+        .await?;
+        let verified_forms = crate::lexicon::shared_forms::preflight_identities(
+            &mut transaction,
+            entry_id,
+            &forms,
+            crate::lexicon::shared_forms::IdentityCheck::Draft,
+            &node_preflight.identities,
+        )
+        .await?;
         replace_v3_forms(
             &mut transaction,
             entry_id,
             &forms,
             &catalog_parts,
             v3_kind_string(input.kind),
+            verified_forms,
         )
         .await?;
         sqlx::query(
@@ -1818,6 +1841,7 @@ impl LexiconService {
             presentation,
             capabilities: AdminWordV3Capabilities {
                 shared_form_contents: None,
+                form_content_reassignment: None,
                 atomic_form_sense_bindings: Some(true),
                 multi_group_sense_bindings: Some(true),
                 text_links: Some(true),
@@ -1913,7 +1937,7 @@ impl LexiconService {
             &mut input.content,
         )
         .await?;
-        preflight_v3_form_node_identities(
+        let node_preflight = preflight_v3_form_node_identities(
             &mut validation_tx,
             entry_id,
             &current.forms,
@@ -1924,6 +1948,8 @@ impl LexiconService {
             &mut validation_tx,
             entry_id,
             &input.content,
+            crate::lexicon::shared_forms::IdentityCheck::Draft,
+            &node_preflight.identities,
         )
         .await?;
         validation_tx.commit().await.map_err(database_error)?;
@@ -2078,6 +2104,11 @@ impl LexiconService {
             return Err(invariant_record());
         }
         let mut forms = historical.forms;
+        let restore_identity_check = if forms.shared.is_none() {
+            crate::lexicon::shared_forms::IdentityCheck::LegacyPublicationRestore
+        } else {
+            crate::lexicon::shared_forms::IdentityCheck::PublicationRestore
+        };
         forms.enable_shared().map_err(|error| {
             LexiconServiceError::Authorization(crate::error::AppError::internal(anyhow::anyhow!(
                 error
@@ -2249,7 +2280,23 @@ impl LexiconService {
         }
         let catalog_parts = resolve_v3_catalog_parts(&mut tx, &forms, &record.kind).await?;
         // 恢复两步完整内容：先建立历史词性/词形，再写回依赖它们的释义。
-        replace_v3_forms(&mut tx, entry_id, &forms, &catalog_parts, &record.kind).await?;
+        let verified_forms = crate::lexicon::shared_forms::preflight_identities(
+            &mut tx,
+            entry_id,
+            &forms,
+            restore_identity_check,
+            &identities,
+        )
+        .await?;
+        replace_v3_forms(
+            &mut tx,
+            entry_id,
+            &forms,
+            &catalog_parts,
+            &record.kind,
+            verified_forms,
+        )
+        .await?;
         LexiconRepository::prepare_v3_sentence_translation_aliases(&mut tx, entry_id, &meanings)
             .await
             .map_err(repository_error)?;
@@ -2455,17 +2502,19 @@ impl LexiconService {
             &mut input.content,
         )
         .await?;
-        let audit_node_delta = preflight_v3_form_node_identities(
+        let node_preflight = preflight_v3_form_node_identities(
             &mut transaction,
             entry_id,
             &current_forms,
             &input.content,
         )
         .await?;
-        crate::lexicon::shared_forms::preflight_identities(
+        let verified_forms = crate::lexicon::shared_forms::preflight_identities(
             &mut transaction,
             entry_id,
             &input.content,
+            crate::lexicon::shared_forms::IdentityCheck::Draft,
+            &node_preflight.identities,
         )
         .await?;
         let current_form_pos_ids = current_forms
@@ -2660,6 +2709,7 @@ impl LexiconService {
             &input.content,
             &catalog_parts,
             &record.kind,
+            verified_forms,
         )
         .await?;
         let now = Utc::now();
@@ -2785,7 +2835,7 @@ impl LexiconService {
             "lexicon.entry.forms.save.v3",
             entry_id,
             next_revision,
-            v3_save_audit_metadata(input.intent, audit_node_delta),
+            v3_save_audit_metadata(input.intent, node_preflight.delta),
         )
         .await?;
         transaction.commit().await.map_err(database_error)?;
@@ -5143,7 +5193,7 @@ async fn preflight_v3_form_node_identities(
     entry_id: Uuid,
     current: &DraftFormsStepContentV3,
     proposed_content: &DraftFormsStepContentV3,
-) -> Result<V3AuditNodeDelta, LexiconServiceError> {
+) -> Result<V3FormNodePreflight, LexiconServiceError> {
     let proposed = v3_form_proposed_nodes(proposed_content);
     let proposed_ids = sorted_unique_node_ids(proposed.iter().map(|node| node.id));
     LexiconRepository::lock_node_ids(tx, &proposed_ids)
@@ -5162,12 +5212,15 @@ async fn preflight_v3_form_node_identities(
     if !node_issues.is_empty() {
         return Err(v3_validation_failed(node_issues));
     }
-    Ok(v3_audit_node_delta(
-        entry_id,
-        &v3_form_node_ids(current),
-        &proposed_ids,
-        &existing,
-    ))
+    Ok(V3FormNodePreflight {
+        delta: v3_audit_node_delta(
+            entry_id,
+            &v3_form_node_ids(current),
+            &proposed_ids,
+            &existing,
+        ),
+        identities: existing,
+    })
 }
 
 fn v3_audit_node_delta(
@@ -5331,8 +5384,9 @@ async fn replace_v3_forms(
     catalog_parts: &HashMap<String, Uuid>,
     // entry_kind 与 resolve_v3_catalog_parts 校验时用的是同一个值：校验哪个 kind，就写哪个 kind。
     entry_kind: &str,
+    verified: crate::lexicon::shared_forms::VerifiedFormIdentities,
 ) -> Result<(), LexiconServiceError> {
-    crate::lexicon::shared_forms::persist(tx, entry_id, content).await?;
+    crate::lexicon::shared_forms::persist(tx, entry_id, content, verified).await?;
     sqlx::query(
         r#"
         UPDATE lexicon.nodes

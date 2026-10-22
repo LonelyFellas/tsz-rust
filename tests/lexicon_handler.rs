@@ -394,7 +394,7 @@ async fn call_with_form_capability(
         assert_eq!(
             vary.as_ref().and_then(|value| value.to_str().ok()),
             Some(
-                "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents"
+                "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment"
             )
         );
     }

@@ -70,7 +70,7 @@ pub(super) fn spelling_markup_response<T: Serialize>(
     response.headers_mut().insert(
         header::VARY,
         axum::http::HeaderValue::from_static(
-            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents",
+            "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment",
         ),
     );
     Ok(response)
