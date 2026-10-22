@@ -274,6 +274,9 @@ async fn call_with_key(
         .header("Idempotency-Key", idempotency_key.to_string())
         .header("X-TSZ-Sentence-Formatting", "v1");
     let body = if let Some(body) = body {
+        if body.pointer("/content/forms_format").is_some() {
+            req = req.header("X-TSZ-Form-Contents", "v1");
+        }
         req = req.header(header::CONTENT_TYPE, "application/json");
         Body::from(body.to_string())
     } else {
@@ -1817,6 +1820,44 @@ async fn bind_form_fixture(pool: &PgPool, source: Uuid) {
         .await
         .unwrap();
     }
+    // 直接写入的夹具需补齐共享内容迁移会建立的当前图与身份账本。
+    let mut tx = pool.begin().await.unwrap();
+    for (tag, kind, parent, role) in [
+        (5, "form_group", 1, "forms.form_group"),
+        (9, "group_membership", 5, "forms.group_membership"),
+    ] {
+        sqlx::query("INSERT INTO lexicon.nodes(id,entry_id,node_type,parent_node_id,node_role,stable_slot) VALUES($1,$2,$3,$4,$5,false)")
+            .bind(node_id(source, tag)).bind(source).bind(kind).bind(node_id(source, parent)).bind(role).execute(&mut *tx).await.unwrap();
+    }
+    sqlx::query("INSERT INTO lexicon.v3_form_groups(id,entry_id,entry_pos_id,is_regular,ordinal,scope,spelling_mode,phonetic_mode) VALUES($1,$2,$3,true,0,'general','unified','unified')")
+        .bind(node_id(source, 5)).bind(source).bind(node_id(source, 1)).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.v3_concrete_forms(id,entry_id,entry_pos_id,form_type,ordinal) VALUES($1,$2,$3,'base',0)")
+        .bind(node_id(source, 2)).bind(source).bind(node_id(source, 1)).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.v3_group_memberships(id,entry_id,entry_pos_id,form_group_id,form_id,ordinal) VALUES($1,$2,$3,$4,$5,0)")
+        .bind(node_id(source, 9)).bind(source).bind(node_id(source, 1)).bind(node_id(source, 5)).bind(node_id(source, 2)).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.v3_form_variants(id,entry_id,form_id,dialect,spelling,normalized_spelling,normalization_version,origin,is_regular) SELECT $1,$2,$3,'common',forms#>>'{pos,0,forms,0,regional_variants,common,spelling}',forms#>>'{pos,0,forms,0,regional_variants,common,spelling}',1,'manual',true FROM lexicon.entry_editor_projection WHERE entry_id=$2")
+        .bind(node_id(source, 3)).bind(source).bind(node_id(source, 2)).execute(&mut *tx).await.unwrap();
+    sqlx::query("UPDATE lexicon.entry_editor_projection SET forms=lexicon.v3_legacy_forms_to_shared(forms) WHERE entry_id=$1")
+        .bind(source).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.v3_form_contents(id,entry_id,content) SELECT (content->>'id')::uuid,entry_id,content FROM lexicon.entry_editor_projection, jsonb_array_elements(forms->'contents') content WHERE entry_id=$1")
+        .bind(source).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.v3_form_content_bindings(form_id,entry_id,content_id,regional_bindings) SELECT (form->>'id')::uuid,entry_id,(form->>'content_id')::uuid,form->'regional_bindings' FROM lexicon.entry_editor_projection,jsonb_array_elements(forms->'pos') pos,jsonb_array_elements(pos->'forms') form WHERE entry_id=$1")
+        .bind(source).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.v3_form_content_slots(id,entry_id,content_id,role) SELECT id,entry_id,id,'content' FROM lexicon.v3_form_contents WHERE entry_id=$1")
+        .bind(source).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.v3_form_content_slots(id,entry_id,content_id,parent_slot_id,role) SELECT (region.value->>'id')::uuid,content.entry_id,content.id,content.id,region.key FROM lexicon.v3_form_contents content,jsonb_each(content.content->'regional_variants') region WHERE content.entry_id=$1 AND region.key IN ('common','uk','us')")
+        .bind(source).execute(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO lexicon.v3_form_content_node_slots(node_id,entry_id,content_id,content_slot_id) SELECT (region.value->>'id')::uuid,binding.entry_id,binding.content_id,(region.value->>'content_slot_id')::uuid FROM lexicon.v3_form_content_bindings binding,jsonb_each(binding.regional_bindings) region WHERE binding.entry_id=$1 AND region.key IN ('common','uk','us')")
+        .bind(source).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn shared_forms_payload(pool: &PgPool, expanded: &Value) -> Value {
+    sqlx::query_scalar("SELECT lexicon.v3_legacy_forms_to_shared($1)")
+        .bind(expanded)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 #[sqlx::test]
@@ -1860,6 +1901,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
     let mut respelled = snapshot["forms"].clone();
     respelled["pos"][0]["forms"][0]["regional_variants"]["common"]["spelling"] =
         json!("wonderfully");
+    let respelled = shared_forms_payload(&pool, &respelled).await;
     let (status, impact) = call(
         &state,
         actor,
@@ -1893,6 +1935,7 @@ async fn form_changes_and_old_publications_cannot_strand_sentence_targets(pool: 
     // 同一地区不能替换稳定变体 ID；合法的 common ↔ uk_us 切换另行验证。
     let mut drifted = snapshot["forms"].clone();
     drifted["pos"][0]["forms"][0]["regional_variants"]["common"]["id"] = json!(Uuid::now_v7());
+    let drifted = shared_forms_payload(&pool, &drifted).await;
     let (status, impact) = call(
         &state,
         actor,
@@ -2384,7 +2427,7 @@ async fn forms_impact_flags_only_changes_that_break_sentence_targets(pool: PgPoo
         actor,
         Method::POST,
         &impact_path,
-        Some(json!({"schema_version":3,"base_revision":1,"content":split})),
+        Some(json!({"schema_version":3,"base_revision":1,"content":shared_forms_payload(&pool, &split).await})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{impact}");
@@ -2397,6 +2440,7 @@ async fn forms_impact_flags_only_changes_that_break_sentence_targets(pool: PgPoo
     let mut respelled = forms.clone();
     respelled["pos"][0]["forms"][0]["regional_variants"]["common"]["spelling"] =
         json!("wonderfully");
+    let respelled = shared_forms_payload(&pool, &respelled).await;
     let (status, impact) = call(
         &state,
         actor,
@@ -2427,7 +2471,7 @@ async fn forms_impact_flags_only_changes_that_break_sentence_targets(pool: PgPoo
         actor,
         Method::POST,
         &impact_path,
-        Some(json!({"schema_version":3,"base_revision":1,"content":harmless})),
+        Some(json!({"schema_version":3,"base_revision":1,"content":shared_forms_payload(&pool, &harmless).await})),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{impact}");
