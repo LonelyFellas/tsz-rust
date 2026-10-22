@@ -2104,6 +2104,11 @@ impl LexiconService {
             return Err(invariant_record());
         }
         let mut forms = historical.forms;
+        let restore_identity_check = if forms.shared.is_none() {
+            crate::lexicon::shared_forms::IdentityCheck::LegacyPublicationRestore
+        } else {
+            crate::lexicon::shared_forms::IdentityCheck::PublicationRestore
+        };
         forms.enable_shared().map_err(|error| {
             LexiconServiceError::Authorization(crate::error::AppError::internal(anyhow::anyhow!(
                 error
@@ -2279,7 +2284,7 @@ impl LexiconService {
             &mut tx,
             entry_id,
             &forms,
-            crate::lexicon::shared_forms::IdentityCheck::PublicationRestore,
+            restore_identity_check,
             &identities,
         )
         .await?;

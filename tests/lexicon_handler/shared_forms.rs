@@ -1626,15 +1626,20 @@ async fn shared_forms_pronunciation_correspondence_persists_and_cannot_be_reassi
 
 #[sqlx::test]
 async fn shared_forms_reassignment_review_restore_retired_content(pool: PgPool) {
-    reassignment_restore_history(pool, false).await;
+    reassignment_restore_history(pool, false, false).await;
 }
 
 #[sqlx::test]
 async fn shared_forms_reassignment_review_restore_deleted_form(pool: PgPool) {
-    reassignment_restore_history(pool, true).await;
+    reassignment_restore_history(pool, true, false).await;
 }
 
-async fn reassignment_restore_history(pool: PgPool, delete_form: bool) {
+#[sqlx::test]
+async fn shared_forms_restore_pre_shared_publication_with_unregistered_content(pool: PgPool) {
+    reassignment_restore_history(pool, true, true).await;
+}
+
+async fn reassignment_restore_history(pool: PgPool, delete_form: bool, legacy_snapshot: bool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -1653,7 +1658,7 @@ async fn reassignment_restore_history(pool: PgPool, delete_form: bool) {
     let mut forms = read["word"]["forms"].clone();
     // F is removable; another base keeps the group valid. H keeps A active in the deleted-form case.
     forms["pos"][0]["forms"][0]["form_type"] = json!("plural");
-    if delete_form {
+    if delete_form && !legacy_snapshot {
         let mut h = forms["pos"][0]["forms"][0].clone();
         h["id"] = json!(Uuid::now_v7());
         h["form_type"] = json!("base");
@@ -1700,9 +1705,28 @@ async fn reassignment_restore_history(pool: PgPool, delete_form: bool) {
     )
     .await;
     let original_forms = original["word"]["forms"].clone();
+    let mut expected_forms = original_forms.clone();
+    if legacy_snapshot {
+        let expanded: tsz_rust::lexicon::dto::DraftFormsStepContentV3 =
+            serde_json::from_value(original_forms.clone()).unwrap();
+        let mut snapshot = original["word"].clone();
+        snapshot["forms"] = json!({"pos": expanded.pos});
+        expected_forms = sqlx::query_scalar("SELECT lexicon.v3_legacy_forms_to_shared($1)")
+            .bind(&snapshot["forms"])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        // Emulate an immutable expanded publication that predates the shared-content migration.
+        sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+            .bind(publication_id)
+            .bind(snapshot)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     let mut moved = original_forms.clone();
     reassign_form_content(&mut moved, 0, 0, 1);
-    if !delete_form {
+    if !delete_form || legacy_snapshot {
         moved["contents"].as_array_mut().unwrap().remove(0);
     }
     let mut moved = save_shared(
@@ -1733,6 +1757,27 @@ async fn reassignment_restore_history(pool: PgPool, delete_form: bool) {
     assert_eq!(status, StatusCode::OK, "{archived}");
     let (status, draft) = call_with_form_capability(&state, Method::POST, &format!("{ROOT}/entries/{id}/restore"), &bearer, Some(Uuid::now_v7()), Some(json!({"restore_as":"draft","base_revision":archived["word"]["revision"],"base_lifecycle_revision":archived["word"]["lifecycle_revision"]})), (true,true,true,true), true).await;
     assert_eq!(status, StatusCode::OK, "{draft}");
+    if legacy_snapshot {
+        let removed_content =
+            Uuid::parse_str(original_forms["contents"][0]["id"].as_str().unwrap()).unwrap();
+        // A migration before any shared binding existed would not have created this ledger.
+        sqlx::query("DELETE FROM lexicon.v3_form_content_node_slots WHERE entry_id=$1 AND node_id IN (SELECT id FROM lexicon.nodes WHERE entry_id=$1 AND removed_from_draft_at IS NOT NULL)").bind(entry_id).execute(&pool).await.unwrap();
+        sqlx::query(
+            "DELETE FROM lexicon.v3_form_content_slots WHERE entry_id=$1 AND content_id=$2",
+        )
+        .bind(entry_id)
+        .bind(removed_content)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_form_content_slots WHERE id=$1")
+                .bind(removed_content)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+    }
     let restore_key = Uuid::now_v7();
     let input = json!({"schema_version":3,"base_revision":draft["word"]["revision"],"base_lifecycle_revision":draft["word"]["lifecycle_revision"]});
     for _ in 0..2 {
@@ -1752,7 +1797,7 @@ async fn reassignment_restore_history(pool: PgPool, delete_form: bool) {
             StatusCode::OK,
             "delete_form={delete_form}: {restored}"
         );
-        assert_eq!(restored["word"]["forms"], original_forms);
+        assert_eq!(restored["word"]["forms"], expected_forms);
         assert_eq!(
             restored["word"]["revision"].as_i64(),
             Some(draft["word"]["revision"].as_i64().unwrap() + 1)
@@ -1766,7 +1811,7 @@ async fn reassignment_restore_history(pool: PgPool, delete_form: bool) {
         None,
     )
     .await;
-    assert_eq!(fresh["word"]["forms"], original_forms);
+    assert_eq!(fresh["word"]["forms"], expected_forms);
 }
 
 #[sqlx::test]

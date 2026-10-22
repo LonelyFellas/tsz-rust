@@ -906,6 +906,7 @@ pub(crate) async fn preserve_pronunciation_slots(
 pub(crate) enum IdentityCheck {
     Draft,
     PublicationRestore,
+    LegacyPublicationRestore,
 }
 
 pub(crate) struct VerifiedFormIdentities {
@@ -1041,9 +1042,21 @@ pub(crate) async fn preflight_identities(
     }
     // The caller already loaded and validated permanent identities, including retired forms.
     let identities: HashMap<_, _> = identities.iter().map(|node| (node.id, node)).collect();
+    if matches!(check, IdentityCheck::LegacyPublicationRestore) {
+        // Older immutable publications were never backfilled into the shared-content ledger.
+        // Only the trusted snapshot path may materialize their deterministic content IDs.
+        for binding in shared.pos.iter().flat_map(|pos| &pos.forms) {
+            if binding.content_id != legacy_slot("content", binding.id) {
+                return Err(LexiconServiceError::StableNodeIdChanged);
+            }
+            known_contents.insert(binding.content_id);
+        }
+    }
     let allowed_contents = match check {
         IdentityCheck::Draft => &active_contents,
-        IdentityCheck::PublicationRestore => &known_contents,
+        IdentityCheck::PublicationRestore | IdentityCheck::LegacyPublicationRestore => {
+            &known_contents
+        }
     };
     for binding in shared.pos.iter().flat_map(|pos| &pos.forms) {
         if identities.contains_key(&binding.id) && !allowed_contents.contains(&binding.content_id) {
