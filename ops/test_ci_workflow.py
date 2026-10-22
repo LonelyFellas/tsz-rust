@@ -85,6 +85,12 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertNotIn("services:", audit)
         self.assertIn('cron: "23 3 * * 1"', self.workflow)
         self.assertIn("github.event_name == 'schedule' && 'scheduled-audit'", self.workflow)
+        quality = self._job("quality")
+        self.assertIn("needs: [dependency-audit]", quality)
+        self.assertIn("always()", quality)
+        self.assertIn("needs['dependency-audit'].result", quality)
+        self.assertIn('test "$AUDIT_RESULT" = "success"', quality)
+        self.assertLess(quality.index("Require dependency audit to pass"), quality.index("Check out repository"))
         for name in ("quality", "unit-doc", "integration", "lexicon-summary", "ci-summary"):
             self.assertIn("github.event_name != 'schedule'", self._job(name))
 
