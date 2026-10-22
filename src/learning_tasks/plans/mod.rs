@@ -179,27 +179,6 @@ async fn write_cycle(
     }
     Ok(id)
 }
-async fn create_receipt(
-    tx: &mut Tx<'_>,
-    auth: &AuthUser,
-    key: Uuid,
-    h: &[u8],
-) -> Result<Option<Uuid>, AppError> {
-    let old: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
-        "SELECT id,create_hash FROM learning_tasks WHERE user_id=$1 AND create_key=$2",
-    )
-    .bind(auth.subject)
-    .bind(key)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(AppError::internal)?;
-    if let Some((id, old)) = old {
-        service::match_hash(&old, h)?;
-        Ok(Some(id))
-    } else {
-        Ok(None)
-    }
-}
 pub async fn create(
     pool: &PgPool,
     auth: &AuthUser,
@@ -207,7 +186,7 @@ pub async fn create(
 ) -> Result<LearningPlan, AppError> {
     let h = hash(&input)?;
     let mut receipt = begin(pool, auth, &[]).await?;
-    let prior = create_receipt(&mut receipt, auth, input.idempotency_key, &h).await?;
+    let prior = service::create_receipt(&mut receipt, auth, input.idempotency_key, &h).await?;
     receipt.commit().await.map_err(AppError::internal)?;
     if let Some(id) = prior {
         return detail(pool, auth, id).await;
@@ -215,7 +194,7 @@ pub async fn create(
     plan_name(&input.name)?;
     validate(&input.preview())?;
     let mut tx = begin(pool, auth, &input.wordlist_ids).await?;
-    if let Some(id) = create_receipt(&mut tx, auth, input.idempotency_key, &h).await? {
+    if let Some(id) = service::create_receipt(&mut tx, auth, input.idempotency_key, &h).await? {
         tx.commit().await.map_err(AppError::internal)?;
         return detail(pool, auth, id).await;
     }

@@ -6,6 +6,8 @@ on:
   pull_request:
     branches: [main, dev]
   workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 1"
 
 # CI only needs to read repository contents.
 permissions:
@@ -13,7 +15,7 @@ permissions:
 
 # A newer push makes an older run for the same branch or PR obsolete.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'scheduled-audit' || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -25,12 +27,33 @@ env:
   SQLX_OFFLINE: "true"
 
 jobs:
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install pinned audit tool
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit locked dependencies
+        run: cargo audit --deny warnings
+
   quality:
+    if: ${{ always() && github.event_name != 'schedule' }}
+    needs: [dependency-audit]
     name: Quality
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
+      - name: Require dependency audit to pass
+        env:
+          AUDIT_RESULT: ${{ needs['dependency-audit'].result }}
+        run: test "$AUDIT_RESULT" = "success"
+
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -137,6 +160,7 @@ jobs:
           cargo clippy --locked --all-targets --all-features -- -D warnings
 
   unit-doc:
+    if: github.event_name != 'schedule'
     name: Unit and doc tests
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -232,6 +256,7 @@ jobs:
           cargo test --locked --all-features --doc
 
   integration:
+    if: github.event_name != 'schedule'
     name: Integration (${{ matrix.module }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -365,7 +390,7 @@ jobs:
     # Preserve the existing required branch-protection check; every shard and
     # the executed-case audit must pass before this check can become green.
     name: Integration (lexicon)
-    if: ${{ always() }}
+    if: ${{ always() && github.event_name != 'schedule' }}
     needs: [integration]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
@@ -391,8 +416,8 @@ jobs:
 
   ci-summary:
     name: Format, lint and test
-    if: ${{ always() }}
-    needs: [quality, unit-doc, integration, lexicon-summary]
+    if: ${{ always() && github.event_name != 'schedule' }}
+    needs: [quality, unit-doc, integration, lexicon-summary, dependency-audit]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
 
@@ -403,7 +428,9 @@ jobs:
           UNIT_DOC_RESULT: ${{ needs['unit-doc'].result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           INVENTORY_RESULT: ${{ needs['lexicon-summary'].result }}
+          AUDIT_RESULT: ${{ needs['dependency-audit'].result }}
         run: |
+          test "$AUDIT_RESULT" = "success"
           test "$QUALITY_RESULT" = "success"
           test "$UNIT_DOC_RESULT" = "success"
           test "$INTEGRATION_RESULT" = "success"

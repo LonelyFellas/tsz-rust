@@ -57,8 +57,10 @@ class CiWorkflowTests(unittest.TestCase):
         summary = self._job("ci-summary")
 
         self.assertIn("name: Format, lint and test", summary)
-        self.assertIn("needs: [quality, unit-doc, integration, lexicon-summary]", summary)
-        self.assertIn("if: ${{ always() }}", summary)
+        self.assertIn("needs: [quality, unit-doc, integration, lexicon-summary, dependency-audit]", summary)
+        self.assertIn("if: ${{ always() && github.event_name != 'schedule' }}", summary)
+        self.assertIn("needs['dependency-audit'].result", summary)
+        self.assertIn('test "$AUDIT_RESULT" = "success"', summary)
         self.assertIn("needs.quality.result", summary)
         self.assertIn("needs['unit-doc'].result", summary)
         self.assertIn("needs.integration.result", summary)
@@ -73,6 +75,24 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("name: identity-phase-measurements", self._job("integration"))
         self.assertIn("if: matrix.module == 'lexicon-handler'", self._job("integration"))
         self.assertIn("name: lexicon-handler-phase-measurements", self._job("integration"))
+
+    def test_dependency_audit_blocks_ci_and_runs_alone_on_schedule(self) -> None:
+        audit = self._job("dependency-audit")
+        self.assertIn("cargo install cargo-audit --version 0.22.2 --locked", audit)
+        self.assertIn("cargo audit --deny warnings", audit)
+        self.assertNotIn("if:", audit)
+        self.assertNotIn("continue-on-error:", audit)
+        self.assertNotIn("services:", audit)
+        self.assertIn('cron: "23 3 * * 1"', self.workflow)
+        self.assertIn("github.event_name == 'schedule' && 'scheduled-audit'", self.workflow)
+        quality = self._job("quality")
+        self.assertIn("needs: [dependency-audit]", quality)
+        self.assertIn("always()", quality)
+        self.assertIn("needs['dependency-audit'].result", quality)
+        self.assertIn('test "$AUDIT_RESULT" = "success"', quality)
+        self.assertLess(quality.index("Require dependency audit to pass"), quality.index("Check out repository"))
+        for name in ("quality", "unit-doc", "integration", "lexicon-summary", "ci-summary"):
+            self.assertIn("github.event_name != 'schedule'", self._job(name))
 
     def test_ci10_release_artifact_is_exact_main_and_auditable(self) -> None:
         release = self._job("release-artifact")

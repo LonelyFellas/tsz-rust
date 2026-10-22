@@ -841,7 +841,7 @@ impl Modify for SecurityAddon {
     }
 }
 
-/// 给所有已声明的 4xx/5xx 自动挂上统一 ProblemDetails，避免每个 handler 重复标注。
+/// 补齐 OpenAPI 3.1 必需的响应描述，并给已声明的 4xx/5xx 挂上统一 ProblemDetails。
 struct ProblemDetailsAddon;
 
 impl Modify for ProblemDetailsAddon {
@@ -864,18 +864,24 @@ fn add_error_response_schema(operation: Option<&mut Operation>) {
         return;
     };
     for (status, response) in &mut operation.responses.responses {
+        let RefOr::T(response) = response else {
+            continue;
+        };
+        if response.description.is_empty() {
+            response.description = status
+                .parse::<http::StatusCode>()
+                .ok()
+                .and_then(|status| status.canonical_reason())
+                .unwrap_or("Response")
+                .to_owned();
+        }
         let is_error = status
             .parse::<u16>()
             .is_ok_and(|status| (400..600).contains(&status));
-        if !is_error {
-            continue;
-        }
-        if let RefOr::T(response) = response
-            && response.content.is_empty()
-        {
+        if is_error && response.content.is_empty() {
             response.content.insert(
                 "application/problem+json".to_owned(),
-                Content::new(Some(Ref::from_schema_name("ProblemDetails"))),
+                Content::new(Some(Ref::from_schema_name("ProblemDetails"))).into(),
             );
         }
     }
@@ -976,6 +982,20 @@ mod tests {
     fn openapi_spec_is_well_formed() {
         let spec = ApiDoc::openapi();
         let json = serde_json::to_value(&spec).expect("spec 应能序列化为 JSON");
+
+        for (path, item) in json["paths"].as_object().unwrap() {
+            for (method, operation) in item.as_object().unwrap() {
+                if let Some(responses) = operation.get("responses").and_then(|v| v.as_object()) {
+                    for (status, response) in responses {
+                        assert!(
+                            response.get("$ref").is_some()
+                                || response.get("description").is_some_and(|v| v.is_string()),
+                            "OpenAPI 3.1 response requires a description: {method} {path} {status}"
+                        );
+                    }
+                }
+            }
+        }
 
         // 所有已标注路由都在（注意带 nest 前缀）。漏登记会在这里失败。
         for (method, path) in [

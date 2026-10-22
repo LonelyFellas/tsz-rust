@@ -545,6 +545,21 @@ pub struct ItemRow {
     pub private_note: String,
     pub note_revision: i64,
 }
+pub(super) fn public_items(
+    rows: Vec<ItemRow>,
+    mut entries: std::collections::HashMap<Uuid, WordlistEntry>,
+) -> Vec<WordlistItem> {
+    rows.into_iter()
+        .map(|r| WordlistItem {
+            entry_id: r.entry_id,
+            item_id: Some(r.item_id),
+            custom_word: r.custom_word.map(|v| v.0),
+            position: r.position,
+            author_note: Some(r.author_note),
+            entry: r.entry_id.and_then(|id| entries.remove(&id)),
+        })
+        .collect()
+}
 pub async fn read_entries(
     tx: &mut Tx<'_>,
     entry_ids: &[Uuid],
