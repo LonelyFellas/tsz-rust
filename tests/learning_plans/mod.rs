@@ -277,15 +277,34 @@ async fn plan_dates_fingerprint_and_short_tail(pool: PgPool) {
     body["name"] = json!("尾量任务");
     body["idempotency_key"] = json!(Uuid::now_v7());
     body["preview_fingerprint"] = p.1["preview_fingerprint"].clone();
-    let created = call(
-        &state,
-        &auth,
-        "POST",
-        "/api/v1/me/learning-plans",
-        body.clone(),
-    )
-    .await;
+    let (created, replay) = tokio::join!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/learning-plans",
+            body.clone(),
+        ),
+        call(
+            &state,
+            &auth,
+            "POST",
+            "/api/v1/me/learning-plans",
+            body.clone(),
+        )
+    );
     assert_eq!(created.0, 200, "{}", created.1);
+    assert_eq!(replay.0, 200, "{}", replay.1);
+    assert_eq!(created.1["task"], replay.1["task"]);
+    assert_eq!(created.1["current_cycle"], replay.1["current_cycle"]);
+    let mut changed = body.clone();
+    changed["name"] = json!("不同内容");
+    assert_eq!(
+        call(&state, &auth, "POST", "/api/v1/me/learning-plans", changed)
+            .await
+            .0,
+        409
+    );
     let r = open(&state, &auth, &created.1).await;
     assert_eq!(r["target_count"], 35);
     answer_n(&state, &auth, &r, 35).await;

@@ -131,6 +131,33 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn both_realms_only_accept_hs256() {
+        for realm in [Realm::Web, Realm::Admin] {
+            let manager = TokenManager::new("test-secret", realm, Duration::minutes(5));
+            assert_eq!(manager.validation.algorithms, vec![Algorithm::HS256]);
+            let token = manager.generate(Uuid::now_v7(), "student").unwrap();
+            assert_eq!(
+                jsonwebtoken::decode_header(&token).unwrap().alg,
+                Algorithm::HS256
+            );
+            assert!(manager.parse(&token).is_ok());
+            let payload = TokenPayload {
+                sub: Uuid::now_v7(),
+                aud: realm.as_aud().to_owned(),
+                role: "student".to_owned(),
+                iat: chrono::Utc::now().timestamp(),
+                exp: (chrono::Utc::now() + Duration::minutes(5)).timestamp(),
+                security_version: None,
+            };
+            for algorithm in [Algorithm::HS384, Algorithm::HS512] {
+                let token =
+                    encode(&Header::new(algorithm), &payload, &manager.encoding_key).unwrap();
+                assert!(matches!(manager.parse(&token), Err(TokenError::Invalid)));
+            }
+        }
+    }
+
+    #[test]
     fn subject_wire_format_and_legacy_tokens_remain_compatible() {
         let manager = TokenManager::new("test-secret", Realm::Web, Duration::minutes(5));
         let subject = Uuid::now_v7();

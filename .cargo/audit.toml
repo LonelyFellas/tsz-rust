@@ -1,0 +1,10 @@
+[advisories]
+# Reviewed 2026-10-22; recheck by 2027-01-22 and whenever JWT algorithms/providers change.
+# jsonwebtoken's rust_crypto feature includes rsa, but both realms only use HS256.
+# RSA private-key operations are unused and upstream has no patched release.
+# Rationale and removal conditions: docs/dependency-security.md.
+ignore = ["RUSTSEC-2023-0071"]
+
+[output]
+quiet = false
+deny = ["warnings"]

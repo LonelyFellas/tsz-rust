@@ -39,6 +39,27 @@ pub(super) fn match_hash(old: &[u8], new: &[u8]) -> Result<(), AppError> {
     }
     Ok(())
 }
+pub(super) async fn create_receipt(
+    tx: &mut Tx<'_>,
+    auth: &AuthUser,
+    key: Uuid,
+    h: &[u8],
+) -> Result<Option<Uuid>, AppError> {
+    let old: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
+        "SELECT id,create_hash FROM learning_tasks WHERE user_id=$1 AND create_key=$2",
+    )
+    .bind(auth.subject)
+    .bind(key)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::internal)?;
+    if let Some((id, old)) = old {
+        match_hash(&old, h)?;
+        Ok(Some(id))
+    } else {
+        Ok(None)
+    }
+}
 pub(super) async fn pool_for(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
@@ -105,32 +126,14 @@ pub async fn create(
     let h = hash(&input)?;
     // No source dependency for a committed creation receipt.
     let mut receipt = begin(pool, auth, &[]).await?;
-    let prior: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
-        "SELECT id,create_hash FROM learning_tasks WHERE user_id=$1 AND create_key=$2",
-    )
-    .bind(auth.subject)
-    .bind(input.idempotency_key)
-    .fetch_optional(&mut *receipt)
-    .await
-    .map_err(AppError::internal)?;
-    if let Some((id, old)) = prior {
-        match_hash(&old, &h)?;
+    if let Some(id) = create_receipt(&mut receipt, auth, input.idempotency_key, &h).await? {
         let result = task(&mut receipt, auth, id).await?;
         receipt.commit().await.map_err(AppError::internal)?;
         return Ok(result);
     }
     receipt.commit().await.map_err(AppError::internal)?;
     let mut tx = begin(pool, auth, &input.wordlist_ids).await?;
-    let prior: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
-        "SELECT id,create_hash FROM learning_tasks WHERE user_id=$1 AND create_key=$2",
-    )
-    .bind(auth.subject)
-    .bind(input.idempotency_key)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(AppError::internal)?;
-    let id = if let Some((id, old)) = prior {
-        match_hash(&old, &h)?;
+    let id = if let Some(id) = create_receipt(&mut tx, auth, input.idempotency_key, &h).await? {
         id
     } else {
         let at = now(&mut tx).await?;

@@ -155,23 +155,13 @@ pub async fn public_items(
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let list = service::read_lock(&mut tx, id, None).await?;
     let (rows, pagination) = service::item_rows(&mut tx, id, &query).await?;
-    let mut entries = service::read_entries_view(
+    let entries = service::read_entries_view(
         &mut tx,
         &rows.iter().filter_map(|r| r.entry_id).collect::<Vec<_>>(),
         query.view,
     )
     .await?;
-    let items = rows
-        .into_iter()
-        .map(|r| WordlistItem {
-            entry_id: r.entry_id,
-            item_id: Some(r.item_id),
-            custom_word: r.custom_word.map(|v| v.0),
-            position: r.position,
-            author_note: Some(r.author_note),
-            entry: r.entry_id.and_then(|id| entries.remove(&id)),
-        })
-        .collect();
+    let items = service::public_items(rows, entries);
     service::eligible_owner(&mut tx, list.owner_user_id).await?;
     tx.commit().await.map_err(AppError::internal)?;
     formatting_response(

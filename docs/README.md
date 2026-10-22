@@ -20,7 +20,7 @@
 
 ## 运维
 
-[部署入口](deployment.md) · [数据库备份与恢复](postgresql-backup-restore.md) · [上传音频资产](../ops/audio-asset-lifecycle/README.md) · [预览生命周期](../ops/speech-preview-lifecycle/README.md) · [语音目录](../ops/speech-voice-catalog/README.md) · [词条发布工具](../ops/lexicon-publish/README.md)
+[部署入口](deployment.md) · [依赖安全检查](dependency-security.md) · [数据库备份与恢复](postgresql-backup-restore.md) · [上传音频资产](../ops/audio-asset-lifecycle/README.md) · [预览生命周期](../ops/speech-preview-lifecycle/README.md) · [语音目录](../ops/speech-voice-catalog/README.md) · [词条发布工具](../ops/lexicon-publish/README.md)
 
 ## 未完成或待确认
 

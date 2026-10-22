@@ -120,23 +120,13 @@ pub async fn items(
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     let list = review::admin_list_lock(&mut tx, auth, id, "wordlists.access", false).await?;
     let (rows, pagination) = service::item_rows(&mut tx, id, &query).await?;
-    let mut entries = service::read_entries_view(
+    let entries = service::read_entries_view(
         &mut tx,
         &rows.iter().filter_map(|r| r.entry_id).collect::<Vec<_>>(),
         query.view,
     )
     .await?;
-    let items = rows
-        .into_iter()
-        .map(|r| WordlistItem {
-            entry_id: r.entry_id,
-            item_id: Some(r.item_id),
-            custom_word: r.custom_word.map(|v| v.0),
-            position: r.position,
-            author_note: Some(r.author_note),
-            entry: r.entry_id.and_then(|id| entries.remove(&id)),
-        })
-        .collect();
+    let items = service::public_items(rows, entries);
     tx.commit().await.map_err(AppError::internal)?;
     Ok(WordlistItems {
         items,
