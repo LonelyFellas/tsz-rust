@@ -88,8 +88,19 @@ pub(crate) fn project_response(
                             crate::error::AppError::internal(anyhow::anyhow!(error))
                         })?)
                         .map_err(crate::error::AppError::internal)?;
-                    object.get_mut("capabilities").expect("capabilities exists")["shared_form_contents"] =
-                        serde_json::json!(true);
+                    let capabilities = object.get_mut("capabilities").expect("capabilities exists");
+                    capabilities["shared_form_contents"] = serde_json::json!(true);
+                    if headers
+                        .get("x-tsz-form-content-reassignment")
+                        .is_some_and(|value| value == "v1")
+                    {
+                        capabilities["form_content_reassignment"] = serde_json::json!(true);
+                    } else {
+                        capabilities
+                            .as_object_mut()
+                            .expect("capabilities object")
+                            .remove("form_content_reassignment");
+                    }
                 } else {
                     if !forms.legacy_readable() {
                         return Err(upgrade_error());
@@ -97,12 +108,13 @@ pub(crate) fn project_response(
                     forms.shared = None;
                     *forms_value =
                         serde_json::to_value(forms).map_err(crate::error::AppError::internal)?;
-                    object
+                    let capabilities = object
                         .get_mut("capabilities")
                         .expect("capabilities exists")
                         .as_object_mut()
-                        .expect("capabilities object")
-                        .remove("shared_form_contents");
+                        .expect("capabilities object");
+                    capabilities.remove("shared_form_contents");
+                    capabilities.remove("form_content_reassignment");
                 }
                 return Ok(());
             }
@@ -891,11 +903,22 @@ pub(crate) async fn preserve_pronunciation_slots(
     Ok(())
 }
 
+pub(crate) enum IdentityCheck {
+    Draft,
+    PublicationRestore,
+}
+
+pub(crate) struct VerifiedFormIdentities {
+    reassignable: HashSet<Uuid>,
+}
+
 pub(crate) async fn preflight_identities(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: Uuid,
     forms: &DraftFormsStepContentV3,
-) -> Result<(), crate::lexicon::service::LexiconServiceError> {
+    check: IdentityCheck,
+    identities: &[super::model::NodeIdentityRecord],
+) -> Result<VerifiedFormIdentities, crate::lexicon::service::LexiconServiceError> {
     use crate::lexicon::repository::LexiconRepositoryError;
     use crate::lexicon::service::LexiconServiceError;
     let db = |error| LexiconServiceError::Repository(LexiconRepositoryError::Database(error));
@@ -965,14 +988,22 @@ pub(crate) async fn preflight_identities(
         }
     }
     let slot_ids: Vec<_> = slots.keys().copied().collect();
-    let existing: Vec<(Uuid, Uuid, Uuid, Option<Uuid>, String)> = sqlx::query_as("SELECT id,entry_id,content_id,parent_slot_id,role FROM lexicon.v3_form_content_slots WHERE id=ANY($1) OR (content_id=ANY($2) AND role IN ('common','uk','us'))")
+    let existing: Vec<(Uuid, Uuid, Uuid, Option<Uuid>, String, bool)> = sqlx::query_as("SELECT id,entry_id,content_id,parent_slot_id,role,retired_at IS NULL FROM lexicon.v3_form_content_slots WHERE id=ANY($1) OR (content_id=ANY($2) AND role IN ('common','uk','us'))")
         .bind(&slot_ids).bind(&content_ids).fetch_all(&mut **tx).await.map_err(db)?;
     let regions: HashMap<_, _> = slots
         .iter()
         .filter(|(_, (_, _, _, role))| matches!(role.as_str(), "common" | "uk" | "us"))
         .map(|(id, (_, content, _, role))| ((*content, role.clone()), *id))
         .collect();
-    for (id, entry, content, parent, role) in existing {
+    let mut known_contents = HashSet::new();
+    let mut active_contents = HashSet::new();
+    for (id, entry, content, parent, role, active) in existing {
+        if entry == entry_id && role == "content" {
+            known_contents.insert(content);
+            if active {
+                active_contents.insert(content);
+            }
+        }
         if slots
             .get(&id)
             .is_some_and(|identity| identity != &(entry, content, parent, role.clone()))
@@ -1008,29 +1039,84 @@ pub(crate) async fn preflight_identities(
             return Err(LexiconServiceError::StableNodeIdChanged);
         }
     }
+    // The caller already loaded and validated permanent identities, including retired forms.
+    let identities: HashMap<_, _> = identities.iter().map(|node| (node.id, node)).collect();
+    let allowed_contents = match check {
+        IdentityCheck::Draft => &active_contents,
+        IdentityCheck::PublicationRestore => &known_contents,
+    };
+    for binding in shared.pos.iter().flat_map(|pos| &pos.forms) {
+        if identities.contains_key(&binding.id) && !allowed_contents.contains(&binding.content_id) {
+            return Err(LexiconServiceError::StableNodeIdChanged);
+        }
+    }
+    let variants: HashMap<_, _> = shared
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.forms)
+        .flat_map(|binding| {
+            binding_variants(&binding.regional_bindings)
+                .into_iter()
+                .map(move |(side, variant)| {
+                    (
+                        variant.id,
+                        (binding.id, format!("forms.form_variant:{side}")),
+                    )
+                })
+        })
+        .collect();
     let node_ids: Vec<_> = nodes.keys().copied().collect();
     let existing: Vec<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as("SELECT node_id,entry_id,content_id,content_slot_id FROM lexicon.v3_form_content_node_slots WHERE node_id=ANY($1)")
         .bind(&node_ids).fetch_all(&mut **tx).await.map_err(db)?;
+    let mut changed_ids = Vec::new();
     for (id, entry, content, slot) in existing {
-        if nodes.get(&id) != Some(&(entry, content, slot)) {
+        if nodes[&id] == (entry, content, slot) {
+            continue;
+        }
+        let (_, target_content, _) = nodes[&id];
+        // Slot IDs inside one content and pronunciation identities remain immutable.
+        // Only a form's own regional node may move between known contents.
+        if entry != entry_id
+            || content == target_content
+            || !variants.contains_key(&id)
+            || !allowed_contents.contains(&target_content)
+        {
             return Err(LexiconServiceError::StableNodeIdChanged);
         }
+        changed_ids.push(id);
+    }
+    let mut reassignable = HashSet::new();
+    for id in changed_ids {
+        let stored = identities
+            .get(&id)
+            .ok_or(LexiconServiceError::StableNodeIdChanged)?;
+        let (form_id, expected_role) = &variants[&id];
+        if stored.entry_id != entry_id
+            || stored.parent_node_id != Some(*form_id)
+            || stored.node_role != *expected_role
+            || stored.node_type != "form_variant"
+            || !stored.stable_slot
+        {
+            return Err(LexiconServiceError::StableNodeIdChanged);
+        }
+        reassignable.insert(id);
     }
     shared
         .resolve()
         .map_err(|error| LexiconServiceError::Authorization(error.into_app_error()))?;
-    Ok(())
+    Ok(VerifiedFormIdentities { reassignable })
 }
 
 pub(crate) async fn persist(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: Uuid,
     forms: &DraftFormsStepContentV3,
+    verified: VerifiedFormIdentities,
 ) -> Result<(), crate::lexicon::service::LexiconServiceError> {
     use crate::lexicon::repository::LexiconRepositoryError;
     use crate::lexicon::service::LexiconServiceError;
     let db = |error| LexiconServiceError::Repository(LexiconRepositoryError::Database(error));
-    preflight_identities(tx, entry_id, forms).await?;
+    let reassignable = verified.reassignable;
     let shared = forms.shared_representation().map_err(|error| {
         LexiconServiceError::Authorization(crate::error::AppError::internal(anyhow::anyhow!(error)))
     })?;
@@ -1122,8 +1208,8 @@ pub(crate) async fn persist(
                     .map(|row| (row.id, row.content_slot_id)),
             );
             for (node_id, slot_id) in nodes {
-                let result = sqlx::query("INSERT INTO lexicon.v3_form_content_node_slots(node_id,entry_id,content_id,content_slot_id) VALUES($1,$2,$3,$4) ON CONFLICT(node_id) DO UPDATE SET content_slot_id=EXCLUDED.content_slot_id WHERE lexicon.v3_form_content_node_slots.entry_id=EXCLUDED.entry_id AND lexicon.v3_form_content_node_slots.content_id=EXCLUDED.content_id AND lexicon.v3_form_content_node_slots.content_slot_id=EXCLUDED.content_slot_id")
-                    .bind(node_id).bind(entry_id).bind(binding.content_id).bind(slot_id).execute(&mut **tx).await.map_err(db)?;
+                let result = sqlx::query("INSERT INTO lexicon.v3_form_content_node_slots(node_id,entry_id,content_id,content_slot_id) VALUES($1,$2,$3,$4) ON CONFLICT(node_id) DO UPDATE SET content_id=EXCLUDED.content_id,content_slot_id=EXCLUDED.content_slot_id WHERE lexicon.v3_form_content_node_slots.entry_id=EXCLUDED.entry_id AND ($5 OR (lexicon.v3_form_content_node_slots.content_id=EXCLUDED.content_id AND lexicon.v3_form_content_node_slots.content_slot_id=EXCLUDED.content_slot_id))")
+                    .bind(node_id).bind(entry_id).bind(binding.content_id).bind(slot_id).bind(reassignable.contains(&node_id)).execute(&mut **tx).await.map_err(db)?;
                 if result.rows_affected() != 1 {
                     return Err(LexiconServiceError::StableNodeIdChanged);
                 }

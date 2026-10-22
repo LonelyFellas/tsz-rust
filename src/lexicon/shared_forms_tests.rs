@@ -25,6 +25,35 @@ fn shared_pair() -> SharedFormsStepContentV3 {
 }
 
 #[test]
+fn reassignment_capability_is_negotiated_separately_from_shared_v1() {
+    for header in [None, Some("v1"), Some("future")] {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-tsz-form-contents", "v1".parse().unwrap());
+        if let Some(value) = header {
+            headers.insert("x-tsz-form-content-reassignment", value.parse().unwrap());
+        }
+        let mut response = json!({"word": {"schema_version":3,"forms":legacy(),"capabilities":{"form_content_reassignment":true}}});
+        project_response(&headers, &mut response).unwrap();
+        let capabilities = &response["word"]["capabilities"];
+        assert_eq!(capabilities["shared_form_contents"], true);
+        if header == Some("v1") {
+            assert_eq!(capabilities["form_content_reassignment"], true);
+        } else {
+            assert!(capabilities.get("form_content_reassignment").is_none());
+        }
+    }
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("x-tsz-form-content-reassignment", "v1".parse().unwrap());
+    let mut response = json!({"word":{"schema_version":3,"forms":legacy(),"capabilities":{"form_content_reassignment":true}}});
+    project_response(&headers, &mut response).unwrap();
+    assert!(
+        response["word"]["capabilities"]
+            .get("form_content_reassignment")
+            .is_none()
+    );
+}
+
+#[test]
 fn legacy_adapter_preserves_reference_tree_without_merging_spelling() {
     let legacy = legacy();
     let shared = legacy.shared_representation().unwrap();

@@ -1469,6 +1469,10 @@ pub struct AdminWordV3Capabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub shared_form_contents: Option<bool>,
+    /// 支持既有词形保留身份并切换到本词条另一份已有共享内容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub form_content_reassignment: Option<bool>,
     /// 支持在词形影响预览及保存中原子更新既有词义绑定。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
