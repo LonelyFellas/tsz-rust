@@ -268,6 +268,93 @@ async fn concurrent_content_claim_returns_identity_conflict(pool: sqlx::PgPool) 
     }
 }
 
+#[sqlx::test]
+async fn opposing_content_claims_return_conflict_on_deadlock(pool: sqlx::PgPool) {
+    use crate::lexicon::service::LexiconServiceError;
+    let admin = Uuid::now_v7();
+    sqlx::query("INSERT INTO admins(id,phone,password_hash,display_name) VALUES($1,$2,'hash','shared identity deadlock')").bind(admin).bind(format!("deadlock-{}", admin.simple())).execute(&pool).await.unwrap();
+    let entries = [Uuid::now_v7(), Uuid::now_v7()];
+    for entry in entries {
+        sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,revision,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word',1,'{}',$2,$2)").bind(entry).bind(admin).execute(&pool).await.unwrap();
+    }
+    let mut shared = shared_pair();
+    shared.contents.push(shared.contents[0].clone());
+    for (content, pos) in shared.contents.iter_mut().zip(&mut shared.pos) {
+        content.id = Uuid::now_v7();
+        let FormContentRegionalVariantsV3::Common { common } = &mut content.regional_variants
+        else {
+            unreachable!()
+        };
+        common.id = Uuid::now_v7();
+        common.pronunciations.clear();
+        pos.forms[0].content_id = content.id;
+        let FormRegionalBindingsV3::Common { common: binding } =
+            &mut pos.forms[0].regional_bindings
+        else {
+            unreachable!()
+        };
+        binding.content_slot_id = common.id;
+        binding.pronunciations.clear();
+    }
+    let mut reversed = shared.clone();
+    reversed.contents.reverse();
+    let forms = shared.clone().resolve().unwrap();
+    let reversed = reversed.resolve().unwrap();
+    let mut left = pool.begin().await.unwrap();
+    let mut right = pool.begin().await.unwrap();
+    let left_verified =
+        preflight_identities(&mut left, entries[0], &forms, IdentityCheck::Draft, &[])
+            .await
+            .unwrap();
+    let right_verified =
+        preflight_identities(&mut right, entries[1], &reversed, IdentityCheck::Draft, &[])
+            .await
+            .unwrap();
+    // Each transaction has claimed its first content before either tries the other's ID.
+    for (tx, entry, content) in [
+        (&mut left, entries[0], shared.contents[0].id),
+        (&mut right, entries[1], shared.contents[1].id),
+    ] {
+        sqlx::query("SET LOCAL deadlock_timeout = '50ms'")
+            .execute(&mut **tx)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO lexicon.v3_form_contents(id,entry_id,content) VALUES($1,$2,'{}')")
+            .bind(content)
+            .bind(entry)
+            .execute(&mut **tx)
+            .await
+            .unwrap();
+    }
+    let (left, right) = tokio::join!(
+        async {
+            let result = persist(&mut left, entries[0], &forms, left_verified).await;
+            left.rollback().await.unwrap();
+            result
+        },
+        async {
+            let result = persist(&mut right, entries[1], &reversed, right_verified).await;
+            right.rollback().await.unwrap();
+            result
+        }
+    );
+    assert!(
+        matches!(
+            (&left, &right),
+            (Err(LexiconServiceError::StableNodeIdChanged), Ok(()))
+                | (Ok(()), Err(LexiconServiceError::StableNodeIdChanged))
+        ),
+        "left={left:?}, right={right:?}"
+    );
+    let partial: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_form_contents WHERE entry_id=ANY($1)")
+            .bind(&entries[..])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(partial, 0);
+}
+
 #[test]
 fn mappings_reject_duplicate_reference_ids_dangling_slots_and_orphans() {
     let shared = shared_pair();

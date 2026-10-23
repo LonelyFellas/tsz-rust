@@ -1072,7 +1072,10 @@ pub(crate) async fn preflight_identities(
         .map(|(id, entry, content, slot)| (id, (entry, content, slot)))
         .collect();
     for binding in shared.pos.iter().flat_map(|pos| &pos.forms) {
-        if !identities.contains_key(&binding.id) || allowed_contents.contains(&binding.content_id) {
+        if allowed_contents.contains(&binding.content_id)
+            || (!identities.contains_key(&binding.id)
+                && !known_contents.contains(&binding.content_id))
+        {
             continue;
         }
         // A retired content may return with its original bindings, but cannot be selected
@@ -1123,7 +1126,7 @@ pub(crate) async fn persist(
     use crate::lexicon::service::LexiconServiceError;
     let db = |error| {
         // Another entry can claim a new content or slot after our ownership preflight.
-        // These constraints express the same immutable identity rule as the preflight.
+        // Constraints and deadlocks from opposing claims return the same identity conflict.
         if [
             "v3_form_contents_pkey",
             "v3_form_content_slots_pkey",
@@ -1134,6 +1137,9 @@ pub(crate) async fn persist(
         ]
         .iter()
         .any(|constraint| crate::platform::is_unique_violation(&error, constraint))
+            || error
+                .as_database_error()
+                .is_some_and(|error| error.code().as_deref() == Some("40P01"))
         {
             LexiconServiceError::StableNodeIdChanged
         } else {

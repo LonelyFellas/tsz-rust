@@ -945,6 +945,45 @@ async fn deleted_form_content_identity(pool: PgPool, restore_original: bool) {
             assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
             assert_eq!(rejected["code"], "stable_node_id_changed", "{rejected}");
         }
+        // A brand-new form must not reactivate another form's retired content either.
+        let mut new_binding = binding.clone();
+        new_binding["id"] = json!(Uuid::now_v7());
+        new_binding["regional_bindings"]["common"]["id"] = json!(Uuid::now_v7());
+        for row in new_binding["regional_bindings"]["common"]["pronunciations"]
+            .as_array_mut()
+            .unwrap()
+        {
+            row["id"] = json!(Uuid::now_v7());
+        }
+        let mut proposed = deleted["word"]["forms"].clone();
+        proposed["contents"]
+            .as_array_mut()
+            .unwrap()
+            .push(common_content.clone());
+        proposed["pos"][0]["form_groups"][0]["members"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":Uuid::now_v7(),"form_id":new_binding["id"]}));
+        proposed["pos"][0]["forms"]
+            .as_array_mut()
+            .unwrap()
+            .push(new_binding);
+        for (method, suffix) in [(Method::POST, "/impact"), (Method::PUT, "")] {
+            let mut body = json!({"schema_version":3,"base_revision":revision,"content":proposed});
+            if method == Method::PUT {
+                body["intent"] = json!("save");
+            }
+            let (status, rejected) = shared_call(
+                &state,
+                &bearer,
+                method,
+                &format!("{ROOT}/entries/{id}/steps/forms{suffix}"),
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+            assert_eq!(rejected["code"], "stable_node_id_changed", "{rejected}");
+        }
         let restored = save_shared(
             &state,
             &bearer,

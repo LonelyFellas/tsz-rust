@@ -1986,9 +1986,9 @@ impl LexiconService {
             &current.forms,
             &input.content,
             &current.meanings,
-            &input.sense_bindings,
+            &reconciled_meanings,
             &blocked,
-        )?;
+        );
         let blocked_references = (!blocked.is_empty()).then_some(blocked);
         if read_projection
             && let Some(surface_match_page) = self
@@ -2569,22 +2569,28 @@ impl LexiconService {
             &mut proposed_meanings,
             &input.sense_bindings,
         )?;
-        let blocked = super::inbound_references::inbound_reference_violations(
-            &mut transaction,
-            entry_id,
-            &input.content,
-            &proposed_meanings,
-            super::inbound_references::InboundReferenceCheck::DraftPreview,
-            Some((&current_forms, &meanings)),
-        )
-        .await?;
+        let blocked = if form_reference_targets_changed(&current_forms, &input.content)
+            || !input.sense_bindings.is_empty()
+        {
+            super::inbound_references::inbound_reference_violations(
+                &mut transaction,
+                entry_id,
+                &input.content,
+                &proposed_meanings,
+                super::inbound_references::InboundReferenceCheck::DraftPreview,
+                Some((&current_forms, &meanings)),
+            )
+            .await?
+        } else {
+            Vec::new()
+        };
         let affected = forms_impact_v3(
             &current_forms,
             &input.content,
             &meanings,
-            &input.sense_bindings,
+            &proposed_meanings,
             &blocked,
-        )?;
+        );
         if !write_projection && !affected.is_empty() {
             let Some(token) = input.confirmed_impact_token else {
                 return Err(LexiconServiceError::DownstreamConfirmationRequired(
@@ -2632,12 +2638,7 @@ impl LexiconService {
             None
         };
         let previous_meanings = serde_json::to_value(&meanings).map_err(serialization_error)?;
-        reconcile_v3_meanings_after_forms(&mut meanings, &input.content);
-        super::form_senses::apply_sense_bindings(
-            &input.content,
-            &mut meanings,
-            &input.sense_bindings,
-        )?;
+        let meanings = proposed_meanings;
         crate::admin::permissions::content::require_changes(
             &authorization,
             "words",
@@ -4821,13 +4822,66 @@ fn ensure_v3_revision(word: &AdminWordV3, revision: i64) -> Result<(), LexiconSe
     }
 }
 
+fn form_reference_targets_changed(
+    current: &DraftFormsStepContentV3,
+    proposed: &DraftFormsStepContentV3,
+) -> bool {
+    // Inbound rules use ownership, group membership/scope, dialect sides and spelling.
+    // Pronunciation, speech and rich-text settings cannot invalidate those targets.
+    current.pos.len() != proposed.pos.len()
+        || current.pos.iter().zip(&proposed.pos).any(|(old, next)| {
+            old.pos_id != next.pos_id
+                || old.form_groups.len() != next.form_groups.len()
+                || old
+                    .form_groups
+                    .iter()
+                    .zip(&next.form_groups)
+                    .any(|(old, next)| {
+                        old.id != next.id
+                            || old.scope != next.scope
+                            || old
+                                .members
+                                .iter()
+                                .map(|member| member.form_id)
+                                .ne(next.members.iter().map(|member| member.form_id))
+                    })
+                || old.forms.len() != next.forms.len()
+                || old.forms.iter().zip(&next.forms).any(|(old, next)| {
+                    old.id != next.id
+                        || old.form_type != next.form_type
+                        || match (&old.regional_variants, &next.regional_variants) {
+                            (
+                                WordRegionalVariantsV3::Common { common: old },
+                                WordRegionalVariantsV3::Common { common: next },
+                            ) => old.id != next.id || old.spelling != next.spelling,
+                            (
+                                WordRegionalVariantsV3::UkUs {
+                                    uk: old_uk,
+                                    us: old_us,
+                                },
+                                WordRegionalVariantsV3::UkUs {
+                                    uk: next_uk,
+                                    us: next_us,
+                                },
+                            ) => {
+                                old_uk.id != next_uk.id
+                                    || old_us.id != next_us.id
+                                    || old_uk.spelling != next_uk.spelling
+                                    || old_us.spelling != next_us.spelling
+                            }
+                            _ => true,
+                        }
+                })
+        })
+}
+
 fn forms_impact_v3(
     current: &DraftFormsStepContentV3,
     proposed: &DraftFormsStepContentV3,
     current_meanings: &DraftMeaningsStepContentV3,
-    sense_bindings: &[crate::lexicon::dto::SenseFormGroupBindingV3],
+    proposed_meanings: &DraftMeaningsStepContentV3,
     blocked_references: &[crate::lexicon::dto::InboundReferenceV3],
-) -> Result<Vec<FormsImpactItemV3>, LexiconServiceError> {
+) -> Vec<FormsImpactItemV3> {
     let proposed_ids = v3_form_node_types(proposed);
     let current_ids = v3_form_node_types(current);
     let removed_forms = current_ids
@@ -4840,10 +4894,7 @@ fn forms_impact_v3(
             })
         })
         .collect::<Vec<_>>();
-    let mut proposed_meanings = current_meanings.clone();
-    reconcile_v3_meanings_after_forms(&mut proposed_meanings, proposed);
-    super::form_senses::apply_sense_bindings(proposed, &mut proposed_meanings, sense_bindings)?;
-    let proposed_meaning_ids = v3_meaning_node_types(&proposed_meanings);
+    let proposed_meaning_ids = v3_meaning_node_types(proposed_meanings);
     let mut affected = v3_meaning_node_types(current_meanings)
         .into_iter()
         .filter_map(|(id, node_type)| {
@@ -4908,7 +4959,7 @@ fn forms_impact_v3(
         }
     }
     affected.sort_by_key(|item| item.node_id);
-    Ok(affected)
+    affected
 }
 
 fn reconcile_v3_meanings_after_forms(
@@ -6987,10 +7038,9 @@ mod tests {
         proposed: &DraftFormsStepContentV3,
         meanings: &DraftMeaningsStepContentV3,
     ) -> Vec<FormsImpactItemV3> {
-        match forms_impact_v3(current, proposed, meanings, &[], &[]) {
-            Ok(items) => items,
-            Err(_) => panic!("forms impact should be computable"),
-        }
+        let mut next = meanings.clone();
+        reconcile_v3_meanings_after_forms(&mut next, proposed);
+        forms_impact_v3(current, proposed, meanings, &next, &[])
     }
 
     fn meanings_bound_to(form_group_id: Option<Uuid>) -> DraftMeaningsStepContentV3 {
@@ -6998,6 +7048,34 @@ mod tests {
         meanings.pos[0].pos_id = fixed_id(100);
         meanings.pos[0].senses[0].form_group_id = form_group_id;
         meanings
+    }
+
+    #[test]
+    fn form_reference_targets_ignore_pronunciation_but_detect_target_changes() {
+        let current = two_form_content(false);
+        let mut proposed = current.clone();
+        let WordRegionalVariantsV3::Common { common } =
+            &mut proposed.pos[0].forms[0].regional_variants
+        else {
+            panic!("common fixture")
+        };
+        common.pronunciations.clear();
+        common.is_regular = Some(false);
+        assert!(!form_reference_targets_changed(&current, &proposed));
+        let mut changed = current.clone();
+        let WordRegionalVariantsV3::Common { common } =
+            &mut changed.pos[0].forms[0].regional_variants
+        else {
+            panic!("common fixture")
+        };
+        common.spelling.push('s');
+        assert!(form_reference_targets_changed(&current, &changed));
+        let mut changed = current.clone();
+        changed.pos[0].form_groups[0].scope = FormGroupScopeV3::Dedicated;
+        assert!(form_reference_targets_changed(&current, &changed));
+        let mut changed = current.clone();
+        changed.pos[0].forms[0].id = fixed_id(999);
+        assert!(form_reference_targets_changed(&current, &changed));
     }
 
     #[test]
