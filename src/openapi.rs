@@ -2747,6 +2747,16 @@ mod tests {
             schemas["AdminWordListResponse"]["properties"]["words"]["items"]["$ref"],
             "#/components/schemas/AdminWordListItemV3"
         );
+        let list_item = &schemas["AdminWordListItemV3"];
+        assert_eq!(list_item["properties"]["updated_by_name"]["type"], "string");
+        assert_ne!(list_item["properties"]["updated_by_name"]["nullable"], true);
+        assert!(
+            !list_item["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("updated_by_name")),
+            "updated_by_name 允许旧后端响应缺少字段，但有值时必须是字符串"
+        );
         assert_eq!(
             schemas["RelatedSearchV2Response"]["properties"]["results"]["items"]["$ref"],
             "#/components/schemas/RelatedWordResultV3"
