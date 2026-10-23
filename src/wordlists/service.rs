@@ -229,10 +229,12 @@ async fn write_items(
     Ok(())
 }
 pub async fn create(
-    pool: &PgPool,
+    state: &crate::state::AppState,
     auth: &AuthUser,
     input: CreateWordlist,
+    headers: &axum::http::HeaderMap,
 ) -> Result<Wordlist, AppError> {
+    let pool = &state.pool;
     let items: Vec<_> = input
         .items
         .iter()
@@ -291,6 +293,22 @@ pub async fn create(
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO wordlists(id,owner_user_id,name,create_key,create_hash) VALUES($1,$2,$3,$4,$5)").bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.idempotency_key).bind(request_hash).execute(&mut *tx).await.map_err(AppError::internal)?;
         write_items(&mut tx, id, &items).await?;
+        if let Some(request) = &input.audio_generation {
+            let audio =
+                super::custom_audio::prepare(&mut tx, state, auth, headers, Some(request)).await?;
+            let context = audio
+                .as_ref()
+                .ok_or_else(|| invalid("语音生成参数未就绪"))?;
+            super::custom_audio::generate_in(
+                &mut tx,
+                auth,
+                id,
+                input.idempotency_key,
+                request,
+                context,
+            )
+            .await?;
+        }
         let item_ids: Vec<_> = items.iter().map(|i| i.item_id).collect();
         let notes: Vec<_> = input
             .items
@@ -315,11 +333,17 @@ pub async fn create(
     Ok(result)
 }
 pub async fn update(
-    pool: &PgPool,
+    state: &crate::state::AppState,
     auth: &AuthUser,
     id: Uuid,
     input: UpdateWordlist,
+    headers: &axum::http::HeaderMap,
 ) -> Result<Wordlist, AppError> {
+    let pool = &state.pool;
+    if input.audio_generation.is_some() && input.idempotency_key.is_none() {
+        return Err(invalid("生成语音的保存请求缺少请求标识"));
+    }
+    let request_hash = hash(&input)?;
     if input.note_updates.len() > 10000
         || input.note_updates.iter().any(|n| {
             n.private_note.chars().count() > 1000
@@ -359,6 +383,20 @@ pub async fn update(
     lock_user(&mut tx, auth).await?;
     super::library::lock(&mut tx, auth.subject).await?;
     let current = lock_list(&mut tx, id, Some(auth.subject), true).await?;
+    if let Some(key) = input.idempotency_key {
+        let stored: Option<(Uuid, Vec<u8>, serde_json::Value)> = sqlx::query_as("SELECT wordlist_id,request_hash,response FROM wordlist_update_requests WHERE user_id=$1 AND request_key=$2")
+            .bind(auth.subject).bind(key).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
+        if let Some((target, previous_hash, response)) = stored {
+            if target != id || previous_hash != request_hash {
+                return Err(AppError::conflict(
+                    ErrorCode::IdempotencyConflict,
+                    None,
+                    "保存请求键已用于其他内容",
+                ));
+            }
+            return serde_json::from_value(response).map_err(AppError::internal);
+        }
+    }
     if current.revision != input.expected_revision {
         return Err(conflict());
     }
@@ -411,6 +449,42 @@ pub async fn update(
         sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("UPDATE wordlists SET name=$2,state='draft',review_state='none',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(c.name.trim()).execute(&mut *tx).await.map_err(AppError::internal)?;
     }
+    super::custom_audio::reconcile_in(&mut tx, id).await?;
+    if let Some(request) = &input.audio_generation {
+        if matches!(
+            current.state,
+            WordlistState::Pending | WordlistState::Published
+        ) {
+            return Err(AppError::conflict(
+                ErrorCode::WordListConflict,
+                None,
+                "请先撤回词表再生成语音",
+            ));
+        }
+        let audio =
+            super::custom_audio::prepare(&mut tx, state, auth, headers, Some(request)).await?;
+        let context = audio
+            .as_ref()
+            .ok_or_else(|| invalid("语音生成参数未就绪"))?;
+        super::custom_audio::generate_in(
+            &mut tx,
+            auth,
+            id,
+            input.idempotency_key.expect("validated above"),
+            request,
+            context,
+        )
+        .await?;
+        if input.content.is_none() && !request.item_ids.is_empty() {
+            sqlx::query(
+                "UPDATE wordlists SET revision=revision+1,updated_at=clock_timestamp() WHERE id=$1",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+        }
+    }
     for note in input.note_updates {
         let result=sqlx::query("UPDATE wordlist_items SET private_note=$3,note_revision=note_revision+1 WHERE wordlist_id=$1 AND item_id=$2 AND note_revision=$4").bind(id).bind(note.item_id.or(note.entry_id)).bind(note.private_note).bind(note.expected_note_revision).execute(&mut *tx).await.map_err(AppError::internal)?;
         if result.rows_affected() != 1 {
@@ -418,6 +492,11 @@ pub async fn update(
         }
     }
     let result = meta(&mut tx, id).await?;
+    if let Some(key) = input.idempotency_key {
+        sqlx::query("INSERT INTO wordlist_update_requests(user_id,request_key,wordlist_id,request_hash,response) VALUES($1,$2,$3,$4,$5)")
+            .bind(auth.subject).bind(key).bind(id).bind(request_hash).bind(serde_json::to_value(&result).map_err(AppError::internal)?)
+            .execute(&mut *tx).await.map_err(AppError::internal)?;
+    }
     crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(result)

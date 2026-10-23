@@ -235,6 +235,17 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 
 新增 `GET /api/v1/admin/wordlists/{id}/delete-impact`（权限 `wordlists.delete`），返回可继续轮次、涉及任务/用户及没有可继续轮次的任务数。删除事务内写入 `wordlist_deleted` 站内通知；通知正文含宽限截止时间（北京时间）。迁移 `20261018070000` 新增删除事件表并扩展通知 kind；down 在已投递 `wordlist_deleted` 通知时拒绝回退，需要先归档通知；成功回退会删除事件表，在途轮次按旧逻辑失效。后端迁移与代码需配套发布；前端通知 kind 和影响预览可先行兼容。主记录位于 tsz 仓库 `docs/features/wordlist-deletion-grace/design.md`。
 
+## 自定义词汇语音与保存扣费（2026-10-23）
+
+跨仓主记录在 tsz `docs/features/wordlist-custom-audio/design.md`。每个选择生成语音的自定义项收 2 天生币，包含英式 Sonia、美式 Aria 各一条；保存事务同时写内容、任务及一笔总扣款。已有同项同词面的 ready/处理中任务不重复收费；后台最终失败或未交付前删改退款一次。
+
+- `POST /me/wordlists`、`PUT /me/wordlists/{id}` 顶层可选 `audio_generation: { item_ids, expected_cost }`；金额为十进制整数字符串。编辑生成必须带新增的 `idempotency_key`，同键同请求回放先于版本校验。缺省字段省略，不改变历史创建哈希和文本响应。
+- `GET /me/wordlists/{id}/custom-audio?item_ids=<逗号分隔UUID>` 返回 `{items:[{item_id,job_id,word,status,locales}]}`，每次最多100项；状态 `queued/processing/ready/refunding/refunded`。公开 `/wordlists/...` 仅 ready；后台当前和审核请求路径分别按当前项、固定审核引用鉴权。对应 `/{item_id}/{locale}` GET 返回短期签名 URL（en-GB/en-US）。对象键不对外返回。
+- 费用重算不一致返回409 `word_list_audio_cost_changed`，余额不足返回既有 `coin_insufficient_balance`，均整体回滚。同步语音准备失败的 `speech_provider_unavailable/speech_storage_unavailable/speech_voice_not_found` 明确未保存未扣款；未知网络结果必须原键重试，不能删生成命令自动降级。
+- 失败退款使用 `wordlist_custom_audio_refund`，消费为 `wordlist_custom_audio`。申请注销存在未结算任务时409 `account_deletion_unsettled_audio`，保持钱包开放直到生成/退款结算；管理员禁用不阻止原收费补偿。
+- 迁移 `20261023090000` 保存任务、对象尝试、审核引用及编辑幂等回执。存在任务/回执时down拒绝破坏性回退；后台worker必须持续结算，不能直接回滚到没有worker的旧版本。先后端再前端；本任务未部署。
+- 新音频使用现有 `audio` 私有存储空间，要求启用 Azure Speech 和默认声音目录。在线临时验收使用 `X-TSZ-Test-Run` 与显式用户白名单，任务保存run并由worker恢复存储范围，不写普通前缀。
+
 ## C 端词表自定义词汇（2026-10-18）
 
 跨仓主记录在 tsz 的 `docs/features/wordlist-custom-vocabulary/design.md`。本次补齐文本创编、Excel 追加、阅读和人工审核；语音及自定义出题不在本批。自定义项保存在词表内，不写平台词库，也不自动按词面改绑。

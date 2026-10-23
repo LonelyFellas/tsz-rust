@@ -220,6 +220,52 @@ async fn apply(
         }
     }
 }
+/// Compensate one charged audio item, even if its account has since been disabled.
+/// The caller locks account → wordlist → job; the wallet must still be open.
+pub(crate) async fn refund_custom_audio_in(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+) -> Result<(), CoinError> {
+    let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT user_id,charge_operation_id,state,refund_operation_id FROM wordlist_audio_jobs WHERE id=$1 FOR UPDATE"
+    ).bind(job_id).fetch_optional(&mut **tx).await?;
+    let (user, charge, state, refund) = row.ok_or(CoinError::InvalidCommand)?;
+    if refund.is_some() {
+        return Ok(());
+    }
+    if state != "refunding" {
+        return Err(CoinError::InvalidCommand);
+    }
+    let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM coin_operations o JOIN coin_entries e ON e.operation_id=o.id JOIN coin_wallets w ON w.id=e.wallet_id WHERE o.id=$1 AND o.kind='debit' AND o.source_type='wordlist_custom_audio' AND w.owner_type='user' AND w.owner_id=$2 AND e.delta=-2*(SELECT count(*) FROM wordlist_audio_jobs j WHERE j.charge_operation_id=o.id))")
+        .bind(charge).bind(user).fetch_one(&mut **tx).await?;
+    if !valid {
+        return Err(CoinError::InvalidCommand);
+    }
+    let owner = Owner {
+        owner_type: OwnerType::User,
+        owner_id: user,
+    };
+    let receipt = record(
+        &mut *tx,
+        OperationKind::Credit,
+        &[(owner, 2)],
+        &Context {
+            actor: Actor::System,
+            idempotency_scope: "wordlist-audio-refund".into(),
+            idempotency_key: job_id.to_string(),
+            source_type: "wordlist_custom_audio_refund".into(),
+            source_id: job_id.to_string(),
+            reason: "自定义词汇语音未交付退款".into(),
+            evidence_ref: None,
+        },
+        false,
+    )
+    .await?;
+    sqlx::query("UPDATE wordlist_audio_jobs SET state='refunded',refund_operation_id=$2,updated_at=clock_timestamp() WHERE id=$1")
+        .bind(job_id).bind(receipt.operation_id).execute(&mut **tx).await?;
+    Ok(())
+}
+
 pub async fn credit_in(
     tx: &mut Transaction<'_, Postgres>,
     owner: Owner,

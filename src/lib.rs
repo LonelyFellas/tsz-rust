@@ -331,6 +331,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         crate::avatar::cleanup::run_worker(state.clone());
         crate::teacher_certification::cleanup::run_worker(state.clone());
         crate::speech::preview::run_worker(state.pool.clone());
+        crate::wordlists::custom_audio::worker::run_worker(state.clone());
         crate::lexicon::audio_assets::run_worker(
             state.pool.clone(),
             state

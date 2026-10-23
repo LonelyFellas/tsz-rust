@@ -432,3 +432,12 @@ mod library;
 
 #[path = "wordlists_handler/custom_items.rs"]
 mod custom_items;
+
+#[path = "wordlists_handler/custom_audio.rs"]
+mod custom_audio;
+
+#[path = "wordlists_handler/custom_audio_read.rs"]
+mod custom_audio_read;
+
+#[path = "wordlists_handler/custom_audio_lifecycle.rs"]
+mod custom_audio_lifecycle;
