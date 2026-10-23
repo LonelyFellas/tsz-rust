@@ -319,23 +319,24 @@ async fn login_ip_budget_uses_connection_boundary(pool: PgPool) {
 
 #[sqlx::test]
 async fn login_concurrent_attempts_cannot_exceed_account_budget(pool: PgPool) {
-    let state = AppState::for_test(pool);
+    // 并发验密使用生产 Redis 预算，避免默认 500ms 响应超时把 CI 调度压力误判为服务故障。
+    let redis_url =
+        std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned());
+    let redis = tsz_rust::platform::connect_redis(&redis_url).await.unwrap();
+    let state = AppState::for_test_with_redis(pool, redis);
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..20 {
         let state = state.clone();
-        tasks.spawn(async move {
-            login_with_state(state, "parallel@example.com", "wrong")
-                .await
-                .0
-        });
+        tasks.spawn(async move { login_with_state(state, "parallel@example.com", "wrong").await });
     }
     let mut checked = 0;
     let mut throttled = 0;
     while let Some(result) = tasks.join_next().await {
-        match result.unwrap() {
+        let (status, _, body) = result.unwrap();
+        match status {
             StatusCode::UNAUTHORIZED => checked += 1,
             StatusCode::TOO_MANY_REQUESTS => throttled += 1,
-            status => panic!("unexpected login status: {status}"),
+            status => panic!("unexpected login status: {status}, body: {body}"),
         }
     }
     assert_eq!((checked, throttled), (10, 10));
