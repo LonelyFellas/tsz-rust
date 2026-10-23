@@ -348,7 +348,7 @@ pub async fn operations(
     lock_authorization(&mut tx, auth)
         .await?
         .require("coins.access")?;
-    let filter = " WHERE o.source_type IN ('manual_purchase','manual_reward','manual_reversal') AND ($1::text IS NULL OR w.owner_type=$1) AND ($2::uuid IS NULL OR w.owner_id=$2) AND ($3::uuid IS NULL OR o.actor_id=$3) AND ($4::text IS NULL OR o.source_type=$4) AND ($5::timestamptz IS NULL OR o.created_at>=$5) AND ($6::timestamptz IS NULL OR o.created_at<=$6) AND ($7::text IS NULL OR $7='' OR w.owner_id::text=$7 OR strpos(lower(COALESCE(u.display_name,a.display_name)),lower($7))>0) AND ($8::text IS NULL OR $8='' OR o.actor_id::text=$8 OR strpos(lower(actor.display_name),lower($8))>0)";
+    let filter = " WHERE o.source_type IN ('manual_purchase','manual_reward','manual_reversal') AND ($1::text IS NULL OR w.owner_type=$1) AND ($2::uuid IS NULL OR w.owner_id=$2) AND ($3::uuid IS NULL OR o.actor_id=$3) AND ($4::text IS NULL OR o.source_type=$4) AND ($5::timestamptz IS NULL OR o.created_at>=$5) AND ($6::timestamptz IS NULL OR o.created_at<=$6) AND ($7::text IS NULL OR $7='' OR w.owner_id::text=lower($7) OR strpos(lower(COALESCE(u.display_name,a.display_name)),lower($7))>0) AND ($8::text IS NULL OR $8='' OR o.actor_id::text=lower($8) OR strpos(lower(actor.display_name),lower($8))>0)";
     let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT count(*) {OPERATION_FROM} {filter}"
     )))

@@ -144,7 +144,7 @@ async fn permissions_identity_amounts_and_search(pool: PgPool) {
 #[sqlx::test]
 async fn operation_names_follow_identity_and_search_keeps_pagination(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
-    let id = Uuid::now_v7();
+    let id = Uuid::parse_str("abcdef12-3456-4789-abcd-ef1234567890").unwrap();
     let user = seed(&pool, OwnerType::User, id).await;
     let recipient = seed(&pool, OwnerType::Admin, id).await;
     let actor = admin(&pool, true, &[]).await;
@@ -189,6 +189,15 @@ async fn operation_names_follow_identity_and_search_keeps_pagination(pool: PgPoo
         ),
         (
             format!("owner_search={id}&actor_search={}", actor.owner_id),
+            None,
+            2,
+        ),
+        (
+            format!(
+                "owner_search={}&actor_search={}",
+                id.to_string().to_uppercase(),
+                actor.owner_id.to_string().to_uppercase()
+            ),
             None,
             2,
         ),
