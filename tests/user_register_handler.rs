@@ -500,6 +500,29 @@ async fn registration_succeeds_without_ip_headers(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn ignores_malformed_forwarded_for_without_real_ip(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, PHONE).await;
+
+    let status = register_forwarded(&state, None, Some("not-an-ip")).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(stored_registration_ip(&pool).await, None);
+}
+
+#[sqlx::test]
+async fn ignores_malformed_last_hop_of_forwarded_for(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, PHONE).await;
+
+    // 最右段无效时不能退回客户端可伪造的前段。
+    let status = register_forwarded(&state, None, Some("203.0.113.9, not-an-ip")).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(stored_registration_ip(&pool).await, None);
+}
+
+#[sqlx::test]
 async fn ignores_malformed_headers(pool: PgPool) {
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     save_register_code(&store, PHONE).await;
