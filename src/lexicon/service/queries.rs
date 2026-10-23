@@ -525,6 +525,7 @@ impl LexiconService {
                             has_unpublished_changes: record.has_unpublished_changes,
                             max_reachable_step: max_reachable_step(&record.completed_steps),
                             created_by_name: record.created_by_name,
+                            updated_by_name: record.updated_by_name,
                             created_by: record.created_by,
                             reference_summary: reference_summaries
                                 .remove(&record.id)
