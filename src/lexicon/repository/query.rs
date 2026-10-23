@@ -206,12 +206,14 @@ impl LexiconRepository {
                        WHERE progress.entry_id = entry.id
                    ), ARRAY[]::text[]) AS completed_steps,
                    creator.display_name AS created_by_name,
+                   updater.display_name AS updated_by_name,
                    entry.created_by_admin_id AS created_by,
                    entry.created_at,
                    entry.updated_at,
                    count(*) OVER() AS total
             FROM lexicon.entries entry
             JOIN admins creator ON creator.id = entry.created_by_admin_id
+            JOIN admins updater ON updater.id = entry.updated_by_admin_id
             LEFT JOIN lexicon.v3_entry_state state ON state.entry_id = entry.id
             JOIN lexicon.entry_editor_projection editor ON editor.entry_id = entry.id
             LEFT JOIN lexicon.entry_publications publication

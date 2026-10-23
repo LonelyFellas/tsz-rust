@@ -6313,6 +6313,71 @@ async fn v3_create_materializes_builtin_and_existing_pos_suggestions(pool: PgPoo
 }
 
 #[sqlx::test]
+async fn list_keeps_creator_and_reports_last_updater_after_save_publish_and_archive(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let creator = seed_admin(&pool).await;
+    let updater = seed_admin(&pool).await;
+    sqlx::query("UPDATE admins SET display_name = '词库更新管理员' WHERE id = $1")
+        .bind(updater)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let creator_token = token(&state, creator);
+    let updater_token = token(&state, updater);
+    let mut word = batch3_word(&state, &creator_token, "harbour").await;
+    let entry_id = Uuid::parse_str(word["word"]["id"].as_str().unwrap()).unwrap();
+
+    for (phase, expected_updater, expected_name, status_filter) in [
+        ("created", creator, "词库测试管理员", "draft"),
+        ("saved", updater, "词库更新管理员", "draft"),
+        ("published", creator, "词库测试管理员", "published"),
+        ("archived", updater, "词库更新管理员", "archived"),
+    ] {
+        match phase {
+            "saved" => {
+                let meanings = writable_v3_meanings(&word);
+                word = save_v3_meanings(&state, &updater_token, &word, meanings).await;
+            }
+            "published" => {
+                let (status, published) = publish_ready_v3(&state, &creator_token, &word).await;
+                assert_eq!(status, StatusCode::CREATED, "{published}");
+                word = published;
+            }
+            "archived" => archive_v3_entry(&state, &updater_token, &word).await,
+            _ => {}
+        }
+        let (status, list) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries?status={status_filter}&created_by={creator}"),
+            &creator_token,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{phase}: {list}");
+        assert_eq!(list["page"]["total"], 1, "{phase}: {list}");
+        let item = &list["words"][0];
+        assert_eq!(item["id"], json!(entry_id), "{phase}");
+        assert_eq!(item["created_by"], json!(creator), "{phase}");
+        assert_eq!(item["created_by_name"], "词库测试管理员", "{phase}");
+        assert_eq!(item["updated_by_name"], expected_name, "{phase}");
+        let (stored_updater, stored_updated_at): (Uuid, chrono::DateTime<chrono::Utc>) =
+            sqlx::query_as(
+                "SELECT updated_by_admin_id, updated_at FROM lexicon.entries WHERE id = $1",
+            )
+            .bind(entry_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored_updater, expected_updater, "{phase}");
+        assert_eq!(item["updated_at"], json!(stored_updated_at), "{phase}");
+    }
+}
+
+#[sqlx::test]
 async fn list_filters_separate_headwords_and_creators_and_keep_totals(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)

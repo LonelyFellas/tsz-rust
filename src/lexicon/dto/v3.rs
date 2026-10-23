@@ -2532,6 +2532,9 @@ pub struct AdminWordListItemV3 {
     pub has_unpublished_changes: bool,
     pub max_reachable_step: WordCreationStep,
     pub created_by_name: String,
+    /// 与 updated_at 对应的最后更新人；契约允许旧后端响应缺少此字段。
+    #[schema(required = false)]
+    pub updated_by_name: String,
     /// 创建人 admin id；前端按「仅本人可删」判定归属时使用。
     pub created_by: Uuid,
     /// 被引用汇总；`total = 0` 即无人引用，可安全清理。
