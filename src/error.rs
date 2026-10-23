@@ -59,6 +59,8 @@ pub enum ErrorCode {
     PhoneUnbindForbidden,
     OtpRateLimited,
     OtpUnavailable,
+    LoginRateLimited,
+    LoginUnavailable,
     CoinInvalidAmount,
     CoinAccountUnavailable,
     CoinWalletUnavailable,
@@ -158,7 +160,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 135] = [
+    pub const ALL: [Self; 137] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -207,6 +209,8 @@ impl ErrorCode {
         Self::PhoneUnbindForbidden,
         Self::OtpRateLimited,
         Self::OtpUnavailable,
+        Self::LoginRateLimited,
+        Self::LoginUnavailable,
         Self::CoinInvalidAmount,
         Self::CoinAccountUnavailable,
         Self::CoinWalletUnavailable,
@@ -541,6 +545,16 @@ impl ErrorCode {
             Self::OtpUnavailable => (
                 "otp_unavailable",
                 "Verification service unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            Self::LoginRateLimited => (
+                "login_rate_limited",
+                "Too many login attempts",
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+            Self::LoginUnavailable => (
+                "login_unavailable",
+                "Login service unavailable",
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
             Self::CoinInvalidAmount => (
@@ -1044,6 +1058,7 @@ pub struct AppError {
     /// 错误是异常路径，一次堆分配的代价可以忽略。
     response: Box<ProblemDetails>,
     source: Option<anyhow::Error>,
+    retry_after: Option<u64>,
 }
 
 // 本次改动的全部价值在于 AppError 保持小体积。解箱 response、或往 AppError 里直接塞大字段，
@@ -1075,6 +1090,7 @@ impl AppError {
                 meta: None,
             }),
             source: None,
+            retry_after: None,
         }
     }
 
@@ -1120,6 +1136,11 @@ impl AppError {
 
     pub fn rate_limited(code: ErrorCode, message: impl Into<String>) -> Self {
         Self::new(StatusCode::TOO_MANY_REQUESTS, code, message, None)
+    }
+
+    pub fn with_retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds.max(1));
+        self
     }
 
     pub fn unavailable(code: ErrorCode, message: impl Into<String>) -> Self {
@@ -1234,6 +1255,13 @@ impl IntoResponse for AppError {
             header::CONTENT_TYPE,
             header::HeaderValue::from_static("application/problem+json"),
         );
+        if let Some(seconds) = self.retry_after {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                header::HeaderValue::from_str(&seconds.to_string())
+                    .expect("integer Retry-After is a valid header"),
+            );
+        }
         response
     }
 }
