@@ -62,6 +62,55 @@ async fn database_deadlines_rollback_writes_and_preserve_default_lock_budget(poo
 }
 
 #[tokio::test]
+async fn redis_connection_handshake_uses_the_configured_budget() {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 4096];
+        assert!(stream.read(&mut buffer).await.unwrap() > 0);
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        stream.write_all(b"+OK\r\n+OK\r\n").await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let pool = platform::connect_redis(&format!("redis://{address}/0"))
+        .await
+        .unwrap();
+    let connection = pool.get().await;
+    server.abort();
+    assert!(
+        connection.is_ok(),
+        "handshake below the configured 3s budget should succeed: {:?}",
+        connection.err()
+    );
+}
+
+#[tokio::test]
+async fn redis_connection_handshake_still_times_out() {
+    use tokio::{io::AsyncReadExt, net::TcpListener};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 4096];
+        assert!(stream.read(&mut buffer).await.unwrap() > 0);
+        std::future::pending::<()>().await;
+    });
+    let pool = platform::connect_redis(&format!("redis://{address}/0"))
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), pool.get()).await;
+    server.abort();
+    assert!(result.expect("connection must remain bounded").is_err());
+    assert!(started.elapsed() >= std::time::Duration::from_secs(2));
+}
+
+#[tokio::test]
 async fn redis_command_response_has_a_budget_after_acquisition() {
     let pool = platform::connect_redis(&std::env::var("TEST_REDIS_URL").unwrap())
         .await
