@@ -335,6 +335,14 @@ async fn login_concurrent_attempts_cannot_exceed_account_budget(pool: PgPool) {
     let redis_url =
         std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned());
     let redis = tsz_rust::platform::connect_redis(&redis_url).await.unwrap();
+    // 与生产启动一致，先完成同步哈希初始化。此用例验证连接就绪后的并发预算，
+    // 冷连接/故障超时由 reliability 和 login_redis_failure 用例独立覆盖。
+    tsz_rust::platform::dummy_hash();
+    let mut connections = Vec::new();
+    for _ in 0..redis.status().max_size.min(20) {
+        connections.push(redis.get().await.expect("Redis fixture must be ready"));
+    }
+    drop(connections);
     let state = AppState::for_test_with_redis(pool, redis);
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..20 {
