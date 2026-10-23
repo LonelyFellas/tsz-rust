@@ -271,6 +271,11 @@ impl Config {
                 || secret.to_ascii_lowercase().starts_with("replace-with-")
                 || secret.chars().all(|value| secret.starts_with(value))
             {
+                tracing::error!(
+                    event = "invalid_jwt_secret",
+                    field = name,
+                    "use a distinct random secret of at least 32 bytes; generate with openssl rand -base64 32"
+                );
                 return Err(envy::Error::Custom(format!(
                     "{name} must contain at least 32 bytes and must not be a placeholder, whitespace or a repeated character; generate it with openssl rand -base64 32"
                 )));
@@ -560,7 +565,10 @@ mod tests {
                 "",
                 "secret",
                 "admin-secret",
-                &"x".repeat(31),
+                &"ab".repeat(15),
+                &format!("{}c", "ab".repeat(15)),
+                &format!("{} c", "ab".repeat(16)),
+                "REPLACE-WITH-A-RANDOM-USER-JWT-SECRET",
                 "replace-with-a-random-user-jwt-secret",
                 "replace-with-a-random-admin-jwt-secret",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
