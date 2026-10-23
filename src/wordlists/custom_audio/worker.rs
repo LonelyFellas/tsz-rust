@@ -153,7 +153,7 @@ async fn synthesize(state: &AppState, attempt: &Attempt) -> Result<(), AppError>
             )
             .await
             .map_err(AppError::internal)?;
-        sqlx::query("UPDATE wordlist_audio_objects SET uploaded=true WHERE job_id=$1 AND attempt_token=$2 AND locale=$3")
+        sqlx::query("UPDATE wordlist_audio_objects SET uploaded=true,deleted_at=NULL,cleanup_after=clock_timestamp()+interval '10 minutes' WHERE job_id=$1 AND attempt_token=$2 AND locale=$3")
             .bind(attempt.job.id).bind(attempt.token).bind(&saved.locale).execute(&state.pool).await.map_err(AppError::internal)?;
     }
     Ok(())
@@ -228,12 +228,11 @@ pub async fn sweep(state: &AppState) -> Result<usize, AppError> {
             }
         }
     }
-    cleanup(state).await?;
     Ok(completed)
 }
 
 pub async fn cleanup(state: &AppState) -> Result<(), AppError> {
-    let candidates: Vec<CleanupCandidate> = sqlx::query_as("SELECT o.job_id,o.attempt_token,j.user_id,j.wordlist_id,o.object_key,j.test_run FROM wordlist_audio_objects o JOIN wordlist_audio_jobs j ON j.id=o.job_id WHERE o.cleanup_after<=clock_timestamp() AND NOT (o.attempt_token=j.lease_token AND ((j.state='processing' AND j.lease_until>clock_timestamp()) OR (j.state='ready' AND ((j.is_current AND EXISTS(SELECT 1 FROM wordlist_items i JOIN wordlists w ON w.id=i.wordlist_id WHERE i.wordlist_id=j.wordlist_id AND i.item_id=j.item_id AND btrim(i.custom_word->>'word')=j.word AND w.deleted_at IS NULL)) OR EXISTS(SELECT 1 FROM wordlist_audio_review_refs r WHERE r.job_id=j.id))))) ORDER BY o.cleanup_after LIMIT 100")
+    let candidates: Vec<CleanupCandidate> = sqlx::query_as("SELECT o.job_id,o.attempt_token,j.user_id,j.wordlist_id,o.object_key,j.test_run FROM wordlist_audio_objects o JOIN wordlist_audio_jobs j ON j.id=o.job_id WHERE o.deleted_at IS NULL AND o.cleanup_after<=clock_timestamp() AND NOT (o.attempt_token=j.lease_token AND ((j.state='processing' AND j.lease_until>clock_timestamp()) OR (j.state='ready' AND ((j.is_current AND EXISTS(SELECT 1 FROM wordlist_items i JOIN wordlists w ON w.id=i.wordlist_id WHERE i.wordlist_id=j.wordlist_id AND i.item_id=j.item_id AND btrim(i.custom_word->>'word')=j.word AND (w.deleted_at IS NULL OR EXISTS(SELECT 1 FROM wordlist_library_nodes n WHERE n.wordlist_id=w.id AND n.user_id=j.user_id AND n.space='owned')))) OR EXISTS(SELECT 1 FROM wordlist_audio_review_refs r WHERE r.job_id=j.id))))) ORDER BY o.cleanup_after LIMIT 100")
         .fetch_all(&state.pool).await.map_err(AppError::internal)?;
     for (job, token, user, list, key, run) in candidates {
         let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
@@ -245,19 +244,22 @@ pub async fn cleanup(state: &AppState) -> Result<(), AppError> {
             continue;
         }
         let store = storage(state, run.as_deref())?;
-        // Retain the tombstone and recheck later: an expired process may finish its PUT late.
-        match store
-            .delete(&ObjectKey::parse(&key).map_err(AppError::internal)?)
-            .await
-        {
+        // A late successful PUT resets deleted_at, returning only that object to cleanup.
+        let key = ObjectKey::parse(&key).map_err(AppError::internal)?;
+        let deletion = match store.stat(&key).await {
+            Err(crate::platform::storage::StorageError::ObjectNotFound { .. }) => Ok(()),
+            Ok(_) => store.delete(&key).await,
+            Err(error) => Err(error),
+        };
+        match deletion {
             Ok(()) => {
                 sqlx::query("UPDATE wordlist_audio_objects SET deleted_at=clock_timestamp(),cleanup_after=clock_timestamp()+interval '1 hour' WHERE object_key=$1")
-                    .bind(key).execute(&mut *tx).await.map_err(AppError::internal)?;
+                    .bind(key.as_str()).execute(&mut *tx).await.map_err(AppError::internal)?;
             }
             Err(error) => {
                 tracing::warn!(job_id=%job,error_kind=crate::safe_log::error_kind(&error),"custom audio cleanup will retry");
                 sqlx::query("UPDATE wordlist_audio_objects SET cleanup_after=clock_timestamp()+interval '1 minute' WHERE object_key=$1")
-                    .bind(key).execute(&mut *tx).await.map_err(AppError::internal)?;
+                    .bind(key.as_str()).execute(&mut *tx).await.map_err(AppError::internal)?;
             }
         }
         tx.commit().await.map_err(AppError::internal)?;
@@ -266,6 +268,20 @@ pub async fn cleanup(state: &AppState) -> Result<(), AppError> {
 }
 
 pub fn run_worker(state: AppState) {
+    let cleanup_state = state.clone();
+    crate::safe_log::spawn_worker("wordlists/custom_audio_cleanup", async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = cleanup(&cleanup_state).await {
+                tracing::error!(
+                    error_kind = crate::safe_log::error_kind(&error),
+                    "custom audio cleanup failed"
+                );
+            }
+        }
+    });
     crate::safe_log::spawn_worker("wordlists/custom_audio", async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

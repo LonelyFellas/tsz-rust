@@ -441,3 +441,6 @@ mod custom_audio_read;
 
 #[path = "wordlists_handler/custom_audio_lifecycle.rs"]
 mod custom_audio_lifecycle;
+
+#[path = "wordlists_handler/custom_audio_review_regressions.rs"]
+mod custom_audio_review_regressions;

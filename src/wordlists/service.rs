@@ -299,15 +299,7 @@ pub async fn create(
             let context = audio
                 .as_ref()
                 .ok_or_else(|| invalid("语音生成参数未就绪"))?;
-            super::custom_audio::generate_in(
-                &mut tx,
-                auth,
-                id,
-                input.idempotency_key,
-                request,
-                context,
-            )
-            .await?;
+            super::custom_audio::generate_in(&mut tx, auth, id, request, context).await?;
         }
         let item_ids: Vec<_> = items.iter().map(|i| i.item_id).collect();
         let notes: Vec<_> = input
@@ -466,15 +458,7 @@ pub async fn update(
         let context = audio
             .as_ref()
             .ok_or_else(|| invalid("语音生成参数未就绪"))?;
-        super::custom_audio::generate_in(
-            &mut tx,
-            auth,
-            id,
-            input.idempotency_key.expect("validated above"),
-            request,
-            context,
-        )
-        .await?;
+        super::custom_audio::generate_in(&mut tx, auth, id, request, context).await?;
         if input.content.is_none() && !request.item_ids.is_empty() {
             sqlx::query(
                 "UPDATE wordlists SET revision=revision+1,updated_at=clock_timestamp() WHERE id=$1",
