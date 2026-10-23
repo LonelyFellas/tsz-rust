@@ -142,6 +142,149 @@ async fn permissions_identity_amounts_and_search(pool: PgPool) {
     reconciled(&pool).await;
 }
 #[sqlx::test]
+async fn operation_names_follow_identity_and_search_keeps_pagination(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let id = Uuid::parse_str("abcdef12-3456-4789-abcd-ef1234567890").unwrap();
+    let user = seed(&pool, OwnerType::User, id).await;
+    let recipient = seed(&pool, OwnerType::Admin, id).await;
+    let actor = admin(&pool, true, &[]).await;
+    sqlx::query("UPDATE users SET display_name='Student Alice' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE admins SET display_name='Teacher Bob' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE admins SET display_name='Operator Carol' WHERE id=$1")
+        .bind(actor.owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (owner, event) in [(user, "user-name"), (recipient, "admin-name")] {
+        let (status, response) = request(
+            &state,
+            actor,
+            "POST",
+            "/coins/manual-credits",
+            input(owner, event),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.get("owner_display_name").is_none());
+        assert!(response.get("actor_display_name").is_none());
+    }
+    for (query, expected_name, count) in [
+        (
+            "owner_search=alice&actor_search=carol".to_owned(),
+            Some("Student Alice"),
+            1,
+        ),
+        (
+            "owner_search=BOB&owner_type=admin".to_owned(),
+            Some("Teacher Bob"),
+            1,
+        ),
+        (
+            format!("owner_search={id}&actor_search={}", actor.owner_id),
+            None,
+            2,
+        ),
+        (
+            format!(
+                "owner_search={}&actor_search={}",
+                id.to_string().to_uppercase(),
+                actor.owner_id.to_string().to_uppercase()
+            ),
+            None,
+            2,
+        ),
+        (
+            "owner_search=alice&actor_search=unknown".to_owned(),
+            None,
+            0,
+        ),
+        ("owner_search=%25".to_owned(), None, 0),
+    ] {
+        let (status, response) = request(
+            &state,
+            actor,
+            "GET",
+            &format!("/coins/operations?{query}&page_size=1&include_names=true"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["pagination"]["total"], count);
+        assert_eq!(
+            response["items"].as_array().unwrap().len(),
+            usize::from(count > 0)
+        );
+        if let Some(name) = expected_name {
+            assert_eq!(response["items"][0]["owner_display_name"], name);
+            assert_eq!(response["items"][0]["actor_display_name"], "Operator Carol");
+        }
+    }
+    sqlx::query("UPDATE users SET display_name='Renamed Alice' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, response) = request(
+        &state,
+        actor,
+        "GET",
+        "/coins/operations?owner_search=Renamed&include_names=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(response["items"][0]["owner_display_name"], "Renamed Alice");
+    let original = response["items"][0]["id"].as_str().unwrap();
+    let (status, reversed) = request(
+        &state,
+        actor,
+        "POST",
+        &format!("/coins/manual-credits/{original}/reversal"),
+        json!({"idempotency_key":Uuid::new_v4(),"reason":"name verification"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(reversed.get("owner_display_name").is_none());
+    assert!(reversed.get("actor_display_name").is_none());
+    let (_, legacy) = request(&state, actor, "GET", "/coins/operations", Value::Null).await;
+    assert_eq!(legacy["pagination"]["total"], 3);
+    for row in legacy["items"].as_array().unwrap() {
+        assert!(row.get("owner_display_name").is_none());
+        assert!(row.get("actor_display_name").is_none());
+    }
+    let (_, enriched) = request(
+        &state,
+        actor,
+        "GET",
+        "/coins/operations?include_names=true&source_type=manual_reversal",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(enriched["items"][0]["owner_display_name"], "Renamed Alice");
+    assert_eq!(enriched["items"][0]["actor_display_name"], "Operator Carol");
+    assert_eq!(
+        request(
+            &state,
+            actor,
+            "GET",
+            &format!("/coins/operations?owner_search={}", "a".repeat(201)),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    reconciled(&pool).await;
+}
+
+#[sqlx::test]
 async fn concurrent_credit_event_uniqueness_replay_and_atomic_audit(pool: PgPool) {
     let state = AppState::for_test(pool.clone());
     let user = seed(&pool, OwnerType::User, Uuid::now_v7()).await;
