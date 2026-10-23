@@ -51,7 +51,8 @@ pub struct NewUser {
     pub password_hash: String,
     pub display_name: String,
     pub first_role: UserRole,
-    /// 注册来源 IP，取自反代 X-Forwarded-For；反代没配这个头时为 None。
+    /// 注册来源 IP，取自反代 `X-Real-IP`（缺头时退而取 `X-Forwarded-For` 最右一跳，
+    /// 见 auth/handler.rs `client_ip`）；没有可用头时为 None。
     pub registration_ip: Option<String>,
 }
 
