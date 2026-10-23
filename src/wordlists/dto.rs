@@ -17,7 +17,7 @@ pub enum WordlistState {
     Rejected,
     Withdrawn,
 }
-#[derive(Serialize, ToSchema, sqlx::FromRow)]
+#[derive(Deserialize, Serialize, ToSchema, sqlx::FromRow)]
 #[serde(deny_unknown_fields)]
 pub struct Wordlist {
     pub id: Uuid,
@@ -130,6 +130,8 @@ pub struct CreateWordlist {
     pub name: String,
     #[schema(min_items = 1, max_items = 10000)]
     pub items: Vec<CreateWordlistItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_generation: Option<super::custom_audio::dto::AudioGeneration>,
 }
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -172,6 +174,10 @@ pub struct WordlistContentUpdate {
 #[derive(Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateWordlist {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_generation: Option<super::custom_audio::dto::AudioGeneration>,
     #[schema(minimum = 1)]
     pub expected_revision: i64,
     #[schema(required = true)]

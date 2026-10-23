@@ -116,6 +116,7 @@ pub async fn create(
             "active consent is required",
         ));
     }
+    crate::wordlists::custom_audio::ensure_settled(&mut tx, auth.subject).await?;
     let wallet = coins::pause_in(
         &mut tx,
         Owner {
@@ -248,6 +249,7 @@ pub async fn complete(pool: &sqlx::PgPool, user_id: Uuid, id: Uuid) -> Result<bo
             "invalid persisted consent"
         )));
     }
+    crate::wordlists::custom_audio::ensure_settled(&mut tx, user_id).await?;
     coins::close_in(
         &mut tx,
         Owner {
@@ -263,6 +265,11 @@ pub async fn complete(pool: &sqlx::PgPool, user_id: Uuid, id: Uuid) -> Result<bo
         .await
         .map_err(AppError::internal)?;
     sqlx::query("UPDATE teacher_certification_files SET state='delete_pending' WHERE user_id=$1 AND state<>'uploading'")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+    sqlx::query("UPDATE wordlist_audio_jobs SET word='已删除',is_current=false WHERE user_id=$1")
         .bind(user_id)
         .execute(&mut *tx)
         .await

@@ -45,6 +45,8 @@ pub enum ErrorCode {
     LearningInsufficientQuestions,
     LearningAlreadyAnswered,
     WordListConflict,
+    WordListAudioCostChanged,
+    AccountDeletionUnsettledAudio,
     WordListEntryUnavailable,
     InvalidCredentials,
     InvalidToken,
@@ -160,7 +162,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 137] = [
+    pub const ALL: [Self; 139] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -195,6 +197,8 @@ impl ErrorCode {
         Self::LearningInsufficientQuestions,
         Self::LearningAlreadyAnswered,
         Self::WordListConflict,
+        Self::WordListAudioCostChanged,
+        Self::AccountDeletionUnsettledAudio,
         Self::WordListEntryUnavailable,
         Self::InvalidCredentials,
         Self::InvalidToken,
@@ -481,6 +485,16 @@ impl ErrorCode {
             Self::WordListConflict => (
                 "word_list_conflict",
                 "Word list conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::WordListAudioCostChanged => (
+                "word_list_audio_cost_changed",
+                "Word list audio cost changed",
+                StatusCode::CONFLICT,
+            ),
+            Self::AccountDeletionUnsettledAudio => (
+                "account_deletion_unsettled_audio",
+                "Audio generation or refund is pending",
                 StatusCode::CONFLICT,
             ),
             Self::WordListEntryUnavailable => (

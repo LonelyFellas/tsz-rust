@@ -544,6 +544,7 @@ pub async fn operation(
                 sqlx::query("UPDATE wordlist_review_requests SET state='cancelled',decided_at=clock_timestamp() WHERE wordlist_id=$1 AND state='pending'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
                 sqlx::query("UPDATE wordlists SET deleted_at=$2,state='draft',review_state='none',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(deleted_at).execute(&mut *tx).await.map_err(AppError::internal)?;
             }
+            super::custom_audio::reconcile_in(&mut tx, id).await?;
         } else if space == LibrarySpace::Favorites {
             if input.action == LibraryAction::Restore {
                 sqlx::query("INSERT INTO wordlist_interactions(wordlist_id,user_id,kind) VALUES($1,$2,'favorite') ON CONFLICT DO NOTHING").bind(id).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?;

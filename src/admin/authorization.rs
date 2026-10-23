@@ -101,6 +101,16 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::All(&["wordlists.access"]),
     ),
     (
+        "GET",
+        "/wordlists/{id}/custom-audio",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/{id}/custom-audio/{item_id}/{locale}",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
         "POST",
         "/wordlists/{id}/visibility",
         RoutePolicy::All(&["wordlists.visibility"]),
@@ -129,6 +139,16 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "GET",
         "/wordlists/{id}/review-requests/{request_id}/items",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/{id}/review-requests/{request_id}/custom-audio",
+        RoutePolicy::All(&["wordlists.access"]),
+    ),
+    (
+        "GET",
+        "/wordlists/{id}/review-requests/{request_id}/custom-audio/{item_id}/{locale}",
         RoutePolicy::All(&["wordlists.access"]),
     ),
     (
@@ -714,6 +734,7 @@ mod tests {
             (include_str!("../lexicon/router.rs"), "/lexicon"),
             (include_str!("../speech/preview/router.rs"), "/speech"),
             (include_str!("../teacher_certification/mod.rs"), ""),
+            (include_str!("../wordlists/custom_audio/handler.rs"), ""),
         ];
         let mut registered = BTreeSet::new();
         for (source, mount) in sources {

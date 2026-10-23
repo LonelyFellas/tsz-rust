@@ -57,6 +57,8 @@ pub async fn submit(
         let request = Uuid::now_v7();
         sqlx::query("UPDATE wordlists SET state='pending',review_state='pending',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("INSERT INTO wordlist_review_requests(id,wordlist_id,submitted_revision,name,entry_ids,submit_key,request_hash,author_notes,item_snapshots) VALUES($1,$2,$3,$4,$5,$6,$7,(SELECT COALESCE(jsonb_object_agg(item_id::text,author_note),'{}'::jsonb) FROM wordlist_items WHERE wordlist_id=$2 AND author_note<>''),$8)").bind(request).bind(id).bind(list.revision+1).bind(list.name).bind(ids).bind(input.idempotency_key).bind(hash).bind(serde_json::to_value(snapshots).map_err(AppError::internal)?).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO wordlist_audio_review_refs(review_id,item_id,job_id) SELECT $1,item_id,id FROM wordlist_audio_jobs WHERE wordlist_id=$2 AND is_current AND state IN ('queued','processing','ready')")
+            .bind(request).bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
         request
     };
     let result = review(&mut tx, id, request).await?;

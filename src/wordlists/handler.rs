@@ -16,6 +16,7 @@ use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
         .merge(super::library::router())
+        .merge(super::custom_audio::handler::router())
         .route(
             "/api/v1/wordlists/interactions",
             get(super::interactions::stats),
@@ -258,9 +259,10 @@ responses((status=403,description="需要先绑定手机号"),(status=200,descri
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     ApiJson(input): ApiJson<CreateWordlist>,
 ) -> Result<Json<Wordlist>, AppError> {
-    Ok(Json(service::create(&state.pool, &auth, input).await?))
+    Ok(Json(service::create(&state, &auth, input, &headers).await?))
 }
 #[utoipa::path(put,path="/api/v1/me/wordlists/{id}",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=UpdateWordlist,
 responses((status=403,description="需要先绑定手机号"),(status=200,description="原子保存内容和备注",body=Wordlist),(status=400,description="内容无效"),(status=401,description="会话无效"),(status=404,description="不可访问"),(status=409,description="版本或状态冲突")))]
@@ -268,9 +270,12 @@ pub async fn update(
     State(state): State<AppState>,
     auth: AuthUser,
     ApiPath(id): ApiPath<Uuid>,
+    headers: HeaderMap,
     ApiJson(input): ApiJson<UpdateWordlist>,
 ) -> Result<Json<Wordlist>, AppError> {
-    Ok(Json(service::update(&state.pool, &auth, id, input).await?))
+    Ok(Json(
+        service::update(&state, &auth, id, input, &headers).await?,
+    ))
 }
 #[utoipa::path(get,path="/api/v1/me/wordlists/{id}/edit",tag="wordlists",params(("id"=Uuid,Path),("X-TSZ-Wordlist-Custom-Items"=Option<String>,Header,description="v1 返回稳定项标识、自定义词汇和计数；旧客户端读取自定义内容返回 409",example="v1")),security(("bearer_auth"=[])),
 responses((status=409,description="客户端不支持此词表的自定义内容，请刷新页面"),(status=403,description="需要先绑定手机号"),(status=200,description="一致版本下的完整有序ID；词义和备注独立分页",body=WordlistEditSnapshot),(status=401,description="会话无效"),(status=404,description="不可访问")))]
