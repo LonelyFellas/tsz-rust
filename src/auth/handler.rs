@@ -282,13 +282,16 @@ pub async fn register(
     Ok((StatusCode::CREATED, jar, Json(resp)))
 }
 
-/// 取注册来源 IP。应用只在反向代理后面跑（见 docs/deployment.md §5），可信反代必须
-/// 覆盖客户端传入的 `X-Forwarded-For`。头形如 `client, proxy1, proxy2`，最左一段是
-/// 原始客户端。解析成 `IpAddr` 再转回字符串，既挡住畸形值落库，也顺带归一化格式。
-/// 反代未配置该头（或本地直连）时返回 None——注册照常成功，只是这行没有来源地址。
+/// 取注册来源 IP。应用只在反向代理后面跑（见 docs/deployment.md §5）。优先读反代
+///（nginx）注入的 `X-Real-IP`——直连 TCP 来源 `$remote_addr` 客户端无法控制；
+/// 客户端自带的 `X-Forwarded-For` 最左段可被伪造，不能作为来源依据（issue #281）。
+/// 解析成 `IpAddr` 再转回字符串，既挡住畸形值落库，也顺带归一化格式。
+/// 没有可用头（或本地直连）时返回 None——注册照常成功，只是这行没有来源地址。
 fn client_ip(headers: &HeaderMap) -> Option<String> {
-    let forwarded = headers.get("x-forwarded-for")?.to_str().ok()?;
-    let client = forwarded.split(',').next()?.trim();
+    let candidate = headers
+        .get("x-real-ip")
+        .or_else(|| headers.get("x-forwarded-for"))?;
+    let client = candidate.to_str().ok()?.rsplit(',').next()?.trim();
     client
         .parse::<std::net::IpAddr>()
         .ok()

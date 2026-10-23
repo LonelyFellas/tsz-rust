@@ -407,12 +407,19 @@ async fn malformed_json_uses_structured_error_response(pool: PgPool) {
     assert_eq!(body["code"], "invalid_json");
 }
 
-/// 带上（或省略）反代注入的 `X-Forwarded-For` 发一次注册，返回响应状态。
-async fn register_forwarded(state: &AppState, forwarded_for: Option<&str>) -> StatusCode {
+/// 发一次注册，可携带反代注入的 `X-Real-IP` / `X-Forwarded-For`，返回响应状态。
+async fn register_forwarded(
+    state: &AppState,
+    real_ip: Option<&str>,
+    forwarded_for: Option<&str>,
+) -> StatusCode {
     let mut builder = Request::builder()
         .method("POST")
         .uri("/api/v1/auth/register")
         .header(header::CONTENT_TYPE, "application/json");
+    if let Some(value) = real_ip {
+        builder = builder.header("x-real-ip", value);
+    }
     if let Some(value) = forwarded_for {
         builder = builder.header("x-forwarded-for", value);
     }
@@ -433,18 +440,35 @@ async fn stored_registration_ip(pool: &PgPool) -> Option<String> {
 }
 
 #[sqlx::test]
-async fn records_leftmost_forwarded_for_as_registration_ip(pool: PgPool) {
+async fn records_x_real_ip_as_registration_ip(pool: PgPool) {
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     save_register_code(&store, PHONE).await;
 
-    // 反代注入的形态是 `客户端, 中间跳...`，最左一段才是真实来源。
-    let status = register_forwarded(&state, Some("203.0.113.9, 10.0.0.1")).await;
+    // nginx 的 X-Real-IP 是直连来源 $remote_addr，客户端无法控制，应优先于 XFF。
+    let status = register_forwarded(&state, Some("203.0.113.9"), Some("1.2.3.4, 10.0.0.1")).await;
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
         stored_registration_ip(&pool).await.as_deref(),
         Some("203.0.113.9"),
-        "应只保留最左侧的客户端地址"
+        "X-Real-IP 存在时不应采信可被伪造的 XFF 最左段"
+    );
+}
+
+#[sqlx::test]
+async fn takes_last_hop_of_forwarded_for_without_real_ip(pool: PgPool) {
+    let (state, store) = AppState::for_test_with_otp_store(pool.clone());
+    save_register_code(&store, PHONE).await;
+
+    // 无 X-Real-IP、XFF 为 `客户端, 中间跳...` 时：最左段可被客户端注入，
+    // 最右段是最后写入者（离我们最近的可信反代），只能取它兜底。
+    let status = register_forwarded(&state, None, Some("1.2.3.4, 10.0.0.1")).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        stored_registration_ip(&pool).await.as_deref(),
+        Some("10.0.0.1"),
+        "XFF 兜底只保留最右一跳，不采信可伪造的最左段"
     );
 }
 
@@ -453,7 +477,7 @@ async fn normalizes_ipv6_registration_ip(pool: PgPool) {
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     save_register_code(&store, PHONE).await;
 
-    let status = register_forwarded(&state, Some("2001:0db8:0:0:0:0:0:1")).await;
+    let status = register_forwarded(&state, Some("2001:0db8:0:0:0:0:0:1"), None).await;
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
@@ -464,24 +488,25 @@ async fn normalizes_ipv6_registration_ip(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn registration_succeeds_without_forwarded_for(pool: PgPool) {
+async fn registration_succeeds_without_ip_headers(pool: PgPool) {
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     save_register_code(&store, PHONE).await;
 
-    // 反代没配 XFF（或本地直连）时，注册不能因为拿不到 IP 就失败。
-    let status = register_forwarded(&state, None).await;
+    // 反代没配注入头（或本地直连）时，注册不能因为拿不到 IP 就失败。
+    let status = register_forwarded(&state, None, None).await;
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(stored_registration_ip(&pool).await, None);
 }
 
 #[sqlx::test]
-async fn ignores_malformed_forwarded_for(pool: PgPool) {
+async fn ignores_malformed_headers(pool: PgPool) {
     let (state, store) = AppState::for_test_with_otp_store(pool.clone());
     save_register_code(&store, PHONE).await;
 
-    // 畸形值不落库，避免把任意头内容当成地址存进去。
-    let status = register_forwarded(&state, Some("not-an-ip")).await;
+    // 畸形值不落库，避免把任意头内容当成地址存进去；X-Real-IP 畸形时
+    // 不允许再退回 XFF，否则伪造方拿 X-Real-IP 占位即可绕过优先级。
+    let status = register_forwarded(&state, Some("not-an-ip"), Some("10.0.0.1")).await;
 
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(stored_registration_ip(&pool).await, None);
