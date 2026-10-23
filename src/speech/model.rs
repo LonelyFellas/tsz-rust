@@ -22,6 +22,8 @@ pub enum SpeechModelError {
     InvalidRate,
     #[error("speech pitch must be between -12 and 12 semitones")]
     InvalidPitch,
+    #[error("speech volume must be between 0 and 100 percent")]
+    InvalidVolume,
     #[error("only canonical RichTextV2 can be synthesized")]
     InvalidRichText,
     #[error("there is nothing left to read in this text")]
@@ -116,11 +118,18 @@ impl AudioOutputFormat {
 pub const MIN_SPEECH_RATE_PERCENT: i16 = -50;
 pub const MAX_SPEECH_RATE_PERCENT: i16 = 100;
 
+pub(crate) fn deserialize_optional_volume<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i16>, D::Error> {
+    <i16 as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeechOptions {
     style: Option<String>,
     rate_percent: i16,
     pitch_semitones: i8,
+    volume_percent: i16,
     output_format: AudioOutputFormat,
 }
 
@@ -130,12 +139,20 @@ impl SpeechOptions {
         style: Option<String>,
         rate_percent: i16,
         pitch_semitones: i8,
+        volume_percent: i16,
     ) -> Result<Self, SpeechModelError> {
-        Self::validate(voice, style.as_deref(), rate_percent, pitch_semitones)?;
+        Self::validate(
+            voice,
+            style.as_deref(),
+            rate_percent,
+            pitch_semitones,
+            volume_percent,
+        )?;
         Ok(Self {
             style,
             rate_percent,
             pitch_semitones,
+            volume_percent,
             output_format: AudioOutputFormat::Mp3_24Khz96KbpsMono,
         })
     }
@@ -145,12 +162,16 @@ impl SpeechOptions {
         style: Option<&str>,
         rate_percent: i16,
         pitch_semitones: i8,
+        volume_percent: i16,
     ) -> Result<(), SpeechModelError> {
         if !(MIN_SPEECH_RATE_PERCENT..=MAX_SPEECH_RATE_PERCENT).contains(&rate_percent) {
             return Err(SpeechModelError::InvalidRate);
         }
         if !(-12..=12).contains(&pitch_semitones) {
             return Err(SpeechModelError::InvalidPitch);
+        }
+        if !(0..=100).contains(&volume_percent) {
+            return Err(SpeechModelError::InvalidVolume);
         }
         if let Some(style) = style {
             validate_token(style, 64, "style")?;
@@ -171,6 +192,10 @@ impl SpeechOptions {
 
     pub const fn pitch_semitones(&self) -> i8 {
         self.pitch_semitones
+    }
+
+    pub const fn volume_percent(&self) -> i16 {
+        self.volume_percent
     }
 
     pub const fn output_format(&self) -> AudioOutputFormat {
@@ -197,6 +222,7 @@ impl SynthesisRequest {
             options.style(),
             options.rate_percent(),
             options.pitch_semitones(),
+            options.volume_percent(),
         )?;
         let mut rich_text = RichText::V2(content);
         rich_text::canonicalize(&mut rich_text).map_err(|_| SpeechModelError::InvalidRichText)?;
@@ -231,6 +257,10 @@ impl SynthesisRequest {
         encoder.field(self.options.pitch_semitones.to_string().as_bytes());
         encoder.field(self.options.output_format.azure_value().as_bytes());
         encoder.field(&self.normalized_content);
+        if self.options.volume_percent != 100 {
+            encoder.field(b"volume_percent");
+            encoder.field(self.options.volume_percent.to_string().as_bytes());
+        }
         SynthesisFingerprint(encoder.finish())
     }
 

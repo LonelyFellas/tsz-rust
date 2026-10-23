@@ -27,6 +27,7 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
         parameters: VoiceParameters {
             rate_percent: -25,
             pitch_semitones: 0,
+            volume_percent: Some(70),
             style: None,
         },
     };
@@ -98,6 +99,7 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
     let read = repository.groups(actor).await.unwrap();
     assert_eq!(read.revision, 1);
     assert_eq!(read.groups[0].uk[0].voice_alias, "en-gb-sonia");
+    assert_eq!(read.groups[0].uk[0].parameters.volume_percent, Some(70));
     assert_eq!(
         repository
             .save_groups(
@@ -358,6 +360,7 @@ fn settings(revision: i64, notes: &str) -> SaveVoiceSettingsRequest {
         parameters: Some(VoiceParameters {
             rate_percent: -25,
             pitch_semitones: 2,
+            volume_percent: Some(65),
             style: Some("chat".into()),
         }),
         notes: notes.into(),
@@ -379,6 +382,10 @@ async fn personal_settings_read_back_and_do_not_leak_between_admins(pool: PgPool
     let read = repository.list(a).await.unwrap();
     assert_eq!(read.items[0].notes, "适合慢读");
     assert_eq!(read.items[0].parameters.as_ref().unwrap().rate_percent, -25);
+    assert_eq!(
+        read.items[0].parameters.as_ref().unwrap().volume_percent,
+        Some(65)
+    );
     let other = repository.list(b).await.unwrap();
     assert_eq!(other.items[0].notes, "");
     assert!(other.items[0].parameters.is_none());

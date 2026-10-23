@@ -978,6 +978,9 @@ fn validate_voice_profile(
                 || voice
                     .pitch_semitones
                     .is_some_and(|pitch| !(-12..=12).contains(&pitch))
+                || voice
+                    .volume_percent
+                    .is_some_and(|volume| !(0..=100).contains(&volume))
                 || voice.style.as_ref().is_some_and(|style| {
                     style.trim().is_empty() || style.chars().count() > 64 || style.contains('\0')
                 })
@@ -3619,7 +3622,7 @@ mod sense_group_voice_tests {
         let legacy = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":0}]});
         let parsed: VoiceProfileV3 = serde_json::from_value(legacy.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
-        let configured = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":-25,"pitch_semitones":2,"style":"cheerful"}]});
+        let configured = json!({"voices":[{"voice_id":"sonia","enabled":true,"rate_percent":-25,"pitch_semitones":2,"volume_percent":65,"style":"cheerful"}]});
         let profile: VoiceProfileV3 = serde_json::from_value(configured.clone()).unwrap();
         let mut issues = vec![];
         validate_voice_profile(Some(&profile), Uuid::now_v7(), &mut issues);
@@ -3627,6 +3630,8 @@ mod sense_group_voice_tests {
         assert_eq!(serde_json::to_value(profile).unwrap(), configured);
         for (key, value) in [
             ("pitch_semitones", json!(13)),
+            ("volume_percent", json!(-1)),
+            ("volume_percent", json!(101)),
             ("style", json!(" ")),
             ("style", json!("x".repeat(65))),
         ] {

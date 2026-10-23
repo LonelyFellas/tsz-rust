@@ -2,7 +2,7 @@ mod azure;
 mod catalog;
 mod config;
 pub mod library;
-mod model;
+pub(crate) mod model;
 pub mod preview;
 mod product_catalog;
 mod provider;

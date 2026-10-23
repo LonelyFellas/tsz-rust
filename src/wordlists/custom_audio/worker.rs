@@ -122,7 +122,7 @@ async fn synthesize(state: &AppState, attempt: &Attempt) -> Result<(), AppError>
             Vec::<String>::new(),
         )
         .map_err(AppError::internal)?;
-        let options = SpeechOptions::new(&voice, None, 0, 0).map_err(AppError::internal)?;
+        let options = SpeechOptions::new(&voice, None, 0, 0, 100).map_err(AppError::internal)?;
         let request = SynthesisRequest::new(
             voice,
             options,

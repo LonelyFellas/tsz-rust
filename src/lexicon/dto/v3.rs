@@ -867,6 +867,13 @@ pub struct VoiceSettingV3 {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::speech::model::deserialize_optional_volume"
+    )]
+    #[schema(minimum = 0, maximum = 100, nullable = false)]
+    pub volume_percent: Option<i16>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_voice_style"
     )]
     #[schema(max_length = 64, nullable = false)]
