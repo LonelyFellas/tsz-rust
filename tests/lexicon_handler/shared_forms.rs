@@ -832,7 +832,16 @@ async fn shared_forms_reassignment_rejects_stolen_nodes_and_new_content(pool: Pg
 }
 
 #[sqlx::test]
+async fn shared_forms_deleted_form_restores_original_content_and_nodes(pool: PgPool) {
+    deleted_form_content_identity(pool, true).await;
+}
+
+#[sqlx::test]
 async fn shared_forms_deleted_form_cannot_use_new_sides_to_bind_new_content(pool: PgPool) {
+    deleted_form_content_identity(pool, false).await;
+}
+
+async fn deleted_form_content_identity(pool: PgPool, restore_original: bool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -905,6 +914,112 @@ async fn shared_forms_deleted_form_cannot_use_new_sides_to_bind_new_content(pool
     )
     .await;
     let revision = deleted["word"]["revision"].as_i64().unwrap();
+    if restore_original {
+        // The exception is only for the original mapping: another form cannot select retired content.
+        let mut switched = deleted["word"]["forms"].clone();
+        let mut replacement = binding.clone();
+        replacement["id"] = switched["pos"][0]["forms"][0]["id"].clone();
+        replacement["form_type"] = switched["pos"][0]["forms"][0]["form_type"].clone();
+        replacement["regional_bindings"]["common"]["id"] = json!(Uuid::now_v7());
+        for row in replacement["regional_bindings"]["common"]["pronunciations"]
+            .as_array_mut()
+            .unwrap()
+        {
+            row["id"] = json!(Uuid::now_v7());
+        }
+        switched["pos"][0]["forms"][0] = replacement;
+        switched["contents"][0] = common_content.clone();
+        for (method, suffix) in [(Method::POST, "/impact"), (Method::PUT, "")] {
+            let mut body = json!({"schema_version":3,"base_revision":revision,"content":switched});
+            if method == Method::PUT {
+                body["intent"] = json!("save");
+            }
+            let (status, rejected) = shared_call(
+                &state,
+                &bearer,
+                method,
+                &format!("{ROOT}/entries/{id}/steps/forms{suffix}"),
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+            assert_eq!(rejected["code"], "stable_node_id_changed", "{rejected}");
+        }
+        // A brand-new form must not reactivate another form's retired content either.
+        let mut new_binding = binding.clone();
+        new_binding["id"] = json!(Uuid::now_v7());
+        new_binding["regional_bindings"]["common"]["id"] = json!(Uuid::now_v7());
+        for row in new_binding["regional_bindings"]["common"]["pronunciations"]
+            .as_array_mut()
+            .unwrap()
+        {
+            row["id"] = json!(Uuid::now_v7());
+        }
+        let mut proposed = deleted["word"]["forms"].clone();
+        proposed["contents"]
+            .as_array_mut()
+            .unwrap()
+            .push(common_content.clone());
+        proposed["pos"][0]["form_groups"][0]["members"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":Uuid::now_v7(),"form_id":new_binding["id"]}));
+        proposed["pos"][0]["forms"]
+            .as_array_mut()
+            .unwrap()
+            .push(new_binding);
+        for (method, suffix) in [(Method::POST, "/impact"), (Method::PUT, "")] {
+            let mut body = json!({"schema_version":3,"base_revision":revision,"content":proposed});
+            if method == Method::PUT {
+                body["intent"] = json!("save");
+            }
+            let (status, rejected) = shared_call(
+                &state,
+                &bearer,
+                method,
+                &format!("{ROOT}/entries/{id}/steps/forms{suffix}"),
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+            assert_eq!(rejected["code"], "stable_node_id_changed", "{rejected}");
+        }
+        let restored = save_shared(
+            &state,
+            &bearer,
+            id,
+            revision,
+            created["word"]["forms"].clone(),
+        )
+        .await;
+        let (_, fresh) = shared_call(
+            &state,
+            &bearer,
+            Method::GET,
+            &format!("{ROOT}/entries/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(fresh["word"]["forms"], created["word"]["forms"]);
+        assert_eq!(fresh["word"]["revision"], restored["word"]["revision"]);
+        let retired: bool = sqlx::query_scalar(
+            "SELECT retired_at IS NOT NULL FROM lexicon.v3_form_content_slots WHERE id=$1",
+        )
+        .bind(Uuid::parse_str(common_content["id"].as_str().unwrap()).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!retired);
+        let removed: bool = sqlx::query_scalar(
+            "SELECT removed_from_draft_at IS NOT NULL FROM lexicon.nodes WHERE id=$1",
+        )
+        .bind(Uuid::parse_str(form_id.as_str().unwrap()).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!removed);
+        return;
+    }
     let mut proposed = deleted["word"]["forms"].clone();
     let mut target = proposed["contents"][0].clone();
     target["id"] = json!(Uuid::now_v7());
@@ -1298,6 +1413,172 @@ async fn shared_forms_reassignment_keeps_self_reference_impact_and_save_guards(p
 }
 
 #[sqlx::test]
+async fn shared_forms_reassignment_without_removed_nodes_requires_reference_confirmation(
+    pool: PgPool,
+) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    let bearer = token(&state, seed_admin(&pool).await);
+    let initial = create_v3_with_complete_forms(&state, &pool, &bearer).await;
+    let initial = save_v3_meanings(
+        &state,
+        &bearer,
+        &initial,
+        complete_v3_meanings_fixture(initial["word"]["forms"]["pos"][0]["pos_id"].clone()),
+    )
+    .await;
+    let id = initial["word"]["id"].as_str().unwrap();
+    let (_, read) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    let mut forms = read["word"]["forms"].clone();
+    forms["pos"][0]["forms"][1]["form_type"] = json!("plural");
+    for content in forms["contents"].as_array_mut().unwrap() {
+        for side in ["uk", "us"] {
+            content["regional_variants"][side]["pronunciations"] = json!([]);
+        }
+        content["pronunciation_slots"] = json!([]);
+    }
+    for binding in forms["pos"][0]["forms"].as_array_mut().unwrap() {
+        for side in ["uk", "us"] {
+            binding["regional_bindings"][side]["pronunciations"] = json!([]);
+        }
+    }
+    forms["contents"][1]["regional_variants"]["uk"]["spelling"] = json!("quay");
+    forms["contents"][1]["regional_variants"]["us"]["spelling"] = json!("quay");
+    let saved = save_shared(
+        &state,
+        &bearer,
+        id,
+        initial["word"]["revision"].as_i64().unwrap(),
+        forms,
+    )
+    .await;
+    let (_, expanded) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let form = &expanded["word"]["forms"]["pos"][0]["forms"][0];
+    let variant_id = form["regional_variants"]["uk"]["id"].clone();
+    let sense_id = expanded["word"]["meanings"]["pos"][0]["senses"][0]["id"].clone();
+    let mut sentence = sentence_with_text_links_json(&expanded, "A harbour sentence.", json!([]));
+    sentence["zh_translations"] = json!([{"id":sentence["zh_text_id"],"band":"balanced_fluency","language":"zh","content":sentence["zh_text"]}]);
+    sentence["links"] = json!([]);
+    let (status, sentence) = call(&state, Method::POST, &format!("{ROOT}/sentences"), &bearer, Some(Uuid::now_v7()), Some(json!({
+        "source_entry_id":id,"source_sense_id":sense_id,
+        "content":{"sentence":sentence,"annotations":[{
+            "id":Uuid::now_v7(),"source_dialect":"common","source_segments":[{"start":2,"end":9,"surface":"harbour"}],
+            "target":{"state":"linked","target_entry_id":id,"target_pos_id":expanded["word"]["forms"]["pos"][0]["pos_id"],"target_base_form_id":form["id"],"target_form_id":form["id"],"target_variant_id":variant_id,"target_sense_id":sense_id,"target_dialect":"uk"}
+        }]}
+    }))).await;
+    assert_eq!(status, StatusCode::OK, "{sentence}");
+    let before = inbound_references_of(&state, &bearer, id).await;
+    assert!(
+        before["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reference| reference["kind"] == "shared_sentence" && reference["stale"] == false),
+        "{before}"
+    );
+    let revision = saved["word"]["revision"].as_i64().unwrap();
+    let mut moved = saved["word"]["forms"].clone();
+    reassign_form_content(&mut moved, 0, 0, 1);
+    moved["contents"].as_array_mut().unwrap().remove(0);
+    let body = json!({"schema_version":3,"base_revision":revision,"intent":"save","content":moved});
+    let (status, rejected) = shared_call(
+        &state,
+        &bearer,
+        Method::PUT,
+        &format!("{ROOT}/entries/{id}/steps/forms"),
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(
+        rejected["code"], "downstream_confirmation_required",
+        "{rejected}"
+    );
+    let (_, unchanged) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(unchanged["word"]["revision"], revision);
+    assert_eq!(unchanged["word"]["forms"], saved["word"]["forms"]);
+    let (status, impact) = shared_call(
+        &state,
+        &bearer,
+        Method::POST,
+        &format!("{ROOT}/entries/{id}/steps/forms/impact"),
+        Some(json!({"schema_version":3,"base_revision":revision,"content":moved})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert!(
+        !impact["blocked_references"].as_array().unwrap().is_empty(),
+        "{impact}"
+    );
+    assert_eq!(impact["requires_confirmation"], true, "{impact}");
+    assert!(
+        impact["affected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["node_id"] == variant_id),
+        "{impact}"
+    );
+    let mut changed_again = body.clone();
+    changed_again["content"]["contents"][0]["regional_variants"]["uk"]["spelling"] = json!("pier");
+    changed_again["confirmed_impact_token"] = impact["confirmation_token"].clone();
+    let (status, rejected) = shared_call(
+        &state,
+        &bearer,
+        Method::PUT,
+        &format!("{ROOT}/entries/{id}/steps/forms"),
+        Some(changed_again),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert_eq!(rejected["code"], "downstream_confirmation_required");
+    let mut confirmed = body;
+    confirmed["confirmed_impact_token"] = impact["confirmation_token"].clone();
+    let (status, saved) = shared_call(
+        &state,
+        &bearer,
+        Method::PUT,
+        &format!("{ROOT}/entries/{id}/steps/forms"),
+        Some(confirmed),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, fresh) = shared_call(
+        &state,
+        &bearer,
+        Method::GET,
+        &format!("{ROOT}/entries/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(fresh["word"]["revision"], revision + 1);
+    assert_eq!(fresh["word"]["forms"], moved);
+}
+
+#[sqlx::test]
 async fn shared_forms_concurrent_saves_accept_one_graph_without_loser_slots(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
@@ -1626,20 +1907,30 @@ async fn shared_forms_pronunciation_correspondence_persists_and_cannot_be_reassi
 
 #[sqlx::test]
 async fn shared_forms_reassignment_review_restore_retired_content(pool: PgPool) {
-    reassignment_restore_history(pool, false, false).await;
+    reassignment_restore_history(pool, false, false, false).await;
 }
 
 #[sqlx::test]
 async fn shared_forms_reassignment_review_restore_deleted_form(pool: PgPool) {
-    reassignment_restore_history(pool, true, false).await;
+    reassignment_restore_history(pool, true, false, false).await;
 }
 
 #[sqlx::test]
 async fn shared_forms_restore_pre_shared_publication_with_unregistered_content(pool: PgPool) {
-    reassignment_restore_history(pool, true, true).await;
+    reassignment_restore_history(pool, true, true, false).await;
 }
 
-async fn reassignment_restore_history(pool: PgPool, delete_form: bool, legacy_snapshot: bool) {
+#[sqlx::test]
+async fn shared_forms_restore_rollback_of_pre_shared_publication(pool: PgPool) {
+    reassignment_restore_history(pool, true, true, true).await;
+}
+
+async fn reassignment_restore_history(
+    pool: PgPool,
+    delete_form: bool,
+    legacy_snapshot: bool,
+    rollback: bool,
+) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -1753,6 +2044,34 @@ async fn reassignment_restore_history(pool: PgPool, delete_form: bool, legacy_sn
         )
         .await;
     }
+    let publication_id = if rollback {
+        let removed_content =
+            Uuid::parse_str(original_forms["contents"][0]["id"].as_str().unwrap()).unwrap();
+        sqlx::query("DELETE FROM lexicon.v3_form_content_node_slots WHERE entry_id=$1 AND node_id IN (SELECT id FROM lexicon.nodes WHERE entry_id=$1 AND removed_from_draft_at IS NOT NULL)").bind(entry_id).execute(&pool).await.unwrap();
+        sqlx::query(
+            "DELETE FROM lexicon.v3_form_content_slots WHERE entry_id=$1 AND content_id=$2",
+        )
+        .bind(entry_id)
+        .bind(removed_content)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (status, rolled_back) = call_with_form_capability(&state, Method::POST, &format!("{ROOT}/entries/{id}/publications/{publication_id}/rollback"), &bearer, Some(Uuid::now_v7()), Some(json!({"schema_version":3,"base_revision":moved["word"]["revision"],"base_lifecycle_revision":moved["word"]["lifecycle_revision"]})), (true,true,true,true), true).await;
+        assert_eq!(status, StatusCode::CREATED, "{rolled_back}");
+        moved = rolled_back;
+        let current = current_publication_id(&pool, entry_id).await;
+        assert_ne!(current, publication_id);
+        let snapshot: Value =
+            sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=$1")
+                .bind(current)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(snapshot["forms"]["forms_format"], "shared_v1");
+        current
+    } else {
+        publication_id
+    };
     let (status, archived) = call_with_form_capability(&state, Method::POST, &format!("{ROOT}/entries/{id}/archive"), &bearer, Some(Uuid::now_v7()), Some(json!({"base_revision":moved["word"]["revision"],"base_lifecycle_revision":moved["word"]["lifecycle_revision"]})), (true,true,true,true), true).await;
     assert_eq!(status, StatusCode::OK, "{archived}");
     let (status, draft) = call_with_form_capability(&state, Method::POST, &format!("{ROOT}/entries/{id}/restore"), &bearer, Some(Uuid::now_v7()), Some(json!({"restore_as":"draft","base_revision":archived["word"]["revision"],"base_lifecycle_revision":archived["word"]["lifecycle_revision"]})), (true,true,true,true), true).await;

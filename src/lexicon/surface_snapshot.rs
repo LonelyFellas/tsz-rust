@@ -202,10 +202,6 @@ pub fn surface_owner_bundle_digest(owner_bundle: &Value) -> Result<String, serde
 }
 
 impl SurfaceSnapshotStore {
-    pub fn with_defaults(redis: Pool) -> Self {
-        Self::new(redis, DEFAULT_SURFACE_IDLE_TTL, DEFAULT_SURFACE_TOKEN_TTL)
-    }
-
     pub fn new(redis: Pool, idle_ttl: Duration, token_ttl: Duration) -> Self {
         Self {
             redis,

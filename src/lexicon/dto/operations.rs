@@ -825,14 +825,6 @@ pub enum RelatedSearchMatchMode {
     Contains,
 }
 
-/// 一侧词头的结构化形式。`headword` 是把这些拼写按同一顺序拼成的展示串，
-/// 想按管理员方言偏好重排就读这个数组——**不要切分 `" / "`**，短语词条的拼写里可能有斜杠。
-#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
-pub struct HeadwordVariant {
-    pub dialect: Dialect,
-    pub headword: String,
-}
-
 #[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelatedSearchLegacyResponse {
