@@ -7,6 +7,12 @@ const DOWN: &str = include_str!("../migrations/20261006040000_wordlists.down.sql
 async fn empty_roundtrip_and_content_prevents_destructive_down(pool: PgPool) {
     let mut tx = pool.begin().await.unwrap();
     sqlx::raw_sql(include_str!(
+        "../migrations/20261023090000_wordlist_custom_audio.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20261018120000_wordlist_custom_items.down.sql"
     ))
     .execute(&mut *tx)
@@ -100,6 +106,12 @@ async fn empty_roundtrip_and_content_prevents_destructive_down(pool: PgPool) {
     .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20261018120000_wordlist_custom_items.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261023090000_wordlist_custom_audio.up.sql"
     ))
     .execute(&mut *tx)
     .await
