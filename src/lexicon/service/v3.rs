@@ -1987,7 +1987,7 @@ impl LexiconService {
             &input.content,
             &current.meanings,
             &input.sense_bindings,
-            !blocked.is_empty(),
+            &blocked,
         )?;
         let blocked_references = (!blocked.is_empty()).then_some(blocked);
         if read_projection
@@ -2104,11 +2104,8 @@ impl LexiconService {
             return Err(invariant_record());
         }
         let mut forms = historical.forms;
-        let restore_identity_check = if forms.shared.is_none() {
-            crate::lexicon::shared_forms::IdentityCheck::LegacyPublicationRestore
-        } else {
-            crate::lexicon::shared_forms::IdentityCheck::PublicationRestore
-        };
+        let restore_identity_check =
+            crate::lexicon::shared_forms::IdentityCheck::PublicationRestore;
         forms.enable_shared().map_err(|error| {
             LexiconServiceError::Authorization(crate::error::AppError::internal(anyhow::anyhow!(
                 error
@@ -2565,43 +2562,29 @@ impl LexiconService {
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut meanings);
         let forms_was_complete = record.completed_steps.iter().any(|step| step == "forms");
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
-        let mut affected = forms_impact_v3(
+        let mut proposed_meanings = meanings.clone();
+        reconcile_v3_meanings_after_forms(&mut proposed_meanings, &input.content);
+        super::form_senses::apply_sense_bindings(
+            &input.content,
+            &mut proposed_meanings,
+            &input.sense_bindings,
+        )?;
+        let blocked = super::inbound_references::inbound_reference_violations(
+            &mut transaction,
+            entry_id,
+            &input.content,
+            &proposed_meanings,
+            super::inbound_references::InboundReferenceCheck::DraftPreview,
+            Some((&current_forms, &meanings)),
+        )
+        .await?;
+        let affected = forms_impact_v3(
             &current_forms,
             &input.content,
             &meanings,
             &input.sense_bindings,
-            false,
+            &blocked,
         )?;
-        if affected.is_empty() {
-            let removed_forms = forms_impact_v3(
-                &current_forms,
-                &input.content,
-                &meanings,
-                &input.sense_bindings,
-                true,
-            )?;
-            if !removed_forms.is_empty() {
-                let mut proposed_meanings = meanings.clone();
-                reconcile_v3_meanings_after_forms(&mut proposed_meanings, &input.content);
-                super::form_senses::apply_sense_bindings(
-                    &input.content,
-                    &mut proposed_meanings,
-                    &input.sense_bindings,
-                )?;
-                let blocked = super::inbound_references::inbound_reference_violations(
-                    &mut transaction,
-                    entry_id,
-                    &input.content,
-                    &proposed_meanings,
-                    super::inbound_references::InboundReferenceCheck::DraftPreview,
-                    Some((&current_forms, &meanings)),
-                )
-                .await?;
-                if !blocked.is_empty() {
-                    affected = removed_forms;
-                }
-            }
-        }
         if !write_projection && !affected.is_empty() {
             let Some(token) = input.confirmed_impact_token else {
                 return Err(LexiconServiceError::DownstreamConfirmationRequired(
@@ -4843,15 +4826,16 @@ fn forms_impact_v3(
     proposed: &DraftFormsStepContentV3,
     current_meanings: &DraftMeaningsStepContentV3,
     sense_bindings: &[crate::lexicon::dto::SenseFormGroupBindingV3],
-    has_affected_references: bool,
+    blocked_references: &[crate::lexicon::dto::InboundReferenceV3],
 ) -> Result<Vec<FormsImpactItemV3>, LexiconServiceError> {
     let proposed_ids = v3_form_node_types(proposed);
-    let removed_forms = v3_form_node_types(current)
-        .into_iter()
+    let current_ids = v3_form_node_types(current);
+    let removed_forms = current_ids
+        .iter()
         .filter_map(|(id, node_type)| {
-            (!proposed_ids.contains_key(&id)).then_some(FormsImpactItemV3 {
-                node_id: id,
-                node_type,
+            (!proposed_ids.contains_key(id)).then_some(FormsImpactItemV3 {
+                node_id: *id,
+                node_type: *node_type,
                 reason: "node_removed_from_draft".to_owned(),
             })
         })
@@ -4898,8 +4882,30 @@ fn forms_impact_v3(
             }),
     );
     // 仅编辑词形自身不需要确认；破坏活跃引用或下游数据时保留确认。
-    if !affected.is_empty() || has_affected_references {
+    if !affected.is_empty() || !blocked_references.is_empty() {
         affected.extend(removed_forms);
+    }
+    // Content replacement can invalidate a reference while retaining every node ID.
+    for reference in blocked_references {
+        let target = &reference.target;
+        let node = [
+            target.variant_id,
+            target.form_id,
+            target.base_form_id,
+            target.pos_id,
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|id| current_ids.get(&id).map(|node_type| (id, *node_type)));
+        if let Some((node_id, node_type)) = node
+            && !affected.iter().any(|item| item.node_id == node_id)
+        {
+            affected.push(FormsImpactItemV3 {
+                node_id,
+                node_type,
+                reason: "inbound_reference_invalidated".to_owned(),
+            });
+        }
     }
     affected.sort_by_key(|item| item.node_id);
     Ok(affected)
@@ -6981,7 +6987,7 @@ mod tests {
         proposed: &DraftFormsStepContentV3,
         meanings: &DraftMeaningsStepContentV3,
     ) -> Vec<FormsImpactItemV3> {
-        match forms_impact_v3(current, proposed, meanings, &[], false) {
+        match forms_impact_v3(current, proposed, meanings, &[], &[]) {
             Ok(items) => items,
             Err(_) => panic!("forms impact should be computable"),
         }

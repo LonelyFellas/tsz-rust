@@ -63,36 +63,6 @@ pub(crate) struct CatalogSubPartRecord {
     pub part_code: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SurfaceLookupKey {
-    pub dialect_scope: String,
-    pub normalized_surface: String,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct SurfaceSourceRecord {
-    pub matched_dialect_scope: String,
-    pub entry_id: Uuid,
-    pub entry_headword: String,
-    pub entry_headword_dialect: String,
-    pub entry_kind: String,
-    pub lifecycle_status: String,
-    pub source_id: String,
-    pub source_kind: String,
-    pub source_node_id: Option<Uuid>,
-    pub content_scope: String,
-    pub publication_id: Option<Uuid>,
-    pub surface: String,
-    pub normalized_surface: String,
-    pub dialect: String,
-    pub normalization_version: i16,
-    pub source_revision: i64,
-    pub event_offset: i64,
-    pub pos_id: Option<Uuid>,
-    pub pos: Option<String>,
-    pub form_type: Option<String>,
-}
-
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct SurfaceInboundRelationRecord {
     pub target_entry_id: Uuid,

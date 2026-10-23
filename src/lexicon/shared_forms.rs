@@ -906,7 +906,6 @@ pub(crate) async fn preserve_pronunciation_slots(
 pub(crate) enum IdentityCheck {
     Draft,
     PublicationRestore,
-    LegacyPublicationRestore,
 }
 
 pub(crate) struct VerifiedFormIdentities {
@@ -1042,47 +1041,56 @@ pub(crate) async fn preflight_identities(
     }
     // The caller already loaded and validated permanent identities, including retired forms.
     let identities: HashMap<_, _> = identities.iter().map(|node| (node.id, node)).collect();
-    if matches!(check, IdentityCheck::LegacyPublicationRestore) {
-        // Older immutable publications were never backfilled into the shared-content ledger.
-        // Only the trusted snapshot path may materialize their deterministic content IDs.
+    if matches!(check, IdentityCheck::PublicationRestore) {
+        // Rollbacks also convert older immutable snapshots to shared_v1 without backfilling
+        // their ledger. Trust deterministic legacy IDs only on this publication path.
         for binding in shared.pos.iter().flat_map(|pos| &pos.forms) {
-            if binding.content_id != legacy_slot("content", binding.id) {
-                return Err(LexiconServiceError::StableNodeIdChanged);
+            if binding.content_id == legacy_slot("content", binding.id) {
+                known_contents.insert(binding.content_id);
             }
-            known_contents.insert(binding.content_id);
         }
     }
     let allowed_contents = match check {
         IdentityCheck::Draft => &active_contents,
-        IdentityCheck::PublicationRestore | IdentityCheck::LegacyPublicationRestore => {
-            &known_contents
-        }
+        IdentityCheck::PublicationRestore => &known_contents,
     };
-    for binding in shared.pos.iter().flat_map(|pos| &pos.forms) {
-        if identities.contains_key(&binding.id) && !allowed_contents.contains(&binding.content_id) {
-            return Err(LexiconServiceError::StableNodeIdChanged);
-        }
-    }
-    let variants: HashMap<_, _> = shared
+    let variants: HashSet<_> = shared
         .pos
         .iter()
         .flat_map(|pos| &pos.forms)
         .flat_map(|binding| {
             binding_variants(&binding.regional_bindings)
                 .into_iter()
-                .map(move |(side, variant)| {
-                    (
-                        variant.id,
-                        (binding.id, format!("forms.form_variant:{side}")),
-                    )
-                })
+                .map(|(_, variant)| variant.id)
         })
         .collect();
     let node_ids: Vec<_> = nodes.keys().copied().collect();
     let existing: Vec<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as("SELECT node_id,entry_id,content_id,content_slot_id FROM lexicon.v3_form_content_node_slots WHERE node_id=ANY($1)")
         .bind(&node_ids).fetch_all(&mut **tx).await.map_err(db)?;
-    let mut changed_ids = Vec::new();
-    for (id, entry, content, slot) in existing {
+    let existing: HashMap<_, _> = existing
+        .into_iter()
+        .map(|(id, entry, content, slot)| (id, (entry, content, slot)))
+        .collect();
+    for binding in shared.pos.iter().flat_map(|pos| &pos.forms) {
+        if !identities.contains_key(&binding.id) || allowed_contents.contains(&binding.content_id) {
+            continue;
+        }
+        // A retired content may return with its original bindings, but cannot be selected
+        // as a replacement by another form. Every submitted node must retain its old mapping.
+        let original_mapping = known_contents.contains(&binding.content_id)
+            && binding_variants(&binding.regional_bindings)
+                .iter()
+                .all(|(_, variant)| {
+                    std::iter::once(variant.id)
+                        .chain(variant.pronunciations.iter().map(|row| row.id))
+                        .all(|id| existing.get(&id) == nodes.get(&id))
+                });
+        if !original_mapping {
+            return Err(LexiconServiceError::StableNodeIdChanged);
+        }
+    }
+    let mut reassignable = HashSet::new();
+    for (&id, &(entry, content, slot)) in &existing {
         if nodes[&id] == (entry, content, slot) {
             continue;
         }
@@ -1091,27 +1099,12 @@ pub(crate) async fn preflight_identities(
         // Only a form's own regional node may move between known contents.
         if entry != entry_id
             || content == target_content
-            || !variants.contains_key(&id)
+            || !variants.contains(&id)
             || !allowed_contents.contains(&target_content)
         {
             return Err(LexiconServiceError::StableNodeIdChanged);
         }
-        changed_ids.push(id);
-    }
-    let mut reassignable = HashSet::new();
-    for id in changed_ids {
-        let stored = identities
-            .get(&id)
-            .ok_or(LexiconServiceError::StableNodeIdChanged)?;
-        let (form_id, expected_role) = &variants[&id];
-        if stored.entry_id != entry_id
-            || stored.parent_node_id != Some(*form_id)
-            || stored.node_role != *expected_role
-            || stored.node_type != "form_variant"
-            || !stored.stable_slot
-        {
-            return Err(LexiconServiceError::StableNodeIdChanged);
-        }
+        // validate_node_identities already checked ownership, parent, role and stable slot.
         reassignable.insert(id);
     }
     shared
@@ -1128,7 +1121,25 @@ pub(crate) async fn persist(
 ) -> Result<(), crate::lexicon::service::LexiconServiceError> {
     use crate::lexicon::repository::LexiconRepositoryError;
     use crate::lexicon::service::LexiconServiceError;
-    let db = |error| LexiconServiceError::Repository(LexiconRepositoryError::Database(error));
+    let db = |error| {
+        // Another entry can claim a new content or slot after our ownership preflight.
+        // These constraints express the same immutable identity rule as the preflight.
+        if [
+            "v3_form_contents_pkey",
+            "v3_form_content_slots_pkey",
+            "lexicon_v3_form_content_slots_region_key",
+            "v3_form_pronunciation_mappings_pkey",
+            "v3_form_pronunciation_mapping_slots_pkey",
+            "v3_form_pronunciation_mapping_slots_mapping_id_region_key",
+        ]
+        .iter()
+        .any(|constraint| crate::platform::is_unique_violation(&error, constraint))
+        {
+            LexiconServiceError::StableNodeIdChanged
+        } else {
+            LexiconServiceError::Repository(LexiconRepositoryError::Database(error))
+        }
+    };
     let reassignable = verified.reassignable;
     let shared = forms.shared_representation().map_err(|error| {
         LexiconServiceError::Authorization(crate::error::AppError::internal(anyhow::anyhow!(error)))

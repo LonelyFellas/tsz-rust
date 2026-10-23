@@ -171,14 +171,6 @@ impl UserService {
             Err(e) => Err(LoginError::Repository(e)),
         }
     }
-    pub async fn find_active_by_identifier(&self, id: &str) -> Result<User, LoginError> {
-        match self.repository.get_by_identifier(id).await {
-            Ok(user) if user.status != UserStatus::Active => Err(LoginError::AccountDisabled),
-            Ok(user) => Ok(user),
-            Err(UserError::NotFound) => Err(LoginError::InvalidCredentials),
-            Err(e) => Err(LoginError::Repository(e)),
-        }
-    }
 
     pub async fn update_display_name(
         &self,

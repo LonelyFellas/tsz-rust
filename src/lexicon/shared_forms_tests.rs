@@ -191,6 +191,83 @@ fn pronunciation_correspondence_roundtrips_and_rejects_changed_parent_or_region(
     assert!(invalid.resolve().is_err());
 }
 
+#[sqlx::test]
+async fn concurrent_content_claim_returns_identity_conflict(pool: sqlx::PgPool) {
+    use crate::lexicon::service::LexiconServiceError;
+    let admin = Uuid::now_v7();
+    sqlx::query("INSERT INTO admins(id,phone,password_hash,display_name) VALUES($1,$2,'hash','shared identity race')").bind(admin).bind(format!("race-{}", admin.simple())).execute(&pool).await.unwrap();
+    let entries = [Uuid::now_v7(), Uuid::now_v7()];
+    for entry in entries {
+        sqlx::query("INSERT INTO lexicon.entries(id,content_schema_version,language,kind,revision,detection_snapshot,created_by_admin_id,updated_by_admin_id) VALUES($1,3,'en','word',1,'{}',$2,$2)").bind(entry).bind(admin).execute(&pool).await.unwrap();
+    }
+    for collide_content in [true, false] {
+        let mut shared = legacy().shared_representation().unwrap();
+        shared.contents[0].id = Uuid::now_v7();
+        let FormContentRegionalVariantsV3::Common { common } =
+            &mut shared.contents[0].regional_variants
+        else {
+            unreachable!()
+        };
+        common.id = Uuid::now_v7();
+        common.pronunciations.clear();
+        let region = common.id;
+        shared.pos[0].forms[0].content_id = shared.contents[0].id;
+        let FormRegionalBindingsV3::Common { common } =
+            &mut shared.pos[0].forms[0].regional_bindings
+        else {
+            unreachable!()
+        };
+        common.content_slot_id = region;
+        common.pronunciations.clear();
+        let forms = shared.resolve().unwrap();
+        let content = forms.shared_representation().unwrap().contents[0].id;
+        // Both requests pass the ownership read before the winner commits its claim.
+        let mut winner = pool.begin().await.unwrap();
+        let mut loser = pool.begin().await.unwrap();
+        preflight_identities(&mut winner, entries[0], &forms, IdentityCheck::Draft, &[])
+            .await
+            .unwrap();
+        let verified =
+            preflight_identities(&mut loser, entries[1], &forms, IdentityCheck::Draft, &[])
+                .await
+                .unwrap();
+        let winner_content = if collide_content {
+            content
+        } else {
+            Uuid::now_v7()
+        };
+        if collide_content {
+            sqlx::query(
+                "INSERT INTO lexicon.v3_form_contents(id,entry_id,content) VALUES($1,$2,'{}')",
+            )
+            .bind(winner_content)
+            .bind(entries[0])
+            .execute(&mut *winner)
+            .await
+            .unwrap();
+        }
+        sqlx::query("INSERT INTO lexicon.v3_form_content_slots(id,entry_id,content_id,role) VALUES($1,$2,$1,'content')").bind(winner_content).bind(entries[0]).execute(&mut *winner).await.unwrap();
+        sqlx::query("INSERT INTO lexicon.v3_form_content_slots(id,entry_id,content_id,parent_slot_id,role) VALUES($1,$2,$3,$3,'common')").bind(region).bind(entries[0]).bind(winner_content).execute(&mut *winner).await.unwrap();
+        winner.commit().await.unwrap();
+        let error = persist(&mut loser, entries[1], &forms, verified)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, LexiconServiceError::StableNodeIdChanged),
+            "{error:?}"
+        );
+        loser.rollback().await.unwrap();
+        let partial: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_form_contents WHERE entry_id=$1")
+                .bind(entries[1])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(partial, 0, "failed claims must roll back all writes");
+    }
+}
+
 #[test]
 fn mappings_reject_duplicate_reference_ids_dangling_slots_and_orphans() {
     let shared = shared_pair();

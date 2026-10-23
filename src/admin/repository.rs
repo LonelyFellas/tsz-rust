@@ -80,22 +80,6 @@ impl AdminRepository {
         .await?
         .ok_or(AdminRepositoryError::NotFound)
     }
-    pub async fn get_roles_by_admin_id(
-        &self,
-        id: &Uuid,
-    ) -> Result<AdminRole, AdminRepositoryError> {
-        let role = sqlx::query_scalar!(
-            r#"
-            SELECT role as "role: AdminRole" FROM admins WHERE id = $1
-            "#,
-            id,
-        )
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(AdminRepositoryError::NotFound)?;
-
-        Ok(role)
-    }
 
     /// 管理员改自己的方言偏好。返回落库后的值而不是请求里的值，
     /// 让调用方回显的一定是服务端事实（默认值也只有这一处）。

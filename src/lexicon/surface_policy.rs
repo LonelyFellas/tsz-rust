@@ -71,13 +71,6 @@ impl SurfacePolicyStore {
             .await
     }
 
-    pub async fn multiple_active_exact_headword_publications(
-        &self,
-    ) -> Result<SurfaceCreationPolicy, SurfacePolicyStoreError> {
-        self.policy(SurfacePolicyNameV2::AllowMultipleActiveExactHeadwordPublications)
-            .await
-    }
-
     pub async fn policy(
         &self,
         name: SurfacePolicyNameV2,
