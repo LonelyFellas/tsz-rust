@@ -319,6 +319,18 @@ async fn login_ip_budget_uses_connection_boundary(pool: PgPool) {
 
 #[sqlx::test]
 async fn login_concurrent_attempts_cannot_exceed_account_budget(pool: PgPool) {
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    let _ = tracing_subscriber::registry()
+        .with(tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.target() == "tsz_rust::auth::login_throttle"
+                && *metadata.level() == tracing::Level::ERROR
+        }))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_test_writer()
+                .without_time(),
+        )
+        .try_init();
     // 并发验密使用生产 Redis 预算，避免默认 500ms 响应超时把 CI 调度压力误判为服务故障。
     let redis_url =
         std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned());

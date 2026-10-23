@@ -84,20 +84,28 @@ impl LoginThrottle {
     }
 
     pub(crate) async fn check_ip(&self, ip: &str) -> Result<(), AppError> {
-        let mut conn = self.pool.get().await.map_err(unavailable)?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|error| unavailable("pool_acquire", error))?;
         let retry: u64 = Script::new(IP_ATTEMPT)
             .key(self.key("ip", ip))
             .arg(IP_LIMIT)
             .arg(WINDOW_SECONDS)
             .invoke_async(&mut conn)
             .await
-            .map_err(unavailable)?;
+            .map_err(|error| unavailable("ip", error))?;
         check_retry(retry)
     }
 
     pub(crate) async fn reserve(&self, scope: &str) -> Result<Attempt, AppError> {
         let key = self.key("account", scope);
-        let mut conn = self.pool.get().await.map_err(unavailable)?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|error| unavailable("pool_acquire", error))?;
         let (retry, generation): (u64, String) = Script::new(RESERVE)
             .key(&key)
             .arg(IDENTIFIER_LIMIT)
@@ -105,13 +113,17 @@ impl LoginThrottle {
             .arg(Uuid::new_v4().to_string())
             .invoke_async(&mut conn)
             .await
-            .map_err(unavailable)?;
+            .map_err(|error| unavailable("reserve", error))?;
         check_retry(retry)?;
         Ok(Attempt { key, generation })
     }
 
     pub(crate) async fn finish(&self, attempt: Attempt, outcome: Outcome) -> Result<(), AppError> {
-        let mut conn = self.pool.get().await.map_err(unavailable)?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|error| unavailable("pool_acquire", error))?;
         Script::new(FINISH)
             .key(attempt.key)
             .arg(attempt.generation)
@@ -122,7 +134,7 @@ impl LoginThrottle {
             })
             .invoke_async::<i64>(&mut conn)
             .await
-            .map_err(unavailable)?;
+            .map_err(|error| unavailable("finish", error))?;
         Ok(())
     }
 }
@@ -138,7 +150,29 @@ fn check_retry(retry: u64) -> Result<(), AppError> {
     }
 }
 
-fn unavailable(error: impl Into<anyhow::Error>) -> AppError {
+fn unavailable(stage: &'static str, error: impl Into<anyhow::Error>) -> AppError {
+    use deadpool_redis::{PoolError, TimeoutType};
+    let error = error.into();
+    let (kind, redis) = match error.downcast_ref::<PoolError>() {
+        Some(PoolError::Timeout(TimeoutType::Wait)) => ("pool_wait_timeout", None),
+        Some(PoolError::Timeout(TimeoutType::Create)) => ("pool_create_timeout", None),
+        Some(PoolError::Timeout(TimeoutType::Recycle)) => ("pool_recycle_timeout", None),
+        Some(PoolError::Backend(redis)) => ("pool_backend", Some(redis)),
+        Some(PoolError::Closed) => ("pool_closed", None),
+        Some(_) => ("pool_other", None),
+        None => (
+            "command",
+            error.downcast_ref::<deadpool_redis::redis::RedisError>(),
+        ),
+    };
+    // 只记录固定分类，不格式化错误正文、连接地址或账号键。
+    tracing::error!(
+        event = "login_throttle_unavailable",
+        stage,
+        kind,
+        redis_kind = ?redis.map(|error| error.kind()),
+        timeout = redis.is_some_and(|error| error.is_timeout()),
+    );
     AppError::unavailable_with_source(
         ErrorCode::LoginUnavailable,
         "login temporarily unavailable",
