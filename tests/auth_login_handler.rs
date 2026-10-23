@@ -54,6 +54,323 @@ async fn login(pool: PgPool, body: Value) -> (StatusCode, Option<String>, Value)
     )
 }
 
+async fn login_with_state(
+    state: AppState,
+    identifier: &str,
+    password: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    login_from(state, identifier, password, None, None).await
+}
+
+async fn login_from(
+    state: AppState,
+    identifier: &str,
+    password: &str,
+    peer: Option<&str>,
+    forwarded: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/auth/login")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(peer) = peer {
+        request = request.extension(axum::extract::ConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    }
+    if let Some(forwarded) = forwarded {
+        request = request
+            .header("x-real-ip", forwarded)
+            .header("x-forwarded-for", forwarded);
+    }
+    let response = tsz_rust::router(state)
+        .oneshot(
+            request
+                .body(Body::from(
+                    json!({ "identifier": identifier, "password": password }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[sqlx::test]
+async fn login_repeated_failures_are_throttled(pool: PgPool) {
+    let state = AppState::for_test(pool);
+    for _ in 0..10 {
+        let (status, _, _) = login_with_state(state.clone(), "unknown@example.com", "wrong").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, headers, body) = login_with_state(state, "unknown@example.com", "wrong").await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "第 11 次密码猜测必须被拦截"
+    );
+    assert_eq!(body["code"], "login_rate_limited");
+    assert!(
+        headers[header::RETRY_AFTER]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 0
+    );
+}
+
+#[sqlx::test]
+async fn login_account_aliases_share_failure_budget(pool: PgPool) {
+    let id = register_user(&pool, "13900000279").await;
+    sqlx::query("UPDATE users SET email = $2 WHERE id = $1")
+        .bind(id)
+        .bind("alias279@example.com")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = AppState::for_test(pool);
+    for index in 0..10 {
+        let identifier = if index % 2 == 0 {
+            "13900000279"
+        } else {
+            " ALIAS279@EXAMPLE.COM "
+        };
+        assert_eq!(
+            login_with_state(state.clone(), identifier, "wrong").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for identifier in ["13900000279", "alias279@example.com"] {
+        let (status, headers, body) =
+            login_with_state(state.clone(), identifier, "Violet!River7294Cloud").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "login_rate_limited");
+        assert!(headers.get(header::SET_COOKIE).is_none());
+    }
+}
+
+#[sqlx::test]
+async fn login_success_clears_only_its_account_failures(pool: PgPool) {
+    register_user(&pool, "13900000279").await;
+    let state = AppState::for_test(pool);
+    for _ in 0..9 {
+        assert_eq!(
+            login_with_state(state.clone(), "13900000279", "wrong")
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for _ in 0..10 {
+        assert_eq!(
+            login_with_state(state.clone(), "other@example.com", "wrong")
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        login_with_state(state.clone(), "13900000279", "Violet!River7294Cloud")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // 正确密码清掉自己已有的 9 次失败；另一个账号的失败窗口保留。
+    for _ in 0..10 {
+        assert_eq!(
+            login_with_state(state.clone(), "13900000279", "wrong")
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        login_with_state(state.clone(), "13900000279", "wrong")
+            .await
+            .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        login_with_state(state, "other@example.com", "wrong")
+            .await
+            .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[sqlx::test]
+async fn login_ip_budget_survives_success_and_identifier_changes(pool: PgPool) {
+    register_user(&pool, "13900000279").await;
+    let state = AppState::for_test(pool);
+    // 无效标识也消耗 IP 请求预算，但不触发密码哈希，避免测试做 100 次昂贵校验。
+    for index in 0..99 {
+        assert_eq!(
+            login_with_state(state.clone(), &format!("invalid-{index}"), "wrong")
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        login_with_state(state.clone(), "13900000279", "Violet!River7294Cloud")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (status, headers, body) = login_with_state(state, "another@example.com", "wrong").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["code"], "login_rate_limited");
+    assert!(
+        headers[header::RETRY_AFTER]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            > 0
+    );
+}
+
+#[sqlx::test]
+async fn login_ip_budget_uses_connection_boundary(pool: PgPool) {
+    let state = AppState::for_test(pool);
+    for _ in 0..100 {
+        assert_eq!(
+            login_from(
+                state.clone(),
+                "invalid",
+                "wrong",
+                Some("198.51.100.7:1234"),
+                Some("192.0.2.1")
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // 换客户端伪造头仍受同一 peer 桶限制；换真实 peer 才获得独立 IP 预算。
+    assert_eq!(
+        login_from(
+            state.clone(),
+            "invalid",
+            "wrong",
+            Some("198.51.100.7:4321"),
+            Some("192.0.2.2")
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        login_from(
+            state.clone(),
+            "invalid",
+            "wrong",
+            Some("198.51.100.8:1234"),
+            Some("192.0.2.1")
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    // 同机可信反代转发同一客户端地址时，必须命中直连请求已经耗尽的预算。
+    assert_eq!(
+        login_from(
+            state.clone(),
+            "invalid",
+            "wrong",
+            Some("127.0.0.1:1234"),
+            Some("198.51.100.7")
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        login_from(
+            state.clone(),
+            "invalid",
+            "wrong",
+            Some("127.0.0.1:1234"),
+            Some("198.51.100.9")
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    for _ in 0..100 {
+        assert_eq!(
+            login_from(state.clone(), "invalid", "wrong", None, Some("192.0.2.1"))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        login_from(state, "invalid", "wrong", None, Some("192.0.2.2"))
+            .await
+            .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[sqlx::test]
+async fn login_concurrent_attempts_cannot_exceed_account_budget(pool: PgPool) {
+    let state = AppState::for_test(pool);
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..20 {
+        let state = state.clone();
+        tasks.spawn(async move {
+            login_with_state(state, "parallel@example.com", "wrong")
+                .await
+                .0
+        });
+    }
+    let mut checked = 0;
+    let mut throttled = 0;
+    while let Some(result) = tasks.join_next().await {
+        match result.unwrap() {
+            StatusCode::UNAUTHORIZED => checked += 1,
+            StatusCode::TOO_MANY_REQUESTS => throttled += 1,
+            status => panic!("unexpected login status: {status}"),
+        }
+    }
+    assert_eq!((checked, throttled), (10, 10));
+}
+
+#[sqlx::test]
+async fn login_unknown_and_existing_accounts_have_identical_limits(pool: PgPool) {
+    register_user(&pool, "13900000279").await;
+    let state = AppState::for_test(pool);
+    for _ in 0..10 {
+        let known = login_with_state(state.clone(), "13900000279", "wrong").await;
+        let unknown = login_with_state(state.clone(), " UNKNOWN@EXAMPLE.COM ", "wrong").await;
+        assert_eq!(known.0, StatusCode::UNAUTHORIZED);
+        assert_eq!((known.0, known.2), (unknown.0, unknown.2));
+    }
+    let known = login_with_state(state.clone(), "13900000279", "wrong").await;
+    let unknown = login_with_state(state, "unknown@example.com", "wrong").await;
+    assert_eq!(known.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!((known.0, known.2), (unknown.0, unknown.2));
+}
+
+#[sqlx::test]
+async fn login_redis_failure_is_503_and_does_not_issue_session(pool: PgPool) {
+    let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1/0")
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .unwrap();
+    let state = AppState::for_test_with_redis(pool, redis);
+    let (status, headers, body) = login_with_state(state, "unknown@example.com", "wrong").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["code"], "login_unavailable");
+    assert_eq!(headers[header::CONTENT_TYPE], "application/problem+json");
+    assert!(headers.get(header::SET_COOKIE).is_none());
+    assert!(!body.to_string().contains("redis"));
+}
+
 // ————————————————————— 成功 —————————————————————
 
 /// 正确凭证 → 200 + `AuthResponse` 形状（契约 T1）：token 字段平铺在顶层、用户对象嵌在

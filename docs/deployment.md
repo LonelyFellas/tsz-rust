@@ -13,6 +13,8 @@
 - `run` 在监听之前应用内嵌迁移并初始化所需数据；升级不是简单替换二进制，必须遵守部署手册的数据库预检、恢复点与迁移兼容检查。
 - `/healthz` 与 `/readyz` 是运行探针；服务 active 或探针成功不能替代登录、刷新、退出等完整 smoke，也不能证明部署来源正确。
 - 生产环境使用 HTTPS 与 Secure cookie；`COOKIE_SECURE=false` 只适用于明确的临时 HTTP 测试环境，不能作为生产部署方案。
+- 密码登录使用 Redis 固定窗口预算：每个来源 IP 每 15 分钟最多 100 次请求；规范化登录标识每 15 分钟最多 10 次失败/在途校验，已绑定同一账号的手机与邮箱共享预算。登录凭据校验成功且账号可用时仅清该账号失败计数，IP 预算保留；超过预算返回 `429 login_rate_limited` 和 `Retry-After` 秒数，Redis 故障返回 `503 login_unavailable`。
+- 登录来源 IP 来自真实 TCP peer。仅 loopback peer 被视为同机可信反代：优先使用它覆盖的 `X-Real-IP`，缺省时取 `X-Forwarded-For` 最右地址，头无效则回退 peer；其他 peer 忽略所有来源头。部署须保持 nginx 同机并覆盖 `X-Real-IP $remote_addr`、追加 XFF，后端应绑定 loopback 或由防火墙限制入口，不能把非同机反代默认视为可信。没有连接信息时所有请求共用保守的 `unknown` 桶。
 - 当前默认启动仍使用 `OtpSender::Mock`，详见 [lib.rs](../src/lib.rs) 和 [sender.rs](../src/otp/sender.rs)。不能把测试验证码通道当作真实短信发送能力。
 
 ## 运维专题
