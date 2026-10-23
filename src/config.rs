@@ -261,6 +261,26 @@ impl Config {
                 "INVITATION_REWARD_AMOUNT must be a positive i64".into(),
             ));
         }
+        for (name, secret) in [
+            ("JWT_SECRET", &cfg.jwt_secret),
+            ("ADMIN_JWT_SECRET", &cfg.admin_jwt_secret),
+        ] {
+            // 长度不能证明随机性；这里拦截误配置，密钥仍须用 CSPRNG 生成。
+            if secret.len() < 32
+                || secret.chars().any(char::is_whitespace)
+                || secret.to_ascii_lowercase().starts_with("replace-with-")
+                || secret.chars().all(|value| secret.starts_with(value))
+            {
+                tracing::error!(
+                    event = "invalid_jwt_secret",
+                    field = name,
+                    "use a distinct random secret of at least 32 bytes; generate with openssl rand -base64 32"
+                );
+                return Err(envy::Error::Custom(format!(
+                    "{name} must contain at least 32 bytes and must not be a placeholder, whitespace or a repeated character; generate it with openssl rand -base64 32"
+                )));
+            }
+        }
         // 两把密钥相同 = per-realm 隔离塌一半,启动即失败(admin-design.md §13)
         if cfg.admin_jwt_secret == cfg.jwt_secret {
             return Err(envy::Error::Custom(
@@ -287,13 +307,13 @@ mod tests {
     fn valid_baseline() -> Vec<(&'static str, &'static str)> {
         vec![
             ("DATABASE_URL", "postgres://localhost/tsz"),
-            ("JWT_SECRET", "s3cret"),
+            ("JWT_SECRET", "b8Ym3xNq7Pz5Av9Kc2Rh6Dt4Wj1Fse0L"),
             // Redis 是硬依赖（见 docs/redis-design.md §4），与 DATABASE_URL 同级必填，
             // 故基线里备齐，其余测试才能只声明「与基线的差异」。
             ("REDIS_URL", "redis://localhost:6379/0"),
             // admin realm 第二把签名密钥（admin-design.md §4）：与 JWT_SECRET 同级必填——
             // 双防线 = per-realm secret + aud 校验，密钥不分离则防线塌一半。
-            ("ADMIN_JWT_SECRET", "adm1n-s3cret"),
+            ("ADMIN_JWT_SECRET", "m9Vq2Bs7Hk4Xa6Rc1Zn8Pw3Dt5Jf0LeY"),
         ]
     }
 
@@ -451,9 +471,9 @@ mod tests {
         assert_eq!(cfg.bind_ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert!(cfg.deployment_smoke_only);
         assert_eq!(cfg.database_url, "postgres://localhost/tsz");
-        assert_eq!(cfg.jwt_secret, "s3cret");
+        assert_eq!(cfg.jwt_secret, "b8Ym3xNq7Pz5Av9Kc2Rh6Dt4Wj1Fse0L");
         assert_eq!(cfg.redis_url, "redis://localhost:6379/0");
-        assert_eq!(cfg.admin_jwt_secret, "adm1n-s3cret");
+        assert_eq!(cfg.admin_jwt_secret, "m9Vq2Bs7Hk4Xa6Rc1Zn8Pw3Dt5Jf0LeY");
     }
 
     #[test]
@@ -485,7 +505,7 @@ mod tests {
 
     #[test]
     fn missing_database_url_errors() {
-        let input = [("JWT_SECRET", "s3cret")];
+        let input = [("JWT_SECRET", "b8Ym3xNq7Pz5Av9Kc2Rh6Dt4Wj1Fse0L")];
         assert!(parse(&input).is_err(), "缺少必填的 DATABASE_URL 应返回错误");
     }
 
@@ -501,7 +521,7 @@ mod tests {
         // 让「Redis 连接串没配」在启动即暴露，而不是运行到发验证码时才炸。
         let input = [
             ("DATABASE_URL", "postgres://localhost/tsz"),
-            ("JWT_SECRET", "s3cret"),
+            ("JWT_SECRET", "b8Ym3xNq7Pz5Av9Kc2Rh6Dt4Wj1Fse0L"),
         ];
         assert!(parse(&input).is_err(), "缺少必填的 REDIS_URL 应返回错误");
     }
@@ -512,7 +532,7 @@ mod tests {
         // 而不是 admin 登录时才发现签不出 token。⚠️ 部署面：上 admin 版前生产 .env 先加此项。
         let input = [
             ("DATABASE_URL", "postgres://localhost/tsz"),
-            ("JWT_SECRET", "s3cret"),
+            ("JWT_SECRET", "b8Ym3xNq7Pz5Av9Kc2Rh6Dt4Wj1Fse0L"),
             ("REDIS_URL", "redis://localhost:6379/0"),
         ];
         assert!(
@@ -528,14 +548,53 @@ mod tests {
         // 解析后校验，相同则启动即失败。
         let input = [
             ("DATABASE_URL", "postgres://localhost/tsz"),
-            ("JWT_SECRET", "same-secret"),
+            ("JWT_SECRET", "b8Ym3xNq7Pz5Av9Kc2Rh6Dt4Wj1Fse0L"),
             ("REDIS_URL", "redis://localhost:6379/0"),
-            ("ADMIN_JWT_SECRET", "same-secret"),
+            ("ADMIN_JWT_SECRET", "b8Ym3xNq7Pz5Av9Kc2Rh6Dt4Wj1Fse0L"),
         ];
         assert!(
             parse(&input).is_err(),
             "ADMIN_JWT_SECRET 与 JWT_SECRET 相同应解析失败（密钥必须分离）"
         );
+    }
+
+    #[test]
+    fn jwt_secrets_reject_weak_values_for_both_realms() {
+        for field in ["JWT_SECRET", "ADMIN_JWT_SECRET"] {
+            for secret in [
+                "",
+                "secret",
+                "admin-secret",
+                &"ab".repeat(15),
+                &format!("{}c", "ab".repeat(15)),
+                &format!("{} c", "ab".repeat(16)),
+                "REPLACE-WITH-A-RANDOM-USER-JWT-SECRET",
+                "replace-with-a-random-user-jwt-secret",
+                "replace-with-a-random-admin-jwt-secret",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "                                ",
+            ] {
+                let mut input = valid_baseline();
+                input.iter_mut().find(|(key, _)| *key == field).unwrap().1 = secret;
+                let error = parse(&input).expect_err("weak JWT secret must fail configuration");
+                assert!(error.to_string().contains(field));
+                if !secret.is_empty() {
+                    assert!(!error.to_string().contains(secret), "do not expose secrets");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jwt_secret_length_is_measured_in_bytes() {
+        let mut input = valid_baseline();
+        input
+            .iter_mut()
+            .find(|(key, _)| *key == "JWT_SECRET")
+            .unwrap()
+            .1 = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4opé";
+        let config = parse(&input).expect("32-byte value should be accepted");
+        assert_eq!(config.jwt_secret.len(), 32);
     }
 
     #[test]
@@ -625,9 +684,9 @@ mod tests {
         // 备齐全部必填项（含 redis_url），否则会因缺项报错而非验证到大小写匹配。
         let input = [
             ("database_url", "postgres://localhost/tsz"),
-            ("jwt_secret", "s3cret"),
+            ("jwt_secret", "b8Ym3xNq7Pz5Av9Kc2Rh6Dt4Wj1Fse0L"),
             ("redis_url", "redis://localhost:6379/0"),
-            ("admin_jwt_secret", "adm1n-s3cret"),
+            ("admin_jwt_secret", "m9Vq2Bs7Hk4Xa6Rc1Zn8Pw3Dt5Jf0LeY"),
         ];
         let cfg = parse(&input).expect("小写键也应能匹配到字段");
         assert_eq!(cfg.database_url, "postgres://localhost/tsz");

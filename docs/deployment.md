@@ -9,6 +9,7 @@
 ## 运行配置与依赖
 
 - 环境变量的名称、必填项与默认值以 [config.rs](../src/config.rs) 和 [.env.example](../.env.example) 为准；示例中的开发凭据不能用于生产。
+- `JWT_SECRET` 与 `ADMIN_JWT_SECRET` 各自使用 `openssl rand -base64 32` 生成，至少 32 字节且不同；所有构建均在连接数据库之前拒绝短值、空白、单字符重复值和 `replace-with-` 占位符。升级到强度校验版本前先检查现有配置，不输出密钥。轮换会使旧 access token 失效，但不会撤销数据库中的 refresh token；若需强制退出，须另行撤销会话。
 - 服务依赖 PostgreSQL 与 Redis。连接创建在 [main.rs](../src/main.rs)，启动过程见 [lib.rs](../src/lib.rs)。
 - `run` 在监听之前应用内嵌迁移并初始化所需数据；升级不是简单替换二进制，必须遵守部署手册的数据库预检、恢复点与迁移兼容检查。
 - `/healthz` 与 `/readyz` 是运行探针；服务 active 或探针成功不能替代登录、刷新、退出等完整 smoke，也不能证明部署来源正确。
