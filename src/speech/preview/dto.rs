@@ -15,6 +15,13 @@ pub struct CreatePreviewRequest {
     pub rate_percent: i16,
     #[serde(default)]
     pub pitch_semitones: i8,
+    /// Absolute synthesis volume; omitted values retain the original volume (100).
+    #[serde(
+        default,
+        deserialize_with = "crate::speech::model::deserialize_optional_volume"
+    )]
+    #[schema(minimum = 0, maximum = 100, nullable = false)]
+    pub volume_percent: Option<i16>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

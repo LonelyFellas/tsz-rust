@@ -328,6 +328,7 @@ fn request(label: &str) -> CreatePreviewRequest {
         style: Some("chat".to_owned()),
         rate_percent: 0,
         pitch_semitones: 0,
+        volume_percent: None,
     }
 }
 

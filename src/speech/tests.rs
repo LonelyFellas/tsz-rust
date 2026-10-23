@@ -28,7 +28,7 @@ fn voice() -> Voice {
 
 fn request(content: RichTextV2) -> SynthesisRequest {
     let voice = voice();
-    let options = SpeechOptions::new(&voice, Some("cheerful".to_owned()), 10, -2).unwrap();
+    let options = SpeechOptions::new(&voice, Some("cheerful".to_owned()), 10, -2, 100).unwrap();
     SynthesisRequest::new(voice, options, content).unwrap()
 }
 
@@ -292,7 +292,7 @@ fn an_all_indicator_text_has_nothing_left_to_read() {
 #[test]
 fn rich_text_boundaries_are_reused_and_v1_or_invalid_v2_are_impossible() {
     let voice = voice();
-    let options = SpeechOptions::new(&voice, None, 0, 0).unwrap();
+    let options = SpeechOptions::new(&voice, None, 0, 0, 100).unwrap();
     let too_long = "a".repeat(crate::lexicon::rich_text::MAX_RICH_TEXT_CODEPOINTS + 1);
     assert_eq!(
         SynthesisRequest::new(voice.clone(), options.clone(), plain(&too_long)).unwrap_err(),
@@ -314,26 +314,79 @@ fn voice_style_rate_and_pitch_are_validated() {
     assert!(Voice::new("azure", "bad voice", "en-US", []).is_err());
     let voice = voice();
     assert_eq!(
-        SpeechOptions::new(&voice, Some("sad".to_owned()), 0, 0).unwrap_err(),
+        SpeechOptions::new(&voice, Some("sad".to_owned()), 0, 0, 100).unwrap_err(),
         SpeechModelError::UnsupportedStyle
     );
     assert_eq!(
-        SpeechOptions::new(&voice, None, -51, 0).unwrap_err(),
+        SpeechOptions::new(&voice, None, -51, 0, 100).unwrap_err(),
         SpeechModelError::InvalidRate
     );
     assert_eq!(
-        SpeechOptions::new(&voice, None, 0, 13).unwrap_err(),
+        SpeechOptions::new(&voice, None, 0, 13, 100).unwrap_err(),
         SpeechModelError::InvalidPitch
     );
-    assert!(SpeechOptions::new(&voice, None, -50, -12).is_ok());
-    assert!(SpeechOptions::new(&voice, None, 100, 12).is_ok());
+    assert!(SpeechOptions::new(&voice, None, -50, -12, 100).is_ok());
+    assert!(SpeechOptions::new(&voice, None, 100, 12, 100).is_ok());
 
-    let cheerful_options = SpeechOptions::new(&voice, Some("cheerful".to_owned()), 0, 0).unwrap();
+    let cheerful_options =
+        SpeechOptions::new(&voice, Some("cheerful".to_owned()), 0, 0, 100).unwrap();
     let plain_voice = Voice::new("azure", "voice-2", "en-US", []).unwrap();
     assert_eq!(
         SynthesisRequest::new(plain_voice, cheerful_options, plain("hello")).unwrap_err(),
         SpeechModelError::UnsupportedStyle
     );
+}
+
+#[test]
+fn volume_is_validated_and_changes_ssml_and_cache_identity() {
+    let voice = voice();
+    for volume in [-1, 101] {
+        assert_eq!(
+            SpeechOptions::new(&voice, None, 0, 0, volume).unwrap_err(),
+            SpeechModelError::InvalidVolume
+        );
+    }
+    let synthesize = |volume| {
+        SynthesisRequest::new(
+            voice.clone(),
+            SpeechOptions::new(&voice, None, 0, 0, volume).unwrap(),
+            plain("hello"),
+        )
+        .unwrap()
+    };
+    let original = synthesize(100);
+    assert!(!build_ssml(&original).unwrap().contains("volume="));
+    for volume in [0, 65, 99] {
+        let adjusted = synthesize(volume);
+        assert!(
+            build_ssml(&adjusted)
+                .unwrap()
+                .contains(&format!("volume=\"{volume}\""))
+        );
+        assert_ne!(original.fingerprint(), adjusted.fingerprint());
+    }
+}
+
+#[test]
+fn volume_wire_defaults_preserve_legacy_and_reject_null() {
+    use super::{library::dto::VoiceParameters, preview::dto::CreatePreviewRequest};
+    use serde_json::json;
+    let legacy = json!({"rate_percent":0,"pitch_semitones":0,"style":null});
+    let parsed: VoiceParameters = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(parsed.volume_percent.unwrap_or(100), 100);
+    assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+    let preview =
+        json!({"voice_alias":"sonia","content":{"version":2,"text":"hello","annotations":[]}});
+    let parsed: CreatePreviewRequest = serde_json::from_value(preview.clone()).unwrap();
+    assert_eq!(parsed.volume_percent.unwrap_or(100), 100);
+    for value in [json!(null), json!("65"), json!(65.5)] {
+        let mut input = legacy.clone();
+        input["volume_percent"] = value.clone();
+        assert!(serde_json::from_value::<VoiceParameters>(input).is_err());
+        let mut input = preview.clone();
+        input["volume_percent"] = value;
+        assert!(serde_json::from_value::<CreatePreviewRequest>(input).is_err());
+    }
 }
 
 #[test]
@@ -367,7 +420,7 @@ fn fingerprint_is_stable_for_equivalent_canonical_content_and_versions_options()
     assert_eq!(first.fingerprint(), second.fingerprint());
 
     let voice = voice();
-    let changed_options = SpeechOptions::new(&voice, None, 10, -2).unwrap();
+    let changed_options = SpeechOptions::new(&voice, None, 10, -2, 100).unwrap();
     let changed = SynthesisRequest::new(voice, changed_options, second.content().clone()).unwrap();
     assert_ne!(first.fingerprint(), changed.fingerprint());
 
@@ -379,7 +432,7 @@ fn fingerprint_is_stable_for_equivalent_canonical_content_and_versions_options()
     )
     .unwrap();
     let other_options =
-        SpeechOptions::new(&other_voice, Some("cheerful".to_owned()), 10, -2).unwrap();
+        SpeechOptions::new(&other_voice, Some("cheerful".to_owned()), 10, -2, 100).unwrap();
     let other_provider =
         SynthesisRequest::new(other_voice, other_options, second.content().clone()).unwrap();
     assert_ne!(first.fingerprint(), other_provider.fingerprint());
@@ -391,8 +444,14 @@ fn fingerprint_is_stable_for_equivalent_canonical_content_and_versions_options()
         ["cheerful".to_owned()],
     )
     .unwrap();
-    let other_locale_options =
-        SpeechOptions::new(&other_locale_voice, Some("cheerful".to_owned()), 10, -2).unwrap();
+    let other_locale_options = SpeechOptions::new(
+        &other_locale_voice,
+        Some("cheerful".to_owned()),
+        10,
+        -2,
+        100,
+    )
+    .unwrap();
     let other_locale = SynthesisRequest::new(
         other_locale_voice,
         other_locale_options,
@@ -607,7 +666,7 @@ async fn azure_rejects_requests_for_another_provider_before_http() {
         1024,
     );
     let voice = Voice::new("other-provider", "voice-1", "en-US", []).unwrap();
-    let options = SpeechOptions::new(&voice, None, 0, 0).unwrap();
+    let options = SpeechOptions::new(&voice, None, 0, 0, 100).unwrap();
     let request = SynthesisRequest::new(voice, options, plain("hello")).unwrap();
     assert_eq!(
         provider.synthesize(&request).await.unwrap_err().kind,
@@ -792,7 +851,7 @@ fn ups_preserves_spelling_and_has_independent_limits_and_cache_identity() {
         (RichTextPhonemeAlphabet::Ups, 1600),
     ] {
         let voice = voice();
-        let options = SpeechOptions::new(&voice, None, 0, 0).unwrap();
+        let options = SpeechOptions::new(&voice, None, 0, 0, 100).unwrap();
         assert!(
             SynthesisRequest::new(
                 voice.clone(),

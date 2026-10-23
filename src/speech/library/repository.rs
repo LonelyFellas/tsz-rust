@@ -136,6 +136,7 @@ fn validate_parameters(row: &PgRow, parameters: &VoiceParameters) -> Result<(), 
         parameters.style.clone(),
         parameters.rate_percent,
         parameters.pitch_semitones,
+        parameters.volume_percent.unwrap_or(100),
     )
     .map_err(|_| invalid())?;
     Ok(())

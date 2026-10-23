@@ -39,6 +39,13 @@ pub struct SaveDubbingGroupsRequest {
 pub struct VoiceParameters {
     pub rate_percent: i16,
     pub pitch_semitones: i8,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::speech::model::deserialize_optional_volume"
+    )]
+    #[schema(minimum = 0, maximum = 100, nullable = false)]
+    pub volume_percent: Option<i16>,
     pub style: Option<String>,
 }
 

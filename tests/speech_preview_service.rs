@@ -82,6 +82,7 @@ fn request(text: &str) -> CreatePreviewRequest {
         style: Some("chat".to_owned()),
         rate_percent: 0,
         pitch_semitones: 0,
+        volume_percent: None,
     }
 }
 
@@ -127,6 +128,19 @@ async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
         .unwrap();
     assert!(matches!(hit.cache_status, PreviewCacheStatus::Hit));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let mut quieter = request("cache-hit-test");
+    quieter.volume_percent = Some(65);
+    let adjusted = service.create_preview(admin_id, quieter).await.unwrap();
+    assert!(matches!(
+        adjusted.cache_status,
+        PreviewCacheStatus::Generated
+    ));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    let mut quieter = request("cache-hit-test");
+    quieter.volume_percent = Some(65);
+    let hit = service.create_preview(admin_id, quieter).await.unwrap();
+    assert!(matches!(hit.cache_status, PreviewCacheStatus::Hit));
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
 }
 
 #[sqlx::test]

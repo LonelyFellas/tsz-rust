@@ -18,6 +18,10 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
     output.push_str(&format_signed(request.options().rate_percent(), "%"));
     output.push_str("\" pitch=\"");
     output.push_str(&format_signed(request.options().pitch_semitones(), "st"));
+    if request.options().volume_percent() != 100 {
+        output.push_str("\" volume=\"");
+        output.push_str(&request.options().volume_percent().to_string());
+    }
     output.push_str("\">");
 
     // 词性提示符（a job 里的 a）是教学标注，只指示词性，不参与朗读：这一段的字符、

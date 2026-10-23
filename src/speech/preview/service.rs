@@ -131,6 +131,7 @@ impl PreviewService {
             input.style,
             input.rate_percent,
             input.pitch_semitones,
+            input.volume_percent.unwrap_or(100),
         )?;
         let request = SynthesisRequest::new(voice.voice, options, input.content)?;
         let request_hash = scoped_hash(
