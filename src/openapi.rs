@@ -1105,6 +1105,23 @@ mod tests {
             json["components"]["schemas"]["RefreshResponse"].is_object(),
             "RefreshResponse schema 应出现在 spec 中（refresh 响应含 refresh_token_expires_at，不是裸 Token）"
         );
+        let login = &json["paths"]["/api/v1/auth/login"]["post"];
+        for status in ["429", "503"] {
+            assert_eq!(
+                login["responses"][status]["content"]["application/problem+json"]["schema"]["$ref"],
+                "#/components/schemas/ProblemDetails"
+            );
+        }
+        assert_eq!(
+            login["responses"]["429"]["headers"]["Retry-After"]["schema"]["type"],
+            "integer"
+        );
+        let codes = json["components"]["schemas"]["ErrorCode"]["enum"]
+            .as_array()
+            .unwrap();
+        for code in ["login_rate_limited", "login_unavailable"] {
+            assert!(codes.iter().any(|value| value == code));
+        }
         let register = &json["paths"]["/api/v1/auth/register"]["post"];
         assert_eq!(
             register["summary"], "POST /api/v1/auth/register",

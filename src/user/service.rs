@@ -150,8 +150,21 @@ impl UserService {
     pub async fn authenticate(&self, identifier: &str, password: &str) -> Result<User, LoginError> {
         let id = normalize_identifier(identifier).map_err(|_| LoginError::IdentifierInvalid)?;
 
-        match self.repository.get_by_identifier(&id).await {
-            Ok(user) => {
+        let user = match self.repository.get_by_identifier(&id).await {
+            Ok(user) => Some(user),
+            Err(UserError::NotFound) => None,
+            Err(error) => return Err(LoginError::Repository(error)),
+        };
+        Self::authenticate_resolved(user, password).await
+    }
+
+    /// 登录限流按已解析的账号共享预算，并使用同一份用户快照验凭证。
+    pub(crate) async fn authenticate_resolved(
+        user: Option<User>,
+        password: &str,
+    ) -> Result<User, LoginError> {
+        match user {
+            Some(user) => {
                 // 先验证密码（不透明验哈希，不跑注册策略——见 Password::verify_raw 注释）
                 if !verify_login_password(password, &user.password_hash).await {
                     return Err(LoginError::InvalidCredentials);
@@ -163,12 +176,10 @@ impl UserService {
                 Ok(user)
             }
             // 未知账号也执行相同的凭据比较，避免泄露账号是否存在。
-            Err(UserError::NotFound) => {
+            None => {
                 verify_login_password(password, dummy_hash()).await;
                 Err(LoginError::InvalidCredentials)
             }
-            // 其余底层错 -> 如实透传
-            Err(e) => Err(LoginError::Repository(e)),
         }
     }
 

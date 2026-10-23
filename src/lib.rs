@@ -314,6 +314,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         refresh_ttl: Duration::days(config.refresh_ttl_days as i64),
         admin_refresh_ttl: Duration::days(config.admin_refresh_ttl_days as i64),
         redis,
+        login_throttle_prefix: "auth:login:".to_owned(),
         surface_policy_prefix: crate::lexicon::surface_policy::SURFACE_POLICY_PREFIX.to_owned(),
         otp_service,
         cookie_secure: config.cookie_secure,
@@ -343,9 +344,12 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
 
     // 接优雅停机：systemctl stop / 容器停止发 SIGTERM，Ctrl+C 发 SIGINT。
     // 收到信号后停止收新连接、放在途请求跑完再退出，避免请求被硬砍。
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

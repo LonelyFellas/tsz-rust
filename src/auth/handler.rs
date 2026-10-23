@@ -17,7 +17,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -61,19 +61,43 @@ pub struct LoginResponse {
                 description = "refresh_token cookie（HttpOnly; SameSite=Lax; Path=/api/v1/auth; Max-Age=refresh TTL 秒）"))),
         (status = 401, description = "凭证无效（用户不存在或密码错误，不可区分）"),
         (status = 403, description = "账号被禁用"),
+        (status = 429, description = "登录尝试过多（login_rate_limited）", body = crate::error::ProblemDetails,
+            content_type = "application/problem+json",
+            headers(("Retry-After" = u64, description = "限流窗口剩余秒数，至少 1 秒"))),
+        (status = 503, description = "登录限流服务不可用（login_unavailable）", body = crate::error::ProblemDetails,
+            content_type = "application/problem+json"),
     )
 )]
 pub async fn login(
     State(state): State<AppState>,
     jar: CookieJar,
+    peer: Option<axum::Extension<ConnectInfo<std::net::SocketAddr>>>,
+    headers: HeaderMap,
     ApiJson(req): ApiJson<LoginRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // 1) 验凭证：业务全在 user 域，handler 只调。失败→统一错误（不可区分）
-    let user_sve = UserService::new(UserRepository::new(state.pool.clone()));
-    let user = user_sve
-        .authenticate(&req.identifier, &req.password)
-        .await
-        .map_err(map_login_error)?;
+    use super::login_throttle::{LoginThrottle, Outcome, source_ip};
+
+    let throttle = LoginThrottle::new(state.redis.clone(), state.login_throttle_prefix.clone());
+    let ip = source_ip(peer.map(|peer| peer.0.0), &headers);
+    throttle.check_ip(&ip).await?;
+    let identifier = normalize_identifier(&req.identifier)
+        .map_err(|_| map_login_error(LoginError::IdentifierInvalid))?;
+    let user = super::security::optional_user(&state, &identifier).await?;
+    // 手机与邮箱属于同一账号时共享预算；未知标识仍预约同样的失败预算。
+    let scope = user.as_ref().map_or_else(
+        || format!("identifier:{identifier}"),
+        |user| format!("user:{}", user.id),
+    );
+    let attempt = throttle.reserve(&scope).await?;
+    let result = UserService::authenticate_resolved(user, &req.password).await;
+    let outcome = match &result {
+        Ok(_) => Outcome::Success,
+        Err(LoginError::InvalidCredentials) => Outcome::Failure,
+        Err(_) => Outcome::Unavailable,
+    };
+    // Redis 完成失败也不签发会话；成功只清账号失败，IP 预算和其他在途预约保留。
+    throttle.finish(attempt, outcome).await?;
+    let user = result.map_err(map_login_error)?;
 
     // 2) 查角色 + 发 token + 拼响应（与 login_otp 共用 build_login_response）
 
