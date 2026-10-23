@@ -69,6 +69,23 @@ async fn login_from(
     peer: Option<&str>,
     forwarded: Option<&str>,
 ) -> (StatusCode, axum::http::HeaderMap, Value) {
+    login_from_router(
+        tsz_rust::router(state),
+        identifier,
+        password,
+        peer,
+        forwarded,
+    )
+    .await
+}
+
+async fn login_from_router(
+    router: axum::Router,
+    identifier: &str,
+    password: &str,
+    peer: Option<&str>,
+    forwarded: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
     let mut request = Request::builder()
         .method("POST")
         .uri("/api/v1/auth/login")
@@ -83,7 +100,7 @@ async fn login_from(
             .header("x-real-ip", forwarded)
             .header("x-forwarded-for", forwarded);
     }
-    let response = tsz_rust::router(state)
+    let response = router
         .oneshot(
             request
                 .body(Body::from(
@@ -344,10 +361,14 @@ async fn login_concurrent_attempts_cannot_exceed_account_budget(pool: PgPool) {
     }
     drop(connections);
     let state = AppState::for_test_with_redis(pool, redis);
+    // 与 serve 一样只装配一次；swagger 的同步 OpenAPI 生成不能占用在途请求的运行时。
+    let router = tsz_rust::router(state);
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..20 {
-        let state = state.clone();
-        tasks.spawn(async move { login_with_state(state, "parallel@example.com", "wrong").await });
+        let router = router.clone();
+        tasks.spawn(async move {
+            login_from_router(router, "parallel@example.com", "wrong", None, None).await
+        });
     }
     let mut checked = 0;
     let mut throttled = 0;
