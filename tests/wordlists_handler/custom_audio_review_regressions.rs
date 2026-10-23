@@ -130,7 +130,8 @@ async fn deleted_objects_leave_cleanup_until_a_late_upload_reopens_them(pool: Pg
         )
         .await
         .unwrap();
-    sqlx::query("UPDATE wordlist_audio_objects SET deleted_at=NULL WHERE object_key=$1")
+    // The old process died after PUT, before it could reopen the database marker.
+    sqlx::query("UPDATE wordlist_audio_objects SET cleanup_after=clock_timestamp()-interval '1 second' WHERE object_key=$1")
         .bind(key.as_str())
         .execute(&pool)
         .await
