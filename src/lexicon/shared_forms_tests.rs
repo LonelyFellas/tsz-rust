@@ -315,10 +315,6 @@ async fn opposing_content_claims_return_conflict_on_deadlock(pool: sqlx::PgPool)
         (&mut left, entries[0], shared.contents[0].id),
         (&mut right, entries[1], shared.contents[1].id),
     ] {
-        sqlx::query("SET LOCAL deadlock_timeout = '50ms'")
-            .execute(&mut **tx)
-            .await
-            .unwrap();
         sqlx::query("INSERT INTO lexicon.v3_form_contents(id,entry_id,content) VALUES($1,$2,'{}')")
             .bind(content)
             .bind(entry)
