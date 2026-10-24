@@ -35,7 +35,7 @@ class IntegrationShardsTests(unittest.TestCase):
         matrix = re.search(r"module: \[([^\]]+)\]", workflow)[1].split(", ")
         self.assertEqual(matrix, list(SHARD_MODULES))
         grouped = classify_targets(discover_targets(ROOT))
-        self.assertEqual(len({target for shard in SHARD_MODULES for target in targets_for(shard, grouped)}), 95)
+        self.assertEqual(len({target for shard in SHARD_MODULES for target in targets_for(shard, grouped)}), 96)
 
     def test_omitted_duplicate_or_unexpected_execution_fails(self):
         for mutation in [lambda r: r[1]["executed"].pop(), lambda r: r[1]["executed"].append(r[1]["executed"][0]), lambda r: r[1]["executed"].append({"target": "unknown", "name": "extra", "status": "ok"})]:

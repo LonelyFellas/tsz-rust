@@ -18,6 +18,10 @@ pub fn router(_state: AppState) -> Router<AppState> {
 
     Router::new()
         .route(
+            "/dashboard/overview",
+            get(crate::dashboard::handler::overview),
+        )
+        .route(
             "/wordlists/management",
             get(crate::wordlists::admin_handler::management_list),
         )

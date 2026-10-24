@@ -20,6 +20,7 @@ from ci_test_modules import (  # noqa: E402
 EXPECTED_TARGETS = {
     "admin": {
         "admin_coins_handler",
+        "admin_dashboard_handler",
         "admin_accounts_create_handler",
         "admin_accounts_list_handler",
         "admin_accounts_repository",
@@ -136,7 +137,7 @@ class CiTestModulesTests(unittest.TestCase):
         )
         flattened = [target for targets in actual.values() for target in targets]
         self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertEqual(len(flattened), 95)
+        self.assertEqual(len(flattened), 96)
 
     def test_ci02_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(
