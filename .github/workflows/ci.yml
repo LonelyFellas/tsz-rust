@@ -463,6 +463,11 @@ jobs:
         run: |
           set -eu
           packages='ca-certificates curl git python3 build-essential pkg-config cmake'
+          # ubuntu 的 docker-clean 钩子会删除默认 archives，切源期间使用独立下载目录。
+          archives=$(mktemp -d)
+          trap 'rm -rf "$archives"' EXIT
+          mkdir -p "$archives/partial"
+          chmod 755 "$archives"
           downloaded=false
           for mirror in \
             http://azure.archive.ubuntu.com/ubuntu/ \
@@ -476,7 +481,8 @@ jobs:
                 -o Acquire::Retries=0 -o Acquire::http::Timeout=15 \
                 -o APT::Update::Error-Mode=any update && \
               timeout --kill-after=5s 90s apt-get install -y --download-only --no-install-recommends \
-                -o Acquire::Retries=0 -o Acquire::http::Timeout=15 $packages
+                -o Acquire::Retries=0 -o Acquire::http::Timeout=15 \
+                -o Dir::Cache::archives="$archives" $packages
             then
               downloaded=true
               break
@@ -487,7 +493,8 @@ jobs:
             echo 'All package mirrors failed' >&2
             exit 1
           fi
-          apt-get install -y --no-download --no-install-recommends $packages
+          apt-get install -y --no-download --no-install-recommends \
+            -o Dir::Cache::archives="$archives" $packages
 
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

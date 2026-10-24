@@ -189,6 +189,8 @@ class CiWorkflowTests(unittest.TestCase):
                 sources = root / "sources.list"
                 sources.write_text("deb http://archive.ubuntu.com/ubuntu/ jammy main\n")
                 log = root / "calls"
+                archives = root / "default-archives"
+                (archives / "partial").mkdir(parents=True)
                 timeout = root / "timeout"
                 timeout.write_text(
                     "#!/bin/sh\n"
@@ -202,14 +204,21 @@ class CiWorkflowTests(unittest.TestCase):
                     "#!/bin/sh\n"
                     'source=$(cut -d " " -f 2 "$APT_SOURCES")\n'
                     'printf "%s %s\\n" "$source" "$*" >> "$CALL_LOG"\n'
+                    'archives="$DEFAULT_ARCHIVES"\n'
+                    'for arg in "$@"; do\n'
+                    '  case "$arg" in Dir::Cache::archives=*) archives=${arg#*=} ;; esac\n'
+                    "done\n"
                     'case "$*" in\n'
-                    '  *--no-download*) exit 0 ;;\n'
+                    '  *update) rm -f "$DEFAULT_ARCHIVES"/*.deb "$DEFAULT_ARCHIVES"/partial/*.deb ;;\n'
+                    '  *--no-download*) test -f "$archives/complete.deb"; exit $? ;;\n'
                     "esac\n"
                     '[ "$FAILURE" != all ] || exit 100\n'
                     'case "$source:$FAILURE:$*" in\n'
                     "  *azure.archive*:update:*update) exit 124 ;;\n"
-                    "  *azure.archive*:download:*--download-only*) exit 124 ;;\n"
+                    '  *azure.archive*:download:*--download-only*) touch "$archives/progress.deb"; exit 124 ;;\n'
+                    '  *:download:*--download-only*) test -f "$archives/progress.deb" || exit 100 ;;\n'
                     "esac\n"
+                    'case "$*" in *--download-only*) touch "$archives/complete.deb" ;; esac\n'
                 )
                 apt.chmod(0o755)
                 sed = root / "sed"
@@ -231,6 +240,8 @@ class CiWorkflowTests(unittest.TestCase):
                         "PATH": f"{root}:{os.environ['PATH']}",
                         "CALL_LOG": str(log),
                         "APT_SOURCES": str(sources),
+                        "DEFAULT_ARCHIVES": str(archives),
+                        "TMPDIR": str(root),
                         "FAILURE": failure,
                     },
                     timeout=10,
