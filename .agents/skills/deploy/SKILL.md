@@ -16,7 +16,7 @@ description: 将 tsz-rust 当前 GitHub main 的成功 CI 制品部署到 tshb-t
 
 通过 Codex CLI 恢复协调会话时，必须显式指定后端项目目录（例如 `codex -C <tsz-rust-root> exec resume <session-id>`），恢复后先核对 cwd 和项目自定义 agent 的加载状态，再唤醒 `backend_deploy_runner`。从前端或其他目录恢复可能得到 `unknown agent_type`；先修正项目上下文，不用普通代理替代。CLI 恢复的 sandbox/approval 设置也须核对并沿用本会话已获授权的执行环境，不能假设自动继承。
 
-实际执行前必须完整读取 [操作手册](references/runbook.md)，包括失败后的回退和锁清理。
+实际执行前必须完整读取 [操作手册](references/ci-gate-validation-intentionally-missing.md)，包括失败后的回退和锁清理。
 仅做讨论/评估时按需读取，不执行手册中的变更命令。
 
 本次需要前端配套发布时，读取本仓 [配套发布清单](../contract-sync/references/paired-release.md)，核实实际版本组合与顺序；清单不能替代本技能的 runner、CI、锁或制品门禁。
