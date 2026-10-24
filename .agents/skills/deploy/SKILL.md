@@ -5,6 +5,8 @@ description: 将 tsz-rust 当前 GitHub main 的成功 CI 制品部署到 tshb-t
 
 # 后端部署到 tshb-test
 
+<!-- Temporary up-to-date gate validation fixture; never merge. -->
+
 通用授权与主任务记录遵循 [AGENTS.md](../../../AGENTS.md)。复用已确认的范围、配套发布依据和同状态验收，不重新评估需求；下列执行时门禁仍逐项运行，已有授权不等于已有 CI/版本证据。
 
 ## 执行入口
