@@ -32,6 +32,7 @@ pub struct DashboardUsers {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DashboardTasks {
+    /// 全部学习任务，含已归档任务。
     pub total: i64,
     /// 至少完成过一轮的学习任务数。
     pub completed: i64,
@@ -39,6 +40,7 @@ pub struct DashboardTasks {
     pub week: i64,
 }
 
+/// 未归档智能词库词条的累计与新增量。
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DashboardLexicon {
     pub total: i64,
@@ -81,12 +83,12 @@ pub struct DashboardCoinFlowPoint {
     pub deduct: String,
 }
 
-/// 有活跃学习任务的学生按今日学习状态划分。
+/// 有进行中且未结束学习任务的学生按今日学习状态划分。
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DashboardLearningProgress {
     /// 今日已完成至少一轮。
     pub completed: i64,
-    /// 今日已开始作答但尚未完成。
+    /// 今日已开始学习（有活跃轮次或作答）但尚未完成。
     pub in_progress: i64,
     /// 今日没有开始学习。
     pub not_started: i64,

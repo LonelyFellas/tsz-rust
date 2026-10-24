@@ -298,13 +298,22 @@ async fn overview_aggregates_real_data_by_beijing_boundaries(pool: PgPool) {
     let user_d = seed_user(&pool, now - Duration::days(8), "active").await;
     let _user_d = user_d;
     let user_e = seed_user(&pool, now - Duration::days(20), "active").await;
+    let user_f = seed_user(&pool, now - Duration::days(20), "active").await;
 
-    // A 完成今天一轮；B 今天已开始但未完成；E 今天未开始；C 已禁用，不计入学习基数。
+    // A 完成今天一轮；B 今天已开始但未完成；E 今天未开始；C 已禁用、F 的任务已结束，
+    // 都不计入学习基数。
     let task_a = seed_task(&pool, user_a, "active", now).await;
     let _task_a_archived = seed_task(&pool, user_a, "archived", now - Duration::days(10)).await;
     let task_b = seed_task(&pool, user_b, "active", now).await;
     let _task_c = seed_task(&pool, user_c, "active", now - Duration::days(10)).await;
     let _task_e = seed_task(&pool, user_e, "active", now - Duration::days(10)).await;
+    let task_f = seed_task(&pool, user_f, "active", now - Duration::days(10)).await;
+    sqlx::query("UPDATE learning_tasks SET ends_at=$2 WHERE id=$1")
+        .bind(task_f)
+        .bind(now - Duration::days(1))
+        .execute(&pool)
+        .await
+        .unwrap();
     let run_a = seed_daily_run(&pool, task_a, user_a, "completed").await;
     seed_completion(&pool, run_a, task_a, user_a).await;
     let run_b = seed_daily_run(&pool, task_b, user_b, "active").await;
@@ -359,12 +368,12 @@ async fn overview_aggregates_real_data_by_beijing_boundaries(pool: PgPool) {
     assert_eq!(status, StatusCode::OK, "{body}");
     let response: Value = serde_json::from_str(&body).expect("响应应为 JSON");
 
-    assert_eq!(response["users"]["total"], 5);
+    assert_eq!(response["users"]["total"], 6);
     assert_eq!(response["users"]["today"], 1);
     assert_eq!(response["users"]["last_3_days"], 3);
     assert_eq!(response["users"]["last_7_days"], 3);
 
-    assert_eq!(response["tasks"]["total"], 5);
+    assert_eq!(response["tasks"]["total"], 6);
     assert_eq!(response["tasks"]["completed"], 1);
     assert_eq!(response["tasks"]["today"], 2);
     assert_eq!(response["tasks"]["week"], 2);

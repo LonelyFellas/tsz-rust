@@ -160,20 +160,24 @@ pub async fn load(pool: &PgPool, include_v3: bool) -> Result<AdminDashboardOverv
 
 const USERS_SQL: &str = r#"
 WITH bounds AS (
-    SELECT (now() AT TIME ZONE 'Asia/Shanghai')::date AS today
+    SELECT
+        ((now() AT TIME ZONE 'Asia/Shanghai')::date::timestamp
+            AT TIME ZONE 'Asia/Shanghai') AS today_start,
+        (((now() AT TIME ZONE 'Asia/Shanghai')::date - 2)::timestamp
+            AT TIME ZONE 'Asia/Shanghai') AS three_day_start,
+        (((now() AT TIME ZONE 'Asia/Shanghai')::date - 6)::timestamp
+            AT TIME ZONE 'Asia/Shanghai') AS seven_day_start
 )
 SELECT
     count(*)::bigint AS total,
     count(*) FILTER (
-        WHERE (u.created_at AT TIME ZONE 'Asia/Shanghai')::date = b.today
+        WHERE u.created_at >= b.today_start
     )::bigint AS today,
     count(*) FILTER (
-        WHERE (u.created_at AT TIME ZONE 'Asia/Shanghai')::date
-              BETWEEN b.today - 2 AND b.today
+        WHERE u.created_at >= b.three_day_start
     )::bigint AS last_3_days,
     count(*) FILTER (
-        WHERE (u.created_at AT TIME ZONE 'Asia/Shanghai')::date
-              BETWEEN b.today - 6 AND b.today
+        WHERE u.created_at >= b.seven_day_start
     )::bigint AS last_7_days
 FROM users u
 CROSS JOIN bounds b
@@ -195,7 +199,8 @@ SELECT
     count(u.id)::bigint AS value
 FROM days d
 LEFT JOIN users u
-    ON (u.created_at AT TIME ZONE 'Asia/Shanghai')::date = d.day
+    ON u.created_at >= (d.day::timestamp AT TIME ZONE 'Asia/Shanghai')
+   AND u.created_at < ((d.day + 1)::timestamp AT TIME ZONE 'Asia/Shanghai')
 GROUP BY d.day
 ORDER BY d.day
 "#;
@@ -203,8 +208,10 @@ ORDER BY d.day
 const TASKS_SQL: &str = r#"
 WITH bounds AS (
     SELECT
-        (now() AT TIME ZONE 'Asia/Shanghai')::date AS today,
-        date_trunc('week', now() AT TIME ZONE 'Asia/Shanghai') AS week_start
+        ((now() AT TIME ZONE 'Asia/Shanghai')::date::timestamp
+            AT TIME ZONE 'Asia/Shanghai') AS today_start,
+        (date_trunc('week', now() AT TIME ZONE 'Asia/Shanghai')
+            AT TIME ZONE 'Asia/Shanghai') AS week_start
 )
 SELECT
     count(*)::bigint AS total,
@@ -214,10 +221,10 @@ SELECT
         )
     )::bigint AS completed,
     count(*) FILTER (
-        WHERE (t.created_at AT TIME ZONE 'Asia/Shanghai')::date = b.today
+        WHERE t.created_at >= b.today_start
     )::bigint AS today,
     count(*) FILTER (
-        WHERE (t.created_at AT TIME ZONE 'Asia/Shanghai') >= b.week_start
+        WHERE t.created_at >= b.week_start
     )::bigint AS week
 FROM learning_tasks t
 CROSS JOIN bounds b
@@ -226,20 +233,23 @@ CROSS JOIN bounds b
 const LEXICON_SQL: &str = r#"
 WITH bounds AS (
     SELECT
-        (now() AT TIME ZONE 'Asia/Shanghai')::date AS today,
-        date_trunc('week', now() AT TIME ZONE 'Asia/Shanghai') AS week_start,
-        date_trunc('month', now() AT TIME ZONE 'Asia/Shanghai') AS month_start
+        ((now() AT TIME ZONE 'Asia/Shanghai')::date::timestamp
+            AT TIME ZONE 'Asia/Shanghai') AS today_start,
+        (date_trunc('week', now() AT TIME ZONE 'Asia/Shanghai')
+            AT TIME ZONE 'Asia/Shanghai') AS week_start,
+        (date_trunc('month', now() AT TIME ZONE 'Asia/Shanghai')
+            AT TIME ZONE 'Asia/Shanghai') AS month_start
 )
 SELECT
     count(*)::bigint AS total,
     count(*) FILTER (
-        WHERE (e.created_at AT TIME ZONE 'Asia/Shanghai')::date = b.today
+        WHERE e.created_at >= b.today_start
     )::bigint AS today,
     count(*) FILTER (
-        WHERE (e.created_at AT TIME ZONE 'Asia/Shanghai') >= b.week_start
+        WHERE e.created_at >= b.week_start
     )::bigint AS week,
     count(*) FILTER (
-        WHERE (e.created_at AT TIME ZONE 'Asia/Shanghai') >= b.month_start
+        WHERE e.created_at >= b.month_start
     )::bigint AS month
 FROM lexicon.entries e
 CROSS JOIN bounds b
@@ -263,7 +273,8 @@ SELECT
     count(e.id)::bigint AS value
 FROM weeks w
 LEFT JOIN lexicon.entries e
-    ON date_trunc('week', e.created_at AT TIME ZONE 'Asia/Shanghai')::date = w.week_start
+    ON e.created_at >= (w.week_start::timestamp AT TIME ZONE 'Asia/Shanghai')
+   AND e.created_at < ((w.week_start + 7)::timestamp AT TIME ZONE 'Asia/Shanghai')
    AND e.archived_at IS NULL
    AND ($1 OR e.content_schema_version = 2)
 GROUP BY w.week_start
@@ -273,28 +284,33 @@ ORDER BY w.week_start
 const COINS_SQL: &str = r#"
 WITH bounds AS (
     SELECT
-        (now() AT TIME ZONE 'Asia/Shanghai')::date AS today,
-        date_trunc('week', now() AT TIME ZONE 'Asia/Shanghai') AS week_start,
-        date_trunc('month', now() AT TIME ZONE 'Asia/Shanghai') AS month_start
+        ((now() AT TIME ZONE 'Asia/Shanghai')::date::timestamp
+            AT TIME ZONE 'Asia/Shanghai') AS today_start,
+        (date_trunc('week', now() AT TIME ZONE 'Asia/Shanghai')
+            AT TIME ZONE 'Asia/Shanghai') AS week_start,
+        (date_trunc('month', now() AT TIME ZONE 'Asia/Shanghai')
+            AT TIME ZONE 'Asia/Shanghai') AS month_start
 ), platform_entries AS (
     SELECT e.delta, e.created_at
     FROM coin_entries e
     JOIN coin_operations o ON o.id = e.operation_id
     JOIN coin_wallets w ON w.id = e.wallet_id
+    CROSS JOIN bounds b
     WHERE w.owner_type = 'user'
       AND o.source_type <> 'wordlist_tip'
+      AND e.created_at >= LEAST(b.today_start, b.week_start, b.month_start)
 )
 SELECT
     (SELECT COALESCE(sum(balance), 0)::bigint::text
        FROM coin_wallets WHERE owner_type = 'user') AS circulation,
     COALESCE(sum(p.delta) FILTER (
-        WHERE (p.created_at AT TIME ZONE 'Asia/Shanghai')::date = b.today
+        WHERE p.created_at >= b.today_start
     ), 0)::bigint::text AS today_net,
     COALESCE(sum(p.delta) FILTER (
-        WHERE (p.created_at AT TIME ZONE 'Asia/Shanghai') >= b.week_start
+        WHERE p.created_at >= b.week_start
     ), 0)::bigint::text AS week_net,
     COALESCE(sum(p.delta) FILTER (
-        WHERE (p.created_at AT TIME ZONE 'Asia/Shanghai') >= b.month_start
+        WHERE p.created_at >= b.month_start
     ), 0)::bigint::text AS month_net
 FROM platform_entries p
 CROSS JOIN bounds b
@@ -346,6 +362,7 @@ WITH bounds AS (
     FROM learning_tasks t
     JOIN users u ON u.id = t.user_id
     WHERE t.state = 'active'
+      AND (t.ends_at IS NULL OR t.ends_at > now())
       AND u.status = 'active'
       AND NOT EXISTS (
           SELECT 1

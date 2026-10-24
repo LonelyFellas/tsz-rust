@@ -11,13 +11,15 @@ use super::{dto::AdminDashboardOverview, repository};
 #[utoipa::path(
     get,
     path = "/api/v1/admin/dashboard/overview",
+    operation_id = "admin_dashboard_overview",
     tag = "admin-dashboard",
     security(("bearer_auth" = [])),
     responses(
         (status = 200, description = "管理端首页看板聚合数据", body = AdminDashboardOverview),
         (status = 401, description = "管理员身份无效"),
         (status = 403, description = "账号已禁用或必须先改密"),
-        (status = 500, description = "数据库查询失败")
+        (status = 500, description = "数据库查询失败"),
+        (status = 503, description = "数据库繁忙或查询超时")
     )
 )]
 pub async fn overview(
