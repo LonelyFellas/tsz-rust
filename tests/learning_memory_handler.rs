@@ -323,6 +323,12 @@ async fn content_epoch_protects_new_memory_from_old_questions(pool: PgPool) {
 #[sqlx::test]
 async fn migration_empty_roundtrip_and_populated_rollback_guard(pool: PgPool) {
     sqlx::raw_sql(include_str!(
+        "../migrations/20261024040000_learning_memory_due_index.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20261024030000_learning_memory_retention.down.sql"
     ))
     .execute(&pool)
@@ -354,6 +360,12 @@ async fn migration_empty_roundtrip_and_populated_rollback_guard(pool: PgPool) {
     .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20261024030000_learning_memory_retention.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261024040000_learning_memory_due_index.up.sql"
     ))
     .execute(&pool)
     .await
@@ -644,6 +656,16 @@ async fn normal_review_stale_evidence_and_paused_memory_are_not_overwritten(pool
         .0,
         200
     );
+    let resumed = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/review-sessions",
+        review_body("due"),
+    )
+    .await;
+    assert_eq!(resumed.0, 200, "{}", resumed.1);
+    assert_eq!(resumed.1["id"], s.1["id"]);
     let revision: i64 = sqlx::query_scalar("SELECT revision FROM learning_memories")
         .fetch_one(&pool)
         .await
@@ -815,5 +837,240 @@ async fn feature_gate_preserves_legacy_answers_without_memory_writes(pool: PgPoo
         .await
         .1["available"],
         false
+    );
+}
+
+#[sqlx::test]
+async fn current_profile_start_and_stale_retest_reveal_are_guarded(pool: PgPool) {
+    let (state, auth, list) = ready_memory(&pool, true).await;
+    let first = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/review-sessions",
+        review_body("retest"),
+    )
+    .await;
+    assert_eq!(first.0, 200, "{}", first.1);
+    let task = create(&state, &auth, list, "longterm").await;
+    let run = start(&state, &auth, &task).await;
+    let qs = questions(&state, &auth, &run).await;
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            &answer_path(&run),
+            answer_body(&qs["items"][0], "apple")
+        )
+        .await
+        .0,
+        200
+    );
+    let overview = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/me/memory/overview",
+        Value::Null,
+    )
+    .await;
+    assert!(overview.1["current_session_id"].is_null(), "{}", overview.1);
+    let reveal = format!(
+        "/api/v1/me/review-sessions/{}/items/{}/reveal",
+        first.1["id"].as_str().unwrap(),
+        first.1["items"][0]["id"].as_str().unwrap()
+    );
+    assert_eq!(call(&state, &auth, "POST", &reveal, json!({})).await.0, 409);
+    sqlx::query("UPDATE student_profiles SET english_variant='AmE' WHERE user_id=$1")
+        .bind(auth.subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let switched = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/review-sessions",
+        review_body("due"),
+    )
+    .await;
+    assert_eq!(switched.0, 409, "{}", switched.1);
+}
+
+#[sqlx::test]
+async fn stale_answer_feedback_starts_a_fresh_cooldown(pool: PgPool) {
+    let (state, auth, list) = ready_memory(&pool, false).await;
+    let old = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/review-sessions",
+        review_body("due"),
+    )
+    .await;
+    assert_eq!(old.0, 200, "{}", old.1);
+    let task = create(&state, &auth, list, "longterm").await;
+    let run = start(&state, &auth, &task).await;
+    let qs = questions(&state, &auth, &run).await;
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            &answer_path(&run),
+            answer_body(&qs["items"][0], "wrong")
+        )
+        .await
+        .0,
+        200
+    );
+    sqlx::query("UPDATE learning_memories SET last_feedback_at=clock_timestamp()-interval '11 minutes',due_at=clock_timestamp()-interval '1 minute'").execute(&pool).await.unwrap();
+    let stale=call(&state,&auth,"POST",&format!("/api/v1/me/review-sessions/{}/answers",old.1["id"].as_str().unwrap()),json!({"idempotency_key":Uuid::now_v7(),"item_id":old.1["items"][0]["id"],"answer":"wrong"})).await;
+    assert_eq!(stale.0, 200, "{}", stale.1);
+    assert_eq!(stale.1["memory_effect"], "practice_only_stale");
+    let next = create(&state, &auth, list, "longterm").await;
+    let nr = start(&state, &auth, &next).await;
+    let nq = questions(&state, &auth, &nr).await;
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            &answer_path(&nr),
+            answer_body(&nq["items"][0], "apple")
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT stage FROM learning_memories")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "relearning"
+    );
+    let accepted: chrono::DateTime<chrono::Utc> =
+        stale.1["accepted_at"].as_str().unwrap().parse().unwrap();
+    let due: chrono::DateTime<chrono::Utc> =
+        stale.1["next_due_at"].as_str().unwrap().parse().unwrap();
+    assert!(due >= accepted + chrono::Duration::minutes(10));
+}
+
+#[sqlx::test]
+async fn due_listing_and_pause_respect_source_budget_and_publication_checks(pool: PgPool) {
+    let (state, auth, list) = ready_memory(&pool, true).await;
+    sqlx::query("UPDATE learning_memories SET retest_day=((clock_timestamp() AT TIME ZONE 'Asia/Shanghai')-interval '4 hours')::date,retest_issued=2").execute(&pool).await.unwrap();
+    let page = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/me/memory/items?filter=due",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(page.0, 200, "{}", page.1);
+    assert!(page.1["items"].as_array().unwrap().is_empty());
+    let (id,revision):(Uuid,i64)=sqlx::query_as("UPDATE learning_memories SET content_available=false,checked_publication_id=(SELECT current_publication_id FROM lexicon.entries WHERE id=entry_id),checked_cefr_level='A1',retest_issued=0 RETURNING id,revision").fetch_one(&pool).await.unwrap();
+    let paused = call(
+        &state,
+        &auth,
+        "PATCH",
+        &format!("/api/v1/me/memory/items/{id}"),
+        json!({"paused":false,"expected_revision":revision}),
+    )
+    .await;
+    assert_eq!(paused.0, 200, "{}", paused.1);
+    assert_eq!(paused.1["content_available"], false);
+    sqlx::query("UPDATE learning_memories SET checked_publication_id=gen_random_uuid()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refreshed = call(&state, &auth, "GET", "/api/v1/me/memory/items", Value::Null).await;
+    assert_eq!(refreshed.0, 200, "{}", refreshed.1);
+    assert_eq!(refreshed.1["items"][0]["content_available"], true);
+    sqlx::query("DELETE FROM wordlists WHERE id=$1")
+        .bind(list)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let hidden = call(
+        &state,
+        &auth,
+        "GET",
+        "/api/v1/me/memory/items?filter=due",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(hidden.0, 200, "{}", hidden.1);
+    assert!(hidden.1["items"].as_array().unwrap().is_empty());
+}
+
+#[sqlx::test]
+async fn content_reset_does_not_reissue_retest_or_spend_its_budget(pool: PgPool) {
+    let (state, auth, list) = ready_memory(&pool, true).await;
+    let entry: Uuid =
+        sqlx::query_scalar("SELECT entry_id FROM wordlist_items WHERE wordlist_id=$1")
+            .bind(list)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let mut snapshot:Value=sqlx::query_scalar("SELECT p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(entry).fetch_one(&pool).await.unwrap();
+    snapshot["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
+        json!("更新后的独立中文释义");
+    let publication = Uuid::now_v7();
+    let admin = wordlists_support::admin(&pool).await;
+    sqlx::query("INSERT INTO lexicon.entry_publications(id,entry_id,publication_number,source_revision,content_schema_version,snapshot,snapshot_hash,published_by_admin_id) VALUES($1,$2,3,3,3,$3,$4,$5)").bind(publication).bind(entry).bind(snapshot).bind(publication.as_bytes().to_vec()).bind(admin).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=$2 WHERE id=$1")
+        .bind(entry)
+        .bind(publication)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let s = call(
+        &state,
+        &auth,
+        "POST",
+        "/api/v1/me/review-sessions",
+        review_body("due"),
+    )
+    .await;
+    assert_eq!(s.0, 200, "{}", s.1);
+    assert_eq!(s.1["items"][0]["kind"], "due");
+    assert_eq!(
+        sqlx::query_scalar::<_, i16>("SELECT retest_issued FROM learning_memories")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let reveal = format!(
+        "/api/v1/me/review-sessions/{}/items/{}/reveal",
+        s.1["id"].as_str().unwrap(),
+        s.1["items"][0]["id"].as_str().unwrap()
+    );
+    assert_eq!(call(&state, &auth, "POST", &reveal, json!({})).await.0, 200);
+    let task = create(&state, &auth, list, "longterm").await;
+    let run = start(&state, &auth, &task).await;
+    let qs = questions(&state, &auth, &run).await;
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "POST",
+            &answer_path(&run),
+            answer_body(&qs["items"][0], "apple")
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT stage FROM learning_memories")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "unverified"
     );
 }

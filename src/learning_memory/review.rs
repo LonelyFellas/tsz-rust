@@ -218,15 +218,16 @@ pub(super) async fn start(
     }
     let at = now(&mut tx).await?;
     let (day, _, day_end) = business_window(at);
-    sqlx::query("UPDATE learning_review_items i SET active=false WHERE i.user_id=$1 AND i.active AND (i.expires_at<=$2 OR EXISTS(SELECT 1 FROM learning_memories m WHERE m.id=i.memory_id AND (m.revision<>i.memory_revision OR m.paused OR m.memory_epoch<>i.memory_epoch)))")
+    sqlx::query("UPDATE learning_review_items i SET active=false WHERE i.user_id=$1 AND i.active AND (i.expires_at<=$2 OR EXISTS(SELECT 1 FROM learning_memories m WHERE m.id=i.memory_id AND (m.paused OR (i.kind='retest' AND (m.revision<>i.memory_revision OR m.memory_epoch<>i.memory_epoch)))))")
         .bind(auth.subject).bind(at).execute(&mut *tx).await.map_err(AppError::internal)?;
     // One active batch per user: another device resumes rather than reissuing short tests.
-    let existing:Option<Uuid>=sqlx::query_scalar("SELECT s.id FROM learning_review_sessions s WHERE s.user_id=$1 AND s.expires_at>$2 AND EXISTS(SELECT 1 FROM learning_review_items i WHERE i.session_id=s.id AND i.active AND i.expires_at>$2) ORDER BY s.created_at DESC LIMIT 1")
-        .bind(auth.subject).bind(at).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
+    let existing:Option<Uuid>=sqlx::query_scalar("SELECT s.id FROM learning_review_sessions s WHERE s.user_id=$1 AND s.expires_at>$2 AND s.settings_snapshot->>'english_variant'=$3 AND EXISTS(SELECT 1 FROM learning_review_items i WHERE i.session_id=s.id AND i.active AND i.expires_at>$2) ORDER BY s.created_at DESC LIMIT 1")
+        .bind(auth.subject).bind(at).bind(&context.english_variant).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
     if let Some(id) = existing {
         let existing_view = view_in(&mut tx, auth, id).await?;
         if existing_view.state == "active" {
             save_start(&mut tx, auth.subject, &input, &h, id).await?;
+            crate::learning_tasks::repository::learner(&mut tx, auth).await?;
             tx.commit().await.map_err(AppError::internal)?;
             return Ok(existing_view);
         }
@@ -271,6 +272,7 @@ pub(super) async fn start(
         let epoch = m.memory_epoch + i64::from(changed);
         let revision = m.revision + i64::from(changed);
         if changed {
+            m.stage = Stage::Unverified;
             sqlx::query("UPDATE learning_memories SET memory_epoch=$2,content_signature=$3,stage='unverified',interval_step=0,due_at=$4,last_feedback_at=NULL,revision=$5,content_available=true WHERE id=$1")
                 .bind(m.id).bind(epoch).bind(&sig).bind(at).bind(revision).execute(&mut *tx).await.map_err(AppError::internal)?;
         }
@@ -367,6 +369,18 @@ pub(super) async fn reveal(
     if !i.active || i.expires_at <= at || !available.available(&i.question()) {
         return Err(conflict("题目已失效"));
     }
+    let current: (i64, i64, bool) = sqlx::query_as(
+        "SELECT revision,memory_epoch,paused FROM learning_memories WHERE id=$1 FOR UPDATE",
+    )
+    .bind(i.memory_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    if current.2
+        || (i.kind == "retest" && (current.0 != i.memory_revision || current.1 != i.memory_epoch))
+    {
+        return Err(conflict("本次重测机会已更新，请恢复进度"));
+    }
     sqlx::query(
         "UPDATE learning_review_items SET revealed_at=COALESCE(revealed_at,$2) WHERE id=$1",
     )
@@ -405,7 +419,7 @@ async fn receipt(
     .fetch_one(pool)
     .await
     .map_err(AppError::internal)?;
-    let due:DateTime<Utc>=sqlx::query_scalar("SELECT m.due_at FROM learning_memories m JOIN learning_review_items i ON i.memory_id=m.id WHERE i.id=$1").bind(a.item_id).fetch_one(pool).await.map_err(AppError::internal)?;
+    let due:DateTime<Utc>=sqlx::query_scalar("SELECT GREATEST(m.due_at,COALESCE(m.last_feedback_at+interval '10 minutes',m.due_at),CASE WHEN m.stage='relearning' AND m.retest_day=((clock_timestamp() AT TIME ZONE 'Asia/Shanghai')-interval '4 hours')::date AND m.retest_issued>=2 THEN ((m.retest_day+1)::timestamp+interval '4 hours') AT TIME ZONE 'Asia/Shanghai' ELSE m.due_at END) FROM learning_memories m JOIN learning_review_items i ON i.memory_id=m.id WHERE i.id=$1").bind(a.item_id).fetch_one(pool).await.map_err(AppError::internal)?;
     Ok(ReviewReceipt {
         answer_id: a.id,
         item_id: a.item_id,
@@ -472,7 +486,7 @@ pub(super) async fn answer(
     let (_, correct) = grade_spelling(&snapshot, &input.answer)?;
     let stale = m.revision != i.memory_revision || m.memory_epoch != i.memory_epoch;
     let content_changed = current_signature.as_ref() != Some(&i.content_signature);
-    let (schedule, effect) = if stale {
+    let (mut schedule, effect) = if stale {
         (m.schedule(), "practice_only_stale")
     } else if content_changed {
         (m.schedule(), "practice_only_content_changed")
@@ -488,10 +502,11 @@ pub(super) async fn answer(
     sqlx::query("INSERT INTO learning_review_attempts(id,user_id,item_id,session_id,request_key,request_hash,submitted_answer,is_correct,effect,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
         .bind(id).bind(auth.subject).bind(i.id).bind(session_id).bind(input.idempotency_key).bind(h).bind(&input.answer).bind(correct).bind(effect).bind(at).execute(&mut *tx).await.map_err(AppError::internal)?;
     let after = m.revision + i64::from(!stale && !content_changed);
-    if after > m.revision {
-        sqlx::query("UPDATE learning_memories SET stage=$2,interval_step=$3,due_at=$4,last_feedback_at=$5,last_evidence_at=$6,revision=$7 WHERE id=$1")
-            .bind(m.id).bind(schedule.stage.as_str()).bind(schedule.interval_step).bind(schedule.due_at).bind(schedule.last_feedback_at).bind(at).bind(after).execute(&mut *tx).await.map_err(AppError::internal)?;
-    }
+    // Feedback exposes the answer even when this evidence cannot advance memory.
+    // Keep its cooldown without overwriting a newer schedule or revision.
+    schedule.last_feedback_at = Some(at);
+    sqlx::query("UPDATE learning_memories SET stage=$2,interval_step=$3,due_at=$4,last_feedback_at=$5,last_evidence_at=$6,revision=$7 WHERE id=$1")
+        .bind(m.id).bind(schedule.stage.as_str()).bind(schedule.interval_step).bind(schedule.due_at).bind(schedule.last_feedback_at).bind(at).bind(after).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("UPDATE learning_review_items SET active=false WHERE id=$1")
         .bind(i.id)
         .execute(&mut *tx)

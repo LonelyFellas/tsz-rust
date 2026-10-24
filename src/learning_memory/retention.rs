@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 async fn sweep(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let users:Vec<Uuid>=sqlx::query_scalar("SELECT DISTINCT user_id FROM learning_memory_events WHERE accepted_at<clock_timestamp()-interval '180 days' UNION SELECT DISTINCT user_id FROM learning_review_sessions WHERE expires_at<clock_timestamp()-interval '180 days' LIMIT 20")
+    let users:Vec<Uuid>=sqlx::query_scalar("SELECT DISTINCT user_id FROM ((SELECT user_id FROM learning_memory_events WHERE accepted_at<clock_timestamp()-interval '180 days' ORDER BY accepted_at LIMIT 500) UNION ALL (SELECT user_id FROM learning_review_sessions WHERE expires_at<clock_timestamp()-interval '180 days' ORDER BY expires_at LIMIT 100)) candidates LIMIT 20")
         .fetch_all(pool).await?;
     for user in users {
         let mut tx = pool.begin().await?;

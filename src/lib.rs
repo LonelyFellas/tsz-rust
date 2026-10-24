@@ -331,9 +331,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     };
 
     if !config.deployment_smoke_only {
-        if state.learning_memory_enabled {
-            crate::learning_memory::retention::run_worker(state.pool.clone());
-        }
+        crate::learning_memory::retention::run_worker(state.pool.clone());
         crate::account_deletion::worker::run_worker(state.pool.clone());
         crate::avatar::cleanup::run_worker(state.clone());
         crate::teacher_certification::cleanup::run_worker(state.clone());

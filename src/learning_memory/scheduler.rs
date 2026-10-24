@@ -59,6 +59,16 @@ pub(super) fn advance(
     correct: bool,
     at: DateTime<Utc>,
 ) -> (Schedule, Effect) {
+    if correct
+        && let Some(current) = current.filter(|s| {
+            s.last_feedback_at
+                .is_some_and(|last| at < last + Duration::minutes(10))
+        })
+    {
+        let mut next = current.clone();
+        next.last_feedback_at = Some(at);
+        return (next, Effect::PracticeEarly);
+    }
     let Some(current) = current.filter(|s| s.stage != Stage::Unverified) else {
         return (
             Schedule {
@@ -189,6 +199,23 @@ mod tests {
             recovered.due_at,
             at + Duration::minutes(31) + Duration::days(1)
         );
+    }
+
+    #[test]
+    fn unverified_recall_must_respect_recent_feedback() {
+        let at = now();
+        let current = Schedule {
+            stage: Stage::Unverified,
+            interval_step: 0,
+            due_at: at,
+            last_feedback_at: Some(at),
+        };
+        let (next, effect) = advance(Some(&current), true, at + Duration::minutes(1));
+        assert_eq!(effect, Effect::PracticeEarly);
+        assert_eq!(next.stage, Stage::Unverified);
+        let (later, effect) = advance(Some(&next), true, at + Duration::minutes(11));
+        assert_eq!(effect, Effect::InitialCorrect);
+        assert_eq!(later.due_at, at + Duration::minutes(11) + Duration::days(1));
     }
 
     #[test]
