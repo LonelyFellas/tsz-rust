@@ -24,7 +24,7 @@ getrandom = "0.4.3"
 http = "1.4.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 jsonwebtoken = { version = "10.4.0", default-features = false, features = [
-    "rust_crypto",
+    "aws_lc_rs",
 ] }
 opendal = { version = "0.58.1", default-features = false, features = [
     "executors-tokio",
