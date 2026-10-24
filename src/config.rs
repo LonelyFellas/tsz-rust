@@ -114,6 +114,8 @@ pub struct Config {
     #[serde(default)]
     pub login_reward_enabled: bool,
     #[serde(default)]
+    pub learning_memory_enabled: bool,
+    #[serde(default)]
     pub invitation_reward_amount: Option<i64>,
     pub database_url: String,
     pub jwt_secret: String,
@@ -402,6 +404,17 @@ mod tests {
         assert!(parse(&input).unwrap().login_reward_enabled);
         input.pop();
         input.push(("LOGIN_REWARD_ENABLED", "yes"));
+        assert!(parse(&input).is_err());
+    }
+
+    #[test]
+    fn learning_memory_switch_defaults_off_and_requires_a_boolean() {
+        assert!(!parse(&valid_baseline()).unwrap().learning_memory_enabled);
+        let mut input = valid_baseline();
+        input.push(("LEARNING_MEMORY_ENABLED", "true"));
+        assert!(parse(&input).unwrap().learning_memory_enabled);
+        input.pop();
+        input.push(("LEARNING_MEMORY_ENABLED", "yes"));
         assert!(parse(&input).is_err());
     }
 

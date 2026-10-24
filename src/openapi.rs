@@ -33,6 +33,14 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::learning_memory::handler::overview,
+        crate::learning_memory::handler::enrollment,
+        crate::learning_memory::handler::items,
+        crate::learning_memory::handler::pause,
+        crate::learning_memory::handler::start,
+        crate::learning_memory::handler::detail,
+        crate::learning_memory::handler::answer,
+        crate::learning_memory::handler::reveal,
         crate::dictionary::handler::search,
         crate::dictionary::handler::detail,
         crate::dictionary::handler::audio,

@@ -30,7 +30,13 @@ async fn approved_five_for_ten_policy_and_login_reward_are_independent(pool: PgP
         .await
         .unwrap();
     let (mut state, auth, _) = setup(&timed).await;
+    sqlx::query("INSERT INTO learning_memory_enrollments(user_id,enabled) VALUES($1,true)")
+        .bind(auth.subject)
+        .execute(&timed)
+        .await
+        .unwrap();
     state.login_reward_enabled = true;
+    state.learning_memory_enabled = true;
     assert_eq!(reward(&state, &auth).await["status"], "reward_disabled");
     assert_eq!(
         call(
