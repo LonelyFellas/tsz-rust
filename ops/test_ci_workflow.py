@@ -1,5 +1,9 @@
+import os
 import pathlib
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -165,6 +169,102 @@ class CiWorkflowTests(unittest.TestCase):
             release.index(safe_directory),
             release.index('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"'),
         )
+
+    def test_release_downloads_have_bounded_mirror_fallback(self) -> None:
+        release = self._job("release-artifact")
+        match = re.search(
+            r"(?ms)^      - name: Install build dependencies\n.*?^        run: \|\n(.*?)(?=^      - name:)",
+            release,
+        )
+        self.assertIsNotNone(match)
+        script = "\n".join(line[10:] for line in match.group(1).splitlines())
+        self.assertIn("--download-only", script)
+        self.assertIn("--no-download", script)
+        self.assertIn("APT::Update::Error-Mode=any", script)
+        self.assertNotIn("mirror+file:", script)
+
+        for failure in ("none", "update", "download", "all"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                sources = root / "sources.list"
+                sources.write_text("deb http://archive.ubuntu.com/ubuntu/ jammy main\n")
+                log = root / "calls"
+                archives = root / "default-archives"
+                (archives / "partial").mkdir(parents=True)
+                timeout = root / "timeout"
+                timeout.write_text(
+                    "#!/bin/sh\n"
+                    'printf "timeout %s %s\\n" "$1" "$2" >> "$CALL_LOG"\n'
+                    "shift 2\n"
+                    'exec "$@"\n'
+                )
+                timeout.chmod(0o755)
+                apt = root / "apt-get"
+                apt.write_text(
+                    "#!/bin/sh\n"
+                    'source=$(cut -d " " -f 2 "$APT_SOURCES")\n'
+                    'printf "%s %s\\n" "$source" "$*" >> "$CALL_LOG"\n'
+                    'archives="$DEFAULT_ARCHIVES"\n'
+                    'for arg in "$@"; do\n'
+                    '  case "$arg" in Dir::Cache::archives=*) archives=${arg#*=} ;; esac\n'
+                    "done\n"
+                    'case "$*" in\n'
+                    '  *update) rm -f "$DEFAULT_ARCHIVES"/*.deb "$DEFAULT_ARCHIVES"/partial/*.deb ;;\n'
+                    '  *--no-download*) test -f "$archives/complete.deb"; exit $? ;;\n'
+                    "esac\n"
+                    '[ "$FAILURE" != all ] || exit 100\n'
+                    'case "$source:$FAILURE:$*" in\n'
+                    "  *azure.archive*:update:*update) exit 124 ;;\n"
+                    '  *azure.archive*:download:*--download-only*) touch "$archives/progress.deb"; exit 124 ;;\n'
+                    '  *:download:*--download-only*) test -f "$archives/progress.deb" || exit 100 ;;\n'
+                    "esac\n"
+                    'case "$*" in *--download-only*) touch "$archives/complete.deb" ;; esac\n'
+                )
+                apt.chmod(0o755)
+                sed = root / "sed"
+                sed.write_text(
+                    f"#!{sys.executable}\n"
+                    "import subprocess, sys\n"
+                    "args = sys.argv[1:]\n"
+                    "if sys.platform == 'darwin': args.insert(1, '')\n"
+                    "raise SystemExit(subprocess.call(['/usr/bin/sed', *args]))\n"
+                )
+                sed.chmod(0o755)
+                result = subprocess.run(
+                    ["/bin/sh"],
+                    input=script.replace("/etc/apt/sources.list", str(sources)),
+                    text=True,
+                    capture_output=True,
+                    env={
+                        **os.environ,
+                        "PATH": f"{root}:{os.environ['PATH']}",
+                        "CALL_LOG": str(log),
+                        "APT_SOURCES": str(sources),
+                        "DEFAULT_ARCHIVES": str(archives),
+                        "TMPDIR": str(root),
+                        "FAILURE": failure,
+                    },
+                    timeout=10,
+                )
+                calls = log.read_text().splitlines()
+                self.assertTrue(all(
+                    line in ("timeout --kill-after=5s 30s", "timeout --kill-after=5s 90s")
+                    for line in calls if line.startswith("timeout ")
+                ))
+                downloads = [line for line in calls if "--download-only" in line]
+                installs = [line for line in calls if "--no-download" in line]
+                if failure == "all":
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(installs, [])
+                    self.assertEqual(len([line for line in calls if line.endswith(" update")]), 3)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(len(installs), 1)
+                    self.assertIn("--download-only", calls[-2])
+                    self.assertIn("--no-download", calls[-1])
+                    self.assertEqual(len(downloads), 2 if failure == "download" else 1)
+                    expected_host = "azure.archive.ubuntu.com" if failure == "none" else "archive.ubuntu.com"
+                    self.assertTrue(installs[0].startswith(f"http://{expected_host}/ubuntu/ "))
 
     def test_ci12_quality_and_unit_doc_keep_every_original_gate(self) -> None:
         quality = self._job("quality")
