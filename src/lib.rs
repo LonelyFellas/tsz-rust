@@ -11,6 +11,7 @@ pub mod deployment_migrations;
 pub mod dictionary;
 pub mod error;
 pub mod invitations;
+mod learning_memory;
 pub mod learning_tasks;
 pub mod lexicon;
 pub mod openapi;
@@ -94,6 +95,7 @@ pub fn router(state: AppState) -> Router {
         .merge(dictionary::handler::router())
         .merge(wordlists::handler::router())
         .merge(learning_tasks::handler::router())
+        .merge(learning_memory::handler::router())
         .merge(avatar::router())
         .merge(teacher_certification::router())
         .nest(admin::ADMIN_MOUNT, admin::router(state.clone()))
@@ -320,6 +322,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         cookie_secure: config.cookie_secure,
         invitation_reward_amount,
         login_reward_enabled: config.login_reward_enabled,
+        learning_memory_enabled: config.learning_memory_enabled,
         object_storage,
         test_resources: config.test_resources.map(Arc::new),
         avatar_public_base_url: config.avatar_public_base_url,
@@ -328,6 +331,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
     };
 
     if !config.deployment_smoke_only {
+        crate::learning_memory::retention::run_worker(state.pool.clone());
         crate::account_deletion::worker::run_worker(state.pool.clone());
         crate::avatar::cleanup::run_worker(state.clone());
         crate::teacher_certification::cleanup::run_worker(state.clone());

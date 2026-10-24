@@ -144,6 +144,7 @@ pub async fn answer(
             id,
             input,
             state.invitation_reward_amount.is_some(),
+            state.learning_memory_enabled,
         )
         .await?,
     ))

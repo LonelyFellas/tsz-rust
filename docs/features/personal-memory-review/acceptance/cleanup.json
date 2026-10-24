@@ -1,0 +1,11 @@
+{
+  "date": "2026-10-24",
+  "status": "completed",
+  "scope": "Only this task's dedicated local test cluster and fixtures",
+  "browser": {"logged_out": true, "pending_review_keys": 0, "local_and_session_storage_cleared": true, "navigated_to_blank": true, "viewport_restored": true},
+  "services": {"web_3077_stopped": true, "api_8396_stopped": true, "postgres_55667_stopped": true, "redis_55668_stopped": true},
+  "removed": ["dedicated PostgreSQL cluster including integration test databases and browser fixture database", "dedicated Redis process and scratch", "synthetic account and content fixtures", "temporary JWT secrets and login credentials", "temporary backend binaries", "task-only helper scripts", "task-only preview launch entries", "accidental duplicate OpenAPI export outside backend worktree"],
+  "preserved": ["frontend and backend task worktrees with all uncommitted code", "final design and redacted verification receipts", "screenshots", "shared Cargo target and pnpm store", "other sessions and their launch configurations"],
+  "remaining_task_test_data": 0,
+  "remote_services_touched": false
+}

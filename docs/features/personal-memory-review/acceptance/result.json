@@ -1,0 +1,63 @@
+{
+  "date": "2026-10-24",
+  "status": "implemented_locally",
+  "backend_base": "72ff5b6efcf92ab30dceff2fbddf0083f920f070",
+  "frontend_base": "39f78ef62da7f9535a8c3d34f429b8ceaa3ea09d",
+  "source": "base commits plus uncommitted task changes",
+  "backend_binary_sha256": "902a2cf2a91e6d760c6cb66174fd9c8a4cd8b720b5087226265c15b8bbf8074d",
+  "web_build_id": "GxRfc9zVKNTIqZ9_MRH9C",
+  "openapi_sha256": "51c6041fb7355168d711c3001718348422b8af90a5d2e3a21d7f58792e7de2ad",
+  "environment": {
+    "web": "http://localhost:3077",
+    "backend": "http://127.0.0.1:8396",
+    "postgres": "127.0.0.1:55667/tsz_memory_phase1",
+    "redis": "127.0.0.1:55668/0",
+    "web_mode": "production build and next start",
+    "api_mocked": false,
+    "sms_sent": false,
+    "data": "dedicated local cluster and synthetic account/content fixtures"
+  },
+  "verification": {
+    "backend_lib_tests": {"passed": 413, "failed": 0},
+    "memory_review_integration": {"passed": 10, "failed": 0},
+    "existing_learning_reward_targets": {"passed": 51, "failed": 0},
+    "backend_fmt": "passed",
+    "backend_clippy_all_targets_all_features_deny_warnings": "passed",
+    "ci_inventory_checks": {"passed": 17, "failed": 0},
+    "web_tests": {"passed": 765, "failed": 0},
+    "api_client_tests": {"passed": 602, "failed": 0},
+    "web_typecheck": "passed",
+    "types_typecheck": "passed",
+    "web_lint": "passed with two pre-existing navigation warnings",
+    "api_client_lint": "passed",
+    "web_production_build": "passed",
+    "old_openapi_paths_changed": 0,
+    "old_openapi_schemas_changed": 0,
+    "new_api_paths": 8
+  },
+  "browser": {
+    "password_login": "passed without OTP",
+    "enable_memory": "passed",
+    "task_wrong_answer_still_completes": "passed",
+    "task_first_accuracy_unchanged": "0 percent",
+    "retest_correct_next_interval": "24 hours",
+    "due_review_correct_intervals": ["3 days", "7 days"],
+    "reload_preserves_completion": "passed",
+    "mobile_width": 375,
+    "mobile_scroll_width": 375,
+    "dark_mode": "passed",
+    "backend_final_errors": 0,
+    "time_control": "only synthetic memory timestamps adjusted; service and business clocks unchanged"
+  },
+  "final_database_observation": {
+    "memory_count": 1,
+    "stage": "reviewing",
+    "interval_step": 2,
+    "original_task_completions": 1,
+    "original_task_correct_count": 0,
+    "review_attempts": 3,
+    "reward_settlements": 0
+  },
+  "not_performed": ["commit", "push", "deployment", "production enablement", "production load test", "old backend binary mixed-version browser test"],
+  "cleanup": "completed; see cleanup.json"
+}

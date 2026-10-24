@@ -468,6 +468,7 @@ pub async fn answer(
     id: Uuid,
     input: SubmitLearningAnswer,
     invitation_rewards_enabled: bool,
+    memory_enabled: bool,
 ) -> Result<LearningAnswerReceipt, AppError> {
     let h = hash(&input)?;
     let mut receipt = begin(pool, auth, &[]).await?;
@@ -588,6 +589,17 @@ pub async fn answer(
     }
     if completed && !access.grace.is_empty() {
         super::plans::cancel_cycles(&mut tx, task_id).await?;
+    }
+    if memory_enabled {
+        crate::learning_memory::record_answer(
+            &mut tx,
+            auth.subject,
+            &row,
+            q,
+            answer_id,
+            &final_access,
+        )
+        .await?;
     }
     learner(&mut tx, auth).await?;
     let end = now(&mut tx).await?;

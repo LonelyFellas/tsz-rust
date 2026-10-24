@@ -168,6 +168,8 @@ pub struct QuestionRow {
     pub source_public_generation: Option<i64>,
     pub entry_id: Uuid,
     pub entry_archive_generation: i64,
+    pub pos_id: Uuid,
+    pub sense_id: Uuid,
     pub prompt_snapshot: serde_json::Value,
     pub answer_snapshot: serde_json::Value,
 }
