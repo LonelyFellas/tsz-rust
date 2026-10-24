@@ -220,6 +220,76 @@ async fn audio_insufficient_balance_and_cost_conflict_leave_no_save(pool: PgPool
 }
 
 #[sqlx::test]
+async fn audio_preparation_failures_roll_back_create_and_update(pool: PgPool) {
+    let (state, auth, _) = fixture(&pool, 10).await;
+    let id = Uuid::now_v7();
+    let mut draft = body(vec![item(id, "sound")], &[id], "2");
+    draft.as_object_mut().unwrap().remove("audio_generation");
+    let saved = call(&state, &auth, "POST", "/api/v1/me/wordlists", draft).await;
+    assert_eq!(saved.0, StatusCode::OK, "{}", saved.1);
+    let list = saved.1["id"].as_str().unwrap();
+
+    for failure in ["invalid", "storage", "provider", "voices"] {
+        let mut unavailable = state.clone();
+        match failure {
+            "storage" => unavailable.object_storage = StorageRegistry::default(),
+            "provider" => unavailable.speech_provider = None,
+            "voices" => {
+                sqlx::query("UPDATE speech.voices SET enabled=false")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let generation = if failure == "invalid" {
+            json!({"item_ids":[id,id],"expected_cost":"2"})
+        } else {
+            json!({"item_ids":[id],"expected_cost":"2"})
+        };
+        let expected_code = match failure {
+            "invalid" => "validation_failed",
+            "storage" => "speech_storage_unavailable",
+            "provider" => "speech_provider_unavailable",
+            _ => "speech_voice_not_found",
+        };
+        let mut create = body(vec![item(id, "sound")], &[id], "2");
+        create["audio_generation"] = generation.clone();
+        let update = json!({
+            "idempotency_key":Uuid::now_v7(),"expected_revision":1,
+            "content":{"name":"must roll back","items":[{"item_id":id,"custom_word":{"word":"sound","definition":"释义"}}]},
+            "note_updates":[],"audio_generation":generation
+        });
+        for (method, path, input) in [
+            ("POST", "/api/v1/me/wordlists".to_owned(), create),
+            ("PUT", format!("/api/v1/me/wordlists/{list}"), update),
+        ] {
+            let result = call(&unavailable, &auth, method, &path, input).await;
+            assert_eq!(
+                result.0,
+                if failure == "invalid" {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                },
+                "{}",
+                result.1
+            );
+            assert_eq!(result.1["code"], expected_code, "{}", result.1);
+        }
+    }
+    assert_eq!(balance(&pool, auth.subject).await, 10);
+    let unchanged: (i64, i64, String, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM wordlists),(SELECT count(*) FROM wordlist_audio_jobs),name,revision FROM wordlists WHERE id=$1",
+    )
+    .bind(Uuid::parse_str(list).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unchanged, (1, 0, "自定义语音".to_owned(), 1));
+}
+
+#[sqlx::test]
 async fn audio_partial_failure_refunds_once_even_after_account_disabled(pool: PgPool) {
     let (state, auth, provider) = fixture(&pool, 10).await;
     provider.fail.store(true, Ordering::SeqCst);

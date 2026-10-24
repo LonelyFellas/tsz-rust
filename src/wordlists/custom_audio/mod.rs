@@ -23,21 +23,18 @@ use dto::{AudioGeneration, SavedVoice};
 
 pub const PRICE: i64 = 2;
 
-pub struct GenerationContext {
+struct GenerationContext {
     voices: Vec<SavedVoice>,
-    pub test_run: Option<String>,
+    test_run: Option<String>,
 }
 
-pub async fn prepare(
+async fn prepare(
     tx: &mut Tx<'_>,
     state: &AppState,
     auth: &AuthUser,
     headers: &HeaderMap,
-    request: Option<&AudioGeneration>,
-) -> Result<Option<GenerationContext>, AppError> {
-    let Some(request) = request else {
-        return Ok(None);
-    };
+    request: &AudioGeneration,
+) -> Result<GenerationContext, AppError> {
     if request.item_ids.len() > 10000
         || request.item_ids.iter().collect::<HashSet<_>>().len() != request.item_ids.len()
         || request
@@ -70,7 +67,7 @@ pub async fn prepare(
             "默认发音人暂不可用",
         ));
     }
-    Ok(Some(GenerationContext {
+    Ok(GenerationContext {
         voices: rows
             .into_iter()
             .map(|(provider_voice_id, locale, provider_version)| SavedVoice {
@@ -80,7 +77,7 @@ pub async fn prepare(
             })
             .collect(),
         test_run,
-    }))
+    })
 }
 
 pub(super) fn storage(
@@ -116,11 +113,13 @@ pub async fn reconcile_in(tx: &mut Tx<'_>, id: Uuid) -> Result<(), AppError> {
 
 pub async fn generate_in(
     tx: &mut Tx<'_>,
+    state: &AppState,
     auth: &AuthUser,
+    headers: &HeaderMap,
     id: Uuid,
     request: &AudioGeneration,
-    context: &GenerationContext,
 ) -> Result<(), AppError> {
+    let context = prepare(tx, state, auth, headers, request).await?;
     let selected: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
         "SELECT i.item_id,btrim(i.custom_word->>'word'),j.state FROM wordlist_items i LEFT JOIN wordlist_audio_jobs j ON j.wordlist_id=i.wordlist_id AND j.item_id=i.item_id AND j.is_current WHERE i.wordlist_id=$1 AND i.item_id=ANY($2) AND i.custom_word IS NOT NULL ORDER BY i.item_id"
     ).bind(id).bind(&request.item_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;

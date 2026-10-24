@@ -294,12 +294,7 @@ pub async fn create(
         sqlx::query("INSERT INTO wordlists(id,owner_user_id,name,create_key,create_hash) VALUES($1,$2,$3,$4,$5)").bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.idempotency_key).bind(request_hash).execute(&mut *tx).await.map_err(AppError::internal)?;
         write_items(&mut tx, id, &items).await?;
         if let Some(request) = &input.audio_generation {
-            let audio =
-                super::custom_audio::prepare(&mut tx, state, auth, headers, Some(request)).await?;
-            let context = audio
-                .as_ref()
-                .ok_or_else(|| invalid("语音生成参数未就绪"))?;
-            super::custom_audio::generate_in(&mut tx, auth, id, request, context).await?;
+            super::custom_audio::generate_in(&mut tx, state, auth, headers, id, request).await?;
         }
         let item_ids: Vec<_> = items.iter().map(|i| i.item_id).collect();
         let notes: Vec<_> = input
@@ -453,12 +448,7 @@ pub async fn update(
                 "请先撤回词表再生成语音",
             ));
         }
-        let audio =
-            super::custom_audio::prepare(&mut tx, state, auth, headers, Some(request)).await?;
-        let context = audio
-            .as_ref()
-            .ok_or_else(|| invalid("语音生成参数未就绪"))?;
-        super::custom_audio::generate_in(&mut tx, auth, id, request, context).await?;
+        super::custom_audio::generate_in(&mut tx, state, auth, headers, id, request).await?;
         if input.content.is_none() && !request.item_ids.is_empty() {
             sqlx::query(
                 "UPDATE wordlists SET revision=revision+1,updated_at=clock_timestamp() WHERE id=$1",
