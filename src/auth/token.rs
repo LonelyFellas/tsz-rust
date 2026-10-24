@@ -131,6 +131,60 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn hs256_signatures_remain_compatible_with_existing_tokens() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        // 固定向量由独立 HMAC-SHA256 实现生成，防止更换加密后端后只测到自签自验。
+        for (realm, signature) in [
+            (Realm::Web, "_jqgSTnuOWplCm6IFcc6ZtRtqPhbRM6g7FZsjacRaXQ"),
+            (Realm::Admin, "RsYkLaGuYVtfTgypaZU7HBxC4XczgcILh8AhSly7ga0"),
+        ] {
+            let manager = TokenManager::new("test-secret", realm, Duration::minutes(5));
+            let payload = TokenPayload {
+                sub: Uuid::from_u128(1),
+                aud: realm.as_aud().to_owned(),
+                role: "student".to_owned(),
+                iat: 1_700_000_000,
+                exp: 4_102_444_800,
+                security_version: Some(7),
+            };
+            let token = format!(
+                "{}.{}.{signature}",
+                URL_SAFE_NO_PAD.encode(br#"{"typ":"JWT","alg":"HS256"}"#),
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap()),
+            );
+            assert_eq!(
+                encode(
+                    &Header::new(Algorithm::HS256),
+                    &payload,
+                    &manager.encoding_key
+                )
+                .unwrap(),
+                token,
+            );
+            let claims = manager.parse(&token).unwrap();
+            assert_eq!(claims.subject, payload.sub);
+            assert_eq!(claims.role, payload.role);
+            assert_eq!(claims.security_version, 7);
+
+            let wrong_key = TokenManager::new("different-secret", realm, Duration::minutes(5));
+            assert!(matches!(wrong_key.parse(&token), Err(TokenError::Invalid)));
+            let other_realm = match realm {
+                Realm::Web => Realm::Admin,
+                Realm::Admin => Realm::Web,
+            };
+            let other = TokenManager::new("test-secret", other_realm, Duration::minutes(5));
+            assert!(matches!(other.parse(&token), Err(TokenError::Invalid)));
+            let tampered = format!(
+                "{}A{}",
+                &token[..token.rfind('.').unwrap() + 1],
+                &signature[1..]
+            );
+            assert!(matches!(manager.parse(&tampered), Err(TokenError::Invalid)));
+        }
+    }
+
+    #[test]
     fn both_realms_only_accept_hs256() {
         for realm in [Realm::Web, Realm::Admin] {
             let manager = TokenManager::new("test-secret", realm, Duration::minutes(5));
