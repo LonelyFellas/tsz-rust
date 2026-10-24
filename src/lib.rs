@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod coins;
 pub mod config;
 pub mod constant;
+pub mod dashboard;
 pub mod deployment_migrations;
 pub mod dictionary;
 pub mod error;
