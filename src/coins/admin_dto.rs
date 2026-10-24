@@ -76,7 +76,13 @@ pub struct ManualCoinOperation {
     pub id: Uuid,
     pub owner_type: OwnerType,
     pub owner_id: Uuid,
+    /// Current account name, included only when requested and available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_display_name: Option<String>,
     pub actor_id: Uuid,
+    /// Current operator name, included only when requested and available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_display_name: Option<String>,
     pub source_type: String,
     pub event_id: String,
     #[schema(pattern = "^-?[1-9][0-9]{0,18}$")]
@@ -99,9 +105,15 @@ pub struct ManualCoinOperationPage {
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
 pub struct CoinOperationsQuery {
+    /// Include current account and operator names. Defaults to false for older clients.
+    pub include_names: Option<bool>,
     pub owner_type: Option<OwnerType>,
     pub owner_id: Option<Uuid>,
     pub actor_id: Option<Uuid>,
+    /// Account name fragment or exact account UUID.
+    pub owner_search: Option<String>,
+    /// Operator name fragment or exact administrator UUID.
+    pub actor_search: Option<String>,
     /// manual_purchase, manual_reward or manual_reversal.
     pub source_type: Option<String>,
     pub created_from: Option<DateTime<Utc>>,

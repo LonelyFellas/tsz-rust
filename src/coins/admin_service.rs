@@ -112,14 +112,19 @@ async fn authorize(
     Ok(())
 }
 // SQL fragments below are fixed literals selected by typed enums; all request values are bound.
-const PROJECTION: &str = "SELECT o.id,w.owner_type,w.owner_id,o.actor_id,o.source_type,o.source_id AS event_id,e.delta::text AS delta,e.balance_after::text AS balance_after,o.reason,o.evidence_ref,o.reverses_operation_id,r.id AS reversed_by_operation_id,o.created_at FROM coin_operations o JOIN coin_entries e ON e.operation_id=o.id JOIN coin_wallets w ON w.id=e.wallet_id LEFT JOIN coin_operations r ON r.reverses_operation_id=o.id";
+const OPERATION_FROM: &str = "FROM coin_operations o JOIN coin_entries e ON e.operation_id=o.id JOIN coin_wallets w ON w.id=e.wallet_id LEFT JOIN coin_operations r ON r.reverses_operation_id=o.id LEFT JOIN users u ON w.owner_type='user' AND u.id=w.owner_id LEFT JOIN admins a ON w.owner_type='admin' AND a.id=w.owner_id LEFT JOIN admins actor ON actor.id=o.actor_id";
+const PROJECTION: &str = "SELECT o.id,w.owner_type,w.owner_id,COALESCE(u.display_name,a.display_name) AS owner_display_name,o.actor_id,actor.display_name AS actor_display_name,o.source_type,o.source_id AS event_id,e.delta::text AS delta,e.balance_after::text AS balance_after,o.reason,o.evidence_ref,o.reverses_operation_id,r.id AS reversed_by_operation_id,o.created_at";
 async fn operation(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
 ) -> Result<ManualCoinOperation, AppError> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!("{PROJECTION} WHERE o.id=$1 AND o.source_type IN ('manual_purchase','manual_reward','manual_reversal')")))
+    let mut result: ManualCoinOperation = sqlx::query_as(sqlx::AssertSqlSafe(format!("{PROJECTION} {OPERATION_FROM} WHERE o.id=$1 AND o.source_type IN ('manual_purchase','manual_reward','manual_reversal')")))
         .bind(id).fetch_optional(&mut **tx).await.map_err(AppError::internal)?
-        .ok_or_else(|| AppError::not_found("manual operation not found"))
+        .ok_or_else(|| AppError::not_found("manual operation not found"))?;
+    // Write responses retain the original shape accepted by older strict clients.
+    result.owner_display_name = None;
+    result.actor_display_name = None;
+    Ok(result)
 }
 async fn audit_once(
     tx: &mut Transaction<'_, Postgres>,
@@ -327,15 +332,25 @@ pub async fn operations(
             "invalid operation filters",
         ));
     }
+    let owner_search = query.owner_search.as_deref().map(str::trim);
+    let actor_search = query.actor_search.as_deref().map(str::trim);
+    if [owner_search, actor_search]
+        .into_iter()
+        .flatten()
+        .any(|value| value.chars().count() > 200)
+    {
+        return Err(AppError::bad_request(
+            ErrorCode::InvalidQuery,
+            "operation search exceeds 200 characters",
+        ));
+    }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     lock_authorization(&mut tx, auth)
         .await?
         .require("coins.access")?;
-    let filter = " WHERE o.source_type IN ('manual_purchase','manual_reward','manual_reversal') AND ($1::text IS NULL OR w.owner_type=$1) AND ($2::uuid IS NULL OR w.owner_id=$2) AND ($3::uuid IS NULL OR o.actor_id=$3) AND ($4::text IS NULL OR o.source_type=$4) AND ($5::timestamptz IS NULL OR o.created_at>=$5) AND ($6::timestamptz IS NULL OR o.created_at<=$6)";
-    let total:i64=sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM coin_operations o JOIN coin_entries e ON e.operation_id=o.id JOIN coin_wallets w ON w.id=e.wallet_id {filter}")))
-        .bind(query.owner_type).bind(query.owner_id).bind(query.actor_id).bind(&query.source_type).bind(query.created_from).bind(query.created_to).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
-    let items = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{PROJECTION} {filter} ORDER BY o.created_at DESC,o.id DESC LIMIT $7 OFFSET $8"
+    let filter = " WHERE o.source_type IN ('manual_purchase','manual_reward','manual_reversal') AND ($1::text IS NULL OR w.owner_type=$1) AND ($2::uuid IS NULL OR w.owner_id=$2) AND ($3::uuid IS NULL OR o.actor_id=$3) AND ($4::text IS NULL OR o.source_type=$4) AND ($5::timestamptz IS NULL OR o.created_at>=$5) AND ($6::timestamptz IS NULL OR o.created_at<=$6) AND ($7::text IS NULL OR $7='' OR w.owner_id::text=lower($7) OR strpos(lower(COALESCE(u.display_name,a.display_name)),lower($7))>0) AND ($8::text IS NULL OR $8='' OR o.actor_id::text=lower($8) OR strpos(lower(actor.display_name),lower($8))>0)";
+    let total: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) {OPERATION_FROM} {filter}"
     )))
     .bind(query.owner_type)
     .bind(query.owner_id)
@@ -343,12 +358,34 @@ pub async fn operations(
     .bind(&query.source_type)
     .bind(query.created_from)
     .bind(query.created_to)
+    .bind(owner_search)
+    .bind(actor_search)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    let mut items: Vec<ManualCoinOperation> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{PROJECTION} {OPERATION_FROM} {filter} ORDER BY o.created_at DESC,o.id DESC LIMIT $9 OFFSET $10"
+    )))
+    .bind(query.owner_type)
+    .bind(query.owner_id)
+    .bind(query.actor_id)
+    .bind(&query.source_type)
+    .bind(query.created_from)
+    .bind(query.created_to)
+    .bind(owner_search)
+    .bind(actor_search)
     .bind(i64::from(size))
     .bind(i64::from(page - 1) * i64::from(size))
     .fetch_all(&mut *tx)
     .await
     .map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
+    if query.include_names != Some(true) {
+        for item in &mut items {
+            item.owner_display_name = None;
+            item.actor_display_name = None;
+        }
+    }
     Ok(ManualCoinOperationPage {
         items,
         pagination: meta(page, size, total),
