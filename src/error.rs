@@ -45,6 +45,7 @@ pub enum ErrorCode {
     LearningInsufficientQuestions,
     LearningAlreadyAnswered,
     WordListConflict,
+    WordListTipLimit,
     WordListAudioCostChanged,
     AccountDeletionUnsettledAudio,
     WordListEntryUnavailable,
@@ -162,7 +163,7 @@ pub struct ErrorDescriptor {
 }
 
 impl ErrorCode {
-    pub const ALL: [Self; 139] = [
+    pub const ALL: [Self; 140] = [
         Self::NotFound,
         Self::InvalidJson,
         Self::InvalidRequestBody,
@@ -197,6 +198,7 @@ impl ErrorCode {
         Self::LearningInsufficientQuestions,
         Self::LearningAlreadyAnswered,
         Self::WordListConflict,
+        Self::WordListTipLimit,
         Self::WordListAudioCostChanged,
         Self::AccountDeletionUnsettledAudio,
         Self::WordListEntryUnavailable,
@@ -485,6 +487,11 @@ impl ErrorCode {
             Self::WordListConflict => (
                 "word_list_conflict",
                 "Word list conflict",
+                StatusCode::CONFLICT,
+            ),
+            Self::WordListTipLimit => (
+                "word_list_tip_limit",
+                "Word list tip limit reached",
                 StatusCode::CONFLICT,
             ),
             Self::WordListAudioCostChanged => (

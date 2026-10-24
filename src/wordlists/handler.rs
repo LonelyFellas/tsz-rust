@@ -42,6 +42,10 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(super::tips::create),
         )
         .route("/api/v1/me/wordlist-tips", get(super::tips::history))
+        .route(
+            "/api/v1/me/wordlist-tip-states",
+            get(super::tips::tip_states),
+        )
         .route("/api/v1/wordlists", get(public_list))
         .route("/api/v1/wordlists/recommended", get(recommended))
         .route(

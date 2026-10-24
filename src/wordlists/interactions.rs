@@ -27,7 +27,7 @@ pub struct InteractionQuery {
     pub ids: String,
 }
 impl InteractionQuery {
-    fn parse(&self) -> Result<Vec<Uuid>, AppError> {
+    pub fn parse(&self) -> Result<Vec<Uuid>, AppError> {
         let ids: Result<Vec<_>, _> = self.ids.split(',').map(str::parse::<Uuid>).collect();
         match ids {
             Ok(ids) if !ids.is_empty() && ids.len() <= 100 => Ok(ids),

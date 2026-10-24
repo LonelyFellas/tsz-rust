@@ -77,6 +77,7 @@ use utoipa::{
         crate::wordlists::tips::receipt,
         crate::wordlists::tips::create,
         crate::wordlists::tips::history,
+        crate::wordlists::tips::tip_states,
         crate::wordlists::handler::submit,
         crate::wordlists::handler::withdraw,
         crate::wordlists::handler::reviews,

@@ -1,5 +1,6 @@
 use super::{
     dto::{WordlistQuery, WordlistState},
+    interactions::InteractionQuery,
     service,
 };
 use crate::{
@@ -12,20 +13,31 @@ use crate::{
     error::{AppError, ErrorCode},
     state::AppState,
 };
-use axum::{Json, extract::State};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderValue, header::CACHE_CONTROL},
+    response::{IntoResponse, Response},
+};
 use chrono::{DateTime, Utc};
 use coins::admin_service::coin_error;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::ToSchema;
 use uuid::Uuid;
+/// 每人对每份词表累计可投出的最大天生币数量。
+pub const TIP_LIMIT: i64 = 2;
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWordlistTip {
     pub event_id: Uuid,
     pub idempotency_key: Uuid,
+    /// 新事件只允许 1 或 2；历史成功事件仍可用原金额重放。
     #[schema(pattern = "^[1-9][0-9]{0,18}$")]
     pub amount: String,
+    /// 同时为该词表点赞；只在为 true 时参与请求签名，缺省不改变历史重试语义。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub like: bool,
 }
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +124,13 @@ pub async fn transfer(
         .map_err(coin_error)?;
     service::lock_user(&mut tx, auth).await?;
     available_wallets(&mut tx, &[auth.subject, author]).await?;
+    super::library::lock(&mut tx, auth.subject).await?;
+    // Same order as interaction writes: per-list advisory before taking the list lock.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!("wordlist-interaction:{}:{id}", auth.subject))
+        .execute(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
     let list = service::lock_list(&mut tx, id, None, true).await?;
     if list.state != WordlistState::Published {
         return Err(AppError::not_found("wordlist not found"));
@@ -171,6 +190,28 @@ pub async fn transfer(
     if exists {
         return Err(coin_error(CoinError::SourceConflict));
     }
+    // New limits apply only after replay lookup, preserving historical successful intents.
+    if value > TIP_LIMIT {
+        return Err(coin_error(CoinError::InvalidAmount));
+    }
+    // Keep the numeric aggregate in SQL: historical totals may exceed an i64.
+    // The wordlist write lock serializes the total check with new financial facts.
+    let exceeds_limit: bool = sqlx::query_scalar(
+        "SELECT COALESCE(sum(amount),0)>$3::bigint FROM wordlist_tips WHERE payer_user_id=$1 AND wordlist_id=$2",
+    )
+    .bind(auth.subject)
+    .bind(id)
+    .bind(TIP_LIMIT - value)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
+    if exceeds_limit {
+        return Err(AppError::conflict(
+            ErrorCode::WordListTipLimit,
+            None,
+            "这份词表累计最多投 2 枚",
+        ));
+    }
     let ctx = Context {
         actor: Actor::Account(payer),
         idempotency_scope: format!("wordlist-tip:{}", auth.subject),
@@ -184,6 +225,12 @@ pub async fn transfer(
         .await
         .map_err(coin_error)?;
     sqlx::query("INSERT INTO wordlist_tips(event_id,wordlist_id,payer_user_id,author_user_id,amount,request_key,request_hash,operation_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)").bind(input.event_id).bind(id).bind(auth.subject).bind(author).bind(value).bind(input.idempotency_key).bind(hash).bind(receipt.operation_id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    if input.like {
+        let inserted = sqlx::query("INSERT INTO wordlist_interactions(wordlist_id,user_id,kind) VALUES($1,$2,'like') ON CONFLICT DO NOTHING").bind(id).bind(auth.subject).execute(&mut *tx).await.map_err(AppError::internal)?;
+        if inserted.rows_affected() == 1 {
+            super::notifications::notify(&mut tx, author, auth.subject, id, None).await?;
+        }
+    }
     super::notifications::notify(&mut tx, author, auth.subject, id, Some(value)).await?;
     let result = sqlx::query_as(sqlx::AssertSqlSafe(format!("{TIP} WHERE event_id=$1")))
         .bind(input.event_id)
@@ -194,6 +241,18 @@ pub async fn transfer(
     crate::account_deletion::ensure_not_effective_in(&mut tx, author).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(result)
+}
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistTipState {
+    pub wordlist_id: Uuid,
+    #[schema(pattern = "^(0|[1-9][0-9]*)$")]
+    pub tip_amount: String,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WordlistTipStates {
+    pub items: Vec<WordlistTipState>,
 }
 pub async fn records(
     pool: &PgPool,
@@ -228,6 +287,25 @@ pub async fn create(
     ApiJson(input): ApiJson<CreateWordlistTip>,
 ) -> Result<Json<WordlistTip>, AppError> {
     Ok(Json(transfer(&state.pool, &auth, id, input).await?))
+}
+#[utoipa::path(get,path="/api/v1/me/wordlist-tip-states",tag="wordlists",params(InteractionQuery),security(("bearer_auth"=[])),responses((status=200,description="本人对各词表累计投币数量，不缓存；仅供展示，实际限额以投币事务为准",body=WordlistTipStates),(status=400,description="查询无效"),(status=401,description="未登录"),(status=403,description="账户不可用")))]
+pub async fn tip_states(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ApiQuery(query): ApiQuery<InteractionQuery>,
+) -> Result<Response, AppError> {
+    let ids = query.parse()?;
+    let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
+    service::lock_user(&mut tx, &auth).await?;
+    let items = sqlx::query_as("SELECT x.id AS wordlist_id,COALESCE((SELECT sum(t.amount) FROM wordlist_tips t WHERE t.wordlist_id=x.id AND t.payer_user_id=$2),0)::text AS tip_amount FROM (SELECT DISTINCT unnest($1::uuid[]) AS id) x ORDER BY x.id")
+        .bind(ids).bind(auth.subject).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
+    tx.commit().await.map_err(AppError::internal)?;
+    let mut response = Json(WordlistTipStates { items }).into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    Ok(response)
 }
 #[utoipa::path(get,path="/api/v1/me/wordlist-tips",tag="wordlists",params(WordlistQuery),security(("bearer_auth"=[])),responses((status=403,description="需要先绑定手机号"),(status=200,description="本人投出与收到记录，不泄露私密词表新名称",body=WordlistTipPage),(status=400,description="查询无效"),(status=401,description="会话无效")))]
 pub async fn history(

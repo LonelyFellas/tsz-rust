@@ -54,6 +54,12 @@ OPENAPI_SOURCE=/absolute/path/to/backend-worktree/docs/openapi.json pnpm --filte
 
 旧 Web/Admin 的严格 runtime 可继续接受候选后端的默认标准/审核响应；不能向旧消费者无条件发送完整字段。发布顺序为后端 → Web，Admin 默认读取不变。新 Web 连接旧 API 时标准默认请求仍可读，完整/新增排序参数会被拒绝，页面明确提示失败并允许切回默认；不能前端先开放这些能力。本批无迁移，回退 Web 不改变数据，仍须保留已发布的 coins/注销 schema 与安全边界。需求和验收集中在前端 `docs/features/coins-system/wordlist-foundation-design.md` 与 `wordlists-tips-acceptance.md`。
 
+## 词表投币
+
+`POST /wordlists/{id}/tips` 的新事件 `amount` 只允许字符串 `"1"`、`"2"`，每人每词表累计最多 2 枚（可 1+1），超额返回 `409 word_list_tip_limit`。可选 `like` 默认 false，true 时与投币同事务置赞；已赞不重复通知，失败整体回滚。原响应 shape、全额作者收入及历史事实不变，无经验奖励。历史成功请求仍能原金额重放，省略/false 不改变旧请求 hash，true 参与 hash；回放不恢复后来取消的赞。
+
+新增鉴权 `GET /me/wordlist-tip-states?ids=<1–100 个逗号分隔 UUID>`，响应 `{items:[{wordlist_id,tip_amount:string}]}`，ID 去重并返回本人累计，无记录为 `"0"`，历史累计可大于 2；`Cache-Control: private, no-store`。无迁移，先发布后端再接入前端；旧前端新发 3 枚及以上会被拒绝，新前端连接旧后端时不得把新状态端点的 404 当作零累计。
+
 ## 学生学习任务（LT-01～LT-04）
 
 `/me/learning-tasks` 与 `/me/learning-runs` 提供学生自建每日/长期任务、出题预览、固定轮次、首次有效作答和历史。题型为中文释义拼写英文，必须具备学生资格、已绑定手机号和真实学习设置。题目与判定由服务端固定；全部有效作答即完成，正确率独立统计，不发放 coins。
