@@ -275,6 +275,7 @@ use utoipa::{
         crate::lexicon::handler::commands::rollback_publication,
         crate::lexicon::handler::commands::restore_draft_from_publication,
         crate::lexicon::handler::query::search_component_targets,
+        crate::speech::generated::generate,
         crate::lexicon::audio_assets::handler::create_audio_upload,
         crate::lexicon::audio_assets::handler::confirm_audio_asset,
         crate::lexicon::audio_assets::handler::audio_asset_url,

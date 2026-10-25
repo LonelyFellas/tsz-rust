@@ -66,12 +66,24 @@ pub(crate) fn response<T: Serialize>(
     status: StatusCode,
     body: T,
 ) -> Result<Response, AppError> {
-    if supported(headers) {
-        return Ok((status, [(header::VARY, HEADER)], Json(body)).into_response());
-    }
     let mut body = serde_json::to_value(body).map_err(AppError::internal)?;
-    project(&mut body);
-    Ok((status, [(header::VARY, HEADER)], Json(body)).into_response())
+    if !supported(headers) {
+        project(&mut body);
+    }
+    if !crate::lexicon::voice_versions::supported(headers) {
+        crate::lexicon::voice_versions::project(&mut body);
+    } else if !crate::lexicon::voice_versions::generated_supported(headers) {
+        crate::lexicon::voice_versions::project_audio(&mut body);
+    }
+    Ok((
+        status,
+        [(
+            header::VARY,
+            "x-tsz-sentence-formatting, x-tsz-voice-versions",
+        )],
+        Json(body),
+    )
+        .into_response())
 }
 
 /// Existing validation vocabulary lets an already-running V3 editor show its refresh hint.

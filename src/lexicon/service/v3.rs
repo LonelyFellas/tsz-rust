@@ -2139,6 +2139,21 @@ impl LexiconService {
         if !issues.is_empty() {
             return Err(v3_validation_failed(issues));
         }
+        if [
+            &record.forms,
+            &record.meanings,
+            &serde_json::to_value(&forms).map_err(serialization_error)?,
+            &serde_json::to_value(&meanings).map_err(serialization_error)?,
+        ]
+        .iter()
+        .any(|content| self.unsupported_voice_content(content))
+        {
+            return Err(crate::lexicon::voice_versions::word_write_error(
+                entry_id,
+                PersistedWordStep::Meanings,
+            )
+            .into());
+        }
         if !self.sentence_formatting_supported
             && [
                 &record.forms,
@@ -2195,11 +2210,6 @@ impl LexiconService {
         if !component_issues.is_empty() {
             return Err(v3_validation_failed(component_issues));
         }
-        let audio_issues =
-            validate_audio_assets(&mut tx, &authorization, entry_id, &meanings).await?;
-        if !audio_issues.is_empty() {
-            return Err(v3_validation_failed(audio_issues));
-        }
         let presentation =
             crate::lexicon::v3_projection::presentation_from_native_forms(entry_id, &forms)
                 .map_err(|_| invariant_record())?;
@@ -2221,6 +2231,12 @@ impl LexiconService {
             false,
         )
         .await?;
+        let audio_issues =
+            validate_audio_assets(&mut tx, &authorization, entry_id, &meanings, &forms, None)
+                .await?;
+        if !audio_issues.is_empty() {
+            return Err(v3_validation_failed(audio_issues));
+        }
         let resolution = resolve_meaning_references(
             &mut tx,
             entry_id,
@@ -2528,6 +2544,20 @@ impl LexiconService {
         let pos_ownership_unchanged = current_form_pos_ids == next_form_pos_ids;
         let mut meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings).map_err(serialization_error)?;
+        if [
+            &serde_json::to_value(&current_forms).map_err(serialization_error)?,
+            &serde_json::to_value(&input.content).map_err(serialization_error)?,
+            &serde_json::to_value(&meanings).map_err(serialization_error)?,
+        ]
+        .iter()
+        .any(|content| self.unsupported_voice_content(content))
+        {
+            return Err(crate::lexicon::voice_versions::word_write_error(
+                entry_id,
+                PersistedWordStep::Forms,
+            )
+            .into());
+        }
         if !self.sentence_formatting_supported {
             if crate::lexicon::sentence_formatting::contains_new_formats(
                 &serde_json::to_value(&current_forms).map_err(serialization_error)?,
@@ -2925,6 +2955,17 @@ impl LexiconService {
                 current_revision: record.revision,
             });
         }
+        if self.unsupported_voice_content(&record.meanings)
+            || self.unsupported_voice_content(
+                &serde_json::to_value(&content).map_err(serialization_error)?,
+            )
+        {
+            return Err(crate::lexicon::voice_versions::word_write_error(
+                entry_id,
+                PersistedWordStep::Meanings,
+            )
+            .into());
+        }
         if !self.sentence_formatting_supported
             && (crate::lexicon::sentence_formatting::contains_new_formats(&record.meanings)
                 || crate::lexicon::sentence_formatting::contains_new_formats(
@@ -2957,11 +2998,6 @@ impl LexiconService {
             return Err(v3_validation_failed(component_issues));
         }
 
-        let audio_issues =
-            validate_audio_assets(&mut transaction, &authorization, entry_id, &content).await?;
-        if !audio_issues.is_empty() {
-            return Err(v3_validation_failed(audio_issues));
-        }
         super::text_links::validate_targets(
             &mut transaction,
             entry_id,
@@ -2980,6 +3016,18 @@ impl LexiconService {
             false,
         )
         .await?;
+        let audio_issues = validate_audio_assets(
+            &mut transaction,
+            &authorization,
+            entry_id,
+            &content,
+            &forms,
+            None,
+        )
+        .await?;
+        if !audio_issues.is_empty() {
+            return Err(v3_validation_failed(audio_issues));
+        }
         let meanings_was_complete = record.completed_steps.iter().any(|step| step == "meanings");
         let mut current_v3_meanings: DraftMeaningsStepContentV3 =
             serde_json::from_value(record.meanings.clone()).map_err(serialization_error)?;
@@ -4329,6 +4377,9 @@ pub(super) fn requested_audio_assets(
                     })
             }),
     );
+    requested.extend(crate::speech::generated_references::asset_references(
+        &serde_json::to_value(content).expect("serializable content"),
+    ));
     requested
 }
 
@@ -4369,7 +4420,7 @@ fn pronunciation_rows_mut(forms: &mut DraftFormsStepContentV3) -> Vec<&mut WordP
 pub(super) fn requested_pronunciation_audio_assets(
     forms: &DraftFormsStepContentV3,
 ) -> Vec<(Uuid, Vec<Uuid>)> {
-    pronunciation_rows(forms)
+    let mut requested = pronunciation_rows(forms)
         .into_iter()
         .filter(|row| !row.audio_assets.is_empty())
         .map(|row| {
@@ -4378,7 +4429,11 @@ pub(super) fn requested_pronunciation_audio_assets(
                 row.audio_assets.iter().map(|asset| asset.id).collect(),
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    requested.extend(crate::speech::generated_references::asset_references(
+        &serde_json::to_value(forms).expect("serializable forms"),
+    ));
+    requested
 }
 
 pub(super) async fn normalize_pronunciation_audio_assets(
@@ -4387,6 +4442,11 @@ pub(super) async fn normalize_pronunciation_audio_assets(
     entry_id: Uuid,
     forms: &mut DraftFormsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
+    crate::speech::generated::validate_bindings(
+        tx,
+        &serde_json::to_value(&*forms).map_err(serialization_error)?,
+    )
+    .await?;
     let requested = requested_pronunciation_audio_assets(forms);
     let mut issues =
         validate_requested_audio_assets(tx, authorization, entry_id, &requested).await?;
@@ -4426,7 +4486,16 @@ pub(super) async fn validate_audio_assets(
     authorization: &crate::admin::permissions::AdminAuthorization,
     entry_id: Uuid,
     content: &DraftMeaningsStepContentV3,
+    forms: &DraftFormsStepContentV3,
+    batch: Option<&super::v3_publication::PublicationBatchContext>,
 ) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
+    crate::speech::generated::validate_bindings_with_forms(
+        tx,
+        &serde_json::to_value(content).map_err(serialization_error)?,
+        Some((entry_id, forms)),
+        batch,
+    )
+    .await?;
     validate_requested_audio_assets(
         tx,
         authorization,
@@ -4492,6 +4561,7 @@ async fn validate_requested_audio_assets(
                ) AS taken
         FROM lexicon.audio_assets asset
         WHERE asset.id = ANY($1) AND asset.reclamation_started_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=asset.id AND g.state<>'ready')
         -- Asset locks above serialize reclamation and cross-resource claims;
         -- this separate statement sees references committed while waiting.
         "#,
@@ -4553,21 +4623,18 @@ pub(super) async fn hydrate_audio_asset_metadata(
     }
     let canonical = load_audio_asset_metadata(tx, &requested).await?;
 
-    let by_variant = requested.into_iter().collect::<HashMap<_, _>>();
     for variant in content
         .pos
         .iter_mut()
         .flat_map(|pos| &mut pos.grammar_structures)
         .flat_map(|grammar| &mut grammar.variants)
     {
-        variant.audio_assets = by_variant
-            .get(&variant.id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| canonical.get(id).cloned())
-                    .collect()
-            })
-            .unwrap_or_default();
+        for asset in &mut variant.audio_assets {
+            *asset = canonical
+                .get(&asset.id)
+                .cloned()
+                .ok_or_else(invariant_record)?;
+        }
     }
     for variant in content
         .pos

@@ -167,7 +167,7 @@ pub struct SentenceHistoryQuery {
     pub before_number: Option<i64>,
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceHistoryQuery,("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=Vec<SentencePublication>)))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),SentenceHistoryQuery,("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=Vec<SentencePublication>)))]
 pub async fn history(
     State(state): State<AppState>,
     auth: AdminAuth,
@@ -194,7 +194,7 @@ pub async fn history(
     )
 }
 
-#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SentencePublication),(status=404,description="发布记录不存在")))]
+#[utoipa::path(get,path="/api/v1/admin/lexicon/sentences/{id}/publications/{publication_id}",tag="admin-lexicon",security(("bearer_auth"=[])),params(("id"=Uuid,Path),("publication_id"=Uuid,Path),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v1 返回命名版本；v2 另返回正式音频引用。旧客户端读取兼容视图并拒绝有损保存。",example="v1"),("X-TSZ-Sentence-Formatting"=Option<String>,Header,description="v1 返回完整句子格式；缺省或未知值隐藏新增格式，并保护旧保存。",example="v1")),responses((status=200,body=SentencePublication),(status=404,description="发布记录不存在")))]
 pub async fn historical(
     State(state): State<AppState>,
     auth: AdminAuth,

@@ -114,6 +114,7 @@ EXPECTED_TARGETS = {
         "object_storage_oss_smoke",
         "redis_readiness",
         "reliability",
+        "speech_generated",
         "speech_library",
         "speech_preview_cleanup",
         "speech_preview_faults",
@@ -137,7 +138,7 @@ class CiTestModulesTests(unittest.TestCase):
         )
         flattened = [target for targets in actual.values() for target in targets]
         self.assertEqual(len(flattened), len(set(flattened)))
-        self.assertEqual(len(flattened), 96)
+        self.assertEqual(len(flattened), 97)
 
     def test_ci02_unknown_target_fails_closed(self) -> None:
         with self.assertRaisesRegex(
