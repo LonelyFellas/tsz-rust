@@ -378,3 +378,71 @@ async fn dictionary_shared_examples_respect_hides_and_withdrawal(pool: PgPool) {
         json!([])
     );
 }
+
+#[sqlx::test]
+async fn dictionary_audio_keeps_source_text_dialect_separate_from_voice_locale(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let id = full_entry(&pool, "sourceaudio").await;
+    let (publication, mut snapshot): (Uuid, Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    let grammar = &mut snapshot["meanings"]["pos"][0]["grammar_structures"][0];
+    let mut uk = grammar["variants"][0].clone();
+    let mut us = uk.clone();
+    let uk_asset = Uuid::now_v7();
+    let us_asset = Uuid::now_v7();
+    uk["dialect"] = json!("uk");
+    uk["content"]["text"] = json!("colour");
+    us["id"] = json!(Uuid::now_v7());
+    us["dialect"] = json!("us");
+    us["content"]["text"] = json!("color");
+    for (variant, asset) in [(&mut uk, uk_asset), (&mut us, us_asset)] {
+        variant["voice_profile"] = json!({"voices":[{"voice_id":"neerja","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"印度补充","locale":"en-IN","audio_asset_id":asset}]});
+    }
+    grammar["variants"] = json!([uk, us]);
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+        .bind(publication)
+        .bind(snapshot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/dictionary/entries/{id}");
+    let token = state
+        .token_manager
+        .generate_with_version(auth.subject, "student", auth.security_version)
+        .unwrap();
+    for models in [false, true] {
+        let mut request = Request::builder()
+            .uri(&path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("X-TSZ-Voice-Versions", "v2")
+            .header("X-TSZ-Voice-Locales", "v1");
+        if models {
+            request = request.header("X-TSZ-Voice-Models", "v1");
+        }
+        let response = tsz_rust::router(state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let items = body["audio"].as_array().unwrap();
+        let uk = items
+            .iter()
+            .find(|item| item["asset_id"] == uk_asset.to_string())
+            .unwrap();
+        let us = items
+            .iter()
+            .find(|item| item["asset_id"] == us_asset.to_string())
+            .unwrap();
+        assert_eq!(uk["locale"], "en-IN");
+        assert_eq!(us["locale"], "en-IN");
+        if models {
+            assert_eq!(uk["source_dialect"], "uk");
+            assert_eq!(us["source_dialect"], "us");
+        } else {
+            assert!(uk.get("source_dialect").is_none());
+            assert!(us.get("source_dialect").is_none());
+        }
+    }
+}

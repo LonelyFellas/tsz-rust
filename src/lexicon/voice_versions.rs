@@ -49,20 +49,17 @@ pub(crate) const UPGRADE_MESSAGE: &str =
 pub(crate) fn supported(headers: &HeaderMap) -> bool {
     headers
         .get(HEADER)
-        .is_some_and(|value| value == "v1" || value == "v2" || value == "v3")
+        .is_some_and(|value| value == "v1" || value == "v2")
 }
 
 pub(crate) fn generated_supported(headers: &HeaderMap) -> bool {
-    headers
-        .get(HEADER)
-        .is_some_and(|value| value == "v2" || value == "v3")
+    headers.get(HEADER).is_some_and(|value| value == "v2")
 }
 
 pub(crate) fn extended_supported(headers: &HeaderMap) -> bool {
     headers
         .get(LOCALES_HEADER)
         .is_some_and(|value| value == "v1")
-        || headers.get(HEADER).is_some_and(|value| value == "v3")
 }
 
 pub(crate) fn contains_extended(value: &Value) -> bool {
@@ -230,7 +227,7 @@ mod tests {
             (None, false, false, false),
             (Some("v1"), true, false, false),
             (Some("v2"), true, true, false),
-            (Some("v3"), true, true, true),
+            (Some("v3"), false, false, false),
         ] {
             let mut headers = HeaderMap::new();
             if let Some(version) = version {

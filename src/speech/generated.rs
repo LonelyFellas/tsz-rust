@@ -195,6 +195,16 @@ impl GeneratedAudioService {
         input.source.validate_locale(native_locale.as_str())?;
         let source = input.source.canonical()?;
         let mut setting = voice_input(&input.setting);
+        if !input.setting.voice_id.starts_with("azure-hd-flash-") {
+            let hash = Sha256::digest(
+                serde_json::to_vec(&serde_json::json!([source, setting]))
+                    .map_err(AppError::internal)?,
+            )
+            .to_vec();
+            if let Some(asset) = self.existing(actor, input.request_id, &hash).await? {
+                return Ok(GenerateVoiceAudioResponse { asset });
+            }
+        }
         let voice = PreviewRepository::new(self.pool.clone())
             .voice_by_alias(&input.setting.voice_id)
             .await

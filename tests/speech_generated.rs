@@ -92,6 +92,10 @@ async fn generated_asset_is_long_lived_idempotent_and_retries_failed_generation(
         .await
         .unwrap()
         .asset;
+    sqlx::query("UPDATE speech.voices SET enabled=false WHERE alias='sonia'")
+        .execute(&pool)
+        .await
+        .unwrap();
     let repeated = service
         .generate(actor, 0, input(request, version, "hello"))
         .await

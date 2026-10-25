@@ -30,6 +30,19 @@ fn reading_response<T: serde::Serialize>(
     value: T,
 ) -> Result<(HeaderMap, Json<serde_json::Value>), AppError> {
     let mut value = serde_json::to_value(value).map_err(AppError::internal)?;
+    if !crate::lexicon::voice_versions::models_supported(headers) {
+        fn project_source(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    fields.remove("source_dialect");
+                    fields.values_mut().for_each(project_source);
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(project_source),
+                _ => {}
+            }
+        }
+        project_source(&mut value);
+    }
     if !crate::lexicon::voice_versions::extended_supported(headers) {
         crate::lexicon::voice_versions::project_extended(&mut value);
     }
