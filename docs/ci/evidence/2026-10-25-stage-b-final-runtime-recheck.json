@@ -1,0 +1,21 @@
+{
+  "artifact_sha256": "b79f61941a913d9f4075ecdf8403fba22e88204f878342827c9a984b954057a2",
+  "cleanup": {
+    "complete": true,
+    "remaining": []
+  },
+  "environment": {
+    "images": {
+      "app": "sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956",
+      "postgresql": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+      "probe": "sha256:b658b05ce9c4eb97ec6fc19424818a1f31993659c2b505a532f470e83807815d",
+      "redis": "sha256:2b35fc7d2908e25aa6aa197f97882c8a67829d3b106ad5ea5c8028f816f26aa8"
+    },
+    "network_internal": true,
+    "postgresql": "18.6",
+    "redis": "6.0.20"
+  },
+  "kind": "final-runtime-recheck",
+  "release_eligible": false,
+  "status": "passed"
+}

@@ -1,0 +1,11 @@
+{
+  "captured_at": "2026-10-25T00:52:08.543233+00:00",
+  "task_downloads_and_linux_build_outputs_removed": [
+    "stage-b-runtime",
+    "stage-b-linux-build"
+  ],
+  "all_absent": true,
+  "shared_cargo_target_touched": false,
+  "docker_images_deleted": false,
+  "source_and_sanitized_evidence_preserved": true
+}

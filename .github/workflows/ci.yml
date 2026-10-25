@@ -148,6 +148,15 @@ jobs:
       - name: Test release artifact manifests
         run: python3 -m unittest ops/test_release_artifact_manifest.py
 
+      - name: Test isolated release and migration verification
+        run: python3 -m unittest discover -s ops -p 'test_release_artifact_smoke.py'
+
+      - name: Test migration compatibility evidence
+        run: python3 -m unittest discover -s ops -p 'test_migration_compatibility.py'
+
+      - name: Test read-only deployed baseline capture
+        run: python3 -m unittest discover -s ops -p 'test_deployed_baseline.py'
+
       - name: Test deployment preflight
         run: python3 -m unittest ops/test_deployment_preflight.py
 
@@ -438,6 +447,10 @@ jobs:
 
   release-artifact:
     name: Build release artifact
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      producer_attempt: ${{ steps.source.outputs.producer_attempt }}
+      git_tree: ${{ steps.source.outputs.git_tree }}
     # 只在 main 推送与手动触发时跑。PR 不需要 release 产物，而它会给每个 PR 的 CI
     # 多加数分钟。代价是「只在 release profile 下才暴露的编译错误」要到合并后才发现；
     # clippy 已覆盖 --all-targets --all-features（debug profile），这类差异极少见，接受。
@@ -511,6 +524,7 @@ jobs:
           test "$GITHUB_REF" = "refs/heads/main"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           echo "git_tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+          echo "producer_attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
       - name: Resolve pinned Rust version
         id: rust
@@ -599,6 +613,7 @@ jobs:
       # artifact 以 zip 传输，可执行位不保证跨往返保留（实测当前组合会保留），
       # 因此部署侧仍会无条件 chmod +x 兜底。
       - name: Upload release artifact
+        id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tsz-rust-x86_64-linux-gnu-${{ github.sha }}-attempt-${{ github.run_attempt }}
@@ -606,5 +621,74 @@ jobs:
             target/release/tsz-rust
             target/release/tsz-rust.sha256
             target/release/tsz-rust.manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  release-smoke:
+    name: Verify release artifact
+    permissions:
+      contents: read
+      actions: read
+    needs: [release-artifact]
+    if: >-
+      github.repository == 'LonelyFellas/tsz-rust' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact main tools
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # 仅重跑失败的 smoke 时，成功构建的输出仍指向原生产 attempt，不能用消费 attempt 猜制品名。
+      - name: Resolve exact artifact identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.release-artifact.outputs.artifact_id }}
+          PRODUCER_TREE: ${{ needs.release-artifact.outputs.git_tree }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$PRODUCER_TREE"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+            > "$RUNNER_TEMP/release-artifact.json"
+
+      - name: Download the uploaded release artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.release-artifact.outputs.artifact_id }}
+          path: ${{ runner.temp }}/release-smoke-download
+          merge-multiple: true
+
+      - name: Prepare isolated dependency images
+        run: |
+          docker pull postgres:18-alpine
+          docker pull redis:6.0-alpine
+          docker pull python:3.12-alpine
+          docker pull --platform linux/amd64 ubuntu:22.04
+
+      - name: Verify downloaded binary with isolated PostgreSQL and Redis
+        run: >-
+          python3 ops/release_artifact_smoke.py
+          --manifest "$RUNNER_TEMP/release-smoke-download/tsz-rust.manifest.json"
+          --artifact "$RUNNER_TEMP/release-smoke-download/tsz-rust"
+          --artifact-id '${{ needs.release-artifact.outputs.artifact_id }}'
+          --artifact-metadata "$RUNNER_TEMP/release-artifact.json"
+          --expected-sha "$GITHUB_SHA"
+          --expected-tree '${{ needs.release-artifact.outputs.git_tree }}'
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt '${{ needs.release-artifact.outputs.producer_attempt }}'
+          --verification-attempt "$GITHUB_RUN_ATTEMPT"
+          --output "$RUNNER_TEMP/release-smoke-receipt.json"
+
+      - name: Upload release verification receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-smoke-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-smoke-receipt.json
           if-no-files-found: error
           retention-days: 30

@@ -9,6 +9,23 @@ pub struct UndoReport {
     pub current_version: i64,
 }
 
+/// 只读构建事实：不加载配置、不连接数据库，也不执行迁移。
+pub fn info() -> serde_json::Value {
+    let migrator = sqlx::migrate!("./migrations");
+    let migrations: Vec<_> = migrator
+        .iter()
+        .map(|migration| {
+            serde_json::json!({
+                "version": migration.version,
+                "direction": if migration.migration_type.is_up_migration() { "up" } else { "down" },
+                "checksum": migration.checksum.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                "transactional": !migration.no_tx,
+            })
+        })
+        .collect();
+    serde_json::json!({ "schema_version": 1, "migrations": migrations })
+}
+
 /// 撤销一次失败部署新引入的迁移。调用方必须先停止所有业务写入，并提供部署前后
 /// 两个精确版本；全部 down migration 与迁移账本更新在一个外层事务里提交。
 pub async fn undo(
@@ -120,6 +137,21 @@ pub async fn undo(
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn deployment_info_matches_embedded_migrations_without_database() {
+        let value = info();
+        let rows = value["migrations"].as_array().unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        assert_eq!(rows.len(), migrator.iter().len());
+        for (row, migration) in rows.iter().zip(migrator.iter()) {
+            assert_eq!(row["version"], migration.version);
+            assert_eq!(row["transactional"], !migration.no_tx);
+            assert_eq!(row["checksum"].as_str().unwrap().len(), 96);
+        }
+        assert!(rows.iter().any(|row| row["direction"] == "up"));
+        assert!(rows.iter().any(|row| row["direction"] == "down"));
+    }
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
     const CURRENT_RELEASE_VERSION: i64 = 20261024090000;
