@@ -905,6 +905,82 @@ async fn generated_version_audio_survives_save_publication_and_draft_removal(poo
 }
 
 #[sqlx::test]
+async fn generated_grammar_audio_can_publish_with_its_draft_target_in_one_batch(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    configure_audio(&mut state);
+    state.speech_provider = Some(Arc::new(GeneratedProvider));
+    let actor = seed_publisher(&pool).await;
+    let bearer = bearer(&state, actor);
+    let source = create_entry(&state, &pool, &bearer, "sourceaudio").await;
+    let mut target = create_entry(&state, &pool, &bearer, "targetaudio").await;
+    let (_, target_draft) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", target.id),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    let mut forms = target_draft["word"]["forms"].clone();
+    forms["pos"][0]["forms"][0]["regional_variants"]["common"]["pronunciations"][0]["synthesis"] = json!({"alphabet":"ipa","ipa":"","ups":"","uk":{"ipa":"fɑː","ups":""},"us":{"ipa":"fɑɹ","ups":""}});
+    let (status, forms_saved) = call(&state, Method::PUT, &format!("{ROOT}/entries/{}/steps/forms", target.id), &bearer, None, Some(json!({"schema_version":3,"base_revision":target.revision,"intent":"complete","content":forms}))).await;
+    assert_eq!(status, StatusCode::OK, "{forms_saved}");
+    target.revision = forms_saved["word"]["revision"].as_i64().unwrap();
+    let (status, target_saved) = call(&state, Method::PUT, &format!("{ROOT}/entries/{}/steps/meanings", target.id), &bearer, None, Some(json!({"schema_version":3,"base_revision":target.revision,"intent":"complete","content":complete_meanings(&target,json!([]))}))).await;
+    assert_eq!(status, StatusCode::OK, "{target_saved}");
+    let target_form = &target_saved["word"]["forms"]["pos"][0]["forms"][0];
+    let links = json!([{"id":Uuid::now_v7(),"source_segments":[{"start":0,"end":11,"surface":"targetaudio"}],"target_word_id":target.id,"target_pos_id":target.pos_id,"target_form_id":target_form["id"],"target_variant_id":target_form["regional_variants"]["common"]["id"],"target_dialect":"common"}]);
+    sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,'sonia','azure','en-GB-SoniaNeural','en-GB','female','[]','v1')").bind(Uuid::now_v7()).execute(&pool).await.unwrap();
+    let content = json!({"version":2,"text":"targetaudio","annotations":[]});
+    let mut setting = json!({"version_id":Uuid::now_v7(),"version_name":"自然","locale":"en-GB","voice_id":"sonia","enabled":true,"rate_percent":0});
+    let (status, generated) = call(&state, Method::POST, "/api/v1/admin/speech/audio", &bearer, None, Some(json!({"request_id":Uuid::now_v7(),"source":{"kind":"text","content":content,"form_links":links},"setting":setting}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{generated}");
+    setting["audio_asset_id"] = generated["asset"]["id"].clone();
+    let mut meanings = complete_meanings(&source, json!([]));
+    let variant = &mut meanings["pos"][0]["grammar_structures"][0]["variants"][0];
+    variant["content"] = content;
+    variant["form_links"] = links;
+    variant["voice_profile"] = json!({"voices":[setting]});
+    let (status, source_saved) = call(&state, Method::PUT, &format!("{ROOT}/entries/{}/steps/meanings", source.id), &bearer, None, Some(json!({"schema_version":3,"base_revision":source.revision,"intent":"complete","content":meanings}))).await;
+    assert_eq!(status, StatusCode::OK, "{source_saved}");
+    let items = [&source_saved, &target_saved].map(|saved| json!({"entry_id":saved["word"]["id"],"base_revision":saved["word"]["revision"],"base_lifecycle_revision":saved["word"]["lifecycle_revision"]}));
+    let (status, published) = call(
+        &state,
+        Method::POST,
+        &format!("{ROOT}/entries/publications/batch"),
+        &bearer,
+        Some(Uuid::now_v7()),
+        Some(json!({"schema_version":3,"items":items})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{published}");
+    let snapshot: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE entry_id=$1")
+            .bind(source.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let target_publication: Uuid =
+        sqlx::query_scalar("SELECT current_publication_id FROM lexicon.entries WHERE id=$1")
+            .bind(target.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let variant = &snapshot["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0];
+    assert_eq!(
+        variant["form_links"][0]["target_publication_id"],
+        json!(target_publication)
+    );
+    assert_eq!(
+        variant["voice_profile"]["voices"][0]["audio_asset_id"],
+        generated["asset"]["id"]
+    );
+}
+
+#[sqlx::test]
 async fn publishing_carries_audio_into_the_snapshot_and_records_its_reference(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let mut state = AppState::for_test_with_redis(pool.clone(), redis)

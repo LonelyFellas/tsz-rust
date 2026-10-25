@@ -63,7 +63,7 @@ impl GeneratedSpeechSource {
         conn: &mut sqlx::PgConnection,
         locale: &str,
     ) -> Result<RichTextV2, crate::error::AppError> {
-        self.resolve_with_forms(conn, locale, None).await
+        self.resolve_with_forms(conn, locale, None, None).await
     }
 
     pub(crate) async fn resolve_with_forms(
@@ -71,6 +71,7 @@ impl GeneratedSpeechSource {
         conn: &mut sqlx::PgConnection,
         locale: &str,
         current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
+        batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
     ) -> Result<RichTextV2, crate::error::AppError> {
         let mut value = self.canonical()?["content"].clone();
         match self {
@@ -83,7 +84,17 @@ impl GeneratedSpeechSource {
                         let local = current.filter(|(id, _)| {
                             *id == link.target_word_id && link.target_publication_id.is_none()
                         });
-                        let forms: Option<Value> = if let Some((_, forms)) = local {
+                        let batch_target = batch
+                            .and_then(|batch| batch.words.get(&link.target_word_id))
+                            .filter(|candidate| {
+                                link.target_publication_id == Some(candidate.publication_id)
+                            });
+                        let forms: Option<Value> = if let Some(candidate) = batch_target {
+                            Some(
+                                serde_json::to_value(&candidate.word.forms)
+                                    .map_err(crate::error::AppError::internal)?,
+                            )
+                        } else if let Some((_, forms)) = local {
                             Some(
                                 serde_json::to_value(forms)
                                     .map_err(crate::error::AppError::internal)?,

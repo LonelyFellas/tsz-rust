@@ -422,13 +422,14 @@ pub(crate) async fn validate_bindings(
     conn: &mut sqlx::PgConnection,
     value: &Value,
 ) -> Result<(), AppError> {
-    validate_bindings_with_forms(conn, value, None).await
+    validate_bindings_with_forms(conn, value, None, None).await
 }
 
 pub(crate) async fn validate_bindings_with_forms(
     conn: &mut sqlx::PgConnection,
     value: &Value,
     current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
+    batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
 ) -> Result<(), AppError> {
     fn uploaded_ids(value: &Value, ids: &mut Vec<Uuid>) {
         if let Some(items) = value.get("audio_assets").and_then(Value::as_array) {
@@ -470,7 +471,7 @@ pub(crate) async fn validate_bindings_with_forms(
         let resolved = serde_json::to_value(
             reference
                 .source
-                .resolve_with_forms(conn, locale, current)
+                .resolve_with_forms(conn, locale, current, batch)
                 .await?,
         )
         .map_err(AppError::internal)?;

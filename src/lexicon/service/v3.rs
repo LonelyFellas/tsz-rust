@@ -2232,7 +2232,8 @@ impl LexiconService {
         )
         .await?;
         let audio_issues =
-            validate_audio_assets(&mut tx, &authorization, entry_id, &meanings, &forms).await?;
+            validate_audio_assets(&mut tx, &authorization, entry_id, &meanings, &forms, None)
+                .await?;
         if !audio_issues.is_empty() {
             return Err(v3_validation_failed(audio_issues));
         }
@@ -3015,9 +3016,15 @@ impl LexiconService {
             false,
         )
         .await?;
-        let audio_issues =
-            validate_audio_assets(&mut transaction, &authorization, entry_id, &content, &forms)
-                .await?;
+        let audio_issues = validate_audio_assets(
+            &mut transaction,
+            &authorization,
+            entry_id,
+            &content,
+            &forms,
+            None,
+        )
+        .await?;
         if !audio_issues.is_empty() {
             return Err(v3_validation_failed(audio_issues));
         }
@@ -4480,11 +4487,13 @@ pub(super) async fn validate_audio_assets(
     entry_id: Uuid,
     content: &DraftMeaningsStepContentV3,
     forms: &DraftFormsStepContentV3,
+    batch: Option<&super::v3_publication::PublicationBatchContext>,
 ) -> Result<Vec<DraftValidationIssue>, LexiconServiceError> {
     crate::speech::generated::validate_bindings_with_forms(
         tx,
         &serde_json::to_value(content).map_err(serialization_error)?,
         Some((entry_id, forms)),
+        batch,
     )
     .await?;
     validate_requested_audio_assets(

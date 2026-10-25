@@ -31,7 +31,7 @@ async fn historical_self_links_use_supplied_forms_and_external_links_hold_a_shar
     let source: GeneratedSpeechSource = serde_json::from_value(json!({"kind":"text","content":{"version":2,"text":"far","annotations":[]},"form_links":[{"id":Uuid::now_v7(),"source_segments":[{"start":0,"end":3,"surface":"far"}],"target_word_id":entry,"target_pos_id":pos,"target_form_id":form,"target_variant_id":variant,"target_dialect":"common"}]})).unwrap();
     let mut tx = pool.begin().await.unwrap();
     let resolved = source
-        .resolve_with_forms(&mut tx, "en-GB", Some((entry, &historical)))
+        .resolve_with_forms(&mut tx, "en-GB", Some((entry, &historical)), None)
         .await
         .unwrap();
     assert_eq!(

@@ -435,6 +435,7 @@ impl LexiconService {
             entry_id,
             &word.meanings,
             &word.forms,
+            batch,
         )
         .await?;
         if !audio_issues.is_empty() {
