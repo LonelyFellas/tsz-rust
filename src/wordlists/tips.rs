@@ -1,7 +1,7 @@
 use super::{
     dto::{WordlistQuery, WordlistState},
     interactions::InteractionQuery,
-    service,
+    private_json, service,
 };
 use crate::{
     api::{ApiJson, ApiPath, ApiQuery, PaginationMeta},
@@ -13,12 +13,7 @@ use crate::{
     error::{AppError, ErrorCode},
     state::AppState,
 };
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderValue, header::CACHE_CONTROL},
-    response::{IntoResponse, Response},
-};
+use axum::{Json, extract::State, response::Response};
 use chrono::{DateTime, Utc};
 use coins::admin_service::coin_error;
 use serde::{Deserialize, Serialize};
@@ -301,11 +296,7 @@ pub async fn tip_states(
         .bind(ids).bind(auth.subject).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     tx.commit().await.map_err(AppError::internal)?;
-    let mut response = Json(WordlistTipStates { items }).into_response();
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
-    Ok(response)
+    Ok(private_json(WordlistTipStates { items }))
 }
 #[utoipa::path(get,path="/api/v1/me/wordlist-tips",tag="wordlists",params(WordlistQuery),security(("bearer_auth"=[])),responses((status=403,description="需要先绑定手机号"),(status=200,description="本人投出与收到记录，不泄露私密词表新名称",body=WordlistTipPage),(status=400,description="查询无效"),(status=401,description="会话无效")))]
 pub async fn history(
