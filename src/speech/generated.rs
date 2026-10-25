@@ -422,6 +422,14 @@ pub(crate) async fn validate_bindings(
     conn: &mut sqlx::PgConnection,
     value: &Value,
 ) -> Result<(), AppError> {
+    validate_bindings_with_forms(conn, value, None).await
+}
+
+pub(crate) async fn validate_bindings_with_forms(
+    conn: &mut sqlx::PgConnection,
+    value: &Value,
+    current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
+) -> Result<(), AppError> {
     fn uploaded_ids(value: &Value, ids: &mut Vec<Uuid>) {
         if let Some(items) = value.get("audio_assets").and_then(Value::as_array) {
             ids.extend(items.iter().filter_map(|item| {
@@ -459,8 +467,13 @@ pub(crate) async fn validate_bindings(
             Some(crate::lexicon::dto::VoiceVersionLocaleV3::Us) => "en-US",
             None => return Err(invalid()),
         };
-        let resolved = serde_json::to_value(reference.source.resolve(conn, locale).await?)
-            .map_err(AppError::internal)?;
+        let resolved = serde_json::to_value(
+            reference
+                .source
+                .resolve_with_forms(conn, locale, current)
+                .await?,
+        )
+        .map_err(AppError::internal)?;
         if row.get::<String, _>("state") != "ready"
             || row.get::<Value, _>("source") != reference.source.canonical()?
             || row.get::<Value, _>("voice") != voice_input(&reference.setting)

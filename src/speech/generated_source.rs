@@ -63,6 +63,15 @@ impl GeneratedSpeechSource {
         conn: &mut sqlx::PgConnection,
         locale: &str,
     ) -> Result<RichTextV2, crate::error::AppError> {
+        self.resolve_with_forms(conn, locale, None).await
+    }
+
+    pub(crate) async fn resolve_with_forms(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        locale: &str,
+        current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
+    ) -> Result<RichTextV2, crate::error::AppError> {
         let mut value = self.canonical()?["content"].clone();
         match self {
             Self::Text { form_links, .. } => {
@@ -71,13 +80,21 @@ impl GeneratedSpeechSource {
                         return Err(invalid());
                     }
                     for link in form_links {
-                        let forms: Option<Value> = if let Some(publication) = link.target_publication_id {
+                        let local = current.filter(|(id, _)| {
+                            *id == link.target_word_id && link.target_publication_id.is_none()
+                        });
+                        let forms: Option<Value> = if let Some((_, forms)) = local {
+                            Some(
+                                serde_json::to_value(forms)
+                                    .map_err(crate::error::AppError::internal)?,
+                            )
+                        } else if let Some(publication) = link.target_publication_id {
                             sqlx::query_scalar("SELECT p.snapshot->'forms' FROM lexicon.entry_publications p JOIN lexicon.entries e ON e.id=p.entry_id WHERE p.id=$1 AND e.id=$2 AND e.archived_at IS NULL")
-                                .bind(publication).bind(link.target_word_id).fetch_optional(&mut *conn).await
+                                .bind(publication).bind(link.target_word_id).fetch_optional(&mut *conn).await.map_err(crate::error::AppError::internal)?
                         } else {
-                            sqlx::query_scalar("SELECT p.forms FROM lexicon.entry_editor_projection p JOIN lexicon.entries e ON e.id=p.entry_id WHERE e.id=$1 AND e.archived_at IS NULL")
-                                .bind(link.target_word_id).fetch_optional(&mut *conn).await
-                        }.map_err(crate::error::AppError::internal)?;
+                            sqlx::query_scalar("SELECT p.forms FROM lexicon.entry_editor_projection p JOIN lexicon.entries e ON e.id=p.entry_id WHERE e.id=$1 AND e.archived_at IS NULL FOR SHARE OF e")
+                                .bind(link.target_word_id).fetch_optional(&mut *conn).await.map_err(crate::error::AppError::internal)?
+                        };
                         let forms: crate::lexicon::dto::DraftFormsStepContentV3 =
                             serde_json::from_value(forms.ok_or_else(invalid)?)
                                 .map_err(|_| invalid())?;
