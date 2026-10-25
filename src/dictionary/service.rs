@@ -62,6 +62,58 @@ pub async fn entries(
         for pos in &native.forms.pos {
             for form in &pos.forms {
                 let variants = match &form.regional_variants {
+                    WordRegionalVariantsV3::Common { common } => {
+                        vec![(common.id, &common.spelling_speech, &common.pronunciations)]
+                    }
+                    WordRegionalVariantsV3::UkUs { uk, us } => vec![
+                        (uk.id, &uk.spelling_speech, &uk.pronunciations),
+                        (us.id, &us.spelling_speech, &us.pronunciations),
+                    ],
+                };
+                for (variant_id, spelling_speech, pronunciations) in variants {
+                    if let Some(speech) = spelling_speech {
+                        generated_audio(&mut audio, variant_id, Some(&speech.voice_profile));
+                    }
+                    for pronunciation in pronunciations {
+                        generated_audio(
+                            &mut audio,
+                            pronunciation.id,
+                            pronunciation.voice_profile.as_ref(),
+                        );
+                        if let Some(synthesis) = &pronunciation.synthesis {
+                            if synthesis.use_spelling == Some(true) {
+                                if let Some(speech) = spelling_speech {
+                                    generated_audio(
+                                        &mut audio,
+                                        pronunciation.id,
+                                        Some(&speech.voice_profile),
+                                    );
+                                }
+                            } else {
+                                for candidate in
+                                    [&synthesis.uk, &synthesis.us].into_iter().flatten()
+                                {
+                                    let speech = match synthesis.alphabet {
+                                        RichTextPhonemeAlphabet::Ipa => &candidate.ipa_speech,
+                                        RichTextPhonemeAlphabet::Ups => &candidate.ups_speech,
+                                    };
+                                    if let Some(speech) = speech {
+                                        generated_audio(
+                                            &mut audio,
+                                            pronunciation.id,
+                                            Some(&speech.voice_profile),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for pos in &native.forms.pos {
+            for form in &pos.forms {
+                let variants = match &form.regional_variants {
                     WordRegionalVariantsV3::Common { common } => vec![&common.pronunciations],
                     WordRegionalVariantsV3::UkUs { uk, us } => {
                         vec![&uk.pronunciations, &us.pronunciations]
@@ -82,6 +134,7 @@ pub async fn entries(
         for pos in &native.meanings.pos {
             for grammar in &pos.grammar_structures {
                 for variant in &grammar.variants {
+                    generated_audio(&mut audio, grammar.id, variant.voice_profile.as_ref());
                     audio.extend(variant.audio_assets.iter().map(|a| DictionaryAudio {
                         target_id: grammar.id,
                         asset_id: a.id,
@@ -90,7 +143,21 @@ pub async fn entries(
                 }
             }
             for sense in &pos.senses {
+                for definition in &sense.definitions {
+                    if let WordDefinitionV3::EnDefinition { id, content, .. }
+                    | WordDefinitionV3::EnSentence { id, content, .. } = definition
+                    {
+                        for variant in crate::lexicon::v3_contract::english_text_variants(content) {
+                            generated_audio(&mut audio, *id, variant.voice_profile.as_ref());
+                        }
+                    }
+                }
                 for sentence in &sense.sentences {
+                    for variant in
+                        crate::lexicon::v3_contract::english_text_variants(&sentence.en_text)
+                    {
+                        generated_audio(&mut audio, sentence.id, variant.voice_profile.as_ref());
+                    }
                     examples.push(DictionaryExample {
                         id: sentence.id,
                         sense_id: sense.id,
@@ -129,6 +196,9 @@ pub async fn entries(
             let shared: crate::lexicon::shared_sentences::SharedSentenceContent =
                 serde_json::from_value(snapshot).map_err(AppError::internal)?;
             let sentence = shared.sentence;
+            for variant in crate::lexicon::v3_contract::english_text_variants(&sentence.en_text) {
+                generated_audio(&mut audio, sentence.id, variant.voice_profile.as_ref());
+            }
             if examples
                 .iter()
                 .any(|e| e.id == sentence.id && e.sense_id == sense_id)
@@ -149,6 +219,30 @@ pub async fn entries(
         });
     }
     Ok(result)
+}
+
+fn generated_audio(
+    audio: &mut Vec<DictionaryAudio>,
+    target_id: Uuid,
+    profile: Option<&VoiceProfileV3>,
+) {
+    for setting in profile
+        .into_iter()
+        .flat_map(|profile| &profile.voices)
+        .filter(|setting| setting.enabled)
+    {
+        if let (Some(asset_id), Some(locale)) = (setting.audio_asset_id, setting.locale) {
+            audio.push(DictionaryAudio {
+                target_id,
+                asset_id,
+                locale: match locale {
+                    VoiceVersionLocaleV3::Uk => "en-GB",
+                    VoiceVersionLocaleV3::Us => "en-US",
+                }
+                .into(),
+            });
+        }
+    }
 }
 
 fn english(content: &EnglishTextV3) -> Vec<WordlistText> {

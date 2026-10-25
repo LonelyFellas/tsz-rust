@@ -9,8 +9,14 @@ pub(super) async fn normalize(
     sentence_id: Uuid,
     text: &mut EnglishTextV3,
 ) -> Result<(), AppError> {
+    let serialized = serde_json::to_value(&*text).map_err(AppError::internal)?;
+    crate::speech::generated::validate_bindings(tx, &serialized).await?;
+    let generated = crate::speech::generated_source::references(&serialized)?;
     let variants = crate::lexicon::v3_contract::english_text_variants(text);
-    let mut ids = HashSet::new();
+    let mut ids = generated
+        .iter()
+        .map(|reference| reference.asset)
+        .collect::<HashSet<_>>();
     for variant in variants {
         let mut seen = HashSet::new();
         if variant.audio_assets.len() > 8 || variant.audio_assets.iter().any(|a| !seen.insert(a.id))
@@ -43,6 +49,7 @@ pub(super) async fn normalize(
                 'created_at',asset.created_at) AS metadata
         FROM lexicon.audio_assets asset
         WHERE asset.id=ANY($1) AND asset.reclamation_started_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=asset.id AND g.state<>'ready')
         "#,
     )
     .bind(&ids)
@@ -104,12 +111,23 @@ pub(super) async fn insert(
 ) -> Result<(), AppError> {
     let mut inserted = HashSet::new();
     for variant in crate::lexicon::v3_contract::english_text_variants(text) {
-        for asset in &variant.audio_assets {
-            if !inserted.insert(asset.id) {
+        let generated = variant
+            .voice_profile
+            .as_ref()
+            .into_iter()
+            .flat_map(|p| &p.voices)
+            .filter_map(|setting| setting.audio_asset_id);
+        for asset_id in variant
+            .audio_assets
+            .iter()
+            .map(|asset| asset.id)
+            .chain(generated)
+        {
+            if !inserted.insert(asset_id) {
                 continue;
             }
             sqlx::query("INSERT INTO lexicon.shared_sentence_audio_asset_references(asset_id,sentence_id,scope,publication_id,variant_id) VALUES($1,$2,$3,$4,$5)")
-                .bind(asset.id).bind(id)
+                .bind(asset_id).bind(id)
                 .bind(if publication_id.is_some() { "publication" } else { "draft" })
                 .bind(publication_id).bind(variant.id)
                 .execute(&mut *tx).await.map_err(AppError::internal)?;

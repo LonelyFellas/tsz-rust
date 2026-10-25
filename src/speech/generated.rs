@@ -1,0 +1,476 @@
+use std::sync::Arc;
+
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Row};
+use tracing::Instrument;
+use utoipa::ToSchema;
+use uuid::Uuid;
+
+use super::{
+    SpeechOptions, SpeechProvider, SynthesisRequest,
+    generated_source::{GeneratedSpeechSource, invalid, voice_input},
+    preview::PreviewRepository,
+};
+use crate::{
+    admin::{AdminAuth, authorization::require_active_admin},
+    api::ApiJson,
+    error::{AppError, ErrorCode},
+    lexicon::{
+        audio_assets::dto::{AudioAsset, AudioAssetGender, AudioAssetLocale},
+        dto::VoiceSettingV3,
+    },
+    platform::storage::{ObjectContentType, ObjectKey, ObjectStore, PutOptions, StorageSpace},
+    state::AppState,
+};
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GenerateVoiceAudioRequest {
+    pub request_id: Uuid,
+    pub source: GeneratedSpeechSource,
+    pub setting: VoiceSettingV3,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GenerateVoiceAudioResponse {
+    pub asset: AudioAsset,
+}
+
+fn unavailable() -> AppError {
+    AppError::unavailable(
+        ErrorCode::SpeechProviderUnavailable,
+        "正式音频生成暂不可用，请稍后重试",
+    )
+}
+fn storage_error() -> AppError {
+    AppError::unavailable(
+        ErrorCode::SpeechStorageUnavailable,
+        "音频存储暂不可用，请使用相同请求重试",
+    )
+}
+fn in_progress() -> AppError {
+    AppError::conflict(
+        ErrorCode::SpeechPreviewInProgress,
+        None,
+        "音频正在生成，请稍后重试",
+    )
+}
+
+// Runtime DB pools have ten connections; leave capacity for authorization and saves
+// while a bounded number of generated-audio requests hold their transaction leases.
+static GENERATION_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+#[derive(Clone)]
+pub struct GeneratedAudioService {
+    pool: PgPool,
+    provider: Option<Arc<dyn SpeechProvider>>,
+    storage: Option<Arc<dyn ObjectStore>>,
+}
+
+impl GeneratedAudioService {
+    pub fn new(
+        pool: PgPool,
+        provider: Option<Arc<dyn SpeechProvider>>,
+        storage: Option<Arc<dyn ObjectStore>>,
+    ) -> Self {
+        Self {
+            pool,
+            provider,
+            storage,
+        }
+    }
+
+    async fn authorize(&self, actor: Uuid, security_version: i64) -> Result<(), AppError> {
+        let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+        let authorization = crate::admin::permissions::lock(&mut tx, actor).await?;
+        let current: i64 = sqlx::query_scalar("SELECT security_version FROM admins WHERE id=$1")
+            .bind(actor)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+        if current != security_version {
+            return Err(AppError::unauthorized(
+                ErrorCode::InvalidToken,
+                "invalid token",
+            ));
+        }
+        authorization.require("speech.generate")?;
+        if ![
+            "words.create",
+            "words.edit",
+            "sentences.create",
+            "sentences.edit",
+        ]
+        .iter()
+        .any(|key| authorization.has(key))
+        {
+            return Err(AppError::forbidden(
+                ErrorCode::Forbidden,
+                "生成正式音频需要内容编辑权限",
+            ));
+        }
+        tx.commit().await.map_err(AppError::internal)
+    }
+
+    pub async fn generate(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        input: GenerateVoiceAudioRequest,
+    ) -> Result<GenerateVoiceAudioResponse, AppError> {
+        self.authorize(actor, security_version).await?;
+        let permit = GENERATION_SLOTS
+            .acquire()
+            .await
+            .map_err(|_| in_progress())?;
+        let mut lease = self.pool.begin().await.map_err(AppError::internal)?;
+        let acquired: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,1))")
+                .bind(format!("generated:{actor}:{}", input.request_id))
+                .fetch_one(&mut *lease)
+                .await
+                .map_err(AppError::internal)?;
+        if !acquired {
+            return Err(in_progress());
+        }
+        // One generation per actor keeps the request lease from exhausting the small DB pool.
+        let actor_slot: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,2))")
+                .bind(format!("generated:{actor}"))
+                .fetch_one(&mut *lease)
+                .await
+                .map_err(AppError::internal)?;
+        if !actor_slot {
+            return Err(in_progress());
+        }
+        let service = self.clone();
+        tokio::spawn(
+            async move {
+                let _permit = permit;
+                let result = service
+                    .generate_locked(actor, security_version, input)
+                    .await;
+                lease.rollback().await.map_err(AppError::internal)?;
+                result
+            }
+            .instrument(tracing::Span::current()),
+        )
+        .await
+        .map_err(AppError::internal)?
+    }
+
+    async fn generate_locked(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        input: GenerateVoiceAudioRequest,
+    ) -> Result<GenerateVoiceAudioResponse, AppError> {
+        self.authorize(actor, security_version).await?;
+        if input.request_id.is_nil()
+            || input.setting.version_id.is_none_or(|id| id.is_nil())
+            || input.setting.locale.is_none()
+            || input.setting.version_name.as_ref().is_none_or(|name| {
+                name.trim().is_empty() || name.chars().count() > 40 || name.contains('\0')
+            })
+        {
+            return Err(invalid());
+        }
+        if let GeneratedSpeechSource::Text { form_links, .. } = &input.source
+            && !form_links.is_empty()
+        {
+            let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+            crate::admin::permissions::lock(&mut tx, actor)
+                .await?
+                .require("words.access")?;
+            tx.commit().await.map_err(AppError::internal)?;
+        }
+        let source = input.source.canonical()?;
+        let setting = voice_input(&input.setting);
+        let hash = Sha256::digest(
+            serde_json::to_vec(&serde_json::json!([source, setting]))
+                .map_err(AppError::internal)?,
+        )
+        .to_vec();
+        if let Some(asset) = self.existing(actor, input.request_id, &hash).await? {
+            return Ok(GenerateVoiceAudioResponse { asset });
+        }
+        let voice = PreviewRepository::new(self.pool.clone())
+            .voice_by_alias(&input.setting.voice_id)
+            .await
+            .map_err(AppError::internal)?
+            .ok_or_else(|| {
+                AppError::not_found_with_code(ErrorCode::SpeechVoiceNotFound, "音色不可用")
+            })?;
+        let locale = match input.setting.locale {
+            Some(crate::lexicon::dto::VoiceVersionLocaleV3::Uk) => "en-GB",
+            _ => "en-US",
+        };
+        let pitch = input.setting.pitch_semitones.unwrap_or(0);
+        if voice.voice.locale() != locale
+            || input.setting.rate_percent < voice.min_rate_percent
+            || input.setting.rate_percent > voice.max_rate_percent
+            || i16::from(pitch) < voice.min_pitch_semitones
+            || i16::from(pitch) > voice.max_pitch_semitones
+        {
+            return Err(invalid());
+        }
+        let mut conn = self.pool.acquire().await.map_err(AppError::internal)?;
+        let content = input.source.resolve(&mut conn, locale).await?;
+        drop(conn);
+        let resolved_content = serde_json::to_value(&content).map_err(AppError::internal)?;
+        let options = SpeechOptions::new(
+            &voice.voice,
+            input.setting.style.clone(),
+            input.setting.rate_percent,
+            pitch,
+            input.setting.volume_percent.unwrap_or(100),
+        )
+        .map_err(|_| invalid())?;
+        let request =
+            SynthesisRequest::new(voice.voice, options, content).map_err(|_| invalid())?;
+        let provider = self.provider.clone().ok_or_else(unavailable)?;
+        if provider.provider_name() != request.voice().provider() {
+            return Err(unavailable());
+        }
+        let storage = self.storage.clone().ok_or_else(|| {
+            AppError::request_error(ErrorCode::AudioStorageNotConfigured, "音频存储尚未配置")
+        })?;
+        let gender = AudioAssetGender::parse(&voice.gender.to_lowercase()).ok_or_else(invalid)?;
+        let asset_locale = AudioAssetLocale::parse(locale).ok_or_else(invalid)?;
+        let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+        let previous: Option<(Uuid,String)> = sqlx::query_as("SELECT a.id,a.object_key FROM lexicon.audio_generations g JOIN lexicon.audio_assets a ON a.id=g.asset_id WHERE g.created_by_admin_id=$1 AND g.request_id=$2 AND a.reclamation_started_at IS NULL FOR UPDATE OF a")
+            .bind(actor).bind(input.request_id).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
+        let id = previous
+            .as_ref()
+            .map(|value| value.0)
+            .unwrap_or_else(Uuid::now_v7);
+        let key = if let Some((_, key)) = &previous {
+            ObjectKey::parse(key).map_err(AppError::internal)?
+        } else {
+            storage
+                .qualify_key(
+                    ObjectKey::parse(format!("assets/generated/{id}.mp3"))
+                        .map_err(AppError::internal)?,
+                )
+                .map_err(AppError::internal)?
+        };
+        let name = format!("voice-{}.mp3", input.setting.version_id.unwrap());
+        // The pending asset is not readable until generation becomes ready. Its row makes
+        // interrupted object writes discoverable by the normal zero-reference collector.
+        if previous.is_none() {
+            sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,'audio/mpeg',1,$4,$5,$6,$7)")
+            .bind(id).bind(key.as_str()).bind(format!("generated/{actor}/{}",input.request_id)).bind(asset_locale.as_str()).bind(gender.as_str()).bind(&name).bind(actor).execute(&mut *tx).await.map_err(AppError::internal)?;
+            sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state) VALUES($1,$2,$3,$4,$5,$6,$7,'pending')")
+            .bind(id).bind(input.request_id).bind(actor).bind(&hash).bind(&source).bind(&setting).bind(&resolved_content).execute(&mut *tx).await.map_err(AppError::internal)?;
+        } else {
+            sqlx::query("UPDATE lexicon.audio_assets SET created_at=now() WHERE id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(AppError::internal)?;
+            sqlx::query("UPDATE lexicon.audio_generations SET state='pending',resolved_content=$2 WHERE asset_id=$1").bind(id).bind(&resolved_content).execute(&mut *tx).await.map_err(AppError::internal)?;
+        }
+        tx.commit().await.map_err(AppError::internal)?;
+        let result = self
+            .finish(actor, security_version, id, &key, storage.clone(), request)
+            .await;
+        if let Err(error) = result {
+            // A commit error may have committed successfully. Only compensate after proving
+            // the row is still pending; unknown outcomes retain the registered object key.
+            let failed = sqlx::query("UPDATE lexicon.audio_generations SET state='failed' WHERE asset_id=$1 AND state='pending'").bind(id).execute(&self.pool).await;
+            if failed.is_ok_and(|row| row.rows_affected() == 1) {
+                if let Err(error) = storage.delete(&key).await {
+                    tracing::warn!(
+                        error_kind = crate::safe_log::error_kind(&error),
+                        "generated audio compensation failed"
+                    );
+                }
+                return Err(error);
+            }
+            if self
+                .existing(actor, input.request_id, &hash)
+                .await?
+                .is_none()
+            {
+                return Err(error);
+            }
+        }
+        self.authorize(actor, security_version).await?;
+        self.existing(actor, input.request_id, &hash)
+            .await?
+            .map(|asset| GenerateVoiceAudioResponse { asset })
+            .ok_or_else(unavailable)
+    }
+
+    async fn finish(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        id: Uuid,
+        key: &ObjectKey,
+        storage: Arc<dyn ObjectStore>,
+        request: SynthesisRequest,
+    ) -> Result<(), AppError> {
+        self.authorize(actor, security_version).await?;
+        let provider = self.provider.as_ref().ok_or_else(unavailable)?;
+        let audio =
+            tokio::time::timeout(provider.synthesis_timeout(), provider.synthesize(&request))
+                .await
+                .map_err(|_| unavailable())?
+                .map_err(|_| unavailable())?;
+        if audio.bytes.is_empty()
+            || audio.content_type != "audio/mpeg"
+            || audio.bytes.len() as u64 > storage.policy().max_object_size()
+        {
+            return Err(unavailable());
+        }
+        self.authorize(actor, security_version).await?;
+        let size = i64::try_from(audio.bytes.len()).map_err(|_| invalid())?;
+        storage
+            .put(
+                key,
+                audio.bytes,
+                PutOptions::new(Some(
+                    ObjectContentType::parse("audio/mpeg").expect("constant MIME"),
+                )),
+            )
+            .await
+            .map_err(|_| storage_error())?;
+        self.authorize(actor, security_version).await?;
+        let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+        sqlx::query("UPDATE lexicon.audio_assets SET size_bytes=$2 WHERE id=$1")
+            .bind(id)
+            .bind(size)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+        sqlx::query("UPDATE lexicon.audio_generations SET state='ready' WHERE asset_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+        tx.commit().await.map_err(AppError::internal)
+    }
+
+    async fn existing(
+        &self,
+        actor: Uuid,
+        request: Uuid,
+        hash: &[u8],
+    ) -> Result<Option<AudioAsset>, AppError> {
+        let row = sqlx::query("SELECT a.*,g.state,g.input_hash FROM lexicon.audio_generations g JOIN lexicon.audio_assets a ON a.id=g.asset_id WHERE g.created_by_admin_id=$1 AND g.request_id=$2 AND a.reclamation_started_at IS NULL")
+            .bind(actor).bind(request).fetch_optional(&self.pool).await.map_err(AppError::internal)?;
+        let Some(row) = row else { return Ok(None) };
+        if row.get::<Vec<u8>, _>("input_hash") != hash {
+            return Err(AppError::conflict(
+                ErrorCode::IdempotencyConflict,
+                None,
+                "请求编号已用于其他配音内容",
+            ));
+        }
+        if row.get::<String, _>("state") != "ready" {
+            return Ok(None);
+        }
+        Ok(Some(AudioAsset {
+            id: row.get("id"),
+            locale: AudioAssetLocale::parse(&row.get::<String, _>("locale")).ok_or_else(invalid)?,
+            gender: AudioAssetGender::parse(&row.get::<String, _>("gender")).ok_or_else(invalid)?,
+            content_type: row.get("content_type"),
+            size_bytes: row.get("size_bytes"),
+            duration_ms: row.get("duration_ms"),
+            original_name: row.get("original_name"),
+            created_at: row.get("created_at"),
+        }))
+    }
+}
+
+#[utoipa::path(post,path="/api/v1/admin/speech/audio",tag="admin-speech",security(("bearer_auth"=[])),request_body=GenerateVoiceAudioRequest,params(("X-TSZ-Test-Run"=Option<String>,Header,description="独占验收资源批次")),responses((status=201,body=GenerateVoiceAudioResponse),(status=400,description="内容或配音版本无效"),(status=401,description="未登录"),(status=403,description="没有生成和内容编辑权限"),(status=404,description="音色不可用"),(status=409,description="生成中或请求编号冲突"),(status=501,description="长期音频存储未配置"),(status=503,description="生成或存储失败")))]
+pub async fn generate(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    headers: HeaderMap,
+    ApiJson(input): ApiJson<GenerateVoiceAudioRequest>,
+) -> Result<(StatusCode, Json<GenerateVoiceAudioResponse>), AppError> {
+    require_active_admin(&state, &auth).await?;
+    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    let service = GeneratedAudioService::new(
+        state.pool.clone(),
+        state.speech_provider.clone(),
+        state
+            .object_storage
+            .get(&StorageSpace::parse("audio").expect("constant space"))
+            .ok(),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            service
+                .generate(auth.subject, auth.security_version, input)
+                .await?,
+        ),
+    ))
+}
+
+pub(crate) async fn validate_bindings(
+    conn: &mut sqlx::PgConnection,
+    value: &Value,
+) -> Result<(), AppError> {
+    fn uploaded_ids(value: &Value, ids: &mut Vec<Uuid>) {
+        if let Some(items) = value.get("audio_assets").and_then(Value::as_array) {
+            ids.extend(items.iter().filter_map(|item| {
+                item.get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| Uuid::parse_str(id).ok())
+            }));
+        }
+        match value {
+            Value::Object(fields) => fields.values().for_each(|value| uploaded_ids(value, ids)),
+            Value::Array(items) => items.iter().for_each(|value| uploaded_ids(value, ids)),
+            _ => {}
+        }
+    }
+    let mut uploads = vec![];
+    uploaded_ids(value, &mut uploads);
+    if !uploads.is_empty()
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM lexicon.audio_generations WHERE asset_id=ANY($1))",
+        )
+        .bind(&uploads)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(AppError::internal)?
+    {
+        return Err(AppError::bad_request(
+            ErrorCode::InvalidSpeechPreview,
+            "生成音频须绑定配音版本，不能作为上传录音保存",
+        ));
+    }
+    for reference in super::generated_source::references(value)? {
+        let row = sqlx::query("SELECT source,voice,resolved_content,state FROM lexicon.audio_generations WHERE asset_id=$1").bind(reference.asset).fetch_optional(&mut *conn).await.map_err(AppError::internal)?.ok_or_else(invalid)?;
+        let locale = match reference.setting.locale {
+            Some(crate::lexicon::dto::VoiceVersionLocaleV3::Uk) => "en-GB",
+            Some(crate::lexicon::dto::VoiceVersionLocaleV3::Us) => "en-US",
+            None => return Err(invalid()),
+        };
+        let resolved = serde_json::to_value(reference.source.resolve(conn, locale).await?)
+            .map_err(AppError::internal)?;
+        if row.get::<String, _>("state") != "ready"
+            || row.get::<Value, _>("source") != reference.source.canonical()?
+            || row.get::<Value, _>("voice") != voice_input(&reference.setting)
+            || row.get::<Value, _>("resolved_content") != resolved
+        {
+            return Err(AppError::bad_request(
+                ErrorCode::InvalidSpeechPreview,
+                "正式音频与当前正文、读法或参数不一致，请重新生成或移除音频",
+            ));
+        }
+    }
+    Ok(())
+}

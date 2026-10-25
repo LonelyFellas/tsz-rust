@@ -179,7 +179,11 @@ async fn dictionary_audio_signs_only_current_published_references(pool: PgPool) 
     let asset = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$3,'audio/mpeg',10,'en-GB','female','sound.mp3',$4)").bind(asset).bind(format!("assets/{asset}.mp3")).bind(format!("uploads/{asset}.mp3")).bind(manager).execute(&pool).await.unwrap();
     let (publication, mut snapshot): (Uuid,Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
-    snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["audio_assets"] = json!([{"id":asset,"locale":"en-GB","gender":"female","content_type":"audio/mpeg","size_bytes":10,"duration_ms":null,"original_name":"sound.mp3","created_at":"2026-10-15T00:00:00Z"}]);
+    let unselected = Uuid::now_v7();
+    snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["voice_profile"] = json!({"voices":[
+        {"voice_id":"sonia","enabled":false,"rate_percent":-25,"version_id":Uuid::now_v7(),"version_name":"备选","locale":"en-GB","audio_asset_id":unselected},
+        {"voice_id":"sonia","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"正式","locale":"en-GB","audio_asset_id":asset}
+    ]});
     sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
         .bind(publication)
         .bind(snapshot)
@@ -190,6 +194,18 @@ async fn dictionary_audio_signs_only_current_published_references(pool: PgPool) 
     let signed = call(&state, &auth, "GET", &path, Value::Null).await;
     assert_eq!(signed.0, StatusCode::OK, "{}", signed.1);
     assert_eq!(signed.1["url_expires_in_seconds"], 60);
+    assert_eq!(
+        call(
+            &state,
+            &auth,
+            "GET",
+            &format!("/api/v1/dictionary/entries/{id}/audio/{unselected}"),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
     let other = full_entry(&pool, "unrelated").await;
     assert_eq!(
         call(
