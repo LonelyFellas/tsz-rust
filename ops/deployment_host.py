@@ -263,8 +263,9 @@ def stop_candidate(plan):
         (LOCK / "candidate_pid").unlink(missing_ok=True)
 
 
-def process_environment():
+def process_environment(plan):
     cfg = configuration()
+    require(configuration_identity(cfg) == state(plan)["configuration_sha256"], "deployment_configuration_changed")
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **cfg}
 
 
@@ -272,7 +273,7 @@ def start_candidate(plan):
     require(int(run(["systemctl", "show", "tsz-rust", "-p", "MainPID", "--value"]).strip()) == 0, "formal_service_not_stopped")
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 18383))
-    env = process_environment()
+    env = process_environment(plan)
     env.update(BIND_IP="127.0.0.1", PORT="18383", DEPLOYMENT_SMOKE_ONLY="true", TSZ_DEPLOYMENT_OWNER=plan["deployment_id"])
     log = transaction(plan) / "candidate.log"
     with log.open("ab") as output:
@@ -483,7 +484,7 @@ def recover(plan, credentials):
         require(minimum < maximum <= plan["migration"]["candidate_version"], "migration_outside_recovery_interval")
         require((plan.get("recovery_policy") or {}).get("kind") == "verified_down", "manual_migration_recovery_required")
         require(sha(BINARY) == plan["artifact_sha256"], "candidate_binary_required_for_recovery")
-        run([str(BINARY), "deploy-undo-migrations", str(minimum), str(maximum)], environment=process_environment(), timeout=120)
+        run([str(BINARY), "deploy-undo-migrations", str(minimum), str(maximum)], environment=process_environment(plan), timeout=120)
         require(ledger() == original, "recovery_ledger_mismatch")
     manifests.restore_deployment(backup_dir=transaction(plan) / "backup", artifact=BINARY, manifest_path=MANIFEST)
     run(["systemctl", "start", "tsz-rust"])

@@ -177,6 +177,20 @@ class HostOperationTests(unittest.TestCase):
                         with self.assertRaisesRegex(host.HostError, 'running_configuration_mismatch'):
                             host.check_running_configuration()
 
+    def test_candidate_configuration_drift_is_rejected_before_starting_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root):
+                plan = self.prepare(root)
+                self.acquire(plan)
+                (host.ROOT / '.env').write_text('DATABASE_URL=postgresql://other/database\nREDIS_URL=redis://synthetic/0\n')
+                with patch.object(host, 'run', return_value=b'0'), patch.object(host.socket, 'socket'), patch.object(host.subprocess, 'Popen') as start:
+                    with self.assertRaisesRegex(host.HostError, 'deployment_configuration_changed'):
+                        host.start_candidate(plan)
+                    start.assert_not_called()
+                with self.assertRaisesRegex(host.HostError, 'deployment_configuration_changed'):
+                    host.process_environment(plan)
+
     def test_backup_files_and_directory_are_synced_before_completion(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
