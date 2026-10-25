@@ -568,6 +568,157 @@ async fn concurrent_amounts_respect_cap_and_interaction_lock_order(pool: PgPool)
         "simultaneous like intents must notify only once"
     );
 }
+async fn race_in_order(
+    pool: &PgPool,
+    user: Uuid,
+    first: impl std::future::Future<Output = (StatusCode, Value)>,
+    second: impl std::future::Future<Output = (StatusCode, Value)>,
+) -> ((StatusCode, Value), (StatusCode, Value)) {
+    let mut blocker = pool.begin().await.unwrap();
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    tsz_rust::wordlists::library::lock(&mut blocker, user)
+        .await
+        .unwrap();
+    let start_second = tokio::sync::Notify::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let ((), first, second) = tokio::join!(
+            async {
+                // Observe both requests in the wait graph before releasing the first one.
+                for count in [1, 2] {
+                    loop {
+                        let waiting: i64 = sqlx::query_scalar("WITH RECURSIVE waiters AS (SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)) UNION SELECT a.pid FROM pg_stat_activity a JOIN waiters w ON w.pid=ANY(pg_blocking_pids(a.pid)) WHERE a.datname=current_database()) SELECT count(*) FROM waiters")
+                            .bind(holder).fetch_one(pool).await.unwrap();
+                        if waiting >= count {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    if count == 1 {
+                        start_second.notify_one();
+                    }
+                }
+                blocker.commit().await.unwrap();
+            },
+            first,
+            async {
+                start_second.notified().await;
+                second.await
+            }
+        );
+        (first, second)
+    })
+    .await
+    .expect("both requests must overlap and finish without deadlocking")
+}
+#[sqlx::test]
+async fn concurrent_one_coin_events_both_succeed_without_exceeding_cap(pool: PgPool) {
+    let (state, author) = setup_bound(&pool).await;
+    let (_, payer) = setup_bound(&pool).await;
+    let e = entry(&pool, "one coin races").await;
+    let id = publish_list(&pool, &state, &author, e).await;
+    fund(&pool, &payer, 10).await;
+    let path = format!("/api/v1/wordlists/{id}/tips");
+    let first = liked(intent("1"));
+    let second = liked(intent("1"));
+    assert_ne!(first["event_id"], second["event_id"]);
+    assert_ne!(first["idempotency_key"], second["idempotency_key"]);
+    let (a, b) = race_in_order(
+        &pool,
+        payer.subject,
+        call(&state, &payer, "POST", &path, first.clone()),
+        call(&state, &payer, "POST", &path, second.clone()),
+    )
+    .await;
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(b.0, StatusCode::OK, "{}", b.1);
+    assert_eq!(a.1["event_id"], first["event_id"]);
+    assert_eq!(b.1["event_id"], second["event_id"]);
+    assert_ne!(a.1["operation_id"], b.1["operation_id"]);
+    let rejected = call(&state, &payer, "POST", &path, liked(intent("1"))).await;
+    assert_eq!(rejected.0, StatusCode::CONFLICT, "{}", rejected.1);
+    assert_eq!(rejected.1["code"], "word_list_tip_limit");
+    assert_eq!(balance(&pool, payer.subject).await, 8);
+    assert_eq!(balance(&pool, author.subject).await, 2);
+    let facts: (i64, i64, i64, i64) = sqlx::query_as("SELECT count(*),sum(amount)::bigint,count(DISTINCT event_id),count(DISTINCT operation_id) FROM wordlist_tips WHERE wordlist_id=$1 AND payer_user_id=$2")
+        .bind(id).bind(payer.subject).fetch_one(&pool).await.unwrap();
+    assert_eq!(facts, (2, 2, 2, 2));
+    let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM wordlist_interactions WHERE wordlist_id=$1 AND kind='like'),(SELECT count(*) FROM user_notifications WHERE wordlist_id=$1 AND kind='wordlist_liked'),(SELECT count(*) FROM user_notifications WHERE wordlist_id=$1 AND kind='wordlist_tipped')")
+        .bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(counts, (1, 1, 2));
+    let states = call(
+        &state,
+        &payer,
+        "GET",
+        &format!("/api/v1/me/wordlist-tip-states?ids={id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(states.0, StatusCode::OK, "{}", states.1);
+    assert_eq!(states.1["items"][0]["tip_amount"], "2");
+}
+#[sqlx::test]
+async fn concurrent_tip_and_unlike_follow_lock_order_without_duplicate_effects(pool: PgPool) {
+    let (state, author) = setup_bound(&pool).await;
+    let (_, payer) = setup_bound(&pool).await;
+    let e = entry(&pool, "tip unlike races").await;
+    fund(&pool, &payer, 10).await;
+    for tip_first in [true, false] {
+        let id = publish_list(&pool, &state, &author, e).await;
+        let path = format!("/api/v1/wordlists/{id}/tips");
+        let interaction_path = format!("/api/v1/me/wordlists/{id}/interactions");
+        let initial_like = call(
+            &state,
+            &payer,
+            "PUT",
+            &interaction_path,
+            json!({"kind":"like","active":true}),
+        )
+        .await;
+        assert_eq!(initial_like.0, StatusCode::OK, "{}", initial_like.1);
+        let tip = call(&state, &payer, "POST", &path, liked(intent("1")));
+        let unlike = call(
+            &state,
+            &payer,
+            "PUT",
+            &interaction_path,
+            json!({"kind":"like","active":false}),
+        );
+        let (tip, unlike) = if tip_first {
+            race_in_order(&pool, payer.subject, tip, unlike).await
+        } else {
+            let (unlike, tip) = race_in_order(&pool, payer.subject, unlike, tip).await;
+            (tip, unlike)
+        };
+        assert_eq!(tip.0, StatusCode::OK, "{}", tip.1);
+        assert_eq!(unlike.0, StatusCode::OK, "{}", unlike.1);
+        assert_eq!(unlike.1["liked"], false);
+        let states = call(
+            &state,
+            &payer,
+            "GET",
+            &format!("/api/v1/me/wordlist-interactions?ids={id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(states.0, StatusCode::OK, "{}", states.1);
+        assert_eq!(states.1["items"][0]["liked"], !tip_first);
+        let facts: (i64, i64, i64, i64) = sqlx::query_as("SELECT count(DISTINCT t.event_id),count(DISTINCT o.id),sum(e.delta)::bigint,count(*) FROM wordlist_tips t JOIN coin_operations o ON o.id=t.operation_id JOIN coin_entries e ON e.operation_id=o.id WHERE t.wordlist_id=$1")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(facts, (1, 1, 0, 2));
+        let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM wordlist_interactions WHERE wordlist_id=$1 AND kind='like'),(SELECT count(*) FROM user_notifications WHERE wordlist_id=$1 AND kind='wordlist_liked'),(SELECT count(*) FROM user_notifications WHERE wordlist_id=$1 AND kind='wordlist_tipped')")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            counts,
+            if tip_first { (0, 1, 1) } else { (1, 2, 1) },
+            "only a new like may add a like notification; tip_first={tip_first}"
+        );
+    }
+    assert_eq!(balance(&pool, payer.subject).await, 8);
+    assert_eq!(balance(&pool, author.subject).await, 2);
+}
 #[sqlx::test]
 async fn insufficient_balance_and_like_failure_leave_no_partial_tip(pool: PgPool) {
     let (state, author) = setup_bound(&pool).await;
