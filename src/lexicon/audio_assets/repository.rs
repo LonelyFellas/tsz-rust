@@ -64,7 +64,7 @@ impl AudioAssetRepository {
 
     pub async fn find(&self, id: Uuid) -> Result<Option<AudioAssetRecord>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT object_key, created_by_admin_id FROM lexicon.audio_assets WHERE id = $1 AND reclamation_started_at IS NULL",
+            "SELECT object_key, created_by_admin_id FROM lexicon.audio_assets a WHERE id = $1 AND reclamation_started_at IS NULL AND NOT EXISTS (SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=a.id AND g.state<>'ready')",
         )
         .bind(id)
         .fetch_optional(&self.pool)

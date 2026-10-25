@@ -304,9 +304,6 @@ impl LexiconService {
             &mut word.forms,
         )
         .await?;
-        issues.extend(
-            super::v3::validate_audio_assets(tx, authorization, entry_id, &word.meanings).await?,
-        );
         let rich_text_is_safe = canonicalize_meanings(&mut word.meanings);
         crate::lexicon::v3_contract::normalize_sentence_translations(&mut word.meanings);
         let semantic_issues = validate_meanings(
@@ -432,6 +429,18 @@ impl LexiconService {
             true,
         )
         .await?;
+        let audio_issues = super::v3::validate_audio_assets(
+            tx,
+            authorization,
+            entry_id,
+            &word.meanings,
+            &word.forms,
+            batch,
+        )
+        .await?;
+        if !audio_issues.is_empty() {
+            return Err(v3_validation_failed(audio_issues));
+        }
         let outbound_issues =
             super::inbound_references::outbound_publication_issues_in(tx, word, batch).await?;
         if !outbound_issues.is_empty() {

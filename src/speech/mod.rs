@@ -1,6 +1,9 @@
 mod azure;
 mod catalog;
 mod config;
+pub mod generated;
+pub(crate) mod generated_references;
+pub mod generated_source;
 pub mod library;
 pub(crate) mod model;
 pub mod preview;
@@ -22,5 +25,7 @@ pub use product_catalog::{
 pub use provider::{SpeechError, SpeechErrorKind, SpeechProvider};
 pub use ssml::build_ssml;
 
+#[cfg(test)]
+mod generated_source_tests;
 #[cfg(test)]
 mod tests;

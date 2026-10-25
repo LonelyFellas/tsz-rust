@@ -85,7 +85,7 @@ pub(crate) fn valid_ranges(variant: &GrammarVariantV3) -> bool {
     })
 }
 
-pub(super) fn target_variant(
+pub(crate) fn target_variant(
     forms: &DraftFormsStepContentV3,
     link: &GrammarFormLinkV3,
 ) -> Option<(Uuid, Dialect, Vec<WordPronunciationV3>)> {
@@ -112,7 +112,7 @@ pub(super) fn target_variant(
     }
 }
 
-fn first_annotation(
+pub(crate) fn first_annotation(
     pronunciations: &[WordPronunciationV3],
     start: usize,
     end: usize,

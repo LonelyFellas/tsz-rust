@@ -8,6 +8,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/voices", get(handler::list_voices))
         .route("/previews", axum::routing::post(handler::create_preview))
+        .route(
+            "/audio",
+            axum::routing::post(crate::speech::generated::generate),
+        )
         .route("/library", get(crate::speech::library::handler::list))
         .route(
             "/groups",

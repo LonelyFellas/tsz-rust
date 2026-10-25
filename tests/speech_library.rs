@@ -408,6 +408,35 @@ async fn personal_settings_read_back_and_do_not_leak_between_admins(pool: PgPool
 }
 
 #[sqlx::test]
+async fn notes_can_preserve_old_parameters_after_voice_capabilities_change(pool: PgPool) {
+    voice(&pool).await;
+    let actor = admin(&pool).await;
+    let repository = VoiceLibraryRepository::new(pool.clone());
+    repository
+        .save_settings(actor, "en-us-jenny", 0, settings(0, "旧听感"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE speech.voices SET styles='[]' WHERE alias='en-us-jenny'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let saved = repository
+        .save_settings(actor, "en-us-jenny", 0, settings(1, "新听感"))
+        .await
+        .unwrap();
+    assert_eq!(saved.notes, "新听感");
+    assert_eq!(saved.parameters.unwrap().style.as_deref(), Some("chat"));
+    let mut invalid = settings(2, "不能写入新参数");
+    invalid.parameters.as_mut().unwrap().rate_percent = 20;
+    assert!(
+        repository
+            .save_settings(actor, "en-us-jenny", 0, invalid)
+            .await
+            .is_err()
+    );
+}
+
+#[sqlx::test]
 async fn stale_and_concurrent_updates_do_not_overwrite_saved_settings(pool: PgPool) {
     voice(&pool).await;
     let actor = admin(&pool).await;

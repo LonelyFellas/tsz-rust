@@ -270,20 +270,23 @@ impl VoiceLibraryRepository {
         let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
         authorize_write(&mut tx, actor, security_version, false).await?;
         let voice = lock_voice(&mut tx, alias).await?;
-        if let Some(parameters) = &request.parameters {
-            validate_parameters(&voice, parameters)?;
-        }
         let id: Uuid = voice.get("id");
-        let revision: Option<i64> = sqlx::query_scalar(
-            "SELECT revision FROM speech.admin_voice_settings WHERE admin_id=$1 AND voice_id=$2",
+        let current: Option<(i64, Option<serde_json::Value>)> = sqlx::query_as(
+            "SELECT revision, parameters FROM speech.admin_voice_settings WHERE admin_id=$1 AND voice_id=$2",
         )
         .bind(actor)
         .bind(id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-        if revision.unwrap_or(0) != request.base_revision {
+        if current.as_ref().map(|value| value.0).unwrap_or(0) != request.base_revision {
             return Err(conflict());
+        }
+        if let Some(parameters) = &request.parameters {
+            let incoming = serde_json::to_value(parameters).map_err(AppError::internal)?;
+            if current.as_ref().and_then(|value| value.1.as_ref()) != Some(&incoming) {
+                validate_parameters(&voice, parameters)?;
+            }
         }
         sqlx::query(
             r#"INSERT INTO speech.admin_voice_settings(admin_id, voice_id, parameters, notes)

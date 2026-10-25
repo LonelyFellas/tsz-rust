@@ -103,7 +103,9 @@ pub async fn reclaim_once(
         .bind(id)
         .fetch_one(&mut *tx)
         .await?;
-        if referenced {
+        let recent: bool = sqlx::query_scalar("SELECT created_at >= now() - make_interval(days => $2) FROM lexicon.audio_assets WHERE id=$1")
+            .bind(id).bind(GRACE_DAYS).fetch_one(&mut *tx).await?;
+        if referenced || recent {
             tx.rollback().await?;
             skipped.push(id);
             continue;

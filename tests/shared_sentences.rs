@@ -166,6 +166,59 @@ async fn sentence_audio_survives_create_and_independent_read(pool: PgPool) {
     );
 }
 
+#[sqlx::test]
+async fn generated_sentence_audio_is_bound_and_retained_by_version(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let asset = audio_asset(&pool, actor).await;
+    let asset_id = Uuid::parse_str(asset["id"].as_str().unwrap()).unwrap();
+    let mut input = content(source);
+    let rich = json!({"version":2,"text":input["sentence"]["en_text"]["common"]["value"]["text"],"annotations":[]});
+    input["sentence"]["en_text"]["common"]["value"] = rich.clone();
+    let version = Uuid::now_v7();
+    let setting = json!({"version_id":version,"version_name":"正式","locale":"en-GB","voice_id":"sonia","enabled":true,"rate_percent":0,"audio_asset_id":asset_id});
+    sqlx::query("INSERT INTO lexicon.audio_generations(asset_id,request_id,created_by_admin_id,input_hash,source,voice,resolved_content,state) VALUES($1,$2,$3,$4,$5,$6,$7,'ready')")
+        .bind(asset_id).bind(Uuid::now_v7()).bind(actor).bind(vec![0u8;32])
+        .bind(json!({"kind":"text","content":rich,"form_links":[]}))
+        .bind(json!({"version_id":version,"voice_id":"sonia","locale":"en-GB","rate_percent":0,"pitch_semitones":0,"volume_percent":100,"style":""}))
+        .bind(&rich).execute(&pool).await.unwrap();
+    input["sentence"]["en_text"]["common"]["voice_profile"] = json!({"voices":[setting]});
+    let (status, created) = call(
+        &state,
+        actor,
+        Method::POST,
+        ROOT,
+        Some(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":input})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(
+        created["content"]["sentence"]["en_text"]["common"]["voice_profile"]["voices"][0]["audio_asset_id"],
+        json!(asset_id)
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.shared_sentence_audio_asset_references WHERE asset_id=$1",
+    )
+    .bind(asset_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    let mut changed = created["content"].clone();
+    changed["sentence"]["en_text"]["common"]["voice_profile"]["voices"][0]["rate_percent"] =
+        json!(-25);
+    let (status, _) = call(
+        &state,
+        actor,
+        Method::PUT,
+        &format!("{ROOT}/{}", created["id"].as_str().unwrap()),
+        Some(json!({"base_revision":created["revision"],"content":changed})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 async fn admin(pool: &PgPool) -> Uuid {
     admin_with_role(pool, AdminRole::SuperAdmin).await
 }
@@ -272,7 +325,8 @@ async fn call_with_key(
         .uri(path)
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header("Idempotency-Key", idempotency_key.to_string())
-        .header("X-TSZ-Sentence-Formatting", "v1");
+        .header("X-TSZ-Sentence-Formatting", "v1")
+        .header("X-TSZ-Voice-Versions", "v2");
     let body = if let Some(body) = body {
         if body.pointer("/content/forms_format").is_some() {
             req = req.header("X-TSZ-Form-Contents", "v1");
@@ -726,6 +780,83 @@ async fn rejects_invalid_targets_positions_and_foreign_draft_without_partial_wri
     conflict["content"]["sentence"]["level"] = json!("C2");
     let (status, _) = call(&state, owner, Method::POST, ROOT, Some(conflict)).await;
     assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[sqlx::test]
+async fn named_voice_versions_survive_shared_sentence_save_and_protect_legacy_writes(pool: PgPool) {
+    let owner = admin(&pool).await;
+    let source = entry(&pool, owner, "wonderful").await;
+    let state = AppState::for_test(pool.clone());
+    let mut proposed = content(source);
+    let profile = json!({"voices":[
+        {"voice_id":"sonia","enabled":false,"rate_percent":-25,"version_id":Uuid::now_v7(),"version_name":"慢读","locale":"en-GB"},
+        {"voice_id":"sonia","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"自然","locale":"en-GB"}
+    ]});
+    proposed["sentence"]["en_text"]["common"]["voice_profile"] = profile.clone();
+    let (status, created) = call(
+        &state,
+        owner,
+        Method::POST,
+        ROOT,
+        Some(
+            json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":proposed}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let (status, read) = call(&state, owner, Method::GET, &format!("{ROOT}/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        read["content"]["sentence"]["en_text"]["common"]["voice_profile"],
+        profile
+    );
+    let mut updated = read["content"].clone();
+    updated["sentence"]["en_text"]["common"]["voice_profile"]["voices"][0]["version_name"] =
+        json!("清晰慢读");
+    let (status, saved) = call(
+        &state,
+        owner,
+        Method::PUT,
+        &format!("{ROOT}/{id}"),
+        Some(json!({"base_revision":read["revision"],"content":updated})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let token = state
+        .admin_token_manager
+        .generate(owner, AdminRole::Admin.as_str())
+        .unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{ROOT}/{id}?view=draft"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let legacy: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(!legacy["content"].to_string().contains("version_id"));
+    let response = tsz_rust::router(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("{ROOT}/{id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"base_revision":saved["revision"],"content":legacy["content"]})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[sqlx::test]

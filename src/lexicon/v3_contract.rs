@@ -446,7 +446,9 @@ fn spelling_speech_equal(
         let mut voices = speech
             .map(|speech| speech.voice_profile.voices.clone())
             .unwrap_or_default();
-        voices.sort_by(|left, right| left.voice_id.cmp(&right.voice_id));
+        voices.sort_by(|left, right| {
+            (&left.voice_id, left.version_id).cmp(&(&right.voice_id, right.version_id))
+        });
         Some((content.annotations, voices))
     };
     canonical(left)
@@ -966,13 +968,30 @@ fn validate_voice_profile(
         return;
     };
     let mut seen = HashSet::new();
+    let mut version_ids = HashSet::new();
+    let mut selected_locales = HashSet::new();
     let voices_invalid = profile.voices.len() > MAX_VOICE_PROFILE_VOICES
         || profile.voices.iter().any(|voice| {
             let voice_id = &voice.voice_id;
-            voice_id.trim().is_empty()
+            let version_invalid = match (&voice.version_id, &voice.version_name, voice.locale) {
+                (None, None, None) => !seen.insert(voice_id.as_str()),
+                (Some(id), Some(name), Some(locale)) => {
+                    id.is_nil()
+                        || !version_ids.insert(*id)
+                        || name.trim().is_empty()
+                        || name.chars().count() > 40
+                        || name.contains('\0')
+                        || (voice.enabled && !selected_locales.insert(locale))
+                }
+                _ => true,
+            };
+            version_invalid
+                || voice
+                    .audio_asset_id
+                    .is_some_and(|id| id.is_nil() || voice.version_id.is_none())
+                || voice_id.trim().is_empty()
                 || voice_id.chars().count() > MAX_VOICE_ID_CODEPOINTS
                 || voice_id.contains('\0')
-                || !seen.insert(voice_id.as_str())
                 || !(MIN_SPEECH_RATE_PERCENT..=MAX_SPEECH_RATE_PERCENT)
                     .contains(&voice.rate_percent)
                 || voice
@@ -3644,6 +3663,39 @@ mod sense_group_voice_tests {
                 issues
                     .iter()
                     .any(|issue| issue.code == V3ValidationIssueCode::VoiceProfileInvalid.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn named_voice_versions_preserve_legacy_data_and_reject_ambiguous_selection() {
+        let version = |id, name, enabled| json!({"version_id": id, "version_name": name, "locale":"en-GB", "voice_id":"sonia", "enabled":enabled, "rate_percent":0});
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        let valid = json!({"voices":[version(first,"自然",true),version(second,"慢读",false),{"voice_id":"retired","enabled":true,"rate_percent":0}]});
+        let profile: VoiceProfileV3 = serde_json::from_value(valid.clone()).unwrap();
+        let mut issues = vec![];
+        validate_voice_profile(Some(&profile), first, &mut issues);
+        assert!(issues.is_empty());
+        assert_eq!(serde_json::to_value(profile).unwrap(), valid);
+        for (field, value) in [
+            ("version_id", json!(first)),
+            ("version_name", json!(" ")),
+            ("enabled", json!(true)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["voices"][1][field] = value;
+            let profile = serde_json::from_value(invalid).unwrap();
+            let mut issues = vec![];
+            validate_voice_profile(Some(&profile), first, &mut issues);
+            assert!(!issues.is_empty(), "{field}");
+        }
+        for field in ["version_id", "version_name", "locale"] {
+            let mut invalid = valid.clone();
+            invalid["voices"][0][field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<VoiceProfileV3>(invalid).is_err(),
+                "{field}"
             );
         }
     }

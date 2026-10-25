@@ -620,6 +620,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ),
     (
         "POST",
+        "/speech/audio",
+        RoutePolicy::All(&["speech.generate"]),
+    ),
+    (
+        "POST",
         "/speech/previews",
         RoutePolicy::All(&["speech.generate"]),
     ),

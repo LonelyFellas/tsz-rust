@@ -199,12 +199,30 @@ pub struct LexiconService {
     surface_policies: SurfacePolicyStore,
     related_search_cursor_key: std::sync::Arc<[u8]>,
     sentence_formatting_supported: bool,
+    voice_versions_supported: bool,
+    generated_audio_supported: bool,
     form_contents_supported: bool,
 }
 
 impl LexiconService {
     pub(crate) fn with_form_contents_support(mut self, supported: bool) -> Self {
         self.form_contents_supported = supported;
+        self
+    }
+
+    fn unsupported_voice_content(&self, value: &serde_json::Value) -> bool {
+        (!self.voice_versions_supported && crate::lexicon::voice_versions::contains_versions(value))
+            || (!self.generated_audio_supported
+                && crate::lexicon::voice_versions::contains_audio(value))
+    }
+
+    pub(crate) fn with_generated_audio_support(mut self, supported: bool) -> Self {
+        self.generated_audio_supported = supported;
+        self
+    }
+
+    pub(crate) fn with_voice_versions_support(mut self, supported: bool) -> Self {
+        self.voice_versions_supported = supported;
         self
     }
 
@@ -229,6 +247,8 @@ impl LexiconService {
             surface_policies,
             related_search_cursor_key,
             sentence_formatting_supported: true,
+            voice_versions_supported: true,
+            generated_audio_supported: true,
             form_contents_supported: true,
         }
     }

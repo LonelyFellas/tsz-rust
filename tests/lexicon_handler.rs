@@ -321,7 +321,8 @@ async fn call_with_form_capability(
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
-        .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header("X-TSZ-Voice-Versions", "v1");
     if markup {
         builder = builder.header("X-TSZ-Spelling-Markup", "v1");
     }
@@ -394,7 +395,7 @@ async fn call_with_form_capability(
         assert_eq!(
             vary.as_ref().and_then(|value| value.to_str().ok()),
             Some(
-                "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment"
+                "x-tsz-spelling-markup, x-tsz-spelling-speech, x-tsz-phoneme-speech, x-tsz-sentence-formatting, x-tsz-form-contents, x-tsz-form-content-reassignment, x-tsz-voice-versions"
             )
         );
     }
@@ -2507,7 +2508,11 @@ async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool)
 
     // A complete catalog exceeds the former 20-item limit; also cover the new boundary.
     let grammar_profile = json!({"voices": (0..2000).map(|index| json!({"voice_id": format!("voice-{index}"), "enabled": index % 2 == 0, "rate_percent": if index % 2 == 0 { -25 } else { 10 }, "pitch_semitones":2, "style":"cheerful"})).collect::<Vec<_>>()});
-    let sentence_profile = json!({"voices": [{"voice_id":"jenny", "enabled":true, "rate_percent":20, "pitch_semitones":2, "style":"cheerful"}]});
+    let sentence_profile = json!({"voices": [
+        {"voice_id":"jenny", "enabled":false, "rate_percent":-20, "pitch_semitones":2, "style":"cheerful", "version_id":Uuid::now_v7(), "version_name":"慢读", "locale":"en-US"},
+        {"voice_id":"jenny", "enabled":true, "rate_percent":20, "pitch_semitones":2, "style":"cheerful", "version_id":Uuid::now_v7(), "version_name":"自然", "locale":"en-US"},
+        {"voice_id":"sonia", "enabled":true, "rate_percent":0, "version_id":Uuid::now_v7(), "version_name":"英式", "locale":"en-GB"}
+    ]});
     let mut meanings = word["word"]["meanings"].clone();
     meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
         grammar_profile.clone();
@@ -2541,10 +2546,55 @@ async fn v3_voice_profiles_persist_on_grammar_and_english_variants(pool: PgPool)
     assert_eq!(status, StatusCode::OK, "{refetched}");
     assert_profiles(&refetched, "刷新页面");
 
+    let entry_id = word["word"]["id"].as_str().unwrap();
+    let legacy_response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{ROOT}/entries/{entry_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy_response.status(), StatusCode::OK);
+    let legacy: Value = serde_json::from_slice(
+        &legacy_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    let legacy_profile = &legacy["word"]["meanings"]["pos"][0]["senses"][0]["sentences"][0]["en_text"]
+        ["common"]["voice_profile"];
+    assert_eq!(legacy_profile["voices"].as_array().unwrap().len(), 2);
+    assert!(!legacy_profile.to_string().contains("version_id"));
+    let legacy_save = tsz_rust::router(state.clone()).oneshot(Request::builder()
+        .method(Method::PUT).uri(format!("{ROOT}/entries/{entry_id}/steps/meanings"))
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"save","content":legacy["word"]["meanings"]}).to_string())).unwrap()).await.unwrap();
+    assert_eq!(legacy_save.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
     // 发布路径上还有两处 V2 往返，配置同样不能在这里蒸发。
     let (status, published) = publish_ready_v3(&state, &bearer, &saved).await;
     assert_eq!(status, StatusCode::CREATED, "{published}");
     assert_profiles(&published, "发布响应");
+    let snapshot_before: Value = sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE entry_id=$1 ORDER BY publication_number DESC LIMIT 1")
+        .bind(Uuid::parse_str(entry_id).unwrap()).fetch_one(&pool).await.unwrap();
+    let mut changed = published["word"]["meanings"].clone();
+    changed["pos"][0]["senses"][0]["sentences"][0]["en_text"]["common"]["voice_profile"]["voices"]
+        [0]["version_name"] = json!("草稿改名");
+    save_v3_meanings(&state, &bearer, &published, changed).await;
+    let snapshot_after: Value = sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE entry_id=$1 ORDER BY publication_number DESC LIMIT 1")
+        .bind(Uuid::parse_str(entry_id).unwrap()).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        snapshot_after, snapshot_before,
+        "草稿改名不能改写已发布配音版本"
+    );
 }
 
 #[sqlx::test]

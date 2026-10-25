@@ -853,6 +853,34 @@ impl RichTextV3 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceSettingV3 {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_voice_version_id"
+    )]
+    #[schema(nullable = false)]
+    pub audio_asset_id: Option<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_voice_version_id"
+    )]
+    #[schema(nullable = false)]
+    pub version_id: Option<Uuid>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_voice_style"
+    )]
+    #[schema(min_length = 1, max_length = 40, nullable = false)]
+    pub version_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_voice_locale"
+    )]
+    #[schema(nullable = false)]
+    pub locale: Option<VoiceVersionLocaleV3>,
     pub voice_id: String,
     pub enabled: bool,
     #[schema(minimum = -50, maximum = 100)]
@@ -878,6 +906,26 @@ pub struct VoiceSettingV3 {
     )]
     #[schema(max_length = 64, nullable = false)]
     pub style: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+pub enum VoiceVersionLocaleV3 {
+    #[serde(rename = "en-GB")]
+    Uk,
+    #[serde(rename = "en-US")]
+    Us,
+}
+
+fn deserialize_optional_voice_version_id<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Uuid>, D::Error> {
+    Uuid::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_voice_locale<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<VoiceVersionLocaleV3>, D::Error> {
+    VoiceVersionLocaleV3::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_optional_voice_pitch<'de, D: Deserializer<'de>>(
