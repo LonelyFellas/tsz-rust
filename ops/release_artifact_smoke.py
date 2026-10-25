@@ -23,8 +23,10 @@ def verify_artifact_record(record, manifest, artifact_id):
 
 
 def validate_identity(args):
-    if any(isinstance(value, bool) or value <= 0 for value in (args.artifact_id, args.run_id, args.run_attempt)):
+    if any(isinstance(value, bool) or value <= 0 for value in (args.artifact_id, args.run_id, args.run_attempt, args.verification_attempt)):
         raise VerificationError("positive_ci_identity_required")
+    if args.verification_attempt < args.run_attempt:
+        raise VerificationError("verification_precedes_artifact_production")
     if not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (args.expected_sha, args.expected_tree)):
         raise VerificationError("exact_source_identity_required")
     if args.output.exists():
@@ -54,6 +56,7 @@ def verify(args, runtime_factory=IsolatedRuntime):
     receipt = {
         "schema_version": 1, "kind": "release-artifact-smoke", "status": "failed",
         "source": manifest["source"], "ci": manifest["ci"], "artifact_id": args.artifact_id,
+        "verification_attempt": args.verification_attempt,
         "artifact_sha256": manifest["artifact"]["sha256"], "started_at": time.time(),
         "checks": {}, "cleanup": {"complete": False}, "resource_owner": runtime.owner if hasattr(runtime, "owner") else None,
     }
@@ -117,7 +120,8 @@ def parser():
     result.add_argument("--expected-sha", required=True)
     result.add_argument("--expected-tree", required=True)
     result.add_argument("--run-id", type=int, required=True)
-    result.add_argument("--run-attempt", type=int, required=True)
+    result.add_argument("--run-attempt", type=int, required=True, help="Attempt that produced the artifact")
+    result.add_argument("--verification-attempt", type=int, required=True, help="Current smoke job attempt")
     result.add_argument("--output", type=Path, required=True)
     return result
 

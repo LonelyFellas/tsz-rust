@@ -37,7 +37,7 @@ def fixture(root):
                                     "workflow_run": {"id": 123456789, "head_sha": SHA, "head_branch": "main"}}))
     return SimpleNamespace(artifact=artifact, manifest=manifest, artifact_id=101, artifact_metadata=metadata,
                            expected_sha=SHA, expected_tree=TREE, run_id=123456789,
-                           run_attempt=2, output=root / "receipt.json")
+                           run_attempt=2, verification_attempt=2, output=root / "receipt.json")
 
 
 class FakeRuntime:
@@ -129,6 +129,27 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertEqual(result["checks"]["redis_unavailable_rejected"], "passed")
             self.assertTrue(runtime.closed)
             self.assertIn("UPDATE _sqlx_migrations", runtime.queries[0])
+
+    def test_failed_job_rerun_keeps_successful_producer_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = fixture(Path(directory))
+            args.verification_attempt = 3
+            result = verify(args, runtime_factory=FakeRuntime)
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["artifact_id"], 101)
+            self.assertEqual(result["ci"]["run_attempt"], 2)
+            self.assertEqual(result["verification_attempt"], 3)
+            metadata = json.loads(args.artifact_metadata.read_text())
+            self.assertTrue(metadata["name"].endswith("attempt-2"))
+
+    def test_verification_cannot_precede_artifact_production(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = fixture(Path(directory))
+            args.verification_attempt = 1
+            with patch("release_artifact_smoke.IsolatedRuntime") as factory:
+                with self.assertRaisesRegex(VerificationError, "verification_precedes"):
+                    verify(args, runtime_factory=factory)
+                factory.assert_not_called()
 
     def test_startup_or_persistence_failure_still_cleans_and_never_passes(self):
         for stage in ("application_exited", "wordlist_persistence_failed", "interrupted"):

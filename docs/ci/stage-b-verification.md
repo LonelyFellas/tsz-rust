@@ -13,7 +13,7 @@
 | `ops/release_artifact_smoke.py` | 验证 manifest、GitHub artifact 元数据、SHA/tree/run/attempt/digest，运行精确二进制，验证健康、鉴权、持久化、依赖故障和迁移失败，生成含清理状态的回执 |
 | `ops/deployed_baseline.py` | 通过固定 `tshb-test` SSH 目标只读采集已接受 manifest、实际运行文件摘要与数据库账本；禁止覆盖旧回执，拒绝部署中/进程变化/摘要不符 |
 | `ops/migration_compatibility.py` | 将实际部署基线与旧 CI 制品绑定，在合成库中演练整个 up/down 区间、旧程序回读；拒绝漂移、缺失、脏账本和不可支持的恢复区间 |
-| `.github/workflows/ci.yml` | 保留完整原有 CI；main push/手动 main 增加 `Verify release artifact`，按当前 artifact ID 重新下载上传制品，并保存成功/失败验收回执；无部署步骤、无测试服 secret |
+| `.github/workflows/ci.yml` | 保留完整原有 CI；main push/手动 main 增加 `Verify release artifact`，按构建任务输出的 artifact ID、生产 attempt 与 tree 重新下载并验收；消费任务 attempt 单独记录，支持仅重跑失败 smoke；无部署步骤、无测试服 secret |
 | `ops/test_*.py` | 新增制品身份、清理、中断、迁移区间、拒绝回退、只读基线与工作流回归；不改业务 API 或数据库迁移 |
 
 主线 CI 的六个集成分片、required check 名称、原生 hooks、部署 gate 均未删除或绕过。本轮新增 job 不是自动 CD：它只在 CI 独立环境运行和销毁测试资源，不写测试服。
@@ -60,12 +60,14 @@ python3 ops/deployed_baseline.py --output <new-baseline-json>
 ```
 
 ```bash
-python3 ops/release_artifact_smoke.py --manifest <manifest> --artifact <binary> --artifact-id <id> --artifact-metadata <github-artifact-json> --expected-sha <full-sha> --expected-tree <tree> --run-id <id> --run-attempt <attempt> --output <new-receipt>
+python3 ops/release_artifact_smoke.py --manifest <manifest> --artifact <binary> --artifact-id <id> --artifact-metadata <github-artifact-json> --expected-sha <full-sha> --expected-tree <tree> --run-id <id> --run-attempt <producer-attempt> --verification-attempt <current-attempt> --output <new-receipt>
 ```
 
 ```bash
 python3 ops/migration_compatibility.py --baseline <captured-baseline> --baseline-manifest <old-manifest> --baseline-artifact <old-binary> --baseline-artifact-id <old-id> --baseline-artifact-metadata <old-github-artifact-json> --manifest <candidate-manifest> --artifact <candidate-binary> --artifact-id <id> --artifact-metadata <github-artifact-json> --expected-sha <full-sha> --expected-tree <tree> --run-id <id> --run-attempt <attempt> --output <new-receipt>
 ```
+
+仅重跑失败 smoke 时，通过构建 job outputs 绑定原成功 artifact，不猜测最新制品；`--run-attempt` 始终指生产 attempt，`--verification-attempt` 指本次验收 attempt，回执分别保存。原制品丢失/过期/身份不匹配时阻断，不自动选择其他 attempt。
 
 成功要求测试与清理都完成。输入身份错误在创建依赖前拒绝；运行中失败仍清理自有资源并保留失败回执。SIGINT/SIGTERM 会走失败清理；SIGKILL/宿主宕机不能保证进程执行 finally，后续须按 owner 标签核实并定向恢复清理，不自动删除其他 owner 的资源。
 
