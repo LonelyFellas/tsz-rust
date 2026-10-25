@@ -80,6 +80,8 @@ class DeploymentTransactionTests(unittest.TestCase):
                     service['running']=True
                     return b''
                 if args[:2]==['systemctl','show']:
+                    if 'EnvironmentFiles' in args:
+                        return f'EnvironmentFiles={host.ROOT}/.env (ignore_errors=no)\nEnvironment=\nWorkingDirectory={host.ROOT}\n'.encode()
                     return b'42' if service['running'] else b'0'
                 if args[-1:] == ['deploy-info']:
                     return json.dumps(INFO).encode()

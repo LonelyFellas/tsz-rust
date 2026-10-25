@@ -168,12 +168,12 @@ class HostOperationTests(unittest.TestCase):
                 self.prepare(root)
                 cfg = host.configuration()
                 running = '\0'.join(key + '=' + value for key, value in cfg.items()).encode()
-                with patch.object(host, 'run', return_value=b'42'), patch.object(Path, 'read_bytes', return_value=running):
+                with patch.object(host, 'check_service_configuration', return_value=cfg), patch.object(host, 'run', return_value=b'42'), patch.object(Path, 'read_bytes', return_value=running):
                     self.assertEqual(host.check_running_configuration(), host.configuration_identity(cfg))
                 for key, value in [('DATABASE_URL', 'postgresql://other/baseline'), ('REDIS_URL', 'redis://other/0'), ('LOGIN_REWARD_ENABLED', 'true')]:
                     changed = {**cfg, key: value}
                     running = '\0'.join(name + '=' + item for name, item in changed.items()).encode()
-                    with self.subTest(key=key), patch.object(host, 'run', return_value=b'42'), patch.object(Path, 'read_bytes', return_value=running):
+                    with self.subTest(key=key), patch.object(host, 'check_service_configuration', return_value=cfg), patch.object(host, 'run', return_value=b'42'), patch.object(Path, 'read_bytes', return_value=running):
                         with self.assertRaisesRegex(host.HostError, 'running_configuration_mismatch'):
                             host.check_running_configuration()
 
@@ -190,6 +190,28 @@ class HostOperationTests(unittest.TestCase):
                     start.assert_not_called()
                 with self.assertRaisesRegex(host.HostError, 'deployment_configuration_changed'):
                     host.process_environment(plan)
+
+    def test_formal_start_checks_configuration_source_and_drift_before_systemctl_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root):
+                plan = self.prepare(root)
+                self.acquire(plan)
+                settings = f'EnvironmentFiles={host.ROOT}/.env (ignore_errors=no)\nEnvironment=\nWorkingDirectory={host.ROOT}\n'.encode()
+                with patch.object(host, 'run', side_effect=[settings, b'']) as command:
+                    host.start_formal(plan)
+                    self.assertEqual(command.call_args.args[0], ['systemctl', 'start', 'tsz-rust'])
+                for changed, stage in [(settings.replace(str(host.ROOT / '.env').encode(), b'/other/.env'), 'unsupported_service_configuration'),
+                                       (settings.replace(b'Environment=\n', b'Environment=DATABASE_URL=postgresql://other/database\n'), 'service_configuration_override')]:
+                    with self.subTest(stage=stage), patch.object(host, 'run', return_value=changed) as command:
+                        with self.assertRaisesRegex(host.HostError, stage):
+                            host.start_formal(plan)
+                        self.assertEqual(command.call_count, 1)
+                (host.ROOT / '.env').write_text('DATABASE_URL=postgresql://other/database\nREDIS_URL=redis://synthetic/0\n')
+                with patch.object(host, 'run', return_value=settings) as command:
+                    with self.assertRaisesRegex(host.HostError, 'deployment_configuration_changed'):
+                        host.start_formal(plan)
+                    self.assertEqual(command.call_count, 1)
 
     def test_backup_files_and_directory_are_synced_before_completion(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -43,6 +43,10 @@ class BusinessSmokeTests(unittest.TestCase):
         self.assertIn("FOR UPDATE", deletion)
         self.assertIn("pg_advisory_xact_lock", deletion)
         self.assertIn("BEGIN READ ONLY", audit)
+        self.assertIn('pg_constraint', deletion)
+        self.assertIn("('public','wordlists','owner_user_id')", deletion)
+        self.assertNotIn("('public','avatar_uploads','user_id')", deletion)
+        self.assertNotIn("('public','teacher_applications','user_id')", deletion)
         for table in ("wordlist_audio_jobs", "coin_wallets", "wordlist_tips", "learning_questions", "learning_memory_sources", "platform.outbox_events", "audit.admin_actions"):
             self.assertIn(table, deletion)
             self.assertIn(table, audit)

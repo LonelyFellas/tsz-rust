@@ -172,11 +172,32 @@ def configuration_identity(cfg):
     return hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest()
 
 
+def check_service_configuration(plan=None):
+    cfg = configuration()
+    settings = dict(line.split('=', 1) for line in run([
+        'systemctl', 'show', 'tsz-rust', '-p', 'EnvironmentFiles', '-p', 'Environment', '-p', 'WorkingDirectory'
+    ]).decode().splitlines() if '=' in line)
+    require(settings.get('EnvironmentFiles') == str(ROOT / '.env') + ' (ignore_errors=no)'
+            and settings.get('WorkingDirectory') == str(ROOT), 'unsupported_service_configuration')
+    overrides = dict(item.split('=', 1) for item in shlex.split(settings.get('Environment', '')) if '=' in item)
+    require(all(key not in overrides or overrides[key] == cfg.get(key, CONFIG_DEFAULTS.get(key, ''))
+                for key in CONFIG_KEYS), 'service_configuration_override')
+    if plan is not None:
+        require(configuration_identity(cfg) == state(plan)['configuration_sha256'], 'deployment_configuration_changed')
+    return cfg
+
+
+def start_formal(plan):
+    check_service_configuration(plan)
+    run(['systemctl', 'start', 'tsz-rust'])
+
+
 def check_running_configuration(plan=None):
+    cfg = check_service_configuration(plan if plan is not None and state_path(plan).exists() else None)
     pid = int(run(["systemctl", "show", "tsz-rust", "-p", "MainPID", "--value"]).strip())
     require(pid > 0, "formal_pid_missing")
     running = dict(item.decode().split("=", 1) for item in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0") if b"=" in item)
-    configured = configuration_identity(configuration())
+    configured = configuration_identity(cfg)
     require(configuration_identity(running) == configured, "running_configuration_mismatch")
     if plan is not None and state_path(plan).exists():
         require(state(plan)["configuration_sha256"] == configured, "deployment_configuration_changed")
@@ -487,7 +508,7 @@ def recover(plan, credentials):
         run([str(BINARY), "deploy-undo-migrations", str(minimum), str(maximum)], environment=process_environment(plan), timeout=120)
         require(ledger() == original, "recovery_ledger_mismatch")
     manifests.restore_deployment(backup_dir=transaction(plan) / "backup", artifact=BINARY, manifest_path=MANIFEST)
-    run(["systemctl", "start", "tsz-rust"])
+    start_formal(plan)
     wait_formal(plan["baseline"]["service"]["file_sha256"])
     auth_smoke(plan, "recovery", credentials)
     manifests.verify_manifest(MANIFEST, BINARY)
@@ -522,7 +543,7 @@ def action(name, plan, credentials):
                              if row["direction"] == "up"], "candidate_migration_ledger_mismatch")
     elif name == "formal_start":
         stop_candidate(plan)
-        run(["systemctl", "start", "tsz-rust"])
+        start_formal(plan)
         wait_formal(plan["artifact_sha256"])
     elif name == "formal_verify":
         auth_smoke(plan, "formal", credentials)
