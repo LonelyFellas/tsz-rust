@@ -201,6 +201,24 @@ class ControllerTests(unittest.TestCase):
             with controller.writer(plan["deployment_id"]), self.assertRaisesRegex(DeploymentError, "local_writer_busy"):
                 Controller(root / "state", gate, host).resume(plan["deployment_id"])
 
+    def test_initialization_can_resume_before_or_after_active_acquisition(self):
+        for acquired in (False, True):
+            with self.subTest(acquired=acquired), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                plan, host, gate = plan_fixture(root)
+                controller = Controller(root / 'state', gate, host)
+                acquire = controller.active
+                def interrupted(owner, action):
+                    if acquired:
+                        acquire(owner, action)
+                    raise SystemExit('initialization_interrupted')
+                with patch.object(controller, 'active', side_effect=interrupted), self.assertRaises(SystemExit):
+                    controller.apply(plan)
+                self.assertTrue(controller.path(plan['deployment_id']).exists())
+                self.assertEqual(controller.resume(plan['deployment_id'])['status'], 'blocked')
+                self.assertFalse((root / 'state/active').exists())
+                self.assertEqual(host.actions, [])
+
     def test_lost_acquire_response_is_cleanly_aborted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

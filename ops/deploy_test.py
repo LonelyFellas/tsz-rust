@@ -235,11 +235,11 @@ class Controller:
         with self.writer(deployment_id):
             if self.path(deployment_id).exists():
                 raise DeploymentError("deployment_exists_use_resume")
-            self.active(deployment_id, True)
             state = {"schema_version": 1, "deployment_id": deployment_id, "plan": plan,
                      "plan_sha256": identity_hash(plan), "phase": "preflight", "status": "running",
                      "pending": None, "completed": [], "mutation_started": False, "events": []}
             self.save(state, "created")
+            self.active(deployment_id, True)
             return self.forward(state)
 
     def validate_state(self, state):
@@ -327,6 +327,10 @@ class Controller:
                     if state["status"] == "recovered" and not observed.get("recovery_matches"):
                         raise DeploymentError("recovered_deployment_identity_mismatch")
                     self.active(deployment_id, False)
+                return state
+            if not (self.directory / "active").exists() and state["pending"] is None and not state["completed"]:
+                state.update(status="blocked", phase="blocked")
+                self.save(state, "initialization_aborted")
                 return state
             owner = json.loads((self.directory / "active" / "owner.json").read_text())
             if owner != {"owner": deployment_id}:

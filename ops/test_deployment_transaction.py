@@ -62,6 +62,8 @@ class DeploymentTransactionTests(unittest.TestCase):
                 TRANSACTIONS=server/'transactions'))
             host.BINARY.parent.mkdir(parents=True)
             host.BINARY.write_bytes(b'previous-binary')
+            (host.ROOT / '.env').write_text('DATABASE_URL=postgresql://synthetic/baseline\nREDIS_URL=redis://synthetic/0\n')
+            stack.enter_context(patch.object(host, 'check_running_configuration', return_value=host.configuration_identity(host.configuration())))
             host.MANIFEST.write_text(json.dumps(plan['baseline']['deployment_manifest']))
             def baseline(candidate):
                 host.require(host.sha(host.BINARY)==candidate['baseline']['service']['file_sha256'], 'baseline_binary_changed')

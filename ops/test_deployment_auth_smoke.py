@@ -261,16 +261,18 @@ class DeploymentAuthSmokeTests(unittest.TestCase):
         listener = 'LISTEN 0 128 127.0.0.1:8383 0.0.0.0:* users:(("tsz-rust",pid=123,fd=7))'
         with mock.patch.object(pathlib.Path, "samefile", return_value=True), \
              mock.patch.object(pathlib.Path, "open", side_effect=lambda *a, **k: io.BytesIO(b"verified-ci-binary")), \
-             mock.patch.object(pathlib.Path, "read_bytes", return_value=b"COOKIE_SECURE=true\\0DEPLOYMENT_SMOKE_ONLY=false\\0"), \
+             mock.patch.object(pathlib.Path, "read_bytes", return_value=b"COOKIE_SECURE=true\0DEPLOYMENT_SMOKE_ONLY=false\0"), \
              mock.patch.object(self.smoke.subprocess, "run", side_effect=[subprocess.CompletedProcess([],0,"123"), subprocess.CompletedProcess([],0,listener)]):
             self.assertEqual(self.smoke.check_formal(expected), 123)
-        for data, environment in [(b"wrong", b"COOKIE_SECURE=true\\0"), (b"verified-ci-binary", b"DEPLOYMENT_SMOKE_ONLY=true\\0")]:
+        for data, environment, stage in [(b"wrong", b"COOKIE_SECURE=true\0", 'formal_digest_mismatch'),
+                                         (b"verified-ci-binary", b"DEPLOYMENT_SMOKE_ONLY=true\0", 'formal_workers_disabled'),
+                                         (b"verified-ci-binary", b"COOKIE_SECURE=false\0", 'formal_cookie_insecure')]:
             with self.subTest(data=data, environment=environment), \
                  mock.patch.object(pathlib.Path, "samefile", return_value=True), \
                  mock.patch.object(pathlib.Path, "open", side_effect=lambda *a, **k: io.BytesIO(data)), \
                  mock.patch.object(pathlib.Path, "read_bytes", return_value=environment), \
-                 mock.patch.object(self.smoke.subprocess, "run", return_value=subprocess.CompletedProcess([],0,"123")):
-                with self.assertRaises(self.smoke.SmokeFailure):
+                 mock.patch.object(self.smoke.subprocess, "run", side_effect=[subprocess.CompletedProcess([],0,"123"), subprocess.CompletedProcess([],0,listener)]):
+                with self.assertRaisesRegex(self.smoke.SmokeFailure, stage):
                     self.smoke.check_formal(expected)
 
     def test_formal_mode_requires_lock_and_rechecks_process_after_https_chain(self):

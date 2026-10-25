@@ -76,7 +76,7 @@ CLI 只有 `accepted` 返回 0；`recovered` 表示发布失败但已恢复旧�
 
 前向步骤固定为：
 
-1. `backup`：备份旧二进制与 manifest，验证两者一致。
+1. `backup`：备份旧二进制与 manifest，验证两者一致，fsync 文件与目录后才记录完成。
 2. `upload`：接收精确候选并核对 SHA256。
 3. `stop`：最后复核 main/CI/基线，持久化 mutation 边界后停正式服务。
 4. `install`：原子替换二进制，撤掉旧 accepted manifest。
@@ -121,7 +121,7 @@ main 只在 mutation 边界之前跟踪。停服前 main 或基线变化会阻�
 
 ## 正式入口验收和数据清理
 
-预检只解析 `.env`，不执行 shell。要求 `COOKIE_SECURE=true`、`LOGIN_REWARD_ENABLED=false`、必要表字段存在、TLS 正常，且 Python 能生成 bcrypt 随机凭据。目标 Ubuntu Python 3.10 使用 libcrypt bcrypt；Python 3.13 移除了 `crypt`，无法生成时预检阻断，不安装包或改用固定共享口令。
+预检只解析 `.env`，不执行 shell；以内存摘要核对正式进程与文件中的数据库、Redis、鉴权密钥及 Cookie/登录奖励配置，事务期间变更会阻断。要求 `COOKIE_SECURE=true`、`LOGIN_REWARD_ENABLED=false`、基线鉴权所需表字段存在、TLS 正常，且 Python 能生成 bcrypt 随机凭据。完整业务清理 schema 在候选完成迁移后才检查；鉴权 fixture 使用实际 schema 的外键与已有非外键引用守卫清理，因此旧基线和 down 后不依赖候选新增表。目标 Ubuntu Python 3.10 使用 libcrypt bcrypt；Python 3.13 移除了 `crypt`，无法生成时预检阻断，不安装包或改用固定共享口令。
 
 正式验收前后核对 systemd MainPID、磁盘和 `/proc/<pid>/exe` 摘要，以及 `127.0.0.1:8383` 的唯一监听归属；拒绝残留 smoke 配置、错误 Cookie 配置和进程变更。HTTPS 验收沿用 Secure/HttpOnly/SameSite/Path、refresh 轮换与 logout 规则。
 

@@ -23,11 +23,12 @@ class HostOperationTests(unittest.TestCase):
         plan, _, _ = plan_fixture(root)
         host.BINARY.parent.mkdir(parents=True)
         host.BINARY.write_bytes(b"previous-binary")
+        (host.ROOT / '.env').write_text('DATABASE_URL=postgresql://synthetic/baseline\nREDIS_URL=redis://synthetic/0\n')
         host.MANIFEST.write_text(json.dumps(plan["baseline"]["deployment_manifest"]))
         return plan
 
     def acquire(self, plan):
-        with patch.object(host, "baseline_matches"):
+        with patch.object(host, "baseline_matches"), patch.object(host, 'check_running_configuration', return_value=host.configuration_identity(host.configuration())):
             host.dispatch("acquire", plan, None)
 
     def test_owner_operation_lock_and_full_plan_hash_are_required(self):
@@ -159,6 +160,40 @@ class HostOperationTests(unittest.TestCase):
                     self.assertTrue(host.accepted_identity(plan,manifest,value))
                     manifest['ci']['verification_receipt_sha256'] = '0'*64
                     self.assertFalse(host.accepted_identity(plan,manifest,value))
+
+    def test_running_and_file_configuration_must_match_before_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root):
+                self.prepare(root)
+                cfg = host.configuration()
+                running = '\0'.join(key + '=' + value for key, value in cfg.items()).encode()
+                with patch.object(host, 'run', return_value=b'42'), patch.object(Path, 'read_bytes', return_value=running):
+                    self.assertEqual(host.check_running_configuration(), host.configuration_identity(cfg))
+                for key, value in [('DATABASE_URL', 'postgresql://other/baseline'), ('REDIS_URL', 'redis://other/0'), ('LOGIN_REWARD_ENABLED', 'true')]:
+                    changed = {**cfg, key: value}
+                    running = '\0'.join(name + '=' + item for name, item in changed.items()).encode()
+                    with self.subTest(key=key), patch.object(host, 'run', return_value=b'42'), patch.object(Path, 'read_bytes', return_value=running):
+                        with self.assertRaisesRegex(host.HostError, 'running_configuration_mismatch'):
+                            host.check_running_configuration()
+
+    def test_backup_files_and_directory_are_synced_before_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.environment(root):
+                plan = self.prepare(root)
+                self.acquire(plan)
+                seen = []
+                real_fsync = host.os.fsync
+                def sync(descriptor):
+                    seen.append(host.os.fstat(descriptor).st_ino)
+                    real_fsync(descriptor)
+                with patch.object(host.os, 'fsync', side_effect=sync):
+                    host.dispatch('backup', plan, None)
+                folder = host.transaction(plan) / 'backup'
+                for path in (folder / 'tsz-rust', folder / 'api.json', folder, folder.parent):
+                    self.assertIn(path.stat().st_ino, seen)
+                self.assertTrue(host.state(plan)['backup_ready'])
 
     def test_configuration_is_parsed_never_executed_and_unknown_expansion_blocks(self):
         with tempfile.TemporaryDirectory() as directory:

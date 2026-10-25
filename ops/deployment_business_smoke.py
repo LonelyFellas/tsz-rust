@@ -51,6 +51,52 @@ def assert_absent(sql, resource):
     require(existing == [], "business_fixture_identity_exists")
 
 
+def check_auth_schema(sql):
+    sql('BEGIN READ ONLY; SELECT id,phone,email,password_hash,display_name FROM users WHERE false;'
+        'SELECT user_id,role FROM user_roles WHERE false; SELECT user_id FROM refresh_tokens WHERE false; ROLLBACK;')
+
+
+def cleanup_auth(sql, resource):
+    """Auth creates only user/role/token rows; refuse every other incoming user reference."""
+    validate_resource(resource)
+    u = resource['user_id']
+    sql(f"""
+    BEGIN;
+    SET LOCAL lock_timeout='5s';
+    SELECT id FROM users WHERE id='{u}' FOR UPDATE;
+    DO $$ DECLARE ref record; present boolean; BEGIN
+      IF EXISTS(SELECT 1 FROM users WHERE id='{u}' AND (email IS DISTINCT FROM '{resource['email']}'
+        OR phone IS DISTINCT FROM '{resource['phone']}' OR md5(password_hash) IS DISTINCT FROM '{resource['credential_fingerprint']}'
+        OR display_name IS DISTINCT FROM 'Deployment smoke'))
+        OR EXISTS(SELECT 1 FROM user_roles WHERE user_id='{u}' AND role<>'student')
+      THEN RAISE EXCEPTION 'auth fixture ownership guard'; END IF;
+      FOR ref IN
+        SELECT ns.nspname AS schema_name,c.relname AS table_name,a.attname AS column_name
+        FROM pg_constraint fk JOIN pg_class c ON c.oid=fk.conrelid
+        JOIN pg_namespace ns ON ns.oid=c.relnamespace
+        JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=ANY(fk.conkey)
+        WHERE fk.contype='f' AND fk.confrelid='users'::regclass
+          AND fk.conrelid NOT IN ('user_roles'::regclass,'refresh_tokens'::regclass)
+        UNION
+        SELECT table_schema,table_name,column_name FROM information_schema.columns
+        WHERE (table_schema,table_name,column_name) IN
+          (('public','coin_wallets','owner_id'),('public','coin_operations','actor_id'),
+           ('public','wordlist_tips','payer_user_id'),('public','wordlist_tips','author_user_id'),
+           ('public','wordlist_audio_jobs','user_id'),('public','wordlist_deletion_events','deleted_by_user_id'),
+           ('platform','outbox_events','aggregate_id'),('audit','admin_actions','resource_id'))
+      LOOP
+        EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I.%I WHERE %I::text=$1)',ref.schema_name,ref.table_name,ref.column_name)
+          INTO present USING '{u}';
+        IF present THEN RAISE EXCEPTION 'auth fixture external reference guard'; END IF;
+      END LOOP;
+    END $$;
+    DELETE FROM users WHERE id='{u}' AND email='{resource['email']}' AND phone='{resource['phone']}';
+    COMMIT;
+    """)
+    absent = sql(f"BEGIN READ ONLY; SELECT (NOT EXISTS(SELECT 1 FROM users WHERE id='{u}') AND NOT EXISTS(SELECT 1 FROM user_roles WHERE user_id='{u}') AND NOT EXISTS(SELECT 1 FROM refresh_tokens WHERE user_id='{u}'))::text; ROLLBACK;")
+    require(absent.splitlines()[-1] == 'true', 'auth_cleanup_residual')
+
+
 def check_schema(sql):
     # Parse every relation/column needed by cleanup before any user is created.
     columns = {

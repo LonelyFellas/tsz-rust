@@ -163,7 +163,28 @@ def ledger():
     return json.loads(sql("SELECT json_agg(json_build_object('version',version,'checksum',encode(checksum,'hex'),'success',success) ORDER BY version) FROM _sqlx_migrations", readonly=True))
 
 
+CONFIG_DEFAULTS = {"COOKIE_SECURE": "true", "LOGIN_REWARD_ENABLED": "false"}
+CONFIG_KEYS = ("DATABASE_URL", "REDIS_URL", "JWT_SECRET", "ADMIN_JWT_SECRET", *CONFIG_DEFAULTS)
+
+
+def configuration_identity(cfg):
+    selected = {key: cfg.get(key, CONFIG_DEFAULTS.get(key, "")) for key in CONFIG_KEYS}
+    return hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest()
+
+
+def check_running_configuration(plan=None):
+    pid = int(run(["systemctl", "show", "tsz-rust", "-p", "MainPID", "--value"]).strip())
+    require(pid > 0, "formal_pid_missing")
+    running = dict(item.decode().split("=", 1) for item in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0") if b"=" in item)
+    configured = configuration_identity(configuration())
+    require(configuration_identity(running) == configured, "running_configuration_mismatch")
+    if plan is not None and state_path(plan).exists():
+        require(state(plan)["configuration_sha256"] == configured, "deployment_configuration_changed")
+    return configured
+
+
 def baseline_matches(plan):
+    check_running_configuration(plan)
     expected = plan["baseline"]
     actual = json.loads(MANIFEST.read_text())
     require(actual == expected["deployment_manifest"], "baseline_manifest_changed")
@@ -178,7 +199,7 @@ def preflight(plan):
     baseline_matches(plan)
     cfg = configuration()
     require(cfg.get("LOGIN_REWARD_ENABLED", "false") == "false", "smoke_login_rewards_must_be_disabled")
-    business.check_schema(lambda statement: sql(statement, readonly=True))
+    business.check_auth_schema(lambda statement: sql(statement, readonly=True))
     business.random_credentials()
     auth.preflight()
     return {"ready": True}
@@ -193,6 +214,12 @@ def backup(plan):
     shutil.copy2(BINARY, folder / "tsz-rust")
     shutil.copy2(MANIFEST, folder / "api.json")
     manifests.validate_backup(folder)
+    for path in (folder / "tsz-rust", folder / "api.json", folder, folder.parent):
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     value = state(plan)
     value["backup_ready"] = True
     atomic(state_path(plan), value)
@@ -321,6 +348,7 @@ def audit_fixture_redis(resource):
 
 def clean_fixture(plan, section, mode=None):
     value = state(plan)
+    require(configuration_identity(configuration()) == value["configuration_sha256"], "deployment_configuration_changed")
     fixture = value[section][mode] if mode is not None else value[section]
     require(fixture.get("absent_before") is True, "fixture_ownership_not_proven")
     def record(identifiers):
@@ -328,7 +356,10 @@ def clean_fixture(plan, section, mode=None):
         target = current[section][mode] if mode is not None else current[section]
         target["wordlist_ids"] = identifiers
         atomic(state_path(plan), current)
-    business.cleanup(sql, fixture["resource"], known_ids=fixture.get("wordlist_ids", []), record_ids=record)
+    if section == "auth_fixtures":
+        business.cleanup_auth(sql, fixture["resource"])
+    else:
+        business.cleanup(sql, fixture["resource"], known_ids=fixture.get("wordlist_ids", []), record_ids=record)
     audit_fixture_redis(fixture["resource"])
     current = state(plan)
     target = current[section][mode] if mode is not None else current[section]
@@ -337,6 +368,9 @@ def clean_fixture(plan, section, mode=None):
 
 
 def auth_smoke(plan, mode, credentials=None):
+    require(configuration_identity(configuration()) == state(plan)["configuration_sha256"], "deployment_configuration_changed")
+    if mode != "candidate":
+        check_running_configuration(plan)
     value = state(plan)
     owner = str(uuid.uuid5(uuid.UUID(plan["deployment_id"]), "auth-" + mode))
     resource = business.resources(owner)
@@ -368,6 +402,8 @@ def auth_smoke(plan, mode, credentials=None):
 
 
 def business_smoke(plan):
+    check_running_configuration(plan)
+    business.check_schema(lambda statement: sql(statement, readonly=True))
     resource = business.resources(plan["deployment_id"])
     password, credential_hash = business.random_credentials()
     resource["credential_fingerprint"] = hashlib.md5(credential_hash.encode()).hexdigest()
@@ -429,6 +465,7 @@ def unlock(plan):
 
 def recover(plan, credentials):
     value = state(plan)
+    require(configuration_identity(configuration()) == value["configuration_sha256"], "deployment_configuration_changed")
     stop_candidate(plan)
     run(["systemctl", "stop", "tsz-rust"])
     cleanup_business(plan)
@@ -568,9 +605,11 @@ def dispatch(name, plan, credentials):
     if name == "acquire":
         require(not LOCK.exists(), "remote_deployment_busy")
         baseline_matches(plan)
+        configuration_sha256 = check_running_configuration()
         transaction(plan).mkdir(mode=0o700, parents=True, exist_ok=False)
         (transaction(plan) / "operation.lock").touch(mode=0o600)
         atomic(state_path(plan), {"owner": plan["deployment_id"], "sha": plan["source"]["git_sha"],
+                                 "configuration_sha256": configuration_sha256,
                                  "plan_sha256": hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                                  "mutation_started": False, "accepted": False, "completed": [], "pending": None})
         LOCK.mkdir(mode=0o700)

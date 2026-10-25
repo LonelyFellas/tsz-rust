@@ -89,6 +89,20 @@ class BusinessSmokeTests(unittest.TestCase):
         self.assertNotIn('INSERT ', statement)
         self.assertNotIn('DELETE ', statement)
 
+    def test_auth_cleanup_uses_existing_schema_and_refuses_unknown_user_references(self):
+        sql = Mock(side_effect=['', 'true'])
+        business.cleanup_auth(sql, self.resource)
+        statement = sql.call_args_list[0].args[0]
+        self.assertIn('pg_constraint', statement)
+        self.assertIn('information_schema.columns', statement)
+        self.assertNotIn('FROM learning_review_items', statement)
+        self.assertIn('BEGIN READ ONLY', sql.call_args_list[1].args[0])
+        with self.assertRaisesRegex(SmokeFailure, 'auth_cleanup_residual'):
+            business.cleanup_auth(Mock(side_effect=['', 'false']), self.resource)
+        sql = Mock()
+        business.check_auth_schema(sql)
+        self.assertNotIn('wordlists', sql.call_args.args[0])
+
     def test_shared_ip_bucket_is_never_part_of_account_cleanup_key(self):
         key = business.account_throttle_key(self.resource['user_id'])
         self.assertTrue(key.startswith('auth:login:account:'))
