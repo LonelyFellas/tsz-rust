@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "kind": "stage-c-local-controller-validation",
+  "date": "2026-10-25",
+  "source": {
+    "base_sha": "462c0ef6646df1fb38fd6fc9344d84f62fd4e50b",
+    "branch": "codex/backend-cicd-controller",
+    "changes_committed": false
+  },
+  "status": "passed_with_environment_limits",
+  "release_eligible": false,
+  "checks": {
+    "python_ops": {
+      "command": "python3 -m unittest discover -s ops -p 'test_*.py'",
+      "tests": 181,
+      "failed": 0,
+      "exit_code": 0,
+      "status": "passed"
+    },
+    "rust": {
+      "toolchain": "1.98.0",
+      "format": "passed",
+      "clippy_all_targets_all_features": "passed",
+      "lib_bin_tests_passed": 423,
+      "lib_bin_tests_failed": 0,
+      "doc_tests_passed": 0,
+      "exit_code": 0,
+      "results_reused_after_python_only_changes": true,
+      "integration_suite_rerun": false
+    },
+    "controller": {
+      "forward_steps": 11,
+      "failure_at_each_forward_step": "passed",
+      "runner_loss_after_each_forward_step": "passed",
+      "main_change_before_and_after_mutation_boundary": "passed",
+      "owner_and_writer_conflicts": "passed",
+      "failed_recovery_then_resume": "passed",
+      "lost_acquire_and_terminal_responses": "passed",
+      "tampered_plan_and_artifact_identity": "passed",
+      "direct_cli_without_network": "passed",
+      "invalid_v2_manifest_preserves_existing_file": "passed"
+    },
+    "transaction_integration": {
+      "tests": 3,
+      "real_files_backup_locks_install_manifest": true,
+      "success_writes_v2": "passed",
+      "formal_failure_restores_v1": "passed",
+      "interrupted_candidate_start_recovers_without_reinstall": "passed",
+      "external_io_uses_test_doubles": ["systemd", "process", "http", "database"],
+      "real_ssh_transport_exercised": false
+    },
+    "real_artifact_business": {
+      "receipt": "2026-10-25-stage-c-isolated-business.json",
+      "random_credentials_verified": true,
+      "source_sha": "462c0ef6646df1fb38fd6fc9344d84f62fd4e50b",
+      "artifact_sha256": "2ad0457febef4fcde1ba93e644af4a15ed29759c5cd37625fdbfffee433e98b1",
+      "postgresql": "18.6",
+      "redis": "6.0.20",
+      "network_internal": true,
+      "persistence_and_exact_cleanup": "passed",
+      "external_reference_guard": "passed",
+      "protected_fixture_unchanged": "passed",
+      "final_cleanup_schema_preflight": "passed"
+    }
+  },
+  "cleanup": {
+    "complete": true,
+    "remaining": [],
+    "owned_container_ids_removed": [
+      "ef6472e51b620149eedd306a44fe6c5a1f95aa5e72151e4fd18bead75990d5b0",
+      "d94020947436f204a606301561acf1e1982c5551a636800d7ea951037c815ccc"
+    ],
+    "ownership_label_checked_before_removal": "tsz.stage-c=20261025",
+    "owned_anonymous_volume_removed": "55d81293b0887393015ea1a9787aa93396e3374c2bbed56b68fe1963fc86369a",
+    "task_download_removed": "target/stage-c-isolated/artifact-download",
+    "independent_container_and_volume_recheck": "passed",
+    "artifact_runtime_containers_networks_volumes_remaining": 0,
+    "shared_cache_or_images_removed": false
+  },
+  "delivery": {
+    "committed": false,
+    "pushed": false,
+    "pull_request_created": false,
+    "deployed": false,
+    "automatic_cd_enabled": false,
+    "ci_changes": "Quality runs controller tests; existing gates and release jobs preserved"
+  },
+  "unverified": [
+    "new controller end-to-end over tshb-test SSH, systemd and nginx",
+    "real-data migration recovery or PITR",
+    "GitHub CI for the uncommitted stage-C changes",
+    "manual deployment exercise and automatic CD"
+  ]
+}

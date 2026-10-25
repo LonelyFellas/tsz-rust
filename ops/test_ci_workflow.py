@@ -316,6 +316,8 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("python3 -m unittest ops/test_ci_cargo_fetch.py", quality)
         self.assertIn("python3 -m unittest ops/test_release_artifact_manifest.py", quality)
         self.assertIn("python3 -m unittest ops/test_deployment_preflight.py", quality)
+        for target in ("test_deploy_test.py", "test_deployment_host.py", "test_deployment_transport.py", "test_deployment_business_smoke.py", "test_deployment_transaction.py"):
+            self.assertIn(target, quality)
         self.assertIn("python3 -m unittest ops/test_deploy_skill.py", quality)
         self.assertIn(
             "cargo clippy --locked --all-targets --all-features -- -D warnings",
