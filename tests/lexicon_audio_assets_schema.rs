@@ -123,8 +123,8 @@ async fn audio_asset_domain_constraints_are_enforced(pool: PgPool) {
     for (label, content_type, size, locale, gender, name) in [
         ("content type", "audio/flac", 1, "en-GB", "female", "a.flac"),
         ("size", "audio/mpeg", 0, "en-GB", "female", "a.mp3"),
-        ("locale", "audio/mpeg", 1, "en-AU", "female", "a.mp3"),
-        ("gender", "audio/mpeg", 1, "en-GB", "neutral", "a.mp3"),
+        ("locale", "audio/mpeg", 1, "zh-CN", "female", "a.mp3"),
+        ("gender", "audio/mpeg", 1, "en-GB", "unknown", "a.mp3"),
         ("empty name", "audio/mpeg", 1, "en-GB", "female", ""),
     ] {
         let result = insert(
@@ -177,6 +177,41 @@ async fn audio_asset_domain_constraints_are_enforced(pool: PgPool) {
             .await,
         CHECK_VIOLATION,
     );
+}
+
+#[sqlx::test]
+async fn english_locale_migration_roundtrips_and_refuses_data_loss(pool: PgPool) {
+    const DOWN: &str = include_str!("../migrations/20261025150000_english_voice_locales.down.sql");
+    const UP: &str = include_str!("../migrations/20261025150000_english_voice_locales.up.sql");
+    sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    sqlx::raw_sql(UP).execute(&pool).await.unwrap();
+    let actor = seed_admin(&pool).await;
+    for (locale, gender) in [("en-AU", "female"), ("en-IN", "male"), ("en-US", "neutral")] {
+        insert(
+            &pool,
+            actor,
+            &format!("assets/{locale}-{gender}.mp3"),
+            "audio/mpeg",
+            1,
+            locale,
+            gender,
+            "test.mp3",
+        )
+        .await
+        .unwrap();
+        assert!(sqlx::raw_sql(DOWN).execute(&pool).await.is_err());
+        let preserved: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.audio_assets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(preserved, 1);
+        sqlx::query("DELETE FROM lexicon.audio_assets")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    sqlx::raw_sql(UP).execute(&pool).await.unwrap();
 }
 
 #[sqlx::test]

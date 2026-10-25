@@ -10,6 +10,7 @@ use crate::lexicon::{
 
 pub const CACHE_SCHEMA_VERSION: &str = "speech-cache-v1";
 pub const SSML_BUILDER_VERSION: &str = "rich-text-v2-ssml-v3";
+pub const HD_FLASH_BUILDER_VERSION: &str = "hd-flash-natural-ssml-v1";
 pub const PROVIDER_NAME: &str = "azure";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -28,6 +29,10 @@ pub enum SpeechModelError {
     InvalidRichText,
     #[error("there is nothing left to read in this text")]
     NothingToSpeak,
+    #[error("指定音素尚未验证适用于该原生地区，请明确选择自然朗读或使用匹配地区的音色")]
+    UnsupportedPhonemeLocale,
+    #[error("该模型暂仅支持原速、原调、原音量的自然朗读，不支持风格、停顿或指定音素")]
+    UnsupportedModelCapability,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +54,19 @@ impl Voice {
         let provider_voice_id = provider_voice_id.into();
         let locale = locale.into();
         validate_token(&provider, 32, "provider")?;
-        validate_token(&provider_voice_id, 128, "provider_voice_id")?;
+        if let Some(persona) = provider_voice_id.strip_suffix(":DragonHDFlashLatestNeural") {
+            validate_token(persona, 102, "provider_voice_id")?;
+            if provider != "azure"
+                || super::locale::EnglishLocale::parse(&locale).is_none()
+                || !persona.starts_with(&format!("{locale}-"))
+            {
+                return Err(SpeechModelError::InvalidVoiceField {
+                    field: "provider_voice_id",
+                });
+            }
+        } else {
+            validate_token(&provider_voice_id, 128, "provider_voice_id")?;
+        }
         validate_token(&locale, 35, "locale")?;
         let mut validated_styles = BTreeSet::new();
         for style in styles {
@@ -76,8 +93,15 @@ impl Voice {
         &self.locale
     }
 
+    pub fn is_hd_flash(&self) -> bool {
+        self.provider == "azure"
+            && self
+                .provider_voice_id
+                .ends_with(":DragonHDFlashLatestNeural")
+    }
+
     pub fn supports_style(&self, style: &str) -> bool {
-        self.styles.contains(style)
+        !self.is_hd_flash() && self.styles.contains(style)
     }
 
     pub fn styles(&self) -> impl Iterator<Item = &str> {
@@ -164,6 +188,14 @@ impl SpeechOptions {
         pitch_semitones: i8,
         volume_percent: i16,
     ) -> Result<(), SpeechModelError> {
+        if voice.is_hd_flash()
+            && (rate_percent != 0
+                || pitch_semitones != 0
+                || volume_percent != 100
+                || style.is_some())
+        {
+            return Err(SpeechModelError::UnsupportedModelCapability);
+        }
         if !(MIN_SPEECH_RATE_PERCENT..=MAX_SPEECH_RATE_PERCENT).contains(&rate_percent) {
             return Err(SpeechModelError::InvalidRate);
         }
@@ -224,6 +256,27 @@ impl SynthesisRequest {
             options.pitch_semitones(),
             options.volume_percent(),
         )?;
+        if voice.is_hd_flash()
+            && content.annotations.iter().any(|annotation| {
+                matches!(
+                    annotation,
+                    crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
+                        | crate::lexicon::dto::RichTextAnnotation::Pause { .. }
+                )
+            })
+        {
+            return Err(SpeechModelError::UnsupportedModelCapability);
+        }
+        if !matches!(voice.locale(), "en-GB" | "en-US")
+            && content.annotations.iter().any(|annotation| {
+                matches!(
+                    annotation,
+                    crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
+                )
+            })
+        {
+            return Err(SpeechModelError::UnsupportedPhonemeLocale);
+        }
         let mut rich_text = RichText::V2(content);
         rich_text::canonicalize(&mut rich_text).map_err(|_| SpeechModelError::InvalidRichText)?;
         let RichText::V2(content) = rich_text else {
@@ -242,7 +295,11 @@ impl SynthesisRequest {
     pub fn fingerprint(&self) -> SynthesisFingerprint {
         let mut encoder = FingerprintEncoder::default();
         encoder.field(CACHE_SCHEMA_VERSION.as_bytes());
-        encoder.field(SSML_BUILDER_VERSION.as_bytes());
+        encoder.field(if self.voice.is_hd_flash() {
+            HD_FLASH_BUILDER_VERSION.as_bytes()
+        } else {
+            SSML_BUILDER_VERSION.as_bytes()
+        });
         encoder.field(self.voice.provider.as_bytes());
         encoder.field(self.voice.provider_voice_id.as_bytes());
         encoder.field(self.voice.locale.as_bytes());

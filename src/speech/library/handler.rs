@@ -1,4 +1,4 @@
-use axum::{Json, extract::State};
+use axum::{Json, extract::State, http::HeaderMap};
 
 use crate::{
     admin::{AdminAuth, authorization::require_active_admin},
@@ -12,6 +12,7 @@ use super::{VoiceLibraryRepository, dto::*};
 #[utoipa::path(
     get, path = "/api/v1/admin/speech/groups", tag = "admin-speech",
     security(("bearer_auth" = [])),
+    params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型分组；旧客户端保留条目但不能覆盖含模型分组")),
     responses((status = 200, body = DubbingGroupsResponse), (status = 401), (status = 403))
 )]
 pub async fn groups(
@@ -29,18 +30,25 @@ pub async fn groups(
 #[utoipa::path(
     put, path = "/api/v1/admin/speech/groups", tag = "admin-speech",
     security(("bearer_auth" = [])), request_body = SaveDubbingGroupsRequest,
+    params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型分组")),
     responses((status = 200, body = DubbingGroupsResponse), (status = 400), (status = 401),
         (status = 403), (status = 404), (status = 409), (status = 422))
 )]
 pub async fn save_groups(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
     ApiJson(request): ApiJson<SaveDubbingGroupsRequest>,
 ) -> Result<Json<DubbingGroupsResponse>, AppError> {
     require_active_admin(&state, &auth).await?;
     Ok(Json(
         VoiceLibraryRepository::new(state.pool)
-            .save_groups(auth.subject, auth.security_version, request)
+            .save_groups_with_models(
+                auth.subject,
+                auth.security_version,
+                request,
+                crate::lexicon::voice_versions::models_supported(&headers),
+            )
             .await?,
     ))
 }
@@ -48,6 +56,7 @@ pub async fn save_groups(
 #[utoipa::path(
     get, path = "/api/v1/admin/speech/library", tag = "admin-speech",
     security(("bearer_auth" = [])),
+    params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型分组；旧客户端保留条目但不能覆盖含模型分组")),
     responses((status = 200, body = VoiceLibraryResponse), (status = 401), (status = 403))
 )]
 pub async fn list(
@@ -64,7 +73,7 @@ pub async fn list(
 
 #[utoipa::path(
     put, path = "/api/v1/admin/speech/library/{alias}/personal", tag = "admin-speech",
-    security(("bearer_auth" = [])), params(("alias" = String, Path)),
+    security(("bearer_auth" = [])), params(("alias" = String, Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型资料及参数")),
     request_body = SaveVoiceSettingsRequest,
     responses((status = 200, body = VoiceLibraryItem), (status = 400), (status = 401),
         (status = 403), (status = 404), (status = 409), (status = 422))
@@ -85,7 +94,7 @@ pub async fn save_settings(
 
 #[utoipa::path(
     put, path = "/api/v1/admin/speech/library/{alias}/description", tag = "admin-speech",
-    security(("bearer_auth" = [])), params(("alias" = String, Path)),
+    security(("bearer_auth" = [])), params(("alias" = String, Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型资料及参数")),
     request_body = SaveVoiceDescriptionRequest,
     responses((status = 200, body = VoiceLibraryItem), (status = 400), (status = 401),
         (status = 403), (status = 404), (status = 409), (status = 422))

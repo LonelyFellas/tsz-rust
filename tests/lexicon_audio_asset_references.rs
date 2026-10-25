@@ -905,6 +905,125 @@ async fn generated_version_audio_survives_save_publication_and_draft_removal(poo
 }
 
 #[sqlx::test]
+async fn native_generated_audio_saves_reopens_publishes_and_blocks_old_writes(pool: PgPool) {
+    let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
+    let mut state = AppState::for_test_with_redis(pool.clone(), redis)
+        .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
+    configure_audio(&mut state);
+    state.speech_provider = Some(Arc::new(GeneratedProvider));
+    let actor = seed_publisher(&pool).await;
+    let bearer = bearer(&state, actor);
+    let entry = create_entry(&state, &pool, &bearer, "nativeaudio").await;
+    let path = format!("{ROOT}/entries/{}/steps/meanings", entry.id);
+    let content = json!({"version":2,"text":"a test grammar","annotations":[]});
+    let mut voices = vec![];
+    for locale in ["en-AU", "en-CA", "en-IN", "en-IE", "en-US"] {
+        let flash = locale == "en-US";
+        let catalog = tsz_rust::speech::CatalogVoice {
+            voice: tsz_rust::speech::Voice::new(
+                "azure",
+                "en-US-Tiana:DragonHDFlashLatestNeural",
+                "en-US",
+                [],
+            )
+            .unwrap(),
+            gender: "female".into(),
+        };
+        let alias = if flash {
+            catalog.alias()
+        } else {
+            locale.to_ascii_lowercase()
+        };
+        sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,$2,'azure',$3,$4,'female','[]','v1')").bind(Uuid::now_v7()).bind(&alias).bind(if flash {"en-US-Tiana:DragonHDFlashLatestNeural".into()} else {format!("{locale}-TestNeural")}).bind(locale).execute(&pool).await.unwrap();
+        let setting = json!({"version_id":Uuid::now_v7(),"version_name":"自然","locale":locale,"voice_id":alias,"enabled":!flash,"rate_percent":0});
+        let generated=tsz_rust::router(state.clone()).oneshot(Request::builder().method(Method::POST).uri("/api/v1/admin/speech/audio").header(header::AUTHORIZATION,format!("Bearer {bearer}")).header(header::CONTENT_TYPE,"application/json").header("X-TSZ-Voice-Versions","v2").header("X-TSZ-Voice-Locales","v1").header("X-TSZ-Voice-Models","v1").body(Body::from(json!({"request_id":Uuid::now_v7(),"source":{"kind":"text","content":content},"setting":setting}).to_string())).unwrap()).await.unwrap();
+        assert_eq!(generated.status(), StatusCode::CREATED);
+        let generated: Value =
+            serde_json::from_slice(&generated.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let mut setting = setting;
+        setting["audio_asset_id"] = generated["asset"]["id"].clone();
+        voices.push(setting);
+    }
+    let mut meanings = complete_meanings(&entry, json!([]));
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"] = content;
+    meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] =
+        json!({"voices":voices});
+    let request = json!({"schema_version":3,"base_revision":entry.revision,"intent":"complete","content":meanings});
+    let saved = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("X-TSZ-Voice-Versions", "v2")
+                .header("X-TSZ-Voice-Locales", "v1")
+                .header("X-TSZ-Voice-Models", "v1")
+                .body(Body::from(request.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved: Value =
+        serde_json::from_slice(&saved.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        saved["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"]
+            ["voices"],
+        json!(voices)
+    );
+    let (_, old) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries/{}", entry.id),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        old["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"]
+            ["voices"],
+        json!([])
+    );
+    let (status,_)=call(&state,Method::PUT,&path,&bearer,None,Some(json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"save","content":old["word"]["meanings"]}))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let published = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("{ROOT}/entries/{}/publications", entry.id))
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", Uuid::now_v7().to_string())
+                .header("X-TSZ-Voice-Versions", "v2")
+                .header("X-TSZ-Voice-Locales", "v1")
+                .header("X-TSZ-Voice-Models", "v1")
+                .body(Body::from(
+                    json!({"schema_version":3,"base_revision":saved["word"]["revision"]})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(published.status(), StatusCode::CREATED);
+    let snapshot: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE entry_id=$1")
+            .bind(entry.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        snapshot["meanings"]["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"]["voices"],
+        json!(voices)
+    );
+    let count:i64=sqlx::query_scalar("SELECT count(*) FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND scope='publication'").bind(entry.id).fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 5);
+}
+
+#[sqlx::test]
 async fn generated_grammar_audio_can_publish_with_its_draft_target_in_one_batch(pool: PgPool) {
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let mut state = AppState::for_test_with_redis(pool.clone(), redis)

@@ -587,6 +587,7 @@ use utoipa::{
             crate::lexicon::audio_assets::dto::AudioAssetUrlResponse,
             crate::speech::preview::dto::CreatePreviewRequest,
             crate::speech::preview::dto::VoiceCapabilities,
+            crate::speech::VoiceMetadata,
             crate::speech::preview::dto::VoiceResponse,
             crate::speech::preview::dto::VoiceListResponse,
             crate::speech::preview::dto::PreviewCacheStatus,
@@ -2081,6 +2082,25 @@ mod tests {
         assert!(voice["alias"].is_object());
         assert!(voice["provider"].is_null());
         assert!(voice["provider_voice_id"].is_null());
+        assert!(voice["metadata"].is_object());
+        let required = json["components"]["schemas"]["VoiceResponse"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(!required.iter().any(|field| field == "metadata"));
+        let metadata = &json["components"]["schemas"]["VoiceMetadata"]["properties"];
+        for field in [
+            "provider_voice_id",
+            "model",
+            "age_group",
+            "description",
+            "personalities",
+            "scenarios",
+            "roles",
+            "source_url",
+            "checked_at",
+        ] {
+            assert!(metadata[field].is_object(), "音色元数据缺少 {field}");
+        }
     }
 
     /// Approved C1 matrix: C01/C02/C05/C06, I12/I13/I14/I16 and R01a's
@@ -2455,6 +2475,18 @@ mod tests {
         assert_eq!(
             schemas["VoiceProfileV3"]["properties"]["voices"]["maxItems"],
             2000
+        );
+        assert_eq!(schemas["EnglishLocale"]["pattern"], "^en-[A-Z]{2}$");
+        assert_eq!(
+            schemas["DictionaryAudio"]["properties"]["accent_group"]["$ref"],
+            "#/components/schemas/AccentGroup"
+        );
+        assert!(
+            !schemas["DictionaryAudio"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "accent_group")
         );
         assert_eq!(
             schemas["VoiceSettingV3"]["properties"]["rate_percent"]["minimum"],

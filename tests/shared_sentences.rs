@@ -860,6 +860,54 @@ async fn named_voice_versions_survive_shared_sentence_save_and_protect_legacy_wr
 }
 
 #[sqlx::test]
+async fn native_sentence_versions_reopen_and_block_old_client_overwrites(pool: PgPool) {
+    let owner = admin(&pool).await;
+    let source = entry(&pool, owner, "wonderful").await;
+    let state = AppState::for_test(pool.clone());
+    let token = state
+        .admin_token_manager
+        .generate(owner, AdminRole::Admin.as_str())
+        .unwrap();
+    let mut proposed = content(source);
+    let voices = json!([{"voice_id":"natasha","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"自然","locale":"en-AU"},{"voice_id":"swara","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"补充","locale":"en-IN"}]);
+    proposed["sentence"]["en_text"]["common"]["voice_profile"] = json!({"voices":voices});
+    let response=tsz_rust::router(state.clone()).oneshot(Request::builder().method(Method::POST).uri(ROOT).header(header::AUTHORIZATION,format!("Bearer {token}")).header(header::CONTENT_TYPE,"application/json").header("X-TSZ-Voice-Versions","v2").header("X-TSZ-Voice-Locales","v1").body(Body::from(json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":proposed}).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        saved["content"]["sentence"]["en_text"]["common"]["voice_profile"]["voices"],
+        voices
+    );
+    let id = saved["id"].as_str().unwrap();
+    let (status, old) = call(&state, owner, Method::GET, &format!("{ROOT}/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        old["content"]["sentence"]["en_text"]["common"]["voice_profile"]["voices"],
+        json!([])
+    );
+    let (status, _) = call(
+        &state,
+        owner,
+        Method::PUT,
+        &format!("{ROOT}/{id}"),
+        Some(json!({"base_revision":saved["revision"],"content":old["content"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let stored: Value =
+        sqlx::query_scalar("SELECT content FROM lexicon.shared_sentences WHERE id=$1")
+            .bind(Uuid::parse_str(id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored["en_text"]["common"]["voice_profile"]["voices"],
+        voices
+    );
+}
+
+#[sqlx::test]
 async fn rejects_voice_settings_and_noncanonical_translation_annotations(pool: PgPool) {
     let owner = admin(&pool).await;
     let source = entry(&pool, owner, "wonderful").await;

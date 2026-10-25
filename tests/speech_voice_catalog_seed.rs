@@ -172,6 +172,51 @@ impl tsz_rust::speech::SpeechProvider for OfflineCatalogProvider {
 }
 
 #[sqlx::test]
+async fn flash_id_constraint_alias_catalog_capabilities_and_rollback_are_bounded(pool: PgPool) {
+    use tsz_rust::speech::preview::PreviewRepository;
+    const DOWN: &str = include_str!("../migrations/20261025160000_hd_flash_voices.down.sql");
+    const UP: &str = include_str!("../migrations/20261025160000_hd_flash_voices.up.sql");
+    sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    sqlx::raw_sql(UP).execute(&pool).await.unwrap();
+    let repo = PreviewRepository::new(pool.clone());
+    repo.ensure_catalog_voices().await.unwrap();
+    let list = repo.list_voices().await.unwrap();
+    let flash = list
+        .items
+        .iter()
+        .filter(|item| {
+            item.metadata
+                .as_ref()
+                .is_some_and(|m| m.model == "hd_flash")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(flash.len(), 3);
+    for item in flash {
+        assert!(item.alias.starts_with("azure-hd-flash-"));
+        assert_eq!(item.capabilities.min_rate_percent, 0);
+        assert_eq!(item.capabilities.max_pitch_semitones, 0);
+        assert_eq!(item.capabilities.supports_volume_percent, Some(false));
+        assert_eq!(item.capabilities.supports_pause, Some(false));
+        assert_eq!(item.capabilities.supports_phoneme, Some(false));
+    }
+    assert!(sqlx::raw_sql(DOWN).execute(&pool).await.is_err());
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM speech.voices WHERE provider_voice_id LIKE '%:%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 3);
+    sqlx::query("DELETE FROM speech.voices WHERE provider_voice_id LIKE '%:%'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
+    sqlx::raw_sql(UP).execute(&pool).await.unwrap();
+    let bad=sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,'bad-hd','azure','en-US-Test:DragonHDOmniLatestNeural','en-US','female','[]','v1')").bind(uuid::Uuid::now_v7()).execute(&pool).await;
+    assert!(bad.is_err());
+}
+
+#[sqlx::test]
 async fn product_catalog_reads_locally_when_azure_is_unavailable(pool: PgPool) {
     use tsz_rust::speech::preview::{PreviewRepository, PreviewService};
     apply_seed(&pool).await;

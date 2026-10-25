@@ -41,6 +41,77 @@ fn plain(text: &str) -> RichTextV2 {
 }
 
 #[test]
+fn hd_flash_requires_defaults_and_preserves_full_identity_without_prosody() {
+    let full_id = "en-US-Tiana:DragonHDFlashLatestNeural";
+    let voice = Voice::new("azure", full_id, "en-US", []).unwrap();
+    let options = SpeechOptions::new(&voice, None, 0, 0, 100).unwrap();
+    let request =
+        SynthesisRequest::new(voice.clone(), options.clone(), plain("Hello <world>")).unwrap();
+    let ssml = build_ssml(&request).unwrap();
+    assert!(ssml.contains(full_id));
+    assert!(ssml.contains("Hello &lt;world&gt;"));
+    assert!(!ssml.contains("prosody"));
+    for (rate, pitch, volume, style) in [
+        (1, 0, 100, None),
+        (0, 1, 100, None),
+        (0, 0, 99, None),
+        (0, 0, 100, Some("cheerful".into())),
+    ] {
+        assert_eq!(
+            SpeechOptions::new(&voice, style, rate, pitch, volume).unwrap_err(),
+            SpeechModelError::UnsupportedModelCapability
+        );
+    }
+    for annotation in [
+        RichTextAnnotation::Pause {
+            at: 5,
+            duration_ms: 300,
+        },
+        RichTextAnnotation::Phoneme {
+            start: 0,
+            end: 5,
+            alphabet: RichTextPhonemeAlphabet::Ipa,
+            phoneme: "həˈləʊ".into(),
+        },
+    ] {
+        let mut content = plain("hello world");
+        content.annotations.push(annotation);
+        assert_eq!(
+            SynthesisRequest::new(voice.clone(), options.clone(), content).unwrap_err(),
+            SpeechModelError::UnsupportedModelCapability
+        );
+    }
+    let item = CatalogVoice {
+        voice: voice.clone(),
+        gender: "female".into(),
+    };
+    assert!(item.alias().starts_with("azure-hd-flash-"));
+    assert!(!item.alias().contains(':'));
+    assert_eq!(item.alias(), item.clone().alias());
+    let other = Voice::new(
+        "azure",
+        "en-US-Tyler:DragonHDFlashLatestNeural",
+        "en-US",
+        [],
+    )
+    .unwrap();
+    assert_ne!(
+        request.fingerprint(),
+        SynthesisRequest::new(other, options, plain("Hello <world>"))
+            .unwrap()
+            .fingerprint()
+    );
+    for invalid in [
+        "en-US-Tiana:DragonHDLatestNeural",
+        "en-US-Tiana:DragonHDOmniLatestNeural",
+        "en-US-Tiana:Other",
+        "en-US-Tiana:DragonHDFlashLatestNeural:bad",
+    ] {
+        assert!(Voice::new("azure", invalid, "en-US", []).is_err());
+    }
+}
+
+#[test]
 fn ssml_is_escaped_nested_and_deterministic() {
     let content = RichTextV2 {
         version: 2,
@@ -746,11 +817,19 @@ async fn azure_catalog_filters_maps_and_caches_concurrent_requests() {
                 styled["Gender"] = "Female".into();
                 styled["StyleList"] = serde_json::json!(["sad", "cheerful", "sad"]);
                 rows.push(styled);
-                for (field, value) in [("Locale", "zh-CN"), ("Locale", "en-AU"), ("Status", "Deprecated"), ("Status", "Preview"), ("Gender", "Unknown"), ("VoiceType", "Standard"), ("ShortName", "en-US-Multi:DragonHDLatestNeural")] {
+                for (field, value) in [("Locale", "zh-CN"), ("Locale", "en-au"), ("Status", "Deprecated"), ("Status", "Preview"), ("Gender", "Unknown"), ("VoiceType", "Standard"), ("ShortName", "en-US-Multi:DragonHDLatestNeural")] {
                     let mut excluded = base.clone();
                     excluded[field] = value.into();
                     rows.push(excluded);
                 }
+                let mut hd = base.clone();
+                hd["ShortName"] = "en-US-FutureNeural".into();
+                hd["VoiceTag"] = serde_json::json!({"ModelSeries":["NeuralHD"]});
+                rows.push(hd);
+                let mut australian = base.clone();
+                australian["Locale"] = "en-AU".into();
+                australian["ShortName"] = "en-AU-NatashaNeural".into();
+                rows.push(australian);
                 axum::Json(rows)
             }
         }
@@ -765,7 +844,8 @@ async fn azure_catalog_filters_maps_and_caches_concurrent_requests() {
     );
     let (first, second) = tokio::join!(provider.list_voices(), provider.list_voices());
     let voices = first.unwrap().unwrap();
-    assert_eq!(voices.len(), 2);
+    assert_eq!(voices.len(), 3);
+    assert_eq!(voices[2].voice.locale(), "en-AU");
     assert_eq!(voices[0].voice.provider_voice_id(), "en-GB-RyanNeural");
     assert_eq!(voices[0].gender, "male");
     assert_eq!(voices[0].voice.styles().count(), 0);

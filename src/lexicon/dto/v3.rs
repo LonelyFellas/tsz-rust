@@ -908,13 +908,7 @@ pub struct VoiceSettingV3 {
     pub style: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
-pub enum VoiceVersionLocaleV3 {
-    #[serde(rename = "en-GB")]
-    Uk,
-    #[serde(rename = "en-US")]
-    Us,
-}
+pub type VoiceVersionLocaleV3 = crate::speech::locale::EnglishLocale;
 
 fn deserialize_optional_voice_version_id<'de, D: Deserializer<'de>>(
     deserializer: D,

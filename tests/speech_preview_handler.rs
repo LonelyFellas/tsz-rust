@@ -19,6 +19,56 @@ use tsz_rust::{
 };
 use uuid::Uuid;
 
+#[sqlx::test]
+async fn model_capability_negotiation_hides_flash_from_old_catalog_and_rejects_legacy_preview(
+    pool: PgPool,
+) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool).await;
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let token = state
+        .admin_token_manager
+        .generate(actor, "super_admin")
+        .unwrap();
+    let old = call(
+        &state,
+        Method::GET,
+        "/api/v1/admin/speech/voices",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(old.0, StatusCode::OK);
+    assert_eq!(old.1["items"].as_array().unwrap().len(), 123);
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/speech/voices")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("X-TSZ-Voice-Models", "v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["items"].as_array().unwrap().len(), 126);
+    let flash = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|voice| voice["metadata"]["model"] == "hd_flash")
+        .unwrap();
+    let rejected=call(&state,Method::POST,"/api/v1/admin/speech/previews",Some(&token),Some(json!({"voice_alias":flash["alias"],"content":{"version":2,"text":"hello","annotations":[]}}))).await;
+    assert_eq!(rejected.0, StatusCode::BAD_REQUEST);
+    assert_eq!(rejected.1["code"], "invalid_speech_preview");
+}
+
 async fn seed_admin(pool: &PgPool) -> Uuid {
     let id = Uuid::now_v7();
     AdminRepository::new(pool.clone())
@@ -136,7 +186,7 @@ async fn speech_endpoints_require_active_admin_and_return_problem_details(pool: 
 }
 
 #[sqlx::test]
-async fn voice_list_is_public_contract_without_provider_identity(pool: PgPool) {
+async fn voice_list_keeps_provider_identity_in_descriptive_metadata_only(pool: PgPool) {
     let admin_id = seed_admin(&pool).await;
     sqlx::query(
         r#"INSERT INTO speech.voices
@@ -158,7 +208,11 @@ async fn voice_list_is_public_contract_without_provider_identity(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["items"][0]["alias"], "en-us-jenny");
-    assert!(body.to_string().find("en-US-AvaNeural").is_none());
+    assert!(body["items"][0].get("provider_voice_id").is_none());
+    assert_eq!(
+        body["items"][0]["metadata"]["provider_voice_id"],
+        "en-US-AvaNeural"
+    );
     assert_eq!(body["items"][0]["display_name"], "Ava 爱娃");
 }
 

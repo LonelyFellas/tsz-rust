@@ -5,6 +5,7 @@ pub mod generated;
 pub(crate) mod generated_references;
 pub mod generated_source;
 pub mod library;
+pub mod locale;
 pub(crate) mod model;
 pub mod preview;
 mod product_catalog;
@@ -20,7 +21,8 @@ pub use model::{
     SynthesizedAudio, Voice,
 };
 pub use product_catalog::{
-    CatalogEntry, ProductVoice, catalog_snapshot, product_voices, voice_display_name,
+    CatalogEntry, ProductVoice, VoiceMetadata, catalog_snapshot, product_voices,
+    voice_display_name, voice_metadata,
 };
 pub use provider::{SpeechError, SpeechErrorKind, SpeechProvider};
 pub use ssml::build_ssml;

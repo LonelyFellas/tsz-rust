@@ -27,36 +27,14 @@ pub fn audio_extension(content_type: &str) -> Option<&'static str> {
         .map(|(_, extension)| extension)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub enum AudioAssetLocale {
-    #[serde(rename = "en-GB")]
-    EnGb,
-    #[serde(rename = "en-US")]
-    EnUs,
-}
-
-impl AudioAssetLocale {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::EnGb => "en-GB",
-            Self::EnUs => "en-US",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "en-GB" => Some(Self::EnGb),
-            "en-US" => Some(Self::EnUs),
-            _ => None,
-        }
-    }
-}
+pub type AudioAssetLocale = crate::speech::locale::EnglishLocale;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioAssetGender {
     Female,
     Male,
+    Neutral,
 }
 
 impl AudioAssetGender {
@@ -64,6 +42,7 @@ impl AudioAssetGender {
         match self {
             Self::Female => "female",
             Self::Male => "male",
+            Self::Neutral => "neutral",
         }
     }
 
@@ -71,6 +50,7 @@ impl AudioAssetGender {
         match value {
             "female" => Some(Self::Female),
             "male" => Some(Self::Male),
+            "neutral" => Some(Self::Neutral),
             _ => None,
         }
     }

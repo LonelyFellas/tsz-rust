@@ -130,6 +130,203 @@ async fn groups_enforce_scope_locale_and_atomic_revision(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn extended_regions_preserve_settings_and_recommend_by_accent_group(pool: PgPool) {
+    voice(&pool).await;
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    for locale in ["en-AU", "en-NZ", "en-CA", "en-IN"] {
+        sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,$2,'azure',$3,$4,'female','[]','v1')").bind(Uuid::now_v7()).bind(locale.to_ascii_lowercase()).bind(format!("{locale}-TestNeural")).bind(locale).execute(&pool).await.unwrap();
+    }
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    let mut proposed_settings = settings(0, "native notes");
+    proposed_settings.parameters.as_mut().unwrap().style = None;
+    repo.save_settings(actor, "en-in", 0, proposed_settings)
+        .await
+        .unwrap();
+    repo.save_description(
+        actor,
+        "en-in",
+        0,
+        SaveVoiceDescriptionRequest {
+            description_zh: "共享介绍".into(),
+            base_revision: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let item = repo
+        .list(actor)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|item| item.voice_alias == "en-in")
+        .unwrap();
+    assert_eq!(item.notes, "native notes");
+    assert_eq!(item.description_zh.as_deref(), Some("共享介绍"));
+    let recommendation = |alias: &str| DubbingRecommendation {
+        id: Uuid::now_v7(),
+        name: alias.into(),
+        voice_alias: alias.into(),
+        parameters: VoiceParameters {
+            rate_percent: 0,
+            pitch_semitones: 0,
+            volume_percent: None,
+            style: None,
+        },
+    };
+    for (revision, uk) in ["en-au", "en-nz"].into_iter().enumerate() {
+        let group = DubbingGroup {
+            id: Uuid::now_v7(),
+            name: "地区分类".into(),
+            areas: vec!["word".into()],
+            uk: vec![recommendation(uk)],
+            us: vec![recommendation("en-ca")],
+        };
+        repo.save_groups(
+            actor,
+            0,
+            SaveDubbingGroupsRequest {
+                groups: vec![group],
+                base_revision: revision as i64,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let group = DubbingGroup {
+        id: Uuid::now_v7(),
+        name: "拒绝补充默认".into(),
+        areas: vec!["word".into()],
+        uk: vec![recommendation("en-in")],
+        us: vec![recommendation("en-ca")],
+    };
+    assert!(
+        repo.save_groups(
+            actor,
+            0,
+            SaveDubbingGroupsRequest {
+                groups: vec![group],
+                base_revision: 2
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(repo.groups(actor).await.unwrap().revision, 2);
+}
+
+#[sqlx::test]
+async fn flash_group_settings_preserve_descriptions_and_block_legacy_overwrite(pool: PgPool) {
+    voice(&pool).await;
+    let actor = admin(&pool).await;
+    sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,'speech.global_dubbing',$1)").bind(actor).execute(&pool).await.unwrap();
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let flash = tsz_rust::speech::catalog_snapshot()
+        .iter()
+        .find(|v| v.provider_voice_id == "en-US-Tiana:DragonHDFlashLatestNeural")
+        .unwrap()
+        .catalog_voice()
+        .alias();
+    let repo = VoiceLibraryRepository::new(pool.clone());
+    let params = VoiceParameters {
+        rate_percent: 0,
+        pitch_semitones: 0,
+        volume_percent: Some(100),
+        style: None,
+    };
+    repo.save_settings(
+        actor,
+        &flash,
+        0,
+        SaveVoiceSettingsRequest {
+            parameters: Some(params.clone()),
+            notes: "留存".into(),
+            base_revision: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let mut bad = params.clone();
+    bad.volume_percent = Some(50);
+    assert!(
+        repo.save_settings(
+            actor,
+            &flash,
+            0,
+            SaveVoiceSettingsRequest {
+                parameters: Some(bad),
+                notes: "保留".into(),
+                base_revision: 1
+            }
+        )
+        .await
+        .is_err()
+    );
+    repo.save_description(
+        actor,
+        &flash,
+        0,
+        SaveVoiceDescriptionRequest {
+            description_zh: "人工说明".into(),
+            base_revision: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let item = repo
+        .list(actor)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|item| item.voice_alias == flash)
+        .unwrap();
+    assert_eq!(item.notes, "留存");
+    assert_eq!(item.description_zh.as_deref(), Some("人工说明"));
+    let recommendation = |alias: &str| DubbingRecommendation {
+        id: Uuid::now_v7(),
+        name: "自然".into(),
+        voice_alias: alias.into(),
+        parameters: params.clone(),
+    };
+    let group = DubbingGroup {
+        id: Uuid::now_v7(),
+        name: "HD".into(),
+        areas: vec!["word".into()],
+        uk: vec![recommendation("en-gb-sonianeural")],
+        us: vec![recommendation(&flash)],
+    };
+    repo.save_groups(
+        actor,
+        0,
+        SaveDubbingGroupsRequest {
+            groups: vec![group],
+            base_revision: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        repo.save_groups_with_models(
+            actor,
+            0,
+            SaveDubbingGroupsRequest {
+                groups: vec![],
+                base_revision: 1
+            },
+            false
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(repo.groups(actor).await.unwrap().groups.len(), 1);
+}
+
+#[sqlx::test]
 async fn global_dubbing_only_can_manage_library_but_revoked_sessions_cannot_write(pool: PgPool) {
     voice(&pool).await;
     let actor = admin(&pool).await;

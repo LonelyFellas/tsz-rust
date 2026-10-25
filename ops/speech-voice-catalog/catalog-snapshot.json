@@ -3,79 +3,253 @@
     "provider_voice_id": "en-GB-AbbiNeural",
     "locale": "en-GB",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-AbbiNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young British female with a soft, thoughtful tone that would be well-suited for a podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-AdaMultilingualNeural",
     "locale": "en-GB",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-AdaMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A cheerful and friendly voice, bringing a positive and engaging energy to every conversation.",
+      "personalities": [
+        "Cheerful",
+        "Warm",
+        "Gentle",
+        "Friendly"
+      ],
+      "scenarios": [
+        "Chat",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-AlfieNeural",
     "locale": "en-GB",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-AlfieNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A middle-aged male with a standard British accent, whose smooth and knowledgeable tone would be perfect for narrating a tech podcast or documentary.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-BellaNeural",
     "locale": "en-GB",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-BellaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "This is an enthusiastic and professional young adult British female voice with a crisp delivery, perfect for e-learning or a tech podcast.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-ElliotNeural",
     "locale": "en-GB",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-ElliotNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A middle-aged British male voice with a polished, professional tone, well-suited for narrating a documentary or an educational podcast.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-EthanNeural",
     "locale": "en-GB",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-EthanNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young British male speaker with a conversational and engaging tone, ideal for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-HollieNeural",
     "locale": "en-GB",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-HollieNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "This young British female voice has a bright, energetic tone and a fast-paced delivery perfect for a modern podcast or explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-LibbyNeural",
     "locale": "en-GB",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-LibbyNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A clear-sounding voice with great versatility that can adapt to any use case and speak in a way that's easy to understand.",
+      "personalities": [
+        "Crisp",
+        "Bright",
+        "Clear"
+      ],
+      "scenarios": [
+        "News",
+        "E-learning"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-MaisieNeural",
     "locale": "en-GB",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-MaisieNeural",
+      "model": "neural",
+      "age_group": "Child",
+      "description": "A child voice that's great at conveying curiousity.",
+      "personalities": [
+        "Crisp",
+        "Cheerful",
+        "Bright"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-NoahNeural",
     "locale": "en-GB",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-NoahNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young British male with an enthusiastic, conversational tone, perfect for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-OliverNeural",
     "locale": "en-GB",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-OliverNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young British male voice with an engaging and enthusiastic tone, and his articulate delivery would be well-suited for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-OliviaNeural",
     "locale": "en-GB",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-OliviaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "This young adult British female speaker has a polished and articulate tone, making her voice ideal for corporate narration or a technology podcast.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-OllieMultilingualNeural",
     "locale": "en-GB",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-OllieMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A friendly and pleasant voice, perfect for creating a comfortable and approachable atmosphere.",
+      "personalities": [
+        "Warm",
+        "Cheerful",
+        "Casual",
+        "Friendly",
+        "Pleasant"
+      ],
+      "scenarios": [
+        "Assistant",
+        "Audiobooks"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-RyanNeural",
@@ -84,7 +258,24 @@
     "styles": [
       "chat",
       "cheerful"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-GB-RyanNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A bright and engaging voice, capturing attention with its vibrant and inviting tone.",
+      "personalities": [
+        "Bright",
+        "Engaging"
+      ],
+      "scenarios": [
+        "Assistant",
+        "News"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-SoniaNeural",
@@ -93,55 +284,207 @@
     "styles": [
       "cheerful",
       "sad"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-GB-SoniaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A gentle and soft voice, providing a calm and soothing presence.",
+      "personalities": [
+        "Gentle",
+        "Soft"
+      ],
+      "scenarios": [
+        "Narration",
+        "News"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-GB-ThomasNeural",
     "locale": "en-GB",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-GB-ThomasNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young British male voice with a smooth, knowledgeable tone, ideal for a tech podcast or educational content.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AIGenerate1Neural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AIGenerate1Neural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A voice that speaks clearly and carefully that can adapt to a wide variety of use cases.",
+      "personalities": [
+        "Serious",
+        "Clear",
+        "Formal"
+      ],
+      "scenarios": [
+        "Podcast",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AIGenerate2Neural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AIGenerate2Neural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A somewhat serious voice to convey information in an objective manner",
+      "personalities": [
+        "Serious",
+        "Mature",
+        "Formal"
+      ],
+      "scenarios": [
+        "Podcast",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AdamMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AdamMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A deep, engaging voice that feels warm and inviting.",
+      "personalities": [
+        "warm",
+        "engaging",
+        "deep"
+      ],
+      "scenarios": [
+        "Narration",
+        "Audiobook"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AlloyTurboMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AlloyTurboMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "Turbo version for Alloy, a versatile male voice suitable for various contexts.",
+      "personalities": [
+        "Versatile"
+      ],
+      "scenarios": [
+        "Chat",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AmandaMultilingualNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AmandaMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A bright and clear voice with a youthful energy.",
+      "personalities": [
+        "clear",
+        "bright",
+        "youthful"
+      ],
+      "scenarios": [
+        "Advertisement",
+        "E-learning"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AmberNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AmberNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "An engaging voice for children's stories that's warm and approachable, perfect for capturing the attention of young listeners.",
+      "personalities": [
+        "Whimsical",
+        "Upbeat",
+        "Light-Hearted"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AnaNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AnaNeural",
+      "model": "neural",
+      "age_group": "Child",
+      "description": "A child voice that's great at conveying curiosity and engaging users with a fun and playful tone that's sure to delight.",
+      "personalities": [
+        "Curious",
+        "Cheerful",
+        "Engaging"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AndrewMultilingualNeural",
@@ -150,13 +493,49 @@
     "styles": [
       "empathetic",
       "relieved"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-AndrewMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A warm, engaging voice that sounds like someone you want to know, perfect for building a connection with listeners.",
+      "personalities": [
+        "Confident",
+        "Casual",
+        "Warm"
+      ],
+      "scenarios": [
+        "Chat",
+        "Advertisement"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AndrewNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AndrewNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A warm, engaging voice that sounds like someone you want to know, perfect for building a connection with listeners.",
+      "personalities": [
+        "Confident",
+        "Authentic",
+        "Warm"
+      ],
+      "scenarios": [
+        "Chat",
+        "Advertisement"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AriaNeural",
@@ -179,19 +558,73 @@
       "terrified",
       "unfriendly",
       "whispering"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-AriaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A clear-sounding voice with great versatility that can adapt to any use case and speak in a way that's easy to understand.",
+      "personalities": [
+        "Crisp",
+        "Bright",
+        "Clear"
+      ],
+      "scenarios": [
+        "News",
+        "E-learning"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AshleyNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AshleyNeural",
+      "model": "neural",
+      "age_group": "YoungAdult",
+      "description": "A young voice that sounds a little shy but honest and sincere, conveying a sense of authenticity and approachability.",
+      "personalities": [
+        "Sincere",
+        "Approachable",
+        "Honest"
+      ],
+      "scenarios": [
+        "Gaming",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AvaMultilingualNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-AvaMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A bright, engaging voice with a beautiful tone that's perfect for delivering search results and capturing users' attention.",
+      "personalities": [
+        "Pleasant",
+        "Friendly",
+        "Caring"
+      ],
+      "scenarios": [
+        "Chat",
+        "News"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-AvaNeural",
@@ -201,55 +634,215 @@
       "angry",
       "fearful",
       "sad"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-AvaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A bright, engaging voice with a beautiful tone that's perfect for delivering search results and capturing users' attention.",
+      "personalities": [
+        "Pleasant",
+        "Caring",
+        "Friendly"
+      ],
+      "scenarios": [
+        "Chat",
+        "Documentary"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-BrandonMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-BrandonMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "YoungAdult",
+      "description": "An honest and soft-spoken voice that's warm and good for conversation, connecting with users on a personal level and building trust.",
+      "personalities": [
+        "Warm",
+        "Engaging",
+        "Authentic"
+      ],
+      "scenarios": [
+        "E-learning",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-BrandonNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-BrandonNeural",
+      "model": "neural",
+      "age_group": "YoungAdult",
+      "description": "An honest and soft-spoken voice that's warm and good for conversation, connecting with users on a personal level and building trust.",
+      "personalities": [
+        "Warm",
+        "Engaging",
+        "Authentic"
+      ],
+      "scenarios": [
+        "E-learning",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-BrianMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-BrianMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "YoungAdult",
+      "description": "A youthful, cheerful, and versatile voice that can handle any task you throw its way, well-suited to a wide variety of contexts.",
+      "personalities": [
+        "Sincere",
+        "Calm",
+        "Approachable"
+      ],
+      "scenarios": [
+        "Podcast",
+        "Chat"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-BrianNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-BrianNeural",
+      "model": "neural",
+      "age_group": "YoungAdult",
+      "description": "A youthful, cheerful, and versatile voice that can handle any task you throw its way, well-suited to a wide variety of contexts.",
+      "personalities": [
+        "Sincere",
+        "Calm",
+        "Approachable"
+      ],
+      "scenarios": [
+        "Podcast",
+        "Chat"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-ChristopherMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-ChristopherMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A warm voice for imparting information, especially for conversation,  great for conveying information in a fun and approachable way.",
+      "personalities": [
+        "Deep",
+        "Warm"
+      ],
+      "scenarios": [
+        "Meditation",
+        "Gaming"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-ChristopherNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-ChristopherNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A warm voice for imparting information, especially for conversation,  great for conveying information in a fun and approachable way.",
+      "personalities": [
+        "Deep",
+        "Warm"
+      ],
+      "scenarios": [
+        "Meditation",
+        "Gaming"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-CoraMultilingualNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-CoraMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A softer voice with a touch of melancholy that conveys understanding and empathy, delivering content in a sensitive and compassionate way.",
+      "personalities": [
+        "Empathetic",
+        "Formal",
+        "Sincere"
+      ],
+      "scenarios": [
+        "E-learning",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-CoraNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-CoraNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A softer voice with a touch of melancholy that conveys understanding and empathy, delivering content in a sensitive and compassionate way.",
+      "personalities": [
+        "Empathetic",
+        "Formal",
+        "Sincere"
+      ],
+      "scenarios": [
+        "Meditation",
+        "Audiobook"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-DavisMultilingualNeural",
@@ -259,7 +852,25 @@
       "empathetic",
       "funny",
       "relieved"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-DavisMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A generally calm and relaxed voice that can switch between tones seamlessly and be highly expressive when needed.",
+      "personalities": [
+        "soothing",
+        "calm",
+        "smooth"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-DavisNeural",
@@ -277,7 +888,25 @@
       "terrified",
       "unfriendly",
       "whispering"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-DavisNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A generally calm and relaxed voice that can switch between tones seamlessly and be highly expressive when needed.",
+      "personalities": [
+        "Soothing",
+        "Calm",
+        "Smooth"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "meditation"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-DerekMultilingualNeural",
@@ -288,49 +917,192 @@
       "excited",
       "relieved",
       "shy"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-DerekMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A formal, knowledgeable voice that exudes confidence.",
+      "personalities": [
+        "confident",
+        "knowledgable",
+        "formal"
+      ],
+      "scenarios": [
+        "Narration",
+        "E-learning"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-DustinMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-DustinMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A voice good for news and podcasts with a unique timbre.",
+      "personalities": [
+        "youthful",
+        "clear",
+        "thoughtful"
+      ],
+      "scenarios": [
+        "Podcast",
+        "News"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-EchoTurboMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-EchoTurboMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "Turbo version for Echo, a clear and expressive male voice",
+      "personalities": [
+        "Clear",
+        "Expressive"
+      ],
+      "scenarios": [
+        "Chat",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-ElizabethNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-ElizabethNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A professorial voice that's clear and authoritative, great for delivering educational content in a way that's easy to understand.",
+      "personalities": [
+        "Authoritative",
+        "Formal",
+        "Serious"
+      ],
+      "scenarios": [
+        "Assistant",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-EmmaMultilingualNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-EmmaMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A friendly, sincere voice with a light-hearted and pleasant tone that's ideal for education and explanations.",
+      "personalities": [
+        "Cheerful",
+        "Light-Hearted",
+        "Casual"
+      ],
+      "scenarios": [
+        "E-learning",
+        "Chat"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-EmmaNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-EmmaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A friendly, sincere voice with a light-hearted and pleasant tone that's ideal for education and explanations.",
+      "personalities": [
+        "Cheerful",
+        "Light-Hearted",
+        "Casual"
+      ],
+      "scenarios": [
+        "E-learning",
+        "Chat"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-EricNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-EricNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A friendly voice that conveys soft-spoken confidence, inspiring trust and reliability with a calm and collected tone.",
+      "personalities": [
+        "Confident",
+        "Sincere",
+        "Warm"
+      ],
+      "scenarios": [
+        "Assistant",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-EvelynMultilingualNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-EvelynMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A youthful voice suite for casual scenarios.",
+      "personalities": [
+        "Youthful",
+        "Crisp",
+        "Upbeat"
+      ],
+      "scenarios": [
+        "Chat",
+        "Gaming"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-GuyNeural",
@@ -348,13 +1120,49 @@
       "terrified",
       "unfriendly",
       "whispering"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-GuyNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A friendly voice with slightly whimsical undertones and a wide expressive range that can convey any emotion with ease.",
+      "personalities": [
+        "Light-Hearted",
+        "Whimsical",
+        "Friendly"
+      ],
+      "scenarios": [
+        "News",
+        "Gaming"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-JacobNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-JacobNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A mature voice that conveys a strong sense of believability, delivering content in a way that's straightforward and to the point.",
+      "personalities": [
+        "Sincere",
+        "Formal",
+        "Confident"
+      ],
+      "scenarios": [
+        "Assistant",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-JaneNeural",
@@ -371,7 +1179,25 @@
       "terrified",
       "unfriendly",
       "whispering"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-JaneNeural",
+      "model": "neural",
+      "age_group": "YoungAdult",
+      "description": "An early-20s female voice like the girl next door that's warm and friendly, great for building a connection with users.",
+      "personalities": [
+        "Serious",
+        "Approachable",
+        "Upbeat"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Meditation"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-JasonNeural",
@@ -388,13 +1214,49 @@
       "terrified",
       "unfriendly",
       "whispering"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-JasonNeural",
+      "model": "neural",
+      "age_group": "YoungAdult",
+      "description": "An early-20s male voice that's polite and unassuming, perhaps a little shy, with a respectful and professional tone that leaves a good impression.",
+      "personalities": [
+        "Gentle",
+        "Shy",
+        "Polite"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Gaming"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-JennyMultilingualNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-JennyMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "YoungAdult",
+      "description": "A youthful voice with a wide range of expressions, perfect for customer service and keeping users satisfied.",
+      "personalities": [
+        "Sincere",
+        "Pleasant",
+        "Approachable"
+      ],
+      "scenarios": [
+        "News",
+        "Assistant"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-JennyNeural",
@@ -415,7 +1277,25 @@
       "terrified",
       "unfriendly",
       "whispering"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-JennyNeural",
+      "model": "neural",
+      "age_group": "YoungAdult",
+      "description": "A youthful voice with a wide range of expressions, perfect for customer service and keeping users satisfied.",
+      "personalities": [
+        "Sincere",
+        "Pleasant",
+        "Approachable"
+      ],
+      "scenarios": [
+        "News",
+        "Assistant"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-KaiNeural",
@@ -423,19 +1303,76 @@
     "gender": "male",
     "styles": [
       "conversation"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-KaiNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A sincere, pleasant, and warm voice, offering a heartfelt and approachable tone to the conversation.",
+      "personalities": [
+        "Sincere",
+        "Pleasant",
+        "Bright",
+        "Clear",
+        "Friendly",
+        "Warm"
+      ],
+      "scenarios": [
+        "Assistant",
+        "Chat"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-LewisMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-LewisMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A confident, formal voice that conveys expertise and authority.",
+      "personalities": [
+        "knowledgable",
+        "formal",
+        "confident"
+      ],
+      "scenarios": [
+        "Chat",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-LolaMultilingualNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-LolaMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A calm and sincere voice with a warm, reassuring tone.",
+      "personalities": [
+        "sincere",
+        "calm",
+        "warm"
+      ],
+      "scenarios": [
+        "Meditation",
+        "Audiobook"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-LunaNeural",
@@ -443,19 +1380,76 @@
     "gender": "female",
     "styles": [
       "conversation"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-LunaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A warm, sincere, and pleasant voice that conveys genuine care and trustworthiness in every interaction.",
+      "personalities": [
+        "Sincere",
+        "Pleasant",
+        "Bright",
+        "Clear",
+        "Friendly",
+        "Warm"
+      ],
+      "scenarios": [
+        "Assistant",
+        "Chat"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-MichelleNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-MichelleNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "An honest voice that conveys confidence and understanding.",
+      "personalities": [
+        "Confident",
+        "Authentic",
+        "Warm"
+      ],
+      "scenarios": [
+        "Podcast",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-MonicaNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-MonicaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A mature voice that conveys a strong sense of believability, perfect for delivering content in the best possible way",
+      "personalities": [
+        "Mature",
+        "Authentic",
+        "Warm"
+      ],
+      "scenarios": [
+        "Podcast",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-NancyMultilingualNeural",
@@ -467,7 +1461,25 @@
       "funny",
       "relieved",
       "shy"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-NancyMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A confident-sounding voice that's perfect for delivering important information with a professional and authoritative tone that inspires trust.",
+      "personalities": [
+        "casual",
+        "youthful",
+        "approachable"
+      ],
+      "scenarios": [
+        "Narration",
+        "Social Media"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-NancyNeural",
@@ -484,19 +1496,72 @@
       "terrified",
       "unfriendly",
       "whispering"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-NancyNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A confident-sounding voice that's perfect for delivering important information with a professional and authoritative tone that inspires trust.",
+      "personalities": [
+        "Confident",
+        "Serious",
+        "Mature"
+      ],
+      "scenarios": [
+        "Narration",
+        "Gaming"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-NovaTurboMultilingualNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-NovaTurboMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "Turbo version for Nova, a deep, resonant female voice",
+      "personalities": [
+        "Deep",
+        "Resonant"
+      ],
+      "scenarios": [
+        "Chat",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-OnyxTurboMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-OnyxTurboMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "Turbo version for Onyx, a confident and authoritative male voice",
+      "personalities": [
+        "Youthful",
+        "Upbeat",
+        "Confident"
+      ],
+      "scenarios": [
+        "Chat",
+        "Social Media"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-PhoebeMultilingualNeural",
@@ -506,25 +1571,97 @@
       "empathetic",
       "sad",
       "serious"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-PhoebeMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A confident and upbeat voice with youthful energy.",
+      "personalities": [
+        "youthful",
+        "upbeat",
+        "confident"
+      ],
+      "scenarios": [
+        "Chat",
+        "Social Media"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-RogerNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-RogerNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A friendly voice that conveys information in a approachable manner",
+      "personalities": [
+        "Serious",
+        "Formal",
+        "Confident"
+      ],
+      "scenarios": [
+        "Assistant",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-RyanMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-RyanMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A straightforward voice that  works well for delivering information quickly and concisely",
+      "personalities": [
+        "Professional",
+        "Authentic",
+        "Sincere"
+      ],
+      "scenarios": [
+        "Assistant",
+        "Gaming"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-SamuelMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-SamuelMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "An expressive voice that feels warm and sincere.",
+      "personalities": [
+        "sincere",
+        "warm",
+        "expressive"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-SaraNeural",
@@ -541,7 +1678,22 @@
       "terrified",
       "unfriendly",
       "whispering"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-SaraNeural",
+      "model": "neural",
+      "age_group": "YoungAdult",
+      "description": "A female teenager voice with a wide range of expressive capabilities that can convey any emotion with ease and keep users engaged.",
+      "personalities": [
+        "Sincere",
+        "Calm",
+        "Confident"
+      ],
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-SerenaMultilingualNeural",
@@ -555,25 +1707,95 @@
       "sad",
       "serious",
       "shy"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-SerenaMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A mature, formal voice that commands confidence and respect.",
+      "personalities": [
+        "formal",
+        "confident",
+        "mature"
+      ],
+      "scenarios": [
+        "Podcast",
+        "E-learning"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-ShimmerTurboMultilingualNeural",
     "locale": "en-US",
     "gender": "female",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-ShimmerTurboMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "Turbo version for Shimmer, a bright and engaging female voice",
+      "personalities": [
+        "Bright",
+        "Engaging"
+      ],
+      "scenarios": [
+        "Chat",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-SteffanMultilingualNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-SteffanMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A pleasant sounding voice that can be someone you know.",
+      "personalities": [
+        "Casual",
+        "Thoughtful"
+      ],
+      "scenarios": [
+        "Chat",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-SteffanNeural",
     "locale": "en-US",
     "gender": "male",
-    "styles": []
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-SteffanNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A great voice for imparting information, especially in a learning environment.",
+      "personalities": [
+        "Mature",
+        "Authentic",
+        "Warm"
+      ],
+      "scenarios": [
+        "Assistant",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
   },
   {
     "provider_voice_id": "en-US-TonyNeural",
@@ -590,6 +1812,986 @@
       "terrified",
       "unfriendly",
       "whispering"
-    ]
+    ],
+    "metadata": {
+      "provider_voice_id": "en-US-TonyNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A versatile voice that can sound both casual and professional, adaptable to any use case and situation.",
+      "personalities": [
+        "Thoughtful",
+        "Authentic",
+        "Sincere"
+      ],
+      "scenarios": [
+        "Gaming",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T13:14:11.307054Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-WilliamMultilingualNeural",
+    "locale": "en-AU",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-WilliamMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "A calm and soothing adult male voice with a dark, warm timbre and a steady, moderate tone, perfect for creating a relaxed and reassuring listening experience.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-NatashaNeural",
+    "locale": "en-AU",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-NatashaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A clear-sounding voice with great versatility that can adapt to any use case and speak in a way that's easy to understand.",
+      "personalities": [
+        "Crisp",
+        "Bright",
+        "Clear"
+      ],
+      "scenarios": [
+        "News",
+        "E-learning"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-WilliamNeural",
+    "locale": "en-AU",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-WilliamNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "An engaging and strong voice, delivering messages with energy and confidence.",
+      "personalities": [
+        "Engaging",
+        "Strong"
+      ],
+      "scenarios": [
+        "Chat",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-AnnetteNeural",
+    "locale": "en-AU",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-AnnetteNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Australian female voice with a friendly and engaging conversational style, perfect for a podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-CarlyNeural",
+    "locale": "en-AU",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-CarlyNeural",
+      "model": "neural",
+      "age_group": "Child",
+      "description": "A child voice that's great at conveying curiousity",
+      "personalities": [
+        "Crisp",
+        "Cheerful",
+        "Bright"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-DarrenNeural",
+    "locale": "en-AU",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-DarrenNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Australian male with an engaging and conversational tone, well-suited for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-DuncanNeural",
+    "locale": "en-AU",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-DuncanNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Australian male whose energetic and engaging tone would be a great fit for a conversational podcast or an informative explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-ElsieNeural",
+    "locale": "en-AU",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-ElsieNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "This young adult Australian female voice has an engaging and thoughtful tone, with a smooth delivery well-suited for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-FreyaNeural",
+    "locale": "en-AU",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-FreyaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A middle-aged Australian female speaks with a smooth, professional tone, making her voice ideal for corporate presentations or documentary narration.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-JoanneNeural",
+    "locale": "en-AU",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-JoanneNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "This young adult Australian female has an engaging and upbeat tone, making her voice perfect for a tech podcast or explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-KenNeural",
+    "locale": "en-AU",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-KenNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Australian male with an enthusiastic and knowledgeable tone, making his polished delivery perfect for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-KimNeural",
+    "locale": "en-AU",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-KimNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Australian female with an upbeat, engaging tone, making it well-suited for a technology podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-NeilNeural",
+    "locale": "en-AU",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-NeilNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Australian male voice with a smooth, articulate delivery, making it well-suited for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-TimNeural",
+    "locale": "en-AU",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-TimNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Australian male voice with a confident and articulate delivery, making it well-suited for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-AU-TinaNeural",
+    "locale": "en-AU",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-AU-TinaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A bright and engaging young adult Australian female voice with a smooth, professional finish, well-suited for an informative podcast or corporate presentation.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-CA-ClaraNeural",
+    "locale": "en-CA",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-CA-ClaraNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A clear-sounding voice with great versatility that can adapt to any use case and speak in a way that's easy to understand.",
+      "personalities": [
+        "Crisp",
+        "Bright",
+        "Clear"
+      ],
+      "scenarios": [
+        "News",
+        "E-learning"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-CA-LiamNeural",
+    "locale": "en-CA",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-CA-LiamNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Canadian male speaks with an enthusiastic and articulate style, making his voice a great fit for a tech podcast or educational content.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-HK-YanNeural",
+    "locale": "en-HK",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-HK-YanNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young female with a Hong Kong English accent, whose friendly and inquisitive tone would be well-suited for a podcast or conversational AI.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-HK-SamNeural",
+    "locale": "en-HK",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-HK-SamNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "This young adult male speaker has a conversational Hong Kong English accent and an engaged tone, making his voice ideal for a podcast or an informal discussion.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IE-EmilyNeural",
+    "locale": "en-IE",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IE-EmilyNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A middle-aged Irish woman with a smooth, professional tone, ideal for news reading or corporate narration.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IE-ConnorNeural",
+    "locale": "en-IE",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IE-ConnorNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A friendly voice with slightly whimsical undertones but with a wide expressive range",
+      "personalities": [
+        "Light-Hearted",
+        "Whimsical",
+        "Friendly"
+      ],
+      "scenarios": [
+        "News",
+        "Gaming"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-AartiIndicNeural",
+    "locale": "en-IN",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-AartiIndicNeural",
+      "model": "neural",
+      "age_group": null,
+      "description": "A warm and engaging adult female voice with a neutral accent, radiating friendliness and approachability. Perfectly suited for conversational and professional contexts, it delivers clarity and a balanced energy that fosters connection and trust.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-ArjunIndicNeural",
+    "locale": "en-IN",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-ArjunIndicNeural",
+      "model": "multilingual",
+      "age_group": null,
+      "description": "A rich, warm, and approachable voice with a friendly tone and a dark timbre, perfect for creating engaging and trustworthy interactions with a touch of calm professionalism.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-NeerjaIndicNeural",
+    "locale": "en-IN",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-NeerjaIndicNeural",
+      "model": "multilingual",
+      "age_group": null,
+      "description": "A calm, warm, and steady voice with a fast-paced delivery, offering a balanced blend of approachability and professionalism, ideal for engaging and dynamic interactions.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-PrabhatIndicNeural",
+    "locale": "en-IN",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-PrabhatIndicNeural",
+      "model": "multilingual",
+      "age_group": null,
+      "description": "A rich and inviting male voice with a dark, warm timbre and a friendly, engaging tone. Its fast-paced delivery and neutral accent make it ideal for dynamic, conversational content while maintaining approachability and charm.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-AaravNeural",
+    "locale": "en-IN",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-AaravNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Indian male speaker with a polished, engaging tone, making his voice well-suited for an educational podcast or a tech review.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-AashiNeural",
+    "locale": "en-IN",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-AashiNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young female speaker with an Indian English accent; her articulate and professional tone is well-suited for a podcast or e-learning material.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-AartiNeural",
+    "locale": "en-IN",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-AartiNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "This young female speaker with an Indian English accent has a confident, professional tone, making her voice ideal for a tech podcast or corporate narration.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-ArjunNeural",
+    "locale": "en-IN",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-ArjunNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young male with an Indian English accent, whose enthusiastic and polished delivery would be well-suited for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-AnanyaNeural",
+    "locale": "en-IN",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-AnanyaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Indian female with an engaging, conversational style and a smooth finish, making it well-suited for a podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-KavyaNeural",
+    "locale": "en-IN",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-KavyaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young female speaker with an Indian English accent; her pleasant and engaging tone would be well-suited for a tech podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-KunalNeural",
+    "locale": "en-IN",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-KunalNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A middle-aged Indian male voice with a professional and confident tone, featuring a smooth finish that is well-suited for corporate narration or e-learning.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-NeerjaNeural",
+    "locale": "en-IN",
+    "gender": "female",
+    "styles": [
+      "cheerful",
+      "empathetic",
+      "newscast"
+    ],
+    "metadata": {
+      "provider_voice_id": "en-IN-NeerjaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Indian female speaker with a smooth, formal tone, whose articulate delivery would be well-suited for e-learning or corporate narration.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-PrabhatNeural",
+    "locale": "en-IN",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-PrabhatNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A middle-aged Indian male with a deep, resonant, and authoritative voice, whose steady delivery is well-suited for news reading or documentaries.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-IN-RehaanNeural",
+    "locale": "en-IN",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-IN-RehaanNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A middle-aged Indian male voice with an engaging and articulate tone, well-suited for a tech podcast or educational content.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-KE-AsiliaNeural",
+    "locale": "en-KE",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-KE-AsiliaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Kenyan female with a smooth, engaging tone, well-suited for a podcast or conversational content.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-KE-ChilembaNeural",
+    "locale": "en-KE",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-KE-ChilembaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Kenyan male with a thoughtful, measured tone, well-suited for an informative podcast or an educational explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-NG-EzinneNeural",
+    "locale": "en-NG",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-NG-EzinneNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Nigerian woman with a smooth and engaging delivery, well-suited for a conversational podcast or an informal explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-NG-AbeoNeural",
+    "locale": "en-NG",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-NG-AbeoNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Nigerian male with a smooth, engaging, and conversational style that would be a great fit for a podcast or a YouTube explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-NZ-MollyNeural",
+    "locale": "en-NZ",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-NZ-MollyNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A middle-aged New Zealand woman with a professional, measured tone, whose smooth delivery would be perfect for a corporate presentation or a tech podcast.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-NZ-MitchellNeural",
+    "locale": "en-NZ",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-NZ-MitchellNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A middle-aged New Zealand male with a smooth, engaging tone and articulate delivery, well-suited for a technology podcast or educational content.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-PH-RosaNeural",
+    "locale": "en-PH",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-PH-RosaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Filipino female voice with a bright, engaging tone and polished delivery, well-suited for a podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-PH-JamesNeural",
+    "locale": "en-PH",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-PH-JamesNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Filipino male with a smooth, informative tone, well-suited for a technology podcast or an educational presentation.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-SG-LunaNeural",
+    "locale": "en-SG",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-SG-LunaNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Singaporean woman with a measured and thoughtful tone, well-suited for a podcast or an educational presentation.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-SG-WayneNeural",
+    "locale": "en-SG",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-SG-WayneNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Singaporean male voice with a calm, informative tone, well-suited for a podcast or an educational presentation.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-TZ-ImaniNeural",
+    "locale": "en-TZ",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-TZ-ImaniNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Tanzanian female with a professional and enthusiastic tone, well-suited for narrating a documentary or a corporate presentation.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-TZ-ElimuNeural",
+    "locale": "en-TZ",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-TZ-ElimuNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young Tanzanian male speaking in a conversational and enthusiastic tone, making it well-suited for a podcast or an educational video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-ZA-LeahNeural",
+    "locale": "en-ZA",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-ZA-LeahNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young South African female with a thoughtful and inquisitive tone, well-suited for a podcast or conversational content.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-ZA-LukeNeural",
+    "locale": "en-ZA",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-ZA-LukeNeural",
+      "model": "neural",
+      "age_group": "Adult",
+      "description": "A young South African male with a relaxed, conversational tone, suitable for a technology podcast or an explainer video.",
+      "personalities": null,
+      "scenarios": null,
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-US-FableTurboMultilingualNeural",
+    "locale": "en-US",
+    "gender": "neutral",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-FableTurboMultilingualNeural",
+      "model": "multilingual",
+      "age_group": "Adult",
+      "description": "Turbo version for Fable, a voice with a touch of mystery and intrigue (gender unspecified)",
+      "personalities": [
+        "Mystery",
+        "Intrigue"
+      ],
+      "scenarios": [
+        "Chat",
+        "Narration"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T14:31:32.921856Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-US-Jimmie:DragonHDFlashLatestNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-Jimmie:DragonHDFlashLatestNeural",
+      "model": "hd_flash",
+      "age_group": "Senior",
+      "description": "HD Flash version of Jimmie, with English and Chinese bilingual capability, deep, mature male voice with magnetic tone and natural gravitas, perfect for immersive storytelling, documentary narration, and character-driven dialogue.",
+      "personalities": [
+        "Deep",
+        "Mature",
+        "Magnetic"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Documentary"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T15:34:42.683261Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-US-Tiana:DragonHDFlashLatestNeural",
+    "locale": "en-US",
+    "gender": "female",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-Tiana:DragonHDFlashLatestNeural",
+      "model": "hd_flash",
+      "age_group": "YoungAdult",
+      "description": "HD Flash version of Tiana, with English and Chinese bilingual capability and warm, gentle tone, with authentic pronunciation in both English and Chinese, suited for audiobook and conversation senarios",
+      "personalities": null,
+      "scenarios": [
+        "Audiobook",
+        "Chat"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T15:34:42.683261Z"
+    }
+  },
+  {
+    "provider_voice_id": "en-US-Tyler:DragonHDFlashLatestNeural",
+    "locale": "en-US",
+    "gender": "male",
+    "styles": [],
+    "metadata": {
+      "provider_voice_id": "en-US-Tyler:DragonHDFlashLatestNeural",
+      "model": "hd_flash",
+      "age_group": "YoungAdult",
+      "description": "HD Flash version of Tyler, with English and Chinese bilingual capability, bright, youthful male voice with lively energy and a pleasant tone, perfect for casual chatting and audiobook scenarios.",
+      "personalities": [
+        "Bright",
+        "Youthful",
+        "Lively"
+      ],
+      "scenarios": [
+        "Audiobook",
+        "Chat"
+      ],
+      "roles": [],
+      "source_url": "https://speech.microsoft.com/portal/voicegallery",
+      "checked_at": "2026-10-25T15:34:42.683261Z"
+    }
   }
 ]

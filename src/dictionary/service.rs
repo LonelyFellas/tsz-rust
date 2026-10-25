@@ -125,6 +125,8 @@ pub async fn entries(
                             target_id: sound.id,
                             asset_id: a.id,
                             locale: a.locale.as_str().into(),
+                            accent_group: a.locale.accent_group(),
+                            hd_flash: false,
                         }));
                     }
                 }
@@ -139,6 +141,8 @@ pub async fn entries(
                         target_id: grammar.id,
                         asset_id: a.id,
                         locale: a.locale.as_str().into(),
+                        accent_group: a.locale.accent_group(),
+                        hd_flash: false,
                     }));
                 }
             }
@@ -235,11 +239,9 @@ fn generated_audio(
             audio.push(DictionaryAudio {
                 target_id,
                 asset_id,
-                locale: match locale {
-                    VoiceVersionLocaleV3::Uk => "en-GB",
-                    VoiceVersionLocaleV3::Us => "en-US",
-                }
-                .into(),
+                locale: locale.as_str().into(),
+                accent_group: locale.accent_group(),
+                hd_flash: setting.voice_id.starts_with("azure-hd-flash-"),
             });
         }
     }

@@ -13,6 +13,10 @@ pub struct CatalogVoice {
 impl CatalogVoice {
     pub fn alias(&self) -> String {
         let name = self.voice.provider_voice_id().to_ascii_lowercase();
+        if self.voice.is_hd_flash() {
+            let hash = hex_digest(name.as_bytes());
+            return format!("azure-hd-flash-{}", &hash[..40]);
+        }
         if name.len() <= 64 {
             return name;
         }
@@ -21,13 +25,19 @@ impl CatalogVoice {
     }
 
     pub fn version(&self) -> String {
-        let facts = serde_json::json!([
+        let mut facts = serde_json::json!([
             self.voice.provider(),
             self.voice.provider_voice_id(),
             self.voice.locale(),
             self.gender,
             self.voice.styles().collect::<Vec<_>>()
         ]);
+        if self.voice.is_hd_flash() {
+            facts
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!(super::model::HD_FLASH_BUILDER_VERSION));
+        }
         format!("azure-catalog-{}", hex_digest(facts.to_string().as_bytes()))
     }
 }
@@ -42,6 +52,15 @@ struct AzureVoice {
     status: String,
     #[serde(default)]
     style_list: Vec<String>,
+    #[serde(default)]
+    voice_tag: Option<AzureVoiceTag>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct AzureVoiceTag {
+    #[serde(default)]
+    model_series: Vec<String>,
 }
 
 pub(super) fn parse_catalog(bytes: &[u8]) -> Result<Vec<CatalogVoice>, serde_json::Error> {
@@ -49,16 +68,27 @@ pub(super) fn parse_catalog(bytes: &[u8]) -> Result<Vec<CatalogVoice>, serde_jso
     Ok(voices
         .into_iter()
         .filter_map(|item| {
-            if !matches!(item.locale.as_str(), "en-GB" | "en-US")
+            if super::locale::EnglishLocale::parse(&item.locale).is_none()
                 || item.status != "GA"
                 || item.voice_type != "Neural"
-                || !matches!(item.gender.as_str(), "Female" | "Male")
+                || !matches!(item.gender.as_str(), "Female" | "Male" | "Neutral")
+                || item.voice_tag.as_ref().is_some_and(|tag| {
+                    tag.model_series.iter().any(|series| {
+                        !matches!(series.as_str(), "Monolingual" | "Multilingual" | "HDFlash")
+                    })
+                })
             {
                 return None;
             }
-            // HD/multi-talker identifiers that cannot be represented by the current SSML model
-            // are deliberately excluded instead of advertising an unusable voice.
             let voice = Voice::new("azure", item.short_name, item.locale, item.style_list).ok()?;
+            if voice.is_hd_flash()
+                != item
+                    .voice_tag
+                    .as_ref()
+                    .is_some_and(|tag| tag.model_series == ["HDFlash"])
+            {
+                return None;
+            }
             Some(CatalogVoice {
                 voice,
                 gender: item.gender.to_ascii_lowercase(),

@@ -36,6 +36,7 @@ fn service(state: &AppState) -> PreviewService {
     path = "/api/v1/admin/speech/voices",
     tag = "admin-speech",
     security(("bearer_auth" = [])),
+    params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 返回已验证模型及能力；旧客户端仅普通目录")),
     responses(
         (status = 200, description = "可用发音人目录", body = VoiceListResponse),
         (status = 401, description = "管理员身份无效"),
@@ -46,13 +47,27 @@ fn service(state: &AppState) -> PreviewService {
 pub async fn list_voices(
     State(state): State<AppState>,
     auth: AdminAuth,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
-    let response = service(&state)
+    let mut response = service(&state)
         .list_voices(auth.subject)
         .await
         .map_err(map_error)?;
-    Ok((StatusCode::OK, Json(response)))
+    if !crate::lexicon::voice_versions::models_supported(&headers) {
+        response.items.retain(|voice| {
+            !voice.alias.starts_with("azure-hd-flash-")
+                && voice
+                    .metadata
+                    .as_ref()
+                    .is_none_or(|metadata| metadata.model != "hd_flash")
+        });
+    }
+    Ok((
+        StatusCode::OK,
+        [("x-tsz-voice-models", "v1"), ("vary", "x-tsz-voice-models")],
+        Json(response),
+    ))
 }
 
 #[utoipa::path(
@@ -61,7 +76,7 @@ pub async fn list_voices(
     tag = "admin-speech",
     security(("bearer_auth" = [])),
     request_body = CreatePreviewRequest,
-    params(("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")),
+    params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型"),("X-TSZ-Test-Run" = Option<String>, Header, description = "仅允许服务端白名单账号使用的8至80位独占测试批次；资源写入temporary-tests前缀")),
     responses(
         (status = 200, description = "试听缓存命中或生成成功", body = PreviewResponse),
         (status = 400, description = "RichText 或语音参数非法"),
@@ -82,6 +97,18 @@ pub async fn create_preview(
     ApiJson(request): ApiJson<CreatePreviewRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     require_active_admin(&state, &auth).await?;
+    if !crate::lexicon::voice_versions::models_supported(&headers) {
+        let voice = PreviewRepository::new(state.pool.clone())
+            .voice_by_alias(&request.voice_alias)
+            .await
+            .map_err(AppError::internal)?;
+        if voice.is_some_and(|record| record.voice.is_hd_flash()) {
+            return Err(AppError::bad_request(
+                ErrorCode::InvalidSpeechPreview,
+                "该模型需要新版配音能力，请刷新页面",
+            ));
+        }
+    }
     let (state, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     let response = service(&state)
         .with_test_run(run)
@@ -98,6 +125,18 @@ fn map_error(error: PreviewServiceError) -> AppError {
         PreviewServiceError::VoiceNotFound => {
             AppError::not_found_with_code(ErrorCode::SpeechVoiceNotFound, "speech voice not found")
         }
+        PreviewServiceError::InvalidRequest(
+            crate::speech::SpeechModelError::UnsupportedPhonemeLocale,
+        ) => AppError::bad_request(
+            ErrorCode::InvalidSpeechPreview,
+            "指定音素尚未验证适用于该原生地区，请明确选择自然朗读或使用匹配地区的音色",
+        ),
+        PreviewServiceError::InvalidRequest(
+            crate::speech::SpeechModelError::UnsupportedModelCapability,
+        ) => AppError::bad_request(
+            ErrorCode::InvalidSpeechPreview,
+            crate::speech::SpeechModelError::UnsupportedModelCapability.to_string(),
+        ),
         PreviewServiceError::InvalidRequest(_) => {
             AppError::bad_request(ErrorCode::InvalidSpeechPreview, "invalid speech preview")
         }

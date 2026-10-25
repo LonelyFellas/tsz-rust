@@ -191,16 +191,10 @@ impl GeneratedAudioService {
                 .require("words.access")?;
             tx.commit().await.map_err(AppError::internal)?;
         }
+        let native_locale = input.setting.locale.ok_or_else(invalid)?;
+        input.source.validate_locale(native_locale.as_str())?;
         let source = input.source.canonical()?;
-        let setting = voice_input(&input.setting);
-        let hash = Sha256::digest(
-            serde_json::to_vec(&serde_json::json!([source, setting]))
-                .map_err(AppError::internal)?,
-        )
-        .to_vec();
-        if let Some(asset) = self.existing(actor, input.request_id, &hash).await? {
-            return Ok(GenerateVoiceAudioResponse { asset });
-        }
+        let mut setting = voice_input(&input.setting);
         let voice = PreviewRepository::new(self.pool.clone())
             .voice_by_alias(&input.setting.voice_id)
             .await
@@ -208,10 +202,16 @@ impl GeneratedAudioService {
             .ok_or_else(|| {
                 AppError::not_found_with_code(ErrorCode::SpeechVoiceNotFound, "音色不可用")
             })?;
-        let locale = match input.setting.locale {
-            Some(crate::lexicon::dto::VoiceVersionLocaleV3::Uk) => "en-GB",
-            _ => "en-US",
-        };
+        input.source.validate_model(&voice.voice)?;
+        if voice.voice.is_hd_flash() {
+            setting["provider_voice_id"] = voice.voice.provider_voice_id().into();
+            setting["provider_version"] = voice.provider_version.clone().into();
+            setting["builder_version"] = super::model::HD_FLASH_BUILDER_VERSION.into();
+        }
+        let identity = serde_json::json!([source, setting]);
+        let hash =
+            Sha256::digest(serde_json::to_vec(&identity).map_err(AppError::internal)?).to_vec();
+        let locale = native_locale.as_str();
         let pitch = input.setting.pitch_semitones.unwrap_or(0);
         if voice.voice.locale() != locale
             || input.setting.rate_percent < voice.min_rate_percent
@@ -232,9 +232,15 @@ impl GeneratedAudioService {
             pitch,
             input.setting.volume_percent.unwrap_or(100),
         )
-        .map_err(|_| invalid())?;
-        let request =
-            SynthesisRequest::new(voice.voice, options, content).map_err(|_| invalid())?;
+        .map_err(|error| {
+            AppError::bad_request(ErrorCode::InvalidSpeechPreview, error.to_string())
+        })?;
+        let request = SynthesisRequest::new(voice.voice, options, content).map_err(|error| {
+            AppError::bad_request(ErrorCode::InvalidSpeechPreview, error.to_string())
+        })?;
+        if let Some(asset) = self.existing(actor, input.request_id, &hash).await? {
+            return Ok(GenerateVoiceAudioResponse { asset });
+        }
         let provider = self.provider.clone().ok_or_else(unavailable)?;
         if provider.provider_name() != request.voice().provider() {
             return Err(unavailable());
@@ -391,14 +397,65 @@ impl GeneratedAudioService {
     }
 }
 
-#[utoipa::path(post,path="/api/v1/admin/speech/audio",tag="admin-speech",security(("bearer_auth"=[])),request_body=GenerateVoiceAudioRequest,params(("X-TSZ-Test-Run"=Option<String>,Header,description="独占验收资源批次")),responses((status=201,body=GenerateVoiceAudioResponse),(status=400,description="内容或配音版本无效"),(status=401,description="未登录"),(status=403,description="没有生成和内容编辑权限"),(status=404,description="音色不可用"),(status=409,description="生成中或请求编号冲突"),(status=501,description="长期音频存储未配置"),(status=503,description="生成或存储失败")))]
+#[utoipa::path(post,path="/api/v1/admin/speech/audio",tag="admin-speech",security(("bearer_auth"=[])),request_body=GenerateVoiceAudioRequest,params(("X-TSZ-Test-Run"=Option<String>,Header,description="独占验收资源批次"),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 支持正式音频"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 与版本 v2 组合支持原生英语地区；指定发音必须携带 phoneme_locale")),responses((status=201,body=GenerateVoiceAudioResponse),(status=400,description="内容或配音版本无效"),(status=401,description="未登录"),(status=403,description="没有生成和内容编辑权限"),(status=404,description="音色不可用"),(status=409,description="生成中或请求编号冲突"),(status=501,description="长期音频存储未配置"),(status=503,description="生成或存储失败")))]
 pub async fn generate(
     State(state): State<AppState>,
     auth: AdminAuth,
     headers: HeaderMap,
     ApiJson(input): ApiJson<GenerateVoiceAudioRequest>,
-) -> Result<(StatusCode, Json<GenerateVoiceAudioResponse>), AppError> {
+) -> Result<(StatusCode, HeaderMap, Json<GenerateVoiceAudioResponse>), AppError> {
     require_active_admin(&state, &auth).await?;
+    if !crate::lexicon::voice_versions::models_supported(&headers) {
+        let model: Option<String> = sqlx::query_scalar(
+            "SELECT provider_voice_id FROM speech.voices WHERE alias=$1 AND enabled",
+        )
+        .bind(&input.setting.voice_id)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(AppError::internal)?;
+        if model.is_some_and(|id| id.ends_with(":DragonHDFlashLatestNeural")) {
+            return Err(AppError::bad_request(
+                ErrorCode::InvalidSpeechPreview,
+                "该模型需要新版配音能力，请刷新页面",
+            ));
+        }
+    }
+    if !crate::lexicon::voice_versions::extended_supported(&headers)
+        && input
+            .setting
+            .locale
+            .is_some_and(|locale| !locale.is_legacy())
+    {
+        return Err(invalid());
+    }
+    if crate::lexicon::voice_versions::extended_supported(&headers)
+        && matches!(
+            &input.source,
+            GeneratedSpeechSource::Phoneme {
+                phoneme_locale: None,
+                ..
+            }
+        )
+    {
+        return Err(AppError::bad_request(
+            ErrorCode::InvalidSpeechPreview,
+            "指定发音必须提供源音素地区",
+        ));
+    }
+    if !crate::lexicon::voice_versions::extended_supported(&headers) {
+        let gender: Option<String> =
+            sqlx::query_scalar("SELECT gender FROM speech.voices WHERE alias=$1 AND enabled")
+                .bind(&input.setting.voice_id)
+                .fetch_optional(&state.pool)
+                .await
+                .map_err(AppError::internal)?;
+        if gender.as_deref() == Some("neutral") {
+            return Err(AppError::bad_request(
+                ErrorCode::InvalidSpeechPreview,
+                "该音色需要新版配音能力，请刷新页面",
+            ));
+        }
+    }
     let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
     let service = GeneratedAudioService::new(
         state.pool.clone(),
@@ -408,8 +465,24 @@ pub async fn generate(
             .get(&StorageSpace::parse("audio").expect("constant space"))
             .ok(),
     );
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        crate::lexicon::voice_versions::MODELS_HEADER,
+        "v1".parse().unwrap(),
+    );
+    response_headers.insert(
+        crate::lexicon::voice_versions::LOCALES_HEADER,
+        "v1".parse().unwrap(),
+    );
+    response_headers.insert(
+        axum::http::header::VARY,
+        "x-tsz-voice-versions, x-tsz-voice-locales, x-tsz-voice-models"
+            .parse()
+            .unwrap(),
+    );
     Ok((
         StatusCode::CREATED,
+        response_headers,
         Json(
             service
                 .generate(auth.subject, auth.security_version, input)
@@ -431,6 +504,107 @@ pub(crate) async fn validate_bindings_with_forms(
     current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
     batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
 ) -> Result<(), AppError> {
+    fn model_settings(
+        value: &Value,
+        phoneme: bool,
+        settings: &mut Vec<(VoiceSettingV3, bool)>,
+    ) -> Result<(), AppError> {
+        if let Some(voices) = value
+            .get("voice_profile")
+            .and_then(|profile| profile.get("voices"))
+            .and_then(Value::as_array)
+        {
+            let designated = phoneme
+                || value
+                    .get("form_links")
+                    .and_then(Value::as_array)
+                    .is_some_and(|links| !links.is_empty())
+                || ["content", "value", "name_en_rich", "dict_phonetic_rich"]
+                    .iter()
+                    .filter_map(|key| value.get(*key))
+                    .any(|content| {
+                        content
+                            .get("annotations")
+                            .and_then(Value::as_array)
+                            .is_some_and(|items| {
+                                items.iter().any(|item| {
+                                    item["type"] == "phoneme" || item["type"] == "pause"
+                                })
+                            })
+                    });
+            for setting in voices {
+                if setting["voice_id"]
+                    .as_str()
+                    .is_some_and(|alias| alias.starts_with("azure-hd-flash-"))
+                {
+                    settings.push((
+                        serde_json::from_value(setting.clone()).map_err(|_| invalid())?,
+                        designated,
+                    ));
+                }
+            }
+        }
+        match value {
+            Value::Object(fields) => {
+                for (key, child) in fields {
+                    if key != "voice_profile" {
+                        model_settings(
+                            child,
+                            phoneme || key == "ipa_speech" || key == "ups_speech",
+                            settings,
+                        )?;
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    model_settings(child, phoneme, settings)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut model_profiles = vec![];
+    model_settings(value, false, &mut model_profiles)?;
+    for (setting, designated) in model_profiles {
+        let row =
+            sqlx::query("SELECT provider_voice_id,locale,styles FROM speech.voices WHERE alias=$1")
+                .bind(&setting.voice_id)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(AppError::internal)?
+                .ok_or_else(invalid)?;
+        let model = super::Voice::new(
+            "azure",
+            row.get::<String, _>("provider_voice_id"),
+            row.get::<String, _>("locale"),
+            serde_json::from_value::<Vec<String>>(row.get("styles")).map_err(AppError::internal)?,
+        )
+        .map_err(|_| invalid())?;
+        if designated {
+            return Err(AppError::bad_request(
+                ErrorCode::InvalidSpeechPreview,
+                super::SpeechModelError::UnsupportedModelCapability.to_string(),
+            ));
+        }
+        if setting
+            .locale
+            .is_none_or(|locale| locale.as_str() != model.locale())
+        {
+            return Err(invalid());
+        }
+        SpeechOptions::new(
+            &model,
+            setting.style.clone(),
+            setting.rate_percent,
+            setting.pitch_semitones.unwrap_or(0),
+            setting.volume_percent.unwrap_or(100),
+        )
+        .map_err(|error| {
+            AppError::bad_request(ErrorCode::InvalidSpeechPreview, error.to_string())
+        })?;
+    }
     fn uploaded_ids(value: &Value, ids: &mut Vec<Uuid>) {
         if let Some(items) = value.get("audio_assets").and_then(Value::as_array) {
             ids.extend(items.iter().filter_map(|item| {
@@ -463,11 +637,35 @@ pub(crate) async fn validate_bindings_with_forms(
     }
     for reference in super::generated_source::references(value)? {
         let row = sqlx::query("SELECT source,voice,resolved_content,state FROM lexicon.audio_generations WHERE asset_id=$1").bind(reference.asset).fetch_optional(&mut *conn).await.map_err(AppError::internal)?.ok_or_else(invalid)?;
-        let locale = match reference.setting.locale {
-            Some(crate::lexicon::dto::VoiceVersionLocaleV3::Uk) => "en-GB",
-            Some(crate::lexicon::dto::VoiceVersionLocaleV3::Us) => "en-US",
-            None => return Err(invalid()),
-        };
+        let native_locale = reference.setting.locale.ok_or_else(invalid)?;
+        let locale = native_locale.as_str();
+        let mut expected_voice = voice_input(&reference.setting);
+        if reference.setting.voice_id.starts_with("azure-hd-flash-") {
+            let catalog = sqlx::query("SELECT provider_voice_id,provider_version,locale,styles FROM speech.voices WHERE alias=$1")
+                .bind(&reference.setting.voice_id).fetch_optional(&mut *conn).await.map_err(AppError::internal)?.ok_or_else(invalid)?;
+            let model = super::Voice::new(
+                "azure",
+                catalog.get::<String, _>("provider_voice_id"),
+                catalog.get::<String, _>("locale"),
+                serde_json::from_value::<Vec<String>>(catalog.get("styles"))
+                    .map_err(AppError::internal)?,
+            )
+            .map_err(|_| invalid())?;
+            reference.source.validate_model(&model)?;
+            SpeechOptions::new(
+                &model,
+                reference.setting.style.clone(),
+                reference.setting.rate_percent,
+                reference.setting.pitch_semitones.unwrap_or(0),
+                reference.setting.volume_percent.unwrap_or(100),
+            )
+            .map_err(|_| invalid())?;
+            expected_voice["provider_voice_id"] =
+                catalog.get::<String, _>("provider_voice_id").into();
+            expected_voice["provider_version"] =
+                catalog.get::<String, _>("provider_version").into();
+            expected_voice["builder_version"] = super::model::HD_FLASH_BUILDER_VERSION.into();
+        }
         let resolved = serde_json::to_value(
             reference
                 .source
@@ -477,7 +675,7 @@ pub(crate) async fn validate_bindings_with_forms(
         .map_err(AppError::internal)?;
         if row.get::<String, _>("state") != "ready"
             || row.get::<Value, _>("source") != reference.source.canonical()?
-            || row.get::<Value, _>("voice") != voice_input(&reference.setting)
+            || row.get::<Value, _>("voice") != expected_voice
             || row.get::<Value, _>("resolved_content") != resolved
         {
             return Err(AppError::bad_request(

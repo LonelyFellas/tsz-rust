@@ -25,50 +25,88 @@ pub fn router() -> Router<AppState> {
             get(audio),
         )
 }
+fn reading_response<T: serde::Serialize>(
+    headers: &HeaderMap,
+    value: T,
+) -> Result<(HeaderMap, Json<serde_json::Value>), AppError> {
+    let mut value = serde_json::to_value(value).map_err(AppError::internal)?;
+    if !crate::lexicon::voice_versions::extended_supported(headers) {
+        crate::lexicon::voice_versions::project_extended(&mut value);
+    }
+    let mut response_headers = private_headers();
+    response_headers.insert(
+        header::VARY,
+        "x-tsz-voice-versions, x-tsz-voice-locales, x-tsz-voice-models"
+            .parse()
+            .unwrap(),
+    );
+    response_headers.insert(
+        crate::lexicon::voice_versions::LOCALES_HEADER,
+        "v1".parse().unwrap(),
+    );
+    response_headers.insert(
+        crate::lexicon::voice_versions::MODELS_HEADER,
+        "v1".parse().unwrap(),
+    );
+    Ok((response_headers, Json(value)))
+}
+
 fn private_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
     headers
 }
-#[utoipa::path(get,path="/api/v1/dictionary",tag="dictionary",params(DictionaryQuery),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/dictionary",tag="dictionary",params(DictionaryQuery,("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 保留正式音频"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 返回原生英语地区及每项 accent_group；缺省仅返回英美旧格式")),security(("bearer_auth"=[])),
 responses((status=200,description="当前发布词条，按英文拼写包含匹配；q 不能为空",body=DictionaryPage),(status=400,description="查询无效"),(status=401,description="需要登录"),(status=403,description="需要绑定手机号")))]
 pub async fn search(
     State(state): State<AppState>,
     _auth: AuthUser,
+    headers: HeaderMap,
     ApiQuery(query): ApiQuery<DictionaryQuery>,
-) -> Result<(HeaderMap, Json<DictionaryPage>), AppError> {
-    Ok((
-        private_headers(),
-        Json(service::search(&state.pool, query).await?),
-    ))
+) -> Result<(HeaderMap, Json<serde_json::Value>), AppError> {
+    let mut page = service::search(&state.pool, query).await?;
+    if !crate::lexicon::voice_versions::models_supported(&headers) {
+        for entry in &mut page.items {
+            entry.audio.retain(|audio| !audio.hd_flash);
+        }
+    }
+    reading_response(&headers, page)
 }
-#[utoipa::path(get,path="/api/v1/dictionary/entries/{id}",tag="dictionary",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/dictionary/entries/{id}",tag="dictionary",params(("id"=Uuid,Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 支持已验证模型；旧读取隐藏模型配置并保护旧写"),("X-TSZ-Voice-Versions"=Option<String>,Header,description="v2 保留正式音频"),("X-TSZ-Voice-Locales"=Option<String>,Header,description="v1 返回原生英语地区及每项 accent_group；缺省仅返回英美旧格式")),security(("bearer_auth"=[])),
 responses((status=200,body=DictionaryEntry),(status=401,description="需要登录"),(status=403,description="需要绑定手机号"),(status=404,description="词条未发布、已撤回或不存在")))]
 pub async fn detail(
     State(state): State<AppState>,
     _auth: AuthUser,
+    headers: HeaderMap,
     ApiPath(id): ApiPath<Uuid>,
-) -> Result<(HeaderMap, Json<DictionaryEntry>), AppError> {
+) -> Result<(HeaderMap, Json<serde_json::Value>), AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    let item = service::entries(&mut tx, &[id])
+    let mut item = service::entries(&mut tx, &[id])
         .await?
         .pop()
         .ok_or_else(|| AppError::not_found("词条暂不可用"))?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok((private_headers(), Json(item)))
+    if !crate::lexicon::voice_versions::models_supported(&headers) {
+        item.audio.retain(|audio| !audio.hd_flash);
+    }
+    reading_response(&headers, item)
 }
-#[utoipa::path(get,path="/api/v1/dictionary/entries/{id}/audio/{asset_id}",tag="dictionary",params(("id"=Uuid,Path),("asset_id"=Uuid,Path)),security(("bearer_auth"=[])),
+#[utoipa::path(get,path="/api/v1/dictionary/entries/{id}/audio/{asset_id}",tag="dictionary",params(("id"=Uuid,Path),("asset_id"=Uuid,Path),("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 读取已发布模型音频")),security(("bearer_auth"=[])),
 responses((status=200,body=AudioAssetUrlResponse),(status=401,description="需要登录"),(status=403,description="需要绑定手机号"),(status=404,description="当前发布词条未引用该音频"),(status=501,description="音频存储未配置"),(status=503,description="音频服务不可用")))]
 pub async fn audio(
     State(state): State<AppState>,
     _auth: AuthUser,
+    headers: HeaderMap,
     ApiPath((id, asset_id)): ApiPath<(Uuid, Uuid)>,
 ) -> Result<(HeaderMap, Json<AudioAssetUrlResponse>), AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
-    let item = service::entries(&mut tx, &[id])
+    let mut item = service::entries(&mut tx, &[id])
         .await?
         .pop()
         .ok_or_else(|| AppError::not_found("词条暂不可用"))?;
+    if !crate::lexicon::voice_versions::models_supported(&headers) {
+        item.audio.retain(|audio| !audio.hd_flash);
+    }
     if !item.audio.iter().any(|a| a.asset_id == asset_id) {
         return Err(AppError::not_found("音频暂不可用"));
     }

@@ -70,6 +70,12 @@ pub(crate) fn response<T: Serialize>(
     if !supported(headers) {
         project(&mut body);
     }
+    if !crate::lexicon::voice_versions::models_supported(headers) {
+        crate::lexicon::voice_versions::project_models(&mut body);
+    }
+    if !crate::lexicon::voice_versions::extended_supported(headers) {
+        crate::lexicon::voice_versions::project_extended(&mut body);
+    }
     if !crate::lexicon::voice_versions::supported(headers) {
         crate::lexicon::voice_versions::project(&mut body);
     } else if !crate::lexicon::voice_versions::generated_supported(headers) {
@@ -77,10 +83,14 @@ pub(crate) fn response<T: Serialize>(
     }
     Ok((
         status,
-        [(
-            header::VARY,
-            "x-tsz-sentence-formatting, x-tsz-voice-versions",
-        )],
+        [
+            (
+                header::VARY.as_str(),
+                "x-tsz-sentence-formatting, x-tsz-voice-versions, x-tsz-voice-locales, x-tsz-voice-models",
+            ),
+            (crate::lexicon::voice_versions::LOCALES_HEADER, "v1"),
+            (crate::lexicon::voice_versions::MODELS_HEADER, "v1"),
+        ],
         Json(body),
     )
         .into_response())

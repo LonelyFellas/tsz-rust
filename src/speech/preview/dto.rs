@@ -31,6 +31,15 @@ pub struct VoiceCapabilities {
     pub max_rate_percent: i16,
     pub min_pitch_semitones: i16,
     pub max_pitch_semitones: i16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub supports_volume_percent: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub supports_pause: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub supports_phoneme: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -41,6 +50,8 @@ pub struct VoiceResponse {
     pub locale: String,
     pub gender: String,
     pub capabilities: VoiceCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<crate::speech::VoiceMetadata>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

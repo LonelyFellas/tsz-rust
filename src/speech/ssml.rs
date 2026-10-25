@@ -14,15 +14,17 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
         push_attr(&mut output, style);
         output.push_str(r#"">"#);
     }
-    output.push_str("<prosody rate=\"");
-    output.push_str(&format_signed(request.options().rate_percent(), "%"));
-    output.push_str("\" pitch=\"");
-    output.push_str(&format_signed(request.options().pitch_semitones(), "st"));
-    if request.options().volume_percent() != 100 {
-        output.push_str("\" volume=\"");
-        output.push_str(&request.options().volume_percent().to_string());
+    if !request.voice().is_hd_flash() {
+        output.push_str("<prosody rate=\"");
+        output.push_str(&format_signed(request.options().rate_percent(), "%"));
+        output.push_str("\" pitch=\"");
+        output.push_str(&format_signed(request.options().pitch_semitones(), "st"));
+        if request.options().volume_percent() != 100 {
+            output.push_str("\" volume=\"");
+            output.push_str(&request.options().volume_percent().to_string());
+        }
+        output.push_str("\">");
     }
-    output.push_str("\">");
 
     // 词性提示符（a job 里的 a）是教学标注，只指示词性，不参与朗读：这一段的字符、
     // 它自己的 emphasis、以及整段被它盖住的音标都不进 SSML，否则空的 phoneme 标签
@@ -105,7 +107,9 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
         return Err(SpeechModelError::NothingToSpeak);
     }
 
-    output.push_str("</prosody>");
+    if !request.voice().is_hd_flash() {
+        output.push_str("</prosody>");
+    }
     if request.options().style().is_some() {
         output.push_str("</mstts:express-as>");
     }
