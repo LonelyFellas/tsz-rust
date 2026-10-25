@@ -1,13 +1,14 @@
 use super::{dto::*, *};
+use crate::wordlists::private_json;
 use crate::{
     api::{ApiJson, ApiPath, ApiQuery},
     state::AppState,
 };
 use axum::{
-    Json, Router,
+    Router,
     extract::State,
-    http::{HeaderValue, StatusCode, header::CACHE_CONTROL},
-    response::{IntoResponse, Response},
+    http::StatusCode,
+    response::Response,
     routing::{get, post, put},
 };
 
@@ -29,12 +30,6 @@ pub fn router() -> Router<AppState> {
             post(apply),
         )
 }
-fn private(value: impl Serialize) -> Response {
-    let mut r = Json(value).into_response();
-    r.headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
-    r
-}
 #[utoipa::path(get,path="/api/v1/me/wordlist-library/{space}",tag="wordlists",params(("space"=LibrarySpace,Path),LibraryQuery),security(("bearer_auth"=[])),responses((status=200,description="个人目录或回收站，用户和系统隔离",body=LibraryPage),(status=400,description="参数无效"),(status=401,description="未登录"),(status=403,description="账户不可用"),(status=404,description="目录不存在")))]
 pub async fn list(
     State(state): State<AppState>,
@@ -42,7 +37,9 @@ pub async fn list(
     ApiPath(space): ApiPath<LibrarySpace>,
     ApiQuery(query): ApiQuery<LibraryQuery>,
 ) -> Result<Response, AppError> {
-    Ok(private(listing(&state.pool, &auth, space, query).await?))
+    Ok(private_json(
+        listing(&state.pool, &auth, space, query).await?,
+    ))
 }
 #[utoipa::path(post,path="/api/v1/me/wordlist-library/{space}/folders",tag="wordlists",params(("space"=LibrarySpace,Path)),security(("bearer_auth"=[])),request_body=LibraryFolderInput,responses((status=204,description="已创建"),(status=400,description="参数无效"),(status=404,description="目录不存在"),(status=409,description="目录版本冲突或重名")))]
 pub async fn folder(
@@ -71,7 +68,7 @@ pub async fn preview(
     ApiPath(space): ApiPath<LibrarySpace>,
     ApiJson(input): ApiJson<LibraryOperation>,
 ) -> Result<Response, AppError> {
-    Ok(private(
+    Ok(private_json(
         operation(&state.pool, &auth, space, input, true).await?,
     ))
 }
@@ -82,7 +79,7 @@ pub async fn apply(
     ApiPath(space): ApiPath<LibrarySpace>,
     ApiJson(input): ApiJson<LibraryOperation>,
 ) -> Result<Response, AppError> {
-    Ok(private(
+    Ok(private_json(
         operation(&state.pool, &auth, space, input, false).await?,
     ))
 }
@@ -93,7 +90,7 @@ pub async fn select(
     ApiPath(space): ApiPath<LibrarySpace>,
     ApiJson(input): ApiJson<LibrarySelectionInput>,
 ) -> Result<Response, AppError> {
-    Ok(private(
+    Ok(private_json(
         expand_selection(&state.pool, &auth, space, input).await?,
     ))
 }

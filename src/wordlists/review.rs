@@ -147,7 +147,7 @@ pub async fn decision(
         service::eligible_owner(&mut tx, list.owner_user_id).await?;
         let ids = service::ids(&mut tx, id).await?;
         service::lock_entries(&mut tx, &ids, true).await?;
-        sqlx::query("UPDATE wordlist_items i SET approved_lifecycle_revision=e.lifecycle_revision,approved_archive_generation=e.wordlist_archive_generation FROM lexicon.entries e WHERE i.wordlist_id=$1 AND e.id=i.entry_id").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+        super::management::approve_entries(&mut tx, id).await?;
     }
     sqlx::query("UPDATE wordlists SET state=$2,review_state=CASE WHEN $2='published' THEN 'approved' ELSE 'rejected' END,revision=revision+1,updated_at=clock_timestamp() WHERE id=$1").bind(id).bind(if input.approve{"published"}else{"rejected"}).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("UPDATE wordlist_review_requests SET state=$2,reviewer_id=$3,reason=$4,decided_at=clock_timestamp() WHERE id=$1").bind(request).bind(if input.approve{"approved"}else{"rejected"}).bind(auth.subject).bind(explanation).execute(&mut *tx).await.map_err(AppError::internal)?;

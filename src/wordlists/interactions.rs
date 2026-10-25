@@ -1,7 +1,7 @@
 //! Reference-based interactions. Existing wordlist responses remain wire-compatible.
 use super::{
     dto::{Wordlist, WordlistQuery},
-    service,
+    private_json, service,
 };
 use crate::{
     api::{ApiJson, ApiPath, ApiQuery, PaginationMeta},
@@ -9,12 +9,7 @@ use crate::{
     error::{AppError, ErrorCode},
     state::AppState,
 };
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderValue, header::CACHE_CONTROL},
-    response::{IntoResponse, Response},
-};
+use axum::{Json, extract::State, response::Response};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -93,13 +88,6 @@ pub struct WordlistFavoritePage {
     pub items: Vec<WordlistFavorite>,
     pub pagination: PaginationMeta,
 }
-fn private(value: impl Serialize) -> Response {
-    let mut response = Json(value).into_response();
-    response
-        .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
-    response
-}
 #[utoipa::path(get,path="/api/v1/wordlists/interactions",tag="wordlists",params(InteractionQuery),responses((status=200,description="公开词表真实统计；不可用词表不返回",body=WordlistInteractionStatsBatch),(status=400,description="查询无效")))]
 pub async fn stats(
     State(state): State<AppState>,
@@ -122,7 +110,7 @@ pub async fn states(
     let items = sqlx::query_as("SELECT x.id AS wordlist_id, EXISTS(SELECT 1 FROM wordlist_interactions i WHERE i.wordlist_id=x.id AND i.user_id=$2 AND i.kind='like') AS liked, EXISTS(SELECT 1 FROM wordlist_interactions i WHERE i.wordlist_id=x.id AND i.user_id=$2 AND i.kind='favorite') AS favorited FROM (SELECT DISTINCT unnest($1::uuid[]) AS id) x ORDER BY x.id")
         .bind(ids).bind(auth.subject).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(private(WordlistInteractionStates { items }))
+    Ok(private_json(WordlistInteractionStates { items }))
 }
 #[utoipa::path(put,path="/api/v1/me/wordlists/{id}/interactions",tag="wordlists",params(("id"=Uuid,Path)),security(("bearer_auth"=[])),request_body=SetWordlistInteraction,responses((status=200,description="设置最终状态，重复请求不重复计数",body=WordlistInteractionState),(status=400,description="参数无效"),(status=401,description="未登录"),(status=403,description="不能操作自己的词表"),(status=404,description="词表不可用")))]
 pub async fn set(
@@ -188,7 +176,7 @@ pub async fn set(
     let result: WordlistInteractionState = sqlx::query_as("SELECT $1::uuid AS wordlist_id, EXISTS(SELECT 1 FROM wordlist_interactions WHERE wordlist_id=$1 AND user_id=$2 AND kind='like') AS liked, EXISTS(SELECT 1 FROM wordlist_interactions WHERE wordlist_id=$1 AND user_id=$2 AND kind='favorite') AS favorited").bind(id).bind(auth.subject).fetch_one(&mut *tx).await.map_err(AppError::internal)?;
     crate::account_deletion::ensure_not_effective_in(&mut tx, auth.subject).await?;
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(private(result))
+    Ok(private_json(result))
 }
 #[utoipa::path(get,path="/api/v1/me/wordlist-favorites",tag="wordlists",params(WordlistQuery),security(("bearer_auth"=[])),responses((status=200,description="引用收藏分页；不可用时不返回词表内容",body=WordlistFavoritePage),(status=400,description="查询无效"),(status=401,description="未登录"),(status=403,description="账户不可用")))]
 pub async fn favorites(
@@ -228,7 +216,7 @@ pub async fn favorites(
         })
         .collect();
     tx.commit().await.map_err(AppError::internal)?;
-    Ok(private(WordlistFavoritePage {
+    Ok(private_json(WordlistFavoritePage {
         items,
         pagination: service::page_meta(page, size, total),
     }))
