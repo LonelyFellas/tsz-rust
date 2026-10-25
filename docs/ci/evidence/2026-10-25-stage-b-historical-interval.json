@@ -1,0 +1,113 @@
+{
+  "actual_deployed_baseline": false,
+  "candidate_sha256": "b79f61941a913d9f4075ecdf8403fba22e88204f878342827c9a984b954057a2",
+  "checks": {
+    "bounded_down": "passed",
+    "old_binary_after_recovery": "passed",
+    "upgrade": "passed"
+  },
+  "cleanup": {
+    "complete": true,
+    "remaining": []
+  },
+  "environment": {
+    "images": {
+      "app": "sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956",
+      "postgresql": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+      "probe": "sha256:b658b05ce9c4eb97ec6fc19424818a1f31993659c2b505a532f470e83807815d",
+      "redis": "sha256:2b35fc7d2908e25aa6aa197f97882c8a67829d3b106ad5ea5c8028f816f26aa8"
+    },
+    "network_internal": true,
+    "postgresql": "18.6",
+    "redis": "6.0.20"
+  },
+  "interval": {
+    "baseline_version": 20261023090000,
+    "candidate_version": 20261024090000,
+    "classification": "new_migrations",
+    "migrations": [
+      {
+        "down": {
+          "checksum": "4c07aea4b1bdc211cf368f26a30ac2cbb3a3763b378a4058e37ef8209defa1c9634cab8acd67bc569fcde4dcafb56e4f",
+          "direction": "down",
+          "transactional": true,
+          "version": 20261024010000
+        },
+        "up": {
+          "checksum": "7dd1771708da914d4e6e6af8346efe54eda0a873b7d72ead8b675ccce903bfa231df5d6378ef03512e8e459a561027e9",
+          "direction": "up",
+          "transactional": true,
+          "version": 20261024010000
+        }
+      },
+      {
+        "down": {
+          "checksum": "be72ec8066c48300d49e58ea98a7f867b26ec1ac8b72de395fe627d9425a5ae815f9be1df461a7c606c28c5de00821e2",
+          "direction": "down",
+          "transactional": true,
+          "version": 20261024020000
+        },
+        "up": {
+          "checksum": "99877a34fc81079c213699659cb5b4dba93f416df99579eec75222cb0d4e3e4d713864e95c14849d71191fe9136d485c",
+          "direction": "up",
+          "transactional": true,
+          "version": 20261024020000
+        }
+      },
+      {
+        "down": {
+          "checksum": "69ae7226139960ba7a73c46e7750f17c7ba8814923a7b9728874a81e7c2c05518d46f0ac1f224ba1ca3de3eb0a246a45",
+          "direction": "down",
+          "transactional": true,
+          "version": 20261024030000
+        },
+        "up": {
+          "checksum": "c37f29e98bf4c6dd007615723db57a5f1b6a2fd14e62660c23ddd81324e928f67e3a0d7e5afc5aefdb9c21c9fb055f82",
+          "direction": "up",
+          "transactional": true,
+          "version": 20261024030000
+        }
+      },
+      {
+        "down": {
+          "checksum": "2de78799477c5fac9f07117269dfc86e3dc877467f5e6a33cd08758ca261387c0d5c170692f63d140ba7faf77936aa9a",
+          "direction": "down",
+          "transactional": true,
+          "version": 20261024040000
+        },
+        "up": {
+          "checksum": "a955c34bd55d02cbb841eb5477532efe2e8440abd4f33171615536a85c7a2009216718c5843ee6d46126e12dc3ef7fef",
+          "direction": "up",
+          "transactional": true,
+          "version": 20261024040000
+        }
+      },
+      {
+        "down": {
+          "checksum": "c5ef4b58ef07b01be1b23653a873d78b70371eb4e5d14f086354dc0a83ffb41ab6f8a7e107405d1e3987e4f73d15151c",
+          "direction": "down",
+          "transactional": true,
+          "version": 20261024090000
+        },
+        "up": {
+          "checksum": "4d0912e6a2c2d257ce295e2acfa1a80fb987dde2be5f878bedf48b666153968c48585559937800bb5372529c77b88898",
+          "direction": "up",
+          "transactional": true,
+          "version": 20261024090000
+        }
+      }
+    ],
+    "versions": [
+      20261024010000,
+      20261024020000,
+      20261024030000,
+      20261024040000,
+      20261024090000
+    ]
+  },
+  "kind": "historical-migration-fixture",
+  "old_sha": "c1eb541d51460f37d1e61485c6c6500214eef720",
+  "release_eligible": false,
+  "rollback_schema_safe": false,
+  "status": "passed"
+}

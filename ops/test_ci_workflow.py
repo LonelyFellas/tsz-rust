@@ -110,6 +110,32 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("release_artifact_manifest.py create", release)
         self.assertIn("release_artifact_manifest.py verify", release)
 
+    def test_release_smoke_downloads_exact_attempt_and_never_deploys(self) -> None:
+        smoke = self._job("release-smoke")
+        self.assertIn("needs: [release-artifact]", smoke)
+        self.assertIn("actions: read", smoke)
+        self.assertIn("contents: read", smoke)
+        self.assertIn("github.ref == 'refs/heads/main'", smoke)
+        self.assertIn("github.event_name == 'push' || github.event_name == 'workflow_dispatch'", smoke)
+        self.assertIn("artifact-ids: ${{ steps.artifact.outputs.id }}", smoke)
+        self.assertIn("--artifact-id '${{ steps.artifact.outputs.id }}'", smoke)
+        self.assertIn('--expected-sha "$GITHUB_SHA"', smoke)
+        self.assertIn('--run-attempt "$GITHUB_RUN_ATTEMPT"', smoke)
+        self.assertIn("release_artifact_smoke.py", smoke)
+        self.assertIn("docker pull postgres:18-alpine", smoke)
+        self.assertIn("docker pull redis:6.0-alpine", smoke)
+        self.assertIn("docker pull --platform linux/amd64 ubuntu:22.04", smoke)
+        self.assertIn("if: ${{ always() }}", smoke)
+        self.assertIn("if-no-files-found: error", smoke)
+        self.assertNotIn("continue-on-error", smoke)
+        self.assertNotIn("ssh ", smoke)
+        self.assertNotIn("secrets.", smoke)
+        self.assertNotIn("workflow_run:", self.workflow)
+        quality = self._job("quality")
+        self.assertIn("test_release_artifact_smoke.py", quality)
+        self.assertIn("test_migration_compatibility.py", quality)
+        self.assertIn("test_deployed_baseline.py", quality)
+
     def test_ci11_caches_are_explicit_restore_only_outside_trusted_main(self) -> None:
         jobs = [
             self._job("quality"),

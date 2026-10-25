@@ -1,0 +1,17 @@
+{
+  "captured_at": "2026-10-25T00:49:10.336379+00:00",
+  "containers_remaining": {
+    "artifact_test": [],
+    "stage_b_lib": [],
+    "stage_b_build": []
+  },
+  "artifact_networks_remaining": [],
+  "test_server_readonly_final_state": {
+    "sha": "f4fab9ef579be2381265ed886bddc94aebaf1270",
+    "pid": 1125651,
+    "lock_present": false
+  },
+  "test_server_mutations": false,
+  "temporary_services_cleaned": true,
+  "shared_services_or_cache_deleted": false
+}

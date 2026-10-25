@@ -1,0 +1,48 @@
+{
+  "verified_at": "2026-10-25T00:50:54.225798+00:00",
+  "rust_toolchain": "1.98.0",
+  "rust_fmt": "passed",
+  "rust_clippy_all_targets_all_features": "passed",
+  "rust_lib_tests_passed": 416,
+  "rust_other_binary_tests_passed": 7,
+  "rust_doc_tests_passed": 0,
+  "python_full_suite_passed": 139,
+  "final_metadata_owner_targeted_regression_passed": 17,
+  "yaml_parse": "passed",
+  "workflow_tests_passed": 15,
+  "linux_release_build": "passed",
+  "linux_release_binary_sha256": "b79f61941a913d9f4075ecdf8403fba22e88204f878342827c9a984b954057a2",
+  "uncommitted_source": true,
+  "published_main_ci_run": false,
+  "deployment_performed": false,
+  "automatic_cd_enabled": false,
+  "source_base_sha": "f4fab9ef579be2381265ed886bddc94aebaf1270",
+  "local-release-smoke": "passed",
+  "local-migration-rehearsal": "passed",
+  "historical-interval": "passed",
+  "real-guard-refusal": "passed",
+  "final-runtime-recheck": "passed",
+  "cleanup": {
+    "captured_at": "2026-10-25T00:49:10.336379+00:00",
+    "containers_remaining": {
+      "artifact_test": [],
+      "stage_b_lib": [],
+      "stage_b_build": []
+    },
+    "artifact_networks_remaining": [],
+    "test_server_readonly_final_state": {
+      "sha": "f4fab9ef579be2381265ed886bddc94aebaf1270",
+      "pid": 1125651,
+      "lock_present": false
+    },
+    "test_server_mutations": false,
+    "temporary_services_cleaned": true,
+    "shared_services_or_cache_deleted": false
+  },
+  "tool_sha256": {
+    "artifact_test_runtime.py": "1157b86e771e14291081819b0e47175c7649c3aff40c64a0d19955db0f558ddf",
+    "release_artifact_smoke.py": "0986b66ac33c60be03e9969cb315bc5622663901f837956fdaac31dfd7f8beb9",
+    "migration_compatibility.py": "f59fb2bb1ad0a778f7eb509a6aac6599009eaf55552f5c7cf7fe05ff2e24c493",
+    "deployed_baseline.py": "e05b8fea86456a5e354e588b978fc5a1c08b1d14f2d0bf1b0e228af155122142"
+  }
+}

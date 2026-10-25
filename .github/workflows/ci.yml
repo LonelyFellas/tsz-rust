@@ -148,6 +148,15 @@ jobs:
       - name: Test release artifact manifests
         run: python3 -m unittest ops/test_release_artifact_manifest.py
 
+      - name: Test isolated release and migration verification
+        run: python3 -m unittest discover -s ops -p 'test_release_artifact_smoke.py'
+
+      - name: Test migration compatibility evidence
+        run: python3 -m unittest discover -s ops -p 'test_migration_compatibility.py'
+
+      - name: Test read-only deployed baseline capture
+        run: python3 -m unittest discover -s ops -p 'test_deployed_baseline.py'
+
       - name: Test deployment preflight
         run: python3 -m unittest ops/test_deployment_preflight.py
 
@@ -606,5 +615,77 @@ jobs:
             target/release/tsz-rust
             target/release/tsz-rust.sha256
             target/release/tsz-rust.manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  release-smoke:
+    name: Verify release artifact
+    permissions:
+      contents: read
+      actions: read
+    needs: [release-artifact]
+    if: >-
+      github.repository == 'LonelyFellas/tsz-rust' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact main tools
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve exact artifact identity
+        id: artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          name="tsz-rust-x86_64-linux-gnu-${GITHUB_SHA}-attempt-${GITHUB_RUN_ATTEMPT}"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            > "$RUNNER_TEMP/release-artifacts.json"
+          python3 - "$RUNNER_TEMP/release-artifacts.json" "$name" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          matches = [item for item in json.load(open(sys.argv[1]))['artifacts'] if item['name'] == sys.argv[2] and not item['expired']]
+          assert len(matches) == 1, 'expected exactly one current-attempt release artifact'
+          json.dump(matches[0], open(sys.argv[1] + '.selected', 'w'))
+          print('id=' + str(matches[0]['id']))
+          PY
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+      - name: Download the uploaded release artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ steps.artifact.outputs.id }}
+          path: ${{ runner.temp }}/release-smoke-download
+          merge-multiple: true
+
+      - name: Prepare isolated dependency images
+        run: |
+          docker pull postgres:18-alpine
+          docker pull redis:6.0-alpine
+          docker pull python:3.12-alpine
+          docker pull --platform linux/amd64 ubuntu:22.04
+
+      - name: Verify downloaded binary with isolated PostgreSQL and Redis
+        run: >-
+          python3 ops/release_artifact_smoke.py
+          --manifest "$RUNNER_TEMP/release-smoke-download/tsz-rust.manifest.json"
+          --artifact "$RUNNER_TEMP/release-smoke-download/tsz-rust"
+          --artifact-id '${{ steps.artifact.outputs.id }}'
+          --artifact-metadata "$RUNNER_TEMP/release-artifacts.json.selected"
+          --expected-sha "$GITHUB_SHA"
+          --expected-tree '${{ steps.artifact.outputs.tree }}'
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --output "$RUNNER_TEMP/release-smoke-receipt.json"
+
+      - name: Upload release verification receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-smoke-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-smoke-receipt.json
           if-no-files-found: error
           retention-days: 30

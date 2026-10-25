@@ -13,6 +13,11 @@ async fn run() -> anyhow::Result<()> {
 
     let mut arguments = std::env::args().skip(1);
     if let Some(command) = arguments.next() {
+        if command == "deploy-info" {
+            anyhow::ensure!(arguments.next().is_none(), "too many arguments");
+            println!("{}", serde_json::to_string(&deployment_migrations::info())?);
+            return Ok(());
+        }
         anyhow::ensure!(
             command == "deploy-undo-migrations",
             "unknown command: {command}"
