@@ -1,0 +1,86 @@
+{
+  "artifact_sha256": "63ddfd9fd26d6da07948c5d03282aae28edc6fbe0071a0c6b34a7499358d9b73",
+  "boundary": "Local TLS relay and real backend/DB/Redis; systemd/process identity substituted; no test-server access.",
+  "checks": {
+    "auth_no_financial_side_effect": "passed",
+    "business_no_financial_side_effect": "passed",
+    "funded_account_cleanup_refused_without_mutation": "passed",
+    "host_business_create_update_readback_and_cleanup": "passed",
+    "policy_effective_and_schedule_guard_restored": "passed",
+    "positive_control_awarded_one_coin": "passed",
+    "protected_positive_control_unchanged": "passed",
+    "real_https_auth_cookie_rotation_logout": "passed",
+    "repeat_cleanup_and_exact_redis_audit": "passed",
+    "smoke_users_wordlists_sessions_removed": "passed"
+  },
+  "cleanup": {
+    "complete": true,
+    "remaining": [],
+    "independent_owner_audit_passed": true,
+    "positive_control_and_policy_removed_with_owned_database": true,
+    "local_scratch_removed": true
+  },
+  "configuration": {
+    "COOKIE_SECURE": "true",
+    "DEPLOYMENT_SMOKE_ONLY": "false",
+    "LOGIN_REWARD_ENABLED": "true"
+  },
+  "environment": {
+    "images": {
+      "app": "sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956",
+      "postgresql": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+      "probe": "sha256:b658b05ce9c4eb97ec6fc19424818a1f31993659c2b505a532f470e83807815d",
+      "redis": "sha256:2b35fc7d2908e25aa6aa197f97882c8a67829d3b106ad5ea5c8028f816f26aa8"
+    },
+    "network_internal": true,
+    "postgresql": "18.6",
+    "redis": "6.0.20"
+  },
+  "kind": "stage-d-login-reward-smoke",
+  "release_eligible": false,
+  "resource_owner": "22ce534d2bb74ea5a91ec9e84e55c5ec",
+  "source_sha": "d15b637ef8b9eed78316bb1032a492619ae0a491",
+  "status": "passed",
+  "tool_sha256": {
+    "deployment_auth_smoke.py": "d16c730f24b3d1f511bc3b49d6ca8a5026b59c185ad808efbe150707b2b60398",
+    "deployment_business_smoke.py": "ade749d2ca7340f32fc2cf46affb60857c0154aa2dc51009cc70a02b9a9d166b",
+    "deployment_host.py": "20b2fe5081c5fa2cdd5d59250089709d356d11f96f164c17c31c74df06bc2a76"
+  },
+  "date": "2026-10-25",
+  "worktree_branch": "codex/backend-cicd-stage-d-preparation",
+  "changes_committed": false,
+  "regression": {
+    "before_fix": "LOGIN_REWARD_ENABLED=true fails with smoke_login_rewards_must_be_disabled; false passes",
+    "after_fix": "true and false pass; both directions of configuration drift still rejected",
+    "ops_test_count": 189,
+    "ops_tests": "passed",
+    "cargo_fmt": "passed",
+    "cargo_clippy_all_targets_all_features": "passed",
+    "rust_toolchain": "1.98.0",
+    "rust_lib_bin_suite_rerun": false,
+    "rust_integration_suite_rerun": false
+  },
+  "fixture": {
+    "policy": "isolated policy scheduled for previous business day",
+    "schedule_trigger": "disabled/re-enabled within one fixture transaction, same as repository integration tests; enabled before all HTTP requests",
+    "positive_control": "distinct random account explicitly claimed one coin",
+    "cleanup_guard": "funded control account rejected; unchanged until owned container destruction",
+    "smoke": "different random auth and business accounts; no wallet/operation/entry changes",
+    "network": "internal Docker network, no application host port; local-only TLS relay"
+  },
+  "initial_attempt": {
+    "status": "failed_before_resource_creation",
+    "stage": "image_not_cached_postgresql",
+    "cleanup_complete": true,
+    "resolution": "independent cached-image check passed; unchanged probe rerun succeeded"
+  },
+  "limits": {
+    "test_server_accessed": false,
+    "test_server_config_modified": false,
+    "test_server_migrations_executed": false,
+    "deployment": false,
+    "automatic_cd": false,
+    "commit_push_pr": false,
+    "systemd_or_nginx_real_validation": false
+  }
+}

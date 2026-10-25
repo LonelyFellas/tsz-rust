@@ -80,7 +80,13 @@ class BusinessSmokeTests(unittest.TestCase):
         self.assertEqual(business.verify(request, self.resource), wordlist)
         put = next(index for index, call in enumerate(calls) if call[0] == 'PUT')
         self.assertTrue(any(call[0] == 'GET' and call[1].endswith(wordlist) for call in calls[put+1:]))
-        self.assertFalse(any('/publish' in call[1] for call in calls))
+        self.assertEqual([(method, path) for method, path, _ in calls], [
+            ('POST', '/api/v1/auth/login'), ('POST', '/api/v1/me/wordlists'),
+            ('GET', '/api/v1/me/wordlists/' + wordlist),
+            ('PUT', '/api/v1/me/wordlists/' + wordlist),
+            ('GET', '/api/v1/me/wordlists/' + wordlist),
+            ('GET', '/api/v1/me/wordlists/' + wordlist + '/items'),
+        ])
 
     def test_schema_preflight_is_readonly_and_never_creates_a_fixture(self):
         sql = Mock(return_value='')

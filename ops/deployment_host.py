@@ -218,8 +218,6 @@ def baseline_matches(plan):
 def preflight(plan):
     require(not LOCK.exists(), "remote_deployment_busy")
     baseline_matches(plan)
-    cfg = configuration()
-    require(cfg.get("LOGIN_REWARD_ENABLED", "false") == "false", "smoke_login_rewards_must_be_disabled")
     business.check_auth_schema(lambda statement: sql(statement, readonly=True))
     business.random_credentials()
     auth.preflight()

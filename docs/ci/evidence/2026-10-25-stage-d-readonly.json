@@ -1,0 +1,587 @@
+{
+  "schema_version": 1,
+  "kind": "stage-d-read-only-preparation",
+  "created_at": "2026-10-25T05:03:41.464140+00:00",
+  "status": "blocked_before_execution",
+  "release_eligible": false,
+  "authorization": {
+    "read_only_preparation": true,
+    "deploy": false,
+    "execute_migrations": false,
+    "automatic_cd": false
+  },
+  "candidate": {
+    "source": {
+      "repository": "LonelyFellas/tsz-rust",
+      "git_ref": "refs/heads/main",
+      "git_sha": "d15b637ef8b9eed78316bb1032a492619ae0a491",
+      "git_tree": "f9fc6061ff7bf5f922c968ff268252a118db2fac"
+    },
+    "ci": {
+      "workflow": "CI",
+      "run_id": 40161887176,
+      "run_attempt": 1,
+      "run_url": "https://github.com/LonelyFellas/tsz-rust/actions/runs/40161887176"
+    },
+    "all_13_ci_jobs_passed": true,
+    "artifact": {
+      "name": "tsz-rust",
+      "target": "x86_64-unknown-linux-gnu",
+      "path": "tsz-rust",
+      "size_bytes": 60000488,
+      "sha256": "63ddfd9fd26d6da07948c5d03282aae28edc6fbe0071a0c6b34a7499358d9b73"
+    },
+    "artifact_id": 12586389862,
+    "artifact_archive_digest_from_github": "sha256:f75a23a3f947e74bdfde36279b030d64ea40a403c24ecf2b2ef2517456218a6e",
+    "artifact_archive_size_bytes": 25988593,
+    "expires_at": "2026-11-24T04:31:59Z",
+    "binary_digest_verified_locally": true,
+    "smoke_receipt_artifact_id": 12586658094,
+    "smoke_receipt_sha256": "9431680d5bffe029f4d6f61898e3516326e42a6f835f140fd1774cdb9b091e8f",
+    "smoke_receipt": {
+      "artifact_id": 12586389862,
+      "artifact_sha256": "63ddfd9fd26d6da07948c5d03282aae28edc6fbe0071a0c6b34a7499358d9b73",
+      "checks": {
+        "auth": "passed",
+        "embedded_migrations": "passed",
+        "health": "passed",
+        "migration_failure_rejected": "passed",
+        "persistence": "passed",
+        "readiness": "passed",
+        "redis_unavailable_rejected": "passed",
+        "startup": "passed"
+      },
+      "ci": {
+        "run_attempt": 1,
+        "run_id": 40161887176,
+        "run_url": "https://github.com/LonelyFellas/tsz-rust/actions/runs/40161887176",
+        "workflow": "CI"
+      },
+      "cleanup": {
+        "complete": true,
+        "remaining": []
+      },
+      "environment": {
+        "images": {
+          "app": "sha256:cee13550f97b8a595506e8e4ca74263ba44924248779a4ba4f942e197652acff",
+          "postgresql": "sha256:57b23a0326ee442e83b3d3fa027c5a148be0a392d7c91d1ca4e1e70131ee859a",
+          "probe": "sha256:f4b7b8044a873fcc0f348549a19b9075cd77bd56ead7177192cfec38d85bce4a",
+          "redis": "sha256:19150f5e615e35503bf28b1e8f215ed641da1460a168f39038c754d07315d4c6"
+        },
+        "network_internal": true,
+        "postgresql": "18.6",
+        "redis": "6.0.20"
+      },
+      "finished_at": 1792902756.959966,
+      "kind": "release-artifact-smoke",
+      "resource_owner": "b99f5962fed84ac6affa6afed3278e9b",
+      "schema_version": 1,
+      "source": {
+        "git_ref": "refs/heads/main",
+        "git_sha": "d15b637ef8b9eed78316bb1032a492619ae0a491",
+        "git_tree": "f9fc6061ff7bf5f922c968ff268252a118db2fac",
+        "repository": "LonelyFellas/tsz-rust"
+      },
+      "started_at": 1792902750.021947,
+      "status": "passed",
+      "verification_attempt": 1
+    },
+    "binary_executed_this_turn": false
+  },
+  "deployed_baseline": {
+    "deployment_manifest": {
+      "accepted_at": "2026-10-24T10:54:00.725328Z",
+      "artifact": {
+        "excluded_paths": [],
+        "file_count": 1,
+        "kind": "file",
+        "path": "/opt/tsz-rust/target/release/tsz-rust",
+        "sha256": "30751290881d5b0f25a3f431e18885e862d5429cca54febb01987b533d737c6b"
+      },
+      "ci": {
+        "conclusion": "success",
+        "run_id": 40086311339,
+        "run_url": "https://github.com/LonelyFellas/tsz-rust/actions/runs/40086311339",
+        "workflow": "CI"
+      },
+      "component": "api",
+      "schema_version": 1,
+      "source": {
+        "git_sha": "f4fab9ef579be2381265ed886bddc94aebaf1270",
+        "git_tree": "50bbb43e7f0af726bfc6b036487108864652487e",
+        "remote_ref": "refs/heads/main",
+        "repository": "LonelyFellas/tsz-rust"
+      }
+    },
+    "service": {
+      "file_sha256": "30751290881d5b0f25a3f431e18885e862d5429cca54febb01987b533d737c6b",
+      "process_sha256": "30751290881d5b0f25a3f431e18885e862d5429cca54febb01987b533d737c6b"
+    },
+    "captured_at": "2026-10-25T04:55:24.527748+00:00",
+    "pid_stable": true,
+    "deployment_lock_present": false,
+    "postgresql_version": "18.3",
+    "transaction_read_only": "on",
+    "migration_count": 133,
+    "ledger_sha256": "794c23e4869e07a8846ccb6b2b4c72f92335954f5b899eb547360f4ffdaa6cbf",
+    "all_versions_checksums_match_candidate": true,
+    "old_artifact_id": 12557785282,
+    "old_artifact_matches_running_and_disk": true,
+    "old_binary_executed_this_turn": false
+  },
+  "migration_interval": {
+    "classification": "no_schema_change",
+    "baseline_version": 20261024090000,
+    "candidate_version": 20261024090000,
+    "versions": [],
+    "migrations": []
+  },
+  "host_readonly": {
+    "captured_at": "2026-10-25T04:57:10.085847+00:00",
+    "mode": "read_only",
+    "service": {
+      "status": "passed",
+      "value": {
+        "MainPID": "1125651",
+        "EnvironmentFiles": "/opt/tsz-rust/.env (ignore_errors=no)",
+        "WorkingDirectory": "/opt/tsz-rust",
+        "User": "",
+        "Group": "",
+        "ActiveState": "active",
+        "SubState": "running",
+        "FragmentPath": "/etc/systemd/system/tsz-rust.service",
+        "DropInPaths": ""
+      }
+    },
+    "configuration_identity": {
+      "status": "passed",
+      "value": true
+    },
+    "configuration_flags": {
+      "status": "passed",
+      "value": {
+        "cookie_secure": "true",
+        "login_reward_enabled": "true",
+        "deployment_smoke_only": "false",
+        "required_connections_present": true
+      }
+    },
+    "auth_schema": {
+      "status": "passed",
+      "value": true
+    },
+    "business_cleanup_schema": {
+      "status": "passed",
+      "value": true
+    },
+    "health": {
+      "status": "passed",
+      "value": {
+        "/healthz": {
+          "status": 200,
+          "body": {
+            "status": "ok"
+          }
+        },
+        "/readyz": {
+          "status": 200,
+          "body": {
+            "status": "ready"
+          }
+        }
+      }
+    },
+    "https": {
+      "status": "passed",
+      "value": {
+        "hostname_verified": true,
+        "not_after": "Dec 12 12:08:53 2026 GMT",
+        "protocol": "TLSv1.3"
+      }
+    },
+    "bcrypt_capability": {
+      "status": "passed",
+      "value": {
+        "python": "3.10.12",
+        "bcrypt_supported": true
+      }
+    },
+    "listeners": {
+      "status": "passed",
+      "value": [
+        "LISTEN 0      128    127.0.0.1:8383 0.0.0.0:* users:((\"tsz-rust\",pid=1125651,fd=10))"
+      ]
+    },
+    "locks": {
+      "/opt/tsz-rust/deploy.lock": false,
+      "/opt/tsz-rust/deployment-transactions": false
+    },
+    "tools": {
+      "python3": true,
+      "psql": true,
+      "pg_dump": true,
+      "pg_restore": true,
+      "systemctl": true,
+      "ss": true,
+      "docker": true,
+      "nginx": true
+    },
+    "disk_free_bytes": 1372098560,
+    "binary_backups": {
+      "status": "passed",
+      "value": [
+        {
+          "path": "/opt/tsz-rust/deploy-backups/20261024T105156Z.Bc8KFM",
+          "modified_at": "2026-10-24T10:51:56.879900+00:00",
+          "binary_present": true,
+          "manifest_present": true,
+          "bytes": 60309528,
+          "source_sha": "14c750538347e639944e7e4f76b891273dd05da2",
+          "recorded_digest": "c63473ad5b3d36686697953b3e7a5bd3f5efcbb552f5c91010b45d8f21a3a1f2"
+        },
+        {
+          "path": "/opt/tsz-rust/deploy-backups/20261024T051646Z.O0Kcxa",
+          "modified_at": "2026-10-24T05:16:46.086083+00:00",
+          "binary_present": true,
+          "manifest_present": true,
+          "bytes": 59895920,
+          "source_sha": "dffed6c59949f4e747e055bfa45f88273cbe5f65",
+          "recorded_digest": "93f1f8baadcb94e84b73195177b7c627cc8aa4d539fb4caa6744dec5e134f666"
+        },
+        {
+          "path": "/opt/tsz-rust/deploy-backups/20261024T024331Z.gzZcIj",
+          "modified_at": "2026-10-24T02:43:31.160666+00:00",
+          "binary_present": true,
+          "manifest_present": true,
+          "bytes": 59686200,
+          "source_sha": "c1eb541d51460f37d1e61485c6c6500214eef720",
+          "recorded_digest": "49219dbf5ff11402d2b1e956dc7d958f85a39febfa774fa879fb4efbbdc265fe"
+        },
+        {
+          "path": "/opt/tsz-rust/deploy-backups/20261024T023524Z.uUpUTf",
+          "modified_at": "2026-10-24T02:35:24.812067+00:00",
+          "binary_present": true,
+          "manifest_present": true,
+          "bytes": 59686200,
+          "source_sha": "c1eb541d51460f37d1e61485c6c6500214eef720",
+          "recorded_digest": "49219dbf5ff11402d2b1e956dc7d958f85a39febfa774fa879fb4efbbdc265fe"
+        },
+        {
+          "path": "/opt/tsz-rust/deploy-backups/20261023T165247Z.nTRM8S",
+          "modified_at": "2026-10-23T16:52:47.967650+00:00",
+          "binary_present": true,
+          "manifest_present": true,
+          "bytes": 59687416,
+          "source_sha": "ee92ddf7dfb7c0776a71080a427d22aa7a5cf50e",
+          "recorded_digest": "b96f82829446a009b0c069bb0fb4db0208644b9f09667a46b19b05cb7ab40c2f"
+        }
+      ]
+    },
+    "database_backups": {
+      "status": "passed",
+      "value": [
+        {
+          "name": "task45-lexicon-csv-20260913T115753Z.tar.gz.sha256",
+          "bytes": 109,
+          "mode": "0o644",
+          "modified_at": "2026-09-13T11:57:53.383251+00:00"
+        },
+        {
+          "name": "task45-lexicon-csv-20260913T115753Z.tar.gz",
+          "bytes": 394514,
+          "mode": "0o600",
+          "modified_at": "2026-09-13T11:57:53.375251+00:00"
+        },
+        {
+          "name": "backend-predeploy-20260908T020626Z-43d5a2ec-fa93-4d9a-975c-ef9fe1d3f7d2.dump.sha256",
+          "bytes": 143,
+          "mode": "0o600",
+          "modified_at": "2026-09-08T02:09:09.711290+00:00"
+        },
+        {
+          "name": "backend-predeploy-20260908T020626Z-43d5a2ec-fa93-4d9a-975c-ef9fe1d3f7d2.dump",
+          "bytes": 412915825,
+          "mode": "0o600",
+          "modified_at": "2026-09-08T02:09:06.675186+00:00"
+        },
+        {
+          "name": "v3-prebackfill-20260826T032800Z.manifest",
+          "bytes": 1630,
+          "mode": "0o600",
+          "modified_at": "2026-08-26T03:36:13.140045+00:00"
+        },
+        {
+          "name": "v3-prebackfill-20260826T032800Z.dump.sha256",
+          "bytes": 103,
+          "mode": "0o600",
+          "modified_at": "2026-08-26T03:30:40.780661+00:00"
+        },
+        {
+          "name": "v3-prebackfill-20260826T032800Z.dump",
+          "bytes": 412601740,
+          "mode": "0o600",
+          "modified_at": "2026-08-26T03:30:38.344577+00:00"
+        },
+        {
+          "name": "v3-acceptance-20260826T010650Z.dump.sha256",
+          "bytes": 102,
+          "mode": "0o600",
+          "modified_at": "2026-08-26T01:09:33.450868+00:00"
+        },
+        {
+          "name": "v3-acceptance-20260826T010650Z.dump",
+          "bytes": 412601495,
+          "mode": "0o600",
+          "modified_at": "2026-08-26T01:09:30.778777+00:00"
+        },
+        {
+          "name": "pre-content-import-20260818T113611Z.dump.sha256",
+          "bytes": 107,
+          "mode": "0o600",
+          "modified_at": "2026-08-18T11:36:16.038728+00:00"
+        },
+        {
+          "name": "pre-content-import-20260818T113611Z.dump",
+          "bytes": 7430756,
+          "mode": "0o600",
+          "modified_at": "2026-08-18T11:36:15.726717+00:00"
+        },
+        {
+          "name": "predeploy-content-completion-20260818T082034Z.dump.sha256",
+          "bytes": 117,
+          "mode": "0o600",
+          "modified_at": "2026-08-18T08:20:38.652196+00:00"
+        },
+        {
+          "name": "predeploy-content-completion-20260818T082034Z.dump",
+          "bytes": 7408312,
+          "mode": "0o600",
+          "modified_at": "2026-08-18T08:20:38.352186+00:00"
+        },
+        {
+          "name": "j2-preflight-20260817T030340Z.dump.sha256",
+          "bytes": 101,
+          "mode": "0o600",
+          "modified_at": "2026-08-17T03:03:45.591300+00:00"
+        },
+        {
+          "name": "j2-preflight-20260817T030340Z.dump",
+          "bytes": 7387565,
+          "mode": "0o600",
+          "modified_at": "2026-08-17T03:03:45.219288+00:00"
+        },
+        {
+          "name": "j2-preflight-secure-20260816T155828Z.manifest",
+          "bytes": 1309,
+          "mode": "0o600",
+          "modified_at": "2026-08-16T15:59:00.382984+00:00"
+        },
+        {
+          "name": "j2-preflight-secure-20260816T155828Z.dump.sha256",
+          "bytes": 108,
+          "mode": "0o600",
+          "modified_at": "2026-08-16T15:58:33.330055+00:00"
+        },
+        {
+          "name": "j2-preflight-secure-20260816T155828Z.dump",
+          "bytes": 7384714,
+          "mode": "0o600",
+          "modified_at": "2026-08-16T15:58:33.002044+00:00"
+        },
+        {
+          "name": "j2-preflight-20260816T154608Z.manifest",
+          "bytes": 1302,
+          "mode": "0o600",
+          "modified_at": "2026-08-16T15:49:13.158835+00:00"
+        },
+        {
+          "name": "j2-preflight-20260816T154608Z.dump.sha256",
+          "bytes": 101,
+          "mode": "0o600",
+          "modified_at": "2026-08-16T15:46:12.564638+00:00"
+        },
+        {
+          "name": "j2-preflight-20260816T154608Z.dump",
+          "bytes": 7384629,
+          "mode": "0o600",
+          "modified_at": "2026-08-16T15:46:12.268628+00:00"
+        }
+      ]
+    },
+    "backup_tools": {
+      "status": "passed",
+      "value": {
+        "pg_dump": "pg_dump (PostgreSQL) 14.24 (Ubuntu 14.24-0ubuntu0.22.04.1)",
+        "pg_restore": "pg_restore (PostgreSQL) 14.24 (Ubuntu 14.24-0ubuntu0.22.04.1)",
+        "cached_images": [
+          "mariadb:10.11 sha256:ce66c7be32a03aabe7241d0a10993a2db827ef652a35d25727d92a832ac8ef73 ce66c7be32a0",
+          "hub.zentao.net/app/zentao:latest sha256:86bcc60a6917bcbe940674a9aeb1a5cf5dba94262aa25d69959fb0ef14a0e845 86bcc60a6917",
+          "postgres:18-alpine sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2 d3e1620b530c"
+        ]
+      }
+    },
+    "nginx_routes": {
+      "status": "passed",
+      "value": {
+        "config_test_succeeded": true,
+        "matched_directives": [
+          {
+            "line": 204,
+            "directive": "#   test.tianshengzhi.com        C 端 web —— /api/v1/* -> tsz-rust(127.0.0.1:8383)，其余 -> Next(127.0.0.1:3000)"
+          },
+          {
+            "line": 214,
+            "directive": "server_name test.tianshengzhi.com;"
+          },
+          {
+            "line": 273,
+            "directive": "proxy_pass http://127.0.0.1:8383;"
+          },
+          {
+            "line": 326,
+            "directive": "proxy_pass http://127.0.0.1:8383;"
+          },
+          {
+            "line": 384,
+            "directive": "server_name test.tianshengzhi.com;"
+          }
+        ]
+      }
+    }
+  },
+  "recovery_readonly": {
+    "captured_at": "2026-10-25T04:58:43.535955+00:00",
+    "mode": "read_only",
+    "controller_preflight": {
+      "status": "blocked",
+      "reason": "smoke_login_rewards_must_be_disabled"
+    },
+    "database_metadata": {
+      "status": "passed",
+      "value": {
+        "transaction_read_only": "on",
+        "database_size_bytes": 2572072639,
+        "user_tables": 132,
+        "users": 30,
+        "wordlists": 17,
+        "entries": 303,
+        "platform_outbox": 2064
+      }
+    },
+    "binary_backup_inventory": {
+      "count": 144,
+      "total_binary_bytes": 6078643616,
+      "matching_current_baseline": 0,
+      "validated": [
+        {
+          "path": "/opt/tsz-rust/deploy-backups/20261024T105156Z.Bc8KFM",
+          "status": "passed",
+          "source_sha": "14c750538347e639944e7e4f76b891273dd05da2",
+          "binary_sha256": "c63473ad5b3d36686697953b3e7a5bd3f5efcbb552f5c91010b45d8f21a3a1f2",
+          "bytes": 60309528
+        }
+      ]
+    },
+    "current_binary_bytes": 59611400,
+    "disk_free_bytes": 1366433792,
+    "ram": {
+      "MemTotal": "        3579032 kB",
+      "MemAvailable": "    1829512 kB",
+      "SwapFree": "        2097148 kB"
+    },
+    "cached_postgresql18": {
+      "Id": "sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
+      "RepoDigests": [
+        "postgres@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2"
+      ],
+      "Architecture": "amd64",
+      "Os": "linux",
+      "Size": 120060019,
+      "Created": "2026-08-13T19:17:31.951845817Z"
+    }
+  },
+  "additional_readonly": {
+    "captured_at": "2026-10-25T05:00:07.244961+00:00",
+    "mode": "read_only",
+    "certificate_private_key_match": true,
+    "redis": {
+      "ping": "passed",
+      "version": "6.0.16"
+    },
+    "latest_existing_full_dump": {
+      "path": "/opt/tsz-rust/backups/backend-predeploy-20260908T020626Z-43d5a2ec-fa93-4d9a-975c-ef9fe1d3f7d2.dump",
+      "bytes": 412915825,
+      "sha256": "211f15015ab5843413d25e81e4d82e07f5b57b14afacad346f02d0cdee8c33e7",
+      "checksum_matches": true,
+      "restore_tested_this_turn": false
+    },
+    "nginx_https_api_routes": [
+      [
+        "server_name test.tianshengzhi.com;",
+        "location /.well-known/acme-challenge/ {",
+        "location /_next/static/ {",
+        "location = /client-resource-error {",
+        "location = /version.json {",
+        "location /api/v1/ {",
+        "proxy_pass http://127.0.0.1:8383;",
+        "location / {",
+        "listen 443 ssl http2;"
+      ]
+    ],
+    "remote_lock_present_after": false,
+    "remote_transactions_directory_present_after": false
+  },
+  "final_identity_check": {
+    "candidate_still_main": true,
+    "github_main": "d15b637ef8b9eed78316bb1032a492619ae0a491",
+    "deployed_identity_unchanged": true,
+    "ledger_unchanged": true,
+    "remote_lock_present": false,
+    "captured_at": "2026-10-25T05:00:50.242261+00:00"
+  },
+  "local_recovery_capacity": {
+    "local_free_bytes": 1645109157888,
+    "docker": {
+      "ServerVersion": "29.5.3",
+      "Architecture": "aarch64",
+      "MemTotal": 8319213568,
+      "NCPU": 18
+    }
+  },
+  "blockers": [
+    {
+      "code": "smoke_login_rewards_must_be_disabled",
+      "kind": "controller_policy",
+      "observed": "LOGIN_REWARD_ENABLED=true",
+      "recommendation": "Keep the business configuration; separately authorize a controller fix and isolated proof that existing smoke does not invoke reward settlement."
+    },
+    {
+      "code": "fresh_restore_point_not_verified",
+      "kind": "recovery_precondition",
+      "observed": "Latest full local dump found is from 2026-09-08; checksum verified, no current restore performed.",
+      "recommendation": "Separately authorize a current backup and isolated restore using approved PostgreSQL 18 tooling with adequate capacity."
+    }
+  ],
+  "cleanup": {
+    "local_downloads_removed": true,
+    "local_probe_scripts_removed": true,
+    "local_task_scratch_absence_rechecked": true,
+    "server_test_resources_created": false,
+    "server_data_changed": false,
+    "server_configuration_changed": false,
+    "server_deploy_lock_created": false,
+    "existing_server_backups_preserved": true,
+    "complete": true
+  },
+  "not_performed": [
+    "controller apply or resume",
+    "new controller full plan CLI",
+    "authentication/login or fixture creation",
+    "database backup creation or restore",
+    "migration up or down",
+    "service/container start, stop, or restart",
+    "server configuration changes or backup pruning",
+    "PITR inspection or exercise",
+    "commit, push, PR creation, merge, deployment or automatic CD"
+  ]
+}

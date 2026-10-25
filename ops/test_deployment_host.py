@@ -31,6 +31,42 @@ class HostOperationTests(unittest.TestCase):
         with patch.object(host, "baseline_matches"), patch.object(host, 'check_running_configuration', return_value=host.configuration_identity(host.configuration())):
             host.dispatch("acquire", plan, None)
 
+    def test_preflight_accepts_either_login_reward_setting_without_changing_it(self):
+        for enabled in ('true', 'false'):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with self.environment(root):
+                    plan = self.prepare(root)
+                    environment = host.ROOT / '.env'
+                    environment.write_text(environment.read_text() + f'LOGIN_REWARD_ENABLED={enabled}\n')
+                    original = environment.read_bytes()
+                    with patch.object(host, 'baseline_matches') as baseline, \
+                         patch.object(host.business, 'check_auth_schema') as schema, \
+                         patch.object(host.business, 'random_credentials'), patch.object(host.auth, 'preflight') as tls:
+                        self.assertEqual(host.preflight(plan), {'ready': True})
+                        baseline.assert_called_once_with(plan)
+                        schema.assert_called_once()
+                        tls.assert_called_once()
+                    self.assertEqual(environment.read_bytes(), original)
+
+    def test_login_reward_drift_still_blocks_candidate_and_formal_start(self):
+        for original, changed in (('true', 'false'), ('false', 'true')):
+            with self.subTest(original=original), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with self.environment(root):
+                    plan = self.prepare(root)
+                    environment = host.ROOT / '.env'
+                    environment.write_text(environment.read_text() + f'LOGIN_REWARD_ENABLED={original}\n')
+                    self.acquire(plan)
+                    environment.write_text(environment.read_text().replace(f'LOGIN_REWARD_ENABLED={original}', f'LOGIN_REWARD_ENABLED={changed}'))
+                    with self.assertRaisesRegex(host.HostError, 'deployment_configuration_changed'):
+                        host.process_environment(plan)
+                    settings = f'EnvironmentFiles={environment} (ignore_errors=no)\nEnvironment=\nWorkingDirectory={host.ROOT}\n'.encode()
+                    with patch.object(host, 'run', return_value=settings) as command:
+                        with self.assertRaisesRegex(host.HostError, 'deployment_configuration_changed'):
+                            host.start_formal(plan)
+                        self.assertEqual(command.call_count, 1)
+
     def test_owner_operation_lock_and_full_plan_hash_are_required(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
