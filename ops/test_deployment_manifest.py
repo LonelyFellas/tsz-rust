@@ -196,6 +196,31 @@ class DeploymentManifestTests(unittest.TestCase):
             self.assertEqual(live_artifact.read_bytes(), b"old-binary")
             self.assertFalse(live_manifest.exists())
 
+    def test_v2_records_exact_release_identity_and_preserves_v1_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            args = create_args(root)
+            args["artifact"].write_bytes(b"release-binary")
+            import hashlib
+            evidence = {"run_attempt": 2, "verification_attempt": 3, "artifact_id": 55,
+                        "artifact_sha256": hashlib.sha256(b"release-binary").hexdigest(),
+                        "verification_receipt_sha256": "d" * 64}
+            value = create_manifest(**args, release_evidence=evidence)
+            self.assertEqual(value["schema_version"], 2)
+            self.assertEqual(value["ci"]["run_attempt"], 2)
+            self.assertEqual(value["ci"]["verification_attempt"], 3)
+            self.assertEqual(verify_manifest(args["output"], args["artifact"]), value)
+            original = args["output"].read_bytes()
+            for invalid in ([], "invalid", {**evidence, "artifact_sha256": "0" * 64}, {**evidence, "run_id": 9}, {**evidence, "verification_attempt": 1}):
+                with self.subTest(invalid=invalid), self.assertRaises(ManifestError):
+                    create_manifest(**args, release_evidence=invalid)
+                self.assertEqual(args["output"].read_bytes(), original)
+
+            malformed = copy.deepcopy(value)
+            malformed['artifact'] = []
+            with self.assertRaises(ManifestError):
+                validate_manifest(malformed)
+
     def test_p08_backup_validation_is_read_only_and_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             backup = pathlib.Path(directory)

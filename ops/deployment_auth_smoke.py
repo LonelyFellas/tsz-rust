@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import hashlib
 import http.client
 import http.cookiejar
 import http.cookies
@@ -238,6 +239,33 @@ def check_candidate(lock):
             and f"pid={pid}," in " ".join(fields[5:]), "candidate_listener")
 
 
+def check_formal(expected_digest):
+    require(re.fullmatch(r"[0-9a-f]{64}", expected_digest or ""), "expected_digest_required")
+    result = subprocess.run(["systemctl", "show", "tsz-rust", "-p", "MainPID", "--value"],
+                            capture_output=True, text=True, timeout=TIMEOUT, check=False)
+    require(result.returncode == 0 and result.stdout.strip().isdigit(), "formal_pid_missing")
+    pid = int(result.stdout.strip())
+    require(pid > 0, "formal_pid_missing")
+    process = pathlib.Path(f"/proc/{pid}")
+    executable = "/opt/tsz-rust/target/release/tsz-rust"
+    require((process / "exe").samefile(executable), "formal_binary_mismatch")
+    for path in (process / "exe", pathlib.Path(executable)):
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1048576), b""):
+                digest.update(block)
+        require(digest.hexdigest() == expected_digest, "formal_digest_mismatch")
+    environment = (process / "environ").read_bytes().split(b"\0")
+    require(b"DEPLOYMENT_SMOKE_ONLY=true" not in environment, "formal_workers_disabled")
+    require(b"COOKIE_SECURE=false" not in environment, "formal_cookie_insecure")
+    listener = subprocess.run(["ss", "-H", "-ltnp", "sport = :8383"], capture_output=True,
+                              text=True, timeout=TIMEOUT, check=False)
+    rows = listener.stdout.splitlines()
+    require(listener.returncode == 0 and len(rows) == 1 and f"pid={pid}," in rows[0]
+            and rows[0].split()[3] == "127.0.0.1:8383", "formal_listener_mismatch")
+    return pid
+
+
 def preflight():
     require(os.environ.get("COOKIE_SECURE", "true") == "true", "cookie_secure_required")
     certificate = pathlib.Path("/etc/letsencrypt/live") / HOST
@@ -250,9 +278,10 @@ def preflight():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("candidate", "recovery", "existing", "preflight"), required=True)
+    parser.add_argument("--mode", choices=("candidate", "formal", "recovery", "existing", "preflight"), required=True)
     parser.add_argument("--owner", required=True)
     parser.add_argument("--expected-sha")
+    parser.add_argument("--expected-digest")
     args = parser.parse_args()
     try:
         require(str(uuid.UUID(args.owner)) == args.owner, "invalid_owner")
@@ -280,7 +309,10 @@ def main():
             with candidate_tls(18383, cert_dir / "fullchain.pem", cert_dir / "privkey.pem") as port:
                 run_smoke(f"https://{HOST}:{port}", 18383, credentials, loopback=True)
         else:
+            formal_pid = check_formal(args.expected_digest) if args.mode == "formal" else None
             run_smoke(f"https://{HOST}", 8383, credentials)
+            if formal_pid is not None:
+                require(check_formal(args.expected_digest) == formal_pid, "formal_process_changed")
         if locked:
             require(owner_file.read_text().strip() == args.owner, "owner_changed")
         else:

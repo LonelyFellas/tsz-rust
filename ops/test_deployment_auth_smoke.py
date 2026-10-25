@@ -255,6 +255,40 @@ class DeploymentAuthSmokeTests(unittest.TestCase):
              ]):
             self.smoke.check_candidate(pathlib.Path("/fixture-lock"))
 
+    def test_formal_mode_checks_process_digest_and_worker_configuration(self):
+        import hashlib
+        expected = hashlib.sha256(b"verified-ci-binary").hexdigest()
+        listener = 'LISTEN 0 128 127.0.0.1:8383 0.0.0.0:* users:(("tsz-rust",pid=123,fd=7))'
+        with mock.patch.object(pathlib.Path, "samefile", return_value=True), \
+             mock.patch.object(pathlib.Path, "open", side_effect=lambda *a, **k: io.BytesIO(b"verified-ci-binary")), \
+             mock.patch.object(pathlib.Path, "read_bytes", return_value=b"COOKIE_SECURE=true\0DEPLOYMENT_SMOKE_ONLY=false\0"), \
+             mock.patch.object(self.smoke.subprocess, "run", side_effect=[subprocess.CompletedProcess([],0,"123"), subprocess.CompletedProcess([],0,listener)]):
+            self.assertEqual(self.smoke.check_formal(expected), 123)
+        for data, environment, stage in [(b"wrong", b"COOKIE_SECURE=true\0", 'formal_digest_mismatch'),
+                                         (b"verified-ci-binary", b"DEPLOYMENT_SMOKE_ONLY=true\0", 'formal_workers_disabled'),
+                                         (b"verified-ci-binary", b"COOKIE_SECURE=false\0", 'formal_cookie_insecure')]:
+            with self.subTest(data=data, environment=environment), \
+                 mock.patch.object(pathlib.Path, "samefile", return_value=True), \
+                 mock.patch.object(pathlib.Path, "open", side_effect=lambda *a, **k: io.BytesIO(data)), \
+                 mock.patch.object(pathlib.Path, "read_bytes", return_value=environment), \
+                 mock.patch.object(self.smoke.subprocess, "run", side_effect=[subprocess.CompletedProcess([],0,"123"), subprocess.CompletedProcess([],0,listener)]):
+                with self.assertRaisesRegex(self.smoke.SmokeFailure, stage):
+                    self.smoke.check_formal(expected)
+
+    def test_formal_mode_requires_lock_and_rechecks_process_after_https_chain(self):
+        output = io.StringIO()
+        owner = "11111111-1111-4111-8111-111111111111"
+        with mock.patch.object(self.smoke.sys, "argv", [str(SCRIPT), "--mode", "formal", "--owner", owner, "--expected-digest", "a"*64]), \
+             mock.patch.object(self.smoke.sys, "stdin", io.StringIO('{"identifier":"fixture","password":"secret"}')), \
+             mock.patch.object(pathlib.Path, "exists", return_value=True), \
+             mock.patch.object(pathlib.Path, "read_text", return_value=owner), \
+             mock.patch.object(self.smoke, "check_formal", return_value=123) as check, \
+             mock.patch.object(self.smoke, "run_smoke") as chain, contextlib.redirect_stdout(output):
+            self.assertEqual(self.smoke.main(), 0)
+            self.assertEqual(check.call_count, 2)
+            chain.assert_called_once_with("https://test.tianshengzhi.com",8383,{"identifier":"fixture","password":"secret"})
+        self.assertNotIn("secret", output.getvalue())
+
     def test_recovery_uses_https_cookie_chain_and_separate_local_health(self):
         with serving(self.handler) as api:
             with self.smoke.candidate_tls(api.server_port, self.cert, self.key) as port:

@@ -60,8 +60,8 @@ def validate_manifest(manifest: Any) -> dict[str, Any]:
         {"schema_version", "component", "source", "ci", "artifact", "accepted_at"},
         "manifest",
     )
-    if isinstance(manifest["schema_version"], bool) or manifest["schema_version"] != 1:
-        raise ManifestError("schema_version must be 1")
+    if isinstance(manifest["schema_version"], bool) or manifest["schema_version"] not in (1, 2):
+        raise ManifestError("schema_version must be 1 or 2")
     if manifest["component"] != "api":
         raise ManifestError("component must be api")
 
@@ -81,7 +81,21 @@ def validate_manifest(manifest: Any) -> dict[str, Any]:
         raise ManifestError("source.remote_ref must be refs/heads/main")
 
     ci = manifest["ci"]
-    _exact_keys(ci, {"workflow", "run_id", "run_url", "conclusion"}, "ci")
+    ci_keys = {"workflow", "run_id", "run_url", "conclusion"}
+    if manifest["schema_version"] == 2:
+        ci_keys |= {"run_attempt", "artifact_id", "artifact_sha256", "verification_attempt", "verification_receipt_sha256"}
+    _exact_keys(ci, ci_keys, "ci")
+    if manifest["schema_version"] == 2:
+        for key in ("run_attempt", "verification_attempt", "artifact_id"):
+            if isinstance(ci[key], bool) or not isinstance(ci[key], int) or ci[key] <= 0:
+                raise ManifestError(f"ci.{key} must be a positive integer")
+        if ci["verification_attempt"] < ci["run_attempt"]:
+            raise ManifestError("verification attempt predates artifact")
+        for key in ("artifact_sha256", "verification_receipt_sha256"):
+            if not isinstance(ci[key], str) or not SHA256_RE.fullmatch(ci[key]):
+                raise ManifestError(f"ci.{key} is invalid")
+        if not isinstance(manifest["artifact"], dict) or ci["artifact_sha256"] != manifest["artifact"].get("sha256"):
+            raise ManifestError("CI and deployment artifact digests differ")
     if ci["workflow"] != "CI":
         raise ManifestError("ci.workflow must be CI")
     if (
@@ -200,8 +214,13 @@ def create_manifest(
     artifact: pathlib.Path,
     artifact_path: str,
     output: pathlib.Path,
+    release_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     digest = _sha256_file(artifact)
+    if release_evidence is not None:
+        _exact_keys(release_evidence, {"run_attempt", "artifact_id", "artifact_sha256", "verification_attempt", "verification_receipt_sha256"}, "release_evidence")
+        if release_evidence["artifact_sha256"] != digest:
+            raise ManifestError("installed artifact differs from verified CI artifact")
     manifest = {
         "schema_version": 1,
         "component": component,
@@ -228,6 +247,9 @@ def create_manifest(
             "+00:00", "Z"
         ),
     }
+    if release_evidence is not None:
+        manifest["schema_version"] = 2
+        manifest["ci"].update(release_evidence)
     validate_manifest(manifest)
     _atomic_write(output, manifest)
     return manifest
@@ -303,6 +325,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--artifact", required=True, type=pathlib.Path)
     create.add_argument("--artifact-path", required=True)
     create.add_argument("--output", required=True, type=pathlib.Path)
+    create.add_argument("--release-evidence", type=pathlib.Path)
     verify = subparsers.add_parser("verify")
     verify.add_argument("--manifest", required=True, type=pathlib.Path)
     verify.add_argument("--artifact", required=True, type=pathlib.Path)
@@ -329,6 +352,7 @@ def main() -> int:
                 artifact=arguments.artifact,
                 artifact_path=arguments.artifact_path,
                 output=arguments.output,
+                release_evidence=json.loads(arguments.release_evidence.read_text()) if arguments.release_evidence else None,
             )
         elif arguments.command == "verify":
             manifest = verify_manifest(arguments.manifest, arguments.artifact)

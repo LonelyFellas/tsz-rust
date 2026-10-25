@@ -157,6 +157,22 @@ jobs:
       - name: Test read-only deployed baseline capture
         run: python3 -m unittest discover -s ops -p 'test_deployed_baseline.py'
 
+      - name: Test release controller and host recovery boundaries
+        run: >-
+          python3 -m unittest discover -s ops -p 'test_deploy_test.py'
+
+      - name: Test release host actions
+        run: python3 -m unittest discover -s ops -p 'test_deployment_host.py'
+
+      - name: Test release transport gates
+        run: python3 -m unittest discover -s ops -p 'test_deployment_transport.py'
+
+      - name: Test release transaction and interrupted recovery
+        run: python3 -m unittest discover -s ops -p 'test_deployment_transaction.py'
+
+      - name: Test owned business smoke boundaries
+        run: python3 -m unittest discover -s ops -p 'test_deployment_business_smoke.py'
+
       - name: Test deployment preflight
         run: python3 -m unittest ops/test_deployment_preflight.py
 
