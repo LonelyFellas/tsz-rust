@@ -2,6 +2,27 @@ use super::generated_source::{GeneratedSpeechSource, references};
 use serde_json::json;
 use uuid::Uuid;
 
+#[test]
+fn new_regions_reject_designated_phonemes_and_links_but_allow_natural_text() {
+    let text = json!({"version":2,"text":"hello","annotations":[]});
+    let natural: GeneratedSpeechSource =
+        serde_json::from_value(json!({"kind":"text","content":text})).unwrap();
+    for locale in ["en-AU", "en-NZ", "en-CA", "en-IN"] {
+        natural.validate_locale(locale).unwrap();
+        for source in [
+            json!({"kind":"phoneme","content":text,"alphabet":"ipa","phoneme":"həˈləʊ","phoneme_locale":"en-GB"}),
+            json!({"kind":"text","content":{"version":2,"text":"hello","annotations":[{"type":"phoneme","start":0,"end":5,"alphabet":"ipa","phoneme":"həˈləʊ"}]}}),
+            json!({"kind":"text","content":text,"form_links":[{"id":Uuid::now_v7(),"source_segments":[{"start":0,"end":5,"surface":"hello"}],"target_word_id":Uuid::now_v7(),"target_pos_id":Uuid::now_v7(),"target_form_id":Uuid::now_v7(),"target_variant_id":Uuid::now_v7(),"target_dialect":"common"}]}),
+        ] {
+            let source: GeneratedSpeechSource = serde_json::from_value(source).unwrap();
+            assert!(source.validate_locale(locale).is_err(), "{locale}");
+        }
+    }
+    let source: GeneratedSpeechSource = serde_json::from_value(json!({"kind":"phoneme","content":text,"alphabet":"ipa","phoneme":"həˈləʊ","phoneme_locale":"en-GB"})).unwrap();
+    source.validate_locale("en-GB").unwrap();
+    assert!(source.validate_locale("en-US").is_err());
+}
+
 #[sqlx::test]
 async fn historical_self_links_use_supplied_forms_and_external_links_hold_a_share_lock(
     pool: sqlx::PgPool,
@@ -62,6 +83,19 @@ async fn historical_self_links_use_supplied_forms_and_external_links_hold_a_shar
     );
     writer.rollback().await.unwrap();
     tx.rollback().await.unwrap();
+}
+
+#[test]
+fn publication_reference_uses_source_phoneme_locale_not_selected_voice_locale() {
+    let owner = json!({"synthesis":{"uk":{"ipa":"həˈləʊ","ups":"","ipa_speech":{"content":{"version":2,"text":"hello","annotations":[]},"voice_profile":{"voices":[{"voice_id":"aria","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"错误口音","locale":"en-US","audio_asset_id":Uuid::now_v7()}]}}}}});
+    let refs = references(&owner).unwrap();
+    assert_eq!(refs.len(), 1);
+    assert!(
+        refs[0]
+            .source
+            .validate_locale(refs[0].setting.locale.unwrap().as_str())
+            .is_err()
+    );
 }
 
 #[test]

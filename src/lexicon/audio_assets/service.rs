@@ -165,6 +165,13 @@ impl AudioAssetService {
         request: ConfirmAudioAssetRequest,
     ) -> Result<ConfirmAudioAssetResponse, AudioAssetServiceError> {
         self.authorize(admin_id, true).await?;
+        if !request.locale.is_legacy() || request.gender == AudioAssetGender::Neutral {
+            return Err(crate::error::AppError::bad_request(
+                crate::error::ErrorCode::InvalidRequestBody,
+                "上传录音地区须为 en-GB 或 en-US",
+            )
+            .into());
+        }
         let storage = self.storage()?;
         let original_name = normalize_original_name(&request.original_name)
             .ok_or(AudioAssetServiceError::InvalidOriginalName)?;

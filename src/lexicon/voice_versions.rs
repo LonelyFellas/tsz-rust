@@ -3,6 +3,46 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 pub(crate) const HEADER: &str = "x-tsz-voice-versions";
+pub(crate) const LOCALES_HEADER: &str = "x-tsz-voice-locales";
+pub(crate) const MODELS_HEADER: &str = "x-tsz-voice-models";
+
+pub(crate) fn models_supported(headers: &HeaderMap) -> bool {
+    headers
+        .get(MODELS_HEADER)
+        .is_some_and(|value| value == "v1")
+}
+
+pub(crate) fn contains_models(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            ["voice_id", "voice_alias"].iter().any(|key| {
+                fields
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|alias| alias.starts_with("azure-hd-flash-"))
+            }) || fields.values().any(contains_models)
+        }
+        Value::Array(items) => items.iter().any(contains_models),
+        _ => false,
+    }
+}
+
+pub(crate) fn project_models(value: &mut Value) {
+    match value {
+        Value::Object(fields) => fields.values_mut().for_each(project_models),
+        Value::Array(items) => {
+            items.retain(|item| {
+                !["voice_id", "voice_alias"].iter().any(|key| {
+                    item.get(*key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|alias| alias.starts_with("azure-hd-flash-"))
+                })
+            });
+            items.iter_mut().for_each(project_models);
+        }
+        _ => {}
+    }
+}
 pub(crate) const UPGRADE_MESSAGE: &str =
     "此内容包含新版文本配音版本，请保留本地输入并刷新页面后再保存";
 
@@ -14,6 +54,50 @@ pub(crate) fn supported(headers: &HeaderMap) -> bool {
 
 pub(crate) fn generated_supported(headers: &HeaderMap) -> bool {
     headers.get(HEADER).is_some_and(|value| value == "v2")
+}
+
+pub(crate) fn extended_supported(headers: &HeaderMap) -> bool {
+    headers
+        .get(LOCALES_HEADER)
+        .is_some_and(|value| value == "v1")
+}
+
+pub(crate) fn contains_extended(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            fields
+                .get("locale")
+                .and_then(Value::as_str)
+                .and_then(crate::speech::locale::EnglishLocale::parse)
+                .is_some_and(|locale| !locale.is_legacy())
+                || fields.get("gender").and_then(Value::as_str) == Some("neutral")
+                || fields.values().any(contains_extended)
+        }
+        Value::Array(items) => items.iter().any(contains_extended),
+        _ => false,
+    }
+}
+
+/// Filter only the response copy; never reinterpret AU/NZ/CA as GB/US.
+pub(crate) fn project_extended(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.remove("accent_group");
+            fields.values_mut().for_each(project_extended);
+        }
+        Value::Array(items) => {
+            items.retain(|item| {
+                item.get("gender").and_then(Value::as_str) != Some("neutral")
+                    && item
+                        .get("locale")
+                        .and_then(Value::as_str)
+                        .and_then(crate::speech::locale::EnglishLocale::parse)
+                        .is_none_or(|locale| locale.is_legacy())
+            });
+            items.iter_mut().for_each(project_extended);
+        }
+        _ => {}
+    }
 }
 
 pub(crate) fn contains_audio(value: &Value) -> bool {
@@ -124,6 +208,56 @@ pub(crate) fn word_write_error(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn legacy_views_filter_extended_regions_without_reclassifying_or_mutating_storage() {
+        let stored = json!({"voice_profile":{"voices":[
+            {"voice_id":"sonia","locale":"en-GB","version_id":"a","enabled":false},
+            {"voice_id":"natasha","locale":"en-AU","version_id":"b","enabled":true},
+            {"voice_id":"swara","locale":"en-IN","version_id":"c","enabled":true}
+        ]},"audio":[{"locale":"en-GB","accent_group":"uk"},{"locale":"en-IN","accent_group":"other"}]});
+        assert!(contains_extended(&stored));
+        let mut old = stored.clone();
+        project_extended(&mut old);
+        assert_eq!(old["voice_profile"]["voices"].as_array().unwrap().len(), 1);
+        assert_eq!(old["audio"], json!([{"locale":"en-GB"}]));
+        assert!(!contains_extended(&old));
+        assert_eq!(stored["audio"].as_array().unwrap().len(), 2);
+        for (version, versions, generated, extended) in [
+            (None, false, false, false),
+            (Some("v1"), true, false, false),
+            (Some("v2"), true, true, false),
+            (Some("v3"), false, false, false),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some(version) = version {
+                headers.insert(HEADER, version.parse().unwrap());
+            }
+            assert_eq!(supported(&headers), versions);
+            assert_eq!(generated_supported(&headers), generated);
+            assert_eq!(extended_supported(&headers), extended);
+        }
+        let mut negotiated = HeaderMap::new();
+        negotiated.insert(HEADER, "v2".parse().unwrap());
+        negotiated.insert(LOCALES_HEADER, "v1".parse().unwrap());
+        assert!(supported(&negotiated));
+        assert!(generated_supported(&negotiated));
+        assert!(extended_supported(&negotiated));
+    }
+
+    #[test]
+    fn model_projection_and_guard_do_not_rewrite_normal_versions() {
+        let stored = json!({"voices":[{"voice_id":"sonia","locale":"en-GB"},{"voice_id":"azure-hd-flash-id","locale":"en-US"}]});
+        assert!(contains_models(&stored));
+        let mut old = stored.clone();
+        project_models(&mut old);
+        assert_eq!(
+            old["voices"],
+            json!([{"voice_id":"sonia","locale":"en-GB"}])
+        );
+        assert!(!contains_models(&old));
+        assert!(contains_models(&stored));
+    }
 
     #[test]
     fn legacy_view_keeps_selected_parameters_without_changing_stored_versions() {

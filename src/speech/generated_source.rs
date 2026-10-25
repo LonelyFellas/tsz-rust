@@ -19,6 +19,8 @@ pub enum GeneratedSpeechSource {
         phoneme: String,
         #[serde(default)]
         ups_words: Vec<crate::lexicon::dto::UpsWordV3>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phoneme_locale: Option<crate::lexicon::dto::PhonemeLocaleV3>,
     },
 }
 
@@ -30,8 +32,85 @@ pub(crate) fn invalid() -> crate::error::AppError {
 }
 
 impl GeneratedSpeechSource {
+    pub(crate) fn validate_locale(&self, locale: &str) -> Result<(), crate::error::AppError> {
+        let locale = super::locale::EnglishLocale::parse(locale).ok_or_else(invalid)?;
+        if let Self::Phoneme {
+            phoneme_locale: Some(source_locale),
+            ..
+        } = self
+        {
+            let source_locale = match source_locale {
+                crate::lexicon::dto::PhonemeLocaleV3::EnGb => "en-GB",
+                crate::lexicon::dto::PhonemeLocaleV3::EnUs => "en-US",
+            };
+            if source_locale != locale.as_str() {
+                return Err(crate::error::AppError::bad_request(
+                    crate::error::ErrorCode::InvalidSpeechPreview,
+                    "音素地区必须与音色原生地区完全一致",
+                ));
+            }
+        }
+        let designated = match self {
+            Self::Phoneme { .. } => true,
+            Self::Text {
+                content,
+                form_links,
+            } => {
+                !form_links.is_empty()
+                    || content.annotations.iter().any(|annotation| {
+                        matches!(
+                            annotation,
+                            crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
+                        )
+                    })
+            }
+        };
+        if !locale.is_legacy() && designated {
+            return Err(crate::error::AppError::bad_request(
+                crate::error::ErrorCode::InvalidSpeechPreview,
+                "指定音素或关联词形尚未验证适用于该原生地区，请明确选择自然朗读或使用匹配地区的音色",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_model(
+        &self,
+        voice: &super::Voice,
+    ) -> Result<(), crate::error::AppError> {
+        if voice.is_hd_flash()
+            && match self {
+                Self::Phoneme { .. } => true,
+                Self::Text {
+                    content,
+                    form_links,
+                } => {
+                    !form_links.is_empty()
+                        || content.annotations.iter().any(|annotation| {
+                            matches!(
+                                annotation,
+                                crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
+                                    | crate::lexicon::dto::RichTextAnnotation::Pause { .. }
+                            )
+                        })
+                }
+            }
+        {
+            return Err(crate::error::AppError::bad_request(
+                crate::error::ErrorCode::InvalidSpeechPreview,
+                super::SpeechModelError::UnsupportedModelCapability.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn canonical(&self) -> Result<Value, crate::error::AppError> {
         let mut value = serde_json::to_value(self).map_err(crate::error::AppError::internal)?;
+        // Locale is validated against the target, but is not part of the historical source identity.
+        value
+            .as_object_mut()
+            .ok_or_else(invalid)?
+            .remove("phoneme_locale");
         // Grammar phonemes are resolved from explicit links for the selected accent.
         if value["form_links"]
             .as_array()
@@ -73,6 +152,7 @@ impl GeneratedSpeechSource {
         current: Option<(Uuid, &crate::lexicon::dto::DraftFormsStepContentV3)>,
         batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
     ) -> Result<RichTextV2, crate::error::AppError> {
+        self.validate_locale(locale)?;
         let mut value = self.canonical()?["content"].clone();
         match self {
             Self::Text { form_links, .. } => {
@@ -239,6 +319,7 @@ pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate
         v: &Value,
         node: Uuid,
         phoneme: Option<(&str, &str, &Value)>,
+        native_locale: Option<&str>,
         out: &mut Vec<GeneratedReference>,
     ) -> Result<(), crate::error::AppError> {
         let node = v
@@ -253,7 +334,11 @@ pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate
                     continue;
                 };
                 let source = if let Some((alphabet, phone, words)) = phoneme {
-                    serde_json::json!({"kind":"phoneme","content":v["content"],"alphabet":alphabet,"phoneme":phone,"ups_words":words})
+                    let mut source = serde_json::json!({"kind":"phoneme","content":v["content"],"alphabet":alphabet,"phoneme":phone,"ups_words":words});
+                    if let Some(locale) = native_locale {
+                        source["phoneme_locale"] = locale.into();
+                    }
+                    source
                 } else {
                     let content = v.get("content").or_else(||v.get("value")).or_else(||v.get("name_en_rich")).or_else(||v.get("dict_phonetic_rich")).cloned().unwrap_or_else(||serde_json::json!({"version":2,"text":v.get("name_en").or_else(||v.get("dict_phonetic")).and_then(Value::as_str).unwrap_or(""),"annotations":[]}));
                     serde_json::json!({"kind":"text","content":content,"form_links":v.get("form_links").filter(|x|!x.is_null()).cloned().unwrap_or_else(||serde_json::json!([]))})
@@ -293,16 +378,32 @@ pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate
                                 phone,
                                 if words.is_null() { &empty } else { words },
                             )),
+                            v.get(format!("{alphabet}_locale"))
+                                .and_then(Value::as_str)
+                                .or(native_locale),
                             out,
                         )?;
                     } else {
-                        walk(child, node, None, out)?;
+                        let locale = match key.as_str() {
+                            "uk" => Some("en-GB"),
+                            "us" => Some("en-US"),
+                            _ => native_locale.or_else(|| {
+                                v.get("dialect")
+                                    .and_then(Value::as_str)
+                                    .and_then(|dialect| match dialect {
+                                        "uk" => Some("en-GB"),
+                                        "us" => Some("en-US"),
+                                        _ => None,
+                                    })
+                            }),
+                        };
+                        walk(child, node, None, locale, out)?;
                     }
                 }
             }
             Value::Array(items) => {
                 for child in items {
-                    walk(child, node, None, out)?;
+                    walk(child, node, None, native_locale, out)?;
                 }
             }
             _ => {}
@@ -310,6 +411,6 @@ pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate
         Ok(())
     }
     let mut result = vec![];
-    walk(value, Uuid::nil(), None, &mut result)?;
+    walk(value, Uuid::nil(), None, None, &mut result)?;
     Ok(result)
 }

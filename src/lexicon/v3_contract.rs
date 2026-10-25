@@ -981,7 +981,7 @@ fn validate_voice_profile(
                         || name.trim().is_empty()
                         || name.chars().count() > 40
                         || name.contains('\0')
-                        || (voice.enabled && !selected_locales.insert(locale))
+                        || (voice.enabled && !selected_locales.insert(locale.selection_key()))
                 }
                 _ => true,
             };
@@ -3697,6 +3697,26 @@ mod sense_group_voice_tests {
                 serde_json::from_value::<VoiceProfileV3>(invalid).is_err(),
                 "{field}"
             );
+        }
+    }
+
+    #[test]
+    fn voice_selection_is_unique_per_accent_and_per_supplemental_locale() {
+        let version = |locale| json!({"version_id":Uuid::now_v7(),"version_name":"自然","locale":locale,"voice_id":locale,"enabled":true,"rate_percent":0});
+        for (locales, valid) in [
+            (vec!["en-AU", "en-US", "en-IN", "en-IE"], true),
+            (vec!["en-GB", "en-AU"], false),
+            (vec!["en-AU", "en-NZ"], false),
+            (vec!["en-US", "en-CA"], false),
+            (vec!["en-IN", "en-IN"], false),
+        ] {
+            let profile = serde_json::from_value(
+                json!({"voices":locales.iter().map(|locale|version(*locale)).collect::<Vec<_>>()}),
+            )
+            .unwrap();
+            let mut issues = vec![];
+            validate_voice_profile(Some(&profile), Uuid::now_v7(), &mut issues);
+            assert_eq!(issues.is_empty(), valid, "{locales:?}");
         }
     }
 

@@ -1,5 +1,9 @@
 use super::*;
-use axum::{body::Body, http::Request};
+use axum::{
+    body::Body,
+    http::{Request, header},
+};
+use http_body_util::BodyExt;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -231,6 +235,95 @@ async fn dictionary_audio_signs_only_current_published_references(pool: PgPool) 
 }
 
 #[sqlx::test]
+async fn dictionary_v3_keeps_native_regions_and_supplements_without_legacy_fallback(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let id = full_entry(&pool, "regions").await;
+    let (publication, mut snapshot): (Uuid,Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    let version = |locale, enabled| json!({"voice_id":locale,"enabled":enabled,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"自然","locale":locale,"audio_asset_id":Uuid::now_v7()});
+    snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["voice_profile"] = json!({"voices":[version("en-AU",true),version("en-CA",true),version("en-IN",true),version("en-IE",true),version("en-GB",false)]});
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+        .bind(publication)
+        .bind(snapshot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/dictionary/entries/{id}");
+    let token = state
+        .token_manager
+        .generate_with_version(auth.subject, "student", auth.security_version)
+        .unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("X-TSZ-Voice-Versions", "v2")
+                .header("X-TSZ-Voice-Locales", "v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let items = body["audio"].as_array().unwrap();
+    assert_eq!(items.len(), 4);
+    for (locale, group) in [
+        ("en-AU", "uk"),
+        ("en-CA", "us"),
+        ("en-IN", "other"),
+        ("en-IE", "other"),
+    ] {
+        assert!(
+            items
+                .iter()
+                .any(|item| item["locale"] == locale && item["accent_group"] == group)
+        );
+    }
+    let old = call(&state, &auth, "GET", &path, Value::Null).await;
+    assert_eq!(old.0, StatusCode::OK);
+    assert_eq!(old.1["audio"], json!([]));
+    let mut flash = version("en-US", true);
+    flash["voice_id"] = json!("azure-hd-flash-test");
+    let mut snapshot: Value =
+        sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=$1")
+            .bind(publication)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    snapshot["forms"]["pos"][0]["forms"][0]["regional_variants"]["uk"]["pronunciations"][0]["voice_profile"]
+        ["voices"] = json!([flash]);
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+        .bind(publication)
+        .bind(snapshot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&state, &auth, "GET", &path, Value::Null).await.1["audio"],
+        json!([])
+    );
+    let response = tsz_rust::router(state)
+        .oneshot(
+            Request::builder()
+                .uri(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("X-TSZ-Voice-Versions", "v2")
+                .header("X-TSZ-Voice-Locales", "v1")
+                .header("X-TSZ-Voice-Models", "v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let response: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(response["audio"].as_array().unwrap().len(), 1);
+    assert!(response["audio"][0].get("hd_flash").is_none());
+}
+
+#[sqlx::test]
 async fn dictionary_shared_examples_respect_hides_and_withdrawal(pool: PgPool) {
     let (state, auth) = setup_bound(&pool).await;
     let id = full_entry(&pool, "apple").await;
@@ -284,4 +377,72 @@ async fn dictionary_shared_examples_respect_hides_and_withdrawal(pool: PgPool) {
         call(&state, &auth, "GET", &path, Value::Null).await.1["examples"],
         json!([])
     );
+}
+
+#[sqlx::test]
+async fn dictionary_audio_keeps_source_text_dialect_separate_from_voice_locale(pool: PgPool) {
+    let (state, auth) = setup_bound(&pool).await;
+    let id = full_entry(&pool, "sourceaudio").await;
+    let (publication, mut snapshot): (Uuid, Value) = sqlx::query_as("SELECT p.id,p.snapshot FROM lexicon.entries e JOIN lexicon.entry_publications p ON p.id=e.current_publication_id WHERE e.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    let grammar = &mut snapshot["meanings"]["pos"][0]["grammar_structures"][0];
+    let mut uk = grammar["variants"][0].clone();
+    let mut us = uk.clone();
+    let uk_asset = Uuid::now_v7();
+    let us_asset = Uuid::now_v7();
+    uk["dialect"] = json!("uk");
+    uk["content"]["text"] = json!("colour");
+    us["id"] = json!(Uuid::now_v7());
+    us["dialect"] = json!("us");
+    us["content"]["text"] = json!("color");
+    for (variant, asset) in [(&mut uk, uk_asset), (&mut us, us_asset)] {
+        variant["voice_profile"] = json!({"voices":[{"voice_id":"neerja","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"印度补充","locale":"en-IN","audio_asset_id":asset}]});
+    }
+    grammar["variants"] = json!([uk, us]);
+    sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=$1")
+        .bind(publication)
+        .bind(snapshot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let path = format!("/api/v1/dictionary/entries/{id}");
+    let token = state
+        .token_manager
+        .generate_with_version(auth.subject, "student", auth.security_version)
+        .unwrap();
+    for models in [false, true] {
+        let mut request = Request::builder()
+            .uri(&path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("X-TSZ-Voice-Versions", "v2")
+            .header("X-TSZ-Voice-Locales", "v1");
+        if models {
+            request = request.header("X-TSZ-Voice-Models", "v1");
+        }
+        let response = tsz_rust::router(state.clone())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let items = body["audio"].as_array().unwrap();
+        let uk = items
+            .iter()
+            .find(|item| item["asset_id"] == uk_asset.to_string())
+            .unwrap();
+        let us = items
+            .iter()
+            .find(|item| item["asset_id"] == us_asset.to_string())
+            .unwrap();
+        assert_eq!(uk["locale"], "en-IN");
+        assert_eq!(us["locale"], "en-IN");
+        if models {
+            assert_eq!(uk["source_dialect"], "uk");
+            assert_eq!(us["source_dialect"], "us");
+        } else {
+            assert!(uk.get("source_dialect").is_none());
+            assert!(us.get("source_dialect").is_none());
+        }
+    }
 }

@@ -4,7 +4,9 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::speech::{CatalogVoice, Voice, catalog_snapshot, product_voices, voice_display_name};
+use crate::speech::{
+    CatalogVoice, Voice, catalog_snapshot, product_voices, voice_display_name, voice_metadata,
+};
 
 use super::{
     CACHE_TTL_HOURS,
@@ -60,7 +62,7 @@ impl PreviewRepository {
         let rows = sqlx::query(
             r#"SELECT alias, provider_voice_id, locale, gender, styles, min_rate_percent, max_rate_percent,
                       min_pitch_semitones, max_pitch_semitones
-               FROM speech.voices WHERE enabled AND provider = 'azure' AND locale IN ('en-GB', 'en-US')
+               FROM speech.voices WHERE enabled AND provider = 'azure' AND locale ~ '^en-[A-Z]{2}$'
                ORDER BY array_position($1, provider_voice_id) NULLS LAST, alias"#,
         )
         .bind(product_voices().iter().map(|v| v.provider_voice_id.as_str()).collect::<Vec<_>>())
@@ -71,6 +73,12 @@ impl PreviewRepository {
             .map(|row| {
                 let mut voice_styles = styles(&row.get::<Value, _>("styles")).unwrap_or_default();
                 voice_styles.sort();
+                let hd_flash = row
+                    .get::<String, _>("provider_voice_id")
+                    .ends_with(":DragonHDFlashLatestNeural");
+                if hd_flash {
+                    voice_styles.clear();
+                }
                 VoiceResponse {
                     alias: row.get("alias"),
                     display_name: voice_display_name(
@@ -82,12 +90,32 @@ impl PreviewRepository {
                         .any(|v| v.provider_voice_id == row.get::<String, _>("provider_voice_id")),
                     locale: row.get("locale"),
                     gender: row.get("gender"),
+                    metadata: voice_metadata(&row.get::<String, _>("provider_voice_id")),
                     capabilities: VoiceCapabilities {
                         styles: voice_styles,
-                        min_rate_percent: row.get("min_rate_percent"),
-                        max_rate_percent: row.get("max_rate_percent"),
-                        min_pitch_semitones: row.get("min_pitch_semitones"),
-                        max_pitch_semitones: row.get("max_pitch_semitones"),
+                        min_rate_percent: if hd_flash {
+                            0
+                        } else {
+                            row.get("min_rate_percent")
+                        },
+                        max_rate_percent: if hd_flash {
+                            0
+                        } else {
+                            row.get("max_rate_percent")
+                        },
+                        min_pitch_semitones: if hd_flash {
+                            0
+                        } else {
+                            row.get("min_pitch_semitones")
+                        },
+                        max_pitch_semitones: if hd_flash {
+                            0
+                        } else {
+                            row.get("max_pitch_semitones")
+                        },
+                        supports_volume_percent: hd_flash.then_some(false),
+                        supports_pause: hd_flash.then_some(false),
+                        supports_phoneme: hd_flash.then_some(false),
                     },
                 }
             })

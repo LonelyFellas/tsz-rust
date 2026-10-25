@@ -63,21 +63,32 @@ pub async fn entries(
             for form in &pos.forms {
                 let variants = match &form.regional_variants {
                     WordRegionalVariantsV3::Common { common } => {
-                        vec![(common.id, &common.spelling_speech, &common.pronunciations)]
+                        vec![(
+                            common.id,
+                            Dialect::Common,
+                            &common.spelling_speech,
+                            &common.pronunciations,
+                        )]
                     }
                     WordRegionalVariantsV3::UkUs { uk, us } => vec![
-                        (uk.id, &uk.spelling_speech, &uk.pronunciations),
-                        (us.id, &us.spelling_speech, &us.pronunciations),
+                        (uk.id, Dialect::Uk, &uk.spelling_speech, &uk.pronunciations),
+                        (us.id, Dialect::Us, &us.spelling_speech, &us.pronunciations),
                     ],
                 };
-                for (variant_id, spelling_speech, pronunciations) in variants {
+                for (variant_id, source_dialect, spelling_speech, pronunciations) in variants {
                     if let Some(speech) = spelling_speech {
-                        generated_audio(&mut audio, variant_id, Some(&speech.voice_profile));
+                        generated_audio(
+                            &mut audio,
+                            variant_id,
+                            source_dialect,
+                            Some(&speech.voice_profile),
+                        );
                     }
                     for pronunciation in pronunciations {
                         generated_audio(
                             &mut audio,
                             pronunciation.id,
+                            source_dialect,
                             pronunciation.voice_profile.as_ref(),
                         );
                         if let Some(synthesis) = &pronunciation.synthesis {
@@ -86,12 +97,17 @@ pub async fn entries(
                                     generated_audio(
                                         &mut audio,
                                         pronunciation.id,
+                                        source_dialect,
                                         Some(&speech.voice_profile),
                                     );
                                 }
                             } else {
-                                for candidate in
-                                    [&synthesis.uk, &synthesis.us].into_iter().flatten()
+                                for (phoneme_dialect, candidate) in
+                                    [(Dialect::Uk, &synthesis.uk), (Dialect::Us, &synthesis.us)]
+                                        .into_iter()
+                                        .filter_map(|(dialect, value)| {
+                                            value.as_ref().map(|value| (dialect, value))
+                                        })
                                 {
                                     let speech = match synthesis.alphabet {
                                         RichTextPhonemeAlphabet::Ipa => &candidate.ipa_speech,
@@ -101,6 +117,7 @@ pub async fn entries(
                                         generated_audio(
                                             &mut audio,
                                             pronunciation.id,
+                                            phoneme_dialect,
                                             Some(&speech.voice_profile),
                                         );
                                     }
@@ -114,17 +131,25 @@ pub async fn entries(
         for pos in &native.forms.pos {
             for form in &pos.forms {
                 let variants = match &form.regional_variants {
-                    WordRegionalVariantsV3::Common { common } => vec![&common.pronunciations],
+                    WordRegionalVariantsV3::Common { common } => {
+                        vec![(Dialect::Common, &common.pronunciations)]
+                    }
                     WordRegionalVariantsV3::UkUs { uk, us } => {
-                        vec![&uk.pronunciations, &us.pronunciations]
+                        vec![
+                            (Dialect::Uk, &uk.pronunciations),
+                            (Dialect::Us, &us.pronunciations),
+                        ]
                     }
                 };
-                for variant in variants {
+                for (source_dialect, variant) in variants {
                     for sound in variant {
                         audio.extend(sound.audio_assets.iter().map(|a| DictionaryAudio {
                             target_id: sound.id,
                             asset_id: a.id,
                             locale: a.locale.as_str().into(),
+                            accent_group: a.locale.accent_group(),
+                            source_dialect,
+                            hd_flash: false,
                         }));
                     }
                 }
@@ -134,11 +159,19 @@ pub async fn entries(
         for pos in &native.meanings.pos {
             for grammar in &pos.grammar_structures {
                 for variant in &grammar.variants {
-                    generated_audio(&mut audio, grammar.id, variant.voice_profile.as_ref());
+                    generated_audio(
+                        &mut audio,
+                        grammar.id,
+                        variant.dialect,
+                        variant.voice_profile.as_ref(),
+                    );
                     audio.extend(variant.audio_assets.iter().map(|a| DictionaryAudio {
                         target_id: grammar.id,
                         asset_id: a.id,
                         locale: a.locale.as_str().into(),
+                        accent_group: a.locale.accent_group(),
+                        source_dialect: variant.dialect,
+                        hd_flash: false,
                     }));
                 }
             }
@@ -147,16 +180,24 @@ pub async fn entries(
                     if let WordDefinitionV3::EnDefinition { id, content, .. }
                     | WordDefinitionV3::EnSentence { id, content, .. } = definition
                     {
-                        for variant in crate::lexicon::v3_contract::english_text_variants(content) {
-                            generated_audio(&mut audio, *id, variant.voice_profile.as_ref());
+                        for (source_dialect, variant) in sourced_english_variants(content) {
+                            generated_audio(
+                                &mut audio,
+                                *id,
+                                source_dialect,
+                                variant.voice_profile.as_ref(),
+                            );
                         }
                     }
                 }
                 for sentence in &sense.sentences {
-                    for variant in
-                        crate::lexicon::v3_contract::english_text_variants(&sentence.en_text)
-                    {
-                        generated_audio(&mut audio, sentence.id, variant.voice_profile.as_ref());
+                    for (source_dialect, variant) in sourced_english_variants(&sentence.en_text) {
+                        generated_audio(
+                            &mut audio,
+                            sentence.id,
+                            source_dialect,
+                            variant.voice_profile.as_ref(),
+                        );
                     }
                     examples.push(DictionaryExample {
                         id: sentence.id,
@@ -196,8 +237,13 @@ pub async fn entries(
             let shared: crate::lexicon::shared_sentences::SharedSentenceContent =
                 serde_json::from_value(snapshot).map_err(AppError::internal)?;
             let sentence = shared.sentence;
-            for variant in crate::lexicon::v3_contract::english_text_variants(&sentence.en_text) {
-                generated_audio(&mut audio, sentence.id, variant.voice_profile.as_ref());
+            for (source_dialect, variant) in sourced_english_variants(&sentence.en_text) {
+                generated_audio(
+                    &mut audio,
+                    sentence.id,
+                    source_dialect,
+                    variant.voice_profile.as_ref(),
+                );
             }
             if examples
                 .iter()
@@ -221,9 +267,25 @@ pub async fn entries(
     Ok(result)
 }
 
+fn sourced_english_variants(
+    content: &EnglishTextV3,
+) -> Vec<(Dialect, &crate::lexicon::dto::RichTextVariantV3)> {
+    match content {
+        EnglishTextV3::Unified { common } => vec![(Dialect::Common, common)],
+        EnglishTextV3::Distinguish { uk, us, .. } => [(Dialect::Uk, uk), (Dialect::Us, us)]
+            .into_iter()
+            .filter_map(|(dialect, slot)| match slot {
+                DialectVariantRichTextSlotV3::Ready { variant } => Some((dialect, variant)),
+                DialectVariantRichTextSlotV3::Missing => None,
+            })
+            .collect(),
+    }
+}
+
 fn generated_audio(
     audio: &mut Vec<DictionaryAudio>,
     target_id: Uuid,
+    source_dialect: Dialect,
     profile: Option<&VoiceProfileV3>,
 ) {
     for setting in profile
@@ -235,11 +297,10 @@ fn generated_audio(
             audio.push(DictionaryAudio {
                 target_id,
                 asset_id,
-                locale: match locale {
-                    VoiceVersionLocaleV3::Uk => "en-GB",
-                    VoiceVersionLocaleV3::Us => "en-US",
-                }
-                .into(),
+                locale: locale.as_str().into(),
+                accent_group: locale.accent_group(),
+                source_dialect,
+                hd_flash: setting.voice_id.starts_with("azure-hd-flash-"),
             });
         }
     }

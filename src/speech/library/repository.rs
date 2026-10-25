@@ -18,7 +18,7 @@ const ITEMS_SQL: &str = r#"
     FROM speech.voices v
     LEFT JOIN speech.voice_descriptions d ON d.voice_id = v.id
     LEFT JOIN speech.admin_voice_settings s ON s.voice_id = v.id AND s.admin_id = $1
-    WHERE v.enabled AND v.provider = 'azure' AND v.locale IN ('en-GB', 'en-US')
+    WHERE v.enabled AND v.provider = 'azure' AND v.locale ~ '^en-[A-Z]{2}$'
       AND ($2::text IS NULL OR v.alias = $2)
     ORDER BY v.alias
 "#;
@@ -103,7 +103,7 @@ async fn lock_voice(tx: &mut Transaction<'_, Postgres>, alias: &str) -> Result<P
         r#"SELECT id, provider, provider_voice_id, locale, styles,
                   min_rate_percent, max_rate_percent, min_pitch_semitones, max_pitch_semitones
            FROM speech.voices WHERE alias = $1 AND enabled AND provider = 'azure'
-           AND locale IN ('en-GB', 'en-US') FOR UPDATE"#,
+           AND locale ~ '^en-[A-Z]{2}$' FOR UPDATE"#,
     )
     .bind(alias)
     .fetch_optional(&mut **tx)
@@ -138,7 +138,7 @@ fn validate_parameters(row: &PgRow, parameters: &VoiceParameters) -> Result<(), 
         parameters.pitch_semitones,
         parameters.volume_percent.unwrap_or(100),
     )
-    .map_err(|_| invalid())?;
+    .map_err(|error| AppError::bad_request(ErrorCode::InvalidRequestBody, error.to_string()))?;
     Ok(())
 }
 
@@ -164,6 +164,17 @@ impl VoiceLibraryRepository {
         security_version: i64,
         request: SaveDubbingGroupsRequest,
     ) -> Result<DubbingGroupsResponse, AppError> {
+        self.save_groups_with_models(actor, security_version, request, true)
+            .await
+    }
+
+    pub async fn save_groups_with_models(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        request: SaveDubbingGroupsRequest,
+        models_supported: bool,
+    ) -> Result<DubbingGroupsResponse, AppError> {
         use std::collections::BTreeSet;
         if request.base_revision < 0 || request.groups.len() > 5 {
             return Err(invalid());
@@ -176,6 +187,23 @@ impl VoiceLibraryRepository {
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
+        if !models_supported {
+            let stored: serde_json::Value =
+                sqlx::query_scalar("SELECT groups FROM speech.dubbing_groups WHERE singleton")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(AppError::internal)?;
+            if crate::lexicon::voice_versions::contains_models(&stored)
+                || crate::lexicon::voice_versions::contains_models(
+                    &serde_json::to_value(&request.groups).map_err(AppError::internal)?,
+                )
+            {
+                return Err(AppError::bad_request(
+                    ErrorCode::InvalidRequestBody,
+                    "分组包含新版模型，请保留输入并刷新页面",
+                ));
+            }
+        }
         if revision != request.base_revision {
             return Err(conflict());
         }
@@ -217,7 +245,13 @@ impl VoiceLibraryRepository {
                         return Err(invalid());
                     }
                     let voice = lock_voice(&mut tx, &recommendation.voice_alias).await?;
-                    if voice.get::<String, _>("locale") != locale {
+                    if crate::speech::locale::EnglishLocale::parse(
+                        &voice.get::<String, _>("locale"),
+                    )
+                    .map(|value| value.accent_group())
+                        != crate::speech::locale::EnglishLocale::parse(locale)
+                            .map(|value| value.accent_group())
+                    {
                         return Err(invalid());
                     }
                     validate_parameters(&voice, &recommendation.parameters)?;
@@ -284,7 +318,11 @@ impl VoiceLibraryRepository {
         }
         if let Some(parameters) = &request.parameters {
             let incoming = serde_json::to_value(parameters).map_err(AppError::internal)?;
-            if current.as_ref().and_then(|value| value.1.as_ref()) != Some(&incoming) {
+            if voice
+                .get::<String, _>("provider_voice_id")
+                .ends_with(":DragonHDFlashLatestNeural")
+                || current.as_ref().and_then(|value| value.1.as_ref()) != Some(&incoming)
+            {
                 validate_parameters(&voice, parameters)?;
             }
         }

@@ -13,6 +13,15 @@ pub struct DictionaryAudio {
     pub target_id: Uuid,
     pub asset_id: Uuid,
     pub locale: String,
+    /// Present on locale-capable responses; optional in the contract for older servers.
+    #[schema(required = false)]
+    pub accent_group: crate::speech::locale::AccentGroup,
+    /// Source text dialect, independent of the voice's native locale.
+    #[schema(required = false)]
+    pub source_dialect: crate::lexicon::dto::Dialect,
+    #[serde(skip)]
+    #[schema(ignore)]
+    pub(crate) hd_flash: bool,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

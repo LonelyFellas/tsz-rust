@@ -92,6 +92,10 @@ async fn generated_asset_is_long_lived_idempotent_and_retries_failed_generation(
         .await
         .unwrap()
         .asset;
+    sqlx::query("UPDATE speech.voices SET enabled=false WHERE alias='sonia'")
+        .execute(&pool)
+        .await
+        .unwrap();
     let repeated = service
         .generate(actor, 0, input(request, version, "hello"))
         .await
@@ -190,6 +194,93 @@ async fn generation_migration_can_be_reverted_without_deleting_assets(pool: PgPo
     .execute(&pool)
     .await
     .unwrap();
+}
+
+#[sqlx::test]
+async fn native_regions_generate_assets_and_reject_phonemes_before_provider_call(pool: PgPool) {
+    let actor = actor(&pool).await;
+    let provider = Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        fail_first: false,
+    });
+    let service = GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(store()));
+    for locale in ["en-AU", "en-NZ", "en-CA", "en-IN"] {
+        let alias = locale.to_ascii_lowercase();
+        sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,$2,'azure',$3,$4,'female','[]','v1')")
+            .bind(Uuid::now_v7()).bind(&alias).bind(format!("{locale}-TestNeural")).bind(locale).execute(&pool).await.unwrap();
+        let mut request = input(Uuid::now_v7(), Uuid::now_v7(), "hello");
+        request.setting.voice_id = alias;
+        request.setting.locale = tsz_rust::speech::locale::EnglishLocale::parse(locale);
+        let asset = service.generate(actor, 0, request).await.unwrap().asset;
+        assert_eq!(asset.locale.as_str(), locale);
+        let stored: String =
+            sqlx::query_scalar("SELECT locale FROM lexicon.audio_assets WHERE id=$1")
+                .bind(asset.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, locale);
+        let mut bad = input(Uuid::now_v7(), Uuid::now_v7(), "hello");
+        bad.setting.voice_id = locale.to_ascii_lowercase();
+        bad.setting.locale = tsz_rust::speech::locale::EnglishLocale::parse(locale);
+        bad.source = serde_json::from_value(json!({"kind":"phoneme","content":{"version":2,"text":"hello","annotations":[]},"alphabet":"ipa","phoneme":"həˈləʊ","phoneme_locale":"en-GB"})).unwrap();
+        let before = provider.calls.load(Ordering::SeqCst);
+        assert!(service.generate(actor, 0, bad).await.is_err());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), before);
+    }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 4);
+}
+
+#[sqlx::test]
+async fn flash_generates_only_natural_defaults_and_records_provider_identity(pool: PgPool) {
+    let actor = actor(&pool).await;
+    let voice = tsz_rust::speech::Voice::new(
+        "azure",
+        "en-US-Tiana:DragonHDFlashLatestNeural",
+        "en-US",
+        [],
+    )
+    .unwrap();
+    let catalog = tsz_rust::speech::CatalogVoice {
+        voice,
+        gender: "female".into(),
+    };
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .sync_voices(std::slice::from_ref(&catalog))
+        .await
+        .unwrap();
+    let provider = Arc::new(Provider {
+        calls: AtomicUsize::new(0),
+        fail_first: false,
+    });
+    let service = GeneratedAudioService::new(pool.clone(), Some(provider.clone()), Some(store()));
+    let mut request = input(Uuid::now_v7(), Uuid::now_v7(), "hello");
+    request.setting.voice_id = catalog.alias();
+    request.setting.locale = tsz_rust::speech::locale::EnglishLocale::parse("en-US");
+    let asset = service.generate(actor, 0, request).await.unwrap().asset;
+    let identity: serde_json::Value =
+        sqlx::query_scalar("SELECT voice FROM lexicon.audio_generations WHERE asset_id=$1")
+            .bind(asset.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        identity["provider_voice_id"],
+        "en-US-Tiana:DragonHDFlashLatestNeural"
+    );
+    assert_eq!(identity["builder_version"], "hd-flash-natural-ssml-v1");
+    for (rate, volume, pause) in [(1, 100, false), (0, 90, false), (0, 100, true)] {
+        let mut request = input(Uuid::now_v7(), Uuid::now_v7(), "hello");
+        request.setting.voice_id = catalog.alias();
+        request.setting.locale = tsz_rust::speech::locale::EnglishLocale::parse("en-US");
+        request.setting.rate_percent = rate;
+        request.setting.volume_percent = Some(volume);
+        if pause {
+            request.source=serde_json::from_value(json!({"kind":"text","content":{"version":2,"text":"hello","annotations":[{"type":"pause","at":5,"duration_ms":300}]}})).unwrap();
+        }
+        assert!(service.generate(actor, 0, request).await.is_err());
+    }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
 #[sqlx::test]
