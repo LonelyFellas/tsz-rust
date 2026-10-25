@@ -2,7 +2,7 @@
 
 ## 部署流程只维护一处
 
-部署到 `tshb-test` 必须遵循[部署技能](../.agents/skills/deploy/SKILL.md)及其[操作手册](../.agents/skills/deploy/references/runbook.md)，由项目指定的部署执行代理处理。本文不另行维护安装、覆盖二进制、回退或 manifest 命令，避免与实际门禁分叉。
+部署到 `tshb-test` 必须遵循[部署技能](../.agents/skills/deploy/SKILL.md)及其[操作手册](../.agents/skills/deploy/references/runbook.md)，执行精确候选携带的 `ops/deploy_test.py plan/apply/status/resume`。执行者按 AGENTS.md 的宿主约定处理；本文不另行维护安装、覆盖二进制、回退或 manifest 命令。真实正常发布已验收，真实回退尚未演练，自动 CD 未启用。
 
 部署使用精确 `origin/main` 的成功 CI 制品；服务器没有 Git checkout，不同步源码或现场编译。提交、推送、合并、前端部署与后端部署分别需要对应授权，阅读本文不构成执行授权。
 

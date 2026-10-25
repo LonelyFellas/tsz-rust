@@ -46,9 +46,10 @@
 
 ## 部署
 
-- 用户明确要求把 tsz-rust 后端部署到 tshb-test 时，主 Agent 必须把部署执行委派给项目级
-  `backend_deploy_runner` 自定义 Agent（`.codex/agents/backend-deploy-runner.toml`）。如果当前 Agent
-  已经是 `backend_deploy_runner`，则直接执行，不得再次递归委派。
+- 后端发布统一使用精确候选携带的 `ops/deploy_test.py`，按 `.agents/skills/deploy/SKILL.md`
+  和其 runbook 执行 `plan/apply/status/resume`；不另拼手工远端发布或回退步骤。
+- Codex 宿主委派项目 `backend_deploy_runner`（`.codex/agents/backend-deploy-runner.toml`），runner 不递归委派；
+  Claude 会话按用户既有约定直接执行同一控制器流程。两者沿用宿主权限，不能冒充不可用工具或绕过门禁。
 - 仅讨论、询问、评估或准备部署不构成执行授权；提交、推送、合并与部署是独立授权边界。
-- `backend_deploy_runner` 必须完整读取并严格遵守 `.agents/skills/deploy/SKILL.md`。该 skill 是后端
-  部署目标、CI 门禁、服务器操作、备份、回退、冒烟验证与 manifest 验收的唯一事实来源。
+- 部署 skill 是来源、配置、备份、恢复、验收和清理门禁的统一入口。真实正常发布已经验收，
+  真实回退尚未演练；不自动故障注入、数据库恢复或启用自动 CD。

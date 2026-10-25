@@ -1,729 +1,163 @@
-# tsz-rust 部署到 tshb-test
+# tshb-test 后端发布：控制器操作手册
 
-把 GitHub **当前 `origin/main` 上 CI 成功的精确提交**部署到 Aliyun ECS
-`tshb-test`（47.121.142.19，ssh 别名已配密钥）。服务器上
-`/opt/tsz-rust` 不是 git 仓库，唯一同步方式就是本流程。
+唯一发布入口为精确候选携带的 `ops/deploy_test.py`。授权、执行者与硬门禁见 [deploy 技能](../SKILL.md)；完整接口/状态见 [控制器说明](../../../../docs/ci/deployment-controller.md)。本手册不再维护独立的 SSH/rsync/systemctl/manifest 写入步骤。目标为 `LonelyFellas/tsz-rust` 当前 GitHub main 的成功 CI 制品，服务固定为 `tshb-test` 的后端；服务器无源码 checkout，不编译。
 
-准备阶段从源仓库根目录执行，其后所有命令在本 session 的独立部署 checkout 执行；入口与授权要求见 [SKILL.md](../SKILL.md)。本文是实际部署时必须完整读取的操作手册。
+2026-10-25 的[真实正常发布证据](../../../../docs/ci/evidence/2026-10-25-stage-d-manual-deployment.json)已通过。**真实回退尚未演练**，自动 CD 未启用；每次发布仍须重新执行门禁，历史成功不代替现场。
 
-## 阶段 C 控制器（先隔离验收，尚未启用实际发布入口）
+## 1. 先辨认新发布还是原事务恢复
 
-统一事务工具位于 `ops/deploy_test.py`，提供 `plan/apply/status/resume`。其本地/远端状态均原子持久化，动作前写 intent，恢复以锁归属、实际进程、精确账本、备份和 manifest 为依据，不重放不确定的前向动作。工具与候选来源绑定，凭据不写入状态或命令参数。完整入口和隔离测试见 [控制器说明](../../../../docs/ci/deployment-controller.md)。
+- 新发布须有本次后端授权。只读准备只运行来源查询、备份适用性核对和 `plan`；不运行 `apply`/`resume`。
+- 恢复已有事务先找到原 source checkout、plan、deployment UUID 和本地 `state.json`，使用同一 `--state-dir`。不另开 UUID，不重跑 `apply`，不改变工具或计划来绕过摘要核验。
+- 默认本地状态目录为 `~/.config/tsz-rust/controller`；事务状态为 `<state-dir>/<deployment-id>/state.json`。可指定其他目录，但同环境发布应复用同一目录；远端 owner 锁仍是所有调用者共用的互斥边界。
+- 本地 active、旧手册的 `~/.config/tsz-rust/deploy.lock` 或远端 `/opt/tsz-rust/deploy.lock` 存在时，先只读定位 owner/state/现场，不删除或抢锁。旧 `state.env` 事务不由新控制器自动接管，必须另作受信工具与现场恢复方案。
 
-本阶段只实施并测试控制器，未进行测试服端到端发布验证；以下旧手册仍作为现行实际执行入口，不因新工具文件存在就改用新入口。后续阶段 D 必须在独立授权的手动演练后，统一手动/自动入口并移除重复执行路径。禁止在测试期间执行 `apply`/`resume` 到 `tshb-test`，禁止创建自动部署 workflow。
+下面代码只说明执行方式，阅读不授予写入授权。每个 shell 块独立 fail-fast；跨调用只传已保存的文件和绝对路径，不依赖前一 shell 的变量或 `source state.env`。
 
-新控制器已增加正式 HTTPS 复验、运行进程摘要、独占合成业务 fixture 与清理门禁。只有这些都通过才创建 schema v2 的 accepted manifest；旧 v1 仍可校验和原样恢复。共享 IP 限流桶属于正常服务状态，不通过删除它完成 smoke 清理；如精确账号键残留或业务资源存在外部引用，保留锁/状态并报告清理失败。
+## 2. 准备独立干净的 main checkout
 
-## 红线
-
-- 只部署本 session 独立干净 checkout 中的 `main`，且 `HEAD` 必须等于 GitHub `origin/main`；不要求原开发工作区干净。
-- 只把 CI `conclusion == success` 视为通过；`skipped`、`neutral` 也不允许部署。
-- CI 为 `queued`、`in_progress`、`pending`、`requested` 或 `waiting` 时等待，不得提前部署。
-- CI 失败、取消、超时、无运行记录、GitHub API/认证异常或状态未知时，一律不部署。
-- 等待期间 `origin/main` 变化时，重新同步并从新 SHA 开始检查，绝不沿用旧提交的绿色结果。
-- CI 门禁通过前，不得备份、rsync、编译、重启或执行任何会改变服务器状态的命令。
-- 跨步骤的值（`deploy_sha` / `ci_run_id` / `deploy_backup_dir` 等）一律经 state 文件传递。
-  Bash 工具每次调用都是新 shell，shell 变量不跨步骤保留；直接引用会展开成空串，
-  最严重的后果是第 6 节回退拿不到备份目录而无法执行。
-- 本地与服务器都必须持有带 owner 的部署锁；发现已有锁时只读报告 owner 并停止，绝不
-  自动抢锁或删除。state、staging、backup 和 server lock 的 owner 必须属于同一 session。
-
-## 1. 准备精确的 main 源码
-
-1. 核对源仓库路径与 origin；保留原开发工作区的分支和全部改动。部署使用 CI 制品，不复制工作区文件。
-2. 创建本次独立部署 checkout，并从 GitHub 获取 main：
-   ```bash
-   set -euo pipefail
-   source_checkout=$(git rev-parse --show-toplevel)
-   source_origin=$(git remote get-url origin)
-   deploy_checkout=$(mktemp -d "${TMPDIR:-/tmp}/tsz-rust-deploy.XXXXXX")
-   git clone --shared --no-checkout "$source_checkout" "$deploy_checkout"
-   git -C "$deploy_checkout" remote set-url origin "$source_origin"
-   git -C "$deploy_checkout" fetch origin main
-   git -C "$deploy_checkout" switch -C main origin/main
-   printf '部署 checkout: %s\n' "$deploy_checkout"
-   ```
-   保存返回的绝对路径；下一步在这个目录运行。它是本 session 的临时 clone，不切换或清理源仓库；部署期间保留源仓库对象。
-   恢复现有 session 时直接读取 state 中的 checkout，不重新创建。尚未写 state 就失败时保留临时目录供诊断。
-3. 原子取得本地部署锁，记录部署 SHA 和主题，并把 session/state 放在锁目录内：
-
-   ```bash
-   set -euo pipefail
-   deploy_checkout=$(git rev-parse --show-toplevel)
-   deploy_sha=$(git rev-parse HEAD)
-   deploy_tree=$(git rev-parse 'HEAD^{tree}')
-   git show -s --format='%H %s' "$deploy_sha"
-   test "$(git branch --show-current)" = main
-   test "$deploy_sha" = "$(git rev-parse origin/main)"
-   test -z "$(git status --porcelain)"
-
-   # mkdir 是本地互斥原语；已有锁可能代表另一个部署或待恢复事故，只读报告后停止。
-   mkdir -p ~/.config/tsz-rust
-   deploy_lock_dir=~/.config/tsz-rust/deploy.lock
-   if ! mkdir "$deploy_lock_dir"; then
-     printf '已有部署锁，owner=%s\n' "$(cat "$deploy_lock_dir/owner" 2>/dev/null || printf unknown)"
-     exit 1
-   fi
-   deploy_session=$(python3 -c 'import uuid; print(uuid.uuid4())')
-   state_file="$deploy_lock_dir/state.env"
-   session_tools_root=~/.cache/tsz-rust-deploy-tools
-   session_tools="$session_tools_root/$deploy_session"
-   mkdir -p "$session_tools_root"
-   mkdir "$session_tools"
-   git show "$deploy_sha:.agents/skills/deploy/scripts/require-green-main.sh" \
-     > "$session_tools/require-green-main.sh"
-   chmod 0755 "$session_tools/require-green-main.sh"
-   printf '%s\n' "$deploy_session" > "$deploy_lock_dir/owner"
-   printf 'deploy_session=%q\ndeploy_sha=%q\ndeploy_tree=%q\nsession_tools=%q\ndeploy_checkout=%q\n' \
-     "$deploy_session" "$deploy_sha" "$deploy_tree" "$session_tools" "$deploy_checkout" > "$state_file"
-   ```
-
-   此后**每个** Bash 步骤都从锁目录的 state 读回状态，并用独立 owner 文件核对 session。
-   state 不再与另一个部署共享；stale lock 必须人工核对服务器 manifest/binary/backup 后处理：
-
-   ```bash
-   set -euo pipefail
-   set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-   test -n "${deploy_checkout:-}"
-   cd "$deploy_checkout"
-   test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-   test -n "${deploy_session:-}" && test -n "${deploy_sha:-}"
-   test "$deploy_sha" = "$(git rev-parse HEAD)"   # 残留或串号立即暴露
-   ```
-
-   在**尚未取得服务器锁**时若 CI、artifact、SSH 或只读预检阻断，核对 owner 后只删除本
-   session 的 state/owner 并 `rmdir` 空锁目录；不得 `rm -rf`，unique staging 保留供诊断：
-
-   ```bash
-   set -euo pipefail
-   set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-   test -n "${deploy_checkout:-}"
-   cd "$deploy_checkout"
-   test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-   rm -f ~/.config/tsz-rust/deploy.lock/state.env ~/.config/tsz-rust/deploy.lock/owner
-   rmdir ~/.config/tsz-rust/deploy.lock
-   ```
-
-## 2. 强制等待 GitHub main CI 成功
-
-调用技能内的确定性门禁脚本；默认最多等待 30 分钟、每 15 秒查询一次：
+从目标仓库根目录运行以下**本地**准备。新建临时 clone，不改变原工作区分支或用户文件。输出的绝对路径作为本次 session 的固定来源；中断恢复复用它。
 
 ```bash
 set -euo pipefail
-set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-test -n "${deploy_checkout:-}"
-cd "$deploy_checkout"
-test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-test -x "$session_tools/require-green-main.sh"
-"$session_tools/require-green-main.sh" "$deploy_sha"
+python3 -I - <<'PY'
+from pathlib import Path
+import json, os, subprocess, tempfile
+origin = subprocess.check_output(['git', 'remote', 'get-url', 'origin'], text=True).strip()
+source = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()
+session = Path(tempfile.mkdtemp(prefix='tsz-backend-deploy-'))
+checkout = session / 'source'
+subprocess.run(['git', 'clone', '--shared', '--no-checkout', source, str(checkout)], check=True)
+subprocess.run(['git', '-C', str(checkout), 'remote', 'set-url', 'origin', origin], check=True)
+subprocess.run(['git', '-C', str(checkout), 'fetch', 'origin', 'main'], check=True)
+subprocess.run(['git', '-C', str(checkout), 'switch', '-C', 'main', 'origin/main'], check=True)
+sha = subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True).strip()
+tree = subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+assert not subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain'], text=True).strip()
+with (session / 'session.json').open('x') as output:
+    json.dump({'checkout': str(checkout), 'git_sha': sha, 'git_tree': tree}, output, indent=2)
+os.chmod(session / 'session.json', 0o600)
+print(session)
+PY
 ```
 
-运行期间持续向用户报告等待状态，不要让用户超过 60 秒收不到进展。仅退出码 `0` 允许继续：
+保留源仓库对象（clone 使用共享对象库），不清理该源 checkout/cache。把 session 路径记入主任务记录；下载、计划和回执放在 `source` 之外，保持部署 checkout 干净。不得将下载目录作为 Python 导入目录或从中执行工具。
 
-- `0`：精确 SHA 的最新 `CI` 工作流已完成，且结论为 `success`；
-- `1`：CI 已完成但失败或为非成功结论，停止部署；
-- `2`：工作区/分支不安全、无 CI、查询/认证/状态异常或等待超时，停止部署；
-- `3`：等待期间 `origin/main` 变化；尚未取得服务器锁时，先按第 1 节核对 owner 并释放本 session 本地锁，再同步新提交、取得新 session 锁并重新检查。
+## 3. 固定精确 CI、制品与 bundle
 
-门禁成功后、任何服务器写操作前，再做一次防竞态复核：
+以下准备在新 source checkout 中执行，或使用其工具的绝对路径。只选择 `.github/workflows/ci.yml` 对应的 `CI`，同仓 main 的 `push`/`workflow_dispatch`；按 created_at/id 选择该 SHA 最新 run，再核对最新 attempt completed/success。失败、无记录、过期、skipped/neutral、运行中、GitHub 查询异常或 main 前进均停止；不要在本地自己编译候选，也不要把 PR 的绿色结果当作 main 证据。
+
+1. 从 `session.json` 读取固定 SHA/tree，通过 GitHub API 查询最新 CI 和该 run 的 artifact 元数据。
+2. 精确找到 `release-smoke-<sha>-attempt-<verification-attempt>` 回执，要求唯一、未过期。在**新建空目录**下载，仅作为 JSON 数据读取。回执必须 passed、cleanup.complete=true，8 项检查全部 passed。
+3. **以回执中的 `artifact_id` 和 `ci.run_attempt` 选择二进制**，不要把 verification attempt 当作生产 attempt。重跑失败 smoke 可以消费之前成功构建的旧 attempt 制品。artifact 元数据须唯一、未过期，name 为 `tsz-rust-x86_64-linux-gnu-<sha>-attempt-<producer-attempt>`，workflow_run 与 SHA/run 对齐。
+4. 二进制及随包 manifest/sha256 下载到另一个新空目录；核对精确 SHA/tree/run/生产 attempt、二进制大小与 SHA256。使用 source checkout 的 `ops/release_artifact_manifest.py` 和 `ops/release_artifact_smoke.py` 的 `verify_artifact_record`，不导入下载目录中的代码。回执的 source/ci/artifact_id/digest/verification attempt 必须与制品对应。
+5. bundle 最终保留下表文件。原始下载目录与归属记录保留至事务结束；不覆盖现有 bundle，不能给旧计划换文件。
+
+| bundle 文件 | 来源及约束 |
+| --- | --- |
+| `tsz-rust` | CI 原始 Linux x86_64 release/default-features 制品，按其 manifest 校验 |
+| `tsz-rust.manifest.json` | 原 CI 制品 manifest，SHA/tree/run/生产 attempt 与固定候选一致 |
+| `artifact.json` | GitHub 对回执中精确 artifact ID 的最新原始元数据 |
+| `release-smoke-receipt.json` | 最新成功验证 attempt 的原始回执字节，不重排 JSON 后替换 |
+| `deploy-info.json` | **同一已校验制品**执行 `deploy-info` 的输出；该命令在加载配置/连接数据库前返回 |
+| `migration-receipt.json` | 有新增迁移时针对实际已部署基线生成的隔离升级/恢复回执，无新增迁移时不要求 |
+
+Linux 制品不能直接在 macOS 执行。按宿主选择原生 Linux，或已缓存不可变 app 镜像的独立 `network none` 容器读取 `deploy-info`；只挂载单个已校验二进制为只读，不传 `.env`、数据库 URL 或业务网络。创建前记录唯一 owner 和精确容器 ID，执行后验证退出码、解析 JSON，并按 ID/归属删除复查。不能仅从源码拼造 `deploy-info.json`。控制器还会从精确 Git 提交读取迁移 SQL 并对账。
+
+控制器的 `check_plan`/`GithubGate` 在 plan、apply 入口及停服前承担最终来源门禁。准备脚本的判断不代替这些检查。不得手工修改受信工具来允许任意 SHA 或降低校验。
+
+## 4. 只读基线、配置与恢复点
+
+计划前确认 SSH `tshb-test` 可连接且主机密钥校验开启。基线由 `ops/deployed_baseline.py` 复用采集：正式 manifest、磁盘与运行进程摘要、PID 稳定、无部署锁、只读完整迁移账本。摘要未知、manifest 缺失/损坏或不匹配时停止，不补造来源。
+
+由执行者在 apply 前完成并记录以下证据；**控制器不会自动证明所有这些外围条件**：
+
+- 写前数据库恢复点按 [PostgreSQL 备份恢复规范](../../../../docs/postgresql-backup-restore.md)验证，检查权限、hash、快照时间、候选/现网账本及兼容性、恢复工具与容量；记录是否覆盖当前风险。恢复环境必须隔离业务网络，并为数据、索引和 checksum 校验临时空间留足容量，不机械照抄示例中的固定 tmpfs 大小。备份不在 bundle 内，不能误删。controller 的 `backup` 只复制当前二进制和 manifest，不生成数据库备份。
+- 无新增迁移也需确认旧二进制可读取本次写入格式。只有实际账本仍等于基线才按 binary/manifest 恢复；该流程不自动恢复数据库或覆盖快照后的正常写入。
+- 有新增迁移：先按阶段 B 的 `ops/migration_compatibility.py` 对实际基线做隔离演练，提供 `migration-receipt.json` 和独立批准的恢复策略。候选区间缺少 down，或 up/down 非事务性时，当前控制器返回 `unsupported_recovery_interval`；`manual` 策略不能绕过这一能力限制。`verified_down`/`manual` 及受保护审批文件格式见[控制器说明](../../../../docs/ci/deployment-controller.md#中断与迁移恢复)。策略摘要绑定新旧 SHA、制品、账本/区间和回执；生成 plan 不能自行授予真实数据 down/PITR 权限。
+- 如本次授权要求“新增迁移或恢复点不适用即停止”，必须先停止报告，不用更宽策略继续。有 down 文件、合成数据演练成功或数据库备份存在都不等于真实数据可自动 down。
+- 保持 `.env` 和业务开关。正式进程、文件及 systemd 的 EnvironmentFiles/WorkingDirectory/相关 Environment 覆盖必须与候选配置一致。`COOKIE_SECURE=true`；`LOGIN_REWARD_ENABLED` 可为 true/false，但身份漂移一律拒绝。
+- TLS 的证书/私钥匹配、系统 CA/域名有效，已有 nginx HTTPS `/api/v1/` upstream 指向正式 `127.0.0.1:8383`。域名根 `/healthz` 可能是前端，正式健康只读本机后端精确 JSON。不改 nginx、不降级 Cookie、不使用 `-k`。
+- 检查服务器空闲磁盘能容纳旧备份、incoming、新安装临时文件和日志，临时端口 18383 无冲突；Python bcrypt、psql/Redis 等能力可用，失败就阻断，不现场安装包或清共享缓存/历史备份。
+- 保存 `.env`、nginx、web/admin manifest 指纹及预选正常实体的精确 ID/摘要；不打印内容、DSN、密码、Cookie、token 或私钥。并发正常业务可能改变数据，样本变化需先核实，不凭变化猜测删除。
+
+生成 plan（将占位路径替换为本次持久记录的绝对路径）：
 
 ```bash
 set -euo pipefail
-set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-test -n "${deploy_checkout:-}"
-cd "$deploy_checkout"
-test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-git fetch origin main
-test "$(git branch --show-current)" = main
-test "$(git rev-parse HEAD)" = "$deploy_sha"
-test "$(git rev-parse origin/main)" = "$deploy_sha"
-test -z "$(git status --porcelain)"
+python3 /absolute/session/source/ops/deploy_test.py --state-dir /absolute/controller-state plan --bundle /absolute/session/bundle --output /absolute/session/plan.json
 ```
 
-任一检查失败就停止并重新走 CI 门禁。
+新增迁移时在 `plan` 后按批准策略追加 `--recovery-policy /absolute/recovery-policy.json`。`--state-dir` 是全局参数，必须放在子命令前。缺省时使用默认目录；后续所有命令复用相同目录。plan 不创建远端锁、不上传/停服/迁移，但会查询 GitHub、只读数据库及执行 TLS 预检。它只读检查不是发布授权。
 
-同时读取门禁刚验证的精确 CI run，供部署 manifest 使用；结果必须与门禁的 success run一致：
+核对 plan 的 environment、UUID、source/ci、制品/回执摘要、baseline、迁移区间、recovery_policy、tools 摘要和绝对文件路径；保存原始 plan、恢复点适用性及授权边界。apply 前 GitHub main 或基线已变化则重新准备，不能只更新 JSON 中的 SHA。已部署同 SHA 时控制器返回 `already_deployed_verify_existing`：仅按受信来源只读核对 manifest/进程/账本，后续完整 smoke 的临时数据操作需属于已有验收授权，不盲目重部署或伪称完成本次发布。
+
+## 5. 使用 apply 执行新发布
+
+只有本次后端发布及必要测试数据/恢复范围已明确授权、plan 和外围恢复点门禁全部通过才执行：
 
 ```bash
 set -euo pipefail
-set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-test -n "${deploy_checkout:-}"
-cd "$deploy_checkout"
-test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-ci_run=$(
-  gh api "repos/LonelyFellas/tsz-rust/actions/runs?branch=main&head_sha=$deploy_sha&per_page=100" \
-    --jq '[.workflow_runs[] | select(.name == "CI")] | sort_by(.created_at) | last | [.id, .run_attempt, .status, .conclusion, .html_url] | @tsv'
-)
-IFS=$'\t' read -r ci_run_id ci_run_attempt ci_status ci_conclusion ci_run_url <<<"$ci_run"
-case "$ci_run_id" in ''|*[!0-9]*) exit 1 ;; esac
-case "$ci_run_attempt" in ''|*[!0-9]*) exit 1 ;; esac
-test "$ci_run_id" -gt 0 && test "$ci_run_attempt" -gt 0
-test "$ci_status" = completed
-test "$ci_conclusion" = success
-test "$ci_run_url" = "https://github.com/LonelyFellas/tsz-rust/actions/runs/$ci_run_id"
-
-printf 'ci_run_id=%q\nci_run_attempt=%q\nci_run_url=%q\n' \
-  "$ci_run_id" "$ci_run_attempt" "$ci_run_url" \
-  >> ~/.config/tsz-rust/deploy.lock/state.env
+python3 /absolute/session/source/ops/deploy_test.py --state-dir /absolute/controller-state apply --plan /absolute/session/plan.json
 ```
 
-## 3. 其他前置检查
+完整顺序由控制器管理，不把下表拆成另一套远端命令：
 
-1. **CI 产物下载与完整验证（动服务器状态之前必查）**：本次部署装的是精确 run attempt
-   的产物。必须在任何服务器写入之前完成唯一性、过期状态、SHA256、manifest、SHA/tree/run/
-   attempt 验证；任一项失败都释放本地锁并停止：
-   ```bash
-   set -euo pipefail
-   set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-   test -n "${deploy_checkout:-}"
-   cd "$deploy_checkout"
-   test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-   artifact_name="tsz-rust-x86_64-linux-gnu-$deploy_sha-attempt-$ci_run_attempt"
-   [[ "$artifact_name" =~ ^tsz-rust-x86_64-linux-gnu-[0-9a-f]{40}-attempt-[1-9][0-9]*$ ]]
-   artifact_record=$(
-     gh api "repos/LonelyFellas/tsz-rust/actions/runs/$ci_run_id/artifacts" \
-       --jq ".artifacts[] | select(.name == \"$artifact_name\") | [.name, .expired, .size_in_bytes] | @tsv"
-   )
-   test "$(printf '%s\n' "$artifact_record" | sed '/^$/d' | wc -l | tr -d ' ')" = 1
-   IFS=$'\t' read -r found_name artifact_expired artifact_size <<<"$artifact_record"
-   test "$found_name" = "$artifact_name"
-   test "$artifact_expired" = false
-   test "$artifact_size" -gt 0
-   printf 'artifact=%s size=%s bytes\n' "$found_name" "$artifact_size"
-   staging_root=~/.cache/tsz-rust-artifacts
-   staging="$staging_root/$deploy_session"
-   mkdir -p "$staging_root"
-   mkdir "$staging"
-   tools="$staging/tools"
-   mkdir "$tools"
-   for tool_path in \
-     ops/ci_fingerprint.py \
-     ops/ci_metrics.py \
-     ops/deployment_manifest.py \
-     ops/deployment_auth_smoke.py \
-     ops/deployment_preflight.py \
-     ops/release_artifact_manifest.py
-   do
-     git show "$deploy_sha:$tool_path" > "$tools/${tool_path##*/}"
-   done
-   python3 "$tools/ci_metrics.py" run --name deploy-artifact-download -- \
-     gh run download "$ci_run_id" --repo LonelyFellas/tsz-rust \
-       --name "$artifact_name" --dir "$staging"
-   test -s "$staging/tsz-rust"
-   chmod +x "$staging/tsz-rust"
-   ( cd "$staging" && shasum -a 256 -c tsz-rust.sha256 )
-   python3 "$tools/release_artifact_manifest.py" verify \
-     --manifest "$staging/tsz-rust.manifest.json" \
-     --artifact "$staging/tsz-rust" \
-     --expected-git-sha "$deploy_sha" \
-     --expected-git-tree "$deploy_tree" \
-     --expected-run-id "$ci_run_id" \
-     --expected-run-attempt "$ci_run_attempt"
-   printf 'artifact_name=%q\nartifact_size=%q\nstaging=%q\ntools=%q\n' \
-     "$artifact_name" "$artifact_size" "$staging" "$tools" \
-     >> ~/.config/tsz-rust/deploy.lock/state.env
-   ```
-   无输出或 `expired` 为 `true` 就停止：前者说明该提交早于「CI 产物部署」上线（或
-   release-artifact job 被跳过），后者说明超过了 30 天保留期。两种情况都不要绕过校验硬来，
-   先把 main 前进到含该 job 的提交、或重跑 CI 生成新产物。
-   本地 `.sqlx/` 此时不得刷新或修改——工作区必须仍等于已验证提交，第 5.1 节的 `git_tree` 依赖它。
-2. **ssh 连通性**：`ssh -o ConnectTimeout=8 tshb-test echo ok`。连不上的两大原因（都遇过）：
-   - 本机 Clash/Surge 开着 TUN 模式，把 ssh 劫走非白名单出口 → 让用户关代理或给
-     47.121.142.19 加 DIRECT 规则；
-   - 家用动态 IP 变了，Aliyun 安全组白名单失效 → 让用户去控制台给新 IP 加 /32。
+| 阶段 | 控制器负责的结果 |
+| --- | --- |
+| acquire | 本地 writer/active 与远端 owner/operation 锁；原 plan/tool 身份落盘；不抢锁 |
+| backup → upload | 当前二进制/manifest 成组校验和 fsync；精确传输及 SHA256 核验 |
+| stop → install | 停服前最后 main/CI/基线校验；持久化 mutation 边界后停正式服务，撤旧 manifest，原子替换 |
+| candidate_start → candidate_verify | loopback 18383、smoke-only 禁 worker；健康/账本及 TLS 鉴权、合成账号清理 |
+| formal_start → formal_verify | 停候选，检查配置后启动 systemd；正式 PID/exe/磁盘摘要/8383/HTTPS 鉴权通过 |
+| business_verify | 独占随机账号，草稿创建、修改与新请求回读持久化；精确清理和复查 |
+| accept → unlock | 清理与正式进程门禁通过后创建 v2 accepted manifest；最后同 owner 解锁 |
 
-   这一项必须排在下面的 manifest 核对**之前**：ssh 连不上时 `cat` 会失败并被兜底成
-   空 JSON，看起来就像「服务器没有 manifest」，从而放行一次本该被拦下的空跑。
+每个动作先保存 intent，再保存结果；state 文件不含明文凭据。停服前 main 前进会阻断；mutation 开始后固定候选完成验收或恢复，不追新 main。`accepted` 是唯一成功状态，不能仅靠命令退出、服务 active 或某段 JSON 的 SHA 判断。
 
-   **TLS / Secure Cookie 只读预检**：在任何正式服务停止、制品替换或迁移前，从服务器 `.env`
-   加载候选将使用的实际配置，运行确定性 preflight。该模式不读取冒烟凭据、不登录、不修改文件；
-   验证 COOKIE_SECURE 为 true（缺省默认 true）、证书私钥匹配及真实 TLS 握手的系统 CA/域名校验。
-   配置为 false、证书不可用或验证失败立即停止，不为满足验收改配置。
-   ```bash
-   set -euo pipefail
-   set +x
-   set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-   test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-   [[ "$deploy_session" =~ ^[0-9a-f-]{36}$ ]]
-   test -s "$tools/deployment_auth_smoke.py"
-   ssh tshb-test "set -eu; set +x; set -a; . /opt/tsz-rust/.env; set +a; python3 - --mode preflight --owner '$deploy_session'" \
-     < "$tools/deployment_auth_smoke.py"
-   ```
+后台运行保留命令句柄、真实退出码与 owner；不要启动第二次 apply。正常跟进约每 60 秒报告有变化的进度；不通过不断查询 CI 或重复 SSH 写操作判断进展。控制器失败会先观察现场并恢复/阻断；原动作仍持 operation 锁时不并行恢复。
 
-3. **数据库只读预检（动服务器状态之前必做）**：必须运行仓库内的确定性工具，不能把
-   多个 `SELECT` 拼进一个 `psql -c` 后再把空输出解释成 0。工具会对每个标量独立调用
-   psql，并把空值、非整数、多行或查询失败全部视为阻断；只输出计数 JSON，不输出 DSN：
-   ```bash
-   set -euo pipefail
-   set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-   test -n "${deploy_checkout:-}"
-   cd "$deploy_checkout"
-   test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-   test -s "$tools/deployment_preflight.py"
-   deployment_preflight=$(
-     ssh tshb-test 'set -a; . /opt/tsz-rust/.env; set +a; python3 -' \
-       < "$tools/deployment_preflight.py"
-   )
-   deployment_preflight=$(
-   python3 -c '
-   import json,sys
-   value=json.load(sys.stdin)
-   expected={"schema_version","entries","v3_entries","successful_migrations","latest_migration"}
-   assert set(value)==expected
-   print(json.dumps(value,sort_keys=True,separators=(",",":")))
-   ' <<<"$deployment_preflight"
-   )
-   printf '%s\n' "$deployment_preflight"
+## 6. status、resume 与人工阻断
 
-   rollback_target_version=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["latest_migration"])' \
-     <<<"$deployment_preflight")
-   [[ "$rollback_target_version" =~ ^[1-9][0-9]*$ ]]
-   migration_paths=$(git ls-tree -r --name-only "$deploy_sha" -- migrations)
-   candidate_up_versions=$(printf '%s\n' "$migration_paths" \
-     | sed -n 's#^migrations/\([0-9][0-9]*\)_.*\.up\.sql$#\1#p' | sort -n)
-   candidate_down_versions=$(printf '%s\n' "$migration_paths" \
-     | sed -n 's#^migrations/\([0-9][0-9]*\)_.*\.down\.sql$#\1#p' | sort -n)
-   rollback_up_versions=$(printf '%s\n' "$candidate_up_versions" \
-     | awk -v target="$rollback_target_version" '$1 > target')
-   rollback_down_versions=$(printf '%s\n' "$candidate_down_versions" \
-     | awk -v target="$rollback_target_version" '$1 > target')
-   test "$rollback_up_versions" = "$rollback_down_versions"
-   test "$(printf '%s\n' "$candidate_up_versions" \
-     | awk -v target="$rollback_target_version" '$1 == target' | wc -l | tr -d ' ')" = 1
-   rollback_expected_version=${rollback_up_versions:+$(printf '%s\n' "$rollback_up_versions" | tail -1)}
-   rollback_expected_version=${rollback_expected_version:-$rollback_target_version}
-   [[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
-   test "$rollback_expected_version" -ge "$rollback_target_version"
-   printf 'rollback_schema_safe=false\nrollback_target_version=%q\nrollback_expected_version=%q\n' \
-     "$rollback_target_version" "$rollback_expected_version" \
-     >> ~/.config/tsz-rust/deploy.lock/state.env
-   ```
-   这份快照是事实记录，不代表自动要求 entries 为 0；实际 migration 约束仍由 migration
-   自身 fail closed，不能为了让部署通过而在预检中写库或清数据。候选版本相对现网新增的
-   每个 migration 都必须有 down migration；部署前数据库版本与候选最高版本写入本 session
-   state，失败回退时只接受这个有界区间。
-   有新迁移时，在写服务器之前核实 down 区间的数据保护条件与隔离验证证据。仅证据证明整个区间可安全撤回时，向本 session state 追加 `rollback_schema_safe=true`，并在交付记录中注明证据；不得仅凭存在 down 文件设为 true。
-   否则保持 false，先明确并批准人工恢复方案；部署失败时停止服务、保留锁与现场并请求恢复决定。未确定任何恢复方案前不得进入服务器写入阶段。
-4. **现有部署来源核对（动服务器状态之前必做）**：读服务器上的正式 manifest，
-   由脚本判定是否与本次目标相同——不要人眼比对两个 40 字符 SHA：
-   ```bash
-   set -euo pipefail
-   set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-   test -n "${deploy_checkout:-}"
-   cd "$deploy_checkout"
-   test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-   deployed_sha=$(ssh tshb-test 'cat /opt/tsz-deploy-manifests/api.json 2>/dev/null || echo "{}"' \
-     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source",{}).get("git_sha",""))')
-   if [ -n "$deployed_sha" ] && ! [[ "$deployed_sha" =~ ^[0-9a-f]{40}$ ]]; then
-     echo "服务器 manifest git_sha 非法，停止"
-     exit 1
-   fi
-   echo "服务器当前: ${deployed_sha:-<无 manifest>}"
-   echo "本次目标:   $deploy_sha"
-   if [ "$deployed_sha" = "$deploy_sha" ]; then
-     echo "该提交已部署：先验证现有制品与健康状态，成功则无需重复发布"
-   else
-     echo "OK 与服务器当前来源不同，可继续"
-   fi
-   printf 'deployed_sha=%q\n' "$deployed_sha" >> ~/.config/tsz-rust/deploy.lock/state.env
-   ```
-   同 SHA 时先验证现有 `api.json` 与实际二进制哈希、运行服务及第 5 节 health/ready/auth 冒烟（使用现有服务端口 8383，不停止服务或启动候选进程）。SHA 相同本身不代表成功。
-   若全部通过且用户未明确要求重部署，核对并释放本 session 本地锁，报告目标已满足，到此结束，不进入第 4 节。
-   若用户明确要求重部署，沿用已有授权继续；验证失败时报告具体差异并按现有授权处理，不能把失败报成已满足。
-
-## 4. 部署步骤
-
-制品下载与预检可能耗时；以下代码在取得远端锁前再次核对 main、工作区及精确 CI run/attempt。
-此复核失败时尚未写远端，按第 1 节释放本 session 本地锁后重新门禁，不能继续使用旧 state。
+`status` 只读原本地事务，不连接服务器：
 
 ```bash
 set -euo pipefail
-set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-test -n "${deploy_checkout:-}"
-cd "$deploy_checkout"
-test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-test -n "${deploy_sha:-}" && test -n "${deploy_tree:-}"
-test -n "${ci_run_id:-}" && test -n "${ci_run_attempt:-}"
-test -n "${artifact_name:-}" && test -n "${staging:-}" && test -n "${tools:-}"
-test -n "${rollback_target_version:-}" && test -n "${rollback_expected_version:-}"
-[[ "$rollback_target_version" =~ ^[1-9][0-9]*$ ]]
-[[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
-test "$rollback_expected_version" -ge "$rollback_target_version"
-test -s "$staging/tsz-rust" && test -s "$staging/tsz-rust.manifest.json"
-test -s "$tools/deployment_manifest.py" && test -s "$tools/ci_metrics.py"
-
-# 写服务器前的最终来源复核；run attempt 变化后必须重新下载并验证产物。
-git fetch origin main
-test "$(git branch --show-current)" = main
-test "$(git rev-parse HEAD)" = "$deploy_sha"
-test "$(git rev-parse origin/main)" = "$deploy_sha"
-test -z "$(git status --porcelain)"
-latest_ci=$(gh api "repos/LonelyFellas/tsz-rust/actions/runs?branch=main&head_sha=$deploy_sha&per_page=100" \
-  --jq '[.workflow_runs[] | select(.name == "CI")] | sort_by(.created_at) | last | if . == null then empty else [.id, .run_attempt, .status, .conclusion] | @tsv end')
-IFS=$'\t' read -r latest_run_id latest_attempt latest_status latest_conclusion <<<"$latest_ci"
-test "$latest_run_id" = "$ci_run_id"
-test "$latest_attempt" = "$ci_run_attempt"
-test "$latest_status" = completed
-test "$latest_conclusion" = success
-
-[[ "$deploy_session" =~ ^[0-9a-f-]{36}$ ]]
-ssh tshb-test "set -eu; set +x; set -a; . /opt/tsz-rust/.env; set +a; python3 - --mode preflight --owner '$deploy_session'" \
-  < "$tools/deployment_auth_smoke.py"
-
-# 1) artifact 已在第 3 节下载并完整验证。现在才取得服务器互斥锁，这是本流程第一次
-#    服务器写入；已有锁只读报告 owner 后停止，绝不抢锁。
-server_lock_result=$(ssh tshb-test "set -eu
-  lock=/opt/tsz-rust/deploy.lock
-  if mkdir \"\$lock\"; then
-    printf '%s\n' '$deploy_session' > \"\$lock/owner\"
-    printf '%s\n' '$deploy_sha' > \"\$lock/git_sha\"
-    printf acquired
-  else
-    printf 'busy owner=%s\n' \"\$(cat \"\$lock/owner\" 2>/dev/null || printf unknown)\" >&2
-    exit 1
-  fi")
-test "$server_lock_result" = acquired
-cat >> ~/.config/tsz-rust/deploy.lock/state.env <<EOF
-server_lock_acquired=true
-EOF
-
-# 锁内重读正式 manifest，堵住只读预检与取得锁之间的竞态。
-locked_deployed_sha=$(ssh tshb-test 'cat /opt/tsz-deploy-manifests/api.json 2>/dev/null || echo "{}"' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("source",{}).get("git_sha",""))')
-if [ "$locked_deployed_sha" != "$deployed_sha" ]; then
-  ssh tshb-test "set -eu; test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'; \
-    rm -f /opt/tsz-rust/deploy.lock/owner /opt/tsz-rust/deploy.lock/git_sha; \
-    rmdir /opt/tsz-rust/deploy.lock"
-  rm -f ~/.config/tsz-rust/deploy.lock/state.env ~/.config/tsz-rust/deploy.lock/owner
-  rmdir ~/.config/tsz-rust/deploy.lock
-  echo "服务器版本在锁前发生变化；释放本 session 锁并从头重新门禁"
-  exit 1
-fi
-
-# 2) 把当前二进制与配套 manifest 成组备份（回退保险）
-deploy_backup_dir=$(ssh tshb-test "
-  set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  base=/opt/tsz-rust/deploy-backups
-  install -d -m 0755 \"\$base\"
-  dir=\$(mktemp -d \"\$base/\$(date -u +%Y%m%dT%H%M%SZ).XXXXXX\")
-  cp /opt/tsz-rust/target/release/tsz-rust \"\$dir/tsz-rust\"
-  if test -f /opt/tsz-deploy-manifests/api.json; then
-    cp /opt/tsz-deploy-manifests/api.json \"\$dir/api.json\"
-  else
-    : > \"\$dir/manifest.absent\"
-  fi
-  printf '%s\n' \"\$dir\"")
-test -n "$deploy_backup_dir"
-[[ "$deploy_backup_dir" =~ ^/opt/tsz-rust/deploy-backups/[A-Za-z0-9._-]+$ ]]
-# 立刻落盘：第 5.1 节 validate/verify 与第 6 节回退都要用，丢了就没法回退
-printf 'deploy_backup_dir=%q\n' "$deploy_backup_dir" \
-  >> ~/.config/tsz-rust/deploy.lock/state.env
-
-# 3) 先安装本提交的原子 restore/manifest 工具，再撤下旧正式 manifest。
-#    从这里到新 manifest verify 完成，任一步失败都必须立即执行第 6 节 restore 并停止。
-deploy_tool_incoming="/opt/tsz-deploy-tools/backend-deployment-manifest.incoming.$deploy_session"
-ssh tshb-test "set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  install -d -m 0755 /opt/tsz-deploy-tools /opt/tsz-deploy-manifests"
-# rsync 一律带 --no-o --no-g：不把本机 uid/gid（如 501）带到服务器——那边没有对应用户，
-# 而 mv 会保留属主；工具与二进制由 root 执行，必须保持 root 属主。
-rsync -az --no-o --no-g "$tools/deployment_manifest.py" "tshb-test:$deploy_tool_incoming"
-ssh tshb-test "set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  python3 '$deploy_tool_incoming' --help >/dev/null
-  python3 '$deploy_tool_incoming' validate-backup --backup-dir '$deploy_backup_dir'
-  mv -f '$deploy_tool_incoming' /opt/tsz-deploy-tools/backend-deployment-manifest.py
-  rm -f /opt/tsz-deploy-manifests/api.json"
-
-# 4) 安装到服务器。**不能直接 cp 覆盖运行中的二进制**（ETXTBSY），
-#    先传到同目录临时名，再用 mv 原子替换（rename 会解除旧 inode 的链接，进程不受影响）。
-binary_incoming="/opt/tsz-rust/target/release/tsz-rust.incoming.$deploy_session"
-ssh tshb-test "set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  install -d -m 0755 /opt/tsz-rust/target/release"
-python3 "$tools/ci_metrics.py" run --name deploy-binary-rsync -- \
-  rsync -az --no-o --no-g "$staging/tsz-rust" "tshb-test:$binary_incoming"
-ssh tshb-test "set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  chmod 0755 '$binary_incoming'
-  mv -f '$binary_incoming' /opt/tsz-rust/target/release/tsz-rust"
-
-# 服务器不再编译；固定记录 0，避免把下载/rsync 时间误报成服务器 build。
-python3 "$tools/ci_metrics.py" record --name deploy-server-build \
-  --value 0 --unit milliseconds
-
-# 5) 停止正式服务，把候选进程只绑定在 loopback；部署冒烟完成前不开放业务流量，
-#    DEPLOYMENT_SMOKE_ONLY 同时关闭所有后台 worker，避免隔离窗口内产生业务写入。
-candidate_port=18383
-candidate_log="/opt/tsz-rust/deploy-candidate.$deploy_session.log"
-candidate_pid=$(ssh tshb-test "set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  systemctl stop tsz-rust
-  if systemctl is-active --quiet tsz-rust; then
-    echo 'formal service is still active' >&2
-    exit 1
-  fi
-  if ss -H -ltn 'sport = :$candidate_port' | grep -q .; then
-    echo 'candidate port is already in use' >&2
-    exit 1
-  fi
-  set -a; . /opt/tsz-rust/.env; set +a
-  export BIND_IP=127.0.0.1 DEPLOYMENT_SMOKE_ONLY=true PORT='$candidate_port'
-  nohup /opt/tsz-rust/target/release/tsz-rust > '$candidate_log' 2>&1 </dev/null &
-  pid=\$!
-  printf '%s\n' \"\$pid\" > /opt/tsz-rust/deploy.lock/candidate_pid
-  sleep 2
-  kill -0 \"\$pid\"
-  curl -fsS http://127.0.0.1:$candidate_port/healthz >/dev/null
-  printf '%s\n' \"\$pid\"")
-case "$candidate_pid" in ''|*[!0-9]*) exit 1 ;; esac
-printf 'candidate_port=%q\ncandidate_log=%q\ncandidate_pid=%q\n' \
-  "$candidate_port" "$candidate_log" "$candidate_pid" \
-  >> ~/.config/tsz-rust/deploy.lock/state.env
+python3 /absolute/session/source/ops/deploy_test.py --state-dir /absolute/controller-state status --deployment-id '<deployment-uuid>'
 ```
 
-取得服务器锁后、撤下正式 manifest 前若备份或工具安装失败，先确认 binary/manifest 未变，
-再按 owner 校验释放服务器锁和本地锁；备份与 unique staging 保留供诊断。撤下正式 manifest
-之后的任何失败必须走第 6 节回退，回退 smoke 全绿前不得释放锁。执行任务异常中断时锁必须
-保留，后续任务只读检查 owner/state/backup/manifest 后请求决定，绝不自动抢锁。
-
-**不再向服务器推送源码**：产物由 CI 编译，而 `include_str!` 与 `sqlx::migrate!` 都是编译期内嵌，
-服务器运行期只需要二进制与 `/opt/tsz-rust/.env`。这一并消掉了原先那串排除项
-（`.claude/worktrees`、`rust-toolchain.toml` 等）和「服务器编译器与 CI 不同版本」的缺口。
-`/opt/tsz-rust/target/` 现在只是二进制的存放目录，不再有构建产物写入。
-
-制品路径仍是 `/opt/tsz-rust/target/release/tsz-rust`：`ops/deployment_manifest.py` 里
-`EXPECTED_ARTIFACT_PATH` 硬编码了它，第 6 节的备份/回退也依赖它。路径语义有点怪
-（一个不再构建的 `target/`），但换路径要同时动 manifest 契约与既有备份，不值得。
-
-部署报告必须保留上面三个 JSON 指标：artifact 下载耗时、rsync 耗时和
-`deploy-server-build=0 milliseconds`，并同时报告下载 artifact 的 GitHub 元数据大小与
-manifest 中的原始 binary 字节数。两者分别是压缩上传包与二进制大小，不能混为一个值。
-
-## 5. 冒烟验证（部署不验证 = 没部署）
-
-先运行本节的确定性工具，不再手拼 Cookie 或按 HTTP 非 Secure Cookie 验收。保持
-`COOKIE_SECURE=true`（未显式设置时为服务默认值），不得为冒烟降级、使用 `-k` 或关闭证书校验。
-
-- `candidate`：正式服务保持停止，候选仍为 `127.0.0.1:18383` 且关闭后台 worker。工具在服务器进程内
-  临时监听 `127.0.0.1` 的随机 TLS 端口，只转发 login/refresh/logout 到候选；复用
-  `/etc/letsencrypt/live/test.tianshengzhi.com/{fullchain.pem,privkey.pem}`，不复制私钥、不修改 nginx。
-  客户端只把 TCP 目的地固定到 loopback，仍验证 `test.tianshengzhi.com` 的主机名、证书链与有效期。
-  不重定向外部业务流量；工具结束或失败后关闭临时监听，进程退出时由系统释放 socket。
-- `recovery`：用于持原事务两端锁的旧版本恢复，health/ready 访问本机 `8383`，认证通过
-  `https://test.tianshengzhi.com/api/v1/auth`。执行前确认现有 nginx `/api/v1/` upstream 为该正式服务。
-  根域名 `/healthz`、`/readyz` 可能是前端页面，不能用它们代替本机健康 JSON。
-
-- `existing`：仅用于第 3 节同 SHA 已部署检查，传输与 recovery 相同；必须尚无远端锁并传入
-  `--expected-sha "$deploy_sha"`，工具核对正式 manifest 来源匹配该 SHA，前后均检查远端锁未出现。
-  这不能替代第 3 节实际二进制哈希与 CI 校验，也不能用来恢复旧事务。
-
-candidate/recovery 都必须持有匹配 owner 的两端锁。下列代码的 `smoke_mode` 在旧事务恢复时
-改为 `recovery`，仅在第 3 节同 SHA 检查时改为 `existing`；不得用正式服务结果替代候选验收：
+`resume` 是原事务的**写入恢复入口**，可能停进程、删本次合成数据、有界 down、还原 binary/manifest 及重启。核对原恢复授权、UUID、state/plan/tool 身份和现场后执行：
 
 ```bash
 set -euo pipefail
-set +x
-set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-test -n "${deploy_checkout:-}"
-cd "$deploy_checkout"
-test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-test "$(git rev-parse HEAD)" = "$deploy_sha"
-[[ "$deploy_session" =~ ^[0-9a-f-]{36}$ ]]
-[[ "$deploy_sha" =~ ^[0-9a-f]{40}$ ]]
-test -s "$tools/deployment_auth_smoke.py"
-smoke_mode=candidate
-set -a; source ~/.config/tsz-rust/deploy-smoke.env; set +a
-python3 -c '
-import json,os,pathlib,sys
-json.dump({"source":pathlib.Path(sys.argv[1]).read_text(),
-           "credentials":{"identifier":os.environ["TSZ_SMOKE_IDENTIFIER"],
-                          "password":os.environ["TSZ_SMOKE_PASSWORD"]}},sys.stdout)
-' "$tools/deployment_auth_smoke.py" | ssh tshb-test \
-  "python3 -c 'import io,json,sys; p=json.load(sys.stdin); sys.stdin=io.StringIO(json.dumps(p[\"credentials\"])); exec(compile(p[\"source\"],\"<deployment_auth_smoke>\",\"exec\"))' --mode '$smoke_mode' --owner '$deploy_session' --expected-sha '$deploy_sha'"
+python3 /absolute/session/source/ops/deploy_test.py --state-dir /absolute/controller-state resume --deployment-id '<deployment-uuid>'
 ```
 
-代码仅从已验证 SHA 导出的 `$tools` 读取工具，经 SSH stdin 在服务器内存执行，不落地凭据、token 或
-工具临时文件。不得开启 shell tracing、打印管道输入或原始响应；正常数据库审计不作修改。
-TLS 证书/私钥、系统 CA、Python ssl 模块与既有 HTTPS upstream 必须在停止正式服务前只读核实可用，
-缺失时停止，不能自动改服务器配置。工具只输出固定失败阶段或 PASS JSON，不重试登录。
+上例引号内的 UUID 占位符必须替换为真实 UUID。不得修改已保存计划、owner、工具或状态来伪装原事务；工具变化或丢失、归属不明、旧 state.env 及异常现场须保留证据并提出具体恢复方案，所需新工具/扩大数据影响另行授权。
 
-旧事务的 `$tools` 若尚无此工具，不修改旧 checkout、`deploy_sha`、owner 或备份记录来伪装来源。
-由用户批准恢复工具更新后，先核实含修复的 GitHub main 精确 SHA/最新 CI 成功，从该 SHA 单独导出
-`ops/deployment_auth_smoke.py` 到本地事务专用目录，记录该恢复工具的 SHA、CI run/attempt 和文件摘要；
-仅将上述调用中的工具文件路径指向该导出文件，原事务其余 state 与恢复门禁不变。不得取未提交文件、
-修改旧 `$tools` 或把新的工具来源写成旧二进制来源；新发布仍从自己的精确目标 SHA 导出工具。
+| 状态 | 判定与后续 |
+| --- | --- |
+| `accepted` | 新版验收和清理通过；恢复若只缺解锁，先核对实际身份再完成原锁释放；不重新发布 |
+| `recovered` | 旧版、原账本/manifest 和 HTTPS 鉴权已复验；发布仍失败，CLI 返回 1；核对清理和解锁 |
+| `blocked` | 尚未改变正式运行版本，原事务终止；查明原因后重新准备，不复用旧计划前进 |
+| `manual_required` | 归属、配置、账本、清理或恢复不能证明安全；保留锁/state/backup，停止有风险写入并报告 |
+| `running` / `recovering` | 不等于成功；先确认原命令是否仍运行，不启动并行恢复 |
 
-完整判据为本机 health/ready 的精确 JSON；无 Cookie refresh 的 401 Problem Details
-（`status=401`、`code=invalid_refresh_token`、含 type/title）；login 200 且 Cookie 含
-`Secure; HttpOnly; SameSite=Lax; Path=/api/v1/auth`；通过正常 CookieJar 刷新 200 且 token 轮换；
-携带新 Cookie logout 204 且 Cookie 被清除。工具中途失败时尝试用已接收 Cookie 登出；无法清理时
-明确报告失败，保留锁与现场，不直接删除数据库会话，不把 cleanup 成功当作完整验收成功。
+恢复先停止本次候选与正式进程、清理本次 fixture，再核账本：账本等于基线才直接还原旧二进制/manifest；仅对已批准 `verified_down` 的精确区间，在历史记录一致、新增版本为候选区间前缀且数据守卫通过时才有界 down，账本恢复后才换回旧版。`manual` 或守卫拒绝时不自动 down，也不自动向现网恢复 dump。
 
-若本次含新迁移，仍须在 `$candidate_log` 确认 `database migrations applied`。原有精确 main/CI、
-制品、迁移恢复、manifest 与解锁门禁保持不变。把冒烟结果整理成表格报告给用户。
+**真实回退尚未演练**。正常发布与隔离恢复测试不自动授权测试服故障注入。accepted 后要求回退属于新的回退计划，不能篡改终态让 `resume` 撤销已验收发布。任何未完成恢复/清理不得报成功，不能为了移除锁删除正常数据或修改保留策略。
 
-### 5.1 发布并验证 API 部署 manifest
+## 7. 独立验收、清理与保留
 
-只有隔离候选的全部 smoke PASS 后才执行。先建立并验证新 manifest，再终止候选进程、启动
-正式 systemd service；正式服务的 health/ready 通过后才释放锁。所有变量均来自上面的严格
-校验，不接收自由文本：
+发布命令完成后，以原 plan/UUID 独立只读核实真实服务，不能只转述 state：
 
-```bash
-set -euo pipefail
-set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-test -n "${deploy_checkout:-}"
-cd "$deploy_checkout"
-test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-test "$deploy_sha" = "$(git rev-parse HEAD)"
-test -n "$ci_run_id" && test -n "$ci_run_attempt" && test -n "$deploy_tree"
+- 正式 manifest 验证、运行与磁盘 SHA256、systemd MainPID、唯一 loopback 8383 监听、health/ready 精确 JSON、配置身份一致；正式进程没有 smoke-only。候选 owner 进程/18383 监听均退出。
+- 候选与正式各完成无 Cookie refresh 401 Problem Details、login 200、Secure/HttpOnly/SameSite=Lax/Path=/api/v1/auth、refresh 轮换、logout 204 且 Cookie 清除。真实正常演练中的结果须与状态步骤一致。
+- 草稿创建→新请求读取→修改→新请求读取，revision、内容及备注持久化。只用本次独占合成账号，不使用共享凭据；不发布词表、不领取登录奖励、不购买音频。
+- 精确 fixture UUID、create_key 和已保存词表 ID 的实体及专属依赖无残留：账号/角色/会话、词表/词项/library/幂等登记、资金/音频/outbox/审计及上传引用。入站外键与资金守卫必须通过；另连只读会话复查，核实精确 Redis 账号键不存在。不删除共享 IP 限流桶，不清空共享库/Redis。
+- 配置/前端/nginx 指纹、预选正常实体样本无意外变化；发生引用/资金副作用或无法证明归属时停止风险删除，保留必要 IDs 和阻断信息。清理不是撤回/归档或等宽限期。
+- 实际迁移账本与计划一致、备份组匹配原基线，保留状态/plan/工具来源、download bundle、owner 释放回执和精确 backup。检查 root 属主，不把本机 UID/GID 传给远端运行文件。
+- 两端 owner 锁已释放；临时探针、凭据材料、测试资源按归属清理并独立复查。运维备份、已验收恢复点、事务审计和既有日志保留，不能纳入临时测试删除范围。
 
-ssh tshb-test \
-  "set -eu
-   test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-   python3 /opt/tsz-deploy-tools/backend-deployment-manifest.py create \
-    --component api \
-    --repository LonelyFellas/tsz-rust \
-    --git-sha '$deploy_sha' \
-    --git-tree '$deploy_tree' \
-    --ci-run-id '$ci_run_id' \
-    --ci-run-url '$ci_run_url' \
-    --artifact /opt/tsz-rust/target/release/tsz-rust \
-    --artifact-path /opt/tsz-rust/target/release/tsz-rust \
-    --output /opt/tsz-deploy-manifests/api.json"
+完整报告写明：实际旧/新 SHA、tree、CI run 与生产/验证 attempt、artifact ID/摘要、accepted 时间、事务 UUID、备份/恢复点及适用性、检查与未验证项；下载/上传/总耗时、server build=0、压缩包和二进制字节数；停服时间若只按步骤时间估算须标明上界。真实回退未发生时明确写“未演练”，不以正常成功代替。
 
-ssh tshb-test "set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  python3 /opt/tsz-deploy-tools/backend-deployment-manifest.py verify \
-    --manifest /opt/tsz-deploy-manifests/api.json \
-    --artifact /opt/tsz-rust/target/release/tsz-rust"
-
-ssh tshb-test "set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  test -f /opt/tsz-rust/deploy.lock/candidate_pid
-  recorded_pid=\$(cat /opt/tsz-rust/deploy.lock/candidate_pid)
-  test \"\$recorded_pid\" = '$candidate_pid'
-  kill -TERM \"\$recorded_pid\"
-  stopped=false
-  for attempt in \$(seq 1 30); do
-    if ! kill -0 \"\$recorded_pid\" 2>/dev/null; then stopped=true; break; fi
-    sleep 1
-  done
-  test \"\$stopped\" = true
-  rm -f /opt/tsz-rust/deploy.lock/candidate_pid
-  systemctl start tsz-rust
-  sleep 2
-  systemctl is-active --quiet tsz-rust
-  test \"\$(curl -fsS http://127.0.0.1:8383/healthz)\" = '{\"status\":\"ok\"}'
-  test \"\$(curl -fsS http://127.0.0.1:8383/readyz)\" = '{\"status\":\"ready\"}'"
-
-# 新 manifest 验证完成后才释放服务器锁；再释放同 owner 的本地锁。unique staging 与部署 checkout 保留供审计；不得清理原开发工作区。
-ssh tshb-test "set -eu; test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'; \
-  rm -f /opt/tsz-rust/deploy.lock/owner /opt/tsz-rust/deploy.lock/git_sha; \
-  rmdir /opt/tsz-rust/deploy.lock"
-test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-rm -f ~/.config/tsz-rust/deploy.lock/state.env ~/.config/tsz-rust/deploy.lock/owner
-rmdir ~/.config/tsz-rust/deploy.lock
-printf '保留已验证 staging: %s\n' "$staging"
-```
-
-create 使用同目录临时文件 + 原子 rename；manifest 只包含 Git/CI/制品摘要，不包含环境变量或认证材料。输出中的 `git_sha`、`ci_run_id`、`artifact_sha256`、`accepted_at` 必须纳入部署报告。
-
-## 6. 回退
-
-从本 session 的锁内 state 读回第 4 节记录的精确 `deploy_backup_dir`、部署前 migration
-版本与候选最高版本，不得用通配符或人工猜测。先停止所有业务写入。仅 `rollback_schema_safe=true` 时，允许候选二进制撤回已验证的迁移区间；否则保留停止状态与锁，按已批准的人工恢复方案请求必要决定。数据库已在部署前版本时可直接恢复二进制，无需 down。只有迁移账本验证通过后才恢复旧二进制与 manifest。
-候选二进制把整个 down 区间放在一个外层事务里，任一数据保护门拒绝时不会留下部分回退。
-本节可能在紧急情况下单独执行，因此代码块自带加载：
-
-```bash
-set -euo pipefail
-set -a; . ~/.config/tsz-rust/deploy.lock/state.env; set +a
-test -n "${deploy_checkout:-}"
-cd "$deploy_checkout"
-test "$(cat ~/.config/tsz-rust/deploy.lock/owner)" = "$deploy_session"
-test -n "${deploy_backup_dir:-}"   # 为空说明 state 丢失，停下来人工确认备份目录，不要猜
-test -n "${rollback_target_version:-}" && test -n "${rollback_expected_version:-}"
-[[ "$rollback_target_version" =~ ^[1-9][0-9]*$ ]]
-[[ "$rollback_expected_version" =~ ^[1-9][0-9]*$ ]]
-test "$rollback_expected_version" -ge "$rollback_target_version"
-
-rollback_schema_safe=${rollback_schema_safe:-false}
-case "$rollback_schema_safe" in true|false) ;; *) exit 1 ;; esac
-
-rollback_report=$(ssh tshb-test "set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  if test -f /opt/tsz-rust/deploy.lock/candidate_pid; then
-    candidate_pid=\$(cat /opt/tsz-rust/deploy.lock/candidate_pid)
-    case \"\$candidate_pid\" in ''|*[!0-9]*) exit 1 ;; esac
-    kill -TERM \"\$candidate_pid\" 2>/dev/null || true
-    for attempt in \$(seq 1 30); do
-      if ! kill -0 \"\$candidate_pid\" 2>/dev/null; then break; fi
-      sleep 1
-    done
-    if kill -0 \"\$candidate_pid\" 2>/dev/null; then
-      echo 'candidate process is still active; refusing database rollback' >&2
-      exit 1
-    fi
-    rm -f /opt/tsz-rust/deploy.lock/candidate_pid
-  fi
-  systemctl stop tsz-rust
-  if systemctl is-active --quiet tsz-rust; then
-    echo 'service is still active; refusing database rollback' >&2
-    exit 1
-  fi
-  set -a; . /opt/tsz-rust/.env; set +a
-  current_version=\$(psql \"\$DATABASE_URL\" -X -A -t -q -v ON_ERROR_STOP=1 \
-    -c 'SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success IS TRUE')
-  case \"\$current_version\" in ''|*[!0-9]*) exit 1 ;; esac
-  if test \"\$current_version\" -eq '$rollback_target_version'; then
-    printf '{\"previous_version\":%s,\"target_version\":%s,\"current_version\":%s}\n' \
-      \"\$current_version\" '$rollback_target_version' \"\$current_version\"
-  elif test \"\$current_version\" -gt '$rollback_target_version' \
-    && test \"\$current_version\" -le '$rollback_expected_version'; then
-    if test '$rollback_schema_safe' != true; then
-      echo 'database rollback was not verified safe; preserving stopped service and locks' >&2
-      exit 1
-    fi
-    /opt/tsz-rust/target/release/tsz-rust deploy-undo-migrations \
-      '$rollback_target_version' \"\$current_version\"
-  else
-    echo 'database migration version is outside this deployment rollback range' >&2
-    exit 1
-  fi")
-python3 -c '
-import json,sys
-value=json.load(sys.stdin)
-assert set(value)=={"previous_version","target_version","current_version"}
-assert value["target_version"]==int(sys.argv[1])
-assert value["current_version"]==int(sys.argv[1])
-' "$rollback_target_version" <<<"$rollback_report"
-
-ssh tshb-test "set -eu
-  test \"\$(cat /opt/tsz-rust/deploy.lock/owner)\" = '$deploy_session'
-  python3 /opt/tsz-deploy-tools/backend-deployment-manifest.py restore \
-    --backup-dir '$deploy_backup_dir' \
-    --artifact /opt/tsz-rust/target/release/tsz-rust \
-    --manifest /opt/tsz-deploy-manifests/api.json
-  systemctl restart tsz-rust"
-```
-
-restore 会先验证备份组，再撤下正式 manifest，以同目录临时文件 + `os.replace` 原子换回二进制，最后才恢复旧 manifest；这避免覆盖运行中二进制的 `Text file busy` 和半恢复错配。第 4 节撤下旧 manifest 后，编译、重启、任一 smoke、create 或 verify 失败都必须进入本节按已验证的恢复边界处理，不得保留“新二进制 + 旧 manifest”。如果 down migration 因检测到新正文关联、重复译文或音频资产而拒绝，保留服务停止状态与两端锁，不能丢数据后强行恢复旧二进制。
-
-回退后运行第 5 节 `recovery` 模式的本机 health/ready 与 HTTPS auth smoke；若恢复了 `api.json`，必须执行 `deployment_manifest.py verify`。若旧部署没有 manifest，回退后的来源状态明确为 UNKNOWN/BLOCKED，不能伪造一个 SHA。只有回退 smoke/manifest 全部通过后，才按第 5.1 节相同的 owner 校验顺序释放服务器锁和本地锁；失败时保留锁、state、staging 与 backup 供恢复，绝不自动抢锁。
-
-服务器上不再用源码构建，`/opt/tsz-rust` 下也不再保留源码树（旧版部署残留的源码、`target/` 下除 `release/tsz-rust` 外的构建产物与 import/seed 等旧工具二进制、根目录的手工二进制备份，已于 2026-09-15 清理），运行只需要二进制与 `.env`；含迁移的发布只有已验证安全时才由候选二进制撤回数据库；否则保持停止状态等待恢复决定，不换回不兼容的旧二进制。只有数据库
-已经处于部署前 migration 版本时，二进制恢复才构成完整回退。
-
-## 7. 环境变量
-
-`/opt/tsz-rust/.env`（部署只推送二进制与部署工具，从不触碰它；改它只能 ssh 手动）当前含以下键（2026-09-15 只读核对键名，不含取值）：
-
-- 基础与鉴权：PORT / DATABASE_URL（外部 Aliyun RDS）/ REDIS_URL / JWT_SECRET / ADMIN_JWT_SECRET（必须不同于 JWT_SECRET）
-- **COOKIE_SECURE=true**：认证验收走 HTTPS，必须保留 Secure Cookie；未显式配置时使用默认 true。纯 HTTP 只用于服务器本机无凭据 health/ready，不以 IP 直连 HTTP 进行认证，也不为部署验收降级。
-- Azure TTS：AZURE_SPEECH_ENABLED / AZURE_SPEECH_REGION / AZURE_SPEECH_KEY / AZURE_SPEECH_CONNECT_TIMEOUT_MS / AZURE_SPEECH_REQUEST_TIMEOUT_MS / AZURE_SPEECH_MAX_RESPONSE_BYTES
-- 对象存储：OBJECT_STORAGE_SPACES，以及 speech 空间的 OBJECT_STORAGE_SPEECH_BACKEND / OBJECT_STORAGE_SPEECH_OSS_ENDPOINT / OBJECT_STORAGE_SPEECH_OSS_REGION / OBJECT_STORAGE_SPEECH_OSS_BUCKET / OBJECT_STORAGE_SPEECH_OSS_ROOT / OBJECT_STORAGE_SPEECH_OSS_ACCESS_KEY_ID / OBJECT_STORAGE_SPEECH_OSS_ACCESS_KEY_SECRET / OBJECT_STORAGE_SPEECH_PRIVACY / OBJECT_STORAGE_SPEECH_MAX_OBJECT_SIZE_BYTES / OBJECT_STORAGE_SPEECH_PRESIGN_TTL_SECONDS / OBJECT_STORAGE_SPEECH_CACHE_CONTROL
-- 智能词库 V3 开关（默认 false，取值只接受小写 true/false）：SMART_LEXICON_V3_READ / SMART_LEXICON_V3_CREATE / SMART_LEXICON_V3_EDIT / SMART_LEXICON_V3_PUBLISH / SMART_LEXICON_V3_PROJECTION / SMART_LEXICON_V3_SENTENCE_ASSOCIATIONS / SMART_LEXICON_V3_SENTENCE_TARGET_DISCOVERY；另有 SMART_LEXICON_V3_LEGACY_BRIDGE_READ / SMART_LEXICON_V3_SENSE_COMPONENT_USAGES，配置结构里已无对应字段，不被读取
-
-新增配置项先核对 `.env.example`、`docs/deployment.md` 与目标环境；如果服务器缺少必需配置，在部署写入前准备具体方案并取得相应授权，不隐式修改服务器 .env。
+本手册不创建自动 CD，也不改变现有 PR/main 两轮 CI。后续自动化只能调用同一控制器，并须有独立授权和同等门禁。

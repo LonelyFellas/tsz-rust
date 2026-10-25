@@ -10,5 +10,5 @@ description: 将 tsz-rust 当前 GitHub main 的成功 CI 制品部署到 tshb-t
 
 - 从当前 checkout 解析链接，不能读取另一 worktree 的同名文件。
 - 当前会话已加载对应项目技能时沿用其流程，不重复执行。
-- 使用当前宿主可调用的工具；不凭空执行 slash command，不冒充不可用的独立 reviewer 或指定部署 agent。
-- 若要求的工具确实缺失，先完成允许的准备工作，再准确报告受阻步骤；不能以兼容为由跳过质量门。
+- 发布和恢复统一调用精确候选的 `ops/deploy_test.py`，不维护手工 SSH/rsync/manifest 步骤。
+- 执行者按项目 AGENTS.md 的宿主约定处理：Claude 直接执行同一控制器流程，不强制寻找 runner；不冒充不可用工具或以兼容为由跳过质量门。
