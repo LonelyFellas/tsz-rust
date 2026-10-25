@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "kind": "stage-d-real-manual-deployment-summary",
+  "status": "passed",
+  "target": "tshb-test",
+  "deployment_id": "ece39ae8-abc6-4e24-9b1b-607d9615583e",
+  "controller_status": "accepted",
+  "source": {
+    "git_ref": "refs/heads/main",
+    "git_sha": "65c16794c1c51691ccf1bbe862db29fb0d1b4425",
+    "git_tree": "21c164a6e3d57725707cacfab1109b6fa30449cd",
+    "repository": "LonelyFellas/tsz-rust"
+  },
+  "ci": {
+    "artifact_id": 12589510039,
+    "latest_attempt": 1,
+    "run_attempt": 1,
+    "run_id": 40167390992,
+    "run_url": "https://github.com/LonelyFellas/tsz-rust/actions/runs/40167390992",
+    "verification_attempt": 1,
+    "verification_receipt_sha256": "546fcb8e9da0c9280acc9f2ab83125dd84a56eba7e7ee4b0b309eb29319a0d30",
+    "workflow": "CI"
+  },
+  "artifact_sha256": "63ddfd9fd26d6da07948c5d03282aae28edc6fbe0071a0c6b34a7499358d9b73",
+  "artifact_bytes": 60000488,
+  "previous_source": {
+    "git_sha": "f4fab9ef579be2381265ed886bddc94aebaf1270",
+    "git_tree": "50bbb43e7f0af726bfc6b036487108864652487e",
+    "remote_ref": "refs/heads/main",
+    "repository": "LonelyFellas/tsz-rust"
+  },
+  "previous_artifact_sha256": "30751290881d5b0f25a3f431e18885e862d5429cca54febb01987b533d737c6b",
+  "started_at": "2026-10-25T08:23:54.614462+00:00",
+  "accepted_at": "2026-10-25T08:24:43.030245Z",
+  "independent_verified_at": "2026-10-25T08:25:36.152769+00:00",
+  "migration_interval": {
+    "baseline_version": 20261024090000,
+    "candidate_version": 20261024090000,
+    "classification": "no_schema_change",
+    "migrations": [],
+    "versions": []
+  },
+  "checks": {
+    "exact_ci_artifact_and_smoke_receipt": "passed",
+    "candidate_health_and_https_auth": "passed",
+    "formal_process_digest_listener_and_configuration": "passed",
+    "formal_https_cookie_refresh_logout": "passed",
+    "business_create_update_new_request_readback": "passed",
+    "same_migration_ledger": "passed",
+    "independent_db_and_redis_fixture_audit": "passed",
+    "normal_protected_entity_sample": "passed",
+    "frontend_manifest_and_nginx_unchanged": "passed",
+    "environment_file_and_login_reward_setting_unchanged": "passed",
+    "binary_backup_valid_and_baseline_matching": "passed",
+    "candidate_exited_and_both_owner_locks_released": "passed"
+  },
+  "normal_entity_verification_scope": "Exact preselected entry and wordlist IDs plus digests; not all business rows were compared during normal service traffic.",
+  "cleanup": {
+    "fixture_count": 3,
+    "all_database_checks_zero": true,
+    "incoming_reference_audits_passed": true,
+    "redis_exact_account_keys_absent": true,
+    "candidate_owner_processes_remaining": 0,
+    "remote_active_lock_present": false,
+    "released_owner_matches": true,
+    "local_active_lock_present": false,
+    "temporary_probes_removed": true,
+    "complete": true
+  },
+  "configuration": {
+    "cookie_secure": "true",
+    "login_reward_enabled": "true",
+    "file_and_runtime_identity_unchanged": true
+  },
+  "preserved_binary_backup": {
+    "path": "/opt/tsz-rust/deployment-transactions/ece39ae8-abc6-4e24-9b1b-607d9615583e/backup",
+    "ready": true,
+    "valid": true,
+    "source_sha": "f4fab9ef579be2381265ed886bddc94aebaf1270",
+    "sha256": "30751290881d5b0f25a3f431e18885e862d5429cca54febb01987b533d737c6b",
+    "matches_baseline": true
+  },
+  "database_restorepoint": {
+    "snapshot_utc": "2026-10-25 07:09:40.429034+00",
+    "backup_sha256_verified": true,
+    "isolated_pg18_restore_verified": true,
+    "same_deployed_manifest_and_process": true,
+    "same_migration_ledger": true,
+    "recovery_method": "Restore old binary/manifest only while ledger remains equal. No database restore or down authorized.",
+    "post_snapshot_writes": "Not overwritten; failure recovery leaves current compatible schema/data in place.",
+    "database_restore_authorized": false
+  },
+  "controller_completed_steps": [
+    "backup",
+    "upload",
+    "stop",
+    "install",
+    "candidate_start",
+    "candidate_verify",
+    "formal_start",
+    "formal_verify",
+    "business_verify",
+    "accept",
+    "unlock"
+  ],
+  "metrics": {
+    "download_seconds": 15.367,
+    "upload_seconds": 11.885,
+    "apply_seconds": 49.436,
+    "server_build_milliseconds": 0,
+    "archive_metadata_bytes": 25988593,
+    "binary_bytes": 60000488,
+    "formal_stop_to_ready_upper_bound_seconds": 8.091,
+    "downtime_measurement": "Controller stop-intent to formal_start readiness result; upper bound, not continuous external uptime measurement.",
+    "step_seconds": {
+      "backup": 1.25,
+      "upload": 11.885,
+      "stop": 1.449,
+      "install": 1.535,
+      "candidate_start": 1.204,
+      "candidate_verify": 2.193,
+      "formal_start": 1.697,
+      "formal_verify": 2.354,
+      "business_verify": 1.615,
+      "accept": 1.549,
+      "unlock": 0.986
+    }
+  },
+  "failure_recovery": {
+    "triggered": false,
+    "fault_injection": false,
+    "real_rollback_rehearsed": false,
+    "note": "Real normal deployment passed; production-host rollback execution was not exercised. Isolated failure tests are separate evidence."
+  },
+  "automatic_cd_enabled": false,
+  "scope": {
+    "backend_deployed": true,
+    "frontend_deployed": false,
+    "business_config_modified": false,
+    "new_migrations_applied": false,
+    "database_restored": false,
+    "automatic_cd_enabled": false,
+    "source_code_modified": false,
+    "commit_push_or_pr": false
+  },
+  "retention": {
+    "full_local_receipt_retained": true,
+    "exact_source_bundle_and_owner_state_retained": true,
+    "binary_backup_and_database_restorepoint_preserved": true
+  },
+  "usage": "Historical normal-path acceptance evidence. Every later deployment still needs fresh main/CI/artifact/baseline/configuration/recovery-point gates."
+}

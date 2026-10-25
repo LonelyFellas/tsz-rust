@@ -1,42 +1,33 @@
 ---
 name: deploy
-description: 将 tsz-rust 当前 GitHub main 的成功 CI 制品部署到 tshb-test，执行精确来源校验、部署锁、备份、原子替换、完整冒烟与回退。仅用于明确的后端部署请求；讨论或准备部署不触发服务器写入。
+description: 经明确授权，使用 ops/deploy_test.py 将当前 GitHub main 的成功 CI 制品发布到 tshb-test，执行来源门禁、持久化事务、备份、完整验收、恢复与精确清理。准备工作不授权服务器写入。
 ---
 
-# 后端部署到 tshb-test
+# 后端发布到 tshb-test
 
-通用授权与主任务记录遵循 [AGENTS.md](../../../AGENTS.md)。复用已确认的范围、配套发布依据和同状态验收，不重新评估需求；下列执行时门禁仍逐项运行，已有授权不等于已有 CI/版本证据。
+通用授权与任务工作区遵循 [AGENTS.md](../../../AGENTS.md)。完整操作只维护在 [runbook](references/runbook.md)，接口、状态与验收边界见 [控制器说明](../../../docs/ci/deployment-controller.md)。执行前完整读取三者；兼容入口和部署 agent 不维护第二套步骤。
 
-## 执行入口
+## 唯一执行入口
 
-用户明确要求后端部署时，按项目 AGENTS.md 委派 `backend_deploy_runner`；该 runner 不再次委派。
-在 Codex 使用项目定义的 agent；其他工具也须遵守该入口，不能用普通子任务冒充指定 runner。
-本技能及其引用的操作手册是唯一部署流程；前端部署、提交或合并授权不能代替后端部署授权。
-本会话已明确授权的同一后端部署可以继续，不因跨步骤或等待重新请求相同许可。
+使用精确候选提交携带的 `ops/deploy_test.py`：`plan` 生成只读计划，`apply` 执行发布，`status` 查看本地状态，`resume` 观察并恢复原事务。不拼接另一套 SSH/rsync/systemctl/manifest 命令；不绕过控制器的步骤顺序或门禁。
 
-通过 Codex CLI 恢复协调会话时，必须显式指定后端项目目录（例如 `codex -C <tsz-rust-root> exec resume <session-id>`），恢复后先核对 cwd 和项目自定义 agent 的加载状态，再唤醒 `backend_deploy_runner`。从前端或其他目录恢复可能得到 `unknown agent_type`；先修正项目上下文，不用普通代理替代。CLI 恢复的 sandbox/approval 设置也须核对并沿用本会话已获授权的执行环境，不能假设自动继承。
+- Codex 宿主使用已加载的项目 `backend_deploy_runner`；它直接执行，不再递归委派。工具缺失时准确报告限制，不让普通子任务冒充。
+- Claude 会话按用户既有约定直接执行相同控制器流程，不以不存在的 runner 阻断；两种宿主遵守同一权限、来源和验收要求。
+- 只有明确的后端发布授权才运行 `apply`；`resume` 也可能停服、清理数据、执行有界 down 及重启，须在本事务恢复授权内使用。提交、合并、前端部署和阅读文档均不代替后端授权。
+- 已授权的同一事务连续推进；中断后读取原 owner、plan、state 与现场，不重新 `apply`，不因换步骤或等待重复申请已有授权。
 
-实际执行前必须完整读取 [操作手册](references/runbook.md)，包括失败后的回退和锁清理。
-仅做讨论/评估时按需读取，不执行手册中的变更命令。
+## 执行门禁
 
-本次需要前端配套发布时，读取本仓 [配套发布清单](../contract-sync/references/paired-release.md)，核实实际版本组合与顺序；清单不能替代本技能的 runner、CI、锁或制品门禁。
+1. 准备独立干净的 `main` checkout，HEAD/tree 等于当前 GitHub main；原开发工作区不切换、不清理。控制器及直接依赖摘要固定到计划，下载目录与受信工具目录分离。
+2. 最新精确 CI run/attempt 必须 completed/success、来自同仓 main 的 push/workflow_dispatch。生产 attempt 和验证 attempt 分开，绑定精确 artifact ID、有效期、摘要与最新通过且清理完成的 smoke 回执；缺失、失败、未知或来源漂移一律阻断。
+3. 在服务器写入前核实部署基线、完整迁移账本、配置身份、TLS、资源容量，以及可用的写前恢复点。控制器不自动创建数据库备份，也不判断恢复点是否适用于当前数据与候选；按 [备份恢复规范](../../../docs/postgresql-backup-restore.md) 留下验收和适用性证据。
+4. 无新增迁移时，只有账本仍等于基线且旧版兼容当前数据才允许二进制/manifest 恢复。有新增迁移时，先取得实际基线的隔离升级/恢复证据与独立批准的策略；合成演练不授权真实数据 down/PITR。未知现场进入 `manual_required`，保留锁和状态。
+5. `apply` 管理本地/远端 owner 锁、动作前 intent、结果落盘、成组备份和原子替换。正式服务停止前再次核对 main/CI/基线，变更开始后固定候选；不抢锁、不手工补写 manifest、不盲目重发。
+6. 保持 `.env`、nginx、前端和业务开关不变。`COOKIE_SECURE=true`；`LOGIN_REWARD_ENABLED` 可开可关，但仍参与配置身份和漂移检查。服务器只运行精确 CI 二进制，不同步源码或现场编译。
+7. 候选和正式 HTTPS 鉴权、正式进程/摘要/监听、草稿持久化、精确 fixture 清理全部通过才创建 v2 accepted manifest。独立复查正常数据保护、数据库/Redis 无本次残留、配置和前端指纹、候选退出及同 owner 解锁；未验证或失败不能报告成功。
 
-## 核心门禁
+## 验收与汇报
 
-- 使用本次独立的干净部署 checkout，其 main HEAD 必须等于 GitHub 当前 origin/main；锁内记录 checkout、SHA、tree 与 session。原开发工作区的无关改动不阻断部署。
-- 精确 SHA 最新 CI 必须成功，skipped/neutral、失败、无记录、异常或未知结果均不放行。
-- 使用目标提交携带的 CI 门禁工具；等待时保留句柄和原始退出码，最长等待按工具设置，持续提供必要进展。main 前进须释放尚未进入服务器阶段的本 session 锁，再从新 SHA 重走。
-- 任意服务器写入前验证 CI run/attempt、制品唯一性/有效期/哈希/manifest、SSH、只读数据库预检、当前部署来源，以及完整 smoke 所需凭据可用且不输出。
-- 本地和远端锁 owner 必须属于同一 session；跨调用状态存入锁内 state，不能假设 shell 变量仍在。
-- 服务器无 Git checkout，不同步源码、不现场编译；只安装精确 CI 二进制，不改 .env 或前端，不执行无关数据库操作；本次迁移及其有界恢复按下条执行。
-- 成组备份二进制与 manifest，再原子替换；撤下正式 manifest 后的失败按手册回退。涉及迁移时先验证本次 down 区间可安全撤回并记录证据，或明确已批准的人工恢复方案。只有已验证安全的区间才允许自动 down；否则失败时保留服务停止、锁与现场并请求恢复决定，不自动改库或换回不兼容二进制。
-- health、ready、auth 全链路和制品 verify 全部通过才算成功；禁止只凭服务 active、退出码 0 或 JSON 中的 SHA 判定。
-- 不抢占/删除其他 session 的锁、不手工补造 manifest，不在失败后盲目重跑整次发布。
+2026-10-25 已完成控制器的真实正常发布演练，见 [阶段 D 证据](../../../docs/ci/evidence/2026-10-25-stage-d-manual-deployment.json)。**真实回退尚未演练**；不把隔离故障测试或正常发布成功写成现网恢复通过，不自动注入故障或启用 CD。
 
-## 执行顺序与终点
-
-按手册依次完成「精确源码与本地锁 → CI → 产物与只读预检 → 远端锁与备份 → 原子替换 → smoke → manifest → 同 owner 解锁」。
-任一步阻断时按已到达阶段处理；恢复任务先读 state/owner/backup/manifest，不从头猜测或清现场。
-
-报告部署 SHA、CI run/attempt、制品校验、下载/同步耗时、server build=0、smoke、manifest 与锁状态。
-失败时报告是否已写远端、是否回退、回退验证与剩余阻塞；未完成完整验收不能报部署成功。
+交付实际版本、CI run/生产与验证 attempt、artifact ID/digest、owner、备份/恢复点、各验收及清理结果，记录下载、上传、总耗时与 server build=0，区分压缩包与二进制大小。失败时同时报告 mutation 边界、实际版本、恢复/锁状态和残留；未完成项保留为未知或阻断。

@@ -1,12 +1,12 @@
-# 测试服发布控制器：阶段 C 本地验收
+# 测试服发布控制器：接口、状态与验收边界
 
-## 当前交付边界
+## 当前验证状态
 
-阶段 C 实现 `ops/deploy_test.py` 的 `plan/apply/status/resume`、持久化发布事务、故障恢复及正式 HTTPS 入口验收。当前只完成本地隔离测试；**未对 `tshb-test` 执行新控制器的发布或恢复，未启用自动 CD**。提交、推送、PR、实际发布和后续手动演练分别需要对应授权。
+`ops/deploy_test.py` 的 `plan/apply/status/resume` 是后端发布与原事务恢复的统一入口，执行步骤以 [部署 runbook](../../.agents/skills/deploy/references/runbook.md) 为准；兼容技能和执行 agent 复用同一流程。本说明解释接口和状态，不维护另一套远端命令。
 
-现行实际发布入口仍是 [部署 runbook](../../.agents/skills/deploy/references/runbook.md)。阶段 D 在独立授权的手动演练通过后，再切换统一入口并移除重复执行路径。本说明中的命令用于解释接口，不代表执行真实发布的授权。
+2026-10-25 阶段 D 已使用精确 main `65c16794c1c51691ccf1bbe862db29fb0d1b4425` 完成 `tshb-test` 的**真实正常发布验收**：候选/正式鉴权、业务持久化、v2 manifest、精确清理和独立复查通过，见[脱敏演练证据](evidence/2026-10-25-stage-d-manual-deployment.json)。本次无新增迁移、未触发恢复、未主动注入故障；**真实回退尚未演练**。自动 CD 未启用，阅读本文不授予发布或恢复授权。
 
-本次实现基于 `462c0ef6646df1fb38fd6fc9344d84f62fd4e50b`。阶段 B 已提供精确 CI 制品与隔离 smoke；本阶段复用其 manifest、基线采集、迁移区间计算和证据格式，不增加自动部署 workflow，不缩减已有 CI 检查。
+阶段 C 的隔离故障/中断测试与阶段 D 的正常真实演练分别说明各自范围；旧记录不是当前候选或现场证明。阶段 B 的制品 manifest、基线采集和迁移证据格式继续复用，原有完整 CI 保留。
 
 ## 模块职责
 
@@ -48,7 +48,7 @@ GitHub 门禁要求受信工具所在 checkout 为干净 `main`，HEAD/tree 与�
 python3 ops/deploy_test.py --state-dir /absolute/state-dir plan --bundle /absolute/bundle --output /absolute/plan.json
 ```
 
-有新增迁移时追加 `--recovery-policy /absolute/recovery-policy.json`。审批文件格式见下一节。当前阶段 C 不执行真实 `apply` 或 `resume`；只有后续获得发布或事故恢复授权后才使用相应接口：
+有新增迁移时在 `plan` 子命令后追加 `--recovery-policy /absolute/recovery-policy.json`，审批文件格式见“中断与迁移恢复”。`apply` 必须具有本次发布授权；`resume` 须处于原事务恢复授权内：
 
 ```bash
 python3 ops/deploy_test.py --state-dir /absolute/state-dir apply --plan /absolute/plan.json
@@ -57,16 +57,16 @@ python3 ops/deploy_test.py --state-dir /absolute/state-dir apply --plan /absolut
 查看状态只读本地文件，不访问服务器：
 
 ```bash
-python3 ops/deploy_test.py --state-dir /absolute/state-dir status --deployment-id <deployment-uuid>
+python3 ops/deploy_test.py --state-dir /absolute/state-dir status --deployment-id '<deployment-uuid>'
 ```
 
 恢复会观察远端并可能停服、清理本次 fixture、回退及重启，属于写操作：
 
 ```bash
-python3 ops/deploy_test.py --state-dir /absolute/state-dir resume --deployment-id <deployment-uuid>
+python3 ops/deploy_test.py --state-dir /absolute/state-dir resume --deployment-id '<deployment-uuid>'
 ```
 
-CLI 只有 `accepted` 返回 0；`recovered` 表示发布失败但已恢复旧版本，仍返回 1。`blocked`、`manual_required`、非法计划或未知现场也返回 1。不能用命令执行成功替代检查事务状态。
+`apply`/`resume` 只有结果为 `accepted` 才返回 0；`recovered` 表示发布失败但已恢复旧版本，仍返回 1。`blocked`、`manual_required`、非法计划或未知现场也返回 1。`plan` 成功写入计划或 `status` 成功读取状态均可返回 0，不能将它们的退出码当作发布成功；仍须检查事务状态和实际现场。
 
 ## 状态与顺序
 
@@ -133,7 +133,7 @@ main 只在 mutation 边界之前跟踪。停服前 main 或基线变化会阻�
 
 v2 accepted manifest 记录生产 attempt、verification attempt、artifact ID、二进制摘要和验收回执摘要。旧 v1 继续可校验、备份和恢复。
 
-## 本地验收证据
+## 隔离验证与真实演练证据
 
 可重复的工具回归：
 
@@ -149,4 +149,6 @@ python3 -m unittest discover -s ops -p 'test_*.py'
 - [随机凭据证据](evidence/2026-10-25-stage-c-random-credentials.json)
 - [本轮最终验证与清理回执](evidence/2026-10-25-stage-c-validation.json)
 
-这些本地证据均为 `release_eligible=false`。真实 SSH/systemd/nginx 端到端、测试服真实迁移恢复和人工事故处置仍须后续独立授权验证；当前不能以单元测试或隔离业务验证替代。
+以上阶段 C 本地证据均为 `release_eligible=false`，不替代真实发布。阶段 D 的[正常发布证据](evidence/2026-10-25-stage-d-manual-deployment.json)已覆盖实际 SSH/systemd/nginx、正式鉴权和清理；实际 `apply` 49.436 秒，下载 15.367 秒、上传 11.885 秒，服务器 build=0，正式停服至 ready 的步骤时间上界为 8.091 秒。
+
+无新增迁移时的真实正常发布成功，不证明真实回退、测试服 down/PITR 或人工事故处置成功。后续故障演练须有独立范围和授权，不自动扩展；数据库备份只覆盖快照时刻和数据库，不覆盖外部对象存储。控制器不创建数据库恢复点、不自动验证其新鲜度，也不替代 runbook 的独立现场复查。

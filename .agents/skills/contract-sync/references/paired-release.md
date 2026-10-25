@@ -31,7 +31,7 @@
 
 - 同版本、配置、schema/数据条件下已有效的兼容、真实联调与组件验收证据共享，只补缺项或变化；各仓 deploy 规定的执行时门禁仍须运行，历史记录不能代替当前 main/CI/锁与来源核验。
 - 先完成已授权的代码、契约、测试和可审查清单；缺少外部动作授权时，此处就是交付终点。沿用会话中已有的同范围授权，不按仓库反复问相同许可。
-- 前后端部署分别读取目标 checkout 的 `.agents/skills/deploy/SKILL.md`。后端必须使用项目指定的 `backend_deploy_runner`，不能让普通 agent 冒充；工具不可用就准确报告限制。
+- 前后端部署分别读取目标 checkout 的 `.agents/skills/deploy/SKILL.md`。后端统一使用精确候选的 `ops/deploy_test.py` 控制器；执行者按后端 AGENTS.md 区分宿主，不在此维护第二套 runner 或远端命令规则。
 - 两仓现有 deploy 均要求 GitHub 当前 main；这份清单不提供任意 SHA 部署能力。等待期间任一 main/CI run/attempt 变化，重新核对候选配对、兼容证据及该仓门禁，再继续；不传不存在的版本参数绕过检查。
 - 保持组件级状态：待发布、已写入待验收、已验收、失败或未知。只在该组件 smoke 和 manifest verify 都通过后标为已验收。
 - 中途失败立即按对应 runbook 处理，记录已完成部分、实际版本及恢复限制。继续前读取当前 manifest/锁/state；已成功且来源未变的组件复用验收，不盲目重发整组。
