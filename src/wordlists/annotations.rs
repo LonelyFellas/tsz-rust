@@ -33,7 +33,7 @@ pub fn response<T: Serialize>(
             return Err(crate::error::AppError::conflict(
                 crate::error::ErrorCode::WordListConflict,
                 None,
-                "此词表包含自定义词汇，请刷新页面后重试",
+                "此词表包含自定义词条，请刷新页面后重试",
             ));
         }
         if body.get("entry_ids").is_some() {

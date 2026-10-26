@@ -13,8 +13,9 @@ pub async fn search(pool: &PgPool, query: DictionaryQuery) -> Result<DictionaryP
         page: query.page,
         page_size: query.page_size,
     })?;
-    let normalized = normalize_headword(&q)
-        .map_err(|_| AppError::validation(ErrorCode::InvalidQuery, "q", "请输入有效的英文词汇"))?;
+    let normalized = normalize_headword(&q).map_err(|_| {
+        AppError::validation(ErrorCode::InvalidQuery, "q", "请输入有效的英文词条名称")
+    })?;
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     // One read snapshot keeps counts, matching and publication content consistent.
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")

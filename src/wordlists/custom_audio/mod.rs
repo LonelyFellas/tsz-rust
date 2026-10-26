@@ -126,7 +126,7 @@ pub async fn generate_in(
     if selected.len() != request.item_ids.len() {
         return Err(AppError::bad_request(
             ErrorCode::ValidationFailed,
-            "只能为本词表的自定义词汇生成语音",
+            "只能为本词表的自定义词条生成语音",
         ));
     }
     let mut new_items = Vec::new();
@@ -170,7 +170,7 @@ pub async fn generate_in(
             idempotency_key: batch.to_string(),
             source_type: "wordlist_custom_audio".into(),
             source_id: batch.to_string(),
-            reason: "自定义词汇英式及美式语音".into(),
+            reason: "自定义词条英式及美式语音".into(),
             evidence_ref: None,
         },
     )

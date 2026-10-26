@@ -165,7 +165,7 @@ pub fn validate_items(name: &str, items: &[WordlistContentItem]) -> Result<(), A
                     && custom.definition.chars().count() <= 200 => {}
             _ => {
                 return Err(invalid(
-                    "请选择平台词条，或填写自定义词汇（1–50 字）及释义（1–200 字）",
+                    "请选择平台词条，或填写自定义词条（1–50 字）及释义（1–200 字）",
                 ));
             }
         }
@@ -410,7 +410,7 @@ pub async fn update(
                 return Err(AppError::conflict(
                     ErrorCode::WordListConflict,
                     None,
-                    "此词表包含自定义词汇，请刷新页面后重新编辑",
+                    "此词表包含自定义词条，请刷新页面后重新编辑",
                 ));
             }
             let notes: std::collections::HashMap<_, _> = old

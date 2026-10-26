@@ -11,7 +11,7 @@ pub async fn match_import(
     if input.words.is_empty() || input.words.len() > 100 {
         return Err(AppError::bad_request(
             crate::error::ErrorCode::InvalidQuery,
-            "每批须包含 1–100 个词汇",
+            "每批须包含 1–100 个词条",
         ));
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;

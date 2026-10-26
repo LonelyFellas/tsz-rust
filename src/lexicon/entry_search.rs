@@ -34,7 +34,7 @@ pub(crate) async fn exact_batch(
         .iter()
         .map(|word| normalize_headword(word).map(|word| word.key))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| AppError::bad_request(ErrorCode::InvalidQuery, "请输入 1–200 字的词汇"))?;
+        .map_err(|_| AppError::bad_request(ErrorCode::InvalidQuery, "请输入 1–200 字的词条名称"))?;
     let matches: Vec<(i64, Uuid, Uuid)> =
         sqlx::query_as(include_str!("search_sql/import_exact.sql"))
             .bind(&keys)
@@ -106,7 +106,7 @@ pub(crate) async fn search(
         return Ok(vec![]);
     }
     let normalized = normalize_headword(q)
-        .map_err(|_| AppError::bad_request(ErrorCode::InvalidQuery, "请输入 1–200 字的词汇"))?;
+        .map_err(|_| AppError::bad_request(ErrorCode::InvalidQuery, "请输入 1–200 字的词条名称"))?;
     let mut ids = Vec::with_capacity(LIMIT);
     append(tx, EXACT, &normalized.key, &mut ids, exclude).await?;
     // Short words remain searchable, without broad prefix/fuzzy scans for a/an.
