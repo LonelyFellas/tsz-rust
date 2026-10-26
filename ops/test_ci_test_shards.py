@@ -34,8 +34,12 @@ class IntegrationShardsTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         matrix = re.search(r"module: \[([^\]]+)\]", workflow)[1].split(", ")
         self.assertEqual(matrix, list(SHARD_MODULES))
-        grouped = classify_targets(discover_targets(ROOT))
-        self.assertEqual(len({target for shard in SHARD_MODULES for target in targets_for(shard, grouped)}), 97)
+        targets = discover_targets(ROOT)
+        for discovered in [targets, (*targets, "speech_shard_fixture")]:
+            with self.subTest(targets=discovered):
+                grouped = classify_targets(discovered)
+                covered = {target for shard in SHARD_MODULES for target in targets_for(shard, grouped)}
+                self.assertEqual(covered, set(discovered))
 
     def test_omitted_duplicate_or_unexpected_execution_fails(self):
         for mutation in [lambda r: r[1]["executed"].pop(), lambda r: r[1]["executed"].append(r[1]["executed"][0]), lambda r: r[1]["executed"].append({"target": "unknown", "name": "extra", "status": "ok"})]:

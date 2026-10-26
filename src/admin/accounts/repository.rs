@@ -1,13 +1,10 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{
-    admin::{
-        Admin, AdminDialectPreference, AdminRole, AdminStatus, NewAdmin,
-        accounts::model::{AdminAccountAdminListFilter, AdminAccountRecord},
-        permissions::{LEGACY_PUBLICATION_KEYS, catalog},
-    },
-    platform::is_unique_violation,
+use crate::admin::{
+    Admin, AdminRepository, AdminRepositoryError, AdminRole, AdminStatus, NewAdmin,
+    accounts::model::{AdminAccountAdminListFilter, AdminAccountRecord},
+    permissions::{LEGACY_PUBLICATION_KEYS, catalog},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -125,30 +122,14 @@ impl AdminAccountsRepository {
     }
 
     pub async fn create(&self, admin: NewAdmin) -> Result<Admin, AdminAccountsRepositoryError> {
-        sqlx::query_as!(
-            Admin,
-            r#"
-            INSERT INTO admins (id, phone, display_name, password_hash, role, must_change_password, created_by_admin_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, phone, display_name, password_hash, security_version,
-                      role as "role: AdminRole",
-                      status as "status: AdminStatus",
-                      must_change_password, failed_login_count, locked_until,
-                      created_by_admin_id,
-                      dialect_preference as "dialect_preference: AdminDialectPreference",
-                      created_at, updated_at
-            "#,
-            admin.id,
-            admin.phone,
-            admin.display_name,
-            admin.password_hash,
-            admin.role as AdminRole,
-            admin.must_change_password,
-            admin.created_by_admin_id
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(map_create_error)
+        AdminRepository::new(self.pool.clone())
+            .create(admin)
+            .await
+            .map_err(|error| match error {
+                AdminRepositoryError::AlreadyExists => AdminAccountsRepositoryError::AlreadyExists,
+                AdminRepositoryError::NotFound => AdminAccountsRepositoryError::NotFound,
+                AdminRepositoryError::Db(error) => AdminAccountsRepositoryError::Database(error),
+            })
     }
 
     pub(crate) async fn admin_list(
@@ -363,12 +344,4 @@ fn legacy_publication_required_keys() -> Vec<String> {
         .collect();
     catalog::expand_grants(&mut keys);
     keys.into_iter().collect()
-}
-
-fn map_create_error(error: sqlx::Error) -> AdminAccountsRepositoryError {
-    if is_unique_violation(&error, "admins_phone_key") {
-        AdminAccountsRepositoryError::AlreadyExists
-    } else {
-        AdminAccountsRepositoryError::Database(error)
-    }
 }
