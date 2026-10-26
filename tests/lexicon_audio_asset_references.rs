@@ -954,7 +954,7 @@ async fn disabled_flash_without_audio_allows_neural_edits_and_preserves_versions
     meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] = profile.clone();
     for annotation in [
         json!({"type":"pause","at":4,"duration_ms":300}),
-        json!({"type":"phoneme","start":0,"end":4,"alphabet":"ipa","phoneme":"juːzd"}),
+        json!({"type":"italic","start":0,"end":4}),
     ] {
         meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"]["annotations"] =
             json!([annotation]);
@@ -993,6 +993,8 @@ async fn disabled_flash_without_audio_allows_neural_edits_and_preserves_versions
     }
     for bound in [false, true] {
         let mut invalid = meanings.clone();
+        invalid["pos"][0]["grammar_structures"][0]["variants"][0]["content"]["annotations"] =
+            json!([{"type":"pause","at":4,"duration_ms":300}]);
         let voices = &mut invalid["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"]
             ["voices"];
         if bound {
