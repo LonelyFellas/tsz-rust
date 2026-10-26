@@ -34,3 +34,26 @@ async fn duplicate_phone_maps_to_repository_conflict(pool: PgPool) {
 
     assert!(matches!(error, AdminAccountsRepositoryError::AlreadyExists));
 }
+
+#[sqlx::test]
+async fn duplicate_id_remains_a_database_error(pool: PgPool) {
+    let repository = AdminAccountsRepository::new(pool);
+    let id = Uuid::now_v7();
+    repository
+        .create(new_admin(id, "first-phone"))
+        .await
+        .unwrap();
+
+    let error = repository
+        .create(new_admin(id, "second-phone"))
+        .await
+        .unwrap_err();
+
+    match error {
+        AdminAccountsRepositoryError::Database(sqlx::Error::Database(error)) => {
+            assert!(error.is_unique_violation());
+            assert_eq!(error.constraint(), Some("admins_pkey"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
