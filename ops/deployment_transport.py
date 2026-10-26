@@ -11,7 +11,7 @@ from migration_compatibility import migration_interval
 
 ROOT = Path(__file__).resolve().parent
 REPOSITORY = "LonelyFellas/tsz-rust"
-MODULES = ("deployment_manifest", "deployment_auth_smoke", "deployment_business_smoke", "deployment_host")
+MODULES = ("deployment_manifest", "deployment_auth_smoke", "deployment_business_smoke", "postgresql_backup_job", "deployment_host")
 
 
 def command(arguments, *, data=None, timeout=60):
@@ -133,7 +133,7 @@ class SshHost:
         return result
 
     def preflight(self, plan):
-        self.request("preflight", plan)
+        return self.request("preflight", plan)
 
     def acquire(self, plan):
         self.request("acquire", plan)

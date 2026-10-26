@@ -71,7 +71,7 @@ Linux 制品不能直接在 macOS 执行。按宿主选择原生 Linux，或已�
 
 由执行者在 apply 前完成并记录以下证据；**控制器不会自动证明所有这些外围条件**：
 
-- 写前数据库恢复点按 [PostgreSQL 备份恢复规范](../../../../docs/postgresql-backup-restore.md)验证，检查权限、hash、快照时间、候选/现网账本及兼容性、恢复工具与容量；记录是否覆盖当前风险。恢复环境必须隔离业务网络，并为数据、索引和 checksum 校验临时空间留足容量，不机械照抄示例中的固定 tmpfs 大小。备份不在 bundle 内，不能误删。controller 的 `backup` 只复制当前二进制和 manifest，不生成数据库备份。
+- 按 [PostgreSQL 备份恢复规范](../../../../docs/postgresql-backup-restore.md)区分普通兼容发布与数据风险发布。普通发布只读取独立备份状态及告警，不在发布路径重新导出、下载整库或执行完整恢复；不要求开发者电脑保存备份。新增迁移、不兼容写入格式、破坏性任务或兼容性未知时，先准备适用的写前备份与专项验证，核对权限、hash、快照时间、账本、工具及容量。恢复环境隔离业务网络，不机械照抄固定 tmpfs 大小。备份不在 bundle 内，不能误删；controller 的 `backup` 仍只复制当前二进制和 manifest。
 - 无新增迁移也需确认旧二进制可读取本次写入格式。只有实际账本仍等于基线才按 binary/manifest 恢复；该流程不自动恢复数据库或覆盖快照后的正常写入。
 - 有新增迁移：先按阶段 B 的 `ops/migration_compatibility.py` 对实际基线做隔离演练，提供 `migration-receipt.json` 和独立批准的恢复策略。候选区间缺少 down，或 up/down 非事务性时，当前控制器返回 `unsupported_recovery_interval`；`manual` 策略不能绕过这一能力限制。`verified_down`/`manual` 及受保护审批文件格式见[控制器说明](../../../../docs/ci/deployment-controller.md#中断与迁移恢复)。策略摘要绑定新旧 SHA、制品、账本/区间和回执；生成 plan 不能自行授予真实数据 down/PITR 权限。
 - 如本次授权要求“新增迁移或恢复点不适用即停止”，必须先停止报告，不用更宽策略继续。有 down 文件、合成数据演练成功或数据库备份存在都不等于真实数据可自动 down。

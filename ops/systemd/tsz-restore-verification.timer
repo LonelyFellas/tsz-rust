@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly tsz-test backup restore verification
+
+[Timer]
+OnCalendar=Sun *-*-* 05:23:00
+RandomizedDelaySec=10min
+Persistent=true
+Unit=tsz-restore-verification.service
+
+[Install]
+WantedBy=timers.target
