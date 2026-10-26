@@ -255,7 +255,7 @@ pub(crate) async fn refund_custom_audio_in(
             idempotency_key: job_id.to_string(),
             source_type: "wordlist_custom_audio_refund".into(),
             source_id: job_id.to_string(),
-            reason: "自定义词汇语音未交付退款".into(),
+            reason: "自定义词条语音未交付退款".into(),
             evidence_ref: None,
         },
         false,
