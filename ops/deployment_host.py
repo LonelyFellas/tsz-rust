@@ -24,6 +24,7 @@ import uuid
 import deployment_auth_smoke as auth
 import deployment_business_smoke as business
 import deployment_manifest as manifests
+from postgresql_backup_job import inspect_status as inspect_backup_status
 
 
 ROOT = Path("/opt/tsz-rust")
@@ -221,7 +222,7 @@ def preflight(plan):
     business.check_auth_schema(lambda statement: sql(statement, readonly=True))
     business.random_credentials()
     auth.preflight()
-    return {"ready": True}
+    return {"ready": True, "scheduled_backup": inspect_backup_status(ROOT / "backups/scheduled")}
 
 
 def backup(plan):
