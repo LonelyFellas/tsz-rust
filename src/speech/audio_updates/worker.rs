@@ -156,6 +156,7 @@ async fn effective(
     profile: &VoiceProfileV3,
     source: &GeneratedSpeechSource,
     path: &str,
+    dialect: Option<&str>,
 ) -> Result<Vec<VoiceSettingV3>, AppError> {
     let side = match source {
         GeneratedSpeechSource::Phoneme {
@@ -166,7 +167,11 @@ async fn effective(
             crate::lexicon::dto::PhonemeLocaleV3::EnUs => "us",
         }),
         _ => {
-            if path.split('/').any(|key| key == "uk") {
+            if dialect == Some("uk") {
+                Some("gb")
+            } else if dialect == Some("us") {
+                Some("us")
+            } else if path.split('/').any(|key| key == "uk") {
                 Some("gb")
             } else if path.split('/').any(|key| key == "us") {
                 Some("us")
@@ -229,7 +234,14 @@ async fn run(
         return Ok(false);
     }
     let source = super::super::generated_source::source_at(&value, &claim.path)?;
-    let mut settings = effective(&mut conn, &profile, &source, &claim.path).await?;
+    let mut settings = effective(
+        &mut conn,
+        &profile,
+        &source,
+        &claim.path,
+        target.get("dialect").and_then(Value::as_str),
+    )
+    .await?;
     let mut hashes = vec![];
     for setting in &settings {
         hashes.push(super::super::generated::prepare_effect(&mut conn, &source, setting).await?);
@@ -307,7 +319,17 @@ async fn run(
         .execute(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let latest = effective(&mut tx, &profile, &source, &claim.path).await?;
+    let latest = effective(
+        &mut tx,
+        &profile,
+        &source,
+        &claim.path,
+        current
+            .pointer(&claim.path)
+            .and_then(|target| target.get("dialect"))
+            .and_then(Value::as_str),
+    )
+    .await?;
     if latest.len() != settings.len() {
         return Err(stale());
     }

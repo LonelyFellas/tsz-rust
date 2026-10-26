@@ -294,6 +294,8 @@ fn validate_element(
                                 | "digits"
                                 | "fraction"
                                 | "telephone"
+                                | "date"
+                                | "time"
                         )
                     ) =>
                 {
@@ -357,6 +359,23 @@ mod tests {
         assert!(request_invalid(
             wrap("cat").replace("SoniaNeural", "OtherNeural")
         ));
+    }
+    #[test]
+    fn generated_date_and_time_markup_can_be_submitted_unchanged() {
+        for interpret_as in ["date", "time"] {
+            let raw = wrap(&format!(
+                r#"<say-as interpret-as="{interpret_as}">12</say-as>"#
+            ));
+            let prepared = request(
+                voice(),
+                raw.clone(),
+                AudioOutputFormat::default(),
+                (-50, 100),
+                (-12, 12),
+            )
+            .unwrap();
+            assert_eq!(super::super::build_ssml(&prepared).unwrap(), raw);
+        }
     }
     fn request_invalid(raw: String) -> bool {
         request(

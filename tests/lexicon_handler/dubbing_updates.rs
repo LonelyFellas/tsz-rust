@@ -88,8 +88,18 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
     let saved: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(status, StatusCode::OK, "{saved}");
+    let mut meanings = saved["word"]["meanings"].clone();
+    let grammar_id = Uuid::now_v7();
+    let grammar_variant_id = Uuid::now_v7();
+    meanings["pos"] = json!([{"pos_id":forms["pos"][0]["pos_id"],"grammar_structures":[{"id":grammar_id,"variants":[{"id":grammar_variant_id,"dialect":"uk","content":{"version":2,"text":spelling,"annotations":[]},"voice_profile":profile("grammar")}]}],"senses":[]}]);
+    let request = Request::builder().method(Method::PUT).uri(format!("{ROOT}/entries/{id}/steps/meanings")).header(header::AUTHORIZATION,format!("Bearer {bearer}")).header(header::CONTENT_TYPE,"application/json").header("X-TSZ-Voice-Versions","v3").body(Body::from(json!({"schema_version":3,"base_revision":saved["word"]["revision"],"intent":"save","content":meanings}).to_string())).unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     let group = Uuid::now_v7();
-    let input=serde_json::from_value(json!({"base_revision":0,"group":{"id":group,"name":"words","areas":["word","azure"],"uk":[{"id":Uuid::now_v7(),"name":"UK","voice_alias":"sonia","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}],"us":[{"id":Uuid::now_v7(),"name":"US","voice_alias":"jenny","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}]}})).unwrap();
+    let input=serde_json::from_value(json!({"base_revision":0,"group":{"id":group,"name":"words","areas":["word","azure","grammar"],"uk":[{"id":Uuid::now_v7(),"name":"UK","voice_alias":"sonia","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}],"us":[{"id":Uuid::now_v7(),"name":"US","voice_alias":"jenny","selected":true,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}]}})).unwrap();
     tsz_rust::speech::library::VoiceLibraryRepository::new(pool.clone())
         .save_group(actor, 0, input, true)
         .await
@@ -129,7 +139,11 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
     assert_eq!(refs, provider.0.load(Ordering::SeqCst) as i64);
     let jobs = audio_updates::list(&pool, group).await.unwrap();
     assert_eq!(jobs.updates[0].state, "completed", "{jobs:?}");
-    assert_eq!(jobs.updates[0].total, 3);
+    assert_eq!(jobs.updates[0].total, 4);
+    let grammar_voices = &fresh["word"]["meanings"]["pos"][0]["grammar_structures"][0]["variants"]
+        [0]["voice_profile"]["voices"];
+    assert_eq!(grammar_voices.as_array().unwrap().len(), 1);
+    assert_eq!(grammar_voices[0]["locale"], "en-GB");
 
     let recording = Uuid::now_v7();
     sqlx::query("INSERT INTO lexicon.audio_assets(id,object_key,source_key,content_type,size_bytes,locale,gender,original_name,created_by_admin_id) VALUES($1,$2,$2,'audio/wav',48,'en-GB','female','recording.wav',$3)")
@@ -153,4 +167,29 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
     assert_eq!(asset["locale"], "en-GB");
     let referenced: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM lexicon.v3_audio_asset_references WHERE entry_id=$1 AND asset_id=$2 AND scope='draft')").bind(entry).bind(recording).fetch_one(&pool).await.unwrap();
     assert!(referenced);
+
+    let mut forms = read["word"]["forms"].clone();
+    let profile = &mut forms.pointer_mut(path).unwrap()["spelling_speech"]["voice_profile"];
+    profile["dubbing"]["mode"] = json!("local");
+    profile["voices"][0]["enabled"] = json!(false);
+    let mut selected = profile["voices"][0].clone();
+    selected["version_id"] = json!(Uuid::now_v7());
+    selected["enabled"] = json!(true);
+    selected["rate_percent"] = json!(-5);
+    selected.as_object_mut().unwrap().remove("audio_asset_id");
+    profile["voices"].as_array_mut().unwrap().push(selected);
+    let request=Request::builder().method(Method::PUT).uri(format!("{ROOT}/entries/{id}/steps/forms")).header(header::AUTHORIZATION,format!("Bearer {bearer}")).header(header::CONTENT_TYPE,"application/json").header("X-TSZ-Form-Contents","v1").header("X-TSZ-Voice-Versions","v3").header("X-TSZ-Voice-Locales","v1").header("X-TSZ-Voice-Models","v1").header("X-TSZ-Spelling-Speech","v1").header("X-TSZ-Phoneme-Speech","v1").body(Body::from(json!({"schema_version":3,"base_revision":read["word"]["revision"],"intent":"save","content":forms}).to_string())).unwrap();
+    let response = tsz_rust::router(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let saved = latest(&state, &bearer, id).await;
+    let voices = &saved["word"]["forms"].pointer(path).unwrap()["spelling_speech"]["voice_profile"]
+        ["voices"];
+    assert_eq!(voices[0]["enabled"], false);
+    assert!(voices[0]["audio_asset_id"].is_string());
 }

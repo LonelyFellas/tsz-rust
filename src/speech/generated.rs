@@ -785,7 +785,9 @@ pub(crate) async fn validate_bindings_with_forms(
         ));
     }
     for reference in super::generated_source::references(value)? {
-        if let Some(profile) = &reference.profile {
+        if reference.setting.enabled
+            && let Some(profile) = &reference.profile
+        {
             super::dubbing::validate_setting(
                 conn,
                 profile,
