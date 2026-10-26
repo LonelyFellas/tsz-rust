@@ -168,6 +168,10 @@ mod tests {
             alias: "operator-kept-alias".into(),
             display_name: "Alfie".into(),
             is_common: true,
+            accent: None,
+            accent_revision: None,
+            synthesis_available: None,
+            capability_evidence: None,
             locale: "en-GB".into(),
             gender: "male".into(),
             capabilities: VoiceCapabilities {

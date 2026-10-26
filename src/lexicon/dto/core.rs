@@ -160,6 +160,16 @@ pub enum RichTextAnnotation {
         alphabet: RichTextPhonemeAlphabet,
         phoneme: String,
     },
+    SayAs {
+        start: usize,
+        end: usize,
+        interpret_as: String,
+    },
+    Sub {
+        start: usize,
+        end: usize,
+        alias: String,
+    },
     Liaison {
         start: usize,
         end: usize,

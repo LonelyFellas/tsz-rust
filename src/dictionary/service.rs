@@ -84,6 +84,12 @@ pub async fn entries(
                             source_dialect,
                             Some(&speech.voice_profile),
                         );
+                        uploaded_audio(
+                            &mut audio,
+                            variant_id,
+                            source_dialect,
+                            &speech.audio_assets,
+                        );
                     }
                     for pronunciation in pronunciations {
                         generated_audio(
@@ -188,6 +194,7 @@ pub async fn entries(
                                 source_dialect,
                                 variant.voice_profile.as_ref(),
                             );
+                            uploaded_audio(&mut audio, *id, source_dialect, &variant.audio_assets);
                         }
                     }
                 }
@@ -198,6 +205,12 @@ pub async fn entries(
                             sentence.id,
                             source_dialect,
                             variant.voice_profile.as_ref(),
+                        );
+                        uploaded_audio(
+                            &mut audio,
+                            sentence.id,
+                            source_dialect,
+                            &variant.audio_assets,
                         );
                     }
                     examples.push(DictionaryExample {
@@ -245,6 +258,12 @@ pub async fn entries(
                     source_dialect,
                     variant.voice_profile.as_ref(),
                 );
+                uploaded_audio(
+                    &mut audio,
+                    sentence.id,
+                    source_dialect,
+                    &variant.audio_assets,
+                );
             }
             if examples
                 .iter()
@@ -276,11 +295,29 @@ fn sourced_english_variants(
         EnglishTextV3::Distinguish { uk, us, .. } => [(Dialect::Uk, uk), (Dialect::Us, us)]
             .into_iter()
             .filter_map(|(dialect, slot)| match slot {
-                DialectVariantRichTextSlotV3::Ready { variant } => Some((dialect, variant)),
+                DialectVariantRichTextSlotV3::Ready { variant } => {
+                    Some((dialect, variant.as_ref()))
+                }
                 DialectVariantRichTextSlotV3::Missing => None,
             })
             .collect(),
     }
+}
+
+fn uploaded_audio(
+    audio: &mut Vec<DictionaryAudio>,
+    target_id: Uuid,
+    source_dialect: Dialect,
+    assets: &[crate::lexicon::audio_assets::dto::AudioAsset],
+) {
+    audio.extend(assets.iter().map(|asset| DictionaryAudio {
+        target_id,
+        asset_id: asset.id,
+        locale: asset.locale.as_str().into(),
+        accent_group: asset.locale.accent_group(),
+        source_dialect,
+        hd_flash: false,
+    }));
 }
 
 fn generated_audio(

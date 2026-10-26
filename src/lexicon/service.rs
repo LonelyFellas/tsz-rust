@@ -64,7 +64,7 @@ mod queries;
 mod sentence_association;
 mod sentence_target_discovery;
 pub(crate) mod text_links;
-mod v3;
+pub(crate) mod v3;
 pub(crate) mod v3_publication;
 mod v3_surface;
 
@@ -203,6 +203,7 @@ pub struct LexiconService {
     generated_audio_supported: bool,
     extended_voice_locales_supported: bool,
     voice_models_supported: bool,
+    dubbing_supported: bool,
     form_contents_supported: bool,
 }
 
@@ -213,13 +214,20 @@ impl LexiconService {
     }
 
     fn unsupported_voice_content(&self, value: &serde_json::Value) -> bool {
-        (!self.voice_models_supported && crate::lexicon::voice_versions::contains_models(value))
+        (!self.dubbing_supported && crate::lexicon::voice_versions::contains_dubbing(value))
+            || (!self.voice_models_supported
+                && crate::lexicon::voice_versions::contains_models(value))
             || (!self.extended_voice_locales_supported
                 && crate::lexicon::voice_versions::contains_extended(value))
             || (!self.voice_versions_supported
                 && crate::lexicon::voice_versions::contains_versions(value))
             || (!self.generated_audio_supported
                 && crate::lexicon::voice_versions::contains_audio(value))
+    }
+
+    pub(crate) fn with_dubbing_support(mut self, supported: bool) -> Self {
+        self.dubbing_supported = supported;
+        self
     }
 
     pub(crate) fn with_voice_models_support(mut self, supported: bool) -> Self {
@@ -267,6 +275,7 @@ impl LexiconService {
             generated_audio_supported: true,
             extended_voice_locales_supported: true,
             voice_models_supported: true,
+            dubbing_supported: true,
             form_contents_supported: true,
         }
     }

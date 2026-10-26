@@ -20,6 +20,265 @@ use tsz_rust::{
 use uuid::Uuid;
 
 #[sqlx::test]
+async fn single_group_routes_protect_legacy_writes_and_project_unselected_candidates(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool).await;
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let token = state
+        .admin_token_manager
+        .generate(actor, "super_admin")
+        .unwrap();
+    let id = Uuid::now_v7();
+    let input = json!({"base_revision":0,"group":{"id":id,"name":"HTTP group","areas":["word"],"uk":[{"id":Uuid::now_v7(),"name":"unselected","voice_alias":"en-gb-sonianeural","selected":false,"parameters":{"rate_percent":0,"pitch_semitones":0,"style":null}}],"us":[]}});
+    let created = call(
+        &state,
+        Method::POST,
+        "/api/v1/admin/speech/groups",
+        Some(&token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(created.0, StatusCode::OK);
+    let group = created.1["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["id"] == json!(id))
+        .unwrap()
+        .clone();
+    assert_eq!(group["revision"], 1);
+    let old = call(
+        &state,
+        Method::GET,
+        "/api/v1/admin/speech/groups",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(old.1["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(old.1["groups"][0]["uk"], json!([]));
+    assert!(old.1["groups"][0].get("revision").is_none());
+    let new = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/speech/groups")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("X-TSZ-Dubbing-Groups", "v2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let new: Value =
+        serde_json::from_slice(&new.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(new["groups"].as_array().unwrap().len(), 2);
+    assert_eq!(new["groups"][1]["uk"][0]["selected"], false);
+    let legacy = call(
+        &state,
+        Method::PUT,
+        "/api/v1/admin/speech/groups",
+        Some(&token),
+        Some(json!({"groups":[],"base_revision":1})),
+    )
+    .await;
+    assert_eq!(legacy.0, StatusCode::CONFLICT);
+    let path = format!("/api/v1/admin/speech/groups/{id}");
+    let stale = call(
+        &state,
+        Method::PUT,
+        &path,
+        Some(&token),
+        Some(json!({"group":group,"base_revision":0})),
+    )
+    .await;
+    assert_eq!(stale.0, StatusCode::CONFLICT);
+    let removed = call(
+        &state,
+        Method::DELETE,
+        &path,
+        Some(&token),
+        Some(json!({"base_revision":1})),
+    )
+    .await;
+    assert_eq!(removed.0, StatusCode::OK);
+    assert_eq!(removed.1["groups"].as_array().unwrap().len(), 1);
+    let global_id = removed.1["groups"][0]["id"].as_str().unwrap();
+    let global = call(
+        &state,
+        Method::DELETE,
+        &format!("/api/v1/admin/speech/groups/{global_id}"),
+        Some(&token),
+        Some(json!({"base_revision":0})),
+    )
+    .await;
+    assert_eq!(global.0, StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+async fn dubbing_resolve_uses_real_routes_without_generating_and_respects_permissions(
+    pool: PgPool,
+) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool).await;
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let token = state
+        .admin_token_manager
+        .generate(actor, "super_admin")
+        .unwrap();
+    let input = json!({"profile":{"voices":[],"dubbing":{"mode":"inherit","area":"word"}},"accent":"gb","source":{"kind":"text","content":{"version":2,"text":"123","annotations":[{"type":"say_as","start":0,"end":3,"interpret_as":"digits"}]}}});
+    let resolved = call(
+        &state,
+        Method::POST,
+        "/api/v1/admin/speech/resolve",
+        Some(&token),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(resolved.0, StatusCode::OK);
+    assert!(!resolved.1["voices"].as_array().unwrap().is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM lexicon.audio_generations")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let phoneme = json!({"profile":{"voices":[],"dubbing":{"mode":"inherit","area":"azure"}},"accent":"gb","source":{"kind":"phoneme","phoneme_locale":"en-GB","alphabet":"ipa","phoneme":"kæt","content":{"version":2,"text":"cat","annotations":[{"type":"sub","start":0,"end":3,"alias":"kitten"}]}}});
+    let replaced = call(
+        &state,
+        Method::POST,
+        "/api/v1/admin/speech/resolve",
+        Some(&token),
+        Some(phoneme),
+    )
+    .await;
+    assert_eq!(replaced.0, StatusCode::OK, "{:?}", replaced.1);
+    assert!(
+        replaced.1["voices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|voice| voice["locale"] == "en-GB")
+    );
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let denied = call(
+        &state,
+        Method::POST,
+        "/api/v1/admin/speech/resolve",
+        Some(&token),
+        Some(input),
+    )
+    .await;
+    assert_eq!(denied.0, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn current_accent_and_restore_routes_require_shared_permission_and_revision(pool: PgPool) {
+    let state = AppState::for_test(pool.clone());
+    let actor = seed_admin(&pool).await;
+    let repository = tsz_rust::speech::preview::PreviewRepository::new(pool.clone());
+    repository.ensure_catalog_voices().await.unwrap();
+    let token = state
+        .admin_token_manager
+        .generate(actor, "super_admin")
+        .unwrap();
+    let path = "/api/v1/admin/speech/library/en-sg-lunaneural/accent";
+    let saved = call(
+        &state,
+        Method::PUT,
+        path,
+        Some(&token),
+        Some(json!({"accent":"gb","base_revision":0})),
+    )
+    .await;
+    assert_eq!(saved.0, StatusCode::OK);
+    assert_eq!(saved.1["accent"], "gb");
+    let stale = call(
+        &state,
+        Method::PUT,
+        path,
+        Some(&token),
+        Some(json!({"accent":"us","base_revision":0})),
+    )
+    .await;
+    assert_eq!(stale.0, StatusCode::CONFLICT);
+    let invalid = call(
+        &state,
+        Method::PUT,
+        path,
+        Some(&token),
+        Some(json!({"accent":"both","base_revision":1})),
+    )
+    .await;
+    assert_eq!(invalid.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let restored = call(
+        &state,
+        Method::POST,
+        "/api/v1/admin/speech/library/en-sg-lunaneural/description/restore",
+        Some(&token),
+        Some(json!({"base_revision":0})),
+    )
+    .await;
+    assert_eq!(restored.0, StatusCode::OK);
+    assert_eq!(restored.1["description_zh"], Value::Null);
+    assert_eq!(restored.1["description_revision"], 1);
+    let new = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/admin/speech/voices")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("X-TSZ-Voice-Models", "v1")
+                .header("X-TSZ-Voice-Catalog", "v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value =
+        serde_json::from_slice(&new.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        body["items"].as_array().unwrap().len(),
+        tsz_rust::speech::capabilities::snapshot().items.len()
+    );
+    let luna = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["alias"] == "en-sg-lunaneural")
+        .unwrap();
+    assert_eq!(luna["accent"], "gb");
+    assert_eq!(luna["locale"], "en-SG");
+    assert_eq!(
+        luna["capability_evidence"]["provider_voice_id"],
+        "en-SG-LunaNeural"
+    );
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let denied = call(
+        &state,
+        Method::PUT,
+        path,
+        Some(&token),
+        Some(json!({"accent":"none","base_revision":1})),
+    )
+    .await;
+    assert_eq!(denied.0, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
 async fn model_capability_negotiation_hides_flash_from_old_catalog_and_rejects_legacy_preview(
     pool: PgPool,
 ) {

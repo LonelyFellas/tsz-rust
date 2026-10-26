@@ -155,6 +155,10 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(crate::lexicon::audio_assets::handler::confirm_audio_asset),
         )
         .route(
+            "/audio-assets/{id}/content",
+            get(crate::lexicon::audio_assets::handler::audio_asset_content),
+        )
+        .route(
             "/audio-assets/{id}/url",
             get(crate::lexicon::audio_assets::handler::audio_asset_url),
         )

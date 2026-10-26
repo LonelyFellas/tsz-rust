@@ -409,6 +409,13 @@ async fn lock_targets(
         })
         .chain(source)
         .collect();
+    if let Some(content) = content {
+        ids.extend(
+            crate::lexicon::v3_contract::english_text_variants(&content.sentence.en_text)
+                .into_iter()
+                .flat_map(|variant| variant.reading_links.iter().map(|link| link.target_word_id)),
+        );
+    }
     let required = ids.clone();
     if let Some(id) = sentence_id {
         ids.extend(sqlx::query_scalar::<_,Uuid>("SELECT target_entry_id FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1 AND target_entry_id IS NOT NULL UNION SELECT a.target_entry_id FROM lexicon.shared_sentence_publication_annotations a JOIN lexicon.shared_sentences s ON s.current_publication_id=a.publication_id WHERE s.id=$1 AND a.target_entry_id IS NOT NULL").bind(id).fetch_all(&mut **tx).await.map_err(AppError::internal)?);
@@ -582,6 +589,39 @@ async fn writable_sentence(
     Ok(())
 }
 
+pub(crate) async fn replace_dubbing_audio(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: Uuid,
+    id: Uuid,
+    revision: i64,
+    value: &serde_json::Value,
+) -> Result<(), AppError> {
+    let authorization = crate::admin::permissions::lock(tx, actor).await?;
+    lock(tx, id, revision).await?;
+    let row =
+        sqlx::query("SELECT content,created_by_admin_id FROM lexicon.shared_sentences WHERE id=$1")
+            .bind(id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(AppError::internal)?;
+    authorization.require_owned_action("sentences.edit", row.get("created_by_admin_id"))?;
+    let before: serde_json::Value = row.get("content");
+    crate::speech::audio_updates::ensure_audio_only(&before["en_text"], value)?;
+    let mut text: crate::lexicon::dto::EnglishTextV3 =
+        serde_json::from_value(value.clone()).map_err(AppError::internal)?;
+    audio::validate_assets(tx, actor, id, &mut text).await?;
+    sqlx::query(
+        "UPDATE lexicon.shared_sentences SET content=jsonb_set(content,'{en_text}',$2) WHERE id=$1",
+    )
+    .bind(id)
+    .bind(value)
+    .execute(&mut **tx)
+    .await
+    .map_err(AppError::internal)?;
+    bump(tx, id).await?;
+    audio::replace_draft(tx, id, &text).await
+}
+
 async fn bump(conn: &mut PgConnection, id: Uuid) -> Result<(), AppError> {
     sqlx::query(
         "UPDATE lexicon.shared_sentences SET revision=revision+1,updated_at=now() WHERE id=$1",
@@ -752,6 +792,13 @@ pub async fn create(
 ) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     validate(&input.content)?;
+    if !crate::lexicon::voice_versions::dubbing_supported(&headers)
+        && crate::lexicon::voice_versions::contains_dubbing(
+            &serde_json::to_value(&input.content).map_err(AppError::internal)?,
+        )
+    {
+        return Err(invalid(crate::lexicon::voice_versions::UPGRADE_MESSAGE));
+    }
     if !crate::lexicon::voice_versions::models_supported(&headers)
         && crate::lexicon::voice_versions::contains_models(
             &serde_json::to_value(&input.content).map_err(AppError::internal)?,
@@ -766,6 +813,10 @@ pub async fn create(
     {
         return Err(invalid(crate::lexicon::voice_versions::UPGRADE_MESSAGE));
     }
+    crate::speech::dubbing::ensure_direct_phonemes_preserved(
+        &serde_json::json!({}),
+        &serde_json::to_value(&input.content).map_err(AppError::internal)?,
+    )?;
     let id = input.content.sentence.id;
     let payload = {
         use sha2::{Digest, Sha256};
@@ -830,6 +881,13 @@ pub async fn update(
 ) -> Result<Response, AppError> {
     let admin = require_active_admin(&state, &auth).await?;
     validate(&input.content)?;
+    if !crate::lexicon::voice_versions::dubbing_supported(&headers)
+        && crate::lexicon::voice_versions::contains_dubbing(
+            &serde_json::to_value(&input.content).map_err(AppError::internal)?,
+        )
+    {
+        return Err(invalid(crate::lexicon::voice_versions::UPGRADE_MESSAGE));
+    }
     if !crate::lexicon::voice_versions::models_supported(&headers)
         && crate::lexicon::voice_versions::contains_models(
             &serde_json::to_value(&input.content).map_err(AppError::internal)?,
@@ -872,6 +930,17 @@ pub async fn update(
     .await?;
     lock(&mut tx, id, input.base_revision).await?;
     let current = read_on(&mut tx, id).await?;
+    crate::speech::dubbing::ensure_direct_phonemes_preserved(
+        &serde_json::to_value(&current.content).map_err(AppError::internal)?,
+        &serde_json::to_value(&input.content).map_err(AppError::internal)?,
+    )?;
+    if !crate::lexicon::voice_versions::dubbing_supported(&headers)
+        && crate::lexicon::voice_versions::contains_dubbing(
+            &serde_json::to_value(&current.content).map_err(AppError::internal)?,
+        )
+    {
+        return Err(invalid(crate::lexicon::voice_versions::UPGRADE_MESSAGE));
+    }
     if !crate::lexicon::voice_versions::models_supported(&headers)
         && crate::lexicon::voice_versions::contains_models(
             &serde_json::to_value(&current.content).map_err(AppError::internal)?,
@@ -962,6 +1031,13 @@ pub async fn delete(
     writable_sentence(&mut tx, id, &authorization, true).await?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_audio_asset_references WHERE sentence_id=$1 AND scope='draft'")
         .bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query(
+        "DELETE FROM speech.dubbing_dependencies WHERE owner_kind='sentence' AND owner_id=$1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(AppError::internal)?;
     sqlx::query("UPDATE lexicon.shared_sentences SET deleted_at=now(),updated_at=now(),revision=revision+1 WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_annotations WHERE sentence_id=$1")
         .bind(id)

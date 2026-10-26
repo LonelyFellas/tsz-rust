@@ -7,8 +7,15 @@ use crate::lexicon::dto::RichTextV2;
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePreviewRequest {
+    #[serde(default)]
+    pub output_format: Option<crate::speech::AudioOutputFormat>,
     pub content: RichTextV2,
     pub voice_alias: String,
+    #[serde(default)]
+    #[schema(minimum = 0.01, maximum = 2)]
+    pub style_degree: Option<f64>,
+    #[serde(default)]
+    pub role: Option<String>,
     #[serde(default)]
     pub style: Option<String>,
     #[serde(default)]
@@ -22,6 +29,28 @@ pub struct CreatePreviewRequest {
     )]
     #[schema(minimum = 0, maximum = 100, nullable = false)]
     pub volume_percent: Option<i16>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ManualPreviewRequest {
+    pub voice_alias: String,
+    #[schema(max_length = 32000)]
+    pub ssml: String,
+    #[serde(default)]
+    pub output_format: crate::speech::AudioOutputFormat,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RenderSsmlRequest {
+    pub source: crate::speech::generated_source::GeneratedSpeechSource,
+    pub setting: crate::lexicon::dto::VoiceSettingV3,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RenderSsmlResponse {
+    pub ssml: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -49,6 +78,14 @@ pub struct VoiceResponse {
     pub is_common: bool,
     pub locale: String,
     pub gender: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accent: Option<crate::speech::locale::VoiceAccent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accent_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synthesis_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability_evidence: Option<crate::speech::capabilities::VoiceCapabilityEvidence>,
     pub capabilities: VoiceCapabilities,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<crate::speech::VoiceMetadata>,
@@ -68,6 +105,7 @@ pub enum PreviewCacheStatus {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PreviewResponse {
+    pub content_path: String,
     pub cache_status: PreviewCacheStatus,
     pub audio_url: String,
     pub expires_at: DateTime<Utc>,

@@ -367,6 +367,22 @@ impl AudioAssetService {
         Ok(record)
     }
 
+    pub async fn read_content(
+        &self,
+        admin_id: Uuid,
+        asset_id: Uuid,
+    ) -> Result<(String, Vec<u8>), AudioAssetServiceError> {
+        let authorization = self.authorize(admin_id, false).await?;
+        let record = self.readable_asset(&authorization, asset_id).await?;
+        let key = ObjectKey::parse(record.object_key).map_err(|error| {
+            AudioAssetServiceError::Database(sqlx::Error::Decode(Box::new(error)))
+        })?;
+        let bytes = self.storage()?.read(&key).await?;
+        let authorization = self.authorize(admin_id, false).await?;
+        self.readable_asset(&authorization, asset_id).await?;
+        Ok((record.content_type, bytes))
+    }
+
     /// 签发短期只读 URL；公开例句读者只能读取当前仍公开的发布引用。
     pub async fn presign_url(
         &self,

@@ -24,12 +24,12 @@ use crate::lexicon::dto::{
     FormGroupScopeV3, FormsImpactItemV3, FormsImpactNodeTypeV3, FormsImpactResponseV3,
     PhraseComponentUsageV3, PresenceAwareVec, PreviewFormsImpactInputV3,
     PronunciationNormalizationVersionV3, PronunciationStyle, RetiredStableNodeV3,
-    RichTextVariantV3, SaveFormsStepInputV3, SaveMeaningsStepInputV3, SuggestedConcreteFormV3,
-    SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3, UsDialectV3, V3PublicationCapability,
-    V3RetiredNodeRole, V3ValidationIssueCode, ValidateAdminWordV3Input, WordCommonFormVariantV3,
-    WordConcreteFormV3, WordDefinitionV3, WordEntryKindV3, WordFormGroupMemberV3, WordFormGroupV3,
-    WordHeadwordsV2, WordPosFormsV3, WordPosMeaningsV3, WordPronunciationV3,
-    WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
+    RichTextVariantV3, SaveFormsStepInputV3, SaveMeaningsStepInputV3, SpellingSpeechV3,
+    SuggestedConcreteFormV3, SuggestedRegionalVariantsV3, TextOrigin, UkDialectV3, UsDialectV3,
+    V3PublicationCapability, V3RetiredNodeRole, V3ValidationIssueCode, ValidateAdminWordV3Input,
+    WordCommonFormVariantV3, WordConcreteFormV3, WordDefinitionV3, WordEntryKindV3,
+    WordFormGroupMemberV3, WordFormGroupV3, WordHeadwordsV2, WordPosFormsV3, WordPosMeaningsV3,
+    WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
 };
 use crate::lexicon::model::{ComponentTargetDraftRecord, NodeIdentityRecord, RegionEvidenceRecord};
 
@@ -2475,6 +2475,10 @@ impl LexiconService {
         crate::lexicon::shared_forms::ensure_write(&compatibility_forms, &input.content)?;
         preserve_missing_component_usages(&mut input.content, &compatibility_forms)?;
         preserve_missing_spelling_rich(&mut input.content, &compatibility_forms);
+        crate::speech::dubbing::ensure_direct_phonemes_preserved(
+            &serde_json::to_value(&compatibility_forms).map_err(serialization_error)?,
+            &serde_json::to_value(&input.content).map_err(serialization_error)?,
+        )?;
         normalize_form_regularity(&mut input.content, Some(&compatibility_forms));
         let issues = crate::lexicon::v3_contract::validate_forms(&input.content, input.intent);
         if !issues.is_empty() {
@@ -2910,6 +2914,10 @@ impl LexiconService {
         preserve_missing_sense_component_usages(&mut content, &compatibility_meanings);
         super::text_links::preserve_missing(&mut content, &compatibility_meanings)?;
         super::grammar_form_links::preserve_missing(&mut content, &compatibility_meanings)?;
+        crate::speech::dubbing::ensure_direct_phonemes_preserved(
+            &serde_json::to_value(&compatibility_meanings).map_err(serialization_error)?,
+            &serde_json::to_value(&content).map_err(serialization_error)?,
+        )?;
         crate::admin::permissions::content::require_changes(
             &authorization,
             "words",
@@ -4306,6 +4314,19 @@ pub(super) async fn replace_v3_audio_asset_references(
     forms: &DraftFormsStepContentV3,
     content: &DraftMeaningsStepContentV3,
 ) -> Result<(), LexiconServiceError> {
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM lexicon.entries WHERE id=$1")
+        .bind(entry_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(database_error)?;
+    crate::speech::dubbing::replace_dependencies(
+        tx,
+        "entry",
+        entry_id,
+        revision + 1,
+        &serde_json::json!([forms, content]),
+    )
+    .await?;
     sqlx::query(
         "DELETE FROM lexicon.v3_audio_asset_references WHERE entry_id = $1 AND scope = 'draft'",
     )
@@ -4417,6 +4438,42 @@ fn pronunciation_rows_mut(forms: &mut DraftFormsStepContentV3) -> Vec<&mut WordP
         .collect()
 }
 
+fn spelling_speeches(forms: &DraftFormsStepContentV3) -> Vec<(Uuid, &SpellingSpeechV3)> {
+    forms
+        .pos
+        .iter()
+        .flat_map(|pos| &pos.forms)
+        .flat_map(|form| match &form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => {
+                vec![(common.id, common.spelling_speech.as_deref())]
+            }
+            WordRegionalVariantsV3::UkUs { uk, us } => vec![
+                (uk.id, uk.spelling_speech.as_deref()),
+                (us.id, us.spelling_speech.as_deref()),
+            ],
+        })
+        .filter_map(|(id, speech)| speech.map(|speech| (id, speech)))
+        .collect()
+}
+
+fn spelling_speeches_mut(forms: &mut DraftFormsStepContentV3) -> Vec<&mut SpellingSpeechV3> {
+    forms
+        .pos
+        .iter_mut()
+        .flat_map(|pos| &mut pos.forms)
+        .flat_map(|form| match &mut form.regional_variants {
+            WordRegionalVariantsV3::Common { common } => {
+                vec![common.spelling_speech.as_deref_mut()]
+            }
+            WordRegionalVariantsV3::UkUs { uk, us } => vec![
+                uk.spelling_speech.as_deref_mut(),
+                us.spelling_speech.as_deref_mut(),
+            ],
+        })
+        .flatten()
+        .collect()
+}
+
 pub(super) fn requested_pronunciation_audio_assets(
     forms: &DraftFormsStepContentV3,
 ) -> Vec<(Uuid, Vec<Uuid>)> {
@@ -4430,6 +4487,17 @@ pub(super) fn requested_pronunciation_audio_assets(
             )
         })
         .collect::<Vec<_>>();
+    requested.extend(
+        spelling_speeches(forms)
+            .into_iter()
+            .filter(|(_, speech)| !speech.audio_assets.is_empty())
+            .map(|(id, speech)| {
+                (
+                    id,
+                    speech.audio_assets.iter().map(|asset| asset.id).collect(),
+                )
+            }),
+    );
     requested.extend(crate::speech::generated_references::asset_references(
         &serde_json::to_value(forms).expect("serializable forms"),
     ));
@@ -4462,6 +4530,14 @@ pub(super) async fn normalize_pronunciation_audio_assets(
         return Err(v3_validation_failed(issues));
     }
     let canonical = load_audio_asset_metadata(tx, &requested).await?;
+    for speech in spelling_speeches_mut(forms) {
+        for asset in &mut speech.audio_assets {
+            *asset = canonical
+                .get(&asset.id)
+                .cloned()
+                .ok_or_else(invariant_record)?;
+        }
+    }
     for row in pronunciation_rows_mut(forms) {
         row.audio_assets = row
             .audio_assets
@@ -4745,7 +4821,7 @@ pub(super) fn english_text_variants_mut(
         EnglishTextV3::Distinguish { uk, us, .. } => [uk, us]
             .into_iter()
             .filter_map(|slot| match slot {
-                DialectVariantRichTextSlotV3::Ready { variant } => Some(variant),
+                DialectVariantRichTextSlotV3::Ready { variant } => Some(variant.as_mut()),
                 DialectVariantRichTextSlotV3::Missing => None,
             })
             .collect(),
@@ -5985,6 +6061,99 @@ async fn upsert_v3_node(
     } else {
         Err(LexiconServiceError::StableNodeIdChanged)
     }
+}
+
+/// Replace only inherited voice snapshots; text and stable authoring identities stay unchanged.
+pub(crate) async fn replace_dubbing_audio(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: Uuid,
+    request: Uuid,
+    entry: Uuid,
+    revision: i64,
+    value: &Value,
+) -> Result<(), crate::error::AppError> {
+    let map = crate::lexicon::handler::map_error;
+    let authorization = crate::admin::permissions::lock(tx, actor).await?;
+    LexiconRepository::lock_surface_contexts(tx, &[entry])
+        .await
+        .map_err(repository_error)
+        .map_err(map)?;
+    let record = LexiconRepository::entry_by_id_for_update(tx, entry)
+        .await
+        .map_err(repository_error)
+        .map_err(map)?
+        .ok_or_else(|| map(LexiconServiceError::WordNotFound))?;
+    ensure_v3_record_active(&record).map_err(map)?;
+    authorization.require_owned_action("words.edit", record.created_by_admin_id)?;
+    if revision != record.revision {
+        return Err(map(LexiconServiceError::RevisionConflict {
+            current_revision: record.revision,
+        }));
+    }
+    let before = serde_json::json!([record.forms, record.meanings]);
+    crate::speech::audio_updates::ensure_audio_only(&before, value)?;
+    let forms: DraftFormsStepContentV3 =
+        serde_json::from_value(value[0].clone()).map_err(crate::error::AppError::internal)?;
+    let meanings: DraftMeaningsStepContentV3 =
+        serde_json::from_value(value[1].clone()).map_err(crate::error::AppError::internal)?;
+    let requested = requested_audio_assets(&meanings)
+        .into_iter()
+        .chain(requested_pronunciation_audio_assets(&forms))
+        .collect::<Vec<_>>();
+    let issues = validate_requested_audio_assets(tx, &authorization, entry, &requested)
+        .await
+        .map_err(map)?;
+    if !issues.is_empty() {
+        return Err(map(v3_validation_failed(issues)));
+    }
+    // Synthesis/spelling extensions live in shared content, not the normalized spelling/phonetic rows.
+    // Update existing content rows without retiring/reassigning any binding or slot.
+    let shared = forms
+        .shared_representation()
+        .map_err(|error| crate::error::AppError::internal(anyhow::anyhow!(error)))?;
+    for content in shared.contents {
+        let changed = sqlx::query(
+            "UPDATE lexicon.v3_form_contents SET content=$3 WHERE id=$1 AND entry_id=$2",
+        )
+        .bind(content.id)
+        .bind(entry)
+        .bind(serde_json::to_value(content).map_err(crate::error::AppError::internal)?)
+        .execute(&mut **tx)
+        .await
+        .map_err(crate::error::AppError::internal)?;
+        if changed.rows_affected() != 1 {
+            return Err(map(invariant_record()));
+        }
+    }
+    replace_v3_audio_asset_references(tx, entry, &forms, &meanings)
+        .await
+        .map_err(map)?;
+    let next = revision + 1;
+    sqlx::query("UPDATE lexicon.entries SET revision=$2,updated_by_admin_id=$3,updated_at=now() WHERE id=$1")
+        .bind(entry).bind(next).bind(actor).execute(&mut **tx).await.map_err(crate::error::AppError::internal)?;
+    sqlx::query("UPDATE lexicon.entry_editor_projection SET forms=$2,meanings=$3,rebuilt_revision=$4,updated_at=now() WHERE entry_id=$1")
+        .bind(entry).bind(&value[0]).bind(&value[1]).bind(next).execute(&mut **tx).await.map_err(crate::error::AppError::internal)?;
+    sqlx::query("UPDATE lexicon.entry_presentation_projection SET source_revision=$2,updated_at=now() WHERE entry_id=$1 AND source_revision=$3")
+        .bind(entry).bind(next).bind(revision).execute(&mut **tx).await.map_err(crate::error::AppError::internal)?;
+    sqlx::query("UPDATE lexicon.surface_sources SET source_revision=$2,updated_at=now() WHERE entry_id=$1 AND content_scope='draft' AND source_revision=$3")
+        .bind(entry).bind(next).bind(revision).execute(&mut **tx).await.map_err(crate::error::AppError::internal)?;
+    for (step, content) in [("forms", &value[0]), ("meanings", &value[1])] {
+        sqlx::query("UPDATE lexicon.entry_step_progress SET completed_revision=$3,content_hash=$4 WHERE entry_id=$1 AND step=$2")
+            .bind(entry).bind(step).bind(next).bind(sha256_json(content).map_err(crate::error::AppError::internal)?)
+            .execute(&mut **tx).await.map_err(crate::error::AppError::internal)?;
+    }
+    insert_v3_audit(
+        tx,
+        actor,
+        request,
+        "lexicon.entry.audio_updated.v3",
+        entry,
+        next,
+        serde_json::json!({"update_target_id":request}),
+    )
+    .await
+    .map_err(map)?;
+    Ok(())
 }
 
 async fn update_v3_step_progress<T: serde::Serialize>(

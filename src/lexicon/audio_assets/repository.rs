@@ -18,6 +18,7 @@ pub struct NewAudioAsset<'a> {
 
 #[derive(Debug, Clone)]
 pub struct AudioAssetRecord {
+    pub content_type: String,
     pub object_key: String,
     pub created_by_admin_id: Uuid,
 }
@@ -64,12 +65,13 @@ impl AudioAssetRepository {
 
     pub async fn find(&self, id: Uuid) -> Result<Option<AudioAssetRecord>, sqlx::Error> {
         let row = sqlx::query(
-            "SELECT object_key, created_by_admin_id FROM lexicon.audio_assets a WHERE id = $1 AND reclamation_started_at IS NULL AND NOT EXISTS (SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=a.id AND g.state<>'ready')",
+            "SELECT object_key, content_type, created_by_admin_id FROM lexicon.audio_assets a WHERE id = $1 AND reclamation_started_at IS NULL AND NOT EXISTS (SELECT 1 FROM lexicon.audio_generations g WHERE g.asset_id=a.id AND g.state<>'ready')",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|row| AudioAssetRecord {
+            content_type: row.get("content_type"),
             object_key: row.get("object_key"),
             created_by_admin_id: row.get("created_by_admin_id"),
         }))

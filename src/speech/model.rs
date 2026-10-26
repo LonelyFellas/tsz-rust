@@ -56,10 +56,7 @@ impl Voice {
         validate_token(&provider, 32, "provider")?;
         if let Some(persona) = provider_voice_id.strip_suffix(":DragonHDFlashLatestNeural") {
             validate_token(persona, 102, "provider_voice_id")?;
-            if provider != "azure"
-                || super::locale::EnglishLocale::parse(&locale).is_none()
-                || !persona.starts_with(&format!("{locale}-"))
-            {
+            if provider != "azure" || !persona.starts_with(&format!("{locale}-")) {
                 return Err(SpeechModelError::InvalidVoiceField {
                     field: "provider_voice_id",
                 });
@@ -125,15 +122,98 @@ fn validate_token(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    utoipa::ToSchema,
+)]
 pub enum AudioOutputFormat {
+    #[default]
+    #[serde(rename = "mp3")]
     Mp3_24Khz96KbpsMono,
+    #[serde(rename = "wav")]
+    Wav24Khz16BitMono,
 }
 
 impl AudioOutputFormat {
     pub const fn azure_value(self) -> &'static str {
-        "audio-24khz-96kbitrate-mono-mp3"
+        match self {
+            Self::Mp3_24Khz96KbpsMono => "audio-24khz-96kbitrate-mono-mp3",
+            Self::Wav24Khz16BitMono => "riff-24khz-16bit-mono-pcm",
+        }
     }
+    pub const fn content_type(self) -> &'static str {
+        match self {
+            Self::Mp3_24Khz96KbpsMono => "audio/mpeg",
+            Self::Wav24Khz16BitMono => "audio/wav",
+        }
+    }
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Mp3_24Khz96KbpsMono => "mp3",
+            Self::Wav24Khz16BitMono => "wav",
+        }
+    }
+    pub fn accepts(self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Mp3_24Khz96KbpsMono => {
+                bytes.starts_with(b"ID3")
+                    || (bytes.len() > 1 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
+            }
+            Self::Wav24Khz16BitMono => valid_pcm_wav(bytes),
+        }
+    }
+}
+
+fn valid_pcm_wav(bytes: &[u8]) -> bool {
+    if bytes.len() < 44 || !bytes.starts_with(b"RIFF") || &bytes[8..12] != b"WAVE" {
+        return false;
+    }
+    let declared = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    if declared.checked_add(8) != Some(bytes.len()) {
+        return false;
+    }
+    let mut offset = 12usize;
+    let mut format = false;
+    let mut data = false;
+    while offset + 8 <= bytes.len() {
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let start = offset + 8;
+        let Some(end) = start.checked_add(size).filter(|end| *end <= bytes.len()) else {
+            return false;
+        };
+        match &bytes[offset..offset + 4] {
+            b"fmt " => {
+                if format || size < 16 {
+                    return false;
+                }
+                format = bytes[start..start + 2] == 1u16.to_le_bytes()
+                    && bytes[start + 2..start + 4] == 1u16.to_le_bytes()
+                    && bytes[start + 4..start + 8] == 24000u32.to_le_bytes()
+                    && bytes[start + 8..start + 12] == 48000u32.to_le_bytes()
+                    && bytes[start + 12..start + 14] == 2u16.to_le_bytes()
+                    && bytes[start + 14..start + 16] == 16u16.to_le_bytes();
+                if !format {
+                    return false;
+                }
+            }
+            b"data" => {
+                if data || size == 0 || !size.is_multiple_of(2) {
+                    return false;
+                }
+                data = true;
+            }
+            _ => {}
+        }
+        offset = end + size % 2;
+    }
+    format && data && offset == bytes.len()
 }
 
 /// 全局语速区间（对应前端 0.50x-2.00x）。单个音色的可用区间只会更窄
@@ -155,6 +235,8 @@ pub struct SpeechOptions {
     pitch_semitones: i8,
     volume_percent: i16,
     output_format: AudioOutputFormat,
+    style_degree_hundredths: Option<u16>,
+    role: Option<String>,
 }
 
 impl SpeechOptions {
@@ -178,6 +260,8 @@ impl SpeechOptions {
             pitch_semitones,
             volume_percent,
             output_format: AudioOutputFormat::Mp3_24Khz96KbpsMono,
+            style_degree_hundredths: None,
+            role: None,
         })
     }
 
@@ -214,6 +298,52 @@ impl SpeechOptions {
         Ok(())
     }
 
+    pub fn with_output_format(mut self, format: AudioOutputFormat) -> Self {
+        self.output_format = format;
+        self
+    }
+
+    pub fn with_expression(
+        mut self,
+        voice: &Voice,
+        style_degree: Option<f64>,
+        role: Option<String>,
+    ) -> Result<Self, SpeechModelError> {
+        let evidence = super::capabilities::for_voice(voice.provider_voice_id());
+        if let Some(degree) = style_degree {
+            if !degree.is_finite()
+                || !(0.01..=2.0).contains(&degree)
+                || ((degree * 100.0).round() - degree * 100.0).abs() > 0.000001
+                || self.style.is_none()
+                || evidence.is_none_or(|item| item.supports_style_degree != Some(true))
+            {
+                return Err(SpeechModelError::UnsupportedModelCapability);
+            }
+            self.style_degree_hundredths = Some((degree * 100.0).round() as u16);
+        }
+        if let Some(role) = role {
+            validate_token(&role, 64, "role")?;
+            if self.style.is_none()
+                || evidence
+                    .and_then(|item| item.roles.as_ref())
+                    .is_none_or(|roles| !roles.contains(&role))
+            {
+                return Err(SpeechModelError::UnsupportedModelCapability);
+            }
+            self.role = Some(role);
+        }
+        Ok(self)
+    }
+
+    pub fn style_degree(&self) -> Option<f64> {
+        self.style_degree_hundredths
+            .map(|value| f64::from(value) / 100.0)
+    }
+
+    pub fn role(&self) -> Option<&str> {
+        self.role.as_deref()
+    }
+
     pub fn style(&self) -> Option<&str> {
         self.style.as_deref()
     }
@@ -241,6 +371,7 @@ pub struct SynthesisRequest {
     options: SpeechOptions,
     content: RichTextV2,
     normalized_content: Vec<u8>,
+    raw_ssml: Option<String>,
 }
 
 impl SynthesisRequest {
@@ -262,6 +393,8 @@ impl SynthesisRequest {
                     annotation,
                     crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
                         | crate::lexicon::dto::RichTextAnnotation::Pause { .. }
+                        | crate::lexicon::dto::RichTextAnnotation::SayAs { .. }
+                        | crate::lexicon::dto::RichTextAnnotation::Sub { .. }
                 )
             })
         {
@@ -277,6 +410,18 @@ impl SynthesisRequest {
         {
             return Err(SpeechModelError::UnsupportedPhonemeLocale);
         }
+        if content.annotations.iter().any(|mark| {
+            matches!(
+                mark,
+                crate::lexicon::dto::RichTextAnnotation::SayAs { .. }
+                    | crate::lexicon::dto::RichTextAnnotation::Sub { .. }
+            )
+        }) && !super::capabilities::synthesis_available(
+            voice.provider_voice_id(),
+            voice.locale(),
+        ) {
+            return Err(SpeechModelError::UnsupportedModelCapability);
+        }
         let mut rich_text = RichText::V2(content);
         rich_text::canonicalize(&mut rich_text).map_err(|_| SpeechModelError::InvalidRichText)?;
         let RichText::V2(content) = rich_text else {
@@ -289,7 +434,17 @@ impl SynthesisRequest {
             options,
             content,
             normalized_content,
+            raw_ssml: None,
         })
+    }
+
+    pub(crate) fn with_manual_ssml(mut self, ssml: String) -> Self {
+        self.raw_ssml = Some(ssml);
+        self
+    }
+
+    pub(crate) fn manual_ssml(&self) -> Option<&str> {
+        self.raw_ssml.as_deref()
     }
 
     pub fn fingerprint(&self) -> SynthesisFingerprint {
@@ -314,9 +469,21 @@ impl SynthesisRequest {
         encoder.field(self.options.pitch_semitones.to_string().as_bytes());
         encoder.field(self.options.output_format.azure_value().as_bytes());
         encoder.field(&self.normalized_content);
+        if let Some(raw) = &self.raw_ssml {
+            encoder.field(b"manual-ssml-v1");
+            encoder.field(raw.as_bytes());
+        }
         if self.options.volume_percent != 100 {
             encoder.field(b"volume_percent");
             encoder.field(self.options.volume_percent.to_string().as_bytes());
+        }
+        if let Some(degree) = self.options.style_degree_hundredths {
+            encoder.field(b"style_degree");
+            encoder.field(degree.to_string().as_bytes());
+        }
+        if let Some(role) = &self.options.role {
+            encoder.field(b"role");
+            encoder.field(role.as_bytes());
         }
         SynthesisFingerprint(encoder.finish())
     }

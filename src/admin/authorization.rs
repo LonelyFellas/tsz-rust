@@ -594,6 +594,11 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::Any(&["words.access", "sentences.access", "speech.global_dubbing"]),
     ),
     (
+        "POST",
+        "/speech/resolve",
+        RoutePolicy::Any(&["words.access", "sentences.access", "speech.global_dubbing"]),
+    ),
+    (
         "GET",
         "/speech/groups",
         RoutePolicy::Any(&["words.access", "sentences.access", "speech.global_dubbing"]),
@@ -601,6 +606,51 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "PUT",
         "/speech/groups",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "POST",
+        "/speech/groups",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "PUT",
+        "/speech/groups/{id}",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "GET",
+        "/speech/audio-update-settings",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "PUT",
+        "/speech/audio-update-settings",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "GET",
+        "/speech/groups/{id}/audio-updates",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "GET",
+        "/speech/audio-updates",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "POST",
+        "/speech/audio-updates/{id}/cancel",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "POST",
+        "/speech/audio-updates/{id}/retry",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "DELETE",
+        "/speech/groups/{id}",
         RoutePolicy::All(&["speech.global_dubbing"]),
     ),
     (
@@ -612,6 +662,16 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         "PUT",
         "/speech/library/{alias}/personal",
         RoutePolicy::Any(&["words.access", "sentences.access", "speech.global_dubbing"]),
+    ),
+    (
+        "PUT",
+        "/speech/library/{alias}/accent",
+        RoutePolicy::All(&["speech.global_dubbing"]),
+    ),
+    (
+        "POST",
+        "/speech/library/{alias}/description/restore",
+        RoutePolicy::All(&["speech.global_dubbing"]),
     ),
     (
         "PUT",
@@ -629,6 +689,21 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         RoutePolicy::All(&["speech.generate"]),
     ),
     (
+        "GET",
+        "/speech/previews/{hash}/content",
+        RoutePolicy::All(&["speech.generate"]),
+    ),
+    (
+        "POST",
+        "/speech/ssml",
+        RoutePolicy::All(&["speech.generate"]),
+    ),
+    (
+        "POST",
+        "/speech/previews/ssml",
+        RoutePolicy::All(&["speech.generate"]),
+    ),
+    (
         "POST",
         "/lexicon/audio-assets/upload-url",
         RoutePolicy::All(&["speech.upload_audio"]),
@@ -637,6 +712,15 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
         "POST",
         "/lexicon/audio-assets",
         RoutePolicy::All(&["speech.upload_audio"]),
+    ),
+    (
+        "GET",
+        "/lexicon/audio-assets/{id}/content",
+        RoutePolicy::Any(&[
+            "words.access",
+            "sentences.access",
+            "sentences.read_published",
+        ]),
     ),
     (
         "GET",

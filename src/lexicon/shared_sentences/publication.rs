@@ -311,7 +311,23 @@ pub(crate) async fn prepare(
         content = serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?;
     }
     validate_published_targets(tx, &mut content, batch).await?;
-    audio::normalize(tx, actor, item.sentence_id, &mut content.sentence.en_text).await?;
+    crate::lexicon::service::grammar_form_links::validate_reading_text(
+        tx,
+        &mut content.sentence.en_text,
+        None,
+        batch,
+        true,
+    )
+    .await
+    .map_err(crate::lexicon::handler::map_error)?;
+    audio::normalize_in(
+        tx,
+        actor,
+        item.sentence_id,
+        &mut content.sentence.en_text,
+        batch,
+    )
+    .await?;
     // Reusing a publication must not rewrite its immutable annotation anchors.
     if let Some(row) = &existing {
         content = serde_json::from_value(row.get("snapshot")).map_err(AppError::internal)?;

@@ -276,16 +276,32 @@ use utoipa::{
         crate::lexicon::handler::commands::restore_draft_from_publication,
         crate::lexicon::handler::query::search_component_targets,
         crate::speech::generated::generate,
+        crate::speech::dubbing::resolve,
+        crate::speech::audio_updates::settings,
+        crate::speech::audio_updates::save_settings,
+        crate::speech::audio_updates::get_updates,
+        crate::speech::audio_updates::all_updates,
+        crate::speech::audio_updates::cancel,
+        crate::speech::audio_updates::retry,
         crate::lexicon::audio_assets::handler::create_audio_upload,
         crate::lexicon::audio_assets::handler::confirm_audio_asset,
         crate::lexicon::audio_assets::handler::audio_asset_url,
+        crate::lexicon::audio_assets::handler::audio_asset_content,
         crate::speech::preview::handler::list_voices,
         crate::speech::preview::handler::create_preview,
+        crate::speech::preview::handler::preview_content,
+        crate::speech::preview::handler::render_ssml,
+        crate::speech::preview::handler::manual_preview,
         crate::speech::library::handler::list,
         crate::speech::library::handler::groups,
         crate::speech::library::handler::save_groups,
+        crate::speech::library::handler::create_group,
+        crate::speech::library::handler::save_group,
+        crate::speech::library::handler::delete_group,
         crate::speech::library::handler::save_settings,
         crate::speech::library::handler::save_description,
+        crate::speech::library::handler::save_accent,
+        crate::speech::library::handler::restore_description,
     ),
     components(
         schemas(
@@ -2427,7 +2443,7 @@ mod tests {
         assert!(
             schemas["RichTextAnnotationV3"]["oneOf"]
                 .as_array()
-                .is_some_and(|branches| branches.len() == 8
+                .is_some_and(|branches| branches.len() == 10
                     && branches
                         .iter()
                         .all(|branch| branch["additionalProperties"] == false))

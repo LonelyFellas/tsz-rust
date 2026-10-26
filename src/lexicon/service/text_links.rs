@@ -507,7 +507,7 @@ pub(super) fn apply_manual(meanings: &mut DraftMeaningsStepContentV3) {
                 .into_iter()
                 .filter_map(|(d, slot)| match slot {
                     crate::lexicon::dto::DialectVariantRichTextSlotV3::Ready { variant } => {
-                        Some((d, variant))
+                        Some((d, variant.as_ref()))
                     }
                     _ => None,
                 })

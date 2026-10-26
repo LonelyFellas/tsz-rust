@@ -33,12 +33,31 @@ impl SpeechProvider for FakeProvider {
 
     async fn synthesize(
         &self,
-        _request: &SynthesisRequest,
+        request: &SynthesisRequest,
     ) -> Result<SynthesizedAudio, SpeechError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let format = request.options().output_format();
+        let bytes = if format == tsz_rust::speech::AudioOutputFormat::Wav24Khz16BitMono {
+            let mut bytes = vec![0; 48];
+            bytes[..4].copy_from_slice(b"RIFF");
+            bytes[4..8].copy_from_slice(&40u32.to_le_bytes());
+            bytes[8..16].copy_from_slice(b"WAVEfmt ");
+            bytes[16..20].copy_from_slice(&16u32.to_le_bytes());
+            bytes[20..22].copy_from_slice(&1u16.to_le_bytes());
+            bytes[22..24].copy_from_slice(&1u16.to_le_bytes());
+            bytes[24..28].copy_from_slice(&24000u32.to_le_bytes());
+            bytes[28..32].copy_from_slice(&48000u32.to_le_bytes());
+            bytes[32..34].copy_from_slice(&2u16.to_le_bytes());
+            bytes[34..36].copy_from_slice(&16u16.to_le_bytes());
+            bytes[36..40].copy_from_slice(b"data");
+            bytes[40..44].copy_from_slice(&4u32.to_le_bytes());
+            bytes
+        } else {
+            b"ID3-fixture".to_vec()
+        };
         Ok(SynthesizedAudio {
-            bytes: b"mp3".to_vec(),
-            content_type: "audio/mpeg",
+            bytes,
+            content_type: format.content_type(),
             provider_request_id: None,
         })
     }
@@ -73,6 +92,7 @@ fn redis_pool() -> deadpool_redis::Pool {
 
 fn request(text: &str) -> CreatePreviewRequest {
     CreatePreviewRequest {
+        output_format: None,
         content: RichTextV2 {
             version: 2,
             text: text.to_owned(),
@@ -80,6 +100,8 @@ fn request(text: &str) -> CreatePreviewRequest {
         },
         voice_alias: "en-us-jenny".to_owned(),
         style: Some("chat".to_owned()),
+        style_degree: None,
+        role: None,
         rate_percent: 0,
         pitch_semitones: 0,
         volume_percent: None,
@@ -92,6 +114,38 @@ async fn insert_voice(pool: &PgPool) {
            (id, alias, provider, provider_voice_id, locale, gender, styles, provider_version)
            VALUES ($1, 'en-us-jenny', 'azure', 'en-US-JennyNeural', 'en-US', 'female', '["chat"]', 'v1')"#,
     ).bind(Uuid::now_v7()).execute(pool).await.unwrap();
+}
+
+#[sqlx::test]
+async fn unknown_capabilities_and_unconfirmed_expression_never_call_provider(pool: PgPool) {
+    let admin_id = seed_admin(&pool).await;
+    insert_voice(&pool).await;
+    let provider = Arc::new(FakeProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let service = PreviewService::new(
+        pool.clone(),
+        PreviewRepository::new(pool.clone()),
+        redis_pool(),
+        Some(provider.clone()),
+        None,
+    );
+    for degree in [0.0, 0.73, 2.01] {
+        let mut input = request("degree");
+        input.style_degree = Some(degree);
+        assert!(service.create_preview(admin_id, input).await.is_err());
+    }
+    let mut input = request("role");
+    input.role = Some("YoungAdultFemale".into());
+    assert!(service.create_preview(admin_id, input).await.is_err());
+    sqlx::query("UPDATE speech.voices SET provider_voice_id='en-US-UnknownNeural' WHERE alias='en-us-jenny'").execute(&pool).await.unwrap();
+    assert!(
+        service
+            .create_preview(admin_id, request("unknown"))
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
 }
 
 #[sqlx::test]
@@ -141,6 +195,84 @@ async fn preview_generation_then_hash_hit_calls_provider_once(pool: PgPool) {
     let hit = service.create_preview(admin_id, quieter).await.unwrap();
     assert!(matches!(hit.cache_status, PreviewCacheStatus::Hit));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+}
+
+#[sqlx::test]
+async fn preview_formats_and_manual_ssml_have_distinct_cache_and_read_actual_bytes(pool: PgPool) {
+    use tsz_rust::speech::{AudioOutputFormat, preview::dto::ManualPreviewRequest};
+    let actor = seed_admin(&pool).await;
+    insert_voice(&pool).await;
+    let provider = Arc::new(FakeProvider {
+        calls: AtomicUsize::new(0),
+    });
+    let storage = MemoryAdapter::object_store(
+        StorageSpace::parse("speech").unwrap(),
+        StoragePolicy::new(StoragePrivacy::Private, 1024, Duration::from_secs(60), None).unwrap(),
+    );
+    let service = PreviewService::new(
+        pool.clone(),
+        PreviewRepository::new(pool.clone()),
+        redis_pool(),
+        Some(provider.clone()),
+        Some(storage),
+    );
+    let mp3 = service
+        .create_preview(actor, request("formats"))
+        .await
+        .unwrap();
+    let mut input = request("formats");
+    input.output_format = Some(AudioOutputFormat::Wav24Khz16BitMono);
+    let wav = service.create_preview(actor, input).await.unwrap();
+    assert_ne!(mp3.content_path, wav.content_path);
+    let hash_string = wav.content_path.split('/').nth(3).unwrap();
+    let mut hash = [0; 32];
+    for (index, byte) in hash.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hash_string[index * 2..index * 2 + 2], 16).unwrap();
+    }
+    let (mime, bytes) = service.read_content(actor, &hash).await.unwrap();
+    assert_eq!(mime, "audio/wav");
+    assert_eq!(&bytes[..4], b"RIFF");
+    let mime: String =
+        sqlx::query_scalar("SELECT mime_type FROM speech.preview_cache WHERE request_hash=$1")
+            .bind(hash.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(mime, "audio/wav");
+    let raw = r#" <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US"><voice name="en-US-JennyNeural"><sub alias="kitten">cat</sub></voice></speak> "#;
+    for _ in 0..2 {
+        service
+            .create_manual_preview(
+                actor,
+                ManualPreviewRequest {
+                    voice_alias: "en-us-jenny".into(),
+                    ssml: raw.into(),
+                    output_format: AudioOutputFormat::default(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    assert!(
+        service
+            .create_manual_preview(
+                actor,
+                ManualPreviewRequest {
+                    voice_alias: "en-us-jenny".into(),
+                    ssml: raw.replace(
+                        "<sub alias=\"kitten\">cat</sub>",
+                        "<audio src=\"https://example.com/a\"/>"
+                    ),
+                    output_format: AudioOutputFormat::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    sqlx::query("DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='speech.generate'").bind(actor).execute(&pool).await.unwrap();
+    assert!(service.read_content(actor, &hash).await.is_err());
 }
 
 #[sqlx::test]

@@ -1,11 +1,15 @@
+pub mod audio_updates;
 mod azure;
+pub mod capabilities;
 mod catalog;
 mod config;
+pub mod dubbing;
 pub mod generated;
 pub(crate) mod generated_references;
 pub mod generated_source;
 pub mod library;
 pub mod locale;
+mod manual_ssml;
 pub(crate) mod model;
 pub mod preview;
 mod product_catalog;

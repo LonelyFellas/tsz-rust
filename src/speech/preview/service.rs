@@ -117,6 +117,14 @@ impl PreviewService {
             .voice_by_alias(&input.voice_alias)
             .await?
             .ok_or(PreviewServiceError::VoiceNotFound)?;
+        if !crate::speech::capabilities::synthesis_available(
+            voice.voice.provider_voice_id(),
+            voice.voice.locale(),
+        ) {
+            return Err(PreviewServiceError::InvalidRequest(
+                SpeechModelError::UnsupportedModelCapability,
+            ));
+        }
         if input.rate_percent < voice.min_rate_percent
             || input.rate_percent > voice.max_rate_percent
             || i16::from(input.pitch_semitones) < voice.min_pitch_semitones
@@ -132,11 +140,52 @@ impl PreviewService {
             input.rate_percent,
             input.pitch_semitones,
             input.volume_percent.unwrap_or(100),
-        )?;
+        )?
+        .with_expression(&voice.voice, input.style_degree, input.role)?
+        .with_output_format(input.output_format.unwrap_or_default());
         let request = SynthesisRequest::new(voice.voice, options, input.content)?;
+        self.create_prepared(actor_id, voice.id, &voice.provider_version, request)
+            .await
+    }
+
+    pub async fn create_manual_preview(
+        &self,
+        actor_id: uuid::Uuid,
+        input: super::dto::ManualPreviewRequest,
+    ) -> Result<PreviewResponse, PreviewServiceError> {
+        self.authorize(actor_id, true).await?;
+        let voice = self
+            .repository
+            .voice_by_alias(&input.voice_alias)
+            .await?
+            .ok_or(PreviewServiceError::VoiceNotFound)?;
+        if !crate::speech::capabilities::synthesis_available(
+            voice.voice.provider_voice_id(),
+            voice.voice.locale(),
+        ) {
+            return Err(SpeechModelError::UnsupportedModelCapability.into());
+        }
+        let request = crate::speech::manual_ssml::request(
+            voice.voice,
+            input.ssml,
+            input.output_format,
+            (voice.min_rate_percent, voice.max_rate_percent),
+            (voice.min_pitch_semitones, voice.max_pitch_semitones),
+        )?;
+        self.create_prepared(actor_id, voice.id, &voice.provider_version, request)
+            .await
+    }
+
+    async fn create_prepared(
+        &self,
+        actor_id: uuid::Uuid,
+        voice_id: uuid::Uuid,
+        provider_version: &str,
+        request: SynthesisRequest,
+    ) -> Result<PreviewResponse, PreviewServiceError> {
         let request_hash = scoped_hash(
             request.fingerprint().as_bytes(),
-            &voice.provider_version,
+            provider_version,
             self.test_run.as_deref(),
         );
         let content_hash: [u8; 32] = Sha256::digest(request.normalized_content()).into();
@@ -148,7 +197,13 @@ impl PreviewService {
 
         if let Some(cache) = self.repository.active_cache(&request_hash).await? {
             return self
-                .signed_response(actor_id, &storage, cache, PreviewCacheStatus::Hit)
+                .signed_response(
+                    actor_id,
+                    &storage,
+                    cache,
+                    PreviewCacheStatus::Hit,
+                    &request_hash,
+                )
                 .await;
         }
 
@@ -168,7 +223,13 @@ impl PreviewService {
                 wait_interval().await;
                 if let Some(cache) = self.repository.active_cache(&request_hash).await? {
                     return self
-                        .signed_response(actor_id, &storage, cache, PreviewCacheStatus::Hit)
+                        .signed_response(
+                            actor_id,
+                            &storage,
+                            cache,
+                            PreviewCacheStatus::Hit,
+                            &request_hash,
+                        )
                         .await;
                 }
             }
@@ -179,7 +240,6 @@ impl PreviewService {
         // axum 会丢弃 handler future，若生成就地跑就会在 put 与 save_cache 之间留下无 DB 行的
         // 孤儿对象，且 lock.release() 永远不会执行，同一 fingerprint 要等租约到期才能再试。
         // detach 后任务照常跑完：已经付过费的合成结果被写进缓存，锁也一定释放。
-        let voice_id = voice.id;
         let service = self.clone();
         // 带上当前 span：任务跑在 handler 之外，不继承的话生成路径上的告警会丢掉 request_id。
         let generation = tokio::spawn(
@@ -219,7 +279,13 @@ impl PreviewService {
     ) -> Result<PreviewResponse, PreviewServiceError> {
         if let Some(cache) = self.repository.active_cache(request_hash).await? {
             return self
-                .signed_response(actor_id, &storage, cache, PreviewCacheStatus::Hit)
+                .signed_response(
+                    actor_id,
+                    &storage,
+                    cache,
+                    PreviewCacheStatus::Hit,
+                    request_hash,
+                )
                 .await;
         }
         let provider = self
@@ -231,7 +297,12 @@ impl PreviewService {
         }
         self.authorize(actor_id, true).await?;
         let audio = provider.synthesize(request).await?;
-        if audio.bytes.is_empty() || audio.content_type != "audio/mpeg" {
+        if audio.bytes.is_empty()
+            || audio.content_type != request.options().output_format().content_type()
+            || (request.options().output_format()
+                == crate::speech::AudioOutputFormat::Wav24Khz16BitMono
+                && !request.options().output_format().accepts(&audio.bytes))
+        {
             return Err(PreviewServiceError::Provider(SpeechError::new(
                 crate::speech::SpeechErrorKind::InvalidResponse,
                 None,
@@ -240,8 +311,11 @@ impl PreviewService {
         let stale = self.repository.cache_by_hash(request_hash).await?;
         let key = storage
             .qualify_key(
-                ObjectKey::generate("previews", Some("mp3"))
-                    .expect("constant speech preview namespace and extension are valid"),
+                ObjectKey::generate(
+                    "previews",
+                    Some(request.options().output_format().extension()),
+                )
+                .expect("constant speech preview namespace and extension are valid"),
             )
             .expect("validated test prefix fits generated key");
         let size_bytes = i64::try_from(audio.bytes.len())
@@ -252,7 +326,8 @@ impl PreviewService {
                 &key,
                 audio.bytes,
                 PutOptions::new(Some(
-                    ObjectContentType::parse("audio/mpeg").expect("constant mime is valid"),
+                    ObjectContentType::parse(request.options().output_format().content_type())
+                        .expect("constant mime is valid"),
                 )),
             )
             .await?;
@@ -283,6 +358,7 @@ impl PreviewService {
                         expires_at: Utc::now() + chrono::Duration::hours(CACHE_TTL_HOURS),
                     },
                     PreviewCacheStatus::Generated,
+                    request_hash,
                 )
                 .await
             }
@@ -293,8 +369,14 @@ impl PreviewService {
                     .active_cache(request_hash)
                     .await?
                     .ok_or(PreviewServiceError::InProgress)?;
-                self.signed_response(actor_id, &storage, cache, PreviewCacheStatus::Hit)
-                    .await
+                self.signed_response(
+                    actor_id,
+                    &storage,
+                    cache,
+                    PreviewCacheStatus::Hit,
+                    request_hash,
+                )
+                .await
             }
             Err(error) => {
                 compensate_delete(&storage, &key).await;
@@ -303,12 +385,47 @@ impl PreviewService {
         }
     }
 
+    pub async fn read_content(
+        &self,
+        actor: uuid::Uuid,
+        hash: &[u8; 32],
+    ) -> Result<(String, Vec<u8>), PreviewServiceError> {
+        self.authorize(actor, true).await?;
+        let cache = self
+            .repository
+            .active_cache(hash)
+            .await?
+            .ok_or(PreviewServiceError::VoiceNotFound)?;
+        let key = ObjectKey::parse(cache.object_key)
+            .map_err(|_| PreviewServiceError::InvalidRequest(SpeechModelError::InvalidRichText))?;
+        let bytes = self
+            .storage
+            .as_ref()
+            .ok_or(PreviewServiceError::ProviderNotConfigured)?
+            .read(&key)
+            .await?;
+        self.authorize(actor, true).await?;
+        if self.repository.active_cache(hash).await?.is_none() {
+            return Err(PreviewServiceError::VoiceNotFound);
+        }
+        Ok((
+            if key.as_str().ends_with(".wav") {
+                "audio/wav"
+            } else {
+                "audio/mpeg"
+            }
+            .into(),
+            bytes,
+        ))
+    }
+
     async fn signed_response(
         &self,
         actor_id: uuid::Uuid,
         storage: &Arc<dyn ObjectStore>,
         cache: CacheRecord,
         cache_status: PreviewCacheStatus,
+        request_hash: &[u8; 32],
     ) -> Result<PreviewResponse, PreviewServiceError> {
         self.authorize(actor_id, true).await?;
         let key = ObjectKey::parse(cache.object_key)
@@ -318,6 +435,13 @@ impl PreviewService {
         let ttl = signed.expires_in();
         let expires_at = DateTime::<Utc>::from(std::time::SystemTime::now() + ttl);
         Ok(PreviewResponse {
+            content_path: format!(
+                "/speech/previews/{}/content",
+                request_hash
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ),
             cache_status,
             audio_url: signed.url().to_owned(),
             expires_at,
