@@ -43,7 +43,9 @@ class HostOperationTests(unittest.TestCase):
                     with patch.object(host, 'baseline_matches') as baseline, \
                          patch.object(host.business, 'check_auth_schema') as schema, \
                          patch.object(host.business, 'random_credentials'), patch.object(host.auth, 'preflight') as tls:
-                        self.assertEqual(host.preflight(plan), {'ready': True})
+                        result = host.preflight(plan)
+                        self.assertTrue(result['ready'])
+                        self.assertEqual(result['scheduled_backup']['status'], 'warning')
                         baseline.assert_called_once_with(plan)
                         schema.assert_called_once()
                         tls.assert_called_once()

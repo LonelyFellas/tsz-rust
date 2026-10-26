@@ -860,6 +860,125 @@ async fn named_voice_versions_survive_shared_sentence_save_and_protect_legacy_wr
 }
 
 #[sqlx::test]
+async fn disabled_flash_without_audio_allows_sentence_neural_edits_and_preserves_versions(
+    pool: PgPool,
+) {
+    let actor = admin(&pool).await;
+    let source = entry(&pool, actor, "wonderful").await;
+    let state = AppState::for_test(pool.clone());
+    tsz_rust::speech::preview::PreviewRepository::new(pool.clone())
+        .ensure_catalog_voices()
+        .await
+        .unwrap();
+    let flash_alias: String = sqlx::query_scalar(
+        "SELECT alias FROM speech.voices WHERE provider_voice_id='en-US-Tiana:DragonHDFlashLatestNeural'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let token = state
+        .admin_token_manager
+        .generate(actor, AdminRole::Admin.as_str())
+        .unwrap();
+    let request = |method: Method, path: &str, body: Value| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("X-TSZ-Voice-Versions", "v2")
+            .header("X-TSZ-Voice-Models", "v1")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let mut proposed = content(source);
+    let flash = json!({"version_id":Uuid::now_v7(),"version_name":"Flash 自然","locale":"en-US","voice_id":flash_alias,"enabled":true,"rate_percent":0});
+    proposed["sentence"]["en_text"]["common"]["voice_profile"] = json!({"voices":[flash.clone()]});
+    let response = tsz_rust::router(state.clone())
+        .oneshot(request(
+            Method::POST,
+            ROOT,
+            json!({"source_entry_id":source,"source_sense_id":sense_id(source),"content":proposed}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let path = format!("{ROOT}/{}", created["id"].as_str().unwrap());
+    let mut disabled = flash;
+    disabled["enabled"] = json!(false);
+    let profile =
+        json!({"voices":[disabled,{"voice_id":"en-us-aria","enabled":true,"rate_percent":0}]});
+    proposed["sentence"]["en_text"]["common"]["voice_profile"] = profile.clone();
+    proposed["sentence"]["en_text"]["common"]["value"]["annotations"] =
+        json!([{"type":"pause","at":1,"duration_ms":300}]);
+    let response = tsz_rust::router(state.clone())
+        .oneshot(request(
+            Method::PUT,
+            &path,
+            json!({"base_revision":created["revision"],"content":proposed}),
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    let saved: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "disabled Flash must not restrict Neural edits: {saved}"
+    );
+    let response = tsz_rust::router(state.clone())
+        .oneshot(request(
+            Method::GET,
+            &format!("{path}?view=draft"),
+            Value::Null,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let read: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        read["content"]["sentence"]["en_text"]["common"]["voice_profile"],
+        profile
+    );
+    assert_eq!(
+        read["content"]["sentence"]["en_text"]["common"]["value"],
+        proposed["sentence"]["en_text"]["common"]["value"]
+    );
+    for bound in [false, true] {
+        let mut invalid = proposed.clone();
+        let voices = &mut invalid["sentence"]["en_text"]["common"]["voice_profile"]["voices"];
+        if bound {
+            voices[0]["audio_asset_id"] = json!(Uuid::now_v7());
+        } else {
+            voices[0]["enabled"] = json!(true);
+            voices[1]["enabled"] = json!(false);
+        }
+        let response = tsz_rust::router(state.clone())
+            .oneshot(request(
+                Method::PUT,
+                &path,
+                json!({"base_revision":saved["revision"],"content":invalid}),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let problem: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{problem}");
+        assert_eq!(problem["code"], "invalid_speech_preview");
+        assert_eq!(
+            problem["detail"],
+            tsz_rust::speech::SpeechModelError::UnsupportedModelCapability.to_string()
+        );
+    }
+}
+
+#[sqlx::test]
 async fn native_sentence_versions_reopen_and_block_old_client_overwrites(pool: PgPool) {
     let owner = admin(&pool).await;
     let source = entry(&pool, owner, "wonderful").await;

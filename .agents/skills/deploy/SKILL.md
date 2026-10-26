@@ -20,7 +20,7 @@ description: 经明确授权，使用 ops/deploy_test.py 将当前 GitHub main �
 
 1. 准备独立干净的 `main` checkout，HEAD/tree 等于当前 GitHub main；原开发工作区不切换、不清理。控制器及直接依赖摘要固定到计划，下载目录与受信工具目录分离。
 2. 最新精确 CI run/attempt 必须 completed/success、来自同仓 main 的 push/workflow_dispatch。生产 attempt 和验证 attempt 分开，绑定精确 artifact ID、有效期、摘要与最新通过且清理完成的 smoke 回执；缺失、失败、未知或来源漂移一律阻断。
-3. 在服务器写入前核实部署基线、完整迁移账本、配置身份、TLS、资源容量，以及可用的写前恢复点。控制器不自动创建数据库备份，也不判断恢复点是否适用于当前数据与候选；按 [备份恢复规范](../../../docs/postgresql-backup-restore.md) 留下验收和适用性证据。
+3. 在服务器写入前核实部署基线、完整迁移账本、配置身份、TLS 与资源容量。`tshb-test` 普通兼容程序发布读取独立备份状态，不现场重新导出、下载整库或等待完整恢复；备份延迟明确报告告警。新增迁移、不兼容写入格式、破坏性任务或无法证明兼容时，仍需适用的写前保护与专项验证。按 [备份恢复规范](../../../docs/postgresql-backup-restore.md) 分级执行；控制器不自动创建恢复点或授权数据恢复。
 4. 无新增迁移时，只有账本仍等于基线且旧版兼容当前数据才允许二进制/manifest 恢复。有新增迁移时，先取得实际基线的隔离升级/恢复证据与独立批准的策略；合成演练不授权真实数据 down/PITR。未知现场进入 `manual_required`，保留锁和状态。
 5. `apply` 管理本地/远端 owner 锁、动作前 intent、结果落盘、成组备份和原子替换。正式服务停止前再次核对 main/CI/基线，变更开始后固定候选；不抢锁、不手工补写 manifest、不盲目重发。
 6. 保持 `.env`、nginx、前端和业务开关不变。`COOKIE_SECURE=true`；`LOGIN_REWARD_ENABLED` 可开可关，但仍参与配置身份和漂移检查。服务器只运行精确 CI 二进制，不同步源码或现场编译。

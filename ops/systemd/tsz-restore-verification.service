@@ -1,0 +1,14 @@
+[Unit]
+Description=Weekly isolated tsz-test offsite backup restore
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=/opt/tsz-rust
+ExecStart=/usr/bin/python3 -I /opt/tsz-rust/ops/postgresql_restore_job.py --config /etc/tsz-rust/backup.json
+TimeoutStartSec=60min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

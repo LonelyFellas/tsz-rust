@@ -712,13 +712,19 @@ pub(crate) async fn validate_bindings_with_forms(
             serde_json::from_value::<Vec<String>>(row.get("styles")).map_err(AppError::internal)?,
         )
         .map_err(|_| invalid())?;
-        configuration.source.validate_model(&model)?;
         let setting = &configuration.setting;
+        let active = setting.enabled || setting.audio_asset_id.is_some();
+        if active {
+            configuration.source.validate_model(&model)?;
+        }
         if setting
             .locale
             .is_none_or(|locale| locale.as_str() != model.locale())
         {
             return Err(invalid());
+        }
+        if !active {
+            continue;
         }
         let content = configuration
             .source

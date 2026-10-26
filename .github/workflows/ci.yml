@@ -173,6 +173,9 @@ jobs:
       - name: Test owned business smoke boundaries
         run: python3 -m unittest discover -s ops -p 'test_deployment_business_smoke.py'
 
+      - name: Test independent backup job and phase progress
+        run: python3 -m unittest discover -s ops -p 'test_postgresql_backup_job.py'
+
       - name: Test deployment preflight
         run: python3 -m unittest ops/test_deployment_preflight.py
 

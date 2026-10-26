@@ -21,6 +21,31 @@ pg_dump_version=18.6
 
 镜像升级必须重新记录 digest、`pg_dump --version` 和恢复验证结果，不能只复用可变的 `postgres:18-alpine` tag。
 
+## tshb-test 发布与独立备份
+
+本环境尚未正式上线。普通兼容程序发布不等待本次整库导出、下载或完整恢复；发布前记录独立备份状态，失败或延迟明确告警。判断兼容性必须覆盖持久化格式和后台副作用，不能仅看有没有 migration。数据风险发布仍需匹配本次风险的写前备份与专项验证，缺失即停止。
+
+独立任务入口为 `ops/postgresql_backup_job.py`；`ops/systemd/tsz-backup.service` 和 `.timer` 是待安装模板，本次实现不自动安装或启用。默认每日服务器本地时间 03:17 后随机延迟最多 10 分钟运行，45 分钟超时；失败通过非零退出与 systemd failed 状态报告，安装时必须接入既有通知通道。`ops/postgresql_restore_job.py` 与 `ops/systemd/tsz-restore-verification.service/.timer` 提供每周日 05:23 后的独立恢复模板：取回最近一次成功异机备份，核对原始摘要与字节数，在不可变镜像、无网络、限 CPU/内存的独占容器恢复，检查表和 SQLx 成功账本，先通过 TCP 对目标数据库执行 `SELECT 1`，避开初始化临时服务；恢复后按持久记录的 owner 与完整 ID 清理容器、匿名数据卷及本地下载副本，全部完成后才写成功的 `restore-latest.json`。Docker 创建响应丢失时仍按 owner 查询，取消信号不作为就绪重试；清理失败保持 `cleanup_complete=false`。工具主版本或镜像变化后追加验证。该自动检查证明归档可恢复与基本账本可读，不替代下述关键业务 row count/checksum 专项审计；日常归档可读也不等于完整恢复验证通过。
+
+受保护的 `/etc/tsz-rust/backup.json` 配置示例：
+
+```json
+{
+  "environment": "tshb-test",
+  "directory": "/opt/tsz-rust/backups/scheduled",
+  "postgresql_major": 18,
+  "archive_command": ["/usr/bin/python3", "-I", "/opt/tsz-rust/ops/backup_archive_ssh.py", "/etc/tsz-rust/backup-storage.json"],
+  "fetch_command": ["/usr/bin/python3", "-I", "/opt/tsz-rust/ops/backup_archive_ssh.py", "fetch", "/etc/tsz-rust/backup-storage.json"],
+  "restore_image": "postgres@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2"
+}
+```
+
+`postgresql_major` 按只读核实的目标填写；任务要求预装的 `psql`、`pg_dump`、`pg_restore` 与之匹配，不自动安装或升级。数据库 URI 只从正式进程读取并通过子进程环境传入，不进入 argv、状态或 journal。任务串行互斥，状态文件替换后同步父目录；外部传输在超时或取消时终止整个本地进程组，再释放锁。dump 写入 `.partial`，工具可读后核对 SHA256，再调用受信任的异机存储传输程序。该程序接收固定归档绝对路径和摘要，完成上传及远端读取校验后返回 JSON：`verified=true`、`sha256`、`bytes`、`reference`；未配置或失败不会生成成功状态。传输程序只接收路径与摘要，不能获得数据库连接环境；安装前须核对其权限、目的地及返回校验，不能以仅上传成功冒充异机可读。
+
+内置 `ops/backup_archive_ssh.py` 支持受审阅 SSH 目的地，存储配置为 `{"host":"已配置的SSH别名","directory":"/absolute/backup/root"}`；连接必须开启主机密钥校验。实际值由运维配置，别名不能指回源数据库机器；首次启用前核实是独立故障域。它以 rsync 传固定文件、在远端复算摘要与字节数，再原子完成命名；测试不连接真实 SSH。不能在配置未知时自动安装任务。
+
+建议异机至少保留近 7 天，存储生命周期由受控目的地配置管理；此工具不自动删除历史备份。`latest.json` 指向最后一次成功的异机归档，`last-attempt.json` 独立记录最近任务，失败或中断不会被旧成功掩盖；`status` 以快照开始时间检查 26 小时新鲜度，具体失败回执保留在任务目录。完整备份不自动包含 OSS 文件，需要独立检查对象版本保留。发布侧只读查看该状态，不触发本任务；真正的数据风险发布不能用普通状态替代写前保护。
+
 ## 创建恢复点
 
 下列命令从运行中服务的 `/proc/<MainPID>/environ` 读取 systemd 已解析的单个 `DATABASE_URL`，不使用 shell `source` 重新解释环境文件。Python 将 URI 拆成 libpq service 参数和密码；两者均通过 FIFO 传入容器，密码只进入容器内 `pg_dump` 的进程环境，argv 和 Docker 配置不含 DSN 或密码。dump 和校验文件权限为 `0600`。不要启用 shell tracing。
@@ -191,4 +216,4 @@ docker exec "$container" pg_restore \
 - `pg_restore --exit-on-error` 退出状态；
 - 恢复容器名称、数据库名、`network:none`、tmpfs 挂载和最终清理结果。
 
-只有 hash 校验、恢复命令、schema/row count/checksum 对比和临时资源清理全部通过，恢复点门禁才是 **PASS**。任何一项缺失均为 **FAIL** 或 **BLOCKED**，不得继续后续业务写入。
+只有 hash 校验、恢复命令、schema/row count/checksum 对比和临时资源清理全部通过，本次完整恢复演练才是 **PASS**。任何一项缺失均为 **FAIL** 或 **BLOCKED**，不得声称该备份已完整恢复验证。源库活跃时，比较基线必须来自 dump 的同一一致快照，不能要求快照后的正常业务写入与恢复库相等。普通兼容程序发布与完整演练解耦；需要本次数据保护的高风险操作仍须在证据齐备后执行。

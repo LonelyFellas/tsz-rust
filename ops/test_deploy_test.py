@@ -120,10 +120,29 @@ class ControllerTests(unittest.TestCase):
             result = controller.apply(plan)
             self.assertEqual(result["status"], "accepted")
             self.assertEqual(host.actions, list(STEPS))
+            self.assertIn('preparation_timings', plan)
+            self.assertEqual(result['scheduled_backup']['status'], 'unknown')
+            self.assertTrue(all(row['status'] == 'passed' for row in result['timings']))
+            self.assertIn('upload', {row['phase'] for row in result['timings']})
             self.assertFalse((root / "state/active").exists())
             self.assertEqual(controller.status(plan["deployment_id"])["status"], "accepted")
             self.assertNotIn("password", controller.path(plan["deployment_id"]).read_text())
             self.assertLess(host.actions.index("business_verify"), host.actions.index("accept"))
+
+    def test_total_deadline_stops_before_mutation_and_keeps_recovery_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan, host, gate = plan_fixture(root)
+            clock = [0]
+            def expired():
+                clock[0] += 1000
+                return clock[0]
+            with patch('deploy_test.time.monotonic', side_effect=expired):
+                result = Controller(root / 'state', gate, host).apply(plan)
+            self.assertEqual(result['status'], 'blocked')
+            self.assertEqual(result['failed_stage'], 'deployment_deadline_exceeded')
+            self.assertFalse(host.mutated)
+            self.assertEqual(host.actions, [])
 
     def test_every_forward_failure_recovers_or_aborts_without_replaying(self):
         for stage in STEPS:

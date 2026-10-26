@@ -68,6 +68,12 @@ python3 ops/deploy_test.py --state-dir /absolute/state-dir resume --deployment-i
 
 `apply`/`resume` 只有结果为 `accepted` 才返回 0；`recovered` 表示发布失败但已恢复旧版本，仍返回 1。`blocked`、`manual_required`、非法计划或未知现场也返回 1。`plan` 成功写入计划或 `status` 成功读取状态均可返回 0，不能将它们的退出码当作发布成功；仍须检查事务状态和实际现场。
 
+## 阶段进度与测试环境备份
+
+`plan` 记录 baseline、GitHub 来源门与 preflight 的耗时；`apply` 对各前向步骤输出 stderr JSON 进度和结果，长阶段每 30 秒输出心跳，状态中保存 `timings`。stdout 继续保留 CLI 最终 JSON，不因计时改变恢复语义。前向执行预算为 15 分钟，在步骤边界检查；单次远端调用仍由传输层超时约束，超出预算进入既有恢复流程，恢复不受该前向预算取消。
+
+`tshb-test` 普通兼容发布不等待整库下载或完整恢复，独立备份状态与告警按 [备份规范](../postgresql-backup-restore.md)记录。新增迁移、破坏性副作用或写入格式变化仍需对应写前保护和恢复策略。调度模板属于待安装配置，代码存在不代表异机备份、通知或每周恢复已运行。
+
 ## 状态与顺序
 
 本地 `<state-dir>/<deployment-uuid>/state.json` 保存完整 plan、`plan_sha256`、`phase`、`status`、`pending`、`completed`、`mutation_started` 和带时间的事件。JSON 以临时文件、fsync、原子替换持久化，文件权限 0600。每个动作先写 intent，完成后再写结果。

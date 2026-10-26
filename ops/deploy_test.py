@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import time
+import threading
 import uuid
 
 from artifact_test_runtime import VerificationError, digest
@@ -30,7 +32,7 @@ TERMINAL = {"accepted", "recovered", "blocked"}
 TOOL_FILES = ("deploy_test.py", "deployment_transport.py", "deployment_host.py", "deployment_business_smoke.py",
               "deployment_manifest.py", "deployment_auth_smoke.py", "deployed_baseline.py",
               "release_artifact_manifest.py", "release_artifact_smoke.py", "migration_compatibility.py",
-              "artifact_test_runtime.py", "ci_fingerprint.py")
+              "artifact_test_runtime.py", "ci_fingerprint.py", "postgresql_backup_job.py")
 
 
 def tools_identity():
@@ -161,7 +163,9 @@ def build_plan(bundle, gate, host, *, recovery_policy=None):
     receipt_path = folder / "release-smoke-receipt.json"
     receipt_bytes = receipt_path.read_bytes()
     receipt = json.loads(receipt_bytes)
-    baseline = host.baseline()
+    timings = []
+    with measured_phase("baseline", timings):
+        baseline = host.baseline()
     info = json.loads((folder / "deploy-info.json").read_text())
     from migration_compatibility import migration_interval
     interval = migration_interval(info, baseline["postgresql"]["migration_ledger"])
@@ -181,9 +185,43 @@ def build_plan(bundle, gate, host, *, recovery_policy=None):
         "recovery_policy": recovery_policy,
     }
     check_plan(plan)
-    gate.check(plan)
-    host.preflight(plan)
+    with measured_phase("github_gate", timings):
+        gate.check(plan)
+    with measured_phase("preflight", timings):
+        preflight = host.preflight(plan) or {}
+    plan["scheduled_backup"] = preflight.get("scheduled_backup", {"status": "unknown"})
+    print(json.dumps({"scheduled_backup": plan["scheduled_backup"]}), file=sys.stderr, flush=True)
+    plan["preparation_timings"] = timings
     return plan
+
+
+@contextlib.contextmanager
+def measured_phase(name, timings, *, heartbeat_seconds=30):
+    started = time.monotonic()
+    finished = threading.Event()
+
+    def emit(status):
+        print(json.dumps({"phase": name, "status": status,
+                          "elapsed_seconds": round(time.monotonic() - started, 3)}),
+              file=sys.stderr, flush=True)
+
+    def heartbeat():
+        while not finished.wait(heartbeat_seconds):
+            emit("running")
+
+    emit("started")
+    worker = threading.Thread(target=heartbeat, daemon=True)
+    worker.start()
+    status = "failed"
+    try:
+        yield
+        status = "passed"
+    finally:
+        finished.set()
+        worker.join()
+        timings.append({"phase": name, "status": status,
+                        "elapsed_seconds": round(time.monotonic() - started, 3)})
+        emit(status)
 
 
 class Controller:
@@ -252,23 +290,33 @@ class Controller:
 
     def forward(self, state):
         plan = state["plan"]
+        timings = state.setdefault("timings", [])
+        deadline = time.monotonic() + 15 * 60
         try:
-            self.gate.check(plan)
-            self.host.preflight(plan)
+            with measured_phase("github_gate", timings):
+                self.gate.check(plan)
+            with measured_phase("preflight", timings):
+                preflight = self.host.preflight(plan) or {}
+                state["scheduled_backup"] = preflight.get("scheduled_backup", {"status": "unknown"})
+                print(json.dumps({"scheduled_backup": state["scheduled_backup"]}), file=sys.stderr, flush=True)
             state["pending"] = "acquire"
             self.save(state, "intent")
             self.host.acquire(plan)
             state.update(phase="locked", pending=None)
             self.save(state, "locked")
             for step in STEPS:
+                if time.monotonic() >= deadline:
+                    raise DeploymentError("deployment_deadline_exceeded")
                 if step == "stop":
                     # Last moving-main/CI check. After this point the transaction stays pinned.
-                    self.gate.check(plan)
-                    self.host.recheck_baseline(plan)
+                    with measured_phase("before_stop_gate", timings):
+                        self.gate.check(plan)
+                        self.host.recheck_baseline(plan)
                     state["mutation_started"] = True
                 state["pending"] = step
                 self.save(state, "intent")
-                self.host.action(step, plan)
+                with measured_phase(step, timings):
+                    self.host.action(step, plan)
                 state["completed"].append(step)
                 state.update(phase=step, pending=None)
                 self.save(state, "done")
