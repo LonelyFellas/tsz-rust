@@ -592,7 +592,7 @@ pub(crate) async fn validate_bindings_with_forms(
             serde_json::from_value::<Vec<String>>(row.get("styles")).map_err(AppError::internal)?,
         )
         .map_err(|_| invalid())?;
-        if designated {
+        if designated && (setting.enabled || setting.audio_asset_id.is_some()) {
             return Err(AppError::bad_request(
                 ErrorCode::InvalidSpeechPreview,
                 super::SpeechModelError::UnsupportedModelCapability.to_string(),
