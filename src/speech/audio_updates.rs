@@ -15,7 +15,6 @@ pub use worker::{run_worker, sweep};
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DubbingUpdateSettings {
     pub wait_seconds: i32,
-    pub enabled: bool,
     pub revision: i64,
 }
 
@@ -23,7 +22,6 @@ pub struct DubbingUpdateSettings {
 #[serde(deny_unknown_fields)]
 pub struct SaveDubbingUpdateSettings {
     pub wait_seconds: i32,
-    pub enabled: bool,
     pub base_revision: i64,
 }
 
@@ -130,14 +128,13 @@ pub(crate) fn ensure_audio_only(
 
 async fn settings_on(conn: &mut PgConnection) -> Result<DubbingUpdateSettings, AppError> {
     let row = sqlx::query(
-        "SELECT wait_seconds,enabled,revision FROM speech.dubbing_update_settings WHERE singleton",
+        "SELECT wait_seconds,revision FROM speech.dubbing_update_settings WHERE singleton",
     )
     .fetch_one(conn)
     .await
     .map_err(AppError::internal)?;
     Ok(DubbingUpdateSettings {
         wait_seconds: row.get("wait_seconds"),
-        enabled: row.get("enabled"),
         revision: row.get("revision"),
     })
 }
@@ -169,8 +166,8 @@ pub async fn save_settings(
     }
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     crate::admin::permissions::lock_session(&mut tx, &auth, "speech.global_dubbing").await?;
-    if sqlx::query("UPDATE speech.dubbing_update_settings SET wait_seconds=$1,enabled=$2,revision=revision+1 WHERE singleton AND revision=$3")
-        .bind(input.wait_seconds).bind(input.enabled).bind(input.base_revision).execute(&mut *tx).await.map_err(AppError::internal)?.rows_affected()!=1 { return Err(conflict()); }
+    if sqlx::query("UPDATE speech.dubbing_update_settings SET wait_seconds=$1,revision=revision+1 WHERE singleton AND revision=$2")
+        .bind(input.wait_seconds).bind(input.base_revision).execute(&mut *tx).await.map_err(AppError::internal)?.rows_affected()!=1 { return Err(conflict()); }
     let result = settings_on(&mut tx).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(axum::Json(result))

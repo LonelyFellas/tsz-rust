@@ -61,10 +61,6 @@ async fn current(pool: &PgPool, id: Uuid) -> Value {
     sqlx::query_scalar("SELECT content->'en_text'->'uk'->'variant'->'voice_profile' FROM lexicon.shared_sentences WHERE id=$1").bind(id).fetch_one(pool).await.unwrap()
 }
 async fn due(pool: &PgPool) {
-    sqlx::query("UPDATE speech.dubbing_update_settings SET enabled=true")
-        .execute(pool)
-        .await
-        .unwrap();
     sqlx::query("UPDATE speech.dubbing_audio_updates SET due_at=now()-interval '1 second' WHERE state='pending'").execute(pool).await.unwrap();
 }
 
@@ -246,7 +242,7 @@ async fn delayed_updates_merge_and_reuse_final_effects_without_touching_publicat
             .await
             .unwrap(),
         0,
-        "disabled queue must remain durable"
+        "submitted updates must wait until due without any enable step"
     );
     due(&pool).await;
     assert_eq!(
@@ -298,6 +294,14 @@ async fn delayed_updates_merge_and_reuse_final_effects_without_touching_publicat
     let updated = current(&pool, sentence).await;
     assert_eq!(updated["voices"][0]["audio_asset_id"], asset);
     assert_eq!(updated["voices"][0]["version_name"], "new version name");
+    let no_generation = audio_updates::list(&pool, id)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(no_generation.completed, 0);
+    assert_eq!(no_generation.skipped, 1);
+    assert!(no_generation.error_codes.is_empty());
     let frozen: Value =
         sqlx::query_scalar("SELECT snapshot FROM lexicon.shared_sentence_publications WHERE id=$1")
             .bind(publication)
@@ -361,15 +365,73 @@ async fn delayed_updates_recheck_permissions_and_exclude_independent_targets(poo
 async fn delayed_updates_migration_is_reversible_until_queue_data_is_written(pool: PgPool) {
     let down = include_str!("../../migrations/20261027090000_dubbing_audio_updates.down.sql");
     let up = include_str!("../../migrations/20261027090000_dubbing_audio_updates.up.sql");
+    let automatic_down =
+        include_str!("../../migrations/20261027110000_dubbing_automatic_updates.down.sql");
+    let automatic_up =
+        include_str!("../../migrations/20261027110000_dubbing_automatic_updates.up.sql");
+    sqlx::raw_sql(automatic_down).execute(&pool).await.unwrap();
     sqlx::raw_sql(down).execute(&pool).await.unwrap();
     sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    sqlx::raw_sql(automatic_up).execute(&pool).await.unwrap();
     let (actor, id, version, _, _) = setup(&pool).await;
     save(&pool, actor, group(id, version, 0), 0).await;
+    sqlx::raw_sql(automatic_down).execute(&pool).await.unwrap();
     assert!(sqlx::raw_sql(down).execute(&pool).await.is_err());
+    sqlx::raw_sql(automatic_up).execute(&pool).await.unwrap();
     assert_eq!(
         audio_updates::list(&pool, id).await.unwrap().updates.len(),
         1
     );
+}
+
+#[sqlx::test]
+async fn automatic_updates_migration_preserves_settings_and_pending_jobs(pool: PgPool) {
+    let down = include_str!("../../migrations/20261027110000_dubbing_automatic_updates.down.sql");
+    let up = include_str!("../../migrations/20261027110000_dubbing_automatic_updates.up.sql");
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE speech.dubbing_update_settings SET enabled=false,wait_seconds=90,revision=4",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (actor, id, version, _, storage) = setup(&pool).await;
+    save(&pool, actor, group(id, version, 0), 0).await;
+    let job = audio_updates::list(&pool, id)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    let settings: (i32, i64) =
+        sqlx::query_as("SELECT wait_seconds,revision FROM speech.dubbing_update_settings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(settings, (90, 4));
+    let preserved = audio_updates::list(&pool, id)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(preserved.id, job.id);
+    assert_eq!(preserved.due_at, job.due_at);
+    assert_eq!(preserved.state, "pending");
+    due(&pool).await;
+    audio_updates::sweep(&pool, None, Some(storage))
+        .await
+        .unwrap();
+    assert_eq!(
+        audio_updates::list(&pool, id).await.unwrap().updates[0].state,
+        "completed"
+    );
+    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    let restored: bool = sqlx::query_scalar("SELECT enabled FROM speech.dubbing_update_settings")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!restored, "rollback restores the previous paused default");
+    sqlx::raw_sql(up).execute(&pool).await.unwrap();
 }
 
 #[sqlx::test]
@@ -417,7 +479,8 @@ async fn delayed_updates_api_enforces_versions_cancel_boundary_and_retry(pool: P
     let (status, settings) = call(&state, actor, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::OK, "{settings}");
     assert_eq!(settings["wait_seconds"], 60);
-    let input = json!({"wait_seconds":0,"enabled":true,"base_revision":0});
+    assert!(settings.get("enabled").is_none());
+    let input = json!({"wait_seconds":0,"base_revision":0});
     assert_eq!(
         call(&state, actor, Method::PUT, &path, Some(input.clone()))
             .await

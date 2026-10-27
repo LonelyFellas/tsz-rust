@@ -43,7 +43,7 @@ async fn claim(pool: &PgPool) -> Result<Option<Claim>, AppError> {
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let due=sqlx::query("SELECT id,areas,test_run,created_by_admin_id FROM speech.dubbing_audio_updates WHERE state='pending' AND due_at<=now() AND (SELECT enabled FROM speech.dubbing_update_settings WHERE singleton) ORDER BY due_at,id LIMIT 1 FOR UPDATE SKIP LOCKED")
+    let due=sqlx::query("SELECT id,areas,test_run,created_by_admin_id FROM speech.dubbing_audio_updates WHERE state='pending' AND due_at<=now() ORDER BY due_at,id LIMIT 1 FOR UPDATE SKIP LOCKED")
         .fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
     if let Some(row) = due {
         let id: Uuid = row.get("id");
@@ -52,7 +52,7 @@ async fn claim(pool: &PgPool) -> Result<Option<Claim>, AppError> {
         sqlx::query("UPDATE speech.dubbing_audio_updates SET state=CASE WHEN EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets WHERE update_id=$1) THEN 'running' ELSE 'completed' END,updated_at=now() WHERE id=$1")
             .bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     }
-    let row=sqlx::query("SELECT t.id,t.update_id,t.owner_kind,t.owner_id,t.target_id,t.target_path,j.created_by_admin_id,j.security_version,j.test_run FROM speech.dubbing_audio_update_targets t JOIN speech.dubbing_audio_updates j ON j.id=t.update_id WHERE j.state='running' AND (SELECT enabled FROM speech.dubbing_update_settings WHERE singleton) AND ((t.state='pending' AND t.retry_at<=now()) OR (t.state='running' AND t.lease_until<=now())) AND t.attempts<3 AND NOT EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets busy JOIN speech.dubbing_audio_updates active ON active.id=busy.update_id WHERE busy.id<>t.id AND busy.owner_kind=t.owner_kind AND busy.owner_id=t.owner_id AND busy.state='running' AND busy.lease_until>now() AND active.state='running') ORDER BY j.due_at,t.id LIMIT 1 FOR UPDATE OF t SKIP LOCKED")
+    let row=sqlx::query("SELECT t.id,t.update_id,t.owner_kind,t.owner_id,t.target_id,t.target_path,j.created_by_admin_id,j.security_version,j.test_run FROM speech.dubbing_audio_update_targets t JOIN speech.dubbing_audio_updates j ON j.id=t.update_id WHERE j.state='running' AND ((t.state='pending' AND t.retry_at<=now()) OR (t.state='running' AND t.lease_until<=now())) AND t.attempts<3 AND NOT EXISTS(SELECT 1 FROM speech.dubbing_audio_update_targets busy JOIN speech.dubbing_audio_updates active ON active.id=busy.update_id WHERE busy.id<>t.id AND busy.owner_kind=t.owner_kind AND busy.owner_id=t.owner_id AND busy.state='running' AND busy.lease_until>now() AND active.state='running') ORDER BY j.due_at,t.id LIMIT 1 FOR UPDATE OF t SKIP LOCKED")
         .fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
     let result = if let Some(row) = row {
         let id = row.get("id");
@@ -143,7 +143,7 @@ async fn snapshot(conn: &mut sqlx::PgConnection, claim: &Claim) -> Result<(i64, 
 async fn renew(pool: &PgPool, claim: &Claim) -> Result<(), AppError> {
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     authorize(&mut tx, claim).await?;
-    let updated=sqlx::query("UPDATE speech.dubbing_audio_update_targets t SET lease_until=now()+interval '10 minutes' FROM speech.dubbing_audio_updates j WHERE t.id=$1 AND t.lease_token=$2 AND t.state='running' AND t.lease_until>now() AND j.id=t.update_id AND j.state='running' AND (SELECT enabled FROM speech.dubbing_update_settings WHERE singleton)")
+    let updated=sqlx::query("UPDATE speech.dubbing_audio_update_targets t SET lease_until=now()+interval '10 minutes' FROM speech.dubbing_audio_updates j WHERE t.id=$1 AND t.lease_token=$2 AND t.state='running' AND t.lease_until>now() AND j.id=t.update_id AND j.state='running'")
         .bind(claim.id).bind(claim.token).execute(&mut *tx).await.map_err(AppError::internal)?;
     if updated.rows_affected() != 1 {
         return Err(stale());
@@ -261,6 +261,7 @@ async fn run(
         }
     }
     drop(conn);
+    let mut generated = false;
     for (setting, hash) in settings.iter_mut().zip(&hashes) {
         if let Some((_, asset)) = old.iter().find(|(old, _)| old == hash) {
             setting.audio_asset_id = Some(*asset);
@@ -280,6 +281,7 @@ async fn run(
             )
             .await?;
         setting.audio_asset_id = Some(result.asset.id);
+        generated = true;
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     authorize(&mut tx, claim).await?;
@@ -287,7 +289,7 @@ async fn run(
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-    let valid = sqlx::query("SELECT t.id FROM speech.dubbing_audio_update_targets t JOIN speech.dubbing_audio_updates j ON j.id=t.update_id WHERE t.id=$1 AND t.lease_token=$2 AND t.state='running' AND t.lease_until>clock_timestamp() AND j.state='running' AND (SELECT enabled FROM speech.dubbing_update_settings WHERE singleton) FOR UPDATE OF t,j")
+    let valid = sqlx::query("SELECT t.id FROM speech.dubbing_audio_update_targets t JOIN speech.dubbing_audio_updates j ON j.id=t.update_id WHERE t.id=$1 AND t.lease_token=$2 AND t.state='running' AND t.lease_until>clock_timestamp() AND j.state='running' FOR UPDATE OF t,j")
         .bind(claim.id).bind(claim.token).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
     if valid.is_none() {
         return Err(stale());
@@ -387,8 +389,8 @@ async fn run(
             .await?;
         }
     }
-    let completed=sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state='completed',error_code=NULL,lease_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 AND lease_token=$2 AND lease_until>clock_timestamp()")
-        .bind(claim.id).bind(claim.token).execute(&mut *tx).await.map_err(AppError::internal)?;
+    let completed=sqlx::query("UPDATE speech.dubbing_audio_update_targets SET state=$3,error_code=NULL,lease_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 AND lease_token=$2 AND lease_until>clock_timestamp()")
+        .bind(claim.id).bind(claim.token).bind(if generated { "completed" } else { "skipped" }).execute(&mut *tx).await.map_err(AppError::internal)?;
     if completed.rows_affected() != 1 {
         return Err(stale());
     }
