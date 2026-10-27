@@ -459,10 +459,9 @@ fn collect_settings(
                     if let Some(locale) = native_locale {
                         source["phoneme_locale"] = locale.into();
                     }
-                    source
+                    serde_json::from_value(source).map_err(|_| invalid())?
                 } else {
-                    let content = v.get("content").or_else(||v.get("value")).or_else(||v.get("name_en_rich")).or_else(||v.get("dict_phonetic_rich")).cloned().unwrap_or_else(||serde_json::json!({"version":2,"text":v.get("name_en").or_else(||v.get("dict_phonetic")).and_then(Value::as_str).unwrap_or(""),"annotations":[]}));
-                    serde_json::json!({"kind":"text","content":content,"form_links":v.get("form_links").or_else(||v.get("reading_links")).filter(|x|!x.is_null()).cloned().unwrap_or_else(||serde_json::json!([]))})
+                    source_at(v, "")?
                 };
                 out.push(GeneratedReference {
                     asset: asset
@@ -470,7 +469,7 @@ fn collect_settings(
                         .transpose()
                         .map_err(|_| invalid())?
                         .unwrap_or_else(Uuid::nil),
-                    source: serde_json::from_value(source).map_err(|_| invalid())?,
+                    source,
                     setting: serde_json::from_value(setting.clone()).map_err(|_| invalid())?,
                     profile: profile
                         .get("dubbing")
