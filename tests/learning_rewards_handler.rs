@@ -315,8 +315,23 @@ async fn disabled_longterm_and_paused_completion_are_not_credited(pool: PgPool) 
 }
 #[sqlx::test]
 async fn audit_failure_and_deadline_after_reward_roll_back_everything(pool: PgPool) {
-    let (state, auth, list) = setup(&pool).await;
-    policy(&pool, true, 2).await;
+    // Freeze the database clock so slow request setup cannot expire the run at entry.
+    sqlx::raw_sql("CREATE SCHEMA reward_clock; CREATE TABLE reward_clock.instant(at timestamptz NOT NULL); INSERT INTO reward_clock.instant VALUES('2026-10-17T06:00:00Z'); CREATE FUNCTION reward_clock.clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE AS 'SELECT at FROM reward_clock.instant';").execute(&pool).await.unwrap();
+    let timed = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(6)
+        .after_connect(|c, _| {
+            Box::pin(async move {
+                sqlx::query("SET search_path TO reward_clock,public,pg_catalog")
+                    .execute(c)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let (state, auth, list) = setup(&timed).await;
+    policy(&timed, true, 2).await;
     let task = create(&state, &auth, list, "daily").await;
     let run = start(&state, &auth, &task).await;
     let qs = questions(&state, &auth, &run).await;
@@ -362,47 +377,77 @@ async fn audit_failure_and_deadline_after_reward_roll_back_everything(pool: PgPo
     .await
     .unwrap();
     let mut blocker = pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
     sqlx::query("SELECT pg_advisory_xact_lock(72120400)")
         .execute(&mut *blocker)
         .await
         .unwrap();
+    let run_id = Uuid::parse_str(run["id"].as_str().unwrap()).unwrap();
     sqlx::query(
         "UPDATE learning_runs SET expires_at=clock_timestamp()+interval '1 second' WHERE id=$1",
     )
-    .bind(Uuid::parse_str(run["id"].as_str().unwrap()).unwrap())
-    .execute(&pool)
+    .bind(run_id)
+    .execute(&timed)
     .await
     .unwrap();
     let path = answer_path(&run);
     let pending = call(&state, &auth, "POST", &path, body.clone());
     let release = async {
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        // Advance time only after this request has passed entry checks and reached policy_lock.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event='advisory' AND $1=ANY(pg_blocking_pids(pid)))")
+                    .bind(blocker_pid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("answer must wait on the reward policy lock");
+        sqlx::query("UPDATE reward_clock.instant SET at=at+interval '2 seconds'")
+            .execute(&pool)
+            .await
+            .unwrap();
         blocker.commit().await.unwrap();
     };
     let (r, ()) = tokio::join!(pending, release);
     assert_eq!(r.0, 409, "{}", r.1);
+    let rolled_back: (String, i64, i64, i64) = sqlx::query_as("SELECT r.state,(SELECT count(*) FROM learning_answers WHERE run_id=r.id),(SELECT count(*) FROM learning_completions WHERE run_id=r.id),(SELECT count(*) FROM learning_reward_settlements WHERE user_id=r.user_id) FROM learning_runs r WHERE r.id=$1")
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rolled_back, ("active".into(), 1, 0, 0));
     assert_eq!(issuance(&pool).await, (0, 0));
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM learning_completions")
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-        0
-    );
     sqlx::query(
         "UPDATE learning_runs SET expires_at=clock_timestamp()+interval '1 hour' WHERE id=$1",
     )
-    .bind(Uuid::parse_str(run["id"].as_str().unwrap()).unwrap())
-    .execute(&pool)
+    .bind(run_id)
+    .execute(&timed)
     .await
     .unwrap();
-    assert_eq!(
-        call(&state, &auth, "POST", &answer_path(&run), body)
-            .await
-            .0,
-        200
-    );
-    assert_eq!(issuance(&pool).await, (1, 13));
+    for _ in 0..2 {
+        let retry = call(&state, &auth, "POST", &path, body.clone()).await;
+        assert_eq!(retry.0, 200, "{}", retry.1);
+        assert_eq!(retry.1["run"]["state"], "completed");
+        assert_eq!(issuance(&pool).await, (1, 13));
+    }
+    let completed: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM learning_answers WHERE run_id=$1),(SELECT count(*) FROM learning_completions WHERE run_id=$1),(SELECT count(*) FROM learning_reward_settlements WHERE user_id=$2)")
+        .bind(run_id)
+        .bind(auth.subject)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(completed, (2, 1, 1));
+    timed.close().await;
 }
 #[sqlx::test]
 async fn query_is_read_only_scoped_and_validates_dates(pool: PgPool) {
