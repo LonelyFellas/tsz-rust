@@ -800,6 +800,8 @@ pub struct AdminWordListQuery {
     pub status: Option<AdminWordStatus>,
     pub created_from: Option<DateTime<Utc>>,
     pub created_to: Option<DateTime<Utc>>,
+    /// 仅显式请求时返回结构化名称，保持旧客户端的严格响应契约。
+    pub include_name_variants: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]

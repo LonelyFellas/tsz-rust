@@ -406,6 +406,7 @@ impl LexiconService {
             }
         }
 
+        let include_name_variants = query.include_name_variants == Some(true);
         let filter = ListFilter {
             q: trimmed(query.q),
             headword: trimmed(query.headword),
@@ -470,6 +471,18 @@ impl LexiconService {
                 }
                 {
                     {
+                        let forms = if include_name_variants
+                            || record.presentation_label.is_none()
+                            || record.presentation_surfaces.is_none()
+                            || record.presentation_strategy.is_none()
+                        {
+                            Some(
+                                serde_json::from_value::<DraftFormsStepContentV3>(record.forms)
+                                    .map_err(serialization_error)?,
+                            )
+                        } else {
+                            None
+                        };
                         let mut presentation = match (
                             record.presentation_label,
                             record.presentation_surfaces,
@@ -482,22 +495,32 @@ impl LexiconService {
                                     strategy_version,
                                 }
                             }
-                            _ => {
-                                let forms: DraftFormsStepContentV3 =
-                                    serde_json::from_value(record.forms)
-                                        .map_err(serialization_error)?;
-                                crate::lexicon::v3_projection::presentation_from_native_forms(
-                                    record.id, &forms,
+                            _ => crate::lexicon::v3_projection::presentation_from_native_forms(
+                                record.id,
+                                forms.as_ref().ok_or_else(invariant_record)?,
+                            )
+                            .map_err(|_| invariant_record())?,
+                        };
+                        let initial_headwords = record
+                            .initial_headwords
+                            .map(serde_json::from_value::<WordHeadwordsV2>)
+                            .transpose()
+                            .map_err(serialization_error)?;
+                        let name_variants = if include_name_variants {
+                            Some(
+                                crate::lexicon::v3_projection::name_variants_from_native_forms(
+                                    forms.as_ref().ok_or_else(invariant_record)?,
+                                    initial_headwords.as_ref(),
                                 )
-                                .map_err(|_| invariant_record())?
-                            }
+                                .map_err(|_| invariant_record())?,
+                            )
+                        } else {
+                            None
                         };
                         // 空词形仍是可找回的草稿；初始名称只用于展示，不生成词面匹配。
                         if presentation.matched_surfaces.is_empty() {
-                            if let Some(headwords) = record.initial_headwords {
-                                let headwords: WordHeadwordsV2 = serde_json::from_value(headwords)
-                                    .map_err(serialization_error)?;
-                                presentation.label = ordered_headword_sides(&headwords)
+                            if let Some(headwords) = initial_headwords.as_ref() {
+                                presentation.label = ordered_headword_sides(headwords)
                                     .into_iter()
                                     .map(|(_, spelling)| spelling)
                                     .collect::<Vec<_>>()
@@ -511,6 +534,7 @@ impl LexiconService {
                             id: record.id,
                             kind: parse_v3_kind(&record.kind).ok_or_else(invariant_record)?,
                             presentation,
+                            name_variants,
                             dialects: v3_list_dialects(&record.form_group_spelling_modes),
                             revision: record.revision,
                             lifecycle_revision: record.lifecycle_revision,

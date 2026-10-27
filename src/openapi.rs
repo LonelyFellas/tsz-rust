@@ -589,6 +589,7 @@ use utoipa::{
             crate::lexicon::dto::AdminWordPublicationEnvelope,
             crate::lexicon::dto::AdminWordPublicationListResponse,
             crate::lexicon::dto::AdminWordListItemV3,
+            crate::lexicon::dto::EntryNameVariantV3,
             crate::lexicon::dto::RelatedWordMatchV3,
             crate::lexicon::dto::RelatedWordSenseV3,
             crate::lexicon::dto::RelatedWordResultV3,
@@ -2818,6 +2819,26 @@ mod tests {
             "#/components/schemas/AdminWordListItemV3"
         );
         let list_item = &schemas["AdminWordListItemV3"];
+        assert_eq!(list_item["properties"]["name_variants"]["type"], "array");
+        assert!(
+            !list_item["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("name_variants"))
+        );
+        assert_eq!(schemas["EntryNameVariantV3"]["additionalProperties"], false);
+        assert_eq!(
+            schemas["EntryNameVariantV3"]["required"],
+            serde_json::json!(["text", "dialects"])
+        );
+        assert!(
+            paths["/api/v1/admin/lexicon/entries"]["get"]["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|parameter| parameter["name"] == "include_name_variants"
+                    && parameter["required"] == false)
+        );
         assert_eq!(list_item["properties"]["updated_by_name"]["type"], "string");
         assert_ne!(list_item["properties"]["updated_by_name"]["nullable"], true);
         assert!(
