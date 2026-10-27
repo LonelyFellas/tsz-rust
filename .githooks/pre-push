@@ -1,33 +1,7 @@
 #!/bin/sh
-# 推送前门禁：clippy（警告即拦截）+ lib/bin 测试（包含 PostgreSQL / Redis 测试）。
-# tests/ 下的集成测试由 GitHub CI 运行；本地 lib/bin 测试仍需隔离的外部服务。
+# 推送前只做快速格式检查；SQLx/Clippy 已由 pre-commit 承接。
+# 开发时按风险运行定向测试；全量测试由 PR/main CI 执行。
 set -e
 
-echo "▶ pre-push: lib/bin 测试需要 PostgreSQL（DATABASE_URL，测试角色需 CREATEDB）和 Redis；SQLX_OFFLINE 不免除运行时依赖。"
-
-# SQLx 会向上查找并加载 .env；不在 shell 中解析或执行它，以免误拦已有配置。
-dotenv_dir=$PWD
-while [ ! -f "$dotenv_dir/.env" ] && [ "$dotenv_dir" != / ]; do
-    dotenv_dir=$(dirname "$dotenv_dir")
-done
-if [ ! -f "$dotenv_dir/.env" ]; then
-    missing_config=false
-    if [ -z "${DATABASE_URL-}" ]; then
-        echo "pre-push: 缺少非空 DATABASE_URL；请显式导出隔离 PostgreSQL 测试连接，角色需 CREATEDB。" >&2
-        missing_config=true
-    fi
-    if [ -z "${TEST_REDIS_URL-${REDIS_URL-}}" ]; then
-        echo "pre-push: 缺少 Redis 测试连接；请显式导出非空 TEST_REDIS_URL（优先）或 REDIS_URL。TEST_REDIS_URL 为空时不会回退。" >&2
-        missing_config=true
-    fi
-    if [ "$missing_config" = true ]; then
-        echo "预检不连接或管理服务；请准备好已确认隔离的测试实例后重试，不要跳过测试。" >&2
-        exit 1
-    fi
-fi
-
-echo "▶ pre-push (1/2): cargo clippy --all-targets --all-features -- -D warnings"
-cargo clippy --all-targets --all-features -- -D warnings
-
-echo "▶ pre-push (2/2): cargo test --locked --lib --bins"
-cargo test --locked --lib --bins
+echo "▶ pre-push: cargo fmt --all -- --check"
+cargo fmt --all -- --check
