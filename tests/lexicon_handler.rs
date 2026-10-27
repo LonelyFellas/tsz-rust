@@ -39,6 +39,19 @@ mod spelling_markup;
 
 const ROOT: &str = "/api/v1/admin/lexicon";
 
+// Keep historical rollback setup in SQLx's measured automatic migration phase.
+static ROLLBACK_BASELINE_MIGRATOR: std::sync::LazyLock<sqlx::migrate::Migrator> =
+    std::sync::LazyLock::new(|| {
+        let mut migrator = sqlx::migrate!("./migrations");
+        migrator.migrations = migrator
+            .migrations
+            .into_owned()
+            .into_iter()
+            .filter(|migration| migration.version <= 20261027100000)
+            .collect::<Vec<_>>()
+            .into();
+        migrator
+    });
 #[derive(Clone, Default)]
 struct TestRouterStats {
     router_builds: usize,
@@ -17391,12 +17404,8 @@ async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
-#[sqlx::test(migrations = false)]
+#[sqlx::test(migrator = "ROLLBACK_BASELINE_MIGRATOR")]
 async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
-    sqlx::migrate!("./migrations")
-        .run_to(20261027100000, &pool)
-        .await
-        .unwrap();
     let state = batch3_state(&pool).await;
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);
