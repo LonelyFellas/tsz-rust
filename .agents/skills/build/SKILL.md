@@ -25,7 +25,7 @@ description: 按明确的任务或已有设计实现 tsz-rust 后端改动，完
 按风险选择：纯逻辑用单元测试，权限/状态码/错误用 handler，事务/唯一约束/并发用 repository，wire 变化验证序列化/OpenAPI 与前端消费者。断言公开行为和真实约束，不弱化断言；Bug 先证明旧实现失败。
 
 迭代运行 `--lib`、`--test <target>` 或相关契约测试。没有紧接 ship 时，代码改动运行 fmt、clippy 与受影响测试；数据库全量集成仅在跨模块风险或明确要求时运行。
-紧接已授权 ship 时由原生 hooks 承接其覆盖的 clippy/单元测试，补齐 fmt 和 hooks 未覆盖的必要检查；clippy 已含编译检查，不重复 cargo check。纯规则文档检查按项目规则，不额外运行运行时套件。
+紧接已授权 ship 时由原生 hooks 承接 clippy/fmt，复用实施阶段已完成的定向测试；全量测试由 PR/main CI 执行。clippy 已含编译检查，不重复 cargo check。纯规则文档检查按项目规则，不额外运行运行时套件。
 
 跨仓功能的真实用户链路按选定前端 `.agents/skills/test/references/real-backend-acceptance.md` 验证；版本/环境不具备就标明阻塞，不以两端测试替代联调。配套发布复用 [配套发布清单](../contract-sync/references/paired-release.md)。
 

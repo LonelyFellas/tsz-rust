@@ -39,6 +39,7 @@
 
 ## 后端验证
 
+- 本地 pre-commit 按变更范围执行 SQLx/Clippy；pre-push 仅执行 `cargo fmt --all -- --check`，不依赖 PostgreSQL/Redis。开发时按风险运行定向测试，全量测试保留在 PR/main CI。
 - 验收写明可执行命令与预期；只能人工验收时给步骤与判据。按实际 Cargo、CI 与 `.githooks` 选择检查，不套前端命令。
 - 迁移 up/down 成对，在隔离库验证并说明数据损失与回退限制；SQL/API 变化同步 `.sqlx` / OpenAPI，新增测试 target 纳入 CI 分区清单。
 - 不清空共享数据库或 Redis，不以启动服务试探未知数据库；启动会执行迁移。环境与连接核对按需使用 [dev-env](.agents/skills/dev-env/SKILL.md)。
