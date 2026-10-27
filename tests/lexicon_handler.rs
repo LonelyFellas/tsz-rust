@@ -1749,6 +1749,41 @@ async fn v3_persists_all_three_group_dialect_rule_combinations(pool: PgPool) {
             ("distinguish".to_owned(), "distinguish".to_owned())
         ]
     );
+    for query in ["", "?include_name_variants=false"] {
+        let (status, listed) = call(
+            &state,
+            Method::GET,
+            &format!("{ROOT}/entries{query}"),
+            &bearer,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert!(
+            listed["words"][0].get("name_variants").is_none(),
+            "{listed}"
+        );
+    }
+    let (status, listed) = call(
+        &state,
+        Method::GET,
+        &format!("{ROOT}/entries?include_name_variants=true"),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(
+        listed["words"][0]["name_variants"],
+        json!([
+            {"text": format!("{surface}-uu"), "dialects": ["common"]},
+            {"text": format!("{surface}-ud"), "dialects": ["common"]},
+            {"text": format!("{surface}-dd-uk"), "dialects": ["uk"]},
+            {"text": format!("{surface}-dd-us"), "dialects": ["us"]}
+        ])
+    );
 }
 
 #[sqlx::test]
