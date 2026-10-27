@@ -136,6 +136,9 @@ jobs:
       - name: Test CI workflow structure
         run: python3 -m unittest ops/test_ci_workflow.py
 
+      - name: Test speech voice metadata updater
+        run: python3 -I ops/speech-voice-catalog/test_update_metadata.py
+
       - name: Test CI build fingerprints
         run: python3 -m unittest ops/test_ci_fingerprint.py
 
