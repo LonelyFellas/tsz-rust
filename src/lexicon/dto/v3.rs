@@ -2641,6 +2641,14 @@ pub enum SurfaceMatchPageV3 {
     TemporarilyDisabled(SurfaceMatchTemporarilyDisabledPageV3),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EntryNameVariantV3 {
+    pub text: String,
+    /// common 表示通用拼写；同形的英美专用拼写合并为 [uk, us]。
+    pub dialects: Vec<Dialect>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminWordListItemV3 {
@@ -2659,6 +2667,10 @@ pub struct AdminWordListItemV3 {
     pub kind: WordEntryKindV3,
     #[schema(read_only)]
     pub presentation: EntryPresentationV3,
+    /// 仅 include_name_variants=true 时返回，按当前原形生成的去重名称。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub name_variants: Option<Vec<EntryNameVariantV3>>,
     /// 方言摘要，按词性**当前**设置聚合：任一词性区分英美拼写 → `[uk, us]`，否则 `[common]`；
     /// 还没有词性的空白草稿为空数组。建条 step 1 的英美选择只是初始快照，不参与此处。
     pub dialects: Vec<Dialect>,
