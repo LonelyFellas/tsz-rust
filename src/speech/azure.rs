@@ -215,7 +215,12 @@ impl SpeechProvider for AzureSpeechProvider {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
             .map(str::trim);
-        if !content_type.is_some_and(|value| value.eq_ignore_ascii_case("audio/mpeg")) {
+        let format = request.options().output_format();
+        if !content_type.is_some_and(|value| {
+            value.eq_ignore_ascii_case(format.content_type())
+                || (format == super::AudioOutputFormat::Wav24Khz16BitMono
+                    && value.eq_ignore_ascii_case("audio/x-wav"))
+        }) {
             return Err(SpeechError::new(
                 SpeechErrorKind::InvalidResponse,
                 Some(status.as_u16()),
@@ -240,9 +245,15 @@ impl SpeechProvider for AzureSpeechProvider {
             }
             bytes.extend_from_slice(&chunk);
         }
+        if !format.accepts(&bytes) {
+            return Err(SpeechError::new(
+                SpeechErrorKind::InvalidResponse,
+                Some(status.as_u16()),
+            ));
+        }
         Ok(SynthesizedAudio {
             bytes,
-            content_type: "audio/mpeg",
+            content_type: format.content_type(),
             provider_request_id,
         })
     }

@@ -415,6 +415,9 @@ where
 pub struct SpellingSpeechV3 {
     pub content: RichTextV2V3,
     pub voice_profile: VoiceProfileV3,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(max_items = 8)]
+    pub audio_assets: Vec<AudioAsset>,
 }
 
 fn deserialize_optional_spelling_speech<'de, D>(
@@ -742,6 +745,16 @@ pub enum RichTextAnnotationV3 {
         #[schema(max_length = 1600)]
         phoneme: String,
     },
+    SayAs {
+        start: usize,
+        end: usize,
+        interpret_as: String,
+    },
+    Sub {
+        start: usize,
+        end: usize,
+        alias: String,
+    },
     Liaison {
         start: usize,
         end: usize,
@@ -853,6 +866,8 @@ impl RichTextV3 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VoiceSettingV3 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<crate::speech::AudioOutputFormat>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -906,6 +921,11 @@ pub struct VoiceSettingV3 {
     )]
     #[schema(max_length = 64, nullable = false)]
     pub style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<f64>, minimum = 0.01, maximum = 2)]
+    pub style_degree: Option<serde_json::Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 pub type VoiceVersionLocaleV3 = crate::speech::locale::EnglishLocale;
@@ -941,6 +961,60 @@ fn deserialize_optional_voice_style<'de, D: Deserializer<'de>>(
 pub struct VoiceProfileV3 {
     #[schema(max_items = 2000)]
     pub voices: Vec<VoiceSettingV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dubbing: Option<Box<VoiceProfileDubbingV3>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VoiceProfileDubbingV3 {
+    pub mode: VoiceProfileModeV3,
+    pub area: DubbingAreaV3,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommendation_order: Vec<Uuid>,
+}
+
+impl VoiceProfileV3 {
+    pub fn mode(&self) -> Option<VoiceProfileModeV3> {
+        self.dubbing.as_ref().map(|value| value.mode)
+    }
+    pub fn area(&self) -> Option<DubbingAreaV3> {
+        self.dubbing.as_ref().map(|value| value.area)
+    }
+    pub fn recommendation_order(&self) -> &[Uuid] {
+        self.dubbing
+            .as_ref()
+            .map_or(&[], |value| value.recommendation_order.as_slice())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceProfileModeV3 {
+    Inherit,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DubbingAreaV3 {
+    Word,
+    Azure,
+    Grammar,
+    Meaning,
+    Example,
+}
+
+impl DubbingAreaV3 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Word => "word",
+            Self::Azure => "azure",
+            Self::Grammar => "grammar",
+            Self::Meaning => "meaning",
+            Self::Example => "example",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -961,6 +1035,9 @@ pub struct RichTextVariantV3 {
     #[serde(default, skip_serializing_if = "PresenceAwareVec::is_empty")]
     #[schema(value_type = Vec<TextLinkV3>, max_items = 100)]
     pub text_links: PresenceAwareVec<TextLinkV3>,
+    #[serde(default, skip_serializing_if = "PresenceAwareVec::is_empty")]
+    #[schema(value_type = Vec<GrammarFormLinkV3>, max_items = 100)]
+    pub reading_links: Box<PresenceAwareVec<GrammarFormLinkV3>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1012,7 +1089,7 @@ pub struct TextLinkV3 {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DialectVariantRichTextSlotV3 {
     Missing,
-    Ready { variant: RichTextVariantV3 },
+    Ready { variant: Box<RichTextVariantV3> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1042,6 +1119,30 @@ pub struct GrammarFormLinkV3 {
     pub target_form_id: Uuid,
     pub target_variant_id: Uuid,
     pub target_dialect: Dialect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading_reference: Option<ReadingReferenceV3>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadingReferenceV3 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uk: Option<ReadingSelectionV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub us: Option<ReadingSelectionV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sense_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadingSelectionV3 {
+    pub pronunciation_id: Uuid,
+    pub alphabet: RichTextPhonemeAlphabet,
+    #[serde(default)]
+    pub use_spelling: bool,
+    pub locale: PhonemeLocaleV3,
+    pub revision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

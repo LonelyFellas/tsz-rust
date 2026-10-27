@@ -954,7 +954,7 @@ async fn disabled_flash_without_audio_allows_neural_edits_and_preserves_versions
     meanings["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"] = profile.clone();
     for annotation in [
         json!({"type":"pause","at":4,"duration_ms":300}),
-        json!({"type":"phoneme","start":0,"end":4,"alphabet":"ipa","phoneme":"juːzd"}),
+        json!({"type":"italic","start":0,"end":4}),
     ] {
         meanings["pos"][0]["grammar_structures"][0]["variants"][0]["content"]["annotations"] =
             json!([annotation]);
@@ -993,6 +993,8 @@ async fn disabled_flash_without_audio_allows_neural_edits_and_preserves_versions
     }
     for bound in [false, true] {
         let mut invalid = meanings.clone();
+        invalid["pos"][0]["grammar_structures"][0]["variants"][0]["content"]["annotations"] =
+            json!([{"type":"pause","at":4,"duration_ms":300}]);
         let voices = &mut invalid["pos"][0]["grammar_structures"][0]["variants"][0]["voice_profile"]
             ["voices"];
         if bound {
@@ -1048,7 +1050,14 @@ async fn native_generated_audio_saves_reopens_publishes_and_blocks_old_writes(po
         } else {
             locale.to_ascii_lowercase()
         };
-        sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,$2,'azure',$3,$4,'female','[]','v1')").bind(Uuid::now_v7()).bind(&alias).bind(if flash {"en-US-Tiana:DragonHDFlashLatestNeural".into()} else {format!("{locale}-TestNeural")}).bind(locale).execute(&pool).await.unwrap();
+        let provider_voice_id = match locale {
+            "en-AU" => "en-AU-NatashaNeural",
+            "en-CA" => "en-CA-ClaraNeural",
+            "en-IN" => "en-IN-NeerjaNeural",
+            "en-IE" => "en-IE-EmilyNeural",
+            _ => "en-US-Tiana:DragonHDFlashLatestNeural",
+        };
+        sqlx::query("INSERT INTO speech.voices(id,alias,provider,provider_voice_id,locale,gender,styles,provider_version) VALUES($1,$2,'azure',$3,$4,'female','[]','v1')").bind(Uuid::now_v7()).bind(&alias).bind(provider_voice_id).bind(locale).execute(&pool).await.unwrap();
         let setting = json!({"version_id":Uuid::now_v7(),"version_name":"自然","locale":locale,"voice_id":alias,"enabled":!flash,"rate_percent":0});
         let generated=tsz_rust::router(state.clone()).oneshot(Request::builder().method(Method::POST).uri("/api/v1/admin/speech/audio").header(header::AUTHORIZATION,format!("Bearer {bearer}")).header(header::CONTENT_TYPE,"application/json").header("X-TSZ-Voice-Versions","v2").header("X-TSZ-Voice-Locales","v1").header("X-TSZ-Voice-Models","v1").body(Body::from(json!({"request_id":Uuid::now_v7(),"source":{"kind":"text","content":content},"setting":setting}).to_string())).unwrap()).await.unwrap();
         assert_eq!(generated.status(), StatusCode::CREATED);

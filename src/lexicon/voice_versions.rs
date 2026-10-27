@@ -49,11 +49,77 @@ pub(crate) const UPGRADE_MESSAGE: &str =
 pub(crate) fn supported(headers: &HeaderMap) -> bool {
     headers
         .get(HEADER)
-        .is_some_and(|value| value == "v1" || value == "v2")
+        .is_some_and(|value| value == "v1" || value == "v2" || value == "v3")
 }
 
 pub(crate) fn generated_supported(headers: &HeaderMap) -> bool {
-    headers.get(HEADER).is_some_and(|value| value == "v2")
+    headers
+        .get(HEADER)
+        .is_some_and(|value| value == "v2" || value == "v3")
+}
+
+pub(crate) fn dubbing_supported(headers: &HeaderMap) -> bool {
+    headers.get(HEADER).is_some_and(|value| value == "v3")
+}
+
+pub(crate) fn contains_dubbing(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            (fields.contains_key("voices") && fields.contains_key("dubbing"))
+                || (fields.contains_key("voice_id")
+                    && (fields.contains_key("style_degree")
+                        || fields.contains_key("role")
+                        || fields.contains_key("output_format")))
+                || fields
+                    .get("spelling_speech")
+                    .and_then(|speech| speech.get("audio_assets"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|assets| !assets.is_empty())
+                || fields.contains_key("reading_reference")
+                || fields.contains_key("reading_links")
+                || fields
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| matches!(kind, "say_as" | "sub"))
+                || fields.values().any(contains_dubbing)
+        }
+        Value::Array(items) => items.iter().any(contains_dubbing),
+        _ => false,
+    }
+}
+
+pub(crate) fn project_dubbing(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            if fields.contains_key("voices") {
+                fields.remove("dubbing");
+            }
+            if let Some(speech) = fields
+                .get_mut("spelling_speech")
+                .and_then(Value::as_object_mut)
+            {
+                speech.remove("audio_assets");
+            }
+            if fields.contains_key("voice_id") {
+                fields.remove("style_degree");
+                fields.remove("role");
+                fields.remove("output_format");
+            }
+            fields.remove("reading_reference");
+            fields.remove("reading_links");
+            fields.values_mut().for_each(project_dubbing);
+        }
+        Value::Array(items) => {
+            items.retain(|item| {
+                !item
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| matches!(kind, "say_as" | "sub"))
+            });
+            items.iter_mut().for_each(project_dubbing);
+        }
+        _ => {}
+    }
 }
 
 pub(crate) fn extended_supported(headers: &HeaderMap) -> bool {
@@ -227,7 +293,8 @@ mod tests {
             (None, false, false, false),
             (Some("v1"), true, false, false),
             (Some("v2"), true, true, false),
-            (Some("v3"), false, false, false),
+            (Some("v3"), true, true, false),
+            (Some("v4"), false, false, false),
         ] {
             let mut headers = HeaderMap::new();
             if let Some(version) = version {
@@ -257,6 +324,38 @@ mod tests {
         );
         assert!(!contains_models(&old));
         assert!(contains_models(&stored));
+    }
+
+    #[test]
+    fn dubbing_projection_removes_new_semantics_and_preserves_stored_content() {
+        let stored = json!({"voice_profile":{"voices":[{"voice_id":"sonia","enabled":true,"style_degree":1.2,"role":"Girl"}],"dubbing":{"mode":"local","area":"meaning"}},"reading_reference":{"uk":{}},"reading_links":[],"value":{"version":2,"text":"123","annotations":[{"type":"say_as","start":0,"end":3,"interpret_as":"digits"},{"type":"sub","start":0,"end":3,"alias":"one"},{"type":"italic","start":0,"end":3}]}});
+        assert!(contains_dubbing(&stored));
+        let mut legacy = stored.clone();
+        project_dubbing(&mut legacy);
+        assert!(!contains_dubbing(&legacy));
+        assert_eq!(
+            legacy["voice_profile"]["voices"][0],
+            json!({"voice_id":"sonia","enabled":true})
+        );
+        assert_eq!(
+            legacy["value"]["annotations"],
+            json!([{"type":"italic","start":0,"end":3}])
+        );
+        assert!(stored["voice_profile"]["dubbing"].is_object());
+    }
+
+    #[test]
+    fn spelling_recordings_require_new_client_without_hiding_existing_grammar_recordings() {
+        let stored = json!({"spelling_speech":{"content":{"version":2,"text":"cat","annotations":[]},"voice_profile":{"voices":[]},"audio_assets":[{"id":"recording"}]},"grammar":{"content":{},"voice_profile":{"voices":[]},"audio_assets":[{"id":"grammar"}]}});
+        assert!(contains_dubbing(&stored));
+        let mut legacy = stored.clone();
+        project_dubbing(&mut legacy);
+        assert!(!contains_dubbing(&legacy));
+        assert!(legacy["spelling_speech"].get("audio_assets").is_none());
+        assert_eq!(
+            legacy["grammar"]["audio_assets"],
+            stored["grammar"]["audio_assets"]
+        );
     }
 
     #[test]

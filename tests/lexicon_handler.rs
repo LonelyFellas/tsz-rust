@@ -28,6 +28,8 @@ use tsz_rust::{
 mod batch4;
 #[path = "lexicon_handler/batch5.rs"]
 mod batch5;
+#[path = "lexicon_handler/dubbing_updates.rs"]
+mod dubbing_updates;
 #[path = "lexicon_handler/fixtures.rs"]
 mod fixtures;
 #[path = "lexicon_handler/shared_forms.rs"]

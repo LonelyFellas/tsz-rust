@@ -61,8 +61,8 @@ impl PreviewRepository {
     pub async fn list_voices(&self) -> Result<VoiceListResponse, sqlx::Error> {
         let rows = sqlx::query(
             r#"SELECT alias, provider_voice_id, locale, gender, styles, min_rate_percent, max_rate_percent,
-                      min_pitch_semitones, max_pitch_semitones
-               FROM speech.voices WHERE enabled AND provider = 'azure' AND locale ~ '^en-[A-Z]{2}$'
+                      min_pitch_semitones, max_pitch_semitones, accent, accent_revision
+               FROM speech.voices WHERE enabled AND provider = 'azure'
                ORDER BY array_position($1, provider_voice_id) NULLS LAST, alias"#,
         )
         .bind(product_voices().iter().map(|v| v.provider_voice_id.as_str()).collect::<Vec<_>>())
@@ -90,6 +90,19 @@ impl PreviewRepository {
                         .any(|v| v.provider_voice_id == row.get::<String, _>("provider_voice_id")),
                     locale: row.get("locale"),
                     gender: row.get("gender"),
+                    accent: Some(
+                        serde_json::from_value(serde_json::json!(row.get::<String, _>("accent")))
+                            .expect("database constraint validates accent"),
+                    ),
+                    accent_revision: Some(row.get("accent_revision")),
+                    synthesis_available: Some(crate::speech::capabilities::synthesis_available(
+                        &row.get::<String, _>("provider_voice_id"),
+                        &row.get::<String, _>("locale"),
+                    )),
+                    capability_evidence: crate::speech::capabilities::for_voice(
+                        &row.get::<String, _>("provider_voice_id"),
+                    )
+                    .cloned(),
                     metadata: voice_metadata(&row.get::<String, _>("provider_voice_id")),
                     capabilities: VoiceCapabilities {
                         styles: voice_styles,
@@ -138,6 +151,30 @@ impl PreviewRepository {
                 ON CONFLICT (alias) DO NOTHING"#)
                 .bind(Uuid::now_v7()).bind(item.alias()).bind(item.voice.provider_voice_id())
                 .bind(item.voice.locale()).bind(&item.gender).bind(serde_json::json!(product.styles))
+                .bind(item.version()).execute(&mut *tx).await?;
+        }
+        for evidence in crate::speech::capabilities::snapshot()
+            .items
+            .iter()
+            .filter(|item| crate::speech::locale::EnglishLocale::parse(&item.locale).is_none())
+        {
+            let item = CatalogVoice {
+                voice: Voice::new(
+                    "azure",
+                    &evidence.provider_voice_id,
+                    &evidence.locale,
+                    evidence.styles.clone(),
+                )
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                gender: evidence.gender.clone(),
+            };
+            sqlx::query(r#"INSERT INTO speech.voices
+                (id, alias, provider, provider_voice_id, locale, gender, styles, provider_version)
+                SELECT $1,$2,'azure',$3,$4,$5,$6,$7
+                WHERE NOT EXISTS (SELECT 1 FROM speech.voices WHERE provider = 'azure' AND provider_voice_id = $3)
+                ON CONFLICT (alias) DO NOTHING"#)
+                .bind(Uuid::now_v7()).bind(item.alias()).bind(item.voice.provider_voice_id())
+                .bind(item.voice.locale()).bind(&item.gender).bind(serde_json::json!(evidence.styles))
                 .bind(item.version()).execute(&mut *tx).await?;
         }
         tx.commit().await
@@ -257,7 +294,7 @@ impl PreviewRepository {
         let previous = sqlx::query_scalar::<_, String>(
             r#"INSERT INTO speech.preview_cache
                (request_hash, voice_id, content_hash, object_key, mime_type, size_bytes, expires_at)
-               VALUES ($1, $2, $3, $4, 'audio/mpeg', $5, $6)
+               VALUES ($1, $2, $3, $4, $7, $5, $6)
                ON CONFLICT (request_hash) DO UPDATE SET
                  voice_id = EXCLUDED.voice_id, content_hash = EXCLUDED.content_hash,
                  object_key = EXCLUDED.object_key, mime_type = EXCLUDED.mime_type,
@@ -271,6 +308,7 @@ impl PreviewRepository {
         .bind(object_key)
         .bind(size_bytes)
         .bind(expires_at)
+        .bind(if object_key.ends_with(".wav") {"audio/wav"} else {"audio/mpeg"})
         .fetch_optional(&self.pool)
         .await?;
         Ok(previous)

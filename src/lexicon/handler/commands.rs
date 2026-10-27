@@ -177,6 +177,7 @@ pub async fn save_forms(
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
         .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(&headers))
         .with_voice_versions_support(crate::lexicon::voice_versions::supported(&headers))
+        .with_dubbing_support(crate::lexicon::voice_versions::dubbing_supported(&headers))
         .with_voice_models_support(crate::lexicon::voice_versions::models_supported(&headers))
         .with_extended_voice_locales_support(crate::lexicon::voice_versions::extended_supported(
             &headers,
@@ -243,6 +244,7 @@ pub async fn save_meanings(
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
         .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(&headers))
         .with_voice_versions_support(crate::lexicon::voice_versions::supported(&headers))
+        .with_dubbing_support(crate::lexicon::voice_versions::dubbing_supported(&headers))
         .with_voice_models_support(crate::lexicon::voice_versions::models_supported(&headers))
         .with_extended_voice_locales_support(crate::lexicon::voice_versions::extended_supported(
             &headers,
@@ -474,6 +476,7 @@ pub async fn restore_draft_from_publication(
         .with_form_contents_support(crate::lexicon::shared_forms::supported(&headers))
         .with_sentence_formatting_support(crate::lexicon::sentence_formatting::supported(&headers))
         .with_voice_versions_support(crate::lexicon::voice_versions::supported(&headers))
+        .with_dubbing_support(crate::lexicon::voice_versions::dubbing_supported(&headers))
         .with_voice_models_support(crate::lexicon::voice_versions::models_supported(&headers))
         .with_extended_voice_locales_support(crate::lexicon::voice_versions::extended_supported(
             &headers,

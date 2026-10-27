@@ -446,10 +446,19 @@ fn spelling_speech_equal(
         let mut voices = speech
             .map(|speech| speech.voice_profile.voices.clone())
             .unwrap_or_default();
-        voices.sort_by(|left, right| {
-            (&left.voice_id, left.version_id).cmp(&(&right.voice_id, right.version_id))
-        });
-        Some((content.annotations, voices))
+        if speech.is_none_or(|speech| speech.voice_profile.dubbing.is_none()) {
+            voices.sort_by(|left, right| {
+                (&left.voice_id, left.version_id).cmp(&(&right.voice_id, right.version_id))
+            });
+        }
+        Some((
+            content.annotations,
+            voices,
+            speech.and_then(|speech| speech.voice_profile.dubbing.clone()),
+            speech
+                .map(|speech| speech.audio_assets.clone())
+                .unwrap_or_default(),
+        ))
     };
     canonical(left)
         .zip(canonical(right))
@@ -925,6 +934,17 @@ pub(crate) fn validate_english_text_limits(
     for variant in english_text_variants(content) {
         validate_rich_text_limits(&variant.value, variant.id, "value", issues);
         validate_voice_profile(variant.voice_profile.as_ref(), variant.id, issues);
+        if !crate::lexicon::service::grammar_form_links::valid_reading_ranges(
+            variant.value.text(),
+            &variant.reading_links,
+        ) {
+            issues.push(meanings_issue(
+                V3ValidationIssueCode::DefinitionInvalid,
+                "reading_links",
+                variant.id,
+                "invalid reading link ranges",
+            ));
+        }
         if !crate::lexicon::service::text_links::valid_ranges(variant) {
             issues.push(meanings_issue(
                 V3ValidationIssueCode::DefinitionInvalid,
@@ -942,7 +962,7 @@ pub(crate) fn english_text_variants(content: &EnglishTextV3) -> Vec<&RichTextVar
         EnglishTextV3::Distinguish { uk, us, .. } => [uk, us]
             .into_iter()
             .filter_map(|slot| match slot {
-                DialectVariantRichTextSlotV3::Ready { variant } => Some(variant),
+                DialectVariantRichTextSlotV3::Ready { variant } => Some(variant.as_ref()),
                 DialectVariantRichTextSlotV3::Missing => None,
             })
             .collect(),
@@ -971,17 +991,31 @@ fn validate_voice_profile(
     let mut version_ids = HashSet::new();
     let mut selected_locales = HashSet::new();
     let voices_invalid = profile.voices.len() > MAX_VOICE_PROFILE_VOICES
+        || (profile.mode() == Some(crate::lexicon::dto::VoiceProfileModeV3::Inherit)
+            && profile.area().is_none())
+        || (profile.mode().is_none()
+            && (profile.area().is_some() || !profile.recommendation_order().is_empty()))
+        || profile.recommendation_order().len() > 2000
+        || profile.recommendation_order().iter().any(|id| id.is_nil())
+        || profile
+            .recommendation_order()
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            != profile.recommendation_order().len()
         || profile.voices.iter().any(|voice| {
             let voice_id = &voice.voice_id;
             let version_invalid = match (&voice.version_id, &voice.version_name, voice.locale) {
-                (None, None, None) => !seen.insert(voice_id.as_str()),
+                (None, None, None) => profile.mode().is_some() || !seen.insert(voice_id.as_str()),
                 (Some(id), Some(name), Some(locale)) => {
                     id.is_nil()
                         || !version_ids.insert(*id)
                         || name.trim().is_empty()
                         || name.chars().count() > 40
                         || name.contains('\0')
-                        || (voice.enabled && !selected_locales.insert(locale.selection_key()))
+                        || (profile.mode().is_none()
+                            && voice.enabled
+                            && !selected_locales.insert(locale.selection_key()))
                 }
                 _ => true,
             };
@@ -1002,6 +1036,14 @@ fn validate_voice_profile(
                     .is_some_and(|volume| !(0..=100).contains(&volume))
                 || voice.style.as_ref().is_some_and(|style| {
                     style.trim().is_empty() || style.chars().count() > 64 || style.contains('\0')
+                })
+                || voice.style_degree.as_ref().is_some_and(|degree| {
+                    degree
+                        .as_f64()
+                        .is_none_or(|degree| !(0.01..=2.0).contains(&degree))
+                })
+                || voice.role.as_ref().is_some_and(|role| {
+                    role.trim().is_empty() || role.chars().count() > 64 || role.contains('\0')
                 })
         });
     if voices_invalid {
@@ -1289,7 +1331,11 @@ fn validate_variant(
                     let valid_gaps = speech.content.annotations.iter().all(|mark| {
                         let crate::lexicon::dto::RichTextAnnotationV3::Pause { at, .. } = mark
                         else {
-                            return false;
+                            return matches!(
+                                mark,
+                                crate::lexicon::dto::RichTextAnnotationV3::SayAs { .. }
+                                    | crate::lexicon::dto::RichTextAnnotationV3::Sub { .. }
+                            );
                         };
                         let at = *at;
                         at > 0
@@ -1917,6 +1963,15 @@ mod tests {
         let left = speech(json!([sonia, guy]));
         let right = speech(json!([guy, sonia]));
         assert!(spelling_speech_equal(Some(&left), Some(&right)));
+        let explicit = |speech: &crate::lexicon::dto::SpellingSpeechV3| {
+            let mut value = serde_json::to_value(speech).unwrap();
+            value["voice_profile"]["dubbing"] = json!({"mode":"local","area":"word"});
+            serde_json::from_value(value).unwrap()
+        };
+        assert!(!spelling_speech_equal(
+            Some(&explicit(&left)),
+            Some(&explicit(&right))
+        ));
         assert!(!spelling_speech_equal(
             Some(&left),
             Some(&speech(json!([sonia])))

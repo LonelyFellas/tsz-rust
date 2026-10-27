@@ -4,13 +4,38 @@ use super::*;
 use crate::lexicon::{audio_assets::dto::AudioAsset, dto::EnglishTextV3};
 
 pub(super) async fn normalize(
-    tx: &mut PgConnection,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: Uuid,
+    sentence_id: Uuid,
+    text: &mut EnglishTextV3,
+) -> Result<(), AppError> {
+    normalize_in(tx, actor, sentence_id, text, None).await
+}
+
+pub(super) async fn normalize_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: Uuid,
+    sentence_id: Uuid,
+    text: &mut EnglishTextV3,
+    batch: Option<&crate::lexicon::service::v3_publication::PublicationBatchContext>,
+) -> Result<(), AppError> {
+    crate::lexicon::service::grammar_form_links::validate_reading_text(
+        tx, text, None, batch, false,
+    )
+    .await
+    .map_err(crate::lexicon::handler::map_error)?;
+    let serialized = serde_json::to_value(&*text).map_err(AppError::internal)?;
+    crate::speech::generated::validate_bindings_with_forms(tx, &serialized, None, batch).await?;
+    validate_assets(tx, actor, sentence_id, text).await
+}
+
+pub(super) async fn validate_assets(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     actor: Uuid,
     sentence_id: Uuid,
     text: &mut EnglishTextV3,
 ) -> Result<(), AppError> {
     let serialized = serde_json::to_value(&*text).map_err(AppError::internal)?;
-    crate::speech::generated::validate_bindings(tx, &serialized).await?;
     let generated = crate::speech::generated_source::references(&serialized)?;
     let variants = crate::lexicon::v3_contract::english_text_variants(text);
     let mut ids = generated
@@ -32,7 +57,7 @@ pub(super) async fn normalize(
     // Re-read ownership with a fresh snapshot after any concurrent claim commits.
     sqlx::query("SELECT id FROM lexicon.audio_assets WHERE id=ANY($1) ORDER BY id FOR UPDATE")
         .bind(&ids)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .map_err(AppError::internal)?;
     let rows = sqlx::query(
@@ -55,7 +80,7 @@ pub(super) async fn normalize(
     .bind(&ids)
     .bind(sentence_id)
     .bind(actor)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .map_err(AppError::internal)?;
     let mut canonical = HashMap::<Uuid, AudioAsset>::new();
@@ -86,7 +111,7 @@ fn variants_mut(text: &mut EnglishTextV3) -> Vec<&mut crate::lexicon::dto::RichT
         EnglishTextV3::Distinguish { uk, us, .. } => [uk, us]
             .into_iter()
             .filter_map(|slot| match slot {
-                DialectVariantRichTextSlotV3::Ready { variant } => Some(variant),
+                DialectVariantRichTextSlotV3::Ready { variant } => Some(variant.as_mut()),
                 DialectVariantRichTextSlotV3::Missing => None,
             })
             .collect(),
@@ -98,6 +123,20 @@ pub(super) async fn replace_draft(
     id: Uuid,
     text: &EnglishTextV3,
 ) -> Result<(), AppError> {
+    let revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM lexicon.shared_sentences WHERE id=$1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+    crate::speech::dubbing::replace_dependencies(
+        tx,
+        "sentence",
+        id,
+        revision,
+        &serde_json::to_value(text).map_err(AppError::internal)?,
+    )
+    .await?;
     sqlx::query("DELETE FROM lexicon.shared_sentence_audio_asset_references WHERE sentence_id=$1 AND scope='draft'")
         .bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     insert(tx, id, None, text).await

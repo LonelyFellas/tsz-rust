@@ -56,8 +56,8 @@ impl GeneratedSpeechSource {
                 content,
                 form_links,
             } => {
-                !form_links.is_empty()
-                    || content.annotations.iter().any(|annotation| {
+                form_links.is_empty()
+                    && content.annotations.iter().any(|annotation| {
                         matches!(
                             annotation,
                             crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
@@ -84,16 +84,18 @@ impl GeneratedSpeechSource {
                 Self::Text {
                     content,
                     form_links,
-                } => {
-                    !form_links.is_empty()
-                        || content.annotations.iter().any(|annotation| {
-                            matches!(
-                                annotation,
-                                crate::lexicon::dto::RichTextAnnotation::Phoneme { .. }
-                                    | crate::lexicon::dto::RichTextAnnotation::Pause { .. }
-                            )
-                        })
-                }
+                } => content
+                    .annotations
+                    .iter()
+                    .any(|annotation| match annotation {
+                        crate::lexicon::dto::RichTextAnnotation::Phoneme { .. } => {
+                            form_links.is_empty()
+                        }
+                        crate::lexicon::dto::RichTextAnnotation::Pause { .. }
+                        | crate::lexicon::dto::RichTextAnnotation::SayAs { .. }
+                        | crate::lexicon::dto::RichTextAnnotation::Sub { .. } => true,
+                        _ => false,
+                    }),
             }
         {
             return Err(crate::error::AppError::bad_request(
@@ -210,12 +212,21 @@ impl GeneratedSpeechSource {
                         {
                             return Err(invalid());
                         }
-                        let accent = if locale == "en-GB" {
+                        let accent = if matches!(locale, "en-GB" | "en-AU" | "en-NZ") {
                             crate::lexicon::dto::Dialect::Uk
                         } else {
                             crate::lexicon::dto::Dialect::Us
                         };
-                        if let Some(annotation) =
+                        let annotation = if let Some(reference) = &link.reading_reference {
+                            crate::lexicon::service::grammar_form_links::annotation_for_reading(
+                                &pronunciations,
+                                segment.start,
+                                segment.end,
+                                accent,
+                                dialect,
+                                reference,
+                            )
+                        } else {
                             crate::lexicon::service::grammar_form_links::first_annotation(
                                 &pronunciations,
                                 segment.start,
@@ -223,8 +234,17 @@ impl GeneratedSpeechSource {
                                 accent,
                                 dialect,
                             )
-                            .map_err(|_| invalid())?
-                        {
+                        }
+                        .map_err(|message| {
+                            crate::error::AppError::bad_request(
+                                crate::error::ErrorCode::InvalidSpeechPreview,
+                                message,
+                            )
+                        })?;
+                        if annotation.is_some() && !matches!(locale, "en-GB" | "en-US") {
+                            return Err(invalid());
+                        }
+                        if let Some(annotation) = annotation {
                             value["annotations"]
                                 .as_array_mut()
                                 .ok_or_else(invalid)?
@@ -247,7 +267,10 @@ impl GeneratedSpeechSource {
                     return Err(invalid());
                 }
                 let annotations = value["annotations"].as_array_mut().ok_or_else(invalid)?;
-                if annotations.iter().any(|a| a["type"] != "pause") {
+                if annotations
+                    .iter()
+                    .any(|a| !matches!(a["type"].as_str(), Some("pause" | "say_as" | "sub")))
+                {
                     return Err(invalid());
                 }
                 let words = text.split_whitespace().collect::<Vec<_>>();
@@ -289,6 +312,35 @@ impl GeneratedSpeechSource {
                 }
             }
         }
+        if matches!(self, Self::Phoneme { .. }) {
+            let annotations = value["annotations"].as_array_mut().ok_or_else(invalid)?;
+            let special = annotations
+                .iter()
+                .filter(|mark| matches!(mark["type"].as_str(), Some("say_as" | "sub")))
+                .cloned()
+                .collect::<Vec<_>>();
+            if annotations
+                .iter()
+                .filter(|mark| mark["type"] == "phoneme")
+                .any(|mark| {
+                    special.iter().any(|reading| {
+                        reading["start"].as_u64() < mark["end"].as_u64()
+                            && mark["start"].as_u64() < reading["end"].as_u64()
+                            && (reading["start"].as_u64() > mark["start"].as_u64()
+                                || reading["end"].as_u64() < mark["end"].as_u64())
+                    })
+                })
+            {
+                return Err(invalid());
+            }
+            annotations.retain(|mark| {
+                mark["type"] != "phoneme"
+                    || !special.iter().any(|reading| {
+                        reading["start"].as_u64() < mark["end"].as_u64()
+                            && mark["start"].as_u64() < reading["end"].as_u64()
+                    })
+            });
+        }
         normalize_content(serde_json::from_value(value).map_err(|_| invalid())?)
     }
 }
@@ -303,7 +355,55 @@ fn normalize_content(content: RichTextV2) -> Result<RichTextV2, crate::error::Ap
 }
 
 pub(crate) fn voice_input(setting: &VoiceSettingV3) -> Value {
-    serde_json::json!({"version_id":setting.version_id,"voice_id":setting.voice_id,"locale":setting.locale,"rate_percent":setting.rate_percent,"pitch_semitones":setting.pitch_semitones.unwrap_or(0),"volume_percent":setting.volume_percent.unwrap_or(100),"style":setting.style.as_deref().unwrap_or("")})
+    let mut value = serde_json::json!({"version_id":setting.version_id,"voice_id":setting.voice_id,"locale":setting.locale,"rate_percent":setting.rate_percent,"pitch_semitones":setting.pitch_semitones.unwrap_or(0),"volume_percent":setting.volume_percent.unwrap_or(100),"style":setting.style.as_deref().unwrap_or("")});
+    if let Some(format) = setting
+        .output_format
+        .filter(|format| *format != super::AudioOutputFormat::default())
+    {
+        value["output_format"] = serde_json::json!(format);
+    }
+    if let Some(degree) = &setting.style_degree {
+        value["style_degree"] = serde_json::json!(degree);
+    }
+    if let Some(role) = &setting.role {
+        value["role"] = serde_json::json!(role);
+    }
+    value
+}
+
+pub(crate) fn source_at(
+    value: &Value,
+    path: &str,
+) -> Result<GeneratedSpeechSource, crate::error::AppError> {
+    let mut current = value;
+    let mut locale = None;
+    let mut phoneme = None;
+    for key in path.split('/').skip(1) {
+        if key == "uk" {
+            locale = Some("en-GB");
+        }
+        if key == "us" {
+            locale = Some("en-US");
+        }
+        if key == "ipa_speech" || key == "ups_speech" {
+            let alphabet = if key == "ipa_speech" { "ipa" } else { "ups" };
+            phoneme = Some((alphabet, current.clone()));
+        }
+        current = if let Some(items) = current.as_array() {
+            items
+                .get(key.parse::<usize>().map_err(|_| invalid())?)
+                .ok_or_else(invalid)?
+        } else {
+            current.get(key).ok_or_else(invalid)?
+        };
+    }
+    let source = if let Some((alphabet, parent)) = phoneme {
+        serde_json::json!({"kind":"phoneme","content":current["content"],"alphabet":alphabet,"phoneme":parent[alphabet],"ups_words":if alphabet=="ups" {parent.get("ups_words").cloned().unwrap_or_else(||serde_json::json!([]))} else {serde_json::json!([])},"phoneme_locale":locale})
+    } else {
+        let content = current.get("content").or_else(||current.get("value")).or_else(||current.get("name_en_rich")).or_else(||current.get("dict_phonetic_rich")).cloned().unwrap_or_else(||serde_json::json!({"version":2,"text":current.get("name_en").or_else(||current.get("dict_phonetic")).and_then(Value::as_str).unwrap_or(""),"annotations":[]}));
+        serde_json::json!({"kind":"text","content":content,"form_links":current.get("form_links").or_else(||current.get("reading_links")).filter(|v|!v.is_null()).cloned().unwrap_or_else(||serde_json::json!([]))})
+    };
+    serde_json::from_value(source).map_err(|_| invalid())
 }
 
 #[derive(Debug, Clone)]
@@ -311,15 +411,30 @@ pub(crate) struct GeneratedReference {
     pub asset: Uuid,
     pub source: GeneratedSpeechSource,
     pub setting: VoiceSettingV3,
+    pub profile: Option<crate::lexicon::dto::VoiceProfileV3>,
 }
 
 /// Walk the owned DTO representation. Each voice_profile is paired with its actual text owner.
 pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate::error::AppError> {
+    collect_settings(value, true)
+}
+
+pub(crate) fn configurations(
+    value: &Value,
+) -> Result<Vec<GeneratedReference>, crate::error::AppError> {
+    collect_settings(value, false)
+}
+
+fn collect_settings(
+    value: &Value,
+    assets_only: bool,
+) -> Result<Vec<GeneratedReference>, crate::error::AppError> {
     fn walk(
         v: &Value,
         node: Uuid,
         phoneme: Option<(&str, &str, &Value)>,
         native_locale: Option<&str>,
+        assets_only: bool,
         out: &mut Vec<GeneratedReference>,
     ) -> Result<(), crate::error::AppError> {
         let node = v
@@ -330,9 +445,15 @@ pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate
         if let Some(profile) = v.get("voice_profile").filter(|profile| !profile.is_null()) {
             let voices = profile["voices"].as_array().ok_or_else(invalid)?;
             for setting in voices {
-                let Some(asset) = setting.get("audio_asset_id") else {
+                let asset = setting.get("audio_asset_id");
+                if assets_only && asset.is_none()
+                    || !assets_only
+                        && !setting["voice_id"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("azure-hd-flash-"))
+                {
                     continue;
-                };
+                }
                 let source = if let Some((alphabet, phone, words)) = phoneme {
                     let mut source = serde_json::json!({"kind":"phoneme","content":v["content"],"alphabet":alphabet,"phoneme":phone,"ups_words":words});
                     if let Some(locale) = native_locale {
@@ -341,12 +462,21 @@ pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate
                     source
                 } else {
                     let content = v.get("content").or_else(||v.get("value")).or_else(||v.get("name_en_rich")).or_else(||v.get("dict_phonetic_rich")).cloned().unwrap_or_else(||serde_json::json!({"version":2,"text":v.get("name_en").or_else(||v.get("dict_phonetic")).and_then(Value::as_str).unwrap_or(""),"annotations":[]}));
-                    serde_json::json!({"kind":"text","content":content,"form_links":v.get("form_links").filter(|x|!x.is_null()).cloned().unwrap_or_else(||serde_json::json!([]))})
+                    serde_json::json!({"kind":"text","content":content,"form_links":v.get("form_links").or_else(||v.get("reading_links")).filter(|x|!x.is_null()).cloned().unwrap_or_else(||serde_json::json!([]))})
                 };
                 out.push(GeneratedReference {
-                    asset: serde_json::from_value(asset.clone()).map_err(|_| invalid())?,
+                    asset: asset
+                        .map(|asset| serde_json::from_value(asset.clone()))
+                        .transpose()
+                        .map_err(|_| invalid())?
+                        .unwrap_or_else(Uuid::nil),
                     source: serde_json::from_value(source).map_err(|_| invalid())?,
                     setting: serde_json::from_value(setting.clone()).map_err(|_| invalid())?,
+                    profile: profile
+                        .get("dubbing")
+                        .map(|_| serde_json::from_value(profile.clone()))
+                        .transpose()
+                        .map_err(|_| invalid())?,
                 });
             }
         }
@@ -381,6 +511,7 @@ pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate
                             v.get(format!("{alphabet}_locale"))
                                 .and_then(Value::as_str)
                                 .or(native_locale),
+                            assets_only,
                             out,
                         )?;
                     } else {
@@ -397,13 +528,13 @@ pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate
                                     })
                             }),
                         };
-                        walk(child, node, None, locale, out)?;
+                        walk(child, node, None, locale, assets_only, out)?;
                     }
                 }
             }
             Value::Array(items) => {
                 for child in items {
-                    walk(child, node, None, native_locale, out)?;
+                    walk(child, node, None, native_locale, assets_only, out)?;
                 }
             }
             _ => {}
@@ -411,6 +542,6 @@ pub(crate) fn references(value: &Value) -> Result<Vec<GeneratedReference>, crate
         Ok(())
     }
     let mut result = vec![];
-    walk(value, Uuid::nil(), None, None, &mut result)?;
+    walk(value, Uuid::nil(), None, None, assets_only, &mut result)?;
     Ok(result)
 }

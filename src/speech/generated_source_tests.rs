@@ -3,7 +3,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[test]
-fn new_regions_reject_designated_phonemes_and_links_but_allow_natural_text() {
+fn new_regions_reject_direct_phonemes_and_defer_links_until_actual_reading_is_resolved() {
     let text = json!({"version":2,"text":"hello","annotations":[]});
     let natural: GeneratedSpeechSource =
         serde_json::from_value(json!({"kind":"text","content":text})).unwrap();
@@ -12,7 +12,6 @@ fn new_regions_reject_designated_phonemes_and_links_but_allow_natural_text() {
         for source in [
             json!({"kind":"phoneme","content":text,"alphabet":"ipa","phoneme":"həˈləʊ","phoneme_locale":"en-GB"}),
             json!({"kind":"text","content":{"version":2,"text":"hello","annotations":[{"type":"phoneme","start":0,"end":5,"alphabet":"ipa","phoneme":"həˈləʊ"}]}}),
-            json!({"kind":"text","content":text,"form_links":[{"id":Uuid::now_v7(),"source_segments":[{"start":0,"end":5,"surface":"hello"}],"target_word_id":Uuid::now_v7(),"target_pos_id":Uuid::now_v7(),"target_form_id":Uuid::now_v7(),"target_variant_id":Uuid::now_v7(),"target_dialect":"common"}]}),
         ] {
             let source: GeneratedSpeechSource = serde_json::from_value(source).unwrap();
             assert!(source.validate_locale(locale).is_err(), "{locale}");

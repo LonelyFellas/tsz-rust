@@ -3,6 +3,9 @@ use crate::lexicon::dto::{RichTextAnnotation, RichTextEmphasisLevel, RichTextPho
 use super::{SpeechModelError, SynthesisRequest};
 
 pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError> {
+    if let Some(raw) = request.manual_ssml() {
+        return Ok(raw.to_owned());
+    }
     let mut output = String::with_capacity(request.content().text.len() + 256);
     output.push_str(r#"<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang=""#);
     push_attr(&mut output, request.voice().locale());
@@ -12,6 +15,14 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
     if let Some(style) = request.options().style() {
         output.push_str(r#"<mstts:express-as style=""#);
         push_attr(&mut output, style);
+        if let Some(degree) = request.options().style_degree() {
+            output.push_str(r#"" styledegree=""#);
+            output.push_str(&degree.to_string());
+        }
+        if let Some(role) = request.options().role() {
+            output.push_str(r#"" role=""#);
+            push_attr(&mut output, role);
+        }
         output.push_str(r#"">"#);
     }
     if !request.voice().is_hd_flash() {
@@ -119,7 +130,9 @@ pub fn build_ssml(request: &SynthesisRequest) -> Result<String, SpeechModelError
 
 fn range(annotation: &RichTextAnnotation) -> Option<(usize, usize)> {
     match annotation {
-        RichTextAnnotation::Phoneme { start, end, .. } => Some((*start, *end)),
+        RichTextAnnotation::Phoneme { start, end, .. }
+        | RichTextAnnotation::SayAs { start, end, .. }
+        | RichTextAnnotation::Sub { start, end, .. } => Some((*start, *end)),
         _ => None,
     }
 }
@@ -139,6 +152,16 @@ fn open_range(
             push_attr(output, phoneme.trim());
             output.push_str(r#"">"#);
         }
+        RichTextAnnotation::SayAs { interpret_as, .. } => {
+            output.push_str(r#"<say-as interpret-as=""#);
+            push_attr(output, interpret_as);
+            output.push_str(r#"">"#);
+        }
+        RichTextAnnotation::Sub { alias, .. } => {
+            output.push_str(r#"<sub alias=""#);
+            push_attr(output, alias);
+            output.push_str(r#"">"#);
+        }
         _ => return Err(SpeechModelError::InvalidRichText),
     }
     Ok(())
@@ -147,6 +170,8 @@ fn open_range(
 fn close_range(output: &mut String, annotation: &RichTextAnnotation) {
     match annotation {
         RichTextAnnotation::Phoneme { .. } => output.push_str("</phoneme>"),
+        RichTextAnnotation::SayAs { .. } => output.push_str("</say-as>"),
+        RichTextAnnotation::Sub { .. } => output.push_str("</sub>"),
         _ => unreachable!("only speech range annotations are collected"),
     }
 }

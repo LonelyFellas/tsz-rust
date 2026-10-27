@@ -66,18 +66,26 @@ fn grammar_form_candidates(
     target_entry_id: Uuid,
 ) -> Vec<Candidate> {
     super::grammar_form_links::variants(meanings)
-        .flat_map(|variant| {
-            variant
-                .form_links
+        .map(|variant| {
+            (
+                variant.id,
+                variant.form_links.as_deref().unwrap_or_default(),
+            )
+        })
+        .chain(
+            super::text_links::variants(meanings)
+                .map(|variant| (variant.id, variant.reading_links.as_slice())),
+        )
+        .flat_map(|(variant_id, links)| {
+            links
                 .iter()
-                .flatten()
                 .filter(move |link| link.target_word_id == target_entry_id)
                 .map(move |link| Candidate {
                     reference: reference(
                         format!(
                             "grammar_form:{source_entry_id}:{}:{}:{}",
                             publication_id.map_or_else(|| "draft".to_owned(), |id| id.to_string()),
-                            variant.id,
+                            variant_id,
                             link.id
                         ),
                         InboundReferenceKindV3::GrammarFormLink,
@@ -85,12 +93,16 @@ fn grammar_form_candidates(
                             pos_id: Some(link.target_pos_id),
                             form_id: Some(link.target_form_id),
                             variant_id: Some(link.target_variant_id),
+                            sense_id: link
+                                .reading_reference
+                                .as_ref()
+                                .and_then(|reference| reference.sense_id),
                             ..InboundReferenceTargetV3::default()
                         },
                         InboundReferenceSourceV3 {
                             entry_id: Some(source_entry_id),
                             publication_id,
-                            node_id: Some(variant.id),
+                            node_id: Some(variant_id),
                             reference_kind: Some("grammar_form_link".to_owned()),
                             ..InboundReferenceSourceV3::default()
                         },
@@ -824,7 +836,7 @@ async fn collect_candidates(
         FROM lexicon.entries entry
         JOIN lexicon.entry_publications publication ON publication.id = entry.current_publication_id AND publication.entry_id = entry.id
         WHERE entry.archived_at IS NULL AND entry.id <> $1 AND publication.content_schema_version = 3
-          AND jsonb_path_exists(publication.snapshot, '$.meanings.pos[*].grammar_structures[*].variants[*].form_links[*].target_word_id ? (@ == $target)', jsonb_build_object('target', $1::text))
+          AND jsonb_path_exists(publication.snapshot, '$.meanings.**.target_word_id ? (@ == $target)', jsonb_build_object('target', $1::text))
         ORDER BY entry.id
     "#).bind(entry_id).fetch_all(&mut **tx).await.map_err(database_error)?;
     for (source_entry_id, publication_id, meanings) in published {
@@ -836,6 +848,57 @@ async fn collect_candidates(
             &meanings,
             entry_id,
         ));
+    }
+    let sentences = sqlx::query_as::<_, (Uuid, i64, Option<Uuid>, Value)>(r#"
+        SELECT id,revision,NULL::uuid,content->'en_text' FROM lexicon.shared_sentences
+        WHERE deleted_at IS NULL AND jsonb_path_exists(content, '$.en_text.**.reading_links[*].target_word_id ? (@ == $target)', jsonb_build_object('target',$1::text))
+        UNION ALL
+        SELECT sentence.id,sentence.revision,publication.id,publication.snapshot->'sentence'->'en_text'
+        FROM lexicon.shared_sentences sentence JOIN lexicon.shared_sentence_publications publication ON publication.id=sentence.current_publication_id
+        WHERE sentence.deleted_at IS NULL AND sentence.withdrawn_at IS NULL AND jsonb_path_exists(publication.snapshot, '$.sentence.en_text.**.reading_links[*].target_word_id ? (@ == $target)', jsonb_build_object('target',$1::text))
+    "#).bind(entry_id).fetch_all(&mut **tx).await.map_err(database_error)?;
+    for (sentence_id, revision, publication_id, text) in sentences {
+        let text: EnglishTextV3 = serde_json::from_value(text).map_err(serialization_error)?;
+        for variant in crate::lexicon::v3_contract::english_text_variants(&text) {
+            for link in variant
+                .reading_links
+                .iter()
+                .filter(|link| link.target_word_id == entry_id)
+            {
+                candidates.push(Candidate {
+                    reference: reference(
+                        format!(
+                            "reading_sentence:{sentence_id}:{}:{}",
+                            publication_id.map_or_else(|| "draft".to_owned(), |id| id.to_string()),
+                            link.id
+                        ),
+                        InboundReferenceKindV3::GrammarFormLink,
+                        InboundReferenceTargetV3 {
+                            pos_id: Some(link.target_pos_id),
+                            form_id: Some(link.target_form_id),
+                            variant_id: Some(link.target_variant_id),
+                            sense_id: link
+                                .reading_reference
+                                .as_ref()
+                                .and_then(|reference| reference.sense_id),
+                            ..InboundReferenceTargetV3::default()
+                        },
+                        InboundReferenceSourceV3 {
+                            sentence_id: Some(sentence_id),
+                            sentence_revision: Some(revision),
+                            publication_id,
+                            node_id: Some(variant.id),
+                            sentence_text: Some(variant.value.text().to_owned()),
+                            reference_kind: Some("reading_link".into()),
+                            ..InboundReferenceSourceV3::default()
+                        },
+                    ),
+                    rule: Rule::GrammarForm {
+                        link: Box::new(link.clone()),
+                    },
+                });
+            }
+        }
     }
     Ok(candidates)
 }
@@ -870,9 +933,21 @@ fn evaluate(
     for candidate in candidates {
         let target = &mut candidate.reference.target;
         let holds = match &candidate.rule {
-            Rule::GrammarForm { link } => {
-                super::grammar_form_links::target_variant(forms, link).is_some()
-            }
+            Rule::GrammarForm { link } => super::grammar_form_links::target_variant(forms, link)
+                .is_some_and(|(_, dialect, pronunciations)| {
+                    super::grammar_form_links::reading_sense_valid(forms, meanings, link)
+                        && link.reading_reference.as_ref().is_none_or(|reference| {
+                            super::grammar_form_links::annotation_for_reading(
+                                &pronunciations,
+                                0,
+                                1,
+                                Dialect::Common,
+                                dialect,
+                                reference,
+                            )
+                            .is_ok()
+                        })
+                }),
             Rule::TextLink { link } => {
                 super::text_links::text_target_matches(forms, meanings, link)
             }

@@ -41,6 +41,77 @@ fn plain(text: &str) -> RichTextV2 {
 }
 
 #[test]
+fn final_effect_hash_ignores_teaching_marks_and_tracks_provider_version_and_sound() {
+    let baseline = request(plain("hello"));
+    let mut content = plain("hello");
+    content
+        .annotations
+        .push(RichTextAnnotation::Italic { start: 0, end: 5 });
+    let decorated = request(content);
+    let hash = generated::effect_hash(&baseline, "v1").unwrap();
+    assert_eq!(hash, generated::effect_hash(&decorated, "v1").unwrap());
+    assert_ne!(hash, generated::effect_hash(&baseline, "v2").unwrap());
+    let changed = SynthesisRequest::new(
+        voice(),
+        SpeechOptions::new(&voice(), Some("cheerful".into()), -27, -2, 100).unwrap(),
+        plain("hello"),
+    )
+    .unwrap();
+    assert_ne!(hash, generated::effect_hash(&changed, "v1").unwrap());
+}
+
+#[test]
+fn special_reading_ssml_escapes_alias_and_rejects_overlap_or_unknown_types() {
+    let content = |annotations| RichTextV2 {
+        version: 2,
+        text: "12 API".into(),
+        annotations,
+    };
+    let marks = vec![
+        RichTextAnnotation::SayAs {
+            start: 0,
+            end: 2,
+            interpret_as: "digits".into(),
+        },
+        RichTextAnnotation::Sub {
+            start: 3,
+            end: 6,
+            alias: "A & B".into(),
+        },
+    ];
+    let xml = build_ssml(&request(content(marks.clone()))).unwrap();
+    assert!(xml.contains(r#"<say-as interpret-as="digits">12</say-as>"#));
+    assert!(xml.contains(r#"<sub alias="A &amp; B">API</sub>"#));
+    let mut overlap = marks;
+    overlap.push(RichTextAnnotation::Phoneme {
+        start: 0,
+        end: 2,
+        alphabet: RichTextPhonemeAlphabet::Ipa,
+        phoneme: "a".into(),
+    });
+    assert!(
+        SynthesisRequest::new(
+            voice(),
+            SpeechOptions::new(&voice(), None, 0, 0, 100).unwrap(),
+            content(overlap)
+        )
+        .is_err()
+    );
+    assert!(
+        SynthesisRequest::new(
+            voice(),
+            SpeechOptions::new(&voice(), None, 0, 0, 100).unwrap(),
+            content(vec![RichTextAnnotation::SayAs {
+                start: 0,
+                end: 2,
+                interpret_as: "unknown".into()
+            }])
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn hd_flash_requires_defaults_and_preserves_full_identity_without_prosody() {
     let full_id = "en-US-Tiana:DragonHDFlashLatestNeural";
     let voice = Voice::new("azure", full_id, "en-US", []).unwrap();
@@ -625,7 +696,7 @@ async fn azure_accepts_mp3_and_maps_http_statuses() {
         StubResponse {
             status: StatusCode::OK,
             content_type: "audio/mpeg; codec=mp3",
-            body: b"mp3".to_vec(),
+            body: b"ID3-test-mp3".to_vec(),
             delay: Duration::ZERO,
         },
         Duration::from_secs(1),
@@ -633,7 +704,7 @@ async fn azure_accepts_mp3_and_maps_http_statuses() {
     )
     .await;
     let audio = ok.synthesize(&request(plain("hello"))).await.unwrap();
-    assert_eq!(audio.bytes, b"mp3");
+    assert_eq!(audio.bytes, b"ID3-test-mp3");
     assert_eq!(audio.provider_request_id.as_deref(), Some("safe-request-1"));
 
     for (status, kind) in [
@@ -672,7 +743,7 @@ async fn azure_rejects_timeout_oversize_and_wrong_content_type() {
         StubResponse {
             status: StatusCode::OK,
             content_type: "audio/mpeg",
-            body: b"mp3".to_vec(),
+            body: b"ID3-test-mp3".to_vec(),
             delay: Duration::from_millis(100),
         },
         Duration::from_millis(20),

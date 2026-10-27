@@ -125,6 +125,29 @@ pub async fn audio_asset_url(
     Ok((StatusCode::OK, Json(response)))
 }
 
+#[utoipa::path(get,path="/api/v1/admin/lexicon/audio-assets/{id}/content",tag="admin-lexicon",security(("bearer_auth"=[])),params(AudioAssetPath),responses((status=200,content_type="application/octet-stream",body=Vec<u8>),(status=403),(status=404),(status=501),(status=503)))]
+pub async fn audio_asset_content(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    headers: HeaderMap,
+    ApiPath(path): ApiPath<AudioAssetPath>,
+) -> Result<axum::response::Response, AppError> {
+    require_active_admin(&state, &auth).await?;
+    let (state, _) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    let (mime, bytes) = service(&state)
+        .read_content(auth.subject, path.id)
+        .await
+        .map_err(map_error)?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CACHE_CONTROL, "no-store".into()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 fn map_error(error: AudioAssetServiceError) -> AppError {
     match error {
         AudioAssetServiceError::Authorization(error) => error,

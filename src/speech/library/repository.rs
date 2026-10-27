@@ -8,23 +8,41 @@ use crate::{
 };
 
 use super::dto::{
-    DubbingGroupsResponse, SaveDubbingGroupsRequest, SaveVoiceDescriptionRequest,
-    SaveVoiceSettingsRequest, VoiceLibraryItem, VoiceLibraryResponse, VoiceParameters,
+    DeleteDubbingGroupRequest, DubbingGroup, DubbingGroupsResponse, RestoreVoiceDescriptionRequest,
+    SaveDubbingGroupRequest, SaveDubbingGroupsRequest, SaveVoiceAccentRequest,
+    SaveVoiceDescriptionRequest, SaveVoiceSettingsRequest, VoiceLibraryItem, VoiceLibraryResponse,
+    VoiceParameters,
 };
 
 const ITEMS_SQL: &str = r#"
-    SELECT v.alias, d.description_zh, COALESCE(d.revision, 0) AS description_revision,
+    SELECT v.alias, v.accent, v.accent_revision, d.description_zh, COALESCE(d.revision, 0) AS description_revision,
            s.parameters, COALESCE(s.notes, '') AS notes, COALESCE(s.revision, 0) AS personal_revision
     FROM speech.voices v
     LEFT JOIN speech.voice_descriptions d ON d.voice_id = v.id
     LEFT JOIN speech.admin_voice_settings s ON s.voice_id = v.id AND s.admin_id = $1
-    WHERE v.enabled AND v.provider = 'azure' AND v.locale ~ '^en-[A-Z]{2}$'
+    WHERE v.enabled AND v.provider = 'azure'
       AND ($2::text IS NULL OR v.alias = $2)
     ORDER BY v.alias
 "#;
 
+pub fn global_group_id() -> Uuid {
+    Uuid::from_u128(0x00000000000040008000000000000001)
+}
+
+async fn write_groups(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: Uuid,
+    groups: &[DubbingGroup],
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE speech.dubbing_groups SET groups=$1, revision=revision+1, updated_by=$2, updated_at=now() WHERE singleton")
+        .bind(serde_json::to_value(groups).map_err(AppError::internal)?).bind(actor)
+        .execute(&mut **tx).await.map_err(AppError::internal)?;
+    Ok(())
+}
+
 pub struct VoiceLibraryRepository {
     pool: PgPool,
+    test_run: Option<String>,
 }
 
 fn invalid() -> AppError {
@@ -47,6 +65,9 @@ fn item(row: PgRow) -> Result<VoiceLibraryItem, AppError> {
         row.try_get("parameters").map_err(AppError::internal)?;
     Ok(VoiceLibraryItem {
         voice_alias: row.try_get("alias").map_err(AppError::internal)?,
+        accent: serde_json::from_value(serde_json::json!(row.get::<String, _>("accent")))
+            .map_err(AppError::internal)?,
+        accent_revision: row.get("accent_revision"),
         description_zh: row.try_get("description_zh").map_err(AppError::internal)?,
         description_revision: row
             .try_get("description_revision")
@@ -101,9 +122,9 @@ async fn authorize_write(
 async fn lock_voice(tx: &mut Transaction<'_, Postgres>, alias: &str) -> Result<PgRow, AppError> {
     sqlx::query(
         r#"SELECT id, provider, provider_voice_id, locale, styles,
-                  min_rate_percent, max_rate_percent, min_pitch_semitones, max_pitch_semitones
+                  min_rate_percent, max_rate_percent, min_pitch_semitones, max_pitch_semitones, accent, accent_revision
            FROM speech.voices WHERE alias = $1 AND enabled AND provider = 'azure'
-           AND locale ~ '^en-[A-Z]{2}$' FOR UPDATE"#,
+           FOR UPDATE"#,
     )
     .bind(alias)
     .fetch_optional(&mut **tx)
@@ -138,6 +159,9 @@ fn validate_parameters(row: &PgRow, parameters: &VoiceParameters) -> Result<(), 
         parameters.pitch_semitones,
         parameters.volume_percent.unwrap_or(100),
     )
+    .and_then(|options| {
+        options.with_expression(&voice, parameters.style_degree, parameters.role.clone())
+    })
     .map_err(|error| AppError::bad_request(ErrorCode::InvalidRequestBody, error.to_string()))?;
     Ok(())
 }
@@ -162,114 +186,231 @@ impl VoiceLibraryRepository {
         &self,
         actor: Uuid,
         security_version: i64,
-        request: SaveDubbingGroupsRequest,
+        _request: SaveDubbingGroupsRequest,
     ) -> Result<DubbingGroupsResponse, AppError> {
-        self.save_groups_with_models(actor, security_version, request, true)
-            .await
+        let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+        authorize_write(&mut tx, actor, security_version, true).await?;
+        Err(AppError::conflict(
+            ErrorCode::RevisionConflict,
+            None,
+            "分组已升级为单组保存，请保留输入并刷新页面",
+        ))
     }
 
-    pub async fn save_groups_with_models(
+    pub async fn save_group(
         &self,
         actor: Uuid,
         security_version: i64,
-        request: SaveDubbingGroupsRequest,
-        models_supported: bool,
+        mut request: SaveDubbingGroupRequest,
+        create: bool,
     ) -> Result<DubbingGroupsResponse, AppError> {
-        use std::collections::BTreeSet;
-        if request.base_revision < 0 || request.groups.len() > 5 {
-            return Err(invalid());
-        }
         let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
         authorize_write(&mut tx, actor, security_version, true).await?;
-        let revision: i64 = sqlx::query_scalar(
-            "SELECT revision FROM speech.dubbing_groups WHERE singleton FOR UPDATE",
+        let row = sqlx::query(
+            "SELECT groups, revision FROM speech.dubbing_groups WHERE singleton FOR UPDATE",
         )
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::internal)?;
-        if !models_supported {
-            let stored: serde_json::Value =
-                sqlx::query_scalar("SELECT groups FROM speech.dubbing_groups WHERE singleton")
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(AppError::internal)?;
-            if crate::lexicon::voice_versions::contains_models(&stored)
-                || crate::lexicon::voice_versions::contains_models(
-                    &serde_json::to_value(&request.groups).map_err(AppError::internal)?,
-                )
+        let mut groups: Vec<DubbingGroup> =
+            serde_json::from_value(row.get("groups")).map_err(AppError::internal)?;
+        let index = groups.iter().position(|group| group.id == request.group.id);
+        if create
+            && groups
+                .iter()
+                .flat_map(|group| group.uk.iter().chain(&group.us))
+                .any(|item| item.id == request.group.id)
+        {
+            return Err(invalid());
+        }
+        if !create && index.is_none() {
+            return Err(AppError::not_found("分组不存在"));
+        }
+        if create != index.is_none() || request.base_revision < 0 {
+            return Err(conflict());
+        }
+        if let Some(index) = index {
+            if groups[index].revision != request.base_revision {
+                return Err(conflict());
+            }
+            if groups[index].is_global != request.group.is_global
+                || (groups[index].is_global
+                    && (request.group.name != "全局常用" || !request.group.areas.is_empty()))
             {
-                return Err(AppError::bad_request(
-                    ErrorCode::InvalidRequestBody,
-                    "分组包含新版模型，请保留输入并刷新页面",
+                return Err(invalid());
+            }
+        } else if request.base_revision != 0
+            || request.group.is_global
+            || request.group.id.is_nil()
+            || request.group.id == global_group_id()
+        {
+            return Err(invalid());
+        }
+        if request.group.name.trim().is_empty()
+            || request.group.name.chars().count() > 30
+            || request.group.name.contains('\0')
+            || request.group.areas.len() > 5
+        {
+            return Err(invalid());
+        }
+        let mut assigned = std::collections::BTreeSet::new();
+        for area in &request.group.areas {
+            if !["word", "azure", "grammar", "meaning", "example"].contains(&area.as_str())
+                || !assigned.insert(area)
+            {
+                return Err(invalid());
+            }
+        }
+        for other in groups.iter().filter(|group| group.id != request.group.id) {
+            if other.name.trim() == request.group.name.trim()
+                || other.areas.iter().any(|area| assigned.contains(area))
+            {
+                return Err(AppError::conflict(
+                    ErrorCode::RevisionConflict,
+                    None,
+                    "分组名称或板块已被其他组占用，请保留草稿并重新载入",
                 ));
             }
         }
-        if revision != request.base_revision {
-            return Err(conflict());
+        if create && groups.len() >= 6 {
+            return Err(invalid());
         }
-        // Share the catalog synchronizer's lock before acquiring multiple voice rows.
         sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
             .execute(&mut *tx)
             .await
             .map_err(AppError::internal)?;
-        let mut areas = BTreeSet::new();
-        let mut ids = BTreeSet::new();
-        let mut names = BTreeSet::new();
-        for group in &request.groups {
-            if group.name.trim().is_empty()
-                || group.name.chars().count() > 30
-                || group.name.contains('\0')
-                || group.areas.is_empty()
-                || !ids.insert(group.id)
-                || !names.insert(group.name.trim())
-            {
+        let mut ids = std::collections::BTreeSet::new();
+        for (accent, items) in [("gb", &mut request.group.uk), ("us", &mut request.group.us)] {
+            if items.len() > 20 {
                 return Err(invalid());
             }
-            for area in &group.areas {
-                if !["word", "azure", "grammar", "meaning", "example"].contains(&area.as_str())
-                    || !areas.insert(area)
+            for item in items.iter() {
+                if item.id.is_nil()
+                    || !ids.insert(item.id)
+                    || item.name.trim().is_empty()
+                    || item.name.chars().count() > 40
+                    || item.name.contains('\0')
+                    || item.id == request.group.id
+                    || groups.iter().any(|group| group.id == item.id)
+                    || groups
+                        .iter()
+                        .filter(|group| group.id != request.group.id)
+                        .flat_map(|group| group.uk.iter().chain(&group.us))
+                        .any(|other| other.id == item.id)
                 {
                     return Err(invalid());
                 }
-            }
-            for (locale, recommendations) in [("en-GB", &group.uk), ("en-US", &group.us)] {
-                if recommendations.is_empty() || recommendations.len() > 20 {
+                let voice = lock_voice(&mut tx, &item.voice_alias).await?;
+                let stored = index.and_then(|i| {
+                    if accent == "gb" {
+                        groups[i].uk.iter().find(|old| old.id == item.id)
+                    } else {
+                        groups[i].us.iter().find(|old| old.id == item.id)
+                    }
+                });
+                let unchanged = stored.is_some_and(|old| {
+                    let mut retained = old.clone();
+                    if !item.selected {
+                        retained.selected = false;
+                    }
+                    serde_json::to_value(retained).ok() == serde_json::to_value(item).ok()
+                });
+                if voice.get::<String, _>("accent") != accent && !unchanged {
                     return Err(invalid());
                 }
-                for recommendation in recommendations {
-                    if recommendation.name.trim().is_empty()
-                        || recommendation.name.chars().count() > 40
-                        || recommendation.name.contains('\0')
-                        || !ids.insert(recommendation.id)
-                    {
-                        return Err(invalid());
-                    }
-                    let voice = lock_voice(&mut tx, &recommendation.voice_alias).await?;
-                    if crate::speech::locale::EnglishLocale::parse(
+                if !unchanged {
+                    if !crate::speech::capabilities::synthesis_available(
+                        &voice.get::<String, _>("provider_voice_id"),
                         &voice.get::<String, _>("locale"),
-                    )
-                    .map(|value| value.accent_group())
-                        != crate::speech::locale::EnglishLocale::parse(locale)
-                            .map(|value| value.accent_group())
-                    {
+                    ) {
                         return Err(invalid());
                     }
-                    validate_parameters(&voice, &recommendation.parameters)?;
+                    validate_parameters(&voice, &item.parameters)?;
                 }
             }
+            items.sort_by_key(|item| !item.selected);
         }
-        sqlx::query("UPDATE speech.dubbing_groups SET groups=$1, revision=revision+1, updated_by=$2, updated_at=now() WHERE singleton")
-            .bind(serde_json::to_value(&request.groups).map_err(AppError::internal)?).bind(actor)
-            .execute(&mut *tx).await.map_err(AppError::internal)?;
+        request.group.revision = index.map_or(1, |i| groups[i].revision + 1);
+        request.group.name = request.group.name.trim().into();
+        super::super::audio_updates::enqueue(
+            &mut tx,
+            actor,
+            security_version,
+            request.group.id,
+            request.group.revision,
+            (index.map(|i| &groups[i]), Some(&request.group)),
+            self.test_run.as_deref(),
+        )
+        .await?;
+        if let Some(index) = index {
+            groups[index] = request.group;
+        } else {
+            groups.push(request.group);
+        }
+        write_groups(&mut tx, actor, &groups).await?;
         tx.commit().await.map_err(AppError::internal)?;
         Ok(DubbingGroupsResponse {
-            groups: request.groups,
-            revision: revision + 1,
+            groups,
+            revision: row.get::<i64, _>("revision") + 1,
+        })
+    }
+
+    pub async fn delete_group(
+        &self,
+        actor: Uuid,
+        security_version: i64,
+        id: Uuid,
+        request: DeleteDubbingGroupRequest,
+    ) -> Result<DubbingGroupsResponse, AppError> {
+        let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+        authorize_write(&mut tx, actor, security_version, true).await?;
+        let row = sqlx::query(
+            "SELECT groups, revision FROM speech.dubbing_groups WHERE singleton FOR UPDATE",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AppError::internal)?;
+        let mut groups: Vec<DubbingGroup> =
+            serde_json::from_value(row.get("groups")).map_err(AppError::internal)?;
+        let index = groups
+            .iter()
+            .position(|group| group.id == id)
+            .ok_or_else(|| AppError::not_found("分组不存在"))?;
+        if groups[index].is_global {
+            return Err(invalid());
+        }
+        if groups[index].revision != request.base_revision {
+            return Err(conflict());
+        }
+        super::super::audio_updates::enqueue(
+            &mut tx,
+            actor,
+            security_version,
+            id,
+            groups[index].revision + 1,
+            (Some(&groups[index]), None),
+            self.test_run.as_deref(),
+        )
+        .await?;
+        groups.remove(index);
+        write_groups(&mut tx, actor, &groups).await?;
+        tx.commit().await.map_err(AppError::internal)?;
+        Ok(DubbingGroupsResponse {
+            groups,
+            revision: row.get::<i64, _>("revision") + 1,
         })
     }
 
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            test_run: None,
+        }
+    }
+
+    pub(crate) fn with_test_run(mut self, test_run: Option<String>) -> Self {
+        self.test_run = test_run;
+        self
     }
 
     pub async fn list(&self, actor: Uuid) -> Result<VoiceLibraryResponse, AppError> {
@@ -358,6 +499,42 @@ impl VoiceLibraryRepository {
         Ok(result)
     }
 
+    pub async fn save_accent(
+        &self,
+        actor: Uuid,
+        alias: &str,
+        security_version: i64,
+        request: SaveVoiceAccentRequest,
+    ) -> Result<VoiceLibraryItem, AppError> {
+        if request.base_revision < 0 {
+            return Err(invalid());
+        }
+        let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
+        authorize_write(&mut tx, actor, security_version, true).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(734892105)")
+            .execute(&mut *tx)
+            .await
+            .map_err(AppError::internal)?;
+        let voice = lock_voice(&mut tx, alias).await?;
+        if voice.get::<i64, _>("accent_revision") != request.base_revision {
+            return Err(conflict());
+        }
+        sqlx::query("UPDATE speech.voices SET accent=$2, accent_revision=accent_revision+1, updated_at=now() WHERE id=$1")
+            .bind(voice.get::<Uuid, _>("id"))
+            .bind(request.accent.as_str())
+            .execute(&mut *tx).await.map_err(AppError::internal)?;
+        let result = item(
+            sqlx::query(ITEMS_SQL)
+                .bind(actor)
+                .bind(alias)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(AppError::internal)?,
+        )?;
+        tx.commit().await.map_err(AppError::internal)?;
+        Ok(result)
+    }
+
     pub async fn save_description(
         &self,
         actor: Uuid,
@@ -371,6 +548,38 @@ impl VoiceLibraryRepository {
         {
             return Err(invalid());
         }
+        self.save_description_value(
+            actor,
+            alias,
+            security_version,
+            Some(request.description_zh),
+            request.base_revision,
+        )
+        .await
+    }
+
+    pub async fn restore_description(
+        &self,
+        actor: Uuid,
+        alias: &str,
+        security_version: i64,
+        request: RestoreVoiceDescriptionRequest,
+    ) -> Result<VoiceLibraryItem, AppError> {
+        if request.base_revision < 0 {
+            return Err(invalid());
+        }
+        self.save_description_value(actor, alias, security_version, None, request.base_revision)
+            .await
+    }
+
+    async fn save_description_value(
+        &self,
+        actor: Uuid,
+        alias: &str,
+        security_version: i64,
+        description: Option<String>,
+        base_revision: i64,
+    ) -> Result<VoiceLibraryItem, AppError> {
         let mut tx = self.pool.begin().await.map_err(AppError::internal)?;
         authorize_write(&mut tx, actor, security_version, true).await?;
         let id: Uuid = lock_voice(&mut tx, alias).await?.get("id");
@@ -380,7 +589,7 @@ impl VoiceLibraryRepository {
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(AppError::internal)?;
-        if revision.unwrap_or(0) != request.base_revision {
+        if revision.unwrap_or(0) != base_revision {
             return Err(conflict());
         }
         sqlx::query(
@@ -390,7 +599,7 @@ impl VoiceLibraryRepository {
                 revision=speech.voice_descriptions.revision+1, updated_at=now()"#,
         )
         .bind(id)
-        .bind(request.description_zh)
+        .bind(description)
         .bind(actor)
         .execute(&mut *tx)
         .await

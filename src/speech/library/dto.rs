@@ -9,6 +9,12 @@ pub struct DubbingRecommendation {
     pub name: String,
     pub voice_alias: String,
     pub parameters: VoiceParameters,
+    #[serde(default = "selected_default")]
+    pub selected: bool,
+}
+
+fn selected_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -19,6 +25,10 @@ pub struct DubbingGroup {
     pub areas: Vec<String>,
     pub uk: Vec<DubbingRecommendation>,
     pub us: Vec<DubbingRecommendation>,
+    #[serde(default)]
+    pub revision: i64,
+    #[serde(default)]
+    pub is_global: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -31,6 +41,19 @@ pub struct DubbingGroupsResponse {
 #[serde(deny_unknown_fields)]
 pub struct SaveDubbingGroupsRequest {
     pub groups: Vec<DubbingGroup>,
+    pub base_revision: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveDubbingGroupRequest {
+    pub group: DubbingGroup,
+    pub base_revision: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteDubbingGroupRequest {
     pub base_revision: i64,
 }
 
@@ -47,11 +70,18 @@ pub struct VoiceParameters {
     #[schema(minimum = 0, maximum = 100, nullable = false)]
     pub volume_percent: Option<i16>,
     pub style: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 0.01, maximum = 2)]
+    pub style_degree: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct VoiceLibraryItem {
     pub voice_alias: String,
+    pub accent: crate::speech::locale::VoiceAccent,
+    pub accent_revision: i64,
     pub description_zh: Option<String>,
     pub description_revision: i64,
     pub parameters: Option<VoiceParameters>,
@@ -76,5 +106,18 @@ pub struct SaveVoiceSettingsRequest {
 #[serde(deny_unknown_fields)]
 pub struct SaveVoiceDescriptionRequest {
     pub description_zh: String,
+    pub base_revision: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveVoiceAccentRequest {
+    pub accent: crate::speech::locale::VoiceAccent,
+    pub base_revision: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreVoiceDescriptionRequest {
     pub base_revision: i64,
 }

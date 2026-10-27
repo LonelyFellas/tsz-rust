@@ -3209,6 +3209,7 @@ dependencies = [
  "ip2region",
  "jsonwebtoken",
  "opendal",
+ "quick-xml",
  "rand",
  "redis",
  "regex",

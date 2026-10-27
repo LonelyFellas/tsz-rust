@@ -106,7 +106,7 @@ impl PreviewRepositoryPort for FakeRepository {
             provider_version: "v1".to_owned(),
             voice: Voice::new(
                 "azure",
-                "provider-sensitive-id",
+                "en-US-JennyNeural",
                 "en-US",
                 vec!["chat".to_owned()],
             )
@@ -319,6 +319,7 @@ fn cache(key: &str) -> CacheRecord {
 
 fn request(label: &str) -> CreatePreviewRequest {
     CreatePreviewRequest {
+        output_format: None,
         content: RichTextV2 {
             version: 2,
             text: format!("ssml-sensitive-{label}"),
@@ -326,6 +327,8 @@ fn request(label: &str) -> CreatePreviewRequest {
         },
         voice_alias: "en-us-jenny".to_owned(),
         style: Some("chat".to_owned()),
+        style_degree: None,
+        role: None,
         rate_percent: 0,
         pitch_semitones: 0,
         volume_percent: None,

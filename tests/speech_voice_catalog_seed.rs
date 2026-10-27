@@ -176,8 +176,14 @@ async fn flash_id_constraint_alias_catalog_capabilities_and_rollback_are_bounded
     use tsz_rust::speech::preview::PreviewRepository;
     const DOWN: &str = include_str!("../migrations/20261025160000_hd_flash_voices.down.sql");
     const UP: &str = include_str!("../migrations/20261025160000_hd_flash_voices.up.sql");
+    const CATALOG_UP: &str =
+        include_str!("../migrations/20261026090000_voice_current_accent.up.sql");
+    const CATALOG_DOWN: &str =
+        include_str!("../migrations/20261026090000_voice_current_accent.down.sql");
+    sqlx::raw_sql(CATALOG_DOWN).execute(&pool).await.unwrap();
     sqlx::raw_sql(DOWN).execute(&pool).await.unwrap();
     sqlx::raw_sql(UP).execute(&pool).await.unwrap();
+    sqlx::raw_sql(CATALOG_UP).execute(&pool).await.unwrap();
     let repo = PreviewRepository::new(pool.clone());
     repo.ensure_catalog_voices().await.unwrap();
     let list = repo.list_voices().await.unwrap();
@@ -205,7 +211,14 @@ async fn flash_id_constraint_alias_catalog_capabilities_and_rollback_are_bounded
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(
+        count,
+        tsz_rust::speech::capabilities::snapshot()
+            .items
+            .iter()
+            .filter(|item| item.model == "hd_flash")
+            .count() as i64
+    );
     sqlx::query("DELETE FROM speech.voices WHERE provider_voice_id LIKE '%:%'")
         .execute(&pool)
         .await
@@ -227,7 +240,7 @@ async fn product_catalog_reads_locally_when_azure_is_unavailable(pool: PgPool) {
     assert_eq!(voice(&pool, "en-us-aria").await.updated_at, before);
     assert_eq!(
         aliases(&pool).await.len(),
-        tsz_rust::speech::catalog_snapshot().len()
+        tsz_rust::speech::capabilities::snapshot().items.len()
     );
     let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -255,7 +268,7 @@ async fn product_catalog_reads_locally_when_azure_is_unavailable(pool: PgPool) {
     let listed = service.list_voices(admin_id).await.unwrap();
     assert_eq!(
         listed.items.len(),
-        tsz_rust::speech::catalog_snapshot().len()
+        tsz_rust::speech::capabilities::snapshot().items.len()
     );
     assert_eq!(listed.items.iter().filter(|v| v.is_common).count(), 8);
     assert_eq!(listed.items[0].alias, "en-gb-sonia");
@@ -270,7 +283,7 @@ async fn product_catalog_reads_locally_when_azure_is_unavailable(pool: PgPool) {
     let listed = service.list_voices(admin_id).await.unwrap();
     assert_eq!(
         listed.items.len(),
-        tsz_rust::speech::catalog_snapshot().len()
+        tsz_rust::speech::capabilities::snapshot().items.len()
     );
     assert!(
         listed
@@ -291,6 +304,6 @@ async fn product_catalog_reads_locally_when_azure_is_unavailable(pool: PgPool) {
         .unwrap();
     assert_eq!(
         service.list_voices(admin_id).await.unwrap().items.len(),
-        tsz_rust::speech::catalog_snapshot().len() - 1
+        tsz_rust::speech::capabilities::snapshot().items.len() - 1
     );
 }

@@ -383,6 +383,13 @@ impl LexiconService {
         {
             return Err(LexiconServiceError::EntryNotDeletable);
         }
+        sqlx::query(
+            "DELETE FROM speech.dubbing_dependencies WHERE owner_kind='entry' AND owner_id=$1",
+        )
+        .bind(entry_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(database_error)?;
         Ok(())
     }
 
@@ -729,6 +736,18 @@ impl LexiconService {
                 .await?;
                 restored_audit_targets.push((next.id, next.revision));
             }
+            crate::speech::dubbing::replace_dependencies(
+                &mut transaction,
+                "entry",
+                next.id,
+                next.revision,
+                &if target_state == TargetState::Active {
+                    serde_json::json!([next.forms, next.meanings])
+                } else {
+                    serde_json::Value::Null
+                },
+            )
+            .await?;
             affected += 1;
             words_by_id.insert(next.id, next);
         }

@@ -1,6 +1,24 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use utoipa::ToSchema;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceAccent {
+    Gb,
+    Us,
+    None,
+}
+
+impl VoiceAccent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gb => "gb",
+            Self::Us => "us",
+            Self::None => "none",
+        }
+    }
+}
+
 /// Native English synthesis locale. Accent grouping never changes this identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ToSchema)]
 #[schema(value_type = String, pattern = "^en-[A-Z]{2}$")]

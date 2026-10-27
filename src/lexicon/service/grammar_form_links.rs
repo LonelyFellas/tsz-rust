@@ -58,16 +58,43 @@ pub(super) fn preserve_missing(
             variant.form_links = previous.form_links.clone();
         }
     }
+    let old: HashMap<_, _> = super::text_links::variants(previous)
+        .map(|variant| (variant.id, variant))
+        .collect();
+    for variant in next
+        .pos
+        .iter_mut()
+        .flat_map(super::v3::target_english_texts)
+        .flat_map(super::v3::english_text_variants_mut)
+    {
+        if let Some(previous) = old.get(&variant.id) {
+            if !variant.reading_links.was_present()
+                && !previous.reading_links.is_empty()
+                && previous.value.text() != variant.value.text()
+            {
+                return Err(invalid(variant.id, "正文已改变，请重新确认读法关联"));
+            }
+            variant
+                .reading_links
+                .preserve_missing_from(&previous.reading_links);
+        }
+    }
     Ok(())
 }
 
 pub(crate) fn valid_ranges(variant: &GrammarVariantV3) -> bool {
-    let links = variant.form_links.as_deref().unwrap_or_default();
+    valid_reading_ranges(
+        variant.content.text(),
+        variant.form_links.as_deref().unwrap_or_default(),
+    )
+}
+
+pub(crate) fn valid_reading_ranges(text: &str, links: &[GrammarFormLinkV3]) -> bool {
     if links.len() > 100 {
         return false;
     }
-    let chars: Vec<_> = variant.content.text().chars().collect();
-    let tokens = crate::lexicon::text_tokenization::tokenize(variant.content.text());
+    let chars: Vec<_> = text.chars().collect();
+    let tokens = crate::lexicon::text_tokenization::tokenize(text);
     let mut ids = HashSet::new();
     let mut occupied = HashSet::new();
     links.iter().all(|link| {
@@ -97,19 +124,104 @@ pub(crate) fn target_variant(
         .iter()
         .find(|form| form.id == link.target_form_id)?;
     match &form.regional_variants {
-        WordRegionalVariantsV3::Common { common } => {
+        WordRegionalVariantsV3::Common { common } if common.id == link.target_variant_id => {
             Some((common.id, Dialect::Common, common.pronunciations.clone()))
         }
+        WordRegionalVariantsV3::Common { .. } => None,
         WordRegionalVariantsV3::UkUs { uk, us } => {
-            if uk.id == link.target_variant_id || link.target_dialect == Dialect::Uk {
+            if uk.id == link.target_variant_id {
                 Some((uk.id, Dialect::Uk, uk.pronunciations.clone()))
-            } else if us.id == link.target_variant_id || link.target_dialect == Dialect::Us {
+            } else if us.id == link.target_variant_id {
                 Some((us.id, Dialect::Us, us.pronunciations.clone()))
             } else {
                 None
             }
         }
     }
+}
+
+pub(crate) fn reading_revision(
+    synthesis: &crate::lexicon::dto::PronunciationSynthesisV3,
+    locale: crate::lexicon::dto::PhonemeLocaleV3,
+    legacy: Dialect,
+    alphabet: RichTextPhonemeAlphabet,
+) -> String {
+    let selected = synthesis.for_locale(locale, legacy);
+    let phone = match alphabet {
+        RichTextPhonemeAlphabet::Ipa => &selected.ipa,
+        RichTextPhonemeAlphabet::Ups => &selected.ups,
+    };
+    let words = if matches!(alphabet, RichTextPhonemeAlphabet::Ups) {
+        selected.ups_words.map(|words| {
+            words
+                .into_iter()
+                .map(|word| (word.text, word.phoneme))
+                .collect::<Vec<_>>()
+        })
+    } else {
+        None
+    };
+    serde_json::json!([
+        locale,
+        alphabet,
+        phone,
+        words,
+        selected.use_spelling.unwrap_or(false)
+    ])
+    .to_string()
+}
+
+pub(crate) fn annotation_for_reading(
+    pronunciations: &[WordPronunciationV3],
+    start: usize,
+    end: usize,
+    dialect: Dialect,
+    legacy: Dialect,
+    reference: &crate::lexicon::dto::ReadingReferenceV3,
+) -> Result<Option<RichTextAnnotationV3>, &'static str> {
+    use crate::lexicon::dto::PhonemeLocaleV3;
+    if dialect == Dialect::Common {
+        if reference.uk.is_none() && reference.us.is_none() {
+            return Err("请选择具体口音的读法");
+        }
+        for (dialect, selected) in [(Dialect::Uk, &reference.uk), (Dialect::Us, &reference.us)] {
+            if selected.is_some() {
+                annotation_for_reading(pronunciations, start, end, dialect, legacy, reference)?;
+            }
+        }
+        return Ok(None);
+    }
+    let reference = if dialect == Dialect::Uk {
+        reference.uk.as_ref()
+    } else {
+        reference.us.as_ref()
+    }
+    .ok_or("当前口音未选择读法，请明确选择")?;
+    let row = pronunciations
+        .iter()
+        .find(|row| row.id == reference.pronunciation_id)
+        .ok_or("指定读法已失效，请重新选择读法")?;
+    let synthesis = row
+        .synthesis
+        .as_ref()
+        .ok_or("指定读法未配置合成音标，请修复读法")?;
+    if matches!(
+        (dialect, reference.locale),
+        (Dialect::Uk, PhonemeLocaleV3::EnUs) | (Dialect::Us, PhonemeLocaleV3::EnGb)
+    ) {
+        return Err("指定读法与当前口音不匹配");
+    }
+    let mut synthesis = synthesis.for_locale(reference.locale, legacy);
+    synthesis.use_spelling = Some(reference.use_spelling);
+    if reading_revision(&synthesis, reference.locale, legacy, reference.alphabet)
+        != reference.revision
+    {
+        return Err("指定读法已变化，请重新确认读法版本");
+    }
+    let mut row = row.clone();
+    synthesis.alphabet = reference.alphabet;
+    row.synthesis = Some(synthesis);
+    first_annotation(&[row], start, end, dialect, legacy)
 }
 
 pub(crate) fn first_annotation(
@@ -172,6 +284,7 @@ pub(super) async fn validate_targets(
     batch: Option<&super::v3_publication::PublicationBatchContext>,
     publishing: bool,
 ) -> Result<(), LexiconServiceError> {
+    let current_meanings = content.clone();
     for variant in content
         .pos
         .iter_mut()
@@ -201,6 +314,9 @@ pub(super) async fn validate_targets(
                     if kind != WordEntryKindV3::Word {
                         return Err(invalid(variant.id, "关联词形只支持单词"));
                     }
+                    if !reading_sense_valid(forms, &current_meanings, link) {
+                        return Err(invalid(variant.id, "读法义项不属于当前词性或词形"));
+                    }
                     target_variant(forms, link)
                 } else {
                     let target = super::v3::resolve_component_target_in(
@@ -220,6 +336,9 @@ pub(super) async fn validate_targets(
                         return Err(invalid(variant.id, "请先发布目标单词，再关联其已发布词形"));
                     }
                     link.target_publication_id = target.publication_id();
+                    if !reading_sense_valid(&target.forms, &target.meanings, link) {
+                        return Err(invalid(variant.id, "读法义项不属于当前词性或词形"));
+                    }
                     target_variant(&target.forms, link)
                 };
             let (id, dialect, pronunciations) =
@@ -227,18 +346,44 @@ pub(super) async fn validate_targets(
             link.target_variant_id = id;
             link.target_dialect = dialect;
             let segment = &link.source_segments[0];
-            if let Some(annotation) = first_annotation(
-                &pronunciations,
-                segment.start,
-                segment.end,
-                variant.dialect,
-                dialect,
-            )
-            .map_err(|message| invalid(variant.id, message))?
-            {
+            let annotation = if let Some(reference) = &link.reading_reference {
+                annotation_for_reading(
+                    &pronunciations,
+                    segment.start,
+                    segment.end,
+                    variant.dialect,
+                    dialect,
+                    reference,
+                )
+            } else {
+                first_annotation(
+                    &pronunciations,
+                    segment.start,
+                    segment.end,
+                    variant.dialect,
+                    dialect,
+                )
+            }
+            .map_err(|message| invalid(variant.id, message))?;
+            if let Some(annotation) = annotation {
                 rich.annotations.push(annotation);
             }
         }
+    }
+    let mut texts = content
+        .pos
+        .iter_mut()
+        .flat_map(super::v3::target_english_texts)
+        .collect::<Vec<_>>();
+    for text in &mut texts {
+        validate_reading_text(
+            tx,
+            text,
+            Some((entry_id, forms, &current_meanings)),
+            batch,
+            publishing,
+        )
+        .await?;
     }
     if !crate::lexicon::rich_text::canonicalize_meanings(content) {
         return Err(invalid(
@@ -249,11 +394,126 @@ pub(super) async fn validate_targets(
     Ok(())
 }
 
+pub(crate) async fn validate_reading_text(
+    tx: &mut Transaction<'_, Postgres>,
+    text: &mut crate::lexicon::dto::EnglishTextV3,
+    current: Option<(Uuid, &DraftFormsStepContentV3, &DraftMeaningsStepContentV3)>,
+    batch: Option<&super::v3_publication::PublicationBatchContext>,
+    publishing: bool,
+) -> Result<(), LexiconServiceError> {
+    for variant in super::v3::english_text_variants_mut(text) {
+        if !valid_reading_ranges(variant.value.text(), &variant.reading_links) {
+            return Err(invalid(variant.id, "读法关联必须绑定完整单词且不能重叠"));
+        }
+        for link in variant.reading_links.iter_mut() {
+            let local = current.filter(|(id, _, _)| {
+                *id == link.target_word_id && link.target_publication_id.is_none()
+            });
+            let resolved;
+            let (forms, meanings) = if let Some((_, forms, meanings)) = local {
+                (forms, meanings)
+            } else {
+                resolved = super::v3::resolve_component_target_in(
+                    tx,
+                    link.target_word_id,
+                    link.target_publication_id,
+                    batch,
+                    |_| false,
+                )
+                .await?
+                .ok_or_else(|| invalid(variant.id, "读法目标已失效"))?;
+                if resolved.kind != WordEntryKindV3::Word
+                    || publishing && resolved.publication_id().is_none()
+                {
+                    return Err(invalid(variant.id, "请先发布读法目标单词"));
+                }
+                link.target_publication_id = resolved.publication_id();
+                (&resolved.forms, &resolved.meanings)
+            };
+            let (_, dialect, pronunciations) =
+                target_variant(forms, link).ok_or_else(|| invalid(variant.id, "读法词形已失效"))?;
+            let reference = link
+                .reading_reference
+                .as_ref()
+                .ok_or_else(|| invalid(variant.id, "请选择具体读法"))?;
+            if !reading_sense_valid(forms, meanings, link) {
+                return Err(invalid(variant.id, "读法义项不属于当前词性或词形"));
+            }
+            let range = &link.source_segments[0];
+            annotation_for_reading(
+                &pronunciations,
+                range.start,
+                range.end,
+                Dialect::Common,
+                dialect,
+                reference,
+            )
+            .map_err(|message| invalid(variant.id, message))?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn reading_sense_valid(
+    forms: &DraftFormsStepContentV3,
+    meanings: &DraftMeaningsStepContentV3,
+    link: &GrammarFormLinkV3,
+) -> bool {
+    let Some(sense_id) = link
+        .reading_reference
+        .as_ref()
+        .and_then(|reference| reference.sense_id)
+    else {
+        return true;
+    };
+    forms
+        .pos
+        .iter()
+        .find(|pos| pos.pos_id == link.target_pos_id)
+        .is_some_and(|pos| {
+            super::form_senses::allowed_form_senses(pos, meanings, link.target_form_id)
+                .any(|sense| sense.id == sense_id)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn explicit_second_reading_and_field_are_pinned_and_stale_or_cross_accent_references_fail() {
+        use crate::lexicon::dto::{PhonemeLocaleV3, ReadingReferenceV3, ReadingSelectionV3};
+        let row = |phone: &str| {
+            serde_json::from_value::<WordPronunciationV3>(json!({"id":Uuid::new_v4(),"dict_phonetic":"","actual_pron":"","synthesis":{"alphabet":"ipa","use_spelling":false,"ipa":phone,"ups":"K AE T","ipa_locale":"en-GB","ups_locale":"en-GB"}})).unwrap()
+        };
+        let rows = vec![row("kæt"), row("kɛt")];
+        let selection = ReadingSelectionV3 {
+            pronunciation_id: rows[1].id,
+            alphabet: RichTextPhonemeAlphabet::Ipa,
+            use_spelling: false,
+            locale: PhonemeLocaleV3::EnGb,
+            revision: reading_revision(
+                rows[1].synthesis.as_ref().unwrap(),
+                PhonemeLocaleV3::EnGb,
+                Dialect::Uk,
+                RichTextPhonemeAlphabet::Ipa,
+            ),
+        };
+        let mut reference = ReadingReferenceV3 {
+            uk: Some(selection),
+            us: None,
+            sense_id: None,
+        };
+        let resolved = annotation_for_reading(&rows, 0, 3, Dialect::Uk, Dialect::Uk, &reference)
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_value(resolved).unwrap()["phoneme"], "kɛt");
+        assert!(annotation_for_reading(&rows, 0, 3, Dialect::Us, Dialect::Uk, &reference).is_err());
+        reference.uk.as_mut().unwrap().revision = "stale".into();
+        assert!(annotation_for_reading(&rows, 0, 3, Dialect::Uk, Dialect::Uk, &reference).is_err());
+    }
 
     #[test]
     fn grammar_form_ranges_require_single_whole_nonoverlapping_words() {

@@ -36,7 +36,7 @@ fn service(state: &AppState) -> PreviewService {
     path = "/api/v1/admin/speech/voices",
     tag = "admin-speech",
     security(("bearer_auth" = [])),
-    params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 返回已验证模型及能力；旧客户端仅普通目录")),
+    params(("X-TSZ-Voice-Models"=Option<String>,Header,description="v1 返回已验证模型及能力；旧客户端仅普通目录"), ("X-TSZ-Voice-Catalog"=Option<String>,Header,description="v1 返回全语种浏览目录、当前三态归属及真实能力证据；合成仅开放已验证英语")),
     responses(
         (status = 200, description = "可用发音人目录", body = VoiceListResponse),
         (status = 401, description = "管理员身份无效"),
@@ -63,9 +63,27 @@ pub async fn list_voices(
                     .is_none_or(|metadata| metadata.model != "hd_flash")
         });
     }
+    if headers
+        .get("x-tsz-voice-catalog")
+        .is_none_or(|value| value != "v1")
+    {
+        response
+            .items
+            .retain(|voice| crate::speech::locale::EnglishLocale::parse(&voice.locale).is_some());
+        for voice in &mut response.items {
+            voice.accent = None;
+            voice.accent_revision = None;
+            voice.synthesis_available = None;
+            voice.capability_evidence = None;
+        }
+    }
     Ok((
         StatusCode::OK,
-        [("x-tsz-voice-models", "v1"), ("vary", "x-tsz-voice-models")],
+        [
+            ("x-tsz-voice-models", "v1"),
+            ("x-tsz-voice-catalog", "v1"),
+            ("vary", "x-tsz-voice-models, x-tsz-voice-catalog"),
+        ],
         Json(response),
     ))
 }
@@ -117,6 +135,84 @@ pub async fn create_preview(
         .map_err(map_error)?;
     tracing::info!(cache_status = ?response.cache_status, "speech preview served");
     Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(post,path="/api/v1/admin/speech/ssml",tag="admin-speech",security(("bearer_auth"=[])),request_body=super::dto::RenderSsmlRequest,responses((status=200,body=super::dto::RenderSsmlResponse),(status=400),(status=403)))]
+pub async fn render_ssml(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiJson(input): ApiJson<super::dto::RenderSsmlRequest>,
+) -> Result<Json<super::dto::RenderSsmlResponse>, AppError> {
+    let permission = crate::admin::permissions::load(&state, &auth).await?;
+    permission.require("speech.generate")?;
+    permission.require("words.access")?;
+    let mut conn = state.pool.acquire().await.map_err(AppError::internal)?;
+    let (request, _) = crate::speech::generated::prepare_request(
+        &mut conn,
+        &input.source,
+        &input.setting,
+        None,
+        None,
+    )
+    .await?;
+    Ok(Json(super::dto::RenderSsmlResponse {
+        ssml: crate::speech::build_ssml(&request).map_err(|_| {
+            AppError::bad_request(ErrorCode::InvalidSpeechPreview, "invalid synthesis request")
+        })?,
+    }))
+}
+
+#[utoipa::path(post,path="/api/v1/admin/speech/previews/ssml",tag="admin-speech",security(("bearer_auth"=[])),request_body=super::dto::ManualPreviewRequest,responses((status=200,body=PreviewResponse),(status=400),(status=403),(status=503)))]
+pub async fn manual_preview(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    headers: HeaderMap,
+    ApiJson(input): ApiJson<super::dto::ManualPreviewRequest>,
+) -> Result<Json<PreviewResponse>, AppError> {
+    require_active_admin(&state, &auth).await?;
+    let (state, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    Ok(Json(
+        service(&state)
+            .with_test_run(run)
+            .create_manual_preview(auth.subject, input)
+            .await
+            .map_err(map_error)?,
+    ))
+}
+
+#[utoipa::path(get,path="/api/v1/admin/speech/previews/{hash}/content",tag="admin-speech",security(("bearer_auth"=[])),params(("hash"=String,Path)),responses((status=200,content_type="application/octet-stream",body=Vec<u8>),(status=400),(status=403),(status=404),(status=503)))]
+pub async fn preview_content(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    headers: HeaderMap,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+) -> Result<axum::response::Response, AppError> {
+    require_active_admin(&state, &auth).await?;
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AppError::bad_request(
+            ErrorCode::InvalidPathParameter,
+            "invalid preview hash",
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    for (index, value) in bytes.iter_mut().enumerate() {
+        *value =
+            u8::from_str_radix(&hash[index * 2..index * 2 + 2], 16).map_err(AppError::internal)?;
+    }
+    let (state, run) = crate::test_resources::scoped_state(&state, &headers, auth.subject, true)?;
+    let (mime, content) = service(&state)
+        .with_test_run(run)
+        .read_content(auth.subject, &bytes)
+        .await
+        .map_err(map_error)?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CACHE_CONTROL, "no-store".into()),
+        ],
+        content,
+    )
+        .into_response())
 }
 
 fn map_error(error: PreviewServiceError) -> AppError {

@@ -45,6 +45,8 @@ pub fn canonicalize_spelling_speech(value: &mut crate::lexicon::dto::RichTextV2V
         !matches!(
             annotation,
             crate::lexicon::dto::RichTextAnnotationV3::Pause { .. }
+                | crate::lexicon::dto::RichTextAnnotationV3::SayAs { .. }
+                | crate::lexicon::dto::RichTextAnnotationV3::Sub { .. }
         )
     }) {
         return false;
@@ -228,7 +230,12 @@ fn canonicalize_v2(value: &mut RichTextV2) -> Result<(), Vec<RichTextIssue>> {
 
     let mut merged: Vec<RichTextAnnotation> = Vec::new();
     for annotation in ranges {
-        if matches!(annotation, RichTextAnnotation::Phoneme { .. }) {
+        if matches!(
+            annotation,
+            RichTextAnnotation::Phoneme { .. }
+                | RichTextAnnotation::SayAs { .. }
+                | RichTextAnnotation::Sub { .. }
+        ) {
             merged.push(annotation);
             continue;
         }
@@ -338,6 +345,40 @@ pub(super) fn validate_v2(value: &RichTextV2) -> Vec<RichTextIssue> {
                     );
                 }
             }
+            RichTextAnnotation::SayAs {
+                start,
+                end,
+                interpret_as,
+            } => {
+                validate_range(&mut issues, &value.text, *start, *end, &path);
+                if ![
+                    "characters",
+                    "cardinal",
+                    "ordinal",
+                    "digits",
+                    "date",
+                    "time",
+                    "telephone",
+                ]
+                .contains(&interpret_as.as_str())
+                {
+                    push_issue(&mut issues, "invalid_reading", path, "不支持的内容读法类型");
+                }
+            }
+            RichTextAnnotation::Sub { start, end, alias } => {
+                validate_range(&mut issues, &value.text, *start, *end, &path);
+                if alias.trim().is_empty()
+                    || alias.chars().count() > 200
+                    || alias.chars().any(char::is_control)
+                {
+                    push_issue(
+                        &mut issues,
+                        "invalid_reading",
+                        path,
+                        "替换读法文字不能为空、不能超过200个字符或包含控制字符",
+                    );
+                }
+            }
             RichTextAnnotation::Liaison {
                 start,
                 end,
@@ -370,7 +411,14 @@ pub(super) fn validate_v2(value: &RichTextV2) -> Vec<RichTextIssue> {
     let mut phonemes = value
         .annotations
         .iter()
-        .filter(|annotation| matches!(annotation, RichTextAnnotation::Phoneme { .. }))
+        .filter(|annotation| {
+            matches!(
+                annotation,
+                RichTextAnnotation::Phoneme { .. }
+                    | RichTextAnnotation::SayAs { .. }
+                    | RichTextAnnotation::Sub { .. }
+            )
+        })
         .collect::<Vec<_>>();
     phonemes.sort_by(|left, right| compare_range_positions(left, right));
     if phonemes.windows(2).any(|window| {
@@ -509,6 +557,8 @@ fn annotation_type_rank(annotation: &RichTextAnnotation) -> u8 {
         RichTextAnnotation::Italic { .. } => 5,
         RichTextAnnotation::Bold { .. } => 6,
         RichTextAnnotation::Underline { .. } => 7,
+        RichTextAnnotation::SayAs { .. } => 8,
+        RichTextAnnotation::Sub { .. } => 9,
     }
 }
 
@@ -522,6 +572,8 @@ pub(super) fn range_bounds(annotation: &RichTextAnnotation) -> Option<(usize, us
         | RichTextAnnotation::Italic { start, end }
         | RichTextAnnotation::Bold { start, end }
         | RichTextAnnotation::Underline { start, end }
+        | RichTextAnnotation::SayAs { start, end, .. }
+        | RichTextAnnotation::Sub { start, end, .. }
         | RichTextAnnotation::Phoneme { start, end, .. }
         | RichTextAnnotation::Liaison { start, end, .. }
         | RichTextAnnotation::Highlight { start, end, .. } => Some((*start, *end)),
@@ -535,6 +587,8 @@ pub(super) fn set_range_end(annotation: &mut RichTextAnnotation, next_end: usize
         | RichTextAnnotation::Italic { end, .. }
         | RichTextAnnotation::Bold { end, .. }
         | RichTextAnnotation::Underline { end, .. }
+        | RichTextAnnotation::SayAs { end, .. }
+        | RichTextAnnotation::Sub { end, .. }
         | RichTextAnnotation::Phoneme { end, .. }
         | RichTextAnnotation::Liaison { end, .. }
         | RichTextAnnotation::Highlight { end, .. } => *end = next_end,
