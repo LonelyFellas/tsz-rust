@@ -104,7 +104,10 @@ async fn inherited_word_updates_persist_shared_spelling_ipa_ups_and_asset_refere
         .save_group(actor, 0, input, true)
         .await
         .unwrap();
-    sqlx::raw_sql("UPDATE speech.dubbing_update_settings SET enabled=true; UPDATE speech.dubbing_audio_updates SET due_at=now()-interval '1 second'").execute(&pool).await.unwrap();
+    sqlx::raw_sql("UPDATE speech.dubbing_audio_updates SET due_at=now()-interval '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
     let provider = Arc::new(Provider(AtomicUsize::new(0)));
     let storage = MemoryAdapter::object_store(
         StorageSpace::parse("audio").unwrap(),
