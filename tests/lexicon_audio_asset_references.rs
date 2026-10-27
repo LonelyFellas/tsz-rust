@@ -2020,8 +2020,12 @@ async fn pronunciation_editor_rejects_invalid_annotations_and_profiles(pool: PgP
     }
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = false)]
 async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool) {
+    sqlx::migrate!("./migrations")
+        .run_to(20261027100000, &pool)
+        .await
+        .unwrap();
     let redis = platform::connect_redis(&test_redis_url()).await.unwrap();
     let mut state = AppState::for_test_with_redis(pool.clone(), redis)
         .with_smart_lexicon_v3_flags_for_test(SmartLexiconV3Flags::all_enabled());
@@ -2112,8 +2116,12 @@ async fn uncertain_object_delete_never_reopens_the_asset_for_saving(pool: PgPool
     assert!(!asset_exists(&pool, &asset["id"]).await);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = false)]
 async fn audio_reclamation_schema_can_be_reverted_and_reapplied(pool: PgPool) {
+    sqlx::migrate!("./migrations")
+        .run_to(20261027100000, &pool)
+        .await
+        .unwrap();
     let current_version: i64 =
         sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
             .fetch_one(&pool)

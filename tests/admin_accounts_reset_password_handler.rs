@@ -400,8 +400,12 @@ async fn refresh_waits_for_password_change_and_cannot_escape_revocation(pool: Pg
     assert_eq!(active_session_count(&pool, id).await, 0);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = false)]
 async fn admin_security_version_cannot_be_removed_after_password_change(pool: PgPool) {
+    sqlx::migrate!("./migrations")
+        .run_to(20261027100000, &pool)
+        .await
+        .unwrap();
     let id = seed_admin(&pool, AdminRole::Admin, "old-hash", false).await;
     AdminRepository::new(pool.clone())
         .set_password(&id, "new-hash", false)

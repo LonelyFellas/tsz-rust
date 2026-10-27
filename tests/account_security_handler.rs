@@ -713,8 +713,12 @@ async fn disabled_and_unknown_reset_targets_have_identical_public_responses(pool
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = false)]
 async fn security_migration_cannot_be_rolled_back_after_credentials_change(pool: PgPool) {
+    sqlx::migrate!("./migrations")
+        .run_to(20261027100000, &pool)
+        .await
+        .unwrap();
     let u = user(&pool, Some("13800138000"), None).await;
     sqlx::query("UPDATE users SET security_version=1 WHERE id=$1")
         .bind(u.id)

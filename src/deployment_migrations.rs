@@ -154,9 +154,23 @@ mod tests {
     }
 
     const PREVIOUS_RELEASE_VERSION: i64 = 20260906180000;
-    const CURRENT_RELEASE_VERSION: i64 = 20261027110000;
+    const HISTORICAL_RELEASE_VERSION: i64 = 20261027100000;
 
-    #[sqlx::test]
+    // Exercise older rollback guards from the last release before the manual-only boundary.
+    static HISTORICAL_MIGRATOR: std::sync::LazyLock<sqlx::migrate::Migrator> =
+        std::sync::LazyLock::new(|| {
+            let mut migrator = sqlx::migrate!("./migrations");
+            migrator.migrations = migrator
+                .migrations
+                .into_owned()
+                .into_iter()
+                .filter(|migration| migration.version <= HISTORICAL_RELEASE_VERSION)
+                .collect::<Vec<_>>()
+                .into();
+            migrator
+        });
+
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn coverage_release_undo_restores_the_deployed_custom_item_schema(pool: PgPool) {
         let current: i64 =
             sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
@@ -168,7 +182,7 @@ mod tests {
         );
         assert_eq!(report.current_version, 20261018120000);
         assert!(sqlx::query_scalar::<_,bool>("SELECT to_regclass('learning_cycles') IS NULL AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='wordlist_items' AND column_name='custom_word')").fetch_one(&pool).await.unwrap());
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        HISTORICAL_MIGRATOR.run(&pool).await.unwrap();
         assert!(
             sqlx::query_scalar::<_, bool>("SELECT to_regclass('learning_cycles') IS NOT NULL")
                 .fetch_one(&pool)
@@ -177,7 +191,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn coverage_release_undo_preserves_coverage_facts_and_ledger(pool: PgPool) {
         let user = Uuid::now_v7();
         sqlx::query("INSERT INTO users(id,email,password_hash,display_name) VALUES($1,$2,'hash','coverage rollback')").bind(user).bind(format!("{user}@example.test")).execute(&pool).await.unwrap();
@@ -206,7 +220,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn deployment_undo_preserves_author_annotations_and_ledger(pool: PgPool) {
         let admin = Uuid::now_v7();
         let list = Uuid::now_v7();
@@ -220,7 +234,7 @@ mod tests {
             .bind(request).bind(list).bind(entry).bind(Uuid::now_v7())
             .bind(serde_json::json!({(entry.to_string()): "must preserve public annotation"}))
             .execute(&pool).await.unwrap();
-        let error = undo(&pool, 20261013100000, CURRENT_RELEASE_VERSION)
+        let error = undo(&pool, 20261013100000, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("wordlist author annotations must be preserved"));
@@ -229,7 +243,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(current, CURRENT_RELEASE_VERSION);
+        assert_eq!(current, HISTORICAL_RELEASE_VERSION);
         let notes: serde_json::Value =
             sqlx::query_scalar("SELECT author_notes FROM wordlist_review_requests WHERE id=$1")
                 .bind(request)
@@ -305,13 +319,13 @@ mod tests {
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='sentences.associate'").bind(owner).fetch_one(&pool).await.unwrap(),1);
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn coin_release_undo_matches_deployed_phone_schema_and_preserves_new_funds(pool: PgPool) {
         use crate::coins::{model::*, service};
         let user = Uuid::now_v7();
         sqlx::query("INSERT INTO users(id,email,password_hash,display_name) VALUES($1,$2,'hash','release rollback')")
             .bind(user).bind(format!("{user}@example.test")).execute(&pool).await.unwrap();
-        let report = undo(&pool, 20261002000000, CURRENT_RELEASE_VERSION)
+        let report = undo(&pool, 20261002000000, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap();
         assert_eq!(report.current_version, 20261002000000);
@@ -331,7 +345,7 @@ mod tests {
             .await
             .unwrap()
         );
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        HISTORICAL_MIGRATOR.run(&pool).await.unwrap();
         let mut tx = pool.begin().await.unwrap();
         service::credit_in(
             &mut tx,
@@ -354,7 +368,7 @@ mod tests {
         .unwrap();
         tx.commit().await.unwrap();
         assert!(
-            undo(&pool, 20261002000000, CURRENT_RELEASE_VERSION)
+            undo(&pool, 20261002000000, HISTORICAL_RELEASE_VERSION)
                 .await
                 .is_err()
         );
@@ -363,7 +377,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap(),
-            CURRENT_RELEASE_VERSION
+            HISTORICAL_RELEASE_VERSION
         );
         assert!(sqlx::query_scalar::<_,bool>("SELECT to_regclass('wordlists') IS NOT NULL AND to_regclass('wordlist_tips') IS NOT NULL").fetch_one(&pool).await.unwrap());
         assert_eq!(
@@ -378,12 +392,12 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn permission_history_prevents_destructive_rollback_after_revocation(pool: PgPool) {
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO admins (id, phone, password_hash, display_name, permission_version) VALUES ($1, $2, 'hash', 'permission rollback', 2)")
             .bind(id).bind(id.to_string()).execute(&pool).await.unwrap();
-        let error = undo(&pool, 20261001000000, CURRENT_RELEASE_VERSION)
+        let error = undo(&pool, 20261001000000, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("cannot remove permission schema"));
@@ -392,7 +406,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(current, CURRENT_RELEASE_VERSION);
+        assert_eq!(current, HISTORICAL_RELEASE_VERSION);
         let version: i64 =
             sqlx::query_scalar("SELECT permission_version FROM admins WHERE id = $1")
                 .bind(id)
@@ -402,7 +416,7 @@ mod tests {
         assert_eq!(version, 2);
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn deployment_undo_preserves_payloads_supported_by_target_and_guards_new_regularity(
         pool: PgPool,
     ) {
@@ -418,7 +432,7 @@ mod tests {
         sqlx::query("INSERT INTO lexicon.entry_editor_projection (entry_id, forms, meanings, rebuilt_revision) VALUES ($1, $2, $3, 1)")
             .bind(entry_id).bind(&forms).bind(&meanings).execute(&pool).await.unwrap();
         let target = 20260917120000;
-        let error = undo(&pool, target, CURRENT_RELEASE_VERSION)
+        let error = undo(&pool, target, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap_err();
         assert!(
@@ -430,7 +444,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(current, CURRENT_RELEASE_VERSION);
+        assert_eq!(current, HISTORICAL_RELEASE_VERSION);
         let mut legacy_forms = forms.clone();
         legacy_forms["pos"][0]["forms"][0]["regional_variants"]["common"]
             .as_object_mut()
@@ -442,7 +456,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let report = undo(&pool, target, CURRENT_RELEASE_VERSION).await.unwrap();
+        let report = undo(&pool, target, HISTORICAL_RELEASE_VERSION)
+            .await
+            .unwrap();
         assert_eq!(report.current_version, target);
         let stored: (serde_json::Value, serde_json::Value) = sqlx::query_as(
             "SELECT forms, meanings FROM lexicon.entry_editor_projection WHERE entry_id=$1",
@@ -463,13 +479,13 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn deployment_undo_reaches_the_previous_ledger_version(pool: PgPool) {
-        let report = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+        let report = undo(&pool, PREVIOUS_RELEASE_VERSION, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap();
 
-        assert_eq!(report.previous_version, CURRENT_RELEASE_VERSION);
+        assert_eq!(report.previous_version, HISTORICAL_RELEASE_VERSION);
         assert_eq!(report.target_version, PREVIOUS_RELEASE_VERSION);
         assert_eq!(report.current_version, PREVIOUS_RELEASE_VERSION);
         let remaining: i64 = sqlx::query_scalar(
@@ -633,7 +649,7 @@ mod tests {
         )));
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn translation_slot_rollback_rejects_nodes_created_after_migration(pool: PgPool) {
         let admin_id = Uuid::now_v7();
         let entry_id = Uuid::now_v7();
@@ -672,7 +688,7 @@ mod tests {
         .await
         .unwrap();
 
-        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap_err();
         assert!(
@@ -686,7 +702,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(latest, CURRENT_RELEASE_VERSION);
+        assert_eq!(latest, HISTORICAL_RELEASE_VERSION);
         let audio_reference_table: Option<String> =
             sqlx::query_scalar("SELECT to_regclass('lexicon.v3_audio_asset_references')::text")
                 .fetch_one(&pool)
@@ -698,7 +714,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn deployment_undo_reports_duplicate_sub_pos_name_en(pool: PgPool) {
         // 放开 name_en 唯一后管理员就该能填重复的正式英文；回退要给出可读原因而不是裸 23505。
         let noun: Uuid =
@@ -729,7 +745,7 @@ mod tests {
         .await
         .unwrap();
 
-        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap_err();
         let rendered = format!("{error:#}");
@@ -743,10 +759,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(latest, CURRENT_RELEASE_VERSION, "守卫失败时账本不应回退");
+        assert_eq!(latest, HISTORICAL_RELEASE_VERSION, "守卫失败时账本不应回退");
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn deployment_undo_reports_duplicate_form_type_abbreviation(pool: PgPool) {
         // 放开词形缩写唯一后同一词性下可以有 V-ing / v-ing；回退要指名重复的词形而不是裸 23505。
         let verb: Uuid =
@@ -793,7 +809,7 @@ mod tests {
             .unwrap();
         }
 
-        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap_err();
         let rendered = format!("{error:#}");
@@ -807,10 +823,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(latest, CURRENT_RELEASE_VERSION, "守卫失败时账本不应回退");
+        assert_eq!(latest, HISTORICAL_RELEASE_VERSION, "守卫失败时账本不应回退");
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn deployment_undo_refuses_while_full_name_en_exceeds_64_characters(pool: PgPool) {
         // 英文全称上限放宽到 200 后再回退会让超长存量撞 CHECK：要报出表名与 code，账本不动。
         sqlx::query(
@@ -827,7 +843,7 @@ mod tests {
         .await
         .unwrap();
 
-        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap_err();
         let rendered = format!("{error:#}");
@@ -841,10 +857,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(latest, CURRENT_RELEASE_VERSION, "守卫失败时账本不应回退");
+        assert_eq!(latest, HISTORICAL_RELEASE_VERSION, "守卫失败时账本不应回退");
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn deployment_undo_refuses_while_phrase_parts_of_speech_exist(pool: PgPool) {
         // 删 kind 列会把短语词性静默变成单词词性：有短语词性时回退要报出 code，账本不动。
         sqlx::query(
@@ -860,7 +876,7 @@ mod tests {
         .await
         .unwrap();
 
-        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap_err();
         let rendered = format!("{error:#}");
@@ -874,10 +890,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(latest, CURRENT_RELEASE_VERSION, "守卫失败时账本不应回退");
+        assert_eq!(latest, HISTORICAL_RELEASE_VERSION, "守卫失败时账本不应回退");
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn deployment_undo_is_atomic_when_an_older_down_guard_fails(pool: PgPool) {
         let admin_id = Uuid::now_v7();
         let asset_id = Uuid::now_v7();
@@ -905,7 +921,7 @@ mod tests {
         .await
         .unwrap();
 
-        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+        let error = undo(&pool, PREVIOUS_RELEASE_VERSION, HISTORICAL_RELEASE_VERSION)
             .await
             .unwrap_err();
         assert!(
@@ -919,7 +935,7 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(latest, CURRENT_RELEASE_VERSION);
+        assert_eq!(latest, HISTORICAL_RELEASE_VERSION);
         let asset_count: i64 =
             sqlx::query_scalar("SELECT count(*) FROM lexicon.audio_assets WHERE id = $1")
                 .bind(asset_id)
@@ -939,7 +955,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test]
+    #[sqlx::test(migrator = "HISTORICAL_MIGRATOR")]
     async fn deployment_undo_rejects_new_keys_in_persisted_v3_payloads(pool: PgPool) {
         let admin_id = Uuid::now_v7();
         let entry_id = Uuid::now_v7();
@@ -1012,7 +1028,7 @@ mod tests {
             .await
             .unwrap();
 
-            let error = undo(&pool, PREVIOUS_RELEASE_VERSION, CURRENT_RELEASE_VERSION)
+            let error = undo(&pool, PREVIOUS_RELEASE_VERSION, HISTORICAL_RELEASE_VERSION)
                 .await
                 .unwrap_err();
             assert!(
@@ -1056,6 +1072,6 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(latest, CURRENT_RELEASE_VERSION);
+        assert_eq!(latest, HISTORICAL_RELEASE_VERSION);
     }
 }

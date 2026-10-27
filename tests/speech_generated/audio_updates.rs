@@ -361,48 +361,58 @@ async fn delayed_updates_recheck_permissions_and_exclude_independent_targets(poo
     assert_eq!(job.error_codes, vec!["forbidden"]);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = false)]
 async fn delayed_updates_migration_is_reversible_until_queue_data_is_written(pool: PgPool) {
+    sqlx::migrate!("./migrations")
+        .run_to(20261027100000, &pool)
+        .await
+        .unwrap();
     let down = include_str!("../../migrations/20261027090000_dubbing_audio_updates.down.sql");
     let up = include_str!("../../migrations/20261027090000_dubbing_audio_updates.up.sql");
-    let automatic_down =
-        include_str!("../../migrations/20261027110000_dubbing_automatic_updates.down.sql");
-    let automatic_up =
-        include_str!("../../migrations/20261027110000_dubbing_automatic_updates.up.sql");
-    sqlx::raw_sql(automatic_down).execute(&pool).await.unwrap();
     sqlx::raw_sql(down).execute(&pool).await.unwrap();
     sqlx::raw_sql(up).execute(&pool).await.unwrap();
-    sqlx::raw_sql(automatic_up).execute(&pool).await.unwrap();
     let (actor, id, version, _, _) = setup(&pool).await;
     save(&pool, actor, group(id, version, 0), 0).await;
-    sqlx::raw_sql(automatic_down).execute(&pool).await.unwrap();
-    assert!(sqlx::raw_sql(down).execute(&pool).await.is_err());
-    sqlx::raw_sql(automatic_up).execute(&pool).await.unwrap();
+    let error = sqlx::raw_sql(down).execute(&pool).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("dubbing audio update data exists")
+    );
     assert_eq!(
         audio_updates::list(&pool, id).await.unwrap().updates.len(),
         1
     );
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = false)]
 async fn automatic_updates_migration_preserves_settings_and_pending_jobs(pool: PgPool) {
-    let down = include_str!("../../migrations/20261027110000_dubbing_automatic_updates.down.sql");
-    let up = include_str!("../../migrations/20261027110000_dubbing_automatic_updates.up.sql");
-    sqlx::raw_sql(down).execute(&pool).await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    migrator.run_to(20261027100000, &pool).await.unwrap();
     sqlx::query(
         "UPDATE speech.dubbing_update_settings SET enabled=false,wait_seconds=90,revision=4",
     )
     .execute(&pool)
     .await
     .unwrap();
-    let (actor, id, version, _, storage) = setup(&pool).await;
+    let (actor, id, version, provider, storage) = setup(&pool).await;
+    let sentence = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
     save(&pool, actor, group(id, version, 0), 0).await;
     let job = audio_updates::list(&pool, id)
         .await
         .unwrap()
         .updates
         .remove(0);
-    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    let target = Uuid::now_v7();
+    let inserted = sqlx::query("INSERT INTO speech.dubbing_audio_update_targets(id,update_id,owner_kind,owner_id,target_id,target_path) SELECT $1,$2,owner_kind,owner_id,target_id,target_path FROM speech.dubbing_dependencies WHERE owner_kind='sentence' AND owner_id=$3")
+        .bind(target).bind(job.id).bind(sentence).execute(&pool).await.unwrap();
+    assert_eq!(inserted.rows_affected(), 1);
+    migrator.run(&pool).await.unwrap();
     let settings: (i32, i64) =
         sqlx::query_as("SELECT wait_seconds,revision FROM speech.dubbing_update_settings")
             .fetch_one(&pool)
@@ -417,21 +427,66 @@ async fn automatic_updates_migration_preserves_settings_and_pending_jobs(pool: P
     assert_eq!(preserved.id, job.id);
     assert_eq!(preserved.due_at, job.due_at);
     assert_eq!(preserved.state, "pending");
-    due(&pool).await;
-    audio_updates::sweep(&pool, None, Some(storage))
-        .await
-        .unwrap();
-    assert_eq!(
-        audio_updates::list(&pool, id).await.unwrap().updates[0].state,
-        "completed"
-    );
-    sqlx::raw_sql(down).execute(&pool).await.unwrap();
-    let restored: bool = sqlx::query_scalar("SELECT enabled FROM speech.dubbing_update_settings")
+
+    let snapshot_sql = r#"SELECT jsonb_build_object(
+        'settings', (SELECT jsonb_agg(to_jsonb(s)) FROM speech.dubbing_update_settings s),
+        'jobs', (SELECT jsonb_agg(to_jsonb(j) ORDER BY id) FROM speech.dubbing_audio_updates j),
+        'targets', (SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM speech.dubbing_audio_update_targets t),
+        'ledger', (SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM _sqlx_migrations m),
+        'columns', (SELECT jsonb_agg(to_jsonb(c) ORDER BY ordinal_position) FROM information_schema.columns c
+            WHERE table_schema='speech' AND table_name='dubbing_update_settings'),
+        'constraints', (SELECT jsonb_agg(jsonb_build_array(conname, pg_get_constraintdef(oid)) ORDER BY conname)
+            FROM pg_constraint WHERE conrelid='speech.dubbing_update_settings'::regclass))"#;
+    let before: Value = sqlx::query_scalar(snapshot_sql)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(!restored, "rollback restores the previous paused default");
-    sqlx::raw_sql(up).execute(&pool).await.unwrap();
+    assert_eq!(
+        before["targets"].as_array().map(Vec::len),
+        Some(1),
+        "rollback refusal must cover a persisted target"
+    );
+    let error = tsz_rust::deployment_migrations::undo(&pool, 20261027100000, 20261027110000)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("automatic dubbing updates require manual recovery"));
+    let after: Value = sqlx::query_scalar(snapshot_sql)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "refusing rollback must preserve schema, settings, tasks and ledger"
+    );
+
+    due(&pool).await;
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage))
+        .await
+        .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let completed = audio_updates::list(&pool, id)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(completed.state, "completed");
+    assert_eq!(completed.total, 1);
+    assert_eq!(completed.completed, 1);
+    let target_state: String =
+        sqlx::query_scalar("SELECT state FROM speech.dubbing_audio_update_targets WHERE id=$1")
+            .bind(target)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(target_state, "completed");
+    let stored = current(&pool, sentence).await;
+    let asset = Uuid::parse_str(stored["voices"][0]["audio_asset_id"].as_str().unwrap()).unwrap();
+    let references: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.shared_sentence_audio_asset_references WHERE sentence_id=$1 AND asset_id=$2 AND scope='draft'")
+        .bind(sentence).bind(asset).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        references, 1,
+        "generated audio must be persisted on the inherited draft"
+    );
 }
 
 #[sqlx::test]
