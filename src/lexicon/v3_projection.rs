@@ -9,7 +9,10 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::lexicon::{
-    dto::{DraftFormsStepContentV3, EntryPresentationV3, WordFormTypeV3, WordRegionalVariantsV3},
+    dto::{
+        Dialect, DialectModeV3, DraftFormsStepContentV3, EntryNameVariantV3, EntryPresentationV3,
+        WordFormTypeV3, WordHeadwordsV2, WordRegionalVariantsV3,
+    },
     normalization::{
         HEADWORD_NORMALIZATION_VERSION, HeadwordNormalizationError, normalize_headword,
     },
@@ -131,6 +134,108 @@ pub(crate) fn presentation_from_native_forms(
         matched_surfaces,
         strategy_version: strategy_version.to_owned(),
     })
+}
+
+pub(crate) fn name_variants_from_native_forms(
+    forms: &DraftFormsStepContentV3,
+    initial_headwords: Option<&WordHeadwordsV2>,
+) -> Result<Vec<EntryNameVariantV3>, V3ProjectionError> {
+    let mut names = Vec::<EntryNameVariantV3>::new();
+    let mut indices = HashMap::<String, usize>::new();
+    let mut push =
+        |variant_id, spelling: &str, dialect: Option<Dialect>| -> Result<(), V3ProjectionError> {
+            let Some(normalized) = projectable_surface(variant_id, spelling)? else {
+                return Ok(());
+            };
+            if let Some(&index) = indices.get(&normalized.key) {
+                let dialects = &mut names[index].dialects;
+                if let Some(dialect) = dialect
+                    && !dialects.contains(&dialect)
+                {
+                    dialects.push(dialect);
+                }
+            } else {
+                indices.insert(normalized.key, names.len());
+                names.push(EntryNameVariantV3 {
+                    text: normalized.display,
+                    dialects: dialect.into_iter().collect(),
+                });
+            }
+            Ok(())
+        };
+    let mut has_current_name = false;
+    for pos in &forms.pos {
+        for form in &pos.forms {
+            if form.form_type != "base" {
+                continue;
+            }
+            match &form.regional_variants {
+                WordRegionalVariantsV3::Common { common } => {
+                    has_current_name |= !common.spelling.trim().is_empty();
+                    push(common.id, &common.spelling, Some(Dialect::Common))?;
+                }
+                WordRegionalVariantsV3::UkUs { uk, us } => {
+                    let groups = pos
+                        .form_groups
+                        .iter()
+                        .filter(|group| {
+                            group.members.iter().any(|member| member.form_id == form.id)
+                        })
+                        .collect::<Vec<_>>();
+                    let spelling_mode = forms
+                        .content_rules(form.id)
+                        .map(|rules| rules.spelling_mode)
+                        .or_else(|| {
+                            groups
+                                .first()
+                                .map(|group| group.dialect_rules.spelling_mode)
+                        });
+                    for (variant_id, spelling, dialect) in [
+                        (uk.id, uk.spelling.as_str(), Dialect::Uk),
+                        (us.id, us.spelling.as_str(), Dialect::Us),
+                    ] {
+                        has_current_name |= !spelling.trim().is_empty();
+                        push(
+                            variant_id,
+                            spelling,
+                            spelling_mode.map(|mode| match mode {
+                                DialectModeV3::Distinguish => dialect,
+                                DialectModeV3::Unified => Dialect::Common,
+                            }),
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    if !has_current_name && let Some(headwords) = initial_headwords {
+        match headwords {
+            WordHeadwordsV2::Unified { common } => {
+                push(Uuid::nil(), common, Some(Dialect::Common))?
+            }
+            WordHeadwordsV2::Distinguish { uk, us, .. } => {
+                push(Uuid::nil(), uk, Some(Dialect::Uk))?;
+                push(Uuid::nil(), us, Some(Dialect::Us))?;
+            }
+        }
+    }
+    for name in &mut names {
+        name.dialects.sort_by_key(|dialect| match dialect {
+            Dialect::Common => 0,
+            Dialect::Uk => 1,
+            Dialect::Us => 2,
+        });
+    }
+    names.sort_by_key(|name| {
+        if name.dialects.contains(&Dialect::Common) {
+            0
+        } else if name.dialects.contains(&Dialect::Uk) {
+            1
+        } else {
+            2
+        }
+    });
+    Ok(names)
 }
 
 pub(crate) fn form_variant_sources(
@@ -379,6 +484,169 @@ mod tests {
                 },
             },
         }
+    }
+
+    fn name_forms(
+        forms: Vec<WordConcreteFormV3>,
+        rules: DialectRulesV3,
+    ) -> DraftFormsStepContentV3 {
+        DraftFormsStepContentV3 {
+            shared: None,
+            pos: vec![WordPosFormsV3 {
+                pos_id: id(900),
+                pos: "noun".to_owned(),
+                form_groups: vec![WordFormGroupV3 {
+                    id: id(901),
+                    is_regular: false,
+                    scope: FormGroupScopeV3::General,
+                    dialect_rules: rules,
+                    members: forms
+                        .iter()
+                        .enumerate()
+                        .map(|(index, form)| WordFormGroupMemberV3 {
+                            id: id(1000 + index as u128),
+                            form_id: form.id,
+                        })
+                        .collect(),
+                }],
+                forms,
+            }],
+        }
+    }
+
+    #[test]
+    fn list_names_merge_dialects_and_ignore_inflections() {
+        let mut inflection = common_form(id(10), id(11), "colours");
+        inflection.form_type = "plural".to_owned();
+        let mut forms = name_forms(
+            vec![
+                uk_us_form(id(1), id(2), "colour", id(3), "color"),
+                uk_us_form(id(4), id(5), "theatre", id(6), "theater"),
+                uk_us_form(id(7), id(8), "same", id(9), "same"),
+                inflection,
+            ],
+            DialectRulesV3::DISTINGUISH,
+        );
+        let mut duplicate = forms.pos[0].clone();
+        duplicate.pos_id = id(999);
+        forms.pos.push(duplicate);
+        let names = name_variants_from_native_forms(&forms, None).unwrap();
+        assert_eq!(
+            names,
+            vec![
+                EntryNameVariantV3 {
+                    text: "colour".into(),
+                    dialects: vec![Dialect::Uk]
+                },
+                EntryNameVariantV3 {
+                    text: "theatre".into(),
+                    dialects: vec![Dialect::Uk]
+                },
+                EntryNameVariantV3 {
+                    text: "same".into(),
+                    dialects: vec![Dialect::Uk, Dialect::Us]
+                },
+                EntryNameVariantV3 {
+                    text: "color".into(),
+                    dialects: vec![Dialect::Us]
+                },
+                EntryNameVariantV3 {
+                    text: "theater".into(),
+                    dialects: vec![Dialect::Us]
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn list_names_use_spelling_rules_instead_of_pronunciation_sides() {
+        let forms = name_forms(
+            vec![uk_us_form(id(1), id(2), "cat", id(3), "cat")],
+            DialectRulesV3::UNIFIED_DISTINGUISH,
+        );
+        assert_eq!(
+            name_variants_from_native_forms(&forms, None).unwrap(),
+            vec![EntryNameVariantV3 {
+                text: "cat".into(),
+                dialects: vec![Dialect::Common]
+            },]
+        );
+        let mut mixed = forms.clone();
+        mixed.pos.extend(
+            name_forms(
+                vec![uk_us_form(id(4), id(5), "cat", id(6), "cat")],
+                DialectRulesV3::DISTINGUISH,
+            )
+            .pos,
+        );
+        assert_eq!(
+            name_variants_from_native_forms(&mixed, None).unwrap()[0].dialects,
+            [Dialect::Common, Dialect::Uk, Dialect::Us]
+        );
+    }
+
+    #[test]
+    fn list_names_use_shared_content_rules_and_keep_unbound_draft_names_unmarked() {
+        let mut forms = name_forms(
+            vec![uk_us_form(id(1), id(2), "cat", id(3), "cat")],
+            DialectRulesV3::UNIFIED_DISTINGUISH,
+        );
+        forms.enable_shared().unwrap();
+        forms.pos[0].form_groups[0].dialect_rules = DialectRulesV3::DISTINGUISH;
+        assert_eq!(
+            name_variants_from_native_forms(&forms, None).unwrap()[0].dialects,
+            [Dialect::Common]
+        );
+        let mut unbound = name_forms(
+            vec![uk_us_form(id(1), id(2), "cat", id(3), "cat")],
+            DialectRulesV3::DISTINGUISH,
+        );
+        unbound.pos[0].form_groups.clear();
+        assert_eq!(
+            name_variants_from_native_forms(&unbound, None).unwrap(),
+            vec![EntryNameVariantV3 {
+                text: "cat".into(),
+                dialects: vec![]
+            },]
+        );
+    }
+
+    #[test]
+    fn list_names_only_fall_back_to_initial_names_when_all_base_spellings_are_blank() {
+        let initial = WordHeadwordsV2::Distinguish {
+            uk: "cosy".into(),
+            us: "cozy".into(),
+            source_dialect: crate::lexicon::dto::SourceDialect::Us,
+        };
+        let mut forms = name_forms(
+            vec![uk_us_form(id(1), id(2), "", id(3), "")],
+            DialectRulesV3::DISTINGUISH,
+        );
+        assert_eq!(
+            name_variants_from_native_forms(&forms, Some(&initial))
+                .unwrap()
+                .iter()
+                .map(|name| name.text.as_str())
+                .collect::<Vec<_>>(),
+            ["cosy", "cozy"]
+        );
+        let WordRegionalVariantsV3::UkUs { us, .. } = &mut forms.pos[0].forms[0].regional_variants
+        else {
+            unreachable!()
+        };
+        us.spelling = "current".into();
+        assert_eq!(
+            name_variants_from_native_forms(&forms, Some(&initial)).unwrap(),
+            vec![EntryNameVariantV3 {
+                text: "current".into(),
+                dialects: vec![Dialect::Us]
+            },]
+        );
+        assert!(
+            name_variants_from_native_forms(&DraftFormsStepContentV3::default(), None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
