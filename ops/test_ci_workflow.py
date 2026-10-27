@@ -311,6 +311,9 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("python3 -m unittest ops/test_ci_test_shards.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_identity_profile.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_workflow.py", quality)
+        self.assertIn(
+            "python3 -I ops/speech-voice-catalog/test_update_metadata.py", quality
+        )
         self.assertIn("python3 -m unittest ops/test_ci_fingerprint.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_metrics.py", quality)
         self.assertIn("python3 -m unittest ops/test_ci_cargo_fetch.py", quality)
