@@ -17391,8 +17391,12 @@ async fn batch3_permission_revocation_and_ownership(pool: PgPool) {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = false)]
 async fn batch3_rollback_creates_history_without_changing_draft(pool: PgPool) {
+    sqlx::migrate!("./migrations")
+        .run_to(20261027100000, &pool)
+        .await
+        .unwrap();
     let state = batch3_state(&pool).await;
     let actor = seed_admin(&pool).await;
     let bearer = token(&state, actor);

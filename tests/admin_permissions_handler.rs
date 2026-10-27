@@ -1165,10 +1165,10 @@ async fn audio_upload_migration_preserves_effective_writers_without_expanding_re
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM admin_permission_grants WHERE permission_key='speech.upload_audio'").fetch_one(&pool).await.unwrap(),0);
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = false)]
 async fn retired_wordlist_permissions_do_not_break_tag_authorization_after_upgrade(pool: PgPool) {
     let migrator = sqlx::migrate!("./migrations");
-    migrator.undo(&pool, 20261018140000).await.unwrap();
+    migrator.run_to(20261018140000, &pool).await.unwrap();
     let super_id = seed(&pool, AdminRole::SuperAdmin).await;
     let holder = seed(&pool, AdminRole::Admin).await;
     let recipient = seed(&pool, AdminRole::Admin).await;
