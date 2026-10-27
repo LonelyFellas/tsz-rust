@@ -395,13 +395,23 @@ async fn automatic_updates_migration_preserves_settings_and_pending_jobs(pool: P
     .execute(&pool)
     .await
     .unwrap();
-    let (actor, id, version, _, storage) = setup(&pool).await;
+    let (actor, id, version, provider, storage) = setup(&pool).await;
+    let sentence = sentence(
+        &pool,
+        actor,
+        json!({"voices":[],"dubbing":{"mode":"inherit","area":"example"}}),
+    )
+    .await;
     save(&pool, actor, group(id, version, 0), 0).await;
     let job = audio_updates::list(&pool, id)
         .await
         .unwrap()
         .updates
         .remove(0);
+    let target = Uuid::now_v7();
+    let inserted = sqlx::query("INSERT INTO speech.dubbing_audio_update_targets(id,update_id,owner_kind,owner_id,target_id,target_path) SELECT $1,$2,owner_kind,owner_id,target_id,target_path FROM speech.dubbing_dependencies WHERE owner_kind='sentence' AND owner_id=$3")
+        .bind(target).bind(job.id).bind(sentence).execute(&pool).await.unwrap();
+    assert_eq!(inserted.rows_affected(), 1);
     migrator.run(&pool).await.unwrap();
     let settings: (i32, i64) =
         sqlx::query_as("SELECT wait_seconds,revision FROM speech.dubbing_update_settings")
@@ -431,6 +441,11 @@ async fn automatic_updates_migration_preserves_settings_and_pending_jobs(pool: P
         .fetch_one(&pool)
         .await
         .unwrap();
+    assert_eq!(
+        before["targets"].as_array().map(Vec::len),
+        Some(1),
+        "rollback refusal must cover a persisted target"
+    );
     let error = tsz_rust::deployment_migrations::undo(&pool, 20261027100000, 20261027110000)
         .await
         .unwrap_err();
@@ -445,12 +460,32 @@ async fn automatic_updates_migration_preserves_settings_and_pending_jobs(pool: P
     );
 
     due(&pool).await;
-    audio_updates::sweep(&pool, None, Some(storage))
+    audio_updates::sweep(&pool, Some(provider.clone()), Some(storage))
         .await
         .unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let completed = audio_updates::list(&pool, id)
+        .await
+        .unwrap()
+        .updates
+        .remove(0);
+    assert_eq!(completed.state, "completed");
+    assert_eq!(completed.total, 1);
+    assert_eq!(completed.completed, 1);
+    let target_state: String =
+        sqlx::query_scalar("SELECT state FROM speech.dubbing_audio_update_targets WHERE id=$1")
+            .bind(target)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(target_state, "completed");
+    let stored = current(&pool, sentence).await;
+    let asset = Uuid::parse_str(stored["voices"][0]["audio_asset_id"].as_str().unwrap()).unwrap();
+    let references: i64 = sqlx::query_scalar("SELECT count(*) FROM lexicon.shared_sentence_audio_asset_references WHERE sentence_id=$1 AND asset_id=$2 AND scope='draft'")
+        .bind(sentence).bind(asset).fetch_one(&pool).await.unwrap();
     assert_eq!(
-        audio_updates::list(&pool, id).await.unwrap().updates[0].state,
-        "completed"
+        references, 1,
+        "generated audio must be persisted on the inherited draft"
     );
 }
 
