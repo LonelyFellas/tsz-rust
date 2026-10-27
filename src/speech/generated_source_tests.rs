@@ -1,6 +1,54 @@
-use super::generated_source::{GeneratedSpeechSource, references};
+use super::generated_source::{GeneratedSpeechSource, references, source_at};
 use serde_json::json;
 use uuid::Uuid;
+
+#[test]
+fn text_source_paths_preserve_field_priority_and_null_validation() {
+    let rich = |text| json!({"version":2,"text":text,"annotations":[]});
+    let fields = ["content", "value", "name_en_rich", "dict_phonetic_rich"];
+    let version = json!({"voice_id":"sonia","enabled":true,"rate_percent":0,"version_id":Uuid::now_v7(),"version_name":"自然","locale":"en-GB","audio_asset_id":Uuid::now_v7()});
+    let link = json!({"id":Uuid::now_v7(),"source_segments":[{"start":0,"end":3,"surface":"far"}],"target_word_id":Uuid::now_v7(),"target_pos_id":Uuid::now_v7(),"target_form_id":Uuid::now_v7(),"target_variant_id":Uuid::now_v7(),"target_dialect":"common"});
+    for index in 0..=fields.len() + 2 {
+        let mut owner = json!({"voice_profile":{"voices":[version]}});
+        let expected = if let Some(field) = fields.get(index) {
+            for name in &fields[index..] {
+                owner[*name] = rich(*name);
+            }
+            owner["name_en"] = json!("name");
+            owner["dict_phonetic"] = json!("phonetic");
+            *field
+        } else if index == fields.len() {
+            owner["name_en"] = json!("name");
+            owner["dict_phonetic"] = json!("phonetic");
+            "name"
+        } else if index == fields.len() + 1 {
+            owner["dict_phonetic"] = json!("phonetic");
+            "phonetic"
+        } else {
+            ""
+        };
+        owner["reading_links"] = json!([link]);
+        let mut expected_links = json!([link]);
+        if index == 0 {
+            owner["form_links"] = json!([]);
+            expected_links = json!([]);
+        } else if index == 1 {
+            owner["form_links"] = serde_json::Value::Null;
+            expected_links = json!([]);
+        }
+        let source = source_at(&owner, "").unwrap();
+        let source_json = serde_json::to_value(&source).unwrap();
+        assert_eq!(source_json["content"], rich(expected));
+        assert_eq!(source_json["form_links"], expected_links);
+        let refs = references(&owner).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(serde_json::to_value(&refs[0].source).unwrap(), source_json);
+    }
+    let invalid =
+        json!({"content":null,"value":rich("fallback"),"voice_profile":{"voices":[version]}});
+    assert!(source_at(&invalid, "").is_err());
+    assert!(references(&invalid).is_err());
+}
 
 #[test]
 fn new_regions_reject_direct_phonemes_and_defer_links_until_actual_reading_is_resolved() {

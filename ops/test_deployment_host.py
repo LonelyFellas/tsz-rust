@@ -1,10 +1,11 @@
+import http.client
 import io
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -68,6 +69,49 @@ class HostOperationTests(unittest.TestCase):
                         with self.assertRaisesRegex(host.HostError, 'deployment_configuration_changed'):
                             host.start_formal(plan)
                         self.assertEqual(command.call_count, 1)
+
+    def test_readiness_retries_http_protocol_errors_and_keeps_timeout(self):
+        for mode in ('candidate', 'formal'):
+            for error_type in (http.client.BadStatusLine, http.client.IncompleteRead):
+                for ready_after_error in (True, False):
+                    with self.subTest(mode=mode, error=error_type.__name__, ready=ready_after_error), tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        with self.environment(root):
+                            plan = self.prepare(root)
+                            self.acquire(plan)
+                            response = Mock(status=200)
+                            response.read.return_value = b'{"status":"ready"}'
+                            client = Mock()
+                            client.getresponse.return_value = response
+                            error = error_type(b'partial')
+                            if error_type is http.client.IncompleteRead:
+                                response.read.side_effect = [error, b'{"status":"ready"}'] if ready_after_error else error
+                            else:
+                                client.getresponse.side_effect = [error, response] if ready_after_error else error
+                            process = Mock(pid=123, poll=Mock(return_value=None))
+                            with patch.object(host, 'run', return_value=b'0'), \
+                                 patch.object(host.socket, 'socket'), \
+                                 patch.object(host.subprocess, 'Popen', return_value=process), \
+                                 patch.object(host.auth, 'check_formal') as formal, \
+                                 patch.object(http.client, 'HTTPConnection', return_value=client), \
+                                 patch.object(host.time, 'sleep') as sleep:
+                                if ready_after_error:
+                                    if mode == 'candidate':
+                                        host.start_candidate(plan)
+                                    else:
+                                        host.wait_formal(host.BINARY)
+                                else:
+                                    with self.assertRaisesRegex(host.HostError, f'{mode}_readiness_timeout'):
+                                        if mode == 'candidate':
+                                            host.start_candidate(plan)
+                                        else:
+                                            host.wait_formal(host.BINARY)
+                                attempts = 2 if ready_after_error else 120
+                                self.assertEqual(client.request.call_count, attempts)
+                                self.assertEqual(client.close.call_count, attempts)
+                                self.assertEqual(sleep.call_count, 1 if ready_after_error else 120)
+                                self.assertEqual(process.poll.call_count, attempts if mode == 'candidate' else 0)
+                                self.assertEqual(formal.call_count, attempts if mode == 'formal' else 0)
 
     def test_owner_operation_lock_and_full_plan_hash_are_required(self):
         with tempfile.TemporaryDirectory() as directory:

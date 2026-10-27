@@ -3,6 +3,7 @@
 import contextlib
 import fcntl
 import hashlib
+import http.client
 import http.cookiejar
 import json
 import os
@@ -306,13 +307,12 @@ def start_candidate(plan):
     for attempt in range(120):
         require(process.poll() is None, "candidate_start_failed")
         try:
-            import http.client
             with contextlib.closing(http.client.HTTPConnection("127.0.0.1", 18383, timeout=2)) as client:
                 client.request("GET", "/readyz")
                 response = client.getresponse()
                 if response.status == 200 and json.loads(response.read(4096)) == {"status": "ready"}:
                     return
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             pass
         time.sleep(0.25)
     raise HostError("candidate_readiness_timeout")
@@ -322,13 +322,12 @@ def wait_formal(expected):
     for attempt in range(120):
         try:
             auth.check_formal(expected)
-            import http.client
             with contextlib.closing(http.client.HTTPConnection("127.0.0.1", 8383, timeout=2)) as client:
                 client.request("GET", "/readyz")
                 response = client.getresponse()
                 if response.status == 200 and json.loads(response.read(4096)) == {"status": "ready"}:
                     return
-        except (OSError, ValueError, auth.SmokeFailure):
+        except (OSError, ValueError, http.client.HTTPException, auth.SmokeFailure):
             pass
         time.sleep(0.25)
     raise HostError("formal_readiness_timeout")
