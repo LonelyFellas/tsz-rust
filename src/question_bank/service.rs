@@ -143,7 +143,6 @@ async fn candidate_entry_page(
     tx: &mut Tx<'_>,
     query: &QuestionCandidateQuery,
     after: Option<Uuid>,
-    part_of_speech: Option<&str>,
 ) -> Result<Vec<Uuid>, AppError> {
     let levels = ["A1", "A2", "B1", "B2", "C1", "C2"];
     let rank = levels
@@ -165,10 +164,9 @@ async fn candidate_entry_page(
             CROSS JOIN LATERAL jsonb_array_elements(m.value->'senses') s(value)
             CROSS JOIN LATERAL jsonb_array_elements(s.value->'definitions') d(value)
             WHERE f.value->>'pos_id'=m.value->>'pos_id'
-              AND ($4::text IS NULL OR f.value->>'pos'=$4)
               AND COALESCE((s.value->>'depends_on_context')::boolean,false)=false
               AND d.value->>'definition_mode'='zh_definition'
-              AND d.value->>'level'=ANY($5)
+              AND d.value->>'level'=ANY($4)
           )
         ORDER BY e.id LIMIT 64
     "#,
@@ -176,7 +174,6 @@ async fn candidate_entry_page(
     .bind(query.entry_id)
     .bind(query.query.as_deref().filter(|s| !s.is_empty()))
     .bind(after)
-    .bind(part_of_speech)
     .bind(&allowed_levels)
     .fetch_all(&mut **tx)
     .await
@@ -198,7 +195,7 @@ pub async fn candidates(
     let mut after = None;
     let mut items = Vec::new();
     loop {
-        let ids = candidate_entry_page(tx, query, after, None).await?;
+        let ids = candidate_entry_page(tx, query, after).await?;
         if ids.is_empty() {
             break;
         }
@@ -225,13 +222,6 @@ pub async fn agent_candidates(
     use crate::platform::text::key_v1;
     use std::collections::HashSet;
     source::validate_context(&input.question_level, &input.answer_profile)?;
-    let query = QuestionCandidateQuery {
-        entry_id: None,
-        query: None,
-        question_level: input.question_level.clone(),
-        answer_profile: input.answer_profile.clone(),
-    };
-    let mut after = None;
     let mut items = Vec::new();
     let mut entries = HashSet::from([target.source.entry_id]);
     let mut spellings: HashSet<_> = target
@@ -241,14 +231,12 @@ pub async fn agent_candidates(
         .map(|s| key_v1(s))
         .collect();
     let target_definition = key_v1(&target.definition);
-    loop {
-        let ids = candidate_entry_page(tx, &query, after, Some(&target.part_of_speech)).await?;
-        if ids.is_empty() {
-            break;
-        }
-        after = ids.last().copied();
-        let candidates =
-            source::candidates(tx, &ids, &input.question_level, &input.answer_profile).await?;
+    let ranked = ranked_candidate_entries(tx, target, input).await?;
+    for ids in ranked.chunks(64) {
+        let mut candidates =
+            source::candidates(tx, ids, &input.question_level, &input.answer_profile).await?;
+        // Authoritative reads use UUID lock order; restore retrieval order afterwards.
+        candidates.sort_by_key(|c| ids.iter().position(|id| *id == c.source.entry_id));
         // A second request must move beyond entries already returned, not recycle another sense.
         for candidate in &candidates {
             if input
@@ -295,14 +283,65 @@ pub async fn agent_candidates(
                 });
             }
         }
-        if ids.len() < 64 {
-            break;
-        }
     }
     Ok(QuestionCandidatePage {
         contract_version: 1,
         items,
     })
+}
+
+async fn ranked_candidate_entries(
+    tx: &mut Tx<'_>,
+    target: &QuestionCandidate,
+    input: &AgentCandidateSearch,
+) -> Result<Vec<Uuid>, AppError> {
+    let levels = ["A1", "A2", "B1", "B2", "C1", "C2"];
+    let rank = levels
+        .iter()
+        .position(|level| *level == input.question_level)
+        .unwrap();
+    // Lexical similarity is only a recall signal, never evidence of a wrong answer.
+    // Rank IDs once, then read authoritative snapshots in small batches until full.
+    sqlx::query_scalar(
+        r#"
+        SELECT e.id FROM lexicon.entries e
+        JOIN lexicon.entry_publications p ON p.id=e.current_publication_id
+        CROSS JOIN LATERAL (
+            SELECT max(greatest(
+                similarity(lower(trim(COALESCE(
+                    form.value#>>'{regional_variants,common,spelling}',
+                    form.value#>>ARRAY['regional_variants',$4,'spelling']
+                ))), lower($2)),
+                similarity(d.value#>>'{content,text}', $3)
+            )) AS relevance
+            FROM jsonb_array_elements(p.snapshot#>'{forms,pos}') f(value)
+            CROSS JOIN LATERAL jsonb_array_elements(f.value->'forms') form(value)
+            CROSS JOIN LATERAL jsonb_array_elements(p.snapshot#>'{meanings,pos}') m(value)
+            CROSS JOIN LATERAL jsonb_array_elements(m.value->'senses') s(value)
+            CROSS JOIN LATERAL jsonb_array_elements(s.value->'definitions') d(value)
+            WHERE f.value->>'pos_id'=m.value->>'pos_id'
+              AND f.value->>'pos'=$1 AND form.value->>'form_type'='base'
+              AND COALESCE((s.value->>'depends_on_context')::boolean,false)=false
+              AND d.value->>'definition_mode'='zh_definition'
+              AND d.value->>'level'=ANY($5)
+        ) ranked
+        WHERE e.archived_at IS NULL AND e.teaching_eligible AND p.content_schema_version=3
+          AND ranked.relevance IS NOT NULL
+        ORDER BY ranked.relevance DESC, e.id
+        "#,
+    )
+    .bind(&target.part_of_speech)
+    .bind(&target.spelling)
+    .bind(&target.definition)
+    .bind(if input.answer_profile == "BrE" {
+        "uk"
+    } else {
+        "us"
+    })
+    .bind(&levels[..=rank])
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(AppError::internal)
 }
 
 pub async fn create(
