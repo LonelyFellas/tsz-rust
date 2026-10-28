@@ -1,4 +1,4 @@
-use super::{dto::*, service, source};
+use super::{batch, dto::*, service, source};
 use crate::{
     admin::AdminAuth,
     api::{ApiJson, ApiPath, ApiQuery},
@@ -14,6 +14,30 @@ use axum::{
 use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/v1/admin/question-bank/candidate-page",
+            get(candidate_page),
+        )
+        .route(
+            "/api/v1/admin/question-bank/batches/preview",
+            post(batch_preview),
+        )
+        .route(
+            "/api/v1/admin/question-bank/batches",
+            get(batches).post(create_batch),
+        )
+        .route(
+            "/api/v1/admin/question-bank/batches/{id}",
+            get(batch_detail),
+        )
+        .route(
+            "/api/v1/admin/question-bank/batches/{id}/items",
+            get(batch_items),
+        )
+        .route(
+            "/api/v1/admin/question-bank/batches/{id}/cancel",
+            post(cancel_batch),
+        )
         .route(
             "/api/v1/admin/question-bank/candidates",
             get(candidate_list),
@@ -250,4 +274,76 @@ pub async fn capabilities(_auth: crate::auth::extract::AuthUser) -> Json<Learnin
     Json(LearningCapabilities {
         question_types: vec!["spelling_zh_to_en".into(), "choice_zh_to_en".into()],
     })
+}
+
+#[utoipa::path(get,path="/api/v1/admin/question-bank/candidate-page",tag="question_bank",security(("bearer_auth"=[])),params(QuestionCandidatePageQuery),responses((status=200,description="批量命题操作结果",body=QuestionCandidateSearchPage),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="无操作权限"),(status=404,description="不存在"),(status=409,description="覆盖情况已变化"),(status=422,description="格式无效"),(status=503,description="生成服务不可用")))]
+pub async fn candidate_page(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiQuery(input): ApiQuery<QuestionCandidatePageQuery>,
+) -> Result<Json<QuestionCandidateSearchPage>, AppError> {
+    Ok(Json(
+        batch::candidate_page(&state.pool, &auth, input).await?,
+    ))
+}
+
+#[utoipa::path(post,path="/api/v1/admin/question-bank/batches/preview",tag="question_bank",security(("bearer_auth"=[])),request_body=QuestionBatchSelection,responses((status=200,description="批量命题操作结果",body=QuestionBatchPreview),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="无操作权限"),(status=404,description="不存在"),(status=409,description="覆盖情况已变化"),(status=422,description="格式无效"),(status=503,description="生成服务不可用")))]
+pub async fn batch_preview(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiJson(input): ApiJson<QuestionBatchSelection>,
+) -> Result<Json<QuestionBatchPreview>, AppError> {
+    Ok(Json(batch::preview(&state.pool, &auth, input).await?))
+}
+
+#[utoipa::path(get,path="/api/v1/admin/question-bank/batches",tag="question_bank",security(("bearer_auth"=[])),params(QuestionBankQuery),responses((status=200,description="批量命题操作结果",body=QuestionBatchPage),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="无操作权限"),(status=404,description="不存在"),(status=409,description="覆盖情况已变化"),(status=422,description="格式无效"),(status=503,description="生成服务不可用")))]
+pub async fn batches(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiQuery(input): ApiQuery<QuestionBankQuery>,
+) -> Result<Json<QuestionBatchPage>, AppError> {
+    Ok(Json(batch::list(&state.pool, &auth, input).await?))
+}
+
+#[utoipa::path(post,path="/api/v1/admin/question-bank/batches",tag="question_bank",security(("bearer_auth"=[])),request_body=CreateQuestionBatch,responses((status=200,description="批量命题操作结果",body=QuestionBatch),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="无操作权限"),(status=404,description="不存在"),(status=409,description="覆盖情况已变化"),(status=422,description="格式无效"),(status=503,description="生成服务不可用")))]
+pub async fn create_batch(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiJson(input): ApiJson<CreateQuestionBatch>,
+) -> Result<Json<QuestionBatch>, AppError> {
+    if state.vocabulary_agent.is_none() {
+        return Err(AppError::unavailable(
+            crate::error::ErrorCode::ServiceUnavailable,
+            "生成服务尚未配置",
+        ));
+    }
+    Ok(Json(batch::create(&state.pool, &auth, input).await?))
+}
+
+#[utoipa::path(get,path="/api/v1/admin/question-bank/batches/{id}",tag="question_bank",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,description="批量命题操作结果",body=QuestionBatch),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="无操作权限"),(status=404,description="不存在"),(status=409,description="覆盖情况已变化"),(status=422,description="格式无效"),(status=503,description="生成服务不可用")))]
+pub async fn batch_detail(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<QuestionBatch>, AppError> {
+    Ok(Json(batch::get(&state.pool, &auth, id).await?))
+}
+
+#[utoipa::path(get,path="/api/v1/admin/question-bank/batches/{id}/items",tag="question_bank",security(("bearer_auth"=[])),params(("id"=Uuid,Path),QuestionBankQuery),responses((status=200,description="批量命题操作结果",body=QuestionGenerationPage),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="无操作权限"),(status=404,description="不存在"),(status=409,description="覆盖情况已变化"),(status=422,description="格式无效"),(status=503,description="生成服务不可用")))]
+pub async fn batch_items(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiQuery(input): ApiQuery<QuestionBankQuery>,
+) -> Result<Json<QuestionGenerationPage>, AppError> {
+    Ok(Json(batch::items(&state.pool, &auth, id, input).await?))
+}
+
+#[utoipa::path(post,path="/api/v1/admin/question-bank/batches/{id}/cancel",tag="question_bank",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,description="批量命题操作结果",body=QuestionBatch),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="无操作权限"),(status=404,description="不存在"),(status=409,description="覆盖情况已变化"),(status=422,description="格式无效"),(status=503,description="生成服务不可用")))]
+pub async fn cancel_batch(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<QuestionBatch>, AppError> {
+    Ok(Json(batch::cancel(&state.pool, &auth, id).await?))
 }

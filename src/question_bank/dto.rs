@@ -183,3 +183,75 @@ pub struct QuestionGenerationPage {
 pub struct LearningCapabilities {
     pub question_types: Vec<String>,
 }
+
+// Separate responses keep legacy clients with strict validators compatible.
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct QuestionCandidatePageQuery {
+    pub entry_id: Option<Uuid>,
+    pub query: Option<String>,
+    pub question_level: String,
+    pub answer_profile: String,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionCandidateSearchPage {
+    pub items: Vec<QuestionCandidate>,
+    pub pagination: crate::api::PaginationMeta,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionBatchSelection {
+    pub question_levels: Vec<String>,
+    pub answer_profiles: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionBatchCoverage {
+    pub question_level: String,
+    pub answer_profile: String,
+    pub eligible: i64,
+    pub covered: i64,
+    pub generating: i64,
+    pub missing: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionBatchPreview {
+    pub selection: QuestionBatchSelection,
+    pub coverage: Vec<QuestionBatchCoverage>,
+    pub missing: i64,
+    pub preview_token: String,
+}
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateQuestionBatch {
+    pub idempotency_key: Uuid,
+    pub selection: QuestionBatchSelection,
+    pub preview_token: String,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionBatch {
+    pub id: Uuid,
+    pub created_by: Uuid,
+    pub preview: QuestionBatchPreview,
+    pub state: String,
+    pub total: i64,
+    pub queued: i64,
+    pub running: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub insufficient_candidates: i64,
+    pub cancelled: i64,
+    pub created_at: DateTime<Utc>,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionBatchPage {
+    pub items: Vec<QuestionBatch>,
+    pub pagination: crate::api::PaginationMeta,
+}
