@@ -17,6 +17,16 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
+        .route("/opencode/models", get(admin::opencode_models::models))
+        .route(
+            "/opencode/providers",
+            get(admin::opencode_models::key_providers),
+        )
+        .route("/opencode/keys", post(admin::opencode_models::connect_key))
+        .route(
+            "/opencode/model",
+            get(admin::opencode_models::current_model).put(admin::opencode_models::select_model),
+        )
         .route("/opencode", get(admin::opencode::connection))
         .route("/opencode/login", post(admin::opencode::login))
         .route(

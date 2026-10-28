@@ -275,3 +275,157 @@ fn server_config_rejects_remote_http_and_embedded_secrets() {
     assert!(OpenCodeConfig::new("https://opencode.internal.test", PASSWORD.into()).is_ok());
     assert!(OpenCodeConfig::new("http://127.0.0.1:4096", "short".into()).is_err());
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn model_catalog_and_keys_project_only_public_fields(pool: PgPool) {
+    let (state, mock, server) = with_upstream(pool).await;
+    let (_, token) = seed(&state, AdminRole::SuperAdmin).await;
+    // The upstream directory can contain provider settings and headers; never return them.
+    let config = state.opencode.clone().unwrap();
+    drop(config);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let received = Arc::new(Mutex::new(Value::Null));
+    let capture = received.clone();
+    let app = Router::new()
+        .route("/api/model", get(|| async { Json(json!({"data":[{
+            "id":"model-a","providerID":"paid-provider","name":"Model A","enabled":true,
+            "capabilities":{"output":["text"]},"headers":{"Authorization":"must-not-leak"},
+            "settings":{"apiKey":"must-not-leak"}
+        },{
+            "id":"image-model","providerID":"images","name":"Image","enabled":true,
+            "capabilities":{"output":["image"]}
+        }]})) }))
+        .route("/api/integration", get(|| async { Json(json!({"data":[{
+            "id":"paid-provider","name":"Paid provider","methods":[{"type":"key"}],
+            "connections":[{"secret":"must-not-leak"}],"metadata":{"token":"must-not-leak"}
+        },{
+            "id":"custom-form","name":"Custom form","methods":[{"type":"key","form":[{"key":"account"}]}],"connections":[]
+        }]})) }))
+        .route("/api/integration/paid-provider/connect/key", post(move |Json(body):Json<Value>| {
+            let capture=capture.clone(); async move { *capture.lock().await=body; StatusCode::NO_CONTENT }
+        }));
+    let upstream = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut state = state;
+    state.opencode = Some(Arc::new(
+        OpenCodeConfig::new(&format!("http://{address}"), PASSWORD.into()).unwrap(),
+    ));
+    for suffix in ["/models", "/providers", "/model"] {
+        assert_eq!(
+            request(&state, None, Method::GET, suffix).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (_, normal) = seed(&state, AdminRole::Admin).await;
+    for suffix in ["/models", "/providers", "/model"] {
+        assert_eq!(
+            request(&state, Some(&normal), Method::GET, suffix).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let (status, headers, models) = request(&state, Some(&token), Method::GET, "/models").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(
+        models,
+        json!({"models":[{"provider_id":"paid-provider","model_id":"model-a","name":"Model A","enabled":true}]})
+    );
+    let (_, _, providers) = request(&state, Some(&token), Method::GET, "/providers").await;
+    assert_eq!(
+        providers,
+        json!({"providers":[{"id":"paid-provider","name":"Paid provider","connected":true}]})
+    );
+    for (auth, status) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some(&normal), StatusCode::FORBIDDEN),
+        (Some(&token), StatusCode::NO_CONTENT),
+    ] {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/admin/opencode/keys")
+            .header("content-type", "application/json");
+        if let Some(auth) = auth {
+            builder = builder.header("authorization", format!("Bearer {auth}"));
+        }
+        let response = tsz_rust::router(state.clone())
+            .oneshot(
+                builder
+                    .body(Body::from(
+                        json!({"provider_id":"paid-provider","api_key":"synthetic-test-key"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    assert_eq!(
+        *received.lock().await,
+        json!({"key":"synthetic-test-key","label":"TSZ"})
+    );
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 0);
+    upstream.abort();
+    server.abort();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn model_selection_is_forwarded_to_agent_and_reread(pool: PgPool) {
+    let state = AppState::for_test(pool);
+    let (_, token) = seed(&state, AdminRole::SuperAdmin).await;
+    let selected = Arc::new(Mutex::new(
+        json!({"source":"direct","provider_id":"deepseek","model_id":"deepseek-flash"}),
+    ));
+    let read = selected.clone();
+    let write = selected.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/v1/model-selection",
+        get(move |headers: HeaderMap| {
+            let read = read.clone();
+            async move {
+                assert_eq!(headers["authorization"], "Bearer outbound-test");
+                Json(read.lock().await.clone())
+            }
+        })
+        .put(move |Json(body): Json<Value>| {
+            let write = write.clone();
+            async move {
+                *write.lock().await = body.clone();
+                Json(body)
+            }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut state = state;
+    state.vocabulary_agent = Some(Arc::new(tsz_rust::question_bank::worker::AgentConfig {
+        base_url: format!("http://{address}"),
+        outbound_token: "outbound-test".into(),
+        inbound_token: "inbound-test".into(),
+        client: reqwest::Client::new(),
+    }));
+    let target = json!({"source":"opencode","provider_id":"paid-provider","model_id":"model-a"});
+    let response = tsz_rust::router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/v1/admin/opencode/model")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(target.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        request(&state, Some(&token), Method::GET, "/model").await.2,
+        target
+    );
+    server.abort();
+}

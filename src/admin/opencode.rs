@@ -68,7 +68,7 @@ impl OpenCodeConfig {
         })
     }
 
-    async fn call(
+    pub(super) async fn call(
         &self,
         method: Method,
         path: &str,
@@ -90,9 +90,14 @@ impl OpenCodeConfig {
         if response.status() == StatusCode::NO_CONTENT {
             return Ok(None);
         }
+        let limit = if matches!(path, "/api/model" | "/api/integration") {
+            2_000_000
+        } else {
+            64_000
+        };
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| unavailable())? {
-            if bytes.len() + chunk.len() > 64_000 {
+            if bytes.len() + chunk.len() > limit {
                 return Err(unavailable());
             }
             bytes.extend_from_slice(&chunk);
