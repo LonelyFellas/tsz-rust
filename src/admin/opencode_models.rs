@@ -210,6 +210,119 @@ pub async fn connect_key(
         .into_response())
 }
 
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenCodeProbeStatus {
+    Unverified,
+    Checking,
+    Available,
+    Unavailable,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenCodeProbeState {
+    Idle,
+    Running,
+    Completed,
+    Interrupted,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenCodeProbeError {
+    Disabled,
+    NotConfigured,
+    Timeout,
+    RequestFailed,
+    InvalidResponse,
+    Interrupted,
+    RuntimeFailed,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCodeModelProbe {
+    pub source: OpenCodeModelSource,
+    pub provider_id: String,
+    pub model_id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub status: OpenCodeProbeStatus,
+    pub checked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub duration_ms: Option<f64>,
+    pub http_status: Option<u16>,
+    pub error: Option<OpenCodeProbeError>,
+    pub cost: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCodeModelProbeReport {
+    pub batch_id: Option<uuid::Uuid>,
+    pub state: OpenCodeProbeState,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub models: Vec<OpenCodeModelProbe>,
+}
+
+async fn probe_request(state: &AppState, start: bool) -> Result<Response, AppError> {
+    let config = state.vocabulary_agent.as_ref().ok_or_else(unavailable)?;
+    let mut response = config
+        .client
+        .request(
+            if start { Method::POST } else { Method::GET },
+            format!("{}/v1/model-probes", config.base_url),
+        )
+        .bearer_auth(&config.outbound_token)
+        .send()
+        .await
+        .map_err(|_| unavailable())?;
+    let expected = if start {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    if response.status() != expected {
+        return Err(unavailable());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| unavailable())? {
+        if bytes.len() + chunk.len() > 2_000_000 {
+            return Err(unavailable());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let report: OpenCodeModelProbeReport =
+        serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    Ok((
+        expected,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(report),
+    )
+        .into_response())
+}
+
+#[utoipa::path(get, path="/api/v1/admin/opencode/probes", tag="admin", security(("bearer_auth"=[])),
+ responses((status=200,body=OpenCodeModelProbeReport),(status=401,description="会话失效"),(status=403,description="仅超管"),(status=503,description="探针服务不可用")))]
+pub async fn probe_report(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+) -> Result<Response, AppError> {
+    require_super_admin(&state, &auth).await?;
+    probe_request(&state, false).await
+}
+
+#[utoipa::path(post, path="/api/v1/admin/opencode/probes", tag="admin", security(("bearer_auth"=[])),
+ responses((status=202,body=OpenCodeModelProbeReport),(status=401,description="会话失效"),(status=403,description="仅超管"),(status=503,description="探针服务不可用")))]
+pub async fn start_probes(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+) -> Result<Response, AppError> {
+    require_super_admin(&state, &auth).await?;
+    probe_request(&state, true).await
+}
+
 async fn selection(
     state: &AppState,
     body: Option<OpenCodeModelSelection>,
