@@ -213,6 +213,33 @@ pub(crate) async fn verify_login_password(password: &str, hash: &str) -> bool {
 }
 
 #[cfg(test)]
+mod login_password_tests {
+    use super::verify_login_password;
+
+    #[tokio::test]
+    async fn legacy_bcrypt_passwords_are_verified_exactly_without_new_password_policy() {
+        for password in ["RawCase!234", "RAWCASE!234", " RawCase!234 "] {
+            let hash = bcrypt::hash(password, 4).unwrap();
+            assert!(verify_login_password(password, &hash).await);
+            for changed in [
+                password.to_lowercase(),
+                format!("{password}\n"),
+                "WrongPass!234".to_owned(),
+            ] {
+                assert!(!verify_login_password(&changed, &hash).await);
+            }
+        }
+        let hash = bcrypt::hash("RAWCASE!234", 4).unwrap();
+        assert!(!verify_login_password("RawCase!234", &hash).await);
+        let hash = bcrypt::hash(" RawCase!234 ", 4).unwrap();
+        assert!(!verify_login_password("RawCase!234", &hash).await);
+        for hash in ["invalid-hash", "$2b$invalid", "$argon2id$invalid"] {
+            assert!(!verify_login_password("RawCase!234", hash).await);
+        }
+    }
+}
+
+#[cfg(test)]
 mod default_display_name_tests {
     //! `generate_display_name` 的规格测试（随机生成的默认昵称）。
     //! 随机值没法断言确切内容，只能断言**性质**（property-based 思路）。

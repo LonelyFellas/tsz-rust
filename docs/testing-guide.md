@@ -19,9 +19,8 @@
 ### 本地 Git 质量门
 
 - [pre-commit](../.githooks/pre-commit) 按已有变更范围判断执行 SQLx prepare 与 Clippy；触发 `cargo sqlx prepare -- --all-targets --all-features` 时仍需真实数据库，不能用离线模式或跳过 hook 替代。
-- [pre-push](../.githooks/pre-push) 依次执行 `cargo clippy --all-targets --all-features -- -D warnings` 和 `cargo test --locked --lib --bins`。后者包含 [部署迁移测试](../src/deployment_migrations.rs)等 `#[sqlx::test]` 及试听锁测试，并非不依赖外部服务的纯单元测试。CI 额外运行 `tests/` 集成测试，不代表本地 lib/bin 测试无需 PostgreSQL / Redis。
-- 运行前建议显式导出已核实隔离的 `DATABASE_URL` 和 `TEST_REDIS_URL`。试听锁优先读取 `TEST_REDIS_URL`，仅变量不存在时回退到 `REDIS_URL`；空字符串不会回退。该测试自身不加载 `.env`，不能依赖其他 SQLx 测试先执行、顺带加载 Redis 变量的调度顺序。
-- pre-push 的最小预检只在当前目录及祖先目录均未找到 `.env` 时检查上述连接变量；缺失时在调用 Cargo 前提示并失败，不打印连接值、不连接或管理服务。找到 `.env` 时不解析或执行文件，也不拒绝既有 dotenv 用法，内容、权限、连通性及测试结果仍由原有检查判定。变量存在或预检通过不证明服务可用。
+- [pre-push](../.githooks/pre-push) 仅执行 `cargo fmt --all -- --check`，无需 PostgreSQL / Redis，也不编译或运行测试。开发时按改动风险运行定向测试；全量 Clippy、lib/bin、doc 和 `tests/` 集成测试由 PR/main CI 执行。
+- 手动运行 lib/bin 或数据库集成测试前，显式导出已核实隔离的 `DATABASE_URL` 和 `TEST_REDIS_URL`。lib/bin 包含 [部署迁移测试](../src/deployment_migrations.rs)等 `#[sqlx::test]` 及试听锁测试，仍依赖真实服务。试听锁优先读取 `TEST_REDIS_URL`，仅变量不存在时回退到 `REDIS_URL`；空字符串不会回退。该测试自身不加载 `.env`，不能依赖其他 SQLx 测试先执行、顺带加载 Redis 变量的调度顺序。
 - Git 实际使用的 hook 由 `core.hooksPath` 决定，可能指向另一 worktree。修改当前任务的 `.githooks` 不会更新那个路径中的脚本；先只读核实配置来源，不为使本次修改立即生效而修改共享 Git 配置或其他任务 worktree。
 
 定向验证钩子脚本（Cargo 为隔离替身，不连接外部服务，不代表 Rust 测试通过）：
