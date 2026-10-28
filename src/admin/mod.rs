@@ -4,6 +4,7 @@ pub mod auth;
 pub(crate) mod authorization;
 mod extract;
 mod model;
+pub mod opencode;
 pub mod permissions;
 pub mod profile;
 pub mod publication_permission;

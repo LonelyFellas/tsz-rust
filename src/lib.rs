@@ -333,6 +333,7 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         speech_provider,
         smart_lexicon_v3_flags: config.smart_lexicon_v3_flags,
         vocabulary_agent: crate::question_bank::worker::AgentConfig::from_env()?,
+        opencode: crate::admin::opencode::OpenCodeConfig::from_env()?,
     };
 
     if !config.deployment_smoke_only {
