@@ -429,3 +429,75 @@ async fn model_selection_is_forwarded_to_agent_and_reread(pool: PgPool) {
     );
     server.abort();
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn probes_are_super_only_and_proxy_async_reports_without_private_fields(pool: PgPool) {
+    let mut state = AppState::for_test(pool);
+    let (_, token) = seed(&state, AdminRole::SuperAdmin).await;
+    let (_, normal) = seed(&state, AdminRole::Admin).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let report = json!({"batch_id":Uuid::now_v7(),"state":"running","started_at":"2026-10-28T15:00:00Z","finished_at":null,"models":[{
+        "source":"opencode","provider_id":"test","model_id":"listed-but-unusable","name":"Test model","enabled":true,
+        "status":"unavailable","checked_at":"2026-10-28T15:00:01Z","duration_ms":100.0,"http_status":503,"error":"request_failed","cost":null
+    }]});
+    let returned = report.clone();
+    let count = calls.clone();
+    let handler = move |headers: HeaderMap| {
+        let returned = returned.clone();
+        let count = count.clone();
+        async move {
+            assert_eq!(headers["authorization"], "Bearer probe-test-outbound");
+            count.fetch_add(1, Ordering::SeqCst);
+            Json(returned)
+        }
+    };
+    let read = handler.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = Router::new().route(
+        "/v1/model-probes",
+        get(read).post(move |headers: HeaderMap| {
+            let h = handler.clone();
+            async move { (StatusCode::ACCEPTED, h(headers).await) }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    state.vocabulary_agent = Some(Arc::new(tsz_rust::question_bank::worker::AgentConfig {
+        base_url: format!("http://{address}"),
+        outbound_token: "probe-test-outbound".into(),
+        inbound_token: "unused-probe-inbound".into(),
+        client: reqwest::Client::new(),
+    }));
+    for method in [Method::GET, Method::POST] {
+        assert_eq!(
+            request(&state, None, method.clone(), "/probes").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&state, Some(&normal), method.clone(), "/probes")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            if method == Method::GET { 0 } else { 1 }
+        );
+        let (status, headers, body) =
+            request(&state, Some(&token), method.clone(), "/probes").await;
+        assert_eq!(
+            status,
+            if method == Method::POST {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            }
+        );
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(body, report);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    server.abort();
+}
