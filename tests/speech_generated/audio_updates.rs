@@ -412,7 +412,7 @@ async fn automatic_updates_migration_preserves_settings_and_pending_jobs(pool: P
     let inserted = sqlx::query("INSERT INTO speech.dubbing_audio_update_targets(id,update_id,owner_kind,owner_id,target_id,target_path) SELECT $1,$2,owner_kind,owner_id,target_id,target_path FROM speech.dubbing_dependencies WHERE owner_kind='sentence' AND owner_id=$3")
         .bind(target).bind(job.id).bind(sentence).execute(&pool).await.unwrap();
     assert_eq!(inserted.rows_affected(), 1);
-    migrator.run(&pool).await.unwrap();
+    migrator.run_to(20261027110000, &pool).await.unwrap();
     let settings: (i32, i64) =
         sqlx::query_as("SELECT wait_seconds,revision FROM speech.dubbing_update_settings")
             .fetch_one(&pool)
