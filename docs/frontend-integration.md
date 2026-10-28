@@ -264,6 +264,12 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 
 建议先发布后端，再发布支持读取自定义内容的 Admin，最后开放新版 Web 创编。旧 Admin 不能查看自定义审核内容；写入新数据后不能回滚到不支持此模型的后端。这里只记录契约和兼容策略，本批未合并或部署，也未运行旧前端/旧后端二进制组合；兼容证据来自旧请求/响应形状、幂等摘要和拒写集成回归。
 
+## 超管 AI 账本
+
+`GET /api/v1/admin/ai-ledger` 只接受当前有效的 `super_admin`，不通过业务权限标签委派。参数 `page`（1–1,000,000）、`page_size`（1–100）、可选 UUID `run_id`；返回 `AiLedgerPage`。后端复用 `VOCABULARY_AGENT_*` 连接读取 Agent `/v1/model-calls`，不连接 Agent 数据库，不向浏览器下发服务凭据、提示词或模型原文。上游缺少端点、超时、响应过大或契约不符时返回脱敏 503，成功响应禁止缓存。
+
+汇总覆盖整个筛选结果，缓存命中率按已知 token 加权，缺失观测和费用为 `null`。主记录位于 `tsz-agent/docs/features/admin-ai-ledger/README.md`。先显式迁移 Agent `0003` 并更新其服务，再更新 Rust，最后开放 admin `/ai-ledger`；本仓无新增数据库迁移，现有 API 响应不变。
+
 ## 中文释义单选题
 
 主记录沿用前端 `docs/features/vocabulary-mcq/implementation.md`。后台题库 API 位于 `/admin/question-bank`，复用 `words.access`、`words.edit`/`words.edit_others` 和 `words.publish` 权限；生成、编辑、审核分别复核来源与操作者。生成只产出草稿，编辑停用题后必须重新审核。四个来源固定发布版本、词义、基础词形和英美档位；任一来源变化即暂停出题，历史快照保留。

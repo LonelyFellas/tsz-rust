@@ -17,6 +17,7 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
+        .route("/ai-ledger", get(admin::ai_ledger::list))
         .route(
             "/dashboard/overview",
             get(crate::dashboard::handler::overview),

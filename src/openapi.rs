@@ -33,6 +33,7 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::admin::ai_ledger::list,
         crate::question_bank::handler::candidate_list,
         crate::question_bank::handler::generations,
         crate::question_bank::handler::create_generation,
@@ -319,6 +320,7 @@ use utoipa::{
     ),
     components(
         schemas(
+            crate::admin::ai_ledger::AiLedgerPage,
             crate::learning_tasks::dto::LearningTaskState,
             crate::wordlists::dto::WordlistView,
             crate::wordlists::dto::WordlistSort,
