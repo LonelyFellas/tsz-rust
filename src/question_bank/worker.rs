@@ -108,7 +108,29 @@ pub async fn tick(state: &AppState) -> Result<(), AppError> {
     let Some(config) = &state.vocabulary_agent else {
         return Ok(());
     };
-    let id:Option<Uuid>=sqlx::query_scalar("UPDATE question_generations SET next_attempt_at=now()+interval '20 seconds',attempts=attempts+1 WHERE id=(SELECT id FROM question_generations WHERE next_attempt_at<=now() AND (state IN ('queued','running') OR (state='cancelled' AND NOT cancel_delivered)) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id").fetch_optional(&state.pool).await.map_err(AppError::internal)?;
+    let mut claim = state.pool.begin().await.map_err(AppError::internal)?;
+    super::batch::lock_creation(&mut claim).await?;
+    let id: Option<Uuid> = sqlx::query_scalar(r#"
+        WITH active AS (
+          SELECT count(*) AS n FROM question_generations
+          WHERE submitted_at IS NOT NULL AND (state IN ('queued','running') OR
+            (state IN ('cancelled','failed') AND NOT cancel_delivered AND expires_at>now()))
+        ), dispatch AS MATERIALIZED (
+          SELECT batch_id,max(submitted_at) AS last_submitted FROM question_generations GROUP BY batch_id
+        )
+        UPDATE question_generations SET next_attempt_at=now()+interval '20 seconds',attempts=attempts+1,
+          expires_at=CASE WHEN submitted_at IS NULL AND state='queued' THEN now()+interval '2 hours' ELSE expires_at END,
+          submitted_at=CASE WHEN state='queued' THEN COALESCE(submitted_at,now()) ELSE submitted_at END
+        WHERE id=(SELECT g.id FROM question_generations g LEFT JOIN dispatch d ON d.batch_id IS NOT DISTINCT FROM g.batch_id
+          WHERE next_attempt_at<=now() AND (
+            (state IN ('cancelled','failed') AND NOT cancel_delivered) OR
+            (state IN ('queued','running') AND (submitted_at IS NOT NULL OR (SELECT n FROM active)<2)))
+          ORDER BY CASE WHEN state IN ('cancelled','failed') THEN 0 WHEN submitted_at IS NOT NULL THEN 1 ELSE 2 END,
+            CASE WHEN submitted_at IS NULL THEN COALESCE(d.last_submitted,'epoch'::timestamptz) ELSE next_attempt_at END,
+            g.created_at,g.id FOR UPDATE OF g SKIP LOCKED LIMIT 1)
+        RETURNING id
+    "#).fetch_optional(&mut *claim).await.map_err(AppError::internal)?;
+    claim.commit().await.map_err(AppError::internal)?;
     let generation_result = if let Some(id) = id {
         let result = process(state, config, id).await;
         if result.is_err() {
@@ -139,7 +161,7 @@ pub async fn tick(state: &AppState) -> Result<(), AppError> {
 async fn process(state: &AppState, config: &AgentConfig, id: Uuid) -> Result<(), AppError> {
     let mut tx = state.pool.begin().await.map_err(AppError::internal)?;
     let row = service::generation(&mut tx, id).await?;
-    let cancelled = row.state == "cancelled";
+    let cancelled = ["cancelled", "failed"].contains(&row.state.as_str());
     if !cancelled && let Err(error) = service::delegation(&mut tx, id).await {
         if error.status_code().is_server_error() {
             return Err(error);

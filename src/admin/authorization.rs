@@ -73,6 +73,41 @@ pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ("GET", "/ai-ledger", RoutePolicy::SuperAdmin),
     (
         "GET",
+        "/question-bank/candidate-page",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/question-bank/batches/preview",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "GET",
+        "/question-bank/batches",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/question-bank/batches",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "GET",
+        "/question-bank/batches/{id}",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/question-bank/batches/{id}/items",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/question-bank/batches/{id}/cancel",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "GET",
         "/question-bank/candidates",
         RoutePolicy::All(&["words.access"]),
     ),

@@ -560,6 +560,12 @@ async fn delegation_auth_cancellation_and_all_four_sources_fail_closed(pool: PgP
 #[sqlx::test]
 async fn vocabulary_migration_down_up_and_no_silent_loss_of_learning(pool: PgPool) {
     sqlx::raw_sql(include_str!(
+        "../migrations/20261028120000_question_generation_batches.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../migrations/20261028010000_vocabulary_mcq.down.sql"
     ))
     .execute(&pool)
@@ -567,6 +573,12 @@ async fn vocabulary_migration_down_up_and_no_silent_loss_of_learning(pool: PgPoo
     .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20261028010000_vocabulary_mcq.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261028120000_question_generation_batches.up.sql"
     ))
     .execute(&pool)
     .await
@@ -823,4 +835,458 @@ async fn agent_candidates_reach_eligible_entries_beyond_early_library_limits(poo
         second.1["items"].as_array().unwrap().is_empty(),
         "do not recycle other senses/forms from already-issued distractor entries"
     );
+}
+
+async fn batch_call(f: &Fixture, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+    wordlists_support::admin_call(&f.state, f.admin, method, &format!("{BANK}/{path}"), body).await
+}
+fn selection() -> Value {
+    json!({"question_levels":["B1","A1"],"answer_profiles":["BrE","AmE"]})
+}
+async fn batch_preview(f: &Fixture, s: Value) -> Value {
+    let r = batch_call(f, "POST", "batches/preview", s).await;
+    assert_eq!(r.0, 200, "{}", r.1);
+    r.1
+}
+async fn create_batch(f: &Fixture, preview: &Value) -> Value {
+    let r=batch_call(f,"POST","batches",json!({"idempotency_key":Uuid::now_v7(),"selection":preview["selection"],"preview_token":preview["preview_token"]})).await;
+    assert_eq!(r.0, 200, "{}", r.1);
+    r.1
+}
+#[sqlx::test]
+async fn candidate_pagination_covers_all_publications_and_excludes_ineligible_sources(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    for i in 0..43 {
+        wordlists_support::full_entry(&pool, &format!("batch-word-{i}")).await;
+    }
+    let excluded = wordlists_support::full_entry(&pool, "batch-excluded").await;
+    sqlx::query("UPDATE lexicon.entries SET teaching_eligible=false WHERE id=$1")
+        .bind(excluded)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let archived = wordlists_support::full_entry(&pool, "batch-archived").await;
+    sqlx::query("UPDATE lexicon.entries SET archived_at=now() WHERE id=$1")
+        .bind(archived)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let unpublished = wordlists_support::full_entry(&pool, "batch-unpublished").await;
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=NULL WHERE id=$1")
+        .bind(unpublished)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut refs = std::collections::HashSet::new();
+    let mut page = 1;
+    let total = loop {
+        let r = batch_call(
+            &f,
+            "GET",
+            &format!(
+                "candidate-page?question_level=C2&answer_profile=BrE&page={page}&page_size=17"
+            ),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(r.0, 200, "{}", r.1);
+        for c in r.1["items"].as_array().unwrap() {
+            assert_ne!(c["source"]["entry_id"], json!(excluded));
+            assert_ne!(c["source"]["entry_id"], json!(archived));
+            assert!(refs.insert(c["candidate_ref"].as_str().unwrap().to_owned()));
+        }
+        if page == r.1["pagination"]["total_pages"].as_u64().unwrap() {
+            break r.1["pagination"]["total"].as_u64().unwrap();
+        }
+        page += 1;
+    };
+    assert!(total > 80);
+    assert_eq!(refs.len() as u64, total);
+    let search = batch_call(
+        &f,
+        "GET",
+        "candidate-page?question_level=C2&answer_profile=BrE&query=batch-word-42",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(search.0, 200);
+    assert!(!search.1["items"].as_array().unwrap().is_empty());
+    let preview = batch_preview(&f, selection()).await;
+    // Alternate base forms of one definition must not cause duplicate batch questions.
+    assert_eq!(preview["missing"], 47 * 2 * 4);
+    let created = create_batch(&f, &preview).await;
+    assert_eq!(created["total"], 376); // Crosses the insert chunk boundary without truncation.
+}
+#[sqlx::test]
+async fn batch_idempotency_concurrent_creation_cancellation_and_retry_are_persistent(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let preview = batch_preview(&f, selection()).await;
+    assert_eq!(preview["missing"], 32);
+    let body = json!({"idempotency_key":Uuid::now_v7(),"selection":preview["selection"],"preview_token":preview["preview_token"]});
+    let (a, b) = tokio::join!(
+        batch_call(&f, "POST", "batches", body.clone()),
+        batch_call(&f, "POST", "batches", body.clone())
+    );
+    assert_eq!(a.0, 200, "{}", a.1);
+    assert_eq!(b.0, 200, "{}", b.1);
+    assert_eq!(a.1["id"], b.1["id"]);
+    let mut other = body.clone();
+    other["idempotency_key"] = json!(Uuid::now_v7());
+    assert_eq!(batch_call(&f, "POST", "batches", other).await.0, 409);
+    let now = batch_preview(&f, selection()).await;
+    assert_eq!(now["missing"], 0);
+    assert!(
+        now["coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["generating"] == 8)
+    );
+    // Single creation shares the batch admission lock and identity, including alternate forms.
+    assert_eq!(
+        batch_call(&f, "POST", "generations", generation_input(&f))
+            .await
+            .0,
+        409
+    );
+    let id = a.1["id"].as_str().unwrap();
+    let cancelled = batch_call(&f, "POST", &format!("batches/{id}/cancel"), Value::Null).await;
+    assert_eq!(cancelled.0, 200, "{}", cancelled.1);
+    assert_eq!(cancelled.1["cancelled"], 32);
+    let replay = batch_call(&f, "POST", "batches", body).await;
+    assert_eq!(replay.1["id"], a.1["id"]);
+    assert_eq!(replay.1["state"], "cancelled");
+    let detail = batch_call(&f, "GET", &format!("batches/{id}"), Value::Null).await;
+    assert_eq!(detail.1["cancelled"], 32);
+    let items = batch_call(
+        &f,
+        "GET",
+        &format!("batches/{id}/items?page_size=5&state=cancelled"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(items.1["pagination"]["total"], 32);
+    assert_eq!(items.1["items"].as_array().unwrap().len(), 5);
+    assert_eq!(batch_preview(&f, selection()).await["missing"], 32);
+    let p = batch_preview(&f, selection()).await;
+    let input = |key| json!({"idempotency_key":key,"selection":p["selection"],"preview_token":p["preview_token"]});
+    let (x, y) = tokio::join!(
+        batch_call(&f, "POST", "batches", input(Uuid::now_v7())),
+        batch_call(&f, "POST", "batches", input(Uuid::now_v7()))
+    );
+    assert!(
+        (x.0 == 200 && y.0 == 409) || (x.0 == 409 && y.0 == 200),
+        "{x:?} {y:?}"
+    );
+
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM question_generations WHERE batch_id=$1 AND NOT cancel_delivered",
+    )
+    .bind(Uuid::parse_str(id).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0);
+    async fn assert_rollback_blocked(pool: &PgPool) {
+        let mut tx = pool.begin().await.unwrap();
+        let result = sqlx::raw_sql(include_str!(
+            "../migrations/20261028120000_question_generation_batches.down.sql"
+        ))
+        .execute(&mut *tx)
+        .await;
+        tx.rollback().await.unwrap();
+        let error = result
+            .expect_err("rollback must retain active batch scheduling and cancellation ownership");
+        assert!(
+            error.to_string().contains("batch generation work"),
+            "{error}"
+        );
+        let (tasks, linked): (i64, i64) =
+            sqlx::query_as("SELECT count(*),count(batch_id) FROM question_generations")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!((tasks, linked), (64, 64));
+        let batches: i64 = sqlx::query_scalar("SELECT count(*) FROM question_generation_batches")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(batches, 2);
+    }
+    assert_rollback_blocked(&pool).await;
+    let active_batch = if x.0 == 200 { &x.1 } else { &y.1 };
+    let cancelled = batch_call(
+        &f,
+        "POST",
+        &format!("batches/{}/cancel", active_batch["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(cancelled.0, 200, "{}", cancelled.1);
+    let remote: Uuid =
+        sqlx::query_scalar("SELECT id FROM question_generations ORDER BY id LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for state in ["running", "cancelled", "failed"] {
+        sqlx::query("UPDATE question_generations SET state=$2,submitted_at=now()-interval '3 hours',expires_at=now()-interval '1 hour',cancel_delivered=false WHERE id=$1").bind(remote).bind(state).execute(&pool).await.unwrap();
+        // Expiration alone does not prove that a remote execution stopped.
+        assert_rollback_blocked(&pool).await;
+    }
+    sqlx::query("UPDATE question_generations SET cancel_delivered=true WHERE id=$1")
+        .bind(remote)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261028120000_question_generation_batches.down.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM question_generations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(retained, 64);
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261028120000_question_generation_batches.up.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+}
+#[sqlx::test]
+async fn batch_worker_rechecks_sources_and_permissions_and_keeps_queue_alive(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let s = json!({"question_levels":["A1"],"answer_profiles":["BrE"]});
+    let preview = batch_preview(&f, s.clone()).await;
+    let batch = create_batch(&f, &preview).await;
+    let id = Uuid::parse_str(batch["id"].as_str().unwrap()).unwrap();
+    // Simulate a queue that survived a service restart and waited beyond its original TTL.
+    sqlx::query(
+        "UPDATE question_generations SET expires_at=now()-interval '1 day' WHERE batch_id=$1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Pin the known valid target first; the unchanged mock Agent only generates that target.
+    sqlx::query("UPDATE question_generations SET next_attempt_at=CASE WHEN target->>'candidate_ref'=$2 THEN now()-interval '1 minute' ELSE now() END WHERE batch_id=$1").bind(id).bind(f.candidates[0]["candidate_ref"].as_str().unwrap()).execute(&pool).await.unwrap();
+    tick(&f.state).await.unwrap();
+    let rows:Vec<(String,Option<String>)>=sqlx::query_as("SELECT state,error_code FROM question_generations WHERE batch_id=$1 ORDER BY next_attempt_at").bind(id).fetch_all(&pool).await.unwrap();
+    assert!(rows.iter().any(|(s, _)| s == "succeeded"), "{rows:?}");
+    // Revoking teaching eligibility after enrollment is a terminal task failure.
+    sqlx::query("UPDATE lexicon.entries SET teaching_eligible=false WHERE id=(SELECT (target#>>'{source,entry_id}')::uuid FROM question_generations WHERE batch_id=$1 AND state='queued' ORDER BY id LIMIT 1)").bind(id).execute(&pool).await.unwrap();
+    tick(&f.state).await.unwrap();
+    let failures:i64=sqlx::query_scalar("SELECT count(*) FROM question_generations WHERE batch_id=$1 AND state='failed' AND error_code='authorization_or_source_changed'").bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(failures, 1);
+    // Security/permission versions are persisted and rechecked, not inherited from browser state.
+    sqlx::query("UPDATE admins SET permission_version=permission_version+1 WHERE id=$1")
+        .bind(f.admin)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for _ in 0..16 {
+        // Advance only the cancellation retry timer. Unconfirmed remote work keeps
+        // its execution slot; queued tasks proceed after the acknowledgement.
+        sqlx::query("UPDATE question_generations SET next_attempt_at=now() WHERE state IN ('failed','cancelled') AND NOT cancel_delivered").execute(&pool).await.unwrap();
+        tick(&f.state).await.unwrap();
+    }
+    let left:i64=sqlx::query_scalar("SELECT count(*) FROM question_generations WHERE batch_id=$1 AND state IN ('queued','running')").bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(left, 0);
+    let fresh = batch_preview(&f, s).await;
+    assert_eq!(fresh["coverage"][0]["covered"], 0); // Its now-ineligible distractor invalidates coverage.
+    assert!(fresh["missing"].as_i64().unwrap() > 0);
+    let retry = create_batch(&f, &fresh).await;
+    assert_eq!(retry["total"], fresh["missing"]);
+}
+
+#[sqlx::test]
+async fn worker_limits_admission_and_rotates_batches_while_cancellation_survives_restart(
+    pool: PgPool,
+) {
+    let mut f = fixture(&pool).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cancel_attempts = Arc::new(AtomicUsize::new(0));
+    let app=Router::new().route("/v1/runs",post(|Json(input):Json<Value>|async move {
+        Json(json!({"contract_version":1,"id":input["external_request_id"],"external_request_id":input["external_request_id"],"capability":"vocabulary_mcq_zh_en","state":"queued","error_code":null}))
+    })).route("/v1/runs/{id}/cancel",post(move || {let attempts=cancel_attempts.clone(); async move {
+        if attempts.fetch_add(1,Ordering::SeqCst)==0 {(StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":"retry"})))} else {(StatusCode::OK,Json(json!({"state":"cancelled"})))}
+    }}));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    f.state.vocabulary_agent = Some(Arc::new(AgentConfig {
+        base_url: format!("http://{addr}"),
+        outbound_token: "test-outbound-service-token-at-least-32-bytes".into(),
+        inbound_token: CALLBACK.into(),
+        client: reqwest::Client::new(),
+    }));
+    let p = batch_preview(
+        &f,
+        json!({"question_levels":["A1"],"answer_profiles":["BrE"]}),
+    )
+    .await;
+    let first = create_batch(&f, &p).await;
+    let p = batch_preview(
+        &f,
+        json!({"question_levels":["B1"],"answer_profiles":["BrE"]}),
+    )
+    .await;
+    let second = create_batch(&f, &p).await;
+    // Separate worker ticks operate on persistent rows, with no in-memory batch scheduler.
+    tick(&f.state).await.unwrap();
+    tick(&f.state).await.unwrap();
+    tick(&f.state).await.unwrap();
+    let admitted:Vec<(Uuid,i64)>=sqlx::query_as("SELECT batch_id,count(*) FROM question_generations WHERE submitted_at IS NOT NULL GROUP BY batch_id").fetch_all(&pool).await.unwrap();
+    assert_eq!(admitted.len(), 2);
+    assert!(admitted.iter().all(|(_, n)| *n == 1));
+    let cancelled = batch_call(
+        &f,
+        "POST",
+        &format!("batches/{}/cancel", first["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(cancelled.0, 200);
+    assert!(tick(&f.state).await.is_err());
+    tick(&f.state).await.unwrap();
+    let admitted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM question_generations WHERE batch_id=$1 AND submitted_at IS NOT NULL",
+    )
+    .bind(Uuid::parse_str(second["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        admitted, 1,
+        "unacknowledged remote cancellation still occupies its execution slot"
+    );
+    sqlx::query("UPDATE question_generations SET next_attempt_at=now() WHERE state='cancelled' AND NOT cancel_delivered").execute(&pool).await.unwrap();
+    tick(&f.state).await.unwrap();
+    let delivered: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM question_generations WHERE batch_id=$1 AND cancel_delivered",
+    )
+    .bind(Uuid::parse_str(first["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(delivered, 8);
+    tick(&f.state).await.unwrap();
+    let running: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM question_generations WHERE batch_id=$1 AND submitted_at IS NOT NULL",
+    )
+    .bind(Uuid::parse_str(second["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(running, 2);
+    server.abort();
+}
+
+#[sqlx::test]
+async fn batch_scope_excludes_unowned_entries_and_revoked_edit_permission(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let own: Uuid = serde_json::from_value(f.candidates[0]["source"]["entry_id"].clone()).unwrap();
+    sqlx::query("UPDATE lexicon.entries SET created_by_admin_id=$2 WHERE id=$1")
+        .bind(own)
+        .bind(f.admin)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(f.admin)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for key in ["words.access", "words.edit"] {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)").bind(f.admin).bind(key).execute(&pool).await.unwrap();
+    }
+    let token = f
+        .state
+        .admin_token_manager
+        .generate_with_version(f.admin, "admin", 0)
+        .unwrap();
+    let s = json!({"question_levels":["A1"],"answer_profiles":["BrE"]});
+    let preview = request(
+        &f.state,
+        &token,
+        false,
+        "POST",
+        &format!("{BANK}/batches/preview"),
+        s.clone(),
+    )
+    .await;
+    assert_eq!(preview.0, 200, "{}", preview.1);
+    assert_eq!(preview.1["missing"], 2);
+    let candidates = request(
+        &f.state,
+        &token,
+        false,
+        "GET",
+        &format!("{BANK}/candidate-page?question_level=A1&answer_profile=BrE"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(candidates.0, 200);
+    assert!(
+        candidates.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["source"]["entry_id"] == json!(own))
+    );
+    sqlx::query(
+        "DELETE FROM admin_permission_grants WHERE admin_id=$1 AND permission_key='words.edit'",
+    )
+    .bind(f.admin)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let result=request(&f.state,&token,false,"POST",&format!("{BANK}/batches"),json!({"idempotency_key":Uuid::now_v7(),"selection":s,"preview_token":preview.1["preview_token"]})).await;
+    assert_eq!(result.0, 403);
+}
+
+#[sqlx::test]
+async fn insufficient_candidates_is_terminal_and_can_be_filled_again(pool: PgPool) {
+    let mut f = fixture(&pool).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app=Router::new().route("/v1/runs",post(|Json(input):Json<Value>|async move {
+        Json(json!({"contract_version":1,"id":input["external_request_id"],"external_request_id":input["external_request_id"],"capability":"vocabulary_mcq_zh_en","state":"succeeded","error_code":null,"result":{"outcome":"insufficient_candidates","reasons":["库内没有足够的不同词条"]}}))
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    f.state.vocabulary_agent = Some(Arc::new(AgentConfig {
+        base_url: format!("http://{addr}"),
+        outbound_token: "test-outbound-service-token-at-least-32-bytes".into(),
+        inbound_token: CALLBACK.into(),
+        client: reqwest::Client::new(),
+    }));
+    let s = json!({"question_levels":["A1"],"answer_profiles":["BrE"]});
+    let p = batch_preview(&f, s.clone()).await;
+    let first = create_batch(&f, &p).await;
+    for _ in 0..8 {
+        tick(&f.state).await.unwrap();
+    }
+    let result = batch_call(
+        &f,
+        "GET",
+        &format!("batches/{}", first["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(result.1["state"], "completed");
+    assert_eq!(result.1["insufficient_candidates"], 8);
+    let p = batch_preview(&f, s).await;
+    assert_eq!(p["missing"], 8);
+    let second = create_batch(&f, &p).await;
+    assert_ne!(second["id"], first["id"]);
+    assert_eq!(second["total"], 8);
+    server.abort();
 }

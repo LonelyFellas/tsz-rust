@@ -121,7 +121,7 @@ pub(super) async fn delegation(tx: &mut Tx<'_>, id: Uuid) -> Result<GenerationRo
     if security != row.security_version
         || auth.permission_version != row.permission_version
         || !["queued", "running"].contains(&row.state.as_str())
-        || row.expires_at <= Utc::now()
+        || (row.submitted_at.is_some() && row.expires_at <= Utc::now())
     {
         return Err(AppError::forbidden(
             ErrorCode::Forbidden,
@@ -316,6 +316,7 @@ pub async fn create(
     }
     let mut tx = pool.begin().await.map_err(AppError::internal)?;
     authorize(&mut tx, auth, "words.edit", None).await?;
+    super::batch::lock_creation(&mut tx).await?;
     let digest = hash(&input)?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,2810))")
         .bind(format!("{}:{}", auth.subject, input.idempotency_key))
@@ -357,6 +358,10 @@ pub async fn create(
     {
         return Err(invalid("目标词义超过题目级别"));
     }
+    let active: Option<Uuid> = sqlx::query_scalar("SELECT id FROM question_generations WHERE target#>>'{source,entry_id}'=$1 AND target#>>'{source,publication_id}'=$4 AND target#>>'{source,sense_id}'=$5 AND target#>>'{source,definition_id}'=$6 AND question_level=$2 AND answer_profile=$3 AND state IN ('queued','running') ORDER BY id LIMIT 1").bind(target.source.entry_id.to_string()).bind(&input.question_level).bind(&input.answer_profile).bind(target.source.publication_id.to_string()).bind(target.source.sense_id.to_string()).bind(target.source.definition_id.to_string()).fetch_optional(&mut *tx).await.map_err(AppError::internal)?;
+    if active.is_some() {
+        return Err(conflict("当前词义、等级和档位已有生成任务，请查看生成记录"));
+    }
     let id = Uuid::now_v7();
     sqlx::query("INSERT INTO question_generations(id,created_by,security_version,permission_version,request_key,request_hash,target,question_level,answer_profile) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)").bind(id).bind(auth.subject).bind(auth.security_version).bind(a.permission_version).bind(input.idempotency_key).bind(digest).bind(Json(target)).bind(input.question_level).bind(input.answer_profile).execute(&mut *tx).await.map_err(AppError::internal)?;
     let row = generation(&mut tx, id).await?;
@@ -378,12 +383,12 @@ pub async fn cancel(
     if !["queued", "running", "cancelled"].contains(&row.state.as_str()) {
         return Err(conflict("生成已完成"));
     }
-    sqlx::query("UPDATE question_generations SET state='cancelled',revision=revision+1,updated_at=now(),next_attempt_at=now() WHERE id=$1 AND state<>'cancelled'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("UPDATE question_generations SET state='cancelled',error_code=NULL,reasons='{}',cancel_delivered=(submitted_at IS NULL),revision=revision+1,updated_at=now(),next_attempt_at=now() WHERE id=$1 AND state<>'cancelled'").bind(id).execute(&mut *tx).await.map_err(AppError::internal)?;
     let row = generation(&mut tx, id).await?;
     tx.commit().await.map_err(AppError::internal)?;
     Ok(row.view())
 }
-fn pagination(q: &QuestionBankQuery) -> Result<(u32, u32), AppError> {
+pub(super) fn pagination(q: &QuestionBankQuery) -> Result<(u32, u32), AppError> {
     let p = q.page.unwrap_or(1);
     let s = q.page_size.unwrap_or(20);
     if p == 0 || !(1..=100).contains(&s) {

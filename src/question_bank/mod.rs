@@ -1,3 +1,4 @@
+mod batch;
 pub mod dto;
 pub mod handler;
 pub(crate) mod learning;
