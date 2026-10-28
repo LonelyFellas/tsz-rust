@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{Postgres, Row, Transaction};
-use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use super::dictionary_suggestions::{
@@ -32,6 +31,7 @@ use crate::lexicon::dto::{
     WordPronunciationV3, WordRegionalVariantsV3, WordUkFormVariantV3, WordUsFormVariantV3,
 };
 use crate::lexicon::model::{ComponentTargetDraftRecord, NodeIdentityRecord, RegionEvidenceRecord};
+use crate::lexicon::v3_contract::normalize_pronunciation_text;
 
 const V3_CREATE_SCOPE: &str = "lexicon.entry.create.v3";
 const V3_DETECTION_TTL: StdDuration = StdDuration::from_secs(5 * 60);
@@ -5989,8 +5989,8 @@ async fn insert_v3_variant(
         .bind(variant_id)
         .bind(&pronunciation.dict_phonetic)
         .bind(&pronunciation.actual_pron)
-        .bind(normalize_v3_text(&pronunciation.dict_phonetic))
-        .bind(normalize_v3_text(&pronunciation.actual_pron))
+        .bind(normalize_pronunciation_text(&pronunciation.dict_phonetic))
+        .bind(normalize_pronunciation_text(&pronunciation.actual_pron))
         .bind(pronunciation.style.map(pronunciation_style_name))
         .bind(ordinal as i32)
         .execute(&mut **tx)
@@ -6209,10 +6209,6 @@ const fn pronunciation_style_name(value: PronunciationStyle) -> &'static str {
         PronunciationStyle::Strong => "strong",
         PronunciationStyle::Weak => "weak",
     }
-}
-
-fn normalize_v3_text(value: &str) -> String {
-    value.nfkc().collect::<String>().trim().to_lowercase()
 }
 
 fn canonicalize_v3_forms(content: &mut DraftFormsStepContentV3) -> Result<(), LexiconServiceError> {

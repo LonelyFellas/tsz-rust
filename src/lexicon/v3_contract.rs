@@ -1591,7 +1591,7 @@ pub(crate) fn v3_issues(issues: &[DraftValidationIssue]) -> Vec<V3DraftValidatio
     issues.iter().map(v3_issue).collect()
 }
 
-fn normalize_pronunciation_text(value: &str) -> String {
+pub(crate) fn normalize_pronunciation_text(value: &str) -> String {
     value.nfkc().collect::<String>().trim().to_lowercase()
 }
 
