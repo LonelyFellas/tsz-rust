@@ -71,6 +71,8 @@ pub enum RoutePolicy {
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     ("GET", "/ai-ledger", RoutePolicy::SuperAdmin),
+    ("GET", "/ai-ledger/costs", RoutePolicy::SuperAdmin),
+    ("GET", "/ai-ledger/cost-overview", RoutePolicy::SuperAdmin),
     (
         "GET",
         "/question-bank/candidate-page",

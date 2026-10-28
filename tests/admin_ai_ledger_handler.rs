@@ -28,6 +28,72 @@ use uuid::Uuid;
 const URI: &str = "/api/v1/admin/ai-ledger";
 const SERVICE_TOKEN: &str = "test-ledger-service-token-not-for-browser";
 
+#[sqlx::test(migrations = "./migrations")]
+async fn cost_endpoints_are_super_only_and_preserve_decimal_and_unknown_values(pool: PgPool) {
+    let (state, mock, server) = with_upstream(pool).await;
+    let (_, ordinary) = seed(&state, AdminRole::Admin).await;
+    let (super_id, super_token) = seed(&state, AdminRole::SuperAdmin).await;
+    for path in ["/costs", "/cost-overview"] {
+        assert_eq!(
+            request(&state, None, path).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&state, Some(&ordinary), path).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 0);
+    let summary = json!({"total_calls":2,"priced_calls":1,"unknown_calls":1,"estimated_cost_cny":"0.001392000000"});
+    *mock.response.lock().await = (
+        StatusCode::OK,
+        json!({"ledger":payload(),"costs":[],"cost_summary":summary}),
+    );
+    let costs = request(&state, Some(&super_token), "/costs?page=2&page_size=20").await;
+    assert_eq!(costs.0, StatusCode::OK);
+    assert_eq!(costs.2["ledger"]["page"], 2);
+    assert_eq!(
+        costs.2["cost_summary"]["estimated_cost_cny"],
+        "0.001392000000"
+    );
+    assert_eq!(costs.1["cache-control"], "no-store");
+    let mut period = summary.clone();
+    period["start"] = Value::Null;
+    period["end"] = json!("2026-10-28T04:00:00Z");
+    let mut unknown = period.clone();
+    unknown["estimated_cost_cny"] = Value::Null;
+    unknown["priced_calls"] = json!(0);
+    unknown["unknown_calls"] = json!(2);
+    let mut overview = json!({"generated_at":"2026-10-28T04:00:00Z","timezone":"Asia/Shanghai","currency":"CNY","pricing_version":"test-price","pricing_valid_until":"2027-01-01","total":period,"today":unknown,"week":period,"month":period});
+    *mock.response.lock().await = (StatusCode::OK, overview.clone());
+    let result = request(&state, Some(&super_token), "/cost-overview").await;
+    assert_eq!(result.0, StatusCode::OK);
+    assert!(result.2["today"]["estimated_cost_cny"].is_null());
+    assert_eq!(result.2["total"]["estimated_cost_cny"], "0.001392000000");
+    assert_eq!(result.1["cache-control"], "no-store");
+    assert!(mock.queries.lock().await.last().unwrap().is_empty());
+    overview["currency"] = json!("USD");
+    *mock.response.lock().await = (StatusCode::OK, overview);
+    assert_eq!(
+        request(&state, Some(&super_token), "/cost-overview")
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(super_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    for path in ["/costs", "/cost-overview"] {
+        assert_eq!(
+            request(&state, Some(&super_token), path).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    server.abort();
+}
+
 async fn seed(state: &AppState, role: AdminRole) -> (Uuid, String) {
     let id = Uuid::now_v7();
     AdminRepository::new(state.pool.clone())
@@ -82,13 +148,18 @@ async fn upstream(
     Query(query): Query<HashMap<String, String>>,
 ) -> (StatusCode, Json<Value>) {
     assert_eq!(headers["authorization"], format!("Bearer {SERVICE_TOKEN}"));
-    assert!(query.contains_key("page") && query.contains_key("page_size"));
     state.calls.fetch_add(1, Ordering::SeqCst);
     state.queries.lock().await.push(query.clone());
     let (status, mut body) = state.response.lock().await.clone();
-    if body.is_object() && body.get("items").is_some() {
-        body["page"] = json!(query["page"].parse::<u32>().unwrap());
-        body["page_size"] = json!(query["page_size"].parse::<u32>().unwrap());
+    let page = if body.get("ledger").is_some() {
+        &mut body["ledger"]
+    } else {
+        &mut body
+    };
+    if page.is_object() && page.get("items").is_some() {
+        assert!(query.contains_key("page") && query.contains_key("page_size"));
+        page["page"] = json!(query["page"].parse::<u32>().unwrap());
+        page["page_size"] = json!(query["page_size"].parse::<u32>().unwrap());
     }
     (status, Json(body))
 }
@@ -108,6 +179,8 @@ async fn with_upstream(pool: PgPool) -> (AppState, Upstream, tokio::task::JoinHa
     let address = listener.local_addr().unwrap();
     let app = Router::new()
         .route("/v1/model-calls", get(upstream))
+        .route("/v1/model-costs", get(upstream))
+        .route("/v1/model-costs/overview", get(upstream))
         .with_state(mock.clone());
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
