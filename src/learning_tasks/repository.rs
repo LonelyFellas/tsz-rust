@@ -113,7 +113,7 @@ pub async fn begin<'a>(
     Ok(tx)
 }
 pub async fn task(tx: &mut Tx<'_>, auth: &AuthUser, id: Uuid) -> Result<LearningTask, AppError> {
-    sqlx::query_as("SELECT id,name,task_type,wordlist_ids,daily_question_count,ends_at,state,revision,created_at FROM learning_tasks WHERE id=$1 AND user_id=$2 FOR UPDATE").bind(id).bind(auth.subject).fetch_optional(&mut **tx).await.map_err(AppError::internal)?.ok_or_else(||AppError::not_found("任务不存在"))
+    sqlx::query_as("SELECT NULLIF(question_type,'spelling_zh_to_en') AS question_type,id,name,task_type,wordlist_ids,daily_question_count,ends_at,state,revision,created_at FROM learning_tasks WHERE id=$1 AND user_id=$2 FOR UPDATE").bind(id).bind(auth.subject).fetch_optional(&mut **tx).await.map_err(AppError::internal)?.ok_or_else(||AppError::not_found("任务不存在"))
 }
 pub async fn task_lists(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Vec<Uuid>, AppError> {
     sqlx::query_scalar("SELECT wordlist_ids FROM learning_tasks WHERE id=$1 AND user_id=$2")
@@ -135,6 +135,7 @@ pub async fn run_task(pool: &PgPool, auth: &AuthUser, id: Uuid) -> Result<Uuid, 
 }
 #[derive(sqlx::FromRow)]
 pub struct RunRow {
+    pub question_type: String,
     pub cycle_id: Option<Uuid>,
     pub id: Uuid,
     pub task_id: Uuid,
@@ -197,6 +198,7 @@ pub async fn answers(tx: &mut Tx<'_>, id: Uuid) -> Result<HashMap<Uuid, AnswerRo
     Ok(rows.into_iter().map(|r| (r.question_id, r)).collect())
 }
 pub struct SourceAccess {
+    pub choice_available: std::collections::HashSet<(Uuid, i64)>,
     pub lists: HashMap<Uuid, (i64, Option<i64>)>,
     pub(crate) entries: HashMap<Uuid, CurrentPublication>,
     pub members: HashMap<(Uuid, Uuid), Uuid>,
@@ -210,7 +212,7 @@ pub async fn sources(
     auth: &AuthUser,
     ids: &[Uuid],
 ) -> Result<SourceAccess, AppError> {
-    source_access(tx, auth, ids, None, None).await
+    source_access(tx, auth, ids, None, None, false).await
 }
 /// Grace is scoped to a run, not a task or user: only a run that was already in
 /// flight when the wordlist was deleted may finish from its frozen questions.
@@ -222,15 +224,24 @@ pub async fn sources_for_questions(
     questions: &[QuestionRow],
 ) -> Result<SourceAccess, AppError> {
     let entries: Vec<_> = questions.iter().map(|q| q.entry_id).collect();
-    source_access(tx, auth, ids, Some(&entries), Some(run)).await
+    source_access(
+        tx,
+        auth,
+        ids,
+        Some(&entries),
+        Some(run),
+        run.question_type == crate::question_bank::learning::CHOICE,
+    )
+    .await
 }
 pub async fn sources_for_units(
     tx: &mut Tx<'_>,
     auth: &AuthUser,
     ids: &[Uuid],
     entries: &[Uuid],
+    include_choice: bool,
 ) -> Result<SourceAccess, AppError> {
-    source_access(tx, auth, ids, Some(entries), None).await
+    source_access(tx, auth, ids, Some(entries), None, include_choice).await
 }
 async fn deletion_grace(
     tx: &mut Tx<'_>,
@@ -264,6 +275,7 @@ async fn source_access(
     ids: &[Uuid],
     fixed_entries: Option<&[Uuid]>,
     run: Option<&RunRow>,
+    include_choice: bool,
 ) -> Result<SourceAccess, AppError> {
     // Lock the wordlist rows before reading deletion events. A concurrent delete
     // holds the same row lock and inserts its event in the same transaction, so
@@ -325,7 +337,13 @@ async fn source_access(
     grace.retain(|_, generations| !generations.is_empty());
     let visible: Vec<Uuid> = sqlx::query_scalar("SELECT w.id FROM wordlists w LEFT JOIN users u ON u.id=w.owner_user_id WHERE w.id=ANY($1) AND w.deleted_at IS NULL AND (w.owner_admin_id IS NOT NULL OR (u.status='active' AND NOT EXISTS(SELECT 1 FROM account_deletion_requests d WHERE d.user_id=u.id AND d.status='pending' AND d.effective_at<=clock_timestamp())))").bind(&visible_ids).fetch_all(&mut **tx).await.map_err(AppError::internal)?;
     lists.retain(|id, _| grace.contains_key(id) || visible.contains(id));
+    let choice_available = if include_choice {
+        crate::question_bank::learning::available(tx, &entry_ids).await?
+    } else {
+        Default::default()
+    };
     Ok(SourceAccess {
+        choice_available,
         lists,
         entries,
         members: members.iter().map(|(l, e, m)| ((*l, *e), *m)).collect(),
@@ -335,6 +353,19 @@ async fn source_access(
 }
 impl SourceAccess {
     pub fn available(&self, q: &QuestionRow) -> bool {
+        if let Some(choice) = q.answer_snapshot.get("choice").filter(|c| !c.is_null()) {
+            let id = choice
+                .get("question_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<Uuid>().ok());
+            let revision = choice.get("revision").and_then(|v| v.as_i64());
+            if !id
+                .zip(revision)
+                .is_some_and(|pair| self.choice_available.contains(&pair))
+            {
+                return false;
+            }
+        }
         let entry_available = self
             .entries
             .get(&q.entry_id)
@@ -397,13 +428,28 @@ pub fn question_view(
                 is_correct: a.is_correct,
                 accepted_at: a.accepted_at,
                 accepted_answers: snapshot.answers,
+                correct_option_id: snapshot
+                    .choice
+                    .as_ref()
+                    .map(|c| c.correct_option_id.clone()),
+                explanation: snapshot
+                    .choice
+                    .as_ref()
+                    .map(|c| c.content.explanation.clone()),
             })
         })
         .transpose()?
     } else {
         None
     };
+    let snapshot: AnswerSnapshot =
+        serde_json::from_value(q.answer_snapshot.clone()).map_err(AppError::internal)?;
     Ok(LearningQuestion {
+        options: if visible {
+            snapshot.choice.map(|c| c.options)
+        } else {
+            None
+        },
         id: q.id,
         position: q.position,
         answered: a.is_some(),
@@ -451,7 +497,7 @@ pub async fn run_view(
         task_id: row.task_id,
         task_type: row.task_type,
         state,
-        question_type: "spelling_zh_to_en".into(),
+        question_type: row.question_type.clone(),
         task_revision: row.task_revision,
         business_day: row.business_day,
         expires_at: row.expires_at,

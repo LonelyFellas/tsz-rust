@@ -263,3 +263,13 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 - 迁移 `20261018120000` 引入项身份及自定义内容；存在当前自定义项或历史自定义审核快照时 down 拒绝破坏性回退。动态 SQL 无新增编译期 query 宏，不修改 `.sqlx`。
 
 建议先发布后端，再发布支持读取自定义内容的 Admin，最后开放新版 Web 创编。旧 Admin 不能查看自定义审核内容；写入新数据后不能回滚到不支持此模型的后端。这里只记录契约和兼容策略，本批未合并或部署，也未运行旧前端/旧后端二进制组合；兼容证据来自旧请求/响应形状、幂等摘要和拒写集成回归。
+
+## 中文释义单选题
+
+主记录沿用前端 `docs/features/vocabulary-mcq/implementation.md`。后台题库 API 位于 `/admin/question-bank`，复用 `words.access`、`words.edit`/`words.edit_others` 和 `words.publish` 权限；生成、编辑、审核分别复核来源与操作者。生成只产出草稿，编辑停用题后必须重新审核。四个来源固定发布版本、词义、基础词形和英美档位；任一来源变化即暂停出题，历史快照保留。
+
+新 Web 先读取 `/me/learning-capabilities`，旧后端返回 404 时保留拼写。支持单选的客户端为学习计划和批次请求携带 `X-TSZ-Learning-Capabilities: choice-v1`，在计划创建/预览中传 `question_type: choice_zh_to_en`；省略题型仍为拼写。旧客户端列表不显示单选，直接打开单选计划或批次得到 409。拼写响应不增加字段。单选题的 `options` 仅提供固定随机 ID 和词形，提交的 `answer` 为选项 ID；答前不返回正确项、来源或解析。单选不写拼写记忆，和拼写共用同词义去重的每日奖励结算。
+
+Agent 配置为 `VOCABULARY_AGENT_URL`、`VOCABULARY_AGENT_TOKEN`（后端到 Agent）和 `VOCABULARY_AGENT_CALLBACK_TOKEN`（Agent 到后端）；两个凭据须不同且至少 32 字节。三者均缺省时禁用生成，已审核题仍可学习。URL 要求 HTTPS，仅 loopback 允许 HTTP。内部 `/api/internal/agent/v1/requests/{id}` 端点按服务凭据与持久化委托的真实管理员、权限版本、有效期和取消状态共同鉴权。生成投递与审核反馈分别记录在专用表中，未知 POST 结果沿原幂等键恢复后取消，不与既有 outbox 争抢消费状态。
+
+先发布后端再开放前端单选入口；旧前端可继续拼写。迁移 `20261028010000` 的 down 在存在单选学习任务时拒绝执行，避免删除学习事实；无学习任务时 down 会删除题库、生成委托和审核投递记录。存在这些记录时应保留数据库迁移并使用兼容构建，不把 down 当作无损回退。`lexicon.entries.teaching_eligible=false` 排除非教学词条；创建运营或验收专用词条时应明确其资格。

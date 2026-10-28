@@ -16,6 +16,7 @@ use axum::extract::FromRef;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub vocabulary_agent: Option<Arc<crate::question_bank::worker::AgentConfig>>,
     pub pool: PgPool,
     pub token_manager: Arc<TokenManager>,
     pub admin_token_manager: Arc<TokenManager>,
@@ -107,6 +108,7 @@ impl AppState {
             avatar_public_base_url: None,
             speech_provider: None,
             smart_lexicon_v3_flags: SmartLexiconV3Flags::all_disabled(),
+            vocabulary_agent: None,
         }
     }
 

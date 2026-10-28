@@ -18,6 +18,7 @@ pub mod lexicon;
 pub mod openapi;
 pub mod otp;
 pub mod platform;
+pub mod question_bank;
 pub mod reliability;
 pub mod request_id;
 pub mod safe_log;
@@ -96,6 +97,7 @@ pub fn router(state: AppState) -> Router {
         .merge(dictionary::handler::router())
         .merge(wordlists::handler::router())
         .merge(learning_tasks::handler::router())
+        .merge(question_bank::handler::router())
         .merge(learning_memory::handler::router())
         .merge(avatar::router())
         .merge(teacher_certification::router())
@@ -166,6 +168,7 @@ pub fn router(state: AppState) -> Router {
     // Axum 的 layer 后添加者先执行：Request ID 必须先写入 Extensions，
     // TraceLayer 的 make_span_with 才能读取并关联后续日志。
     let router = router
+        .route_layer(middleware::from_fn_with_state(state.clone(),question_bank::learning::capability_guard))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             admin::authorization::enforce_business_access,
@@ -329,9 +332,11 @@ pub async fn run(config: Config, pool: PgPool, redis: deadpool_redis::Pool) -> a
         avatar_public_base_url: config.avatar_public_base_url,
         speech_provider,
         smart_lexicon_v3_flags: config.smart_lexicon_v3_flags,
+        vocabulary_agent: crate::question_bank::worker::AgentConfig::from_env()?,
     };
 
     if !config.deployment_smoke_only {
+        crate::question_bank::worker::run_worker(state.clone());
         crate::learning_memory::retention::run_worker(state.pool.clone());
         crate::account_deletion::worker::run_worker(state.pool.clone());
         crate::avatar::cleanup::run_worker(state.clone());

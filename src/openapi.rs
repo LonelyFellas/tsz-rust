@@ -33,6 +33,20 @@ use utoipa::{
         &SmartLexiconV3SchemaAddon
     ),
     paths(
+        crate::question_bank::handler::candidate_list,
+        crate::question_bank::handler::generations,
+        crate::question_bank::handler::create_generation,
+        crate::question_bank::handler::generation,
+        crate::question_bank::handler::cancel_generation,
+        crate::question_bank::handler::questions,
+        crate::question_bank::handler::question,
+        crate::question_bank::handler::edit_question,
+        crate::question_bank::handler::review_question,
+        crate::question_bank::handler::context,
+        crate::question_bank::handler::search,
+        crate::question_bank::handler::batch_get,
+        crate::question_bank::handler::capabilities,
+
         crate::learning_memory::handler::overview,
         crate::learning_memory::handler::enrollment,
         crate::learning_memory::handler::items,

@@ -72,6 +72,51 @@ pub enum RoutePolicy {
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
     (
         "GET",
+        "/question-bank/candidates",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/question-bank/generations",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/question-bank/generations",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "GET",
+        "/question-bank/generations/{id}",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "POST",
+        "/question-bank/generations/{id}/cancel",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "GET",
+        "/question-bank/questions",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "GET",
+        "/question-bank/questions/{id}",
+        RoutePolicy::All(&["words.access"]),
+    ),
+    (
+        "PATCH",
+        "/question-bank/questions/{id}",
+        RoutePolicy::All(&["words.edit"]),
+    ),
+    (
+        "POST",
+        "/question-bank/questions/{id}/review",
+        RoutePolicy::All(&["words.publish"]),
+    ),
+    (
+        "GET",
         "/lexicon/entries/related-suggestions",
         RoutePolicy::All(&["words.access"]),
     ),
@@ -822,6 +867,7 @@ mod tests {
                 "/settings/form-types",
             ),
             (include_str!("../lexicon/router.rs"), "/lexicon"),
+            (include_str!("../question_bank/handler.rs"), ""),
             (include_str!("../speech/preview/router.rs"), "/speech"),
             (include_str!("../teacher_certification/mod.rs"), ""),
             (include_str!("../wordlists/custom_audio/handler.rs"), ""),

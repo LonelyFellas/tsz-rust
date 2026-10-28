@@ -149,6 +149,9 @@ pub struct LearningPreview {
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 #[serde(deny_unknown_fields)]
 pub struct LearningTask {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub question_type: Option<String>,
     pub id: Uuid,
     pub name: String,
     pub task_type: LearningTaskType,
@@ -210,6 +213,12 @@ pub struct LearningPrompt {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningAnswerFeedback {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub correct_option_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub explanation: Option<String>,
     pub answer_id: Uuid,
     pub submitted_answer: String,
     pub is_correct: bool,
@@ -219,6 +228,9 @@ pub struct LearningAnswerFeedback {
 #[derive(Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningQuestion {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub options: Option<Vec<LearningOption>>,
     pub id: Uuid,
     pub position: i32,
     pub answered: bool,
@@ -249,4 +261,11 @@ pub struct LearningAnswerReceipt {
     pub accepted_at: DateTime<Utc>,
     pub run: LearningRun,
     pub question: LearningQuestion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LearningOption {
+    pub option_id: String,
+    pub spelling: String,
 }

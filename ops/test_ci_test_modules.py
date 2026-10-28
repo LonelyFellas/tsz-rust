@@ -84,6 +84,7 @@ EXPECTED_TARGETS = {
         "learning_rewards_handler",
         "learning_rewards_schema",
         "learning_memory_handler",
+        "question_bank_handler",
         "wordlists_handler",
         "wordlists_schema",
         "wordlists_review",
