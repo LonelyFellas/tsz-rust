@@ -44,6 +44,12 @@ pg_dump_version=18.6
 
 内置 `ops/backup_archive_ssh.py` 支持受审阅 SSH 目的地，存储配置为 `{"host":"已配置的SSH别名","directory":"/absolute/backup/root"}`；连接必须开启主机密钥校验。实际值由运维配置，别名不能指回源数据库机器；首次启用前核实是独立故障域。它以 rsync 传固定文件、在远端复算摘要与字节数，再原子完成命名；测试不连接真实 SSH。不能在配置未知时自动安装任务。
 
+也可使用 `ops/backup_archive_oss.py` 将备份保存到独立私有 OSS Bucket。使用独立受限 RAM 用户，限定到专用 Bucket 和 `database-backups/`，不得复用业务上传凭据；在受保护的 root 所有、权限 `0600` 的 `/etc/tsz-rust/backup-oss.json` 配置 `endpoint`、`region`、`bucket`、`access_key_id` 和 `access_key_secret`，并安排凭据轮换。只允许阿里云 HTTPS endpoint。为避免 OSS 在开启或暂停版本控制时忽略禁止覆盖的请求，专用 Bucket 必须保持版本控制未启用，并禁止公开访问；访问策略和保留期限须单独核实。写入启用 AES256 服务端加密和对象私有 ACL，上传后重新读取全部字节核对 SHA256 与长度；取回时再次核对摘要，失败删除本次独占的临时文件。
+
+在隔离的受控 Python 环境安装 `oss2==2.19.1` 后，把 `backup.json` 的 `archive_command` 设为 `["/opt/tsz-rust/backup-venv/bin/python", "-I", "/opt/tsz-rust/ops/backup_archive_oss.py", "/etc/tsz-rust/backup-oss.json"]`，`fetch_command` 设为同一列表并在脚本路径后加入 `"fetch"`。当前使用单次上传，备份超过 5 GiB 时拒绝上传并报警；容量增长前须另行支持分片上传。在启用调度前验证私有权限、凭据最小授权、完整上传和取回、隔离恢复与失败通知；仅以模拟 OSS 通过不能称为真实归档成功。对象保留和清理由存储端配置，脚本不删除正式备份。
+
+若使用云监控通知，在受保护配置中填写 `monitor_group_id`，为该用户额外授予 `cms:PutCustomEvent`，并创建匹配事件名 `tsz_backup_failure` 的邮件报警规则。安装 `tsz-backup-alert@.service` 及两个 `*.service.d/10-cloud-alert.conf` 后，备份和恢复验证失败会通过该服务上报不含数据库内容的固定事件；`tsz-backup-status.timer` 每日检查最近成功归档是否陈旧，失败时也上报事件。启用前需实际测试事件到邮箱投递。服务器停机或无法访问云监控时，本机告警无法上报；另需独立监控或其他通知通道，不能以本机事件上报证明主机失联可告警。
+
 建议异机至少保留近 7 天，存储生命周期由受控目的地配置管理；此工具不自动删除历史备份。`latest.json` 指向最后一次成功的异机归档，`last-attempt.json` 独立记录最近任务，失败或中断不会被旧成功掩盖；`status` 以快照开始时间检查 26 小时新鲜度，具体失败回执保留在任务目录。完整备份不自动包含 OSS 文件，需要独立检查对象版本保留。发布侧只读查看该状态，不触发本任务；真正的数据风险发布不能用普通状态替代写前保护。
 
 ## 创建恢复点

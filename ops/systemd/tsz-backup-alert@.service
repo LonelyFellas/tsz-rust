@@ -1,0 +1,11 @@
+[Unit]
+Description=Report tsz backup service failure to CloudMonitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+WorkingDirectory=/opt/tsz-rust
+ExecStart=/opt/tsz-rust/backup-venv/bin/python -I /opt/tsz-rust/ops/backup_alert.py /etc/tsz-rust/backup-oss.json %i
+TimeoutStartSec=2min

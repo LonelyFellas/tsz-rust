@@ -15,6 +15,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 import postgresql_backup_job as job
 import backup_archive_ssh as archive_ssh
+import backup_archive_oss as archive_oss
+import backup_alert
 import postgresql_restore_job as restore_job
 from deploy_test import measured_phase
 
@@ -110,6 +112,119 @@ class BackupJobTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'archive_digest_mismatch'):
                     archive_ssh.archive(config, file, 'a' * 64)
                 self.assertFalse(any('mv ' in str(call) for call in run.call_args_list))
+
+    def test_oss_archive_readback_and_fetch_verify_actual_bytes(self):
+        class Remote:
+            def __init__(self):
+                self.objects = {}
+                self.encrypted = True
+            def put_object(self, key, source, headers):
+                from types import SimpleNamespace
+                if key in self.objects:
+                    raise archive_oss.ArchiveError('duplicate')
+                self.assert_headers = headers
+                self.objects[key] = source.read()
+                return SimpleNamespace(status=200)
+            def get_object(self, key):
+                stream = io.BytesIO(self.objects[key])
+                stream.headers = {'x-oss-server-side-encryption': 'AES256' if self.encrypted else ''}
+                return stream
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'scheduled-example' / 'backup.dump'
+            source.parent.mkdir()
+            source.write_bytes(b'recoverable archive')
+            digest = job.sha256(source)
+            remote = Remote()
+            result = archive_oss.archive(remote, 'private-bucket', source, digest)
+            self.assertEqual((result['sha256'], result['bytes']), (digest, source.stat().st_size))
+            self.assertEqual(remote.assert_headers['x-oss-forbid-overwrite'], 'true')
+            self.assertEqual(remote.assert_headers['x-oss-object-acl'], 'private')
+            recovered = root / 'recovered.dump'
+            archive_oss.fetch(remote, source.parent.name, digest, recovered)
+            self.assertEqual(recovered.read_bytes(), source.read_bytes())
+            with self.assertRaisesRegex(archive_oss.ArchiveError, 'destination_exists'):
+                archive_oss.fetch(remote, source.parent.name, digest, recovered)
+            self.assertEqual(recovered.read_bytes(), source.read_bytes())
+            remote.objects[next(iter(remote.objects))] = b'corrupted'
+            with self.assertRaisesRegex(archive_oss.ArchiveError, 'retrieved_backup_mismatch'):
+                archive_oss.fetch(remote, source.parent.name, digest, root / 'corrupt.dump')
+            self.assertFalse((root / 'corrupt.dump').exists())
+            remote.encrypted = False
+            with self.assertRaisesRegex(archive_oss.ArchiveError, 'remote_encryption_unverified'):
+                archive_oss.fetch(remote, source.parent.name, digest, root / 'unencrypted.dump')
+            self.assertFalse((root / 'unencrypted.dump').exists())
+
+            class CorruptReadback(Remote):
+                def get_object(self, key):
+                    stream = io.BytesIO(b'wrong remote bytes')
+                    stream.headers = {'x-oss-server-side-encryption': 'AES256'}
+                    return stream
+            with self.assertRaisesRegex(archive_oss.ArchiveError, 'remote_backup_mismatch'):
+                archive_oss.archive(CorruptReadback(), 'private-bucket', source, digest)
+
+    def test_oss_config_requires_owner_only_and_safe_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'storage.json'
+            path.write_text(json.dumps({'endpoint': 'https://oss-cn-heyuan.aliyuncs.com',
+                                        'region': 'cn-heyuan', 'bucket': 'private-bucket',
+                                        'access_key_id': 'id', 'access_key_secret': 'secret'}))
+            path.chmod(0o644)
+            with self.assertRaisesRegex(archive_oss.ArchiveError, 'insecure_storage_config'):
+                archive_oss.read_config(path)
+            path.chmod(0o600)
+            self.assertEqual(archive_oss.read_config(path)['region'], 'cn-heyuan')
+            with self.assertRaisesRegex(archive_oss.ArchiveError, 'invalid_backup_identity'):
+                archive_oss.identity('scheduled-../escape', 'a' * 64)
+
+    def test_oss_requires_private_unversioned_bucket(self):
+        from types import SimpleNamespace
+        config = {'access_key_id': 'id', 'access_key_secret': 'secret',
+                  'endpoint': 'https://oss-cn-heyuan.aliyuncs.com',
+                  'bucket': 'private-bucket', 'region': 'cn-heyuan'}
+        for acl, blocked, versioning, expected in (('private', True, None, None),
+                                                   ('public-read', True, None, 'bucket_not_private'),
+                                                   ('private', False, None, 'public_access_not_blocked'),
+                                                   ('private', True, 'Enabled', 'bucket_versioning_unsupported'),
+                                                   ('private', True, 'Suspended', 'bucket_versioning_unsupported')):
+            with self.subTest(acl=acl, blocked=blocked, versioning=versioning):
+                bucket = SimpleNamespace(get_bucket_acl=lambda: SimpleNamespace(acl=acl),
+                                         get_bucket_public_access_block=lambda: SimpleNamespace(block_public_access=blocked),
+                                         get_bucket_versioning=lambda: SimpleNamespace(status=versioning))
+                fake_oss = SimpleNamespace(AuthV4=lambda *args: object(), Bucket=lambda *args, **kwargs: bucket)
+                with patch.dict(sys.modules, {'oss2': fake_oss}):
+                    if expected:
+                        with self.assertRaisesRegex(archive_oss.ArchiveError, expected):
+                            archive_oss.connect(config)
+                    else:
+                        self.assertIs(archive_oss.connect(config), bucket)
+
+    def test_cloud_monitor_alert_reports_only_known_service_without_secrets(self):
+        class Request:
+            def __init__(self):
+                self.params = {}
+            def set_domain(self, value): self.domain = value
+            def set_version(self, value): self.version = value
+            def set_action_name(self, value): self.action = value
+            def set_method(self, value): self.method = value
+            def set_protocol_type(self, value): self.protocol = value
+            def add_query_param(self, key, value): self.params[key] = value
+        class Client:
+            def do_action_with_exception(self, request):
+                self.request = request
+                return b'{"Code":"200"}'
+        request, client = Request(), Client()
+        result = backup_alert.report({'monitor_group_id': '123'}, 'tsz-backup.service',
+                                     lambda: (client, request))
+        self.assertEqual(result['status'], 'reported')
+        self.assertEqual(request.protocol, 'https')
+        self.assertEqual(request.params['EventInfo.1.GroupId'], '123')
+        self.assertEqual(request.params['EventInfo.1.EventName'], 'tsz_backup_failure')
+        self.assertNotIn('DATABASE_URL', str(request.params))
+        with self.assertRaisesRegex(archive_oss.ArchiveError, 'invalid_alert_unit'):
+            backup_alert.report({'monitor_group_id': '123'}, 'unknown.service', lambda: (client, request))
+        with self.assertRaisesRegex(archive_oss.ArchiveError, 'invalid_monitor_group'):
+            backup_alert.report({'monitor_group_id': '0'}, 'tsz-backup.service', lambda: (client, request))
 
     def test_restore_fetches_exact_bytes_and_cleans_after_restore_failure(self):
         for fail in (False, True):
