@@ -4,7 +4,7 @@
 
 超管可通过 `GET /api/v1/admin/opencode` 查询服务器的 OpenCode 连接状态，`POST /api/v1/admin/opencode/login` 发起设备授权，`GET/DELETE /api/v1/admin/opencode/login/{attempt_id}` 查询或取消。只返回连接标志、官方授权链接、临时请求 ID、过期时间及 `pending/complete/failed/expired` 状态，不返回任何 Console 凭证或原始异常。成功响应 `Cache-Control: no-store`；全部接口重新核对当前超管角色。
 
-配置项为 `OPENCODE_SERVER_URL` 与 `OPENCODE_SERVER_PASSWORD`，需要真实 OpenCode v2 服务（已验证 v2.1.4）。凭证保存在 OpenCode 自身的数据目录，业务库不新增表；`connected` 仅表示存在已保存连接，不证明额度或模型可用。此次不改变 Agent 的模型调用方式。主任务记录在前端仓库 `docs/features/opencode-connect/README.md`。
+配置项为 `OPENCODE_SERVER_URL` 与 `OPENCODE_SERVER_PASSWORD`，需要真实 OpenCode v2 服务（已验证 v2.1.4）。凭证保存在 OpenCode 自身的数据目录，业务库不新增表；`connected` 仅表示存在已保存连接，不证明额度或模型可用。模型目录、API Key 接入与 Agent 出题模型选择见前端仓库 `docs/features/opencode-models/README.md`；需配套 Agent `0005` 迁移及 API/worker 更新。主任务记录在前端仓库 `docs/features/opencode-connect/README.md`。
 
 本文说明当前仓库的对接入口与兼容边界，不记录线上部署结论。运行环境是否具备某项能力，须核对该环境的部署版本、配置与实际验收结果。
 
