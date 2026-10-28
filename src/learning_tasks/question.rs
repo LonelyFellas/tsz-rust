@@ -17,6 +17,8 @@ pub const GRADING_VERSION: &str = "spelling_exact_v1";
 pub const ANSWER_NORMALIZATION_VERSION: i16 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnswerSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<crate::question_bank::learning::ChoiceSnapshot>,
     pub answers: Vec<String>,
     pub keys: Vec<String>,
     pub normalization_version: i16,
@@ -90,7 +92,7 @@ fn select_definition<'a>(
                 .find(|d| rank(definition_level(d)) == Some(best))
         })
 }
-fn leaks(prompt: &str, key: &str) -> bool {
+pub(crate) fn leaks(prompt: &str, key: &str) -> bool {
     // Latin word boundaries allow “cat” in “category” but reject “猫 cat / cat 猫”.
     let text = key_v1(prompt);
     static WORD_CHAR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
@@ -149,6 +151,7 @@ pub fn build_candidates(
                     continue;
                 }
                 let mut answer = AnswerSnapshot {
+                    choice: None,
                     answers: vec![],
                     keys: vec![],
                     normalization_version: ANSWER_NORMALIZATION_VERSION,
@@ -266,6 +269,7 @@ mod tests {
         assert_eq!(business_window(before).0.to_string(), "2026-10-07");
         assert_eq!(business_window(after).0.to_string(), "2026-10-08");
         let snapshot = AnswerSnapshot {
+            choice: None,
             answers: vec!["don't".into()],
             keys: vec!["don't".into()],
             normalization_version: 1,
@@ -280,6 +284,7 @@ mod tests {
             ("ＣＥＮＴＥＲ", "center"),
         ] {
             let historical = AnswerSnapshot {
+                choice: None,
                 answers: vec![expected_key.into()],
                 keys: vec![expected_key.into()],
                 normalization_version: 1,

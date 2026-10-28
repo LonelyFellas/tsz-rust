@@ -65,6 +65,14 @@ pub(super) async fn pool_for(
     auth: &AuthUser,
     ids: &[Uuid],
 ) -> Result<(CandidatePool, i64, LearningContext), AppError> {
+    pool_for_type(tx, auth, ids, false).await
+}
+pub(super) async fn pool_for_type(
+    tx: &mut Tx<'_>,
+    auth: &AuthUser,
+    ids: &[Uuid],
+    choice: bool,
+) -> Result<(CandidatePool, i64, LearningContext), AppError> {
     let context = learner(tx, auth).await?;
     let access = sources(tx, auth, ids).await?;
     if access.lists.len() != ids.len() {
@@ -74,7 +82,12 @@ pub(super) async fn pool_for(
     if entries.len() > 1000 {
         return Err(invalid("来源超过 1000 个词条，请拆分任务"));
     }
-    let mut candidates = build_candidates(&access.learning_sources()?, &context)?;
+    let mut candidates = if choice {
+        crate::question_bank::learning::build_pool(tx, &access.learning_sources()?, &context)
+            .await?
+    } else {
+        build_candidates(&access.learning_sources()?, &context)?
+    };
     candidates.exclusions.unavailable_entries = entries
         .iter()
         .filter(|e| !access.entries.contains_key(e))
@@ -512,13 +525,22 @@ pub async fn answer(
     }
     let snapshot: AnswerSnapshot =
         serde_json::from_value(q.answer_snapshot.clone()).map_err(AppError::internal)?;
-    let (normalized, correct) = grade_spelling(&snapshot, &input.answer)?;
+    let (normalized, correct) = if row.question_type == crate::question_bank::learning::CHOICE {
+        crate::question_bank::learning::grade(&snapshot, &input.answer)?
+    } else {
+        grade_spelling(&snapshot, &input.answer)?
+    };
     let access = sources_for_questions(&mut tx, auth, &lists, &row, &qs).await?;
     let view = run_view(&mut tx, &row, &qs, &access).await?;
     if view.state != LearningRunState::Active
         || t.state != LearningTaskState::Active
         || !access.available(q)
-        || row.grading_version != GRADING_VERSION
+        || row.grading_version
+            != if row.question_type == crate::question_bank::learning::CHOICE {
+                crate::question_bank::learning::GRADING
+            } else {
+                GRADING_VERSION
+            }
     {
         if view.state != row.state {
             sqlx::query("UPDATE learning_runs SET state=$2 WHERE id=$1")
@@ -546,7 +568,7 @@ pub async fn answer(
     if answered == i64::from(row.target_count) {
         completed = true;
         let completion_id = Uuid::now_v7();
-        sqlx::query("INSERT INTO learning_completions(id,run_id,task_id,user_id,task_type,business_day,task_revision,target_count,answered_count,correct_count,completed_at,generation_version,grading_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)").bind(completion_id).bind(id).bind(task_id).bind(auth.subject).bind(row.task_type).bind(row.business_day).bind(row.task_revision).bind(row.target_count).bind(answered as i32).bind(correct_count as i32).bind(at).bind(&row.generation_version).bind(&row.grading_version).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO learning_completions(id,run_id,task_id,user_id,task_type,business_day,task_revision,target_count,answered_count,correct_count,completed_at,generation_version,grading_version,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)").bind(completion_id).bind(id).bind(task_id).bind(auth.subject).bind(row.task_type).bind(row.business_day).bind(row.task_revision).bind(row.target_count).bind(answered as i32).bind(correct_count as i32).bind(at).bind(&row.generation_version).bind(&row.grading_version).bind(&row.question_type).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("UPDATE learning_runs SET state='completed' WHERE id=$1")
             .bind(id)
             .execute(&mut *tx)
@@ -590,7 +612,7 @@ pub async fn answer(
     if completed && !access.grace.is_empty() {
         super::plans::cancel_cycles(&mut tx, task_id).await?;
     }
-    if memory_enabled {
+    if memory_enabled && row.question_type == "spelling_zh_to_en" {
         crate::learning_memory::record_answer(
             &mut tx,
             auth.subject,
@@ -642,13 +664,13 @@ pub async fn list(
     super::plans::require_legacy_in(&mut tx, auth, None).await?;
     let state = query.state.unwrap_or(LearningTaskState::Active);
     let total: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM learning_tasks WHERE user_id=$1 AND state=$2")
+        sqlx::query_scalar("SELECT count(*) FROM learning_tasks WHERE user_id=$1 AND state=$2 AND question_type='spelling_zh_to_en'")
             .bind(auth.subject)
             .bind(state)
             .fetch_one(&mut *tx)
             .await
             .map_err(AppError::internal)?;
-    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM learning_tasks WHERE user_id=$1 AND state=$2 ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4").bind(auth.subject).bind(state).bind(i64::from(s)).bind(i64::from(p-1)*i64::from(s)).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM learning_tasks WHERE user_id=$1 AND state=$2 AND question_type='spelling_zh_to_en' ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4").bind(auth.subject).bind(state).bind(i64::from(s)).bind(i64::from(p-1)*i64::from(s)).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
     let mut items = vec![];
     for id in ids {

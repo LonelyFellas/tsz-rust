@@ -14,6 +14,9 @@ pub struct LearningSchedule {
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewLearningPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub question_type: Option<String>,
     pub task_type: LearningTaskType,
     pub wordlist_ids: Vec<Uuid>,
     #[schema(required = true)]
@@ -24,6 +27,9 @@ pub struct PreviewLearningPlan {
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLearningPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub question_type: Option<String>,
     pub idempotency_key: Uuid,
     pub name: String,
     pub task_type: LearningTaskType,
@@ -37,6 +43,7 @@ pub struct CreateLearningPlan {
 impl CreateLearningPlan {
     pub fn preview(&self) -> PreviewLearningPlan {
         PreviewLearningPlan {
+            question_type: self.question_type.clone(),
             task_type: self.task_type,
             wordlist_ids: self.wordlist_ids.clone(),
             daily_question_count: self.daily_question_count,

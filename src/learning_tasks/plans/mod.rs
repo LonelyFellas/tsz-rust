@@ -63,6 +63,13 @@ fn digest(value: &impl serde::Serialize) -> Result<String, AppError> {
     Ok(hash(value)?.iter().map(|b| format!("{b:02x}")).collect())
 }
 fn validate(input: &PreviewLearningPlan) -> Result<(), AppError> {
+    if input
+        .question_type
+        .as_deref()
+        .is_some_and(|t| !["spelling_zh_to_en", "choice_zh_to_en"].contains(&t))
+    {
+        return Err(invalid("题型无效"));
+    }
     service::validate(
         input.task_type,
         &input.wordlist_ids,
@@ -99,7 +106,13 @@ async fn preview_in(
     earliest: Option<NaiveDate>,
 ) -> Result<(LearningPlanPreview, Vec<Candidate>), AppError> {
     validate(input)?;
-    let (pool, entry_count, settings) = service::pool_for(tx, auth, &input.wordlist_ids).await?;
+    let (pool, entry_count, settings) = service::pool_for_type(
+        tx,
+        auth,
+        &input.wordlist_ids,
+        input.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE),
+    )
+    .await?;
     let custom_word_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM wordlist_items WHERE wordlist_id=ANY($1) AND entry_id IS NULL",
     )
@@ -115,7 +128,14 @@ async fn preview_in(
         .map(|n| ceil(count, i64::from(n)));
     let mut reasons = vec![];
     if count == 0 {
-        reasons.push("没有可出题内容，请更换词表；自定义词暂不参与出题".into());
+        reasons.push(
+            if input.question_type.as_deref() == Some(crate::question_bank::learning::CHOICE) {
+                "所选词表、级别与英美档位没有已审核可用单选题"
+            } else {
+                "没有可出题内容，请更换词表；自定义词暂不参与出题"
+            }
+            .into(),
+        );
     }
     let available = input.schedule.as_ref().map(|s| {
         if s.start_date < day && earliest.is_none() {
@@ -172,10 +192,15 @@ async fn write_cycle(
     candidates: &[Candidate],
 ) -> Result<Uuid, AppError> {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO learning_cycles(id,task_id,user_id,cycle_number,state,total_count,settings_snapshot,generation_version,grading_version,after_cycle_id,earliest_day) VALUES($1,$2,$3,$4,'active',$5,$6,$7,$8,$9,$10)").bind(id).bind(task_id).bind(auth.subject).bind(predecessor.map_or(1, |c| c.cycle_number+1)).bind(candidates.len() as i32).bind(serde_json::to_value(&preview.settings).map_err(AppError::internal)?).bind(GENERATION_VERSION).bind(GRADING_VERSION).bind(predecessor.map(|c|c.id)).bind(earliest).execute(&mut **tx).await.map_err(AppError::internal)?;
+    let choice = candidates
+        .first()
+        .is_some_and(|c| c.answer.choice.is_some());
+    sqlx::query("INSERT INTO learning_cycles(id,task_id,user_id,cycle_number,state,total_count,settings_snapshot,generation_version,grading_version,after_cycle_id,earliest_day) VALUES($1,$2,$3,$4,'active',$5,$6,$7,$8,$9,$10)").bind(id).bind(task_id).bind(auth.subject).bind(predecessor.map_or(1, |c| c.cycle_number+1)).bind(candidates.len() as i32).bind(serde_json::to_value(&preview.settings).map_err(AppError::internal)?).bind(if choice {"choice_bank_v1"} else {GENERATION_VERSION}).bind(if choice {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(predecessor.map(|c|c.id)).bind(earliest).execute(&mut **tx).await.map_err(AppError::internal)?;
     for (position, c) in candidates.iter().enumerate() {
+        let mut answer = c.answer.clone();
+        crate::question_bank::learning::shuffle_answer(&mut answer);
         sqlx::query("INSERT INTO learning_cycle_units(id,cycle_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
-   .bind(Uuid::now_v7()).bind(id).bind(position as i32).bind(c.source_wordlist_id).bind(c.source_revision).bind(c.source_membership_id).bind(c.source_public_generation).bind(c.entry_id).bind(c.entry_archive_generation).bind(c.publication_id).bind(c.pos_id).bind(c.sense_id).bind(c.definition_id).bind(&c.form_ids).bind(&c.unit_key).bind(serde_json::to_value(&c.prompt).map_err(AppError::internal)?).bind(serde_json::to_value(&c.answer).map_err(AppError::internal)?).bind(hash(c)?).execute(&mut **tx).await.map_err(AppError::internal)?;
+   .bind(Uuid::now_v7()).bind(id).bind(position as i32).bind(c.source_wordlist_id).bind(c.source_revision).bind(c.source_membership_id).bind(c.source_public_generation).bind(c.entry_id).bind(c.entry_archive_generation).bind(c.publication_id).bind(c.pos_id).bind(c.sense_id).bind(c.definition_id).bind(&c.form_ids).bind(&c.unit_key).bind(serde_json::to_value(&c.prompt).map_err(AppError::internal)?).bind(serde_json::to_value(&answer).map_err(AppError::internal)?).bind(hash(c)?).execute(&mut **tx).await.map_err(AppError::internal)?;
     }
     Ok(id)
 }
@@ -207,8 +232,8 @@ pub async fn create(
     }
     let id = Uuid::now_v7();
     let s = input.schedule.as_ref();
-    sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,daily_question_count,ends_at,create_key,create_hash,generation_policy,start_date,end_date) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'coverage_v1',$10,$11)")
- .bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.task_type).bind(&input.wordlist_ids).bind(input.daily_question_count).bind(s.map(|s|boundary(s.end_date+Duration::days(1)))).bind(input.idempotency_key).bind(h).bind(s.map(|s|s.start_date)).bind(s.map(|s|s.end_date)).execute(&mut *tx).await.map_err(AppError::internal)?;
+    sqlx::query("INSERT INTO learning_tasks(id,user_id,name,task_type,wordlist_ids,daily_question_count,ends_at,create_key,create_hash,generation_policy,start_date,end_date,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'coverage_v1',$10,$11,$12)")
+ .bind(id).bind(auth.subject).bind(input.name.trim()).bind(input.task_type).bind(&input.wordlist_ids).bind(input.daily_question_count).bind(s.map(|s|boundary(s.end_date+Duration::days(1)))).bind(input.idempotency_key).bind(h).bind(s.map(|s|s.start_date)).bind(s.map(|s|s.end_date)).bind(input.question_type.as_deref().unwrap_or("spelling_zh_to_en")).execute(&mut *tx).await.map_err(AppError::internal)?;
     let cycle_id = write_cycle(
         &mut tx,
         auth,
@@ -237,7 +262,15 @@ async fn ensure_cycle_sources(
 ) -> Result<(), AppError> {
     let rows = units(tx, id).await?;
     let entries: Vec<_> = rows.iter().map(|u| u.question.entry_id).collect();
-    let access = super::repository::sources_for_units(tx, auth, lists, &entries).await?;
+    let access = super::repository::sources_for_units(
+        tx,
+        auth,
+        lists,
+        &entries,
+        rows.iter()
+            .any(|u| u.question.answer_snapshot.get("choice").is_some()),
+    )
+    .await?;
     if rows.iter().any(|u| !access.available(&u.question)) {
         return Err(unavailable());
     }
@@ -258,7 +291,7 @@ pub(super) async fn require_legacy_in(
     auth: &AuthUser,
     id: Option<Uuid>,
 ) -> Result<(), AppError> {
-    let has:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM learning_tasks WHERE user_id=$1 AND ($2::uuid IS NULL OR id=$2) AND generation_policy='coverage_v1')").bind(auth.subject).bind(id).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
+    let has:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM learning_tasks WHERE user_id=$1 AND ($2::uuid IS NULL OR id=$2) AND generation_policy='coverage_v1' AND ($2::uuid IS NOT NULL OR question_type='spelling_zh_to_en'))").bind(auth.subject).bind(id).fetch_one(&mut **tx).await.map_err(AppError::internal)?;
     if has {
         return Err(conflict("任务功能已更新，请刷新页面后继续"));
     }
@@ -292,7 +325,14 @@ async fn summarize(
     current: Option<&RunRow>,
 ) -> Result<LearningCycle, AppError> {
     let fixed: Vec<_> = rows.iter().map(|u| u.question.entry_id).collect();
-    let access = super::repository::sources_for_units(tx, auth, &t.wordlist_ids, &fixed).await?;
+    let access = super::repository::sources_for_units(
+        tx,
+        auth,
+        &t.wordlist_ids,
+        &fixed,
+        t.question_type.is_some(),
+    )
+    .await?;
     let mut available = 0;
     // Only an active, unexpired run may lend its deletion grace to its own units.
     let time = now(tx).await?;
@@ -341,7 +381,8 @@ async fn source_cards(
     auth: &AuthUser,
     t: &LearningTask,
 ) -> Result<Vec<LearningPlanSource>, AppError> {
-    let access = super::repository::sources_for_units(tx, auth, &t.wordlist_ids, &[]).await?;
+    let access =
+        super::repository::sources_for_units(tx, auth, &t.wordlist_ids, &[], false).await?;
     let mut cards = vec![];
     for id in &t.wordlist_ids {
         let visible = access.lists.contains_key(id);
@@ -525,18 +566,20 @@ pub async fn list(
     pool: &PgPool,
     auth: &AuthUser,
     query: LearningPageQuery,
+    include_choice: bool,
 ) -> Result<LearningPlanPage, AppError> {
     let (p, s) = page(&query)?;
     let mut tx = begin(pool, auth, &[]).await?;
     let state = query.state.unwrap_or(LearningTaskState::Active);
     let total: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM learning_tasks WHERE user_id=$1 AND state=$2")
+        sqlx::query_scalar("SELECT count(*) FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($3 OR question_type='spelling_zh_to_en')")
             .bind(auth.subject)
             .bind(state)
+            .bind(include_choice)
             .fetch_one(&mut *tx)
             .await
             .map_err(AppError::internal)?;
-    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM learning_tasks WHERE user_id=$1 AND state=$2 ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4").bind(auth.subject).bind(state).bind(i64::from(s)).bind(i64::from(p-1)*i64::from(s)).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
+    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM learning_tasks WHERE user_id=$1 AND state=$2 AND ($5 OR question_type='spelling_zh_to_en') ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4").bind(auth.subject).bind(state).bind(i64::from(s)).bind(i64::from(p-1)*i64::from(s)).bind(include_choice).fetch_all(&mut *tx).await.map_err(AppError::internal)?;
     tx.commit().await.map_err(AppError::internal)?;
     let mut items = vec![];
     for id in ids {
@@ -651,7 +694,14 @@ pub async fn start(
         }
         let rows = units(&mut tx, c.id).await?;
         let entries: Vec<_> = rows.iter().map(|u| u.question.entry_id).collect();
-        let access = super::repository::sources_for_units(&mut tx, auth, &lists, &entries).await?;
+        let access = super::repository::sources_for_units(
+            &mut tx,
+            auth,
+            &lists,
+            &entries,
+            t.question_type.is_some(),
+        )
+        .await?;
         let pending: Vec<_> = rows
             .iter()
             .filter(|u| u.covered_answer_id.is_none() && access.available(&u.question))
@@ -671,8 +721,8 @@ pub async fn start(
         };
         let run_id = Uuid::now_v7();
         let expires = daily.then(|| t.ends_at.map_or(window_end, |e| e.min(window_end)));
-        sqlx::query("INSERT INTO learning_runs(id,task_id,user_id,task_revision,task_type,business_day,window_start,window_end,expires_at,settings_snapshot,seed,target_count,state,generation_version,grading_version,cycle_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active',$13,$14,$15)")
-  .bind(run_id).bind(id).bind(auth.subject).bind(t.revision).bind(t.task_type).bind(daily.then_some(day)).bind(daily.then_some(window_start)).bind(daily.then_some(window_end)).bind(expires).bind(&c.settings_snapshot).bind(Uuid::now_v7()).bind(selected.len() as i32).bind(GENERATION_VERSION).bind(GRADING_VERSION).bind(c.id).execute(&mut *tx).await.map_err(AppError::internal)?;
+        sqlx::query("INSERT INTO learning_runs(id,task_id,user_id,task_revision,task_type,business_day,window_start,window_end,expires_at,settings_snapshot,seed,target_count,state,generation_version,grading_version,cycle_id,question_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'active',$13,$14,$15,$16)")
+  .bind(run_id).bind(id).bind(auth.subject).bind(t.revision).bind(t.task_type).bind(daily.then_some(day)).bind(daily.then_some(window_start)).bind(daily.then_some(window_end)).bind(expires).bind(&c.settings_snapshot).bind(Uuid::now_v7()).bind(selected.len() as i32).bind(if t.question_type.is_some() {"choice_bank_v1"} else {GENERATION_VERSION}).bind(if t.question_type.as_deref()==Some(crate::question_bank::learning::CHOICE) {crate::question_bank::learning::GRADING} else {GRADING_VERSION}).bind(c.id).bind(t.question_type.as_deref().unwrap_or("spelling_zh_to_en")).execute(&mut *tx).await.map_err(AppError::internal)?;
         sqlx::query("INSERT INTO learning_questions(id,run_id,cycle_id,cycle_unit_id,position,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint) SELECT gen_random_uuid(),$1,cycle_id,id,(row_number() OVER(ORDER BY position)-1)::integer,source_wordlist_id,source_revision,source_membership_id,source_public_generation,entry_id,entry_archive_generation,publication_id,pos_id,sense_id,definition_id,form_ids,unit_key,prompt_snapshot,answer_snapshot,fingerprint FROM learning_cycle_units WHERE id=ANY($2) ORDER BY position").bind(run_id).bind(&selected).execute(&mut *tx).await.map_err(AppError::internal)?;
         run_id
     };
@@ -746,6 +796,7 @@ async fn cycle_preview_in(
         earliest = earliest.max(m.start_date.unwrap_or(day));
     }
     let req = PreviewLearningPlan {
+        question_type: t.question_type.clone(),
         task_type: t.task_type,
         wordlist_ids: t.wordlist_ids.clone(),
         daily_question_count: t.daily_question_count,

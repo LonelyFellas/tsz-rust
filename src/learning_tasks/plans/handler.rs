@@ -6,6 +6,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::State,
+    http::HeaderMap,
     routing::{get, post},
 };
 pub fn router() -> Router<AppState> {
@@ -31,25 +32,38 @@ pub fn router() -> Router<AppState> {
 pub async fn preview(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     ApiJson(input): ApiJson<PreviewLearningPlan>,
 ) -> Result<Json<LearningPlanPreview>, AppError> {
+    crate::question_bank::learning::require_capability(&headers, input.question_type.as_deref())?;
     Ok(Json(super::preview(&state.pool, &auth, input).await?))
 }
 #[utoipa::path(post,path="/api/v1/me/learning-plans",tag="learning_plans",security(("bearer_auth"=[])),request_body=CreateLearningPlan,responses((status=200,description="学习计划",body=LearningPlan),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="需要学生资格"),(status=404,description="资源不存在"),(status=409,description="版本、来源、预览或请求键冲突"),(status=422,description="JSON不符合契约")))]
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     ApiJson(input): ApiJson<CreateLearningPlan>,
 ) -> Result<Json<LearningPlan>, AppError> {
+    crate::question_bank::learning::require_capability(&headers, input.question_type.as_deref())?;
     Ok(Json(super::create(&state.pool, &auth, input).await?))
 }
 #[utoipa::path(get,path="/api/v1/me/learning-plans",tag="learning_plans",security(("bearer_auth"=[])),params(LearningPageQuery),responses((status=200,description="学习计划",body=LearningPlanPage),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="需要学生资格"),(status=404,description="资源不存在"),(status=409,description="版本、来源、预览或请求键冲突"),(status=422,description="JSON不符合契约")))]
 pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     ApiQuery(query): ApiQuery<LearningPageQuery>,
 ) -> Result<Json<LearningPlanPage>, AppError> {
-    Ok(Json(super::list(&state.pool, &auth, query).await?))
+    Ok(Json(
+        super::list(
+            &state.pool,
+            &auth,
+            query,
+            crate::question_bank::learning::capable(&headers),
+        )
+        .await?,
+    ))
 }
 #[utoipa::path(get,path="/api/v1/me/learning-plans/{id}",tag="learning_plans",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,description="学习计划",body=LearningPlan),(status=400,description="参数无效"),(status=401,description="会话失效"),(status=403,description="需要学生资格"),(status=404,description="资源不存在"),(status=409,description="版本、来源、预览或请求键冲突"),(status=422,description="JSON不符合契约")))]
 pub async fn detail(
