@@ -266,6 +266,10 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 
 ## 超管 AI 账本
 
+费用通过新增超管接口 `/api/v1/admin/ai-ledger/costs` 与 `/api/v1/admin/ai-ledger/cost-overview` 获取，不改变既有账本和所有管理员共用的首页响应。分别对应 Agent `/v1/model-costs` 和 `/v1/model-costs/overview`；价格快照、人民币十进制金额、已计价及未知数量均按新 DTO 透传。费用区块只在超管首页挂载。累计/今日/本周/本月为北京时间自然周期，金额必须标为预估，部分未知时标为已知部分。
+
+先显式执行 Agent 迁移 `0004` 并更新服务，再发布 Rust，最后发布 admin。未更新的 Agent 返回缺少端点时，新费用区块显示不可用；其他首页数据和原账本接口继续可用。跨仓主记录为 `tsz-agent/docs/features/model-cost-overview/README.md`，包括计价依据覆盖期与维护要求。
+
 `GET /api/v1/admin/ai-ledger` 只接受当前有效的 `super_admin`，不通过业务权限标签委派。参数 `page`（1–1,000,000）、`page_size`（1–100）、可选 UUID `run_id`；返回 `AiLedgerPage`。后端复用 `VOCABULARY_AGENT_*` 连接读取 Agent `/v1/model-calls`，不连接 Agent 数据库，不向浏览器下发服务凭据、提示词或模型原文。上游缺少端点、超时、响应过大或契约不符时返回脱敏 503，成功响应禁止缓存。
 
 汇总覆盖整个筛选结果，缓存命中率按已知 token 加权，缺失观测和费用为 `null`。主记录位于 `tsz-agent/docs/features/admin-ai-ledger/README.md`。先显式迁移 Agent `0003` 并更新其服务，再更新 Rust，最后开放 admin `/ai-ledger`；本仓无新增数据库迁移，现有 API 响应不变。

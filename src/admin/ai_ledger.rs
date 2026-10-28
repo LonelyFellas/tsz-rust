@@ -5,7 +5,7 @@ use axum::{
     http::header,
     response::{IntoResponse, Response},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -104,6 +104,93 @@ pub struct AiLedgerPage {
     pub summary: AiLedgerSummary,
 }
 
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub enum AiCostCurrency {
+    #[serde(rename = "CNY")]
+    Cny,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiPricingTariff {
+    Peak,
+    OffPeak,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub enum AiCostTimezone {
+    #[serde(rename = "Asia/Shanghai")]
+    Beijing,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiModelPricing {
+    pub version: String,
+    pub model: String,
+    pub currency: AiCostCurrency,
+    pub tariff: AiPricingTariff,
+    pub quoted_at: DateTime<Utc>,
+    pub input_hit_per_million: String,
+    pub input_miss_per_million: String,
+    pub output_per_million: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiCallCost {
+    pub call_id: Uuid,
+    #[schema(required = true)]
+    pub estimated_cost_cny: Option<String>,
+    #[schema(required = true)]
+    pub pricing: Option<AiModelPricing>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiCostTotals {
+    #[schema(required = true)]
+    pub estimated_cost_cny: Option<String>,
+    pub total_calls: u64,
+    pub priced_calls: u64,
+    pub unknown_calls: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiCostPeriod {
+    #[schema(required = true)]
+    pub estimated_cost_cny: Option<String>,
+    pub total_calls: u64,
+    pub priced_calls: u64,
+    pub unknown_calls: u64,
+    #[schema(required = true)]
+    pub start: Option<DateTime<Utc>>,
+    pub end: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiCostOverview {
+    pub generated_at: DateTime<Utc>,
+    pub timezone: AiCostTimezone,
+    pub currency: AiCostCurrency,
+    pub pricing_version: String,
+    pub pricing_valid_until: NaiveDate,
+    pub total: AiCostPeriod,
+    pub today: AiCostPeriod,
+    pub week: AiCostPeriod,
+    pub month: AiCostPeriod,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiCostLedgerPage {
+    pub ledger: AiLedgerPage,
+    pub costs: Vec<AiCallCost>,
+    pub cost_summary: AiCostTotals,
+}
+
 fn unavailable() -> AppError {
     AppError::unavailable(
         ErrorCode::ServiceUnavailable,
@@ -128,6 +215,19 @@ pub async fn list(
     ApiQuery(query): ApiQuery<AiLedgerQuery>,
 ) -> Result<Response, AppError> {
     require_super_admin(&state, &auth).await?;
+    let (page, page_size) = pagination(&query)?;
+    let bytes = read_agent(&state, "/v1/model-calls", Some(&query)).await?;
+    let result: AiLedgerPage = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    if result.page != page
+        || result.page_size != page_size
+        || result.items.len() > page_size as usize
+    {
+        return Err(unavailable());
+    }
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response())
+}
+
+fn pagination(query: &AiLedgerQuery) -> Result<(u32, u32), AppError> {
     let page = query.page.unwrap_or(1);
     let page_size = query.page_size.unwrap_or(20);
     if !(1..=1_000_000).contains(&page) || !(1..=100).contains(&page_size) {
@@ -136,10 +236,19 @@ pub async fn list(
             "分页参数无效",
         ));
     }
+    Ok((page, page_size))
+}
+
+async fn read_agent(
+    state: &AppState,
+    path: &str,
+    query: Option<&AiLedgerQuery>,
+) -> Result<Vec<u8>, AppError> {
     let config = state.vocabulary_agent.as_ref().ok_or_else(unavailable)?;
-    let mut url = reqwest::Url::parse(&format!("{}/v1/model-calls", config.base_url))
-        .map_err(|_| unavailable())?;
-    {
+    let mut url =
+        reqwest::Url::parse(&format!("{}{path}", config.base_url)).map_err(|_| unavailable())?;
+    if let Some(query) = query {
+        let (page, page_size) = pagination(query)?;
         let mut params = url.query_pairs_mut();
         params.append_pair("page", &page.to_string());
         params.append_pair("page_size", &page_size.to_string());
@@ -164,13 +273,39 @@ pub async fn list(
         }
         bytes.extend_from_slice(&chunk);
     }
-    // Typed projection never forwards arbitrary upstream fields or error bodies.
-    let result: AiLedgerPage = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
-    if result.page != page
-        || result.page_size != page_size
-        || result.items.len() > page_size as usize
+    Ok(bytes)
+}
+
+#[utoipa::path(get, path="/api/v1/admin/ai-ledger/costs", tag="admin", security(("bearer_auth"=[])),
+    params(AiLedgerQuery), responses((status=200,description="超管预估费用账本",body=AiCostLedgerPage),
+    (status=400,description="无效查询"),(status=401,description="会话失效"),(status=403,description="仅超管可访问"),(status=503,description="费用统计不可用")))]
+pub async fn costs(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiQuery(query): ApiQuery<AiLedgerQuery>,
+) -> Result<Response, AppError> {
+    require_super_admin(&state, &auth).await?;
+    let (page, page_size) = pagination(&query)?;
+    let bytes = read_agent(&state, "/v1/model-costs", Some(&query)).await?;
+    let result: AiCostLedgerPage = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    if result.ledger.page != page
+        || result.ledger.page_size != page_size
+        || result.ledger.items.len() > page_size as usize
     {
         return Err(unavailable());
     }
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response())
+}
+
+#[utoipa::path(get, path="/api/v1/admin/ai-ledger/cost-overview", tag="admin", security(("bearer_auth"=[])),
+    responses((status=200,description="累计及北京时间今日/本周/本月预估费用",body=AiCostOverview),
+    (status=401,description="会话失效"),(status=403,description="仅超管可访问"),(status=503,description="费用统计不可用")))]
+pub async fn cost_overview(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+) -> Result<Response, AppError> {
+    require_super_admin(&state, &auth).await?;
+    let bytes = read_agent(&state, "/v1/model-costs/overview", None).await?;
+    let result: AiCostOverview = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response())
 }

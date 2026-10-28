@@ -18,6 +18,11 @@ pub fn router(_state: AppState) -> Router<AppState> {
 
     Router::new()
         .route("/ai-ledger", get(admin::ai_ledger::list))
+        .route("/ai-ledger/costs", get(admin::ai_ledger::costs))
+        .route(
+            "/ai-ledger/cost-overview",
+            get(admin::ai_ledger::cost_overview),
+        )
         .route(
             "/dashboard/overview",
             get(crate::dashboard::handler::overview),
