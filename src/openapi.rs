@@ -41,6 +41,10 @@ use utoipa::{
         crate::question_bank::handler::batch_items,
         crate::question_bank::handler::cancel_batch,
         crate::admin::ai_ledger::list,
+        crate::admin::opencode::connection,
+        crate::admin::opencode::login,
+        crate::admin::opencode::login_status,
+        crate::admin::opencode::cancel_login,
         crate::admin::ai_ledger::costs,
         crate::admin::ai_ledger::cost_overview,
         crate::question_bank::handler::candidate_list,
@@ -330,6 +334,9 @@ use utoipa::{
     components(
         schemas(
             crate::admin::ai_ledger::AiLedgerPage,
+            crate::admin::opencode::OpenCodeConnection,
+            crate::admin::opencode::OpenCodeLogin,
+            crate::admin::opencode::OpenCodeLoginStatus,
             crate::admin::ai_ledger::AiCostOverview,
             crate::admin::ai_ledger::AiCostLedgerPage,
             crate::learning_tasks::dto::LearningTaskState,

@@ -17,6 +17,12 @@ pub fn router(_state: AppState) -> Router<AppState> {
         .nest("/speech", speech::preview::router::router());
 
     Router::new()
+        .route("/opencode", get(admin::opencode::connection))
+        .route("/opencode/login", post(admin::opencode::login))
+        .route(
+            "/opencode/login/{attempt_id}",
+            get(admin::opencode::login_status).delete(admin::opencode::cancel_login),
+        )
         .route("/ai-ledger", get(admin::ai_ledger::list))
         .route("/ai-ledger/costs", get(admin::ai_ledger::costs))
         .route(

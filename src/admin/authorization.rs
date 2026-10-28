@@ -70,6 +70,18 @@ pub enum RoutePolicy {
 }
 
 pub const ROUTE_POLICIES: &[(&str, &str, RoutePolicy)] = &[
+    ("GET", "/opencode", RoutePolicy::SuperAdmin),
+    ("POST", "/opencode/login", RoutePolicy::SuperAdmin),
+    (
+        "GET",
+        "/opencode/login/{attempt_id}",
+        RoutePolicy::SuperAdmin,
+    ),
+    (
+        "DELETE",
+        "/opencode/login/{attempt_id}",
+        RoutePolicy::SuperAdmin,
+    ),
     ("GET", "/ai-ledger", RoutePolicy::SuperAdmin),
     ("GET", "/ai-ledger/costs", RoutePolicy::SuperAdmin),
     ("GET", "/ai-ledger/cost-overview", RoutePolicy::SuperAdmin),
