@@ -66,8 +66,6 @@ def restore(config):
         backup = json.loads((root / "latest.json").read_text())
         if backup.get("environment") != "tshb-test" or backup.get("status") != "passed":
             raise BackupError("verified_backup_required")
-        docker_root = command(["docker", "info", "--format", "{{.DockerRootDir}}"]).decode().strip()
-        check_capacity(root, docker_root, backup.get("bytes"))
         identifier = None
         create_attempted = False
         verified = False
@@ -79,6 +77,8 @@ def restore(config):
                   "cleanup_complete": False}
         try:
             write_status(root / "restore-latest.json", result)
+            docker_root = command(["docker", "info", "--format", "{{.DockerRootDir}}"]).decode().strip()
+            check_capacity(root, docker_root, backup.get("bytes"))
             archive = temporary / "backup.dump"
             fetch = config["fetch_command"]
             if not isinstance(fetch, list) or not fetch or not all(isinstance(arg, str) for arg in fetch):

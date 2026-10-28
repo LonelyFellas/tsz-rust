@@ -434,6 +434,7 @@ class BackupJobTests(unittest.TestCase):
                 'environment': 'tshb-test', 'status': 'passed', 'backup_id': 'scheduled-test',
                 'sha256': 'a' * 64, 'bytes': 1024, 'postgresql_major': 18,
             }))
+            (root / 'restore-latest.json').write_text(json.dumps({'status': 'passed', 'backup_id': 'old'}))
             calls = []
             def command(args, **kwargs):
                 calls.append(args)
@@ -445,6 +446,9 @@ class BackupJobTests(unittest.TestCase):
                 with self.assertRaisesRegex(job.BackupError, 'restore_capacity_insufficient'):
                     restore_job.restore(config)
             self.assertFalse(any(args[0] == '/fetch' or args[:2] == ['docker', 'create'] for args in calls))
+            receipt = json.loads((root / 'restore-latest.json').read_text())
+            self.assertEqual((receipt['status'], receipt['backup_id'], receipt['cleanup_complete']),
+                             ('failed', 'scheduled-test', True))
 
     def test_phase_reports_failure_and_heartbeat_without_changing_exception(self):
         timings = []
