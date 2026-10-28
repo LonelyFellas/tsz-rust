@@ -6,7 +6,8 @@
       "Action": [
         "oss:GetBucketAcl",
         "oss:GetBucketPublicAccessBlock",
-        "oss:GetBucketVersioning"
+        "oss:GetBucketVersioning",
+        "oss:GetBucketOverwriteConfig"
       ],
       "Resource": "acs:oss:*:*:REPLACE_WITH_DEDICATED_BUCKET"
     },
@@ -14,11 +15,6 @@
       "Effect": "Allow",
       "Action": ["oss:PutObject", "oss:GetObject"],
       "Resource": "acs:oss:*:*:REPLACE_WITH_DEDICATED_BUCKET/database-backups/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["cms:PutCustomEvent"],
-      "Resource": "*"
     }
   ]
 }

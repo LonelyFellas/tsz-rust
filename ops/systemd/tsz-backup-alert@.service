@@ -7,5 +7,5 @@ Wants=network-online.target
 Type=oneshot
 UMask=0077
 WorkingDirectory=/opt/tsz-rust
-ExecStart=/opt/tsz-rust/backup-venv/bin/python -I /opt/tsz-rust/ops/backup_alert.py /etc/tsz-rust/backup-oss.json %i
+ExecStart=/opt/tsz-rust/backup-venv/bin/python -I /opt/tsz-rust/ops/backup_alert.py /etc/tsz-rust/backup-alert.json %i
 TimeoutStartSec=2min

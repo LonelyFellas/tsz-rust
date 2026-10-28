@@ -64,7 +64,10 @@ def restore(config):
             fetch = config["fetch_command"]
             if not isinstance(fetch, list) or not fetch or not all(isinstance(arg, str) for arg in fetch):
                 raise BackupError("fetch_command_required")
-            command([*fetch, backup["backup_id"], backup["sha256"], str(archive)],
+            fetch_args = [*fetch, backup["backup_id"], backup["sha256"]]
+            if config.get("fetch_expected_bytes") is True:
+                fetch_args.append(str(backup["bytes"]))
+            command([*fetch_args, str(archive)],
                     environment={"PATH": os.environ["PATH"], "LANG": "C.UTF-8"})
             if (not archive.is_file() or archive.stat().st_size != backup["bytes"]
                     or sha256(archive) != backup["sha256"]):

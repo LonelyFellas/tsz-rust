@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import xml.etree.ElementTree as ET
 
 
 class ArchiveError(Exception):
@@ -49,10 +50,31 @@ def connect(config):
     # OSS ignores forbid-overwrite for versioned buckets; do not silently weaken it.
     if bucket.get_bucket_versioning().status not in (None, ""):
         raise ArchiveError("bucket_versioning_unsupported")
+    # SDK 2.19.1 has no wrapper for GetBucketOverwriteConfig. Use its signed
+    # bucket request and fail closed unless one rule covers the whole prefix.
+    response = bucket._do("GET", bucket.bucket_name, "", params={"overwriteConfig": ""})
+    try:
+        body = b""
+        while len(body) <= 65536:
+            block = response.read(min(4096, 65537 - len(body)))
+            if not block:
+                break
+            body += block
+    finally:
+        response.response.close()
+    if len(body) > 65536:
+        raise ArchiveError("overwrite_config_too_large")
+    root = ET.fromstring(body)
+    rules = root.findall("Rule")
+    if not any(rule.findtext("Action") == "forbid"
+               and rule.findtext("Prefix", "") in ("", "database-backups/")
+               and not rule.findtext("Suffix", "")
+               and not rule.findall("Principals/Principal") for rule in rules):
+        raise ArchiveError("overwrite_protection_missing")
     return bucket
 
 
-def digest_stream(stream, output=None):
+def digest_stream(stream, output=None, maximum=None):
     digest, size = hashlib.sha256(), 0
     try:
         while True:
@@ -61,6 +83,8 @@ def digest_stream(stream, output=None):
                 break
             digest.update(block)
             size += len(block)
+            if maximum is not None and size > maximum:
+                raise ArchiveError("backup_exceeds_expected_size")
             if output is not None:
                 output.write(block)
     finally:
@@ -90,15 +114,18 @@ def archive(bucket, bucket_name, file_path, expected):
     if remote.headers.get("x-oss-server-side-encryption") != "AES256":
         remote.close()
         raise ArchiveError("remote_encryption_unverified")
-    remote_digest, remote_size = digest_stream(remote)
+    remote_digest, remote_size = digest_stream(remote, maximum=size)
     if (remote_digest, remote_size) != (expected, size):
         raise ArchiveError("remote_backup_mismatch")
     return {"verified": True, "sha256": expected, "bytes": size,
             "reference": "oss:" + bucket_name + ":" + key}
 
 
-def fetch(bucket, backup_id, expected, destination):
+def fetch(bucket, backup_id, expected, expected_size, destination):
     key = identity(backup_id, expected)
+    if not re.fullmatch(r"[1-9][0-9]*", str(expected_size)) or int(expected_size) > 5 * 1024 ** 3:
+        raise ArchiveError("invalid_expected_size")
+    expected_size = int(expected_size)
     destination = Path(destination)
     # Exclusive create prevents replacing another file or following a pre-existing symlink.
     try:
@@ -111,10 +138,13 @@ def fetch(bucket, backup_id, expected, destination):
             if stream.headers.get("x-oss-server-side-encryption") != "AES256":
                 stream.close()
                 raise ArchiveError("remote_encryption_unverified")
-            actual, size = digest_stream(stream, output)
+            if stream.content_length != expected_size:
+                stream.close()
+                raise ArchiveError("remote_size_mismatch")
+            actual, size = digest_stream(stream, output, maximum=expected_size)
             output.flush()
             os.fsync(output.fileno())
-        if actual != expected or size == 0:
+        if actual != expected or size != expected_size:
             raise ArchiveError("retrieved_backup_mismatch")
     except BaseException:
         destination.unlink(missing_ok=True)
@@ -127,9 +157,9 @@ def main(args):
         config_path, path, expected = args
         config = read_config(config_path)
         return archive(connect(config), config["bucket"], path, expected)
-    if len(args) == 5 and args[0] == "fetch":
-        _, config_path, backup_id, expected, destination = args
-        return fetch(connect(read_config(config_path)), backup_id, expected, destination)
+    if len(args) == 6 and args[0] == "fetch":
+        _, config_path, backup_id, expected, expected_size, destination = args
+        return fetch(connect(read_config(config_path)), backup_id, expected, expected_size, destination)
     raise ArchiveError("invalid_arguments")
 
 
