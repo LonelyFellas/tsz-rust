@@ -1290,3 +1290,85 @@ async fn insufficient_candidates_is_terminal_and_can_be_filled_again(pool: PgPoo
     assert_eq!(second["total"], 8);
     server.abort();
 }
+
+#[sqlx::test]
+async fn agent_retrieval_ranks_late_related_entries_and_supplements_distinct_words(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let mut preferred = vec![];
+    for (word, definition) in (0..65)
+        .map(|i| (format!("zzqx{i}"), "无关释义".to_owned()))
+        .chain([
+            ("applet".into(), "小程序".into()),
+            ("orchard".into(), "苹果园".into()),
+            ("apple-synonym".into(), "苹果".into()),
+        ])
+    {
+        let id = wordlists_support::full_entry(&pool, &word).await;
+        let mut snapshot: Value = sqlx::query_scalar("SELECT snapshot FROM lexicon.entry_publications WHERE id=(SELECT current_publication_id FROM lexicon.entries WHERE id=$1)")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        for side in ["uk", "us"] {
+            snapshot["forms"]["pos"][0]["forms"][1]["regional_variants"][side]["spelling"] =
+                json!(format!("{word}-alternate"));
+        }
+        snapshot["meanings"]["pos"][0]["senses"][0]["definitions"][0]["content"]["text"] =
+            json!(definition);
+        sqlx::query("UPDATE lexicon.entry_publications SET snapshot=$2 WHERE id=(SELECT current_publication_id FROM lexicon.entries WHERE id=$1)")
+            .bind(id).bind(snapshot).execute(&pool).await.unwrap();
+        if word == "applet" || word == "orchard" {
+            preferred.push(id);
+        }
+    }
+    let generation = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "POST",
+        &format!("{BANK}/generations"),
+        generation_input(&f),
+    )
+    .await;
+    assert_eq!(generation.0, 200);
+    let path = format!(
+        "/api/internal/agent/v1/requests/{}/candidates/search",
+        generation.1["id"].as_str().unwrap()
+    );
+    let mut input = json!({"contract_version":1,"target_source":f.candidates[0]["source"],"question_level":"A1","answer_profile":"BrE","exclude_candidate_refs":[],"limit":40});
+    let first = request(&f.state, CALLBACK, false, "POST", &path, input.clone()).await;
+    assert_eq!(first.0, 200, "{}", first.1);
+    let items = first.1["items"].as_array().unwrap();
+    assert_eq!(items.len(), 40);
+    for id in preferred {
+        assert!(
+            items[..2]
+                .iter()
+                .any(|c| c["source"]["entry_id"] == json!(id)),
+            "related late entry must precede unrelated early entries: target={}, first={:?}",
+            f.candidates[0]["spelling"],
+            items[..4]
+                .iter()
+                .map(|c| (&c["spelling"], &c["definition"]))
+                .collect::<Vec<_>>()
+        );
+    }
+    assert!(items.iter().all(|c| c["definition"] != "苹果"));
+    let repeated = request(&f.state, CALLBACK, false, "POST", &path, input.clone()).await;
+    assert_eq!(
+        first.1, repeated.1,
+        "ranking must be stable for unchanged sources"
+    );
+    input["exclude_candidate_refs"] = json!(
+        items
+            .iter()
+            .map(|c| &c["candidate_ref"])
+            .collect::<Vec<_>>()
+    );
+    let second = request(&f.state, CALLBACK, false, "POST", &path, input).await;
+    assert_eq!(second.0, 200, "{}", second.1);
+    let more = second.1["items"].as_array().unwrap();
+    assert!(!more.is_empty());
+    assert!(more.iter().all(|c| {
+        items
+            .iter()
+            .all(|old| old["source"]["entry_id"] != c["source"]["entry_id"])
+    }));
+    assert!(more.iter().all(|c| c["definition"] != "苹果"));
+}

@@ -282,4 +282,6 @@ common、uk、us 词形变体新增可选且不可为 null 的 `spelling_rich`�
 
 Agent 配置为 `VOCABULARY_AGENT_URL`、`VOCABULARY_AGENT_TOKEN`（后端到 Agent）和 `VOCABULARY_AGENT_CALLBACK_TOKEN`（Agent 到后端）；两个凭据须不同且至少 32 字节。三者均缺省时禁用生成，已审核题仍可学习。URL 要求 HTTPS，仅 loopback 允许 HTTP。内部 `/api/internal/agent/v1/requests/{id}` 端点按服务凭据与持久化委托的真实管理员、权限版本、有效期和取消状态共同鉴权。生成投递与审核反馈分别记录在专用表中，未知 POST 结果沿原幂等键恢复后取消，不与既有 outbox 争抢消费状态。
 
+Agent 候选接口现在先按词性和允许等级筛选有效发布，以基本词形拼写与中文释义的字面相似度排序（复用已有 `pg_trgm`），再按权威词义绑定、档位、重复词条、同词变体及已知同释义规则过滤到最多 40 项；相似度不是语义唯一性的证明。词条 ID 仅用于相似度相同时稳定排序，不再决定首批候选。补查通过既有 `exclude_candidate_refs` 排除已返回词条及其变体，协议字段与管理端候选接口不变，无新增迁移。配套 Agent `mcq_zh_en_v3` 可在模型认为首批不能成题时预算内补查一次，并改进审核经验检索；主记录见 [Agent 检索策略与验证](https://github.com/LonelyFellas/tsz-agent/blob/main/docs/integration.md#检索策略与验证)。新旧 Agent 均可读取本端相同响应结构，只有新版 Agent 启用语义不足补查；更新 Agent 前应完成旧工作流的在途任务。
+
 先发布后端再开放前端单选入口；旧前端可继续拼写。迁移 `20261028010000` 的 down 在存在单选学习任务时拒绝执行，避免删除学习事实；无学习任务时 down 会删除题库、生成委托和审核投递记录。存在这些记录时应保留数据库迁移并使用兼容构建，不把 down 当作无损回退。`lexicon.entries.teaching_eligible=false` 排除非教学词条；创建运营或验收专用词条时应明确其资格。
