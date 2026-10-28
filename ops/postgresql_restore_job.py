@@ -18,6 +18,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from postgresql_backup_job import BackupError, BackupInterrupted, command, sha256, write_status
 
 
+def check_capacity(root, docker_root, archive_bytes):
+    if isinstance(archive_bytes, bool) or not isinstance(archive_bytes, int) or archive_bytes <= 0:
+        raise BackupError("invalid_backup_size")
+    volumes = Path(docker_root) / "volumes"
+    if not Path(docker_root).is_absolute() or not volumes.is_dir():
+        raise BackupError("docker_volume_path_unknown")
+    # Reserve disk for both the compressed copy and the larger restored database.
+    download_budget = archive_bytes + 5 * 1024 ** 3
+    restore_budget = 20 * archive_bytes + 2 * 1024 ** 3
+    if os.stat(root).st_dev == os.stat(volumes).st_dev:
+        if shutil.disk_usage(root).free < download_budget + restore_budget:
+            raise BackupError("restore_capacity_insufficient")
+    elif (shutil.disk_usage(root).free < download_budget
+          or shutil.disk_usage(volumes).free < restore_budget):
+        raise BackupError("restore_capacity_insufficient")
+
+
 def cleanup_containers(owner, identifier):
     selector = "label=tsz.restore-job=" + owner
     identifiers = set(command(["docker", "ps", "-aq", "--no-trunc", "--filter", selector]).decode().split())
@@ -49,6 +66,8 @@ def restore(config):
         backup = json.loads((root / "latest.json").read_text())
         if backup.get("environment") != "tshb-test" or backup.get("status") != "passed":
             raise BackupError("verified_backup_required")
+        docker_root = command(["docker", "info", "--format", "{{.DockerRootDir}}"]).decode().strip()
+        check_capacity(root, docker_root, backup.get("bytes"))
         identifier = None
         create_attempted = False
         verified = False
@@ -72,6 +91,7 @@ def restore(config):
             if (not archive.is_file() or archive.stat().st_size != backup["bytes"]
                     or sha256(archive) != backup["sha256"]):
                 raise BackupError("retrieved_backup_mismatch")
+            check_capacity(root, docker_root, backup["bytes"])
             create_attempted = True
             identifier = command(["docker", "create", "--label", "tsz.restore-job=" + owner,
                                   "--network", "none", "--cpus", "1", "--memory", "2g",

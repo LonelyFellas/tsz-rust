@@ -280,6 +280,7 @@ class BackupJobTests(unittest.TestCase):
         for fail in (False, True):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
+                (root / 'volumes').mkdir()
                 archive = root / 'original.dump'
                 archive.write_bytes(b'archive')
                 backup = {'environment': 'tshb-test', 'status': 'passed', 'backup_id': 'scheduled-example',
@@ -289,6 +290,8 @@ class BackupJobTests(unittest.TestCase):
                 calls = []
                 def command(args, **kwargs):
                     calls.append(args)
+                    if args[:2] == ['docker', 'info']:
+                        return str(root).encode()
                     if args[0] == '/fetch':
                         self.assertEqual(args[-2], '7')
                         Path(args[-1]).write_bytes(b'archive')
@@ -363,6 +366,7 @@ class BackupJobTests(unittest.TestCase):
         for scenario in ('create-lost', 'cancel-ready', 'local-cleanup', 'success'):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
+                (root / 'volumes').mkdir()
                 archive = root / 'original.dump'
                 archive.write_bytes(b'archive')
                 backup = {'environment': 'tshb-test', 'status': 'passed', 'backup_id': 'scheduled-test',
@@ -373,6 +377,8 @@ class BackupJobTests(unittest.TestCase):
                 calls = []
                 def command(args, **kwargs):
                     calls.append(args)
+                    if args[:2] == ['docker', 'info']:
+                        return str(root).encode()
                     if args[0] == '/fetch':
                         Path(args[-1]).write_bytes(b'archive')
                     elif args[:2] == ['docker', 'create']:
@@ -419,6 +425,26 @@ class BackupJobTests(unittest.TestCase):
                 if scenario == 'cancel-ready':
                     self.assertFalse(any('pg_restore' in args for args in calls))
                 self.assertIn('owner', receipt)
+
+    def test_restore_capacity_guard_stops_before_downloading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'volumes').mkdir()
+            (root / 'latest.json').write_text(json.dumps({
+                'environment': 'tshb-test', 'status': 'passed', 'backup_id': 'scheduled-test',
+                'sha256': 'a' * 64, 'bytes': 1024, 'postgresql_major': 18,
+            }))
+            calls = []
+            def command(args, **kwargs):
+                calls.append(args)
+                return str(root).encode() if args[:2] == ['docker', 'info'] else b''
+            config = {**self.config(root), 'restore_image': 'sha256:' + 'a' * 64, 'fetch_command': ['/fetch']}
+            with patch.object(restore_job, 'command', side_effect=command), \
+                 patch.object(restore_job.shutil, 'disk_usage') as usage:
+                usage.return_value = type('Disk', (), {'free': 1024})()
+                with self.assertRaisesRegex(job.BackupError, 'restore_capacity_insufficient'):
+                    restore_job.restore(config)
+            self.assertFalse(any(args[0] == '/fetch' or args[:2] == ['docker', 'create'] for args in calls))
 
     def test_phase_reports_failure_and_heartbeat_without_changing_exception(self):
         timings = []
