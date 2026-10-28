@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod ai_ledger;
 pub mod auth;
 pub(crate) mod authorization;
 mod extract;

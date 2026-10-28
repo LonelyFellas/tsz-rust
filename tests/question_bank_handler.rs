@@ -989,6 +989,57 @@ async fn batch_idempotency_concurrent_creation_cancellation_and_retry_are_persis
     .await
     .unwrap();
     assert_eq!(pending, 0);
+    async fn assert_rollback_blocked(pool: &PgPool) {
+        let mut tx = pool.begin().await.unwrap();
+        let result = sqlx::raw_sql(include_str!(
+            "../migrations/20261028120000_question_generation_batches.down.sql"
+        ))
+        .execute(&mut *tx)
+        .await;
+        tx.rollback().await.unwrap();
+        let error = result
+            .expect_err("rollback must retain active batch scheduling and cancellation ownership");
+        assert!(
+            error.to_string().contains("batch generation work"),
+            "{error}"
+        );
+        let (tasks, linked): (i64, i64) =
+            sqlx::query_as("SELECT count(*),count(batch_id) FROM question_generations")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!((tasks, linked), (64, 64));
+        let batches: i64 = sqlx::query_scalar("SELECT count(*) FROM question_generation_batches")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(batches, 2);
+    }
+    assert_rollback_blocked(&pool).await;
+    let active_batch = if x.0 == 200 { &x.1 } else { &y.1 };
+    let cancelled = batch_call(
+        &f,
+        "POST",
+        &format!("batches/{}/cancel", active_batch["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(cancelled.0, 200, "{}", cancelled.1);
+    let remote: Uuid =
+        sqlx::query_scalar("SELECT id FROM question_generations ORDER BY id LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for state in ["running", "cancelled", "failed"] {
+        sqlx::query("UPDATE question_generations SET state=$2,submitted_at=now()-interval '3 hours',expires_at=now()-interval '1 hour',cancel_delivered=false WHERE id=$1").bind(remote).bind(state).execute(&pool).await.unwrap();
+        // Expiration alone does not prove that a remote execution stopped.
+        assert_rollback_blocked(&pool).await;
+    }
+    sqlx::query("UPDATE question_generations SET cancel_delivered=true WHERE id=$1")
+        .bind(remote)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::raw_sql(include_str!(
         "../migrations/20261028120000_question_generation_batches.down.sql"
     ))

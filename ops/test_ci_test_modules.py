@@ -19,6 +19,7 @@ from ci_test_modules import (  # noqa: E402
 
 EXPECTED_TARGETS = {
     "admin": {
+        "admin_ai_ledger_handler",
         "admin_coins_handler",
         "admin_dashboard_handler",
         "admin_accounts_create_handler",
