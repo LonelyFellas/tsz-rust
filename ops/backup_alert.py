@@ -28,6 +28,7 @@ def read_config(path):
 UNITS = {
     "tsz-backup.service",
     "tsz-restore-verification.service",
+    "tsz-backup-prune.service",
 }
 
 
