@@ -18,6 +18,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from postgresql_backup_job import BackupError, BackupInterrupted, command, sha256, write_status
 
 
+def check_capacity(root, docker_root, archive_bytes):
+    if isinstance(archive_bytes, bool) or not isinstance(archive_bytes, int) or archive_bytes <= 0:
+        raise BackupError("invalid_backup_size")
+    volumes = Path(docker_root) / "volumes"
+    if not Path(docker_root).is_absolute() or not volumes.is_dir():
+        raise BackupError("docker_volume_path_unknown")
+    # Reserve disk for both the compressed copy and the larger restored database.
+    download_budget = archive_bytes + 5 * 1024 ** 3
+    restore_budget = 20 * archive_bytes + 2 * 1024 ** 3
+    if os.stat(root).st_dev == os.stat(volumes).st_dev:
+        if shutil.disk_usage(root).free < download_budget + restore_budget:
+            raise BackupError("restore_capacity_insufficient")
+    elif (shutil.disk_usage(root).free < download_budget
+          or shutil.disk_usage(volumes).free < restore_budget):
+        raise BackupError("restore_capacity_insufficient")
+
+
 def cleanup_containers(owner, identifier):
     selector = "label=tsz.restore-job=" + owner
     identifiers = set(command(["docker", "ps", "-aq", "--no-trunc", "--filter", selector]).decode().split())
@@ -60,15 +77,21 @@ def restore(config):
                   "cleanup_complete": False}
         try:
             write_status(root / "restore-latest.json", result)
+            docker_root = command(["docker", "info", "--format", "{{.DockerRootDir}}"]).decode().strip()
+            check_capacity(root, docker_root, backup.get("bytes"))
             archive = temporary / "backup.dump"
             fetch = config["fetch_command"]
             if not isinstance(fetch, list) or not fetch or not all(isinstance(arg, str) for arg in fetch):
                 raise BackupError("fetch_command_required")
-            command([*fetch, backup["backup_id"], backup["sha256"], str(archive)],
+            fetch_args = [*fetch, backup["backup_id"], backup["sha256"]]
+            if config.get("fetch_expected_bytes") is True:
+                fetch_args.append(str(backup["bytes"]))
+            command([*fetch_args, str(archive)],
                     environment={"PATH": os.environ["PATH"], "LANG": "C.UTF-8"})
             if (not archive.is_file() or archive.stat().st_size != backup["bytes"]
                     or sha256(archive) != backup["sha256"]):
                 raise BackupError("retrieved_backup_mismatch")
+            check_capacity(root, docker_root, backup["bytes"])
             create_attempted = True
             identifier = command(["docker", "create", "--label", "tsz.restore-job=" + owner,
                                   "--network", "none", "--cpus", "1", "--memory", "2g",

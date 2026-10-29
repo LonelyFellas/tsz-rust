@@ -44,6 +44,12 @@ pg_dump_version=18.6
 
 内置 `ops/backup_archive_ssh.py` 支持受审阅 SSH 目的地，存储配置为 `{"host":"已配置的SSH别名","directory":"/absolute/backup/root"}`；连接必须开启主机密钥校验。实际值由运维配置，别名不能指回源数据库机器；首次启用前核实是独立故障域。它以 rsync 传固定文件、在远端复算摘要与字节数，再原子完成命名；测试不连接真实 SSH。不能在配置未知时自动安装任务。
 
+也可使用 `ops/backup_archive_oss.py` 将备份保存到独立私有 OSS Bucket。使用独立受限 RAM 用户，限定到专用 Bucket 和 `database-backups/`，不得复用业务上传凭据；在受保护的 root 所有、权限 `0600` 的 `/etc/tsz-rust/backup-oss.json` 配置 `endpoint`、`region`、`bucket`、`access_key_id` 和 `access_key_secret`，并安排凭据轮换。只允许阿里云 HTTPS endpoint。为避免 OSS 在开启或暂停版本控制时忽略禁止覆盖的请求，专用 Bucket 必须保持版本控制未启用，并禁止公开访问；还须配置服务端禁止覆盖规则，覆盖 `database-backups/` 全前缀及所有主体。适配器每次运行时读取并核实该规则、私有 ACL 与公共访问阻止设置；访问策略和保留期限须单独核实。写入启用 AES256 服务端加密和对象私有 ACL，上传后重新读取全部字节核对 SHA256 与长度；取回时先核对长度，并在流式读取过程中限制文件大小，再核对摘要，失败删除本次独占的临时文件。
+
+在隔离的受控 Python 环境安装 `oss2==2.19.1` 后，把 `backup.json` 的 `archive_command` 设为 `["/opt/tsz-rust/backup-venv/bin/python", "-I", "/opt/tsz-rust/ops/backup_archive_oss.py", "/etc/tsz-rust/backup-oss.json"]`，`fetch_command` 设为同一列表并在脚本路径后加入 `"fetch"`，同时设 `fetch_expected_bytes: true` 以传递回执中的预期大小。当前使用单次上传，备份超过 5 GiB 时拒绝上传并报警；容量增长前须另行支持分片上传。恢复下载前和创建容器前检查备份目录及 Docker 卷所在文件系统，预留压缩包大小加 5 GiB，以及压缩包 20 倍加 2 GiB 的恢复预算；同一文件系统时两项相加。该预算是入场检查，并非卷配额：数据压缩比异常或其他进程同时占用空间时仍可能不足，须根据实际恢复数据量核实并持续监控。在启用调度前验证私有权限、凭据最小授权、完整上传和取回、隔离恢复与失败通知；仅以模拟 OSS 通过不能称为真实归档成功。对象保留和清理由存储端配置，脚本不删除正式备份。
+
+若使用云监控通知，使用独立 RAM 用户与独立的 root 所有、权限 `0600` 的 `/etc/tsz-rust/backup-alert.json`，填写 `access_key_id`、`access_key_secret` 和 `monitor_group_id`；该用户只授予 `cms:PutCustomEvent` 和 `cms:PutCustomMetric`。安装 `tsz-backup-alert@.service` 与两个 `*.service.d/10-cloud-alert.conf`，并创建匹配事件名 `tsz_backup_failure` 的邮件报警规则，备份或恢复验证失败时上报不含数据库内容的固定事件。安装 `tsz-backup-heartbeat.timer`，每五分钟上报 `tsz_backup_health`：备份新鲜且成功、备份目录所在文件系统剩余至少 5 GiB 时为 1，缺失、失败、陈旧或空间不足时为 0。须配置独立云端指标报警，包含持续为 0 和无数据两种条件；由于备份过程中状态可能暂时为 0，阈值和持续时间须覆盖 45 分钟任务超时。启用前实际测试事件、指标异常和无数据到邮箱的完整投递；服务器、凭据或网络失效时依靠云端无数据报警，未经验证不得声称失联监控有效。本机历史 dump 未自动清理，须另行制定并授权安全保留策略，不能仅依靠空间告警。
+
 建议异机至少保留近 7 天，存储生命周期由受控目的地配置管理；此工具不自动删除历史备份。`latest.json` 指向最后一次成功的异机归档，`last-attempt.json` 独立记录最近任务，失败或中断不会被旧成功掩盖；`status` 以快照开始时间检查 26 小时新鲜度，具体失败回执保留在任务目录。完整备份不自动包含 OSS 文件，需要独立检查对象版本保留。发布侧只读查看该状态，不触发本任务；真正的数据风险发布不能用普通状态替代写前保护。
 
 ## 创建恢复点
