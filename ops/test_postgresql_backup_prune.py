@@ -2,6 +2,8 @@ import datetime
 import fcntl
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,6 +12,13 @@ import postgresql_backup_prune as pruning
 
 
 class PruneTests(unittest.TestCase):
+    def test_isolated_python_can_start_the_service_script(self):
+        script = Path(pruning.__file__)
+        result = subprocess.run([sys.executable, '-I', str(script), '/dev/null'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('local_backup_retention', result.stderr)
+        self.assertNotIn('ModuleNotFoundError', result.stderr)
+
     def test_only_expired_owned_successful_archives_are_removed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

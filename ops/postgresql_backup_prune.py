@@ -10,6 +10,7 @@ import re
 import stat
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backup_alert import replica_is_current
 from postgresql_backup_job import inspect_status
 
