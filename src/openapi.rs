@@ -41,6 +41,8 @@ use utoipa::{
         crate::question_bank::handler::batch_items,
         crate::question_bank::handler::cancel_batch,
         crate::admin::ai_ledger::list,
+        crate::admin::opencode_models::probe_report,
+        crate::admin::opencode_models::start_probes,
         crate::admin::opencode_models::models,
         crate::admin::opencode_models::key_providers,
         crate::admin::opencode_models::connect_key,
@@ -339,6 +341,11 @@ use utoipa::{
     components(
         schemas(
             crate::admin::ai_ledger::AiLedgerPage,
+            crate::admin::opencode_models::OpenCodeProbeStatus,
+            crate::admin::opencode_models::OpenCodeProbeState,
+            crate::admin::opencode_models::OpenCodeProbeError,
+            crate::admin::opencode_models::OpenCodeModelProbe,
+            crate::admin::opencode_models::OpenCodeModelProbeReport,
             crate::admin::opencode_models::OpenCodeModel,
             crate::admin::opencode_models::OpenCodeModelList,
             crate::admin::opencode_models::OpenCodeProvider,
