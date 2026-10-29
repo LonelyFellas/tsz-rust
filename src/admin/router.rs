@@ -40,6 +40,18 @@ pub fn router(_state: AppState) -> Router<AppState> {
             "/opencode/providers",
             get(admin::opencode_models::key_providers),
         )
+        .route(
+            "/opencode/connections",
+            get(admin::opencode_models::connected_providers),
+        )
+        .route(
+            "/opencode/providers/{provider_id}/connections/{connection_id}",
+            axum::routing::delete(admin::opencode_models::disconnect_connection),
+        )
+        .route(
+            "/opencode/providers/{provider_id}/connections/{connection_id}/activate",
+            post(admin::opencode_models::activate_connection),
+        )
         .route("/opencode/keys", post(admin::opencode_models::connect_key))
         .route(
             "/opencode/model",

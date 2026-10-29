@@ -1,7 +1,7 @@
 //! Model catalog, server-side credentials and the Agent's active model selection.
 use axum::{
     Json,
-    extract::State,
+    extract::{Path, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -87,7 +87,7 @@ struct NativeProvider {
     id: String,
     name: String,
     methods: Vec<NativeMethod>,
-    connections: Vec<serde::de::IgnoredAny>,
+    connections: Vec<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct NativeMethod {
@@ -169,6 +169,214 @@ pub async fn key_providers(
             })
             .collect(),
     }))
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenCodeConnectionMethod {
+    Oauth,
+    Key,
+    External,
+    Env,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCodeProviderConnection {
+    pub id: Option<String>,
+    pub method: OpenCodeConnectionMethod,
+    pub label: String,
+    pub active: bool,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCodeConnectedProvider {
+    pub id: String,
+    pub name: String,
+    pub connections: Vec<OpenCodeProviderConnection>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCodeConnectedProviderList {
+    pub providers: Vec<OpenCodeConnectedProvider>,
+}
+
+// Only model integrations belong here; unrelated integrations must never be removed.
+async fn model_providers(state: &AppState) -> Result<Vec<NativeProvider>, AppError> {
+    let config = state.opencode.as_ref().ok_or_else(unavailable)?;
+    let value = config
+        .call(Method::GET, "/api/model", None)
+        .await?
+        .ok_or_else(unavailable)?;
+    let models: Vec<NativeModel> = serde_json::from_value(value).map_err(|_| unavailable())?;
+    Ok(providers(state)
+        .await?
+        .into_iter()
+        .filter(|p| p.id == "opencode" || models.iter().any(|m| m.provider_id == p.id))
+        .collect())
+}
+
+fn connection_info(
+    c: &serde_json::Value,
+    active: bool,
+) -> Result<OpenCodeProviderConnection, AppError> {
+    let text = |field| {
+        c.get(field)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(unavailable)
+    };
+    let (id, method, label) = match text("type")? {
+        "credential" => {
+            let id = text("id")?;
+            if id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            {
+                return Err(unavailable());
+            }
+            let method = match text("method")? {
+                "oauth" => OpenCodeConnectionMethod::Oauth,
+                "key" => OpenCodeConnectionMethod::Key,
+                "external" => OpenCodeConnectionMethod::External,
+                _ => return Err(unavailable()),
+            };
+            (Some(id.to_owned()), method, text("label")?.to_owned())
+        }
+        "env" => (
+            None,
+            OpenCodeConnectionMethod::Env,
+            text("name")?.to_owned(),
+        ),
+        _ => return Err(unavailable()),
+    };
+    Ok(OpenCodeProviderConnection {
+        id,
+        method,
+        label,
+        active,
+    })
+}
+
+#[utoipa::path(get, path="/api/v1/admin/opencode/connections", tag="admin", security(("bearer_auth"=[])),
+    responses((status=200,body=OpenCodeConnectedProviderList),(status=401,description="会话失效"),(status=403,description="仅超管"),(status=503,description="模型服务不可用")))]
+pub async fn connected_providers(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+) -> Result<Response, AppError> {
+    require_super_admin(&state, &auth).await?;
+    let providers = model_providers(&state)
+        .await?
+        .into_iter()
+        .filter(|p| !p.connections.is_empty())
+        .map(|p| {
+            let connections = p
+                .connections
+                .iter()
+                .enumerate()
+                .map(|(i, c)| connection_info(c, i == 0))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(OpenCodeConnectedProvider {
+                id: p.id,
+                name: p.name,
+                connections,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(no_store(OpenCodeConnectedProviderList { providers }))
+}
+
+async fn change_connection(
+    state: &AppState,
+    provider_id: &str,
+    connection_id: &str,
+    activate: bool,
+) -> Result<Response, AppError> {
+    let provider = model_providers(state)
+        .await?
+        .into_iter()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(invalid)?;
+    // Resolve the ID from this provider's public integration data, never from the secret credential listing.
+    let connections = provider
+        .connections
+        .iter()
+        .enumerate()
+        .map(|(i, c)| connection_info(c, i == 0))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !connections
+        .iter()
+        .any(|c| c.id.as_deref() == Some(connection_id))
+    {
+        return Err(invalid());
+    }
+    let config = state.opencode.as_ref().ok_or_else(unavailable)?;
+    let path = format!(
+        "/api/credential/{connection_id}{}",
+        if activate { "/activate" } else { "" }
+    );
+    config
+        .call(
+            if activate {
+                Method::POST
+            } else {
+                Method::DELETE
+            },
+            &path,
+            None,
+        )
+        .await?;
+    let current = providers(state)
+        .await?
+        .into_iter()
+        .find(|p| p.id == provider_id);
+    let succeeded = if activate {
+        current
+            .as_ref()
+            .and_then(|p| p.connections.first())
+            .is_some_and(|c| c["type"] == "credential" && c["id"] == connection_id)
+    } else {
+        current.as_ref().is_none_or(|p| {
+            !p.connections
+                .iter()
+                .any(|c| c["type"] == "credential" && c["id"] == connection_id)
+        })
+    };
+    if !succeeded {
+        return Err(unavailable());
+    }
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(header::CACHE_CONTROL, "no-store")],
+    )
+        .into_response())
+}
+
+#[utoipa::path(delete, path="/api/v1/admin/opencode/providers/{provider_id}/connections/{connection_id}", tag="admin", security(("bearer_auth"=[])),
+    params(("provider_id"=String,Path),("connection_id"=String,Path)),
+    responses((status=204,description="此凭据已登出"),(status=400,description="无效连接"),(status=401,description="会话失效"),(status=403,description="仅超管"),(status=503,description="模型服务不可用")))]
+pub async fn disconnect_connection(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Path((provider_id, connection_id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    require_super_admin(&state, &auth).await?;
+    change_connection(&state, &provider_id, &connection_id, false).await
+}
+
+#[utoipa::path(post, path="/api/v1/admin/opencode/providers/{provider_id}/connections/{connection_id}/activate", tag="admin", security(("bearer_auth"=[])),
+    params(("provider_id"=String,Path),("connection_id"=String,Path)),
+    responses((status=204,description="已切换当前凭据"),(status=400,description="无效连接"),(status=401,description="会话失效"),(status=403,description="仅超管"),(status=503,description="模型服务不可用")))]
+pub async fn activate_connection(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    Path((provider_id, connection_id)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    require_super_admin(&state, &auth).await?;
+    change_connection(&state, &provider_id, &connection_id, true).await
 }
 
 #[utoipa::path(post, path="/api/v1/admin/opencode/keys", tag="admin", security(("bearer_auth"=[])), request_body=OpenCodeKeyInput,
