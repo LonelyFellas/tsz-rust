@@ -252,6 +252,14 @@ async fn process(state: &AppState, config: &AgentConfig, id: Uuid) -> Result<(),
             } else {
                 let q = &response["result"]["question"];
                 let content = import_question(q)?;
+                let semantic_review: QuestionSemanticReview =
+                    serde_json::from_value(q["semantic_review"].clone())
+                        .map_err(|_| super::invalid("Agent 语义复审记录无效"))?;
+                if (semantic_review.verdict == QuestionSemanticVerdict::NeedsRevision)
+                    == semantic_review.issues.is_empty()
+                {
+                    return Err(super::invalid("Agent 语义复审结论与问题不一致"));
+                }
                 if content.target != current.target.0
                     || content.question_level != current.question_level
                     || content.answer_profile != current.answer_profile
@@ -267,7 +275,7 @@ async fn process(state: &AppState, config: &AgentConfig, id: Uuid) -> Result<(),
                     error_code = Some("source_or_question_invalid".into());
                 } else {
                     let qid = Uuid::now_v7();
-                    sqlx::query("INSERT INTO question_bank(id,generation_id,content,original_content,target_entry_id,target_sense_id,target_publication_id,question_level,answer_profile,created_by,review_id,question_revision_id) VALUES($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11)").bind(qid).bind(id).bind(Json(&content)).bind(content.target.source.entry_id).bind(content.target.source.sense_id).bind(content.target.source.publication_id).bind(&content.question_level).bind(&content.answer_profile).bind(current.created_by).bind(Uuid::now_v7()).bind(Uuid::now_v7()).execute(&mut *tx).await.map_err(AppError::internal)?;
+                    sqlx::query("INSERT INTO question_bank(id,generation_id,content,original_content,target_entry_id,target_sense_id,target_publication_id,question_level,answer_profile,created_by,review_id,question_revision_id,semantic_review) VALUES($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)").bind(qid).bind(id).bind(Json(&content)).bind(content.target.source.entry_id).bind(content.target.source.sense_id).bind(content.target.source.publication_id).bind(&content.question_level).bind(&content.answer_profile).bind(current.created_by).bind(Uuid::now_v7()).bind(Uuid::now_v7()).bind(Json(&semantic_review)).execute(&mut *tx).await.map_err(AppError::internal)?;
                     question_id = Some(qid);
                     next = "succeeded";
                 }
@@ -325,6 +333,7 @@ fn import_question(q: &Value) -> Result<BankQuestionContent, AppError> {
     if let Some(prompt) = q["proposal"]["suggested_prompt"].as_str() {
         concerns.push(format!("建议题干：{prompt}"));
     }
+    // Preserve human-readable warnings for clients using the legacy strict question response.
     if let Some(issues) = q["semantic_review"]["issues"].as_array() {
         concerns.extend(issues.iter().filter_map(|v| v.as_str().map(str::to_owned)));
     }

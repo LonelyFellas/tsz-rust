@@ -255,3 +255,103 @@ pub struct QuestionBatchPage {
     pub items: Vec<QuestionBatch>,
     pub pagination: crate::api::PaginationMeta,
 }
+
+// Workbench reads are separate from legacy responses, whose consumers validate strictly.
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct QuestionWorkbenchQuery {
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub state: Option<String>,
+    pub query: Option<String>,
+    pub question_level: Option<String>,
+    pub answer_profile: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionWorkbenchOption {
+    pub option_id: String,
+    pub spelling: String,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionWorkbenchItem {
+    pub id: Uuid,
+    pub revision: i64,
+    pub state: String,
+    pub created_by: Uuid,
+    pub spelling: String,
+    pub part_of_speech: String,
+    pub definition: String,
+    pub prompt: String,
+    pub question_level: String,
+    pub answer_profile: String,
+    pub options: Vec<QuestionWorkbenchOption>,
+    pub correct_option_id: String,
+    pub source_current: bool,
+    pub has_concerns: bool,
+    pub updated_at: DateTime<Utc>,
+}
+#[derive(Default, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionStateCounts {
+    pub draft: i64,
+    pub approved: i64,
+    pub rejected: i64,
+    pub disabled: i64,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionWorkbenchPage {
+    pub items: Vec<QuestionWorkbenchItem>,
+    pub pagination: crate::api::PaginationMeta,
+    pub counts: QuestionStateCounts,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionSourceCheck {
+    pub option_id: String,
+    pub current: bool,
+}
+#[derive(Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionInspection {
+    pub question: BankQuestion,
+    pub sources: Vec<QuestionSourceCheck>,
+    pub target_current: bool,
+    pub semantic_review: Option<QuestionSemanticReview>,
+    pub semantic_review_current: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionSemanticReview {
+    pub verdict: QuestionSemanticVerdict,
+    pub issues: Vec<String>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionSemanticVerdict {
+    NoObviousIssue,
+    NeedsRevision,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SearchQuestionCandidates {
+    pub entry_id: Option<Uuid>,
+    pub query: Option<String>,
+    pub question_level: String,
+    pub answer_profile: String,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+    pub part_of_speech: Option<String>,
+    #[serde(default)]
+    pub exclude_entry_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub exclude_spellings: Vec<String>,
+    pub excluded_definition: Option<String>,
+    pub target_spelling: Option<String>,
+    #[serde(default)]
+    pub editable_only: bool,
+}

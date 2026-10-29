@@ -559,30 +559,9 @@ async fn delegation_auth_cancellation_and_all_four_sources_fail_closed(pool: PgP
 
 #[sqlx::test]
 async fn vocabulary_migration_down_up_and_no_silent_loss_of_learning(pool: PgPool) {
-    sqlx::raw_sql(include_str!(
-        "../migrations/20261028120000_question_generation_batches.down.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql(include_str!(
-        "../migrations/20261028010000_vocabulary_mcq.down.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql(include_str!(
-        "../migrations/20261028010000_vocabulary_mcq.up.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql(include_str!(
-        "../migrations/20261028120000_question_generation_batches.up.sql"
-    ))
-    .execute(&pool)
-    .await
-    .unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    migrator.undo(&pool, 20261028000000).await.unwrap();
+    migrator.run(&pool).await.unwrap();
     let f = fixture(&pool).await;
     let draft = generate(&f).await;
     approve(&f, &draft).await;
@@ -1371,4 +1350,468 @@ async fn agent_retrieval_ranks_late_related_entries_and_supplements_distinct_wor
             .all(|old| old["source"]["entry_id"] != c["source"]["entry_id"])
     }));
     assert!(more.iter().all(|c| c["definition"] != "苹果"));
+}
+
+#[sqlx::test]
+async fn workbench_search_is_server_paginated_and_inspects_pinned_publication_sources(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let first = generate(&f).await;
+    let second = generate(&f).await;
+    let approved = approve(&f, &first).await;
+    let r=batch_call(&f,"GET","questions/workbench?query=apple&state=approved&question_level=A1&answer_profile=BrE&page_size=1",Value::Null).await;
+    assert_eq!(r.0, 200, "{}", r.1);
+    assert_eq!(r.1["pagination"]["total"], 1);
+    assert_eq!(r.1["counts"]["approved"], 1);
+    assert_eq!(r.1["counts"]["draft"], 1);
+    assert_eq!(r.1["items"][0]["id"], approved["id"]);
+    assert_eq!(r.1["items"][0]["source_current"], true);
+    assert!(r.1["items"][0].get("original_content").is_none());
+    let page2 = batch_call(
+        &f,
+        "GET",
+        "questions/workbench?page=2&page_size=1",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(page2.0, 200, "{}", page2.1);
+    assert_eq!(page2.1["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page2.1["pagination"]["total"], 2);
+    let source: Uuid =
+        serde_json::from_value(f.candidates[1]["source"]["entry_id"].clone()).unwrap();
+    sqlx::query("UPDATE lexicon.entries SET teaching_eligible=false WHERE id=$1")
+        .bind(source)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inspection = batch_call(
+        &f,
+        "GET",
+        &format!("questions/{}/inspection", second["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(inspection.0, 200, "{}", inspection.1);
+    assert_eq!(inspection.1["target_current"], true);
+    assert_eq!(
+        inspection.1["sources"],
+        json!([{"option_id":"A","current":true},{"option_id":"B","current":false},{"option_id":"C","current":true},{"option_id":"D","current":true}])
+    );
+    assert_eq!(inspection.1["question"]["content"], second["content"]);
+    let stale = batch_call(&f, "GET", "questions/workbench", Value::Null).await;
+    assert_eq!(stale.0, 200);
+    assert!(
+        stale.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|q| q["source_current"] == false)
+    );
+    let legacy = batch_call(
+        &f,
+        "GET",
+        &format!("questions/{}", second["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(legacy.0, 200);
+    assert!(
+        legacy.1.get("sources").is_none(),
+        "legacy strict response remains unchanged"
+    );
+    assert_eq!(legacy.1["original_content"], second["original_content"]);
+    assert_eq!(
+        batch_call(
+            &f,
+            "GET",
+            "questions/workbench?question_level=D1",
+            Value::Null
+        )
+        .await
+        .0,
+        400
+    );
+}
+
+fn candidate_search_input() -> Value {
+    json!({"question_level":"C2","answer_profile":"BrE","page":1,"page_size":3,"editable_only":true})
+}
+#[sqlx::test]
+async fn candidate_search_paginates_published_bound_senses_and_respects_replacement_scope(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let unpublished = wordlists_support::full_entry(&pool, "unpublished-candidate").await;
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=NULL WHERE id=$1")
+        .bind(unpublished)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let archived = wordlists_support::full_entry(&pool, "archived-candidate").await;
+    sqlx::query("UPDATE lexicon.entries SET archived_at=now() WHERE id=$1")
+        .bind(archived)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let nonteaching = wordlists_support::full_entry(&pool, "nonteaching-candidate").await;
+    sqlx::query("UPDATE lexicon.entries SET teaching_eligible=false WHERE id=$1")
+        .bind(nonteaching)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let legacy = batch_call(
+        &f,
+        "GET",
+        "candidate-page?question_level=C2&answer_profile=BrE&page_size=100",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(legacy.0, 200);
+    let expected: std::collections::HashSet<_> = legacy.1["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["candidate_ref"].as_str().unwrap().to_owned())
+        .collect();
+    let mut actual = std::collections::HashSet::new();
+    let mut input = candidate_search_input();
+    let mut page = 1;
+    loop {
+        input["page"] = json!(page);
+        let r = batch_call(&f, "POST", "candidate-search", input.clone()).await;
+        assert_eq!(r.0, 200, "{}", r.1);
+        assert_eq!(r.1["pagination"]["total"], expected.len());
+        for c in r.1["items"].as_array().unwrap() {
+            assert!(actual.insert(c["candidate_ref"].as_str().unwrap().to_owned()));
+        }
+        if page >= r.1["pagination"]["total_pages"].as_u64().unwrap() {
+            break;
+        }
+        page += 1;
+    }
+    assert_eq!(actual, expected);
+    let mut replacement = candidate_search_input();
+    replacement["editable_only"] = json!(false);
+    replacement["page_size"] = json!(100);
+    replacement["part_of_speech"] = json!("noun");
+    replacement["exclude_entry_ids"] = json!([f.candidates[0]["source"]["entry_id"]]);
+    replacement["exclude_spellings"] = f.candidates[0]["accepted_spellings"].clone();
+    replacement["excluded_definition"] = f.candidates[0]["definition"].clone();
+    replacement["target_spelling"] = f.candidates[0]["spelling"].clone();
+    replacement["query"] = json!("香蕉");
+    let found = batch_call(&f, "POST", "candidate-search", replacement.clone()).await;
+    assert_eq!(found.0, 200, "{}", found.1);
+    assert!(!found.1["items"].as_array().unwrap().is_empty());
+    assert!(
+        found.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["definition"] == "香蕉"
+                && c["source"]["entry_id"] != f.candidates[0]["source"]["entry_id"])
+    );
+    // Filter every accepted spelling, not only the spelling currently shown in an option.
+    let mut overlap = replacement.clone();
+    overlap["exclude_spellings"] = json!(["ＡＬＴＥＲＮＡＴＥ１"]);
+    let excluded_alias = batch_call(&f, "POST", "candidate-search", overlap).await;
+    assert_eq!(excluded_alias.0, 200, "{}", excluded_alias.1);
+    assert_eq!(excluded_alias.1["pagination"]["total"], 0);
+    // Another published meaning in the same entry must also exclude a distractor.
+    let mut ambiguous = replacement.clone();
+    ambiguous["excluded_definition"] = json!("专用词义");
+    let excluded_meaning = batch_call(&f, "POST", "candidate-search", ambiguous).await;
+    assert_eq!(excluded_meaning.0, 200);
+    assert_eq!(excluded_meaning.1["pagination"]["total"], 0);
+    let mut literal = replacement.clone();
+    literal["query"] = json!("%_");
+    let literal_search = batch_call(&f, "POST", "candidate-search", literal).await;
+    assert_eq!(literal_search.0, 200);
+    assert_eq!(literal_search.1["pagination"]["total"], 0);
+    replacement["part_of_speech"] = json!("verb");
+    let wrong_pos = batch_call(&f, "POST", "candidate-search", replacement).await;
+    assert_eq!(wrong_pos.0, 200);
+    assert_eq!(wrong_pos.1["pagination"]["total"], 0);
+    // Generation targets are ownership-scoped, but published distractors remain readable.
+    let own: Uuid = serde_json::from_value(f.candidates[0]["source"]["entry_id"].clone()).unwrap();
+    sqlx::query("UPDATE lexicon.entries SET created_by_admin_id=$2 WHERE id=$1")
+        .bind(own)
+        .bind(f.admin)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE admins SET role='admin' WHERE id=$1")
+        .bind(f.admin)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for key in ["words.access", "words.edit"] {
+        sqlx::query("INSERT INTO admin_permission_grants(admin_id,permission_key,granted_by) VALUES($1,$2,$1)").bind(f.admin).bind(key).execute(&pool).await.unwrap();
+    }
+    let token = f
+        .state
+        .admin_token_manager
+        .generate_with_version(f.admin, "admin", 0)
+        .unwrap();
+    input["page"] = json!(1);
+    input["page_size"] = json!(100);
+    let owned = request(
+        &f.state,
+        &token,
+        false,
+        "POST",
+        &format!("{BANK}/candidate-search"),
+        input.clone(),
+    )
+    .await;
+    assert_eq!(owned.0, 200, "{}", owned.1);
+    assert!(
+        owned.1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["source"]["entry_id"] == json!(own))
+    );
+    input["editable_only"] = json!(false);
+    let shared = request(
+        &f.state,
+        &token,
+        false,
+        "POST",
+        &format!("{BANK}/candidate-search"),
+        input,
+    )
+    .await;
+    assert_eq!(shared.0, 200, "{}", shared.1);
+    assert_eq!(shared.1["pagination"]["total"], expected.len());
+}
+
+#[sqlx::test]
+async fn candidate_index_reactivates_and_roundtrips_without_removing_question_facts(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let q = generate(&f).await;
+    let entry: Uuid =
+        serde_json::from_value(f.candidates[0]["source"]["entry_id"].clone()).unwrap();
+    let publication: Uuid =
+        serde_json::from_value(f.candidates[0]["source"]["publication_id"].clone()).unwrap();
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT lexicon.question_candidate_key_v1(value) FROM unnest($1::text[]) value",
+    )
+    .bind(vec!["\u{00a0}Ａ’Ｂ—C\u{3000}", "İ"])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(keys, vec!["a'b-c", "i\u{0307}"]);
+    sqlx::query("DELETE FROM lexicon.question_candidate_index WHERE publication_id=$1")
+        .bind(publication)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=NULL WHERE id=$1")
+        .bind(entry)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE lexicon.entries SET current_publication_id=$2 WHERE id=$1")
+        .bind(entry)
+        .bind(publication)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM lexicon.question_candidate_index WHERE publication_id=$1",
+    )
+    .bind(publication)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        count > 0,
+        "reactivating a publication rebuilds its derived candidate rows"
+    );
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261029020000_question_candidate_index.down.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let retained = batch_call(
+        &f,
+        "GET",
+        &format!("questions/{}", q["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(retained.0, 200);
+    assert_eq!(retained.1["original_content"], q["original_content"]);
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261029020000_question_candidate_index.up.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let fk_index: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname='lexicon' AND indexname='question_candidate_entry')").fetch_one(&pool).await.unwrap();
+    assert!(
+        fk_index,
+        "entry deletion has a leading FK-support index after rebuild"
+    );
+    let restored = batch_call(&f, "POST", "candidate-search", candidate_search_input()).await;
+    assert_eq!(restored.0, 200, "{}", restored.1);
+    assert!(restored.1["pagination"]["total"].as_i64().unwrap() > 0);
+    let questions: i64 = sqlx::query_scalar("SELECT count(*) FROM question_bank")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(questions, 1, "only derived search data is rebuilt");
+}
+
+#[sqlx::test]
+async fn indexed_candidates_resolve_shared_publication_forms_without_changing_references(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let before=batch_call(&f,"POST","candidate-search",json!({"entry_id":f.candidates[0]["source"]["entry_id"],"question_level":"C2","answer_profile":"BrE","page_size":100})).await;
+    assert_eq!(before.0, 200);
+    let entry: Uuid =
+        serde_json::from_value(f.candidates[0]["source"]["entry_id"].clone()).unwrap();
+    wordlists_support::share_current_publication(&pool, entry).await;
+    let after = batch_call(
+        &f,
+        "POST",
+        "candidate-search",
+        json!({"entry_id":entry,"question_level":"C2","answer_profile":"BrE","page_size":100}),
+    )
+    .await;
+    assert_eq!(after.0, 200, "{}", after.1);
+    assert_eq!(
+        after.1, before.1,
+        "shared content slots resolve to the same candidate references and values"
+    );
+}
+
+#[sqlx::test]
+async fn semantic_review_evidence_is_structured_and_unchanged_ambiguity_cannot_be_approved(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let q = generate(&f).await;
+    let id = q["id"].as_str().unwrap();
+    let inspect_path = format!("{BANK}/questions/{id}/inspection");
+    let read =
+        wordlists_support::admin_call(&f.state, f.admin, "GET", &inspect_path, Value::Null).await;
+    assert_eq!(read.0, 200);
+    assert_eq!(read.1["semantic_review"]["verdict"], "no_obvious_issue");
+    assert_eq!(read.1["semantic_review_current"], true);
+    assert!(q.get("semantic_review").is_none());
+    assert!(
+        q["content"].get("semantic_review").is_none(),
+        "legacy strict responses remain unchanged"
+    );
+    let issue = json!({"verdict":"needs_revision","issues":["其他选项也可能对应苹果"]});
+    sqlx::query("UPDATE question_bank SET semantic_review=$2 WHERE id=$1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .bind(&issue)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rejected = wordlists_support::admin_call(&f.state, f.admin, "POST", &format!("{BANK}/questions/{id}/review"), json!({"expected_revision":q["revision"],"decision":"approve","reason_codes":[],"comment":""})).await;
+    assert_eq!(rejected.0, StatusCode::CONFLICT);
+    let options:Vec<_>=q["content"]["options"].as_array().unwrap().iter().map(|o|json!({"candidate_ref":o["candidate"]["candidate_ref"],"source":o["candidate"]["source"],"answer_profile":o["candidate"]["answer_profile"]})).collect();
+    let explanations: Vec<_> = q["content"]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["explanation"].clone())
+        .collect();
+    let edit = json!({"expected_revision":q["revision"],"prompt":q["content"]["prompt"],"options":options,"option_explanations":explanations,"explanation":"仅重写解析不能消除原题面歧义"});
+    let saved = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "PATCH",
+        &format!("{BANK}/questions/{id}"),
+        edit.clone(),
+    )
+    .await;
+    assert_eq!(saved.0, 200, "{}", saved.1);
+    let rejected = wordlists_support::admin_call(&f.state, f.admin, "POST", &format!("{BANK}/questions/{id}/review"), json!({"expected_revision":saved.1["revision"],"decision":"approve","reason_codes":[],"comment":""})).await;
+    assert_eq!(rejected.0, StatusCode::CONFLICT);
+    let mut reordered = edit.clone();
+    reordered["expected_revision"] = saved.1["revision"].clone();
+    reordered["options"].as_array_mut().unwrap().swap(0, 1);
+    reordered["option_explanations"]
+        .as_array_mut()
+        .unwrap()
+        .swap(0, 1);
+    let reordered = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "PATCH",
+        &format!("{BANK}/questions/{id}"),
+        reordered,
+    )
+    .await;
+    assert_eq!(reordered.0, 200);
+    let rejected = wordlists_support::admin_call(&f.state, f.admin, "POST", &format!("{BANK}/questions/{id}/review"), json!({"expected_revision":reordered.1["revision"],"decision":"approve","reason_codes":[],"comment":""})).await;
+    assert_eq!(
+        rejected.0,
+        StatusCode::CONFLICT,
+        "reordering cannot resolve semantic ambiguity"
+    );
+    let mut changed = edit;
+    changed["expected_revision"] = reordered.1["revision"].clone();
+    changed["prompt"] = json!("请选择中文“苹果”对应的英文单词");
+    let saved = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "PATCH",
+        &format!("{BANK}/questions/{id}"),
+        changed,
+    )
+    .await;
+    assert_eq!(saved.0, 200, "{}", saved.1);
+    let read =
+        wordlists_support::admin_call(&f.state, f.admin, "GET", &inspect_path, Value::Null).await;
+    assert_eq!(
+        read.1["semantic_review"], issue,
+        "editing never discards original risk evidence"
+    );
+    assert_eq!(
+        read.1["semantic_review_current"], false,
+        "editing is not a new model review"
+    );
+}
+
+#[sqlx::test]
+async fn semantic_review_migration_preserves_legacy_questions_without_inventing_a_verdict(
+    pool: PgPool,
+) {
+    let f = fixture(&pool).await;
+    let q = generate(&f).await;
+    let id = q["id"].as_str().unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    migrator.undo(&pool, 20261029020000).await.unwrap();
+    let preserved: serde_json::Value =
+        sqlx::query_scalar("SELECT content FROM question_bank WHERE id=$1")
+            .bind(Uuid::parse_str(id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(preserved, q["content"]);
+    migrator.run(&pool).await.unwrap();
+    let read = wordlists_support::admin_call(
+        &f.state,
+        f.admin,
+        "GET",
+        &format!("{BANK}/questions/{id}/inspection"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(read.0, 200);
+    assert_eq!(read.1["semantic_review"], Value::Null);
+    assert_eq!(read.1["semantic_review_current"], false);
+    assert_eq!(read.1["question"]["content"], q["content"]);
 }

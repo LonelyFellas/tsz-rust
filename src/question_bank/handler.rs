@@ -1,4 +1,4 @@
-use super::{batch, dto::*, service, source};
+use super::{batch, dto::*, service, source, workbench};
 use crate::{
     admin::AdminAuth,
     api::{ApiJson, ApiPath, ApiQuery},
@@ -14,6 +14,18 @@ use axum::{
 use uuid::Uuid;
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/v1/admin/question-bank/questions/workbench",
+            get(workbench_questions),
+        )
+        .route(
+            "/api/v1/admin/question-bank/questions/{id}/inspection",
+            get(inspect_question),
+        )
+        .route(
+            "/api/v1/admin/question-bank/candidate-search",
+            post(search_candidates),
+        )
         .route(
             "/api/v1/admin/question-bank/candidate-page",
             get(candidate_page),
@@ -346,4 +358,31 @@ pub async fn cancel_batch(
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<QuestionBatch>, AppError> {
     Ok(Json(batch::cancel(&state.pool, &auth, id).await?))
+}
+
+#[utoipa::path(get,path="/api/v1/admin/question-bank/questions/workbench",tag="question_bank",security(("bearer_auth"=[])),params(QuestionWorkbenchQuery),responses((status=200,description="分页检索轻量题库并核查当前页发布来源",body=QuestionWorkbenchPage),(status=400,description="检索参数无效"),(status=401,description="会话失效"),(status=403,description="无读取权限")))]
+pub async fn workbench_questions(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiQuery(input): ApiQuery<QuestionWorkbenchQuery>,
+) -> Result<Json<QuestionWorkbenchPage>, AppError> {
+    Ok(Json(workbench::list(&state.pool, &auth, input).await?))
+}
+#[utoipa::path(get,path="/api/v1/admin/question-bank/questions/{id}/inspection",tag="question_bank",security(("bearer_auth"=[])),params(("id"=Uuid,Path)),responses((status=200,description="题目原稿与逐选项发布来源核查",body=QuestionInspection),(status=401,description="会话失效"),(status=403,description="无读取权限"),(status=404,description="题目不存在")))]
+pub async fn inspect_question(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiPath(id): ApiPath<Uuid>,
+) -> Result<Json<QuestionInspection>, AppError> {
+    Ok(Json(workbench::inspection(&state.pool, &auth, id).await?))
+}
+#[utoipa::path(post,path="/api/v1/admin/question-bank/candidate-search",tag="question_bank",security(("bearer_auth"=[])),request_body=SearchQuestionCandidates,responses((status=200,description="数据库分页检索已发布教学词义",body=QuestionCandidateSearchPage),(status=400,description="候选检索参数无效"),(status=401,description="会话失效"),(status=403,description="无权限"),(status=409,description="发布来源已变化"),(status=422,description="请求格式无效")))]
+pub async fn search_candidates(
+    State(state): State<AppState>,
+    auth: AdminAuth,
+    ApiJson(input): ApiJson<SearchQuestionCandidates>,
+) -> Result<Json<QuestionCandidateSearchPage>, AppError> {
+    Ok(Json(
+        workbench::candidates(&state.pool, &auth, input).await?,
+    ))
 }
