@@ -35,6 +35,7 @@ async fn chatgpt_accounts_login_and_model_selection_are_super_only(pool: PgPool)
         let count = count.clone();
         async move {
             assert_eq!(headers["authorization"], "Bearer chatgpt-test-outbound");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             count.fetch_add(1, Ordering::SeqCst);
             let result = match request.uri().path() {
                 "/v1/chatgpt/accounts" | "/v1/chatgpt/account" => json!({"configured":true,"active":"oaiapp_fixture","accounts":[{"client_id":"oaiapp_fixture","email":"fixture@example.test","signed_in":true,"plan_enabled":true}],"pending_login":null}),
@@ -55,7 +56,10 @@ async fn chatgpt_accounts_login_and_model_selection_are_super_only(pool: PgPool)
         base_url: format!("http://{address}"),
         outbound_token: "chatgpt-test-outbound".into(),
         inbound_token: "unused".into(),
-        client: reqwest::Client::new(),
+        client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(1))
+            .build()
+            .unwrap(),
     }));
     let routes = [
         (Method::GET, "/chatgpt".to_owned()),
@@ -534,6 +538,7 @@ async fn probes_are_super_only_and_proxy_async_reports_without_private_fields(po
         let count = count.clone();
         async move {
             assert_eq!(headers["authorization"], "Bearer probe-test-outbound");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             count.fetch_add(1, Ordering::SeqCst);
             Json(returned)
         }
@@ -555,7 +560,10 @@ async fn probes_are_super_only_and_proxy_async_reports_without_private_fields(po
         base_url: format!("http://{address}"),
         outbound_token: "probe-test-outbound".into(),
         inbound_token: "unused-probe-inbound".into(),
-        client: reqwest::Client::new(),
+        client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(1))
+            .build()
+            .unwrap(),
     }));
     for method in [Method::GET, Method::POST] {
         assert_eq!(

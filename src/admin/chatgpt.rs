@@ -117,6 +117,7 @@ async fn call<T: DeserializeOwned>(
     let mut request = config
         .client
         .request(method, format!("{}{path}", config.base_url))
+        .timeout(std::time::Duration::from_secs(20))
         .bearer_auth(&config.outbound_token);
     if let Some(body) = body {
         if body
