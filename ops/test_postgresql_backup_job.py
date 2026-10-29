@@ -57,6 +57,39 @@ class BackupJobTests(unittest.TestCase):
                     with self.assertRaisesRegex(archive_oss.ArchiveError, 'independent_replica_required'):
                         archive_oss.main(['fetch-replica', str(path), 'scheduled-test', 'a' * 64, '7', '/tmp/unused'])
 
+    def test_agent_archive_has_recoverable_offsite_identity_and_manifest(self):
+        import hashlib
+        from types import SimpleNamespace
+        objects = {}
+        class Bucket:
+            def put_object(self, key, source, headers):
+                self.assert_headers = headers
+                objects[key] = source.read() if hasattr(source, 'read') else source
+                return SimpleNamespace(status=200)
+            def get_object(self, key):
+                stream = io.BytesIO(objects[key])
+                stream.headers = {'x-oss-server-side-encryption': 'AES256'}
+                stream.content_length = len(objects[key])
+                return stream
+        with tempfile.TemporaryDirectory() as directory:
+            backup_id = 'scheduled-agent-20261029T000000Z-' + 'a' * 32
+            folder = Path(directory) / backup_id
+            folder.mkdir()
+            archive = folder / 'backup.dump'
+            archive.write_bytes(b'agent backup')
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            bucket = Bucket()
+            archive_oss.archive(bucket, 'private-bucket', archive, digest)
+            archive.unlink()
+            manifest = archive_oss.agent_manifest(bucket, backup_id)
+            self.assertEqual((manifest['database'], manifest['sha256'], manifest['bytes']), ('tsz_agent', digest, 12))
+            destination = Path(directory) / 'restored.dump'
+            archive_oss.fetch(bucket, backup_id, manifest['sha256'], manifest['bytes'], destination)
+            self.assertEqual(destination.read_bytes(), b'agent backup')
+            objects['database-backups/' + backup_id + '/manifest.json'] = b'{}'
+            with self.assertRaisesRegex(archive_oss.ArchiveError, 'agent_manifest_invalid'):
+                archive_oss.agent_manifest(bucket, backup_id)
+
     def config(self, root):
         return {"environment": "tshb-test", "directory": str(root), "postgresql_major": 18,
                 "archive_command": ["/reviewed/offsite-upload"]}
@@ -295,6 +328,14 @@ class BackupJobTests(unittest.TestCase):
             self.assertTrue(backup_alert.heartbeat({'monitor_group_id': '123'}, settings,
                                                    lambda: (client, request))['backup_healthy'])
             self.assertEqual(json.loads(request.params['MetricList.1.Values']), {'value': 1})
+            agent = {**settings, 'verification_kind': 'agent', 'health_metric': 'tsz_agent_backup_health'}
+            request = Request()
+            backup_alert.heartbeat({'monitor_group_id': '123'}, agent, lambda: (client, request))
+            self.assertEqual(request.params['MetricList.1.MetricName'], 'tsz_agent_backup_health')
+            for metric in (None, 'tsz_backup_health'):
+                invalid = {**agent, 'health_metric': metric} if metric else {k: v for k, v in agent.items() if k != 'health_metric'}
+                with self.assertRaisesRegex(backup_alert.AlertError, 'invalid_health_metric'):
+                    backup_alert.heartbeat({'monitor_group_id': '123'}, invalid, lambda: (client, Request()))
             with patch.object(backup_alert.shutil, 'disk_usage') as usage:
                 usage.return_value = type('Disk', (), {'free': 1024})()
                 self.assertFalse(backup_alert.heartbeat({'monitor_group_id': '123'}, settings,

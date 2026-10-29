@@ -119,7 +119,8 @@ def backup(config, *, environment=None):
         except BlockingIOError:
             raise BackupError("backup_job_busy") from None
         now = datetime.datetime.now(datetime.timezone.utc)
-        name = "scheduled-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex
+        prefix = "scheduled-agent-" if config.get("verification_kind") == "agent" else "scheduled-"
+        name = prefix + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex
         folder = root / name
         folder.mkdir(mode=0o700)
         status = {"schema_version": 1, "environment": "tshb-test", "backup_id": name,

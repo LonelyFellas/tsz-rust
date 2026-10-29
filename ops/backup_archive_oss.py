@@ -95,6 +95,27 @@ def digest_stream(stream, output=None, maximum=None):
     return digest.hexdigest(), size
 
 
+def agent_manifest(bucket, backup_id):
+    if not re.fullmatch(r"scheduled-agent-\d{8}T\d{6}Z-[0-9a-f]{32}", backup_id):
+        raise ArchiveError("invalid_agent_backup_identity")
+    stream = bucket.get_object("database-backups/" + backup_id + "/manifest.json")
+    try:
+        if stream.headers.get("x-oss-server-side-encryption") != "AES256":
+            raise ArchiveError("remote_encryption_unverified")
+        data = stream.read(4097)
+        if len(data) > 4096:
+            raise ArchiveError("agent_manifest_invalid")
+        value = json.loads(data)
+    finally:
+        stream.close()
+    if (value.get("database") != "tsz_agent" or value.get("backup_id") != backup_id
+            or value.get("postgresql_major") != 18 or not re.fullmatch(r"[0-9a-f]{64}", value.get("sha256", ""))
+            or isinstance(value.get("bytes"), bool) or not isinstance(value.get("bytes"), int)
+            or not 0 < value["bytes"] <= 5 * 1024 ** 3):
+        raise ArchiveError("agent_manifest_invalid")
+    return value
+
+
 def archive(bucket, bucket_name, file_path, expected):
     file = Path(file_path)
     key = identity(file.parent.name, expected)
@@ -120,6 +141,16 @@ def archive(bucket, bucket_name, file_path, expected):
     remote_digest, remote_size = digest_stream(remote, maximum=size)
     if (remote_digest, remote_size) != (expected, size):
         raise ArchiveError("remote_backup_mismatch")
+    if file.parent.name.startswith("scheduled-agent-"):
+        manifest = {"database": "tsz_agent", "backup_id": file.parent.name,
+                    "postgresql_major": 18, "sha256": expected, "bytes": size}
+        key = "database-backups/" + file.parent.name + "/manifest.json"
+        result = bucket.put_object(key, json.dumps(manifest, sort_keys=True).encode(), headers={
+            "x-oss-forbid-overwrite": "true", "x-oss-server-side-encryption": "AES256",
+            "x-oss-object-acl": "private"})
+        if result.status != 200 or agent_manifest(bucket, file.parent.name) != manifest:
+            raise ArchiveError("agent_manifest_unverified")
+        key = identity(file.parent.name, expected)
     return {"verified": True, "sha256": expected, "bytes": size,
             "reference": "oss:" + bucket_name + ":" + key}
 
@@ -156,6 +187,9 @@ def fetch(bucket, backup_id, expected, expected_size, destination):
 
 
 def main(args):
+    if len(args) == 3 and args[0] == "inspect-agent":
+        _, config_path, backup_id = args
+        return agent_manifest(connect(read_config(config_path)), backup_id)
     if len(args) == 3:
         config_path, path, expected = args
         config = read_config(config_path)
@@ -174,7 +208,12 @@ def main(args):
                                   "region": replica["region"], "bucket": replica["bucket"]})
         if target["bucket"] == source["bucket"] or target["region"] == source["region"]:
             raise ArchiveError("independent_replica_required")
-        return fetch(connect(target), backup_id, expected, expected_size, destination)
+        bucket = connect(target)
+        if backup_id.startswith("scheduled-agent-"):
+            manifest = agent_manifest(bucket, backup_id)
+            if manifest["sha256"] != expected or manifest["bytes"] != int(expected_size):
+                raise ArchiveError("agent_manifest_mismatch")
+        return fetch(bucket, backup_id, expected, expected_size, destination)
     raise ArchiveError("invalid_arguments")
 
 
